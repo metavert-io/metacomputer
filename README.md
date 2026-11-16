@@ -148,6 +148,13 @@ store; see Configuration.
 - Everything the VM shows Claude (pages, documents, window titles) is treated as data, never as instructions.
 - Recordings capture the whole screen.
 
+**Optional hardening** (off by default, so it behaves like Cua Driver on its own; [SECURITY.md](SECURITY.md)):
+- `ACTION_LOG=on`: a signed, tamper-evident log of every action sent to the VM (`virtual-computer actions verify`).
+- `SSH_AUTH=cert`: a fresh key and a 5-minute SSH certificate for every connection, named in the VM's log.
+- `DRIVER_MODE=bounded`: Cua Driver does only what a manifest lists. The profiles are `readonly`, `desktop` (no terminal) and `browser` (only the sites you list).
+
+`virtual-computer security` shows which are on.
+
 [architecture.md](architecture.md) has the full design, including its known
 limitations.
 
@@ -167,6 +174,9 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 | `SSH_DIR` | `~/.ssh/virtual-computer` | SSH keys for the VM |
 | `VNC_PASSWORD_STORE` | `file` | `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `BROWSER`, `MODE` | `firefox`, `human` | The skill's defaults |
+| `ACTION_LOG` | `off` | `on`: signed log of every tool call ([SECURITY.md](SECURITY.md)) |
+| `SSH_AUTH` | `key` | `cert`: short-lived SSH certificates instead of static keys |
+| `DRIVER_MODE`, `DRIVER_PROFILE` | `standard`, `desktop` | `bounded`: Cua Driver limited to a profile (`readonly`, `desktop`, `browser` with `DRIVER_ORIGINS`) or your own `DRIVER_MANIFEST` |
 
 `VC_CONFIG=/path/to/other.env virtual-computer …` uses a different settings file,
 for example to run a second VM side by side.
@@ -176,7 +186,8 @@ for example to run a second VM side by side.
 `virtual-computer test` runs six recorded GUI tests: desktop observation,
 calculator, Firefox navigation, LibreOffice, a multi-app workflow, and Chrome
 through its page tools. See [TESTING.md](TESTING.md) for those, the Chrome
-input-guard test, and the headless skill tests.
+input-guard test, the checks for the optional hardening, and the headless skill
+tests.
 
 ## Uninstall
 

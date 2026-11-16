@@ -35,6 +35,12 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   it); `virtual-computer input-reset` if Chrome ignores typing.
 - Don't reset or rebuild the VM without being asked (`virtual-computer reset` restores
   the baseline; host recordings/results are kept).
+- Optional hardening (SECURITY.md): `ACTION_LOG`, `SSH_AUTH`, `DRIVER_MODE`.
+  All default to Cua's own behavior and must stay that way. Each change
+  needs both sides: the host (`scripts/lib.sh`, `lib/actionlog.py`,
+  `lib/mcp_relay.py`, `lib/driver_profiles.py`) and the guest
+  (`virtual-computer-admin ssh-auth|driver-policy`, `driver-mcp`).
+  `virtual-computer security` shows what is on.
 
 ## Useful commands
 
@@ -42,6 +48,7 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
 virtual-computer start | stop | status | reset | test [A-F] | record start|stop | recordings [--sync] | view | where
 virtual-computer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
 virtual-computer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
+virtual-computer security [apply] | actions list|show|verify   # optional hardening, signed action log
 virtual-computer ssh ops 'cmd'      # shell as the desktop user (artifact checks, not GUI work)
 virtual-computer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --describe TOOL
 ```
@@ -53,8 +60,11 @@ virtual-computer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | 
   Code must read settings from there, never hard-code a machine's names,
   paths or hosts. Guest-internal paths (`/opt/virtual-computer`, `~/virtual-computer-runs`) are
   stable names inside the VM; don't rename them (existing VMs depend on them).
+  VMs built before the rename use `/opt/cua-lab`; `status` says to rebuild them.
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
-- Tests: `virtual-computer test`, `python3 tests/test_chrome_guard.py` (TESTING.md).
+- Tests: `virtual-computer test`, `python3 tests/test_chrome_guard.py`,
+  `python3 tests/test_actionlog.py` (no VM), `tests/test_options.py` (test VM only;
+  it switches the VM's SSH and driver settings). See TESTING.md.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),
 docs/chrome-investigation.md, and `.claude/skills/cua-driver/` (the

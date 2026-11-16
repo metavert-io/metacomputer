@@ -32,6 +32,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import driver_profiles  # noqa: E402
+import labconfig  # noqa: E402
 import owners  # noqa: E402
 
 LAB = owners.LAB
@@ -56,6 +58,11 @@ DROPPED_MSG = (
     "The connection to the virtual computer closed during this call (the VM was stopped or restarted). "
     "Check `~/.local/bin/virtual-computer status`; after a restart, element tokens from earlier reads are stale."
 )
+BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
+BOUNDED_END = (
+    "virtual-computer bridge: Cua Driver's bounded session has ended (DRIVER_MODE=bounded; DRIVER_EXPIRES / "
+    "DRIVER_IDLE in the virtual computer's config). Tell the user; they can start a new one by reconnecting the "
+    "virtual-computer MCP server (/mcp).")
 DEFAULT_INIT = {"protocolVersion": "2025-06-18", "capabilities": {},
                 "clientInfo": {"name": "vc-mcp-lazy", "version": "1"}}
 
@@ -96,12 +103,7 @@ SCRIPT_CHROME = (
 
 
 def pinned_version():
-    try:
-        txt = open(os.path.join(LAB, "config", "lab.env")).read()
-    except OSError:
-        return None
-    m = re.search(r"^CUA_DRIVER_VERSION=([^\s#]+)", txt, re.M)
-    return m.group(1) if m else None
+    return labconfig.CONFIG.get("CUA_DRIVER_VERSION")
 
 
 def load_cache():
@@ -297,6 +299,8 @@ class Bridge:
         if not isinstance(res, dict):
             self.annotate.pop(key, None)
             return
+        if res.get("isError") and BOUNDED_END_RE.search(json.dumps(res.get("content") or [])[:4000]):
+            res.setdefault("content", []).append({"type": "text", "text": BOUNDED_END})
         if tool in ("list_windows", "launch_app", "get_window_state", "list_apps"):
             self.learn_apps(res.get("structuredContent") or {})
         if tool and MPX_RE.search(json.dumps(res)[:200000]):
@@ -429,6 +433,14 @@ class Bridge:
     def tool_error(self, msg, text):
         self.reply(msg, {"content": [{"type": "text", "text": text}], "isError": True})
 
+    def refuse(self, msg, text):
+        """A call this bridge won't pass on: tell the caller, and the action log when it's on."""
+        if os.environ.get("VC_ACTION_LOG") == "on" and self.connected():
+            p = msg.get("params") or {}
+            self.send_up({"jsonrpc": "2.0", "method": "notifications/virtual-computer/refused",
+                          "params": {"tool": p.get("name", ""), "args": p.get("arguments") or {}, "reason": text}})
+        self.tool_error(msg, text)
+
     def on_initialize(self, msg):
         self.client_init = msg
         want = (msg.get("params") or {}).get("protocolVersion")
@@ -456,7 +468,7 @@ class Bridge:
             busy = self.busy_others()
             if busy:
                 lines = "\n".join("  - " + owners.describe(o) for o in busy)
-                self.tool_error(msg, (
+                self.refuse(msg, (
                     "The virtual computer is in use by another controller:\n" + lines +
                     "\nOnly one session should control it at a time. Ask the user before taking over; if they "
                     f"agree, run `{CLI} release` and call again. Read-only tools still work."))
@@ -467,9 +479,19 @@ class Bridge:
             return
         if name not in READ_ONLY:
             params = msg.setdefault("params", {})
+            launch_note = None
+            if driver_profiles.bounded():
+                args = params.setdefault("arguments", {})
+                if name == "launch_app":
+                    launch_note = driver_profiles.rewrite_launch(args)
+                elif name == "run_steps":
+                    notes = [driver_profiles.rewrite_launch(a) for t, a in self.steps_of(args) if t == "launch_app"]
+                    launch_note = "; ".join(n for n in notes if n) or None
             err, note = self.chrome_guard(name, params.setdefault("arguments", {}))
+            if launch_note:
+                note = "virtual-computer bridge: " + launch_note + ("; " + note if note else "")
             if err:
-                self.tool_error(msg, err)
+                self.refuse(msg, err)
                 return
             if note:
                 self.annotate[json.dumps(msg["id"])] = note

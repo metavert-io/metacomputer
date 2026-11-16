@@ -20,6 +20,10 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import driver_profiles  # noqa: E402
+import labconfig  # noqa: E402
+
 LAB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BRIDGE = [os.path.join(LAB_ROOT, "bin", "virtual-computer"), "mcp"]
 PROTOCOL = "2025-06-18"
@@ -45,6 +49,8 @@ class MCPClient:
 
     # -- transport --------------------------------------------------------
     def start(self, timeout=90):
+        # The settings this connection starts with (VC_CONFIG may differ per client, e.g. in tests).
+        self.bounded = driver_profiles.bounded(labconfig.load())
         err = open(self.stderr_path, "ab") if self.stderr_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=err, bufsize=0)
@@ -137,6 +143,9 @@ class MCPClient:
 
     def call(self, name, args=None, timeout=120):
         args = args or {}
+        if name == "launch_app" and getattr(self, "bounded", False):
+            args = dict(args)
+            driver_profiles.rewrite_launch(args)   # bounded mode launches apps only by absolute path
         t0 = time.time()
         self.calls += 1
         try:

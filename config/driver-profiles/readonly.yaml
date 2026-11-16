@@ -1,0 +1,30 @@
+# DRIVER_PROFILE=readonly (DRIVER_MODE=bounded): look, never touch.
+# Cua Driver capability manifest v3. @NAME@ placeholders are filled in by
+# lib/driver_profiles.py from config (DRIVER_EXPIRES, DRIVER_IDLE, GUEST_USER).
+version: 3
+expires_after: @EXPIRES@
+idle_timeout: @IDLE@
+allow:
+  tools:
+    - start_session
+    - end_session
+    - get_session
+    - list_sessions
+    - list_apps
+    - list_windows
+    - get_window_state
+    - get_desktop_state
+    - get_accessibility_tree
+    - get_screen_size
+    - get_cursor_position
+    - verify_state
+    - zoom
+    - parse_visual_regions
+    - health_report
+    - check_permissions
+    - get_guide
+resources:
+  apps:
+@APPS_WINDOWS@
+  desktop:
+    display: true

@@ -168,10 +168,67 @@ vm_stop() { # NAME [--force]
 }
 
 # --- SSH --------------------------------------------------------------------
+# The optional hardening settings (SECURITY.md), resolved for the Python helpers.
+export_options() {
+  export VC_ACTION_LOG="$ACTION_LOG" VC_ACTION_LOG_TEXT="$ACTION_LOG_TEXT" VC_ACTION_LOG_DIR="$LOG_DIR/actions" \
+         VC_ACTION_LOG_KEY="${ACTION_LOG_KEY:-$SSH_DIR/action-log}" VC_SSH_DIR="$SSH_DIR" VC_VM_NAME="$VM_NAME" \
+         VC_SSH_AUTH="$SSH_AUTH" VC_SSH_CERT_TTL="$SSH_CERT_TTL" VC_DRIVER_MODE="$DRIVER_MODE" VC_DRIVER_PROFILE="$DRIVER_PROFILE" \
+         VC_DRIVER_MANIFEST="$DRIVER_MANIFEST" VC_DRIVER_ORIGINS="$DRIVER_ORIGINS" VC_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
+         VC_DRIVER_IDLE="$DRIVER_IDLE" VC_BROWSERS="$BROWSERS" VC_GUEST_USER="$GUEST_USER"
+}
+
+# --- SSH_AUTH=cert: a fresh key and a short-lived certificate per connection ---
+CA_KEY="${SSH_CA_KEY:-$SSH_DIR/ca}"
+ca_pub() { case "$CA_KEY" in *.pub) echo "$CA_KEY" ;; *) echo "$CA_KEY.pub" ;; esac; }
+ensure_ca() { # the default CA is a key file made on first use; a .pub means a key you keep in ssh-agent
+  case "$CA_KEY" in *.pub) [ -f "$CA_KEY" ] || die "SSH_CA_KEY $CA_KEY not found" ; return 0 ;; esac
+  [ -f "$CA_KEY" ] && return 0
+  ( umask 077; mkdir -p "$(dirname "$CA_KEY")"; ssh-keygen -q -t ed25519 -N '' -C virtual-computer-ca -f "$CA_KEY" ) \
+    || die "could not create the SSH CA key $CA_KEY"
+}
+CERT_ops=""; CERT_ops_at=0; CERT_mcp=""; CERT_mcp_at=0
+cert_ttl_s() { local t="${SSH_CERT_TTL:-5m}"; case "$t" in *m) echo $(( ${t%m} * 60 )) ;; *h) echo $(( ${t%h} * 3600 )) ;; *s) echo "${t%s}" ;; *) echo 300 ;; esac; }
+cert_for() { # ROLE -> sets CERT_KEY (KEY-cert.pub beside it); reused for half its lifetime in this process
+  local role="$1" now dir key id agent=() opts=() cached at
+  now="$(date +%s)"; eval "cached=\$CERT_$role; at=\$CERT_${role}_at"
+  if [ -n "$cached" ] && [ -f "$cached-cert.pub" ] && [ $(( now - at )) -lt $(( $(cert_ttl_s) / 2 )) ]; then CERT_KEY="$cached"; return 0; fi
+  ensure_ca
+  dir="$SOCK_DIR/certs"; ( umask 077; mkdir -p "$dir" )
+  find "$dir" -type f -mmin +60 -delete 2>/dev/null
+  key="$(mktemp "$dir/$role.XXXXXX")" && rm -f "$key"
+  ssh-keygen -q -t ed25519 -N '' -C "vc-$role" -f "$key" || return 1
+  # The key ID appears in the VM's auth log: who asked, from which project, which process.
+  id="vc:$role:$(id -un):$(basename "$PWD" | tr -cd 'A-Za-z0-9._-' | cut -c1-40):pid$$"
+  case "$CA_KEY" in *.pub) agent=(-U) ;; esac
+  opts=(-O clear -O source-address="$NET_GATEWAY_IP/32")
+  case "$role" in
+    mcp) opts+=(-O force-command=/opt/virtual-computer/bin/driver-mcp) ;;
+    ops) opts+=(-O permit-pty) ;;
+  esac
+  ssh-keygen -q -s "$CA_KEY" ${agent[@]+"${agent[@]}"} -I "$id" -n "$role" -V "-2m:+${SSH_CERT_TTL:-5m}" \
+    -z "$now$(printf '%05d' "$RANDOM")" "${opts[@]}" "$key.pub" 2>/dev/null || { rm -f "$key" "$key.pub"; return 1; }
+  rm -f "$key.pub"
+  eval "CERT_$role=\$key; CERT_${role}_at=\$now"
+  CERT_KEY="$key"
+}
+
 ssh_base() { # ROLE(admin|ops|mcp) -> prints nothing; sets SSH_ARGS array
   local role="$1" user
   case "$role" in admin) user="$ADMIN_USER" ;; ops|mcp) user="$GUEST_USER" ;; *) die "bad ssh role $role" ;; esac
-  SSH_ARGS=(-o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile="$SSH_DIR/$role"
+  local ids=(-o IdentityFile="$SSH_DIR/$role")
+  if [ "$role" != admin ]; then
+    if [ "${SSH_AUTH:-key}" = cert ]; then
+      # The certificate first; the static key stays as a fallback for a VM that
+      # hasn't switched yet (start switches it). A switched VM refuses static keys.
+      cert_for "$role" || die "could not make an SSH certificate for $role (SSH_CA_KEY: $CA_KEY)"
+      ids=(-o IdentityFile="$CERT_KEY" -o CertificateFile="$CERT_KEY-cert.pub" -o IdentityFile="$SSH_DIR/$role")
+    elif [ -f "$RUN_DIR/guest-options-$VM_NAME" ] && [ -f "$(ca_pub)" ] && cert_for "$role" 2>/dev/null; then
+      # Back on static keys in the config, but the VM may still want a certificate
+      # until start (or security apply) switches it back.
+      ids+=(-o IdentityFile="$CERT_KEY" -o CertificateFile="$CERT_KEY-cert.pub")
+    fi
+  fi
+  SSH_ARGS=(-o BatchMode=yes -o IdentitiesOnly=yes "${ids[@]}"
             -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null
             -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR
             -p "$SSH_PORT" "$user@127.0.0.1")
@@ -195,4 +252,47 @@ wait_session() { # TIMEOUT_S
     [ $(( $(date +%s) - start )) -ge "$t" ] && return 1
     sleep 3
   done
+}
+
+# --- DRIVER_MODE=bounded: upload the manifest, ask for it by hash -------------
+driver_request() { # prints the SSH command line for the MCP role ("" = Cua's default)
+  [ "${DRIVER_MODE:-standard}" = bounded ] || return 0
+  local m sha
+  m="$(export_options; "$PY" "$LAB_ROOT/lib/driver_profiles.py" render)" || exit 1
+  sha="$(printf '%s\n' "$m" | shasum -a 256 | cut -d' ' -f1)"
+  printf '%s\n' "$m" | gssh ops "d=~/.config/virtual-computer/manifests; f=\$d/$sha.yaml; [ -f \$f ] || { mkdir -p \$d && cat > \$f.tmp && mv \$f.tmp \$f; }" \
+    || die "could not upload the driver manifest to the VM"
+  echo "bounded $sha"
+}
+
+# --- keep the VM's side of SSH_AUTH and DRIVER_MODE in step with the config ----
+guest_option() { # ssh-auth|driver-policy -> the VM's current setting
+  gssh admin "sudo /usr/local/sbin/virtual-computer-admin $1 status" 2>/dev/null | tail -1
+}
+sync_guest_options() { # [all]: quiet unless something changes; skips the VM in the default setup unless "all"
+  local mark="$RUN_DIR/guest-options-$VM_NAME" have all="${1:-}"
+  if [ "${SSH_AUTH:-key}" = cert ] || [ -f "$mark" ] || [ "$all" = all ]; then
+    have="$(guest_option ssh-auth)"
+    case "$have" in cert|key) ;; *) warn "this VM can't switch SSH_AUTH (built by an earlier version?); rebuild it to use certificates"; have="${SSH_AUTH:-key}" ;; esac
+    if [ "$have" != "${SSH_AUTH:-key}" ]; then
+      if [ "${SSH_AUTH:-key}" = cert ]; then
+        ensure_ca
+        gssh admin "sudo /usr/local/sbin/virtual-computer-admin ssh-auth cert" < "$(ca_pub)" >/dev/null \
+          && ok "SSH: the VM now accepts only short-lived certificates for ops and mcp (SSH_AUTH=cert)" \
+          || die "could not switch the VM to SSH certificates (virtual-computer logs)"
+      else
+        gssh admin "sudo /usr/local/sbin/virtual-computer-admin ssh-auth key" >/dev/null \
+          && ok "SSH: the VM is back on its static keys (SSH_AUTH=key)" || warn "could not switch the VM back to static keys"
+      fi
+    fi
+  fi
+  if [ "${DRIVER_MODE:-standard}" = bounded ] || [ -f "$mark" ] || [ "$all" = all ]; then
+    have="$(guest_option driver-policy)"
+    case "$have" in bounded|standard) ;; *) warn "this VM can't hold a driver policy (built by an earlier version?); bounded sessions still work, but standard ones aren't refused"; have="${DRIVER_MODE:-standard}" ;; esac
+    if [ "$have" != "${DRIVER_MODE:-standard}" ]; then
+      gssh admin "sudo /usr/local/sbin/virtual-computer-admin driver-policy ${DRIVER_MODE:-standard}" >/dev/null \
+        && ok "driver: the VM now starts Cua Driver only in ${DRIVER_MODE:-standard} mode" || warn "could not set the VM's driver policy"
+    fi
+  fi
+  if [ "${SSH_AUTH:-key}" = cert ] || [ "${DRIVER_MODE:-standard}" = bounded ]; then : > "$mark"; else rm -f "$mark"; fi
 }

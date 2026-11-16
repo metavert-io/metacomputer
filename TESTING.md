@@ -43,6 +43,41 @@ show just that one; all three `on` is Lume's own default. The flag parsing
 and device selection have unit tests in
 [lume-secure](https://github.com/metavert-io/lume-secure).
 
+## Optional hardening: `tests/test_actionlog.py`, `tests/test_options.py`
+
+`python3 tests/test_actionlog.py` needs no VM (16 checks). It writes logs to a
+temporary folder, then tampers with them: an edited record, an edited record
+with its hash recomputed, a deleted record, a cut-off end, and a log signed
+with another key. It also runs the relay against a fake driver and checks that
+messages pass through unchanged.
+
+`VC_CONFIG=test-vm.env python3 tests/test_options.py [A] [B] [C]` runs against
+a running **test** VM. It switches the VM's SSH and driver settings through the
+maintenance account, then puts them back to the defaults.
+- **A** (6 checks): a real session is logged in order, typed text is redacted,
+  the file is private, and `actions verify` passes.
+- **B** (12 checks): certificates work. These are refused: the static key, an
+  expired certificate, one for another role, one from another CA, and one from
+  another address. The VM forces the driver command for `mcp` even when the
+  certificate doesn't, key IDs reach the VM's auth log, and the static keys
+  work again afterwards.
+- **C** (21 checks):
+  - `readonly` refuses clicks, typing and launches.
+  - The VM refuses a standard session while bounded.
+  - `desktop` launches Mousepad by name and types into it. It refuses the
+    terminal, page tools, and writes outside the task folders.
+  - `browser` opens a listed origin and refuses another one and desktop input.
+  - An expired manifest and one changed inside the VM are refused.
+  - Standard mode works again afterwards.
+
+The GUI suite also runs under the `desktop` profile: put
+`DRIVER_MODE=bounded` in the test VM's config and run
+`virtual-computer test A B C D`.
+- E reads the copied passage with `clipboard_read`, which bounded mode refuses
+  in driver 0.52.1.
+- F uses page tools and hybrid typing, which need standard mode (or the
+  `browser` profile for the page tools alone).
+
 ## Browser checks: `virtual-computer web …`
 
 `compare`, `responsive`, `a11y` and `open-untrusted` serve as their own

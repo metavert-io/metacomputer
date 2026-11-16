@@ -1,0 +1,73 @@
+# DRIVER_PROFILE=desktop (DRIVER_MODE=bounded): the desktop apps this project
+# installs, operated like a person would, with files only in the task folders.
+# Left out on purpose: the terminal, browser page tools (Cua runs those only in
+# a runtime of their own: DRIVER_PROFILE=browser), extensions, driver settings
+# and trajectory replay. The clipboard tools too: a manifest can't grant the
+# clipboard in Cua Driver 0.52.1 (Ctrl+C / Ctrl+V between apps still work).
+# Apps are launched by absolute path (the bridge maps names like "firefox" to
+# them).
+# Cua Driver capability manifest v3; @NAME@ placeholders are filled in by
+# lib/driver_profiles.py.
+version: 3
+expires_after: @EXPIRES@
+idle_timeout: @IDLE@
+allow:
+  tools:
+    - start_session
+    - end_session
+    - get_session
+    - list_sessions
+    - list_apps
+    - list_windows
+    - get_window_state
+    - get_desktop_state
+    - get_accessibility_tree
+    - get_screen_size
+    - get_cursor_position
+    - verify_state
+    - zoom
+    - parse_visual_regions
+    - health_report
+    - check_permissions
+    - get_guide
+    - launch_app
+    - bring_to_front
+    - set_window_frame
+    - click
+    - double_click
+    - right_click
+    - drag
+    - scroll
+    - move_cursor
+    - mouse_button_down
+    - mouse_button_up
+    - mouse_drag
+    - parallel_mouse_drag
+    - type_text
+    - press_key
+    - hotkey
+    - set_value
+    - invoke_menu
+    - run_steps
+    - run_script
+    - kill_app
+    - start_recording
+    - stop_recording
+    - get_recording_state
+    - get_agent_cursor_state
+    - set_agent_cursor_enabled
+    - set_agent_cursor_motion
+    - set_agent_cursor_theme
+resources:
+  apps:
+@APPS_LAUNCH@
+  files:
+    read:
+      - {dir: @HOME@/virtual-computer-runs, recursive: true}
+      - {dir: @HOME@/Inbox, recursive: true}
+      - {dir: @HOME@/Downloads, recursive: true}
+    write:
+      - {dir: @HOME@/virtual-computer-runs, recursive: true}
+      - {dir: @HOME@/Downloads, recursive: true}
+  desktop:
+    display: true

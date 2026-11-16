@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Signed action log (optional; ACTION_LOG=on, off by default).
+
+Every connection to Cua Driver in the VM goes through `virtual-computer mcp`
+(Claude Code's bridge, `virtual-computer call`, `web`, the tests). With the
+log on, that command runs mcp_relay.py, which writes one JSON Lines file per
+connection under logs/actions/YYYY-MM-DD/: a start record (who connected,
+from which project), then every tool call exactly as it was sent to the VM,
+its result summary and timing, and the calls Claude Code's bridge refused.
+
+- Each record carries the hash of the one before it ("prev") and its own
+  ("hash" = SHA-256 of the record without "hash"), so editing, inserting or
+  removing a record breaks the chain from that point on.
+- Every 20 records, every 60 seconds with new records, and when the session
+  ends, a checkpoint record signs the head of the chain with an SSH key
+  (`ssh-keygen -Y sign`, namespace virtual-computer-action-log). Records after
+  the last checkpoint are reported as unsigned; a file without a final
+  checkpoint ended abnormally or was cut short.
+- Typed text, values and scripts are replaced by their length unless
+  ACTION_LOG_TEXT=keep. Results are kept only as a hash and sizes.
+
+What it proves: that a file matches what the holder of the signing key
+signed. It can't stop someone who has that key (anyone with your login on this
+Mac, by default) from rewriting a log and signing it again; keep the key in
+ssh-agent backed by hardware (ACTION_LOG_KEY=path/to/key.pub) to prevent that.
+
+  actionlog.py list [--days N]
+  actionlog.py show [FILE|latest] [--json]
+  actionlog.py verify [FILE...|--all] [--key PUB]
+"""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+NAMESPACE = "virtual-computer-action-log"
+SIGNER = "virtual-computer"
+FORMAT = 1
+ZERO = "0" * 64
+TEXT_KEYS = {"text", "value", "script", "password", "secret", "token"}
+EVERY_N, EVERY_S = 20, 60
+
+LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def settings():
+    """Resolved by bin/virtual-computer (which sources the config) and passed in the environment."""
+    ssh_dir = os.environ.get("VC_SSH_DIR") or os.path.expanduser("~/.ssh/virtual-computer")
+    return {
+        "on": os.environ.get("VC_ACTION_LOG", "off") == "on",
+        "keep_text": os.environ.get("VC_ACTION_LOG_TEXT", "redact") == "keep",
+        "dir": os.environ.get("VC_ACTION_LOG_DIR") or os.path.join(LAB, "logs", "actions"),
+        "key": os.environ.get("VC_ACTION_LOG_KEY") or os.path.join(ssh_dir, "action-log"),
+    }
+
+
+def canonical(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def record_hash(rec):
+    return hashlib.sha256(canonical({k: v for k, v in rec.items() if k != "hash"})).hexdigest()
+
+
+def pub_path(key):
+    return key if key.endswith(".pub") else key + ".pub"
+
+
+def ensure_key(key):
+    """Create the default signing key on first use (a .pub path means a key you manage, e.g. in ssh-agent)."""
+    if key.endswith(".pub") or os.path.exists(key):
+        return
+    os.makedirs(os.path.dirname(key), mode=0o700, exist_ok=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", NAMESPACE, "-f", key],
+                   check=True, capture_output=True)
+
+
+def fingerprint(pub):
+    r = subprocess.run(["ssh-keygen", "-l", "-f", pub], capture_output=True, text=True)
+    return (r.stdout.split() or ["", "?"])[1]
+
+
+def checkpoint_message(name, seq, head, final):
+    return f"{NAMESPACE}\nfile={name}\nseq={seq}\nhead={head}\nfinal={'true' if final else 'false'}\n".encode()
+
+
+def redact(obj, depth=0):
+    if depth > 8:
+        return obj
+    if isinstance(obj, dict):
+        return {k: ({"redacted": True, "chars": len(v)} if k in TEXT_KEYS and isinstance(v, str)
+                    else redact(v, depth + 1)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact(v, depth + 1) for v in obj]
+    return obj
+
+
+def summarize_result(res, keep_text):
+    if not isinstance(res, dict):
+        return {"kind": type(res).__name__}
+    images = sum(1 for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "image")
+    texts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
+    out = {"error": bool(res.get("isError")), "sha256": hashlib.sha256(canonical(res)).hexdigest(),
+           "images": images, "text_chars": sum(len(t) for t in texts)}
+    if keep_text and texts:
+        out["text"] = "\n".join(texts)[:400]
+    return out
+
+
+class ActionLog:
+    """One session's log file. Thread-safe; every method is a no-op after a failure to sign."""
+
+    def __init__(self, session, cfg=None):
+        cfg = cfg or settings()
+        self.keep_text = cfg["keep_text"]
+        self.key = cfg["key"]
+        ensure_key(self.key)
+        day = time.strftime("%Y-%m-%d")
+        d = os.path.join(cfg["dir"], day)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        self.name = f"{day}/{time.strftime('%H%M%S')}-{session.get('bridge_pid', os.getpid())}.jsonl"
+        self.path = os.path.join(cfg["dir"], self.name)
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        self.f = os.fdopen(fd, "a", buffering=1)
+        self.lock = threading.Lock()
+        self.head, self.seq, self.unsigned, self.last_sign = ZERO, 0, 0, time.time()
+        self.closed = False
+        self.sign_error = None
+        self.started = {}
+        self._append({"type": "start", "format": FORMAT, "file": self.name, "session": session,
+                      "signing_key": fingerprint(pub_path(self.key)),
+                      "text": "kept" if self.keep_text else "redacted"})
+        self._timer = threading.Thread(target=self._tick, daemon=True)
+        self._timer.start()
+
+    # --- writing ------------------------------------------------------------
+    def _append(self, rec):
+        rec = {"seq": self.seq, "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **rec, "prev": self.head}
+        rec["hash"] = record_hash(rec)
+        self.f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+        self.head, self.seq = rec["hash"], self.seq + 1
+        return rec
+
+    def _sign(self, final=False):
+        if self.unsigned == 0 and not final:
+            return
+        covers = self.seq - 1
+        msg = checkpoint_message(self.name, covers, self.head, final)
+        r = subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", self.key, "-n", NAMESPACE],
+                           input=msg, capture_output=True)
+        if r.returncode != 0:
+            self.sign_error = (r.stderr or b"").decode(errors="replace").strip()[:200] or "ssh-keygen failed"
+            self._append({"type": "sign_failed", "covers_seq": covers, "error": self.sign_error})
+            return
+        self._append({"type": "checkpoint", "covers_seq": covers, "head": self.head,
+                      "final": final, "sig": r.stdout.decode()})
+        self.unsigned, self.last_sign = 0, time.time()
+
+    def _add(self, rec):
+        with self.lock:
+            if self.closed:
+                return
+            self._append(rec)
+            self.unsigned += 1
+            if self.unsigned >= EVERY_N:
+                self._sign()
+
+    def _tick(self):
+        while not self.closed:
+            time.sleep(5)
+            with self.lock:
+                if not self.closed and self.unsigned and time.time() - self.last_sign >= EVERY_S:
+                    self._sign()
+
+    def call(self, call_id, tool, args):
+        self.started[call_id] = time.time()
+        self._add({"type": "call", "id": call_id, "tool": tool,
+                   "args": args if self.keep_text else redact(args)})
+
+    def result(self, call_id, tool, msg):
+        t0 = self.started.pop(call_id, None)
+        rec = {"type": "result", "id": call_id, "tool": tool,
+               "ms": int((time.time() - t0) * 1000) if t0 else None}
+        if "error" in msg:
+            rec["rpc_error"] = str((msg.get("error") or {}).get("message", ""))[:300]
+        else:
+            rec["result"] = summarize_result(msg.get("result"), self.keep_text)
+        self._add(rec)
+
+    def refused(self, tool, args, reason):
+        self._add({"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args),
+                   "reason": reason[:300]})
+
+    def event(self, kind, **fields):
+        self._add({"type": kind, **fields})
+
+    def close(self):
+        with self.lock:
+            if self.closed:
+                return
+            self._append({"type": "end"})
+            self.unsigned += 1
+            self._sign(final=True)
+            self.closed = True
+            self.f.close()
+
+
+# --- reading ------------------------------------------------------------------
+def files(base, days=None):
+    out = []
+    if not os.path.isdir(base):
+        return out
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400)) if days else ""
+    for day in sorted(os.listdir(base)):
+        if day < cutoff or not os.path.isdir(os.path.join(base, day)):
+            continue
+        for f in sorted(os.listdir(os.path.join(base, day))):
+            if f.endswith(".jsonl"):
+                out.append(os.path.join(base, day, f))
+    return out
+
+
+def load(path):
+    recs, bad = [], []
+    for i, line in enumerate(open(path, encoding="utf-8"), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            recs.append(json.loads(line))
+        except ValueError:
+            bad.append(i)
+    return recs, bad
+
+
+def verify_sig(pub, message, sig):
+    with tempfile.TemporaryDirectory() as td:
+        allowed = os.path.join(td, "allowed")
+        with open(allowed, "w") as f:
+            f.write(f'{SIGNER} namespaces="{NAMESPACE}" {open(pub).read().strip()}\n')
+        sigf = os.path.join(td, "sig")
+        with open(sigf, "w") as f:
+            f.write(sig)
+        r = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", allowed, "-I", SIGNER, "-n", NAMESPACE, "-s", sigf],
+                           input=message, capture_output=True)
+        return r.returncode == 0
+
+
+def verify_file(path, base, pub):
+    """Returns a dict: ok (no tampering found), problems, signed_through, unsigned, final, calls."""
+    recs, bad = load(path)
+    # Signatures name the file as it was written (DAY/TIME-PID.jsonl), so a copy
+    # (e.g. in a task folder) still verifies; the chain ties the name to the rest.
+    name = (recs[0].get("file") if recs and recs[0].get("type") == "start" else None) or os.path.relpath(path, base)
+    problems = [f"line {n}: not JSON" for n in bad]
+    prev, signed_through, final, calls = ZERO, -1, False, 0
+    for i, r in enumerate(recs):
+        seq = r.get("seq")
+        if seq != i:
+            problems.append(f"record {i}: sequence number {seq} (records missing or reordered)")
+        if r.get("prev") != prev:
+            problems.append(f"record {i}: chain broken (doesn't follow the record before it)")
+        if r.get("hash") != record_hash(r):
+            problems.append(f"record {i}: contents changed after it was written")
+        if r.get("type") == "call":
+            calls += 1
+        if r.get("type") == "checkpoint":
+            cs = r.get("covers_seq")
+            covered = recs[cs] if isinstance(cs, int) and 0 <= cs < i else None
+            msg = checkpoint_message(name, cs, r.get("head"), bool(r.get("final")))
+            if covered is None or covered.get("hash") != r.get("head"):
+                problems.append(f"record {i}: checkpoint doesn't match record {cs}")
+            elif not verify_sig(pub, msg, r.get("sig", "")):
+                problems.append(f"record {i}: signature doesn't verify with {os.path.basename(pub)}")
+            else:
+                signed_through = cs
+                final = final or bool(r.get("final"))
+        prev = r.get("hash")
+    last_cp = max((i for i, r in enumerate(recs) if r.get("type") == "checkpoint"), default=-1)
+    unsigned = len(recs) - 1 - last_cp if recs else 0
+    start = recs[0] if recs and recs[0].get("type") == "start" else {}
+    return {"file": name, "ok": not problems, "problems": problems, "records": len(recs), "calls": calls,
+            "signed_through": signed_through, "unsigned": unsigned, "final": final,
+            "project": (start.get("session") or {}).get("cwd"), "signing_key": start.get("signing_key")}
+
+
+def _fmt_args(a):
+    s = json.dumps(a, ensure_ascii=False, separators=(",", ":"))
+    return s if len(s) <= 110 else s[:107] + "..."
+
+
+def main(argv):
+    cfg = settings()
+    base = cfg["dir"]
+    cmd = argv[0] if argv else "list"
+    rest = argv[1:]
+    if cmd == "list":
+        days = int(rest[rest.index("--days") + 1]) if "--days" in rest else 7
+        fs = files(base, days)
+        if not fs:
+            print(f"no action logs in the last {days} days ({base})"
+                  + ("" if cfg["on"] else "; the log is off: set ACTION_LOG=on in config/local.env"))
+            return 0
+        for p in fs:
+            recs, _ = load(p)
+            start = recs[0] if recs else {}
+            calls = sum(1 for r in recs if r.get("type") == "call")
+            errs = sum(1 for r in recs if r.get("type") == "result" and (r.get("rpc_error") or (r.get("result") or {}).get("error")))
+            refused = sum(1 for r in recs if r.get("type") == "refused")
+            ended = any(r.get("type") == "end" for r in recs)
+            print(f"{os.path.relpath(p, base):32} {calls:4} calls {errs:3} errors {refused:2} refused  "
+                  f"{'ended ' if ended else 'open  '} {(start.get('session') or {}).get('cwd', '')}")
+        return 0
+    if cmd == "show":
+        js = "--json" in rest
+        target = next((a for a in rest if not a.startswith("--")), "latest")
+        fs = files(base)
+        path = (fs[-1] if fs else None) if target == "latest" else (
+            target if os.path.exists(target) else os.path.join(base, target))
+        if not path or not os.path.exists(path):
+            print("no such action log", file=sys.stderr)
+            return 1
+        recs, _ = load(path)
+        if js:
+            print(json.dumps(recs, indent=1, ensure_ascii=False))
+            return 0
+        for r in recs:
+            t, ts = r.get("type"), (r.get("ts") or "")[11:19]
+            if t == "call":
+                print(f"{r['seq']:5} {ts} -> {r.get('tool')} {_fmt_args(r.get('args'))}")
+            elif t == "result":
+                res = r.get("result") or {}
+                state = f"rpc error: {r['rpc_error']}" if r.get("rpc_error") else ("ERROR" if res.get("error") else "ok")
+                print(f"{r['seq']:5} {ts} <- {r.get('tool')} {state} ({r.get('ms')} ms, {res.get('images', 0)} img)")
+            elif t == "refused":
+                print(f"{r['seq']:5} {ts} xx {r.get('tool')} refused: {r.get('reason', '')[:90]}")
+            elif t == "checkpoint":
+                print(f"{r['seq']:5} {ts} == signed through record {r.get('covers_seq')}" + (" (final)" if r.get("final") else ""))
+            else:
+                extra = {k: v for k, v in r.items() if k not in ("seq", "ts", "type", "prev", "hash")}
+                print(f"{r['seq']:5} {ts} {t} {_fmt_args(extra) if extra else ''}")
+        return 0
+    if cmd == "verify":
+        pub = pub_path(rest[rest.index("--key") + 1]) if "--key" in rest else pub_path(cfg["key"])
+        if not os.path.exists(pub):
+            print(f"no public key at {pub} (pass --key PUB)", file=sys.stderr)
+            return 2
+        targets = [a for i, a in enumerate(rest) if not a.startswith("--") and (i == 0 or rest[i - 1] != "--key")]
+        paths = files(base) if "--all" in rest or not targets else [
+            t if os.path.exists(t) else os.path.join(base, t) for t in targets]
+        if not targets and "--all" not in rest:
+            paths = paths[-1:]
+        if not paths:
+            print("no action logs to verify")
+            return 0
+        bad = 0
+        for p in paths:
+            v = verify_file(p, base, pub)
+            if not v["ok"]:
+                bad += 1
+                print(f"TAMPERED  {v['file']}")
+                for pr in v["problems"][:10]:
+                    print(f"          {pr}")
+            else:
+                notes = []
+                if v["unsigned"]:
+                    notes.append(f"{v['unsigned']} record(s) after the last signature")
+                if not v["final"]:
+                    notes.append("no final signature (session still open, crashed, or cut short)")
+                print(f"{'OK' if not notes else 'OK*':9} {v['file']}  {v['calls']} calls, signed through record "
+                      f"{v['signed_through']}" + (f"; {'; '.join(notes)}" if notes else ""))
+        return 1 if bad else 0
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
