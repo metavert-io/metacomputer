@@ -1,4 +1,4 @@
-module virtual-computer/qcow2raw
+module metacomputer/qcow2raw
 
 go 1.26
 

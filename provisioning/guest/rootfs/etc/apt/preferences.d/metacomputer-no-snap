@@ -1,0 +1,4 @@
+# metacomputer: this guest has no snapd; never let a transitional package pull it in.
+Package: snapd
+Pin: version *
+Pin-Priority: -10

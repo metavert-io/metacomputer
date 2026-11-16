@@ -1,4 +1,4 @@
-"""Helpers shared by the virtual-computer GUI tests. All GUI actions go through Cua
+"""Helpers shared by the metacomputer GUI tests. All GUI actions go through Cua
 Driver MCP tools via TestRun.call(); `guest()`/`guest_session()` are used only
 for environment prep (closing leftovers before recording starts) and for
 independent, out-of-band verification (xprop, files on disk)."""

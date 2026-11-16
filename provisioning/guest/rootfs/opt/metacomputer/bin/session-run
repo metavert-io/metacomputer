@@ -2,9 +2,9 @@
 # session-run CMD [ARGS...]: run a command inside the automation user's
 # desktop session environment (DISPLAY, XAUTHORITY, D-Bus/AT-SPI bus).
 # Used by the host's lifecycle and diagnostic commands over SSH.
-RUN="/run/user/$(id -u)/virtual-computer"
+RUN="/run/user/$(id -u)/metacomputer"
 if [ ! -s "$RUN/session.env" ]; then
-  echo "virtual-computer: the desktop session is not up (no $RUN/session.env)" >&2
+  echo "metacomputer: the desktop session is not up (no $RUN/session.env)" >&2
   exit 3
 fi
 set -a

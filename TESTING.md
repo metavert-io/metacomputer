@@ -1,10 +1,10 @@
 # Testing
 
-Everything here runs against your own VM, so start it first: `virtual-computer start`.
+Everything here runs against your own VM, so start it first: `metacomputer start`.
 Results and recordings go to `results/`, `recordings/` and `screenshots/`
 (all ignored by git).
 
-## GUI suite: `virtual-computer test [A-F]`
+## GUI suite: `metacomputer test [A-F]`
 
 Each test drives the VM only through Cua Driver's MCP tools (the same bridge
 Claude Code uses), records an MP4 and per-action traces, and checks its
@@ -24,7 +24,7 @@ and files read back from the VM's disk.
 
 ## Chrome guard: `python3 tests/test_chrome_guard.py`
 
-This test goes through `virtual-computer mcp-lazy`, the bridge Claude Code sessions use. It checks four things:
+This test goes through `metacomputer mcp-lazy`, the bridge Claude Code sessions use. It checks four things:
 - background input aimed at Chrome is sent in the foreground;
 - `set_value` and `run_script` aimed at Chrome are refused;
 - a `run_steps` batch aimed at Chrome is sent in the foreground;
@@ -33,7 +33,7 @@ This test goes through `virtual-computer mcp-lazy`, the bridge Claude Code sessi
 Background is in
 [docs/chrome-investigation.md](docs/chrome-investigation.md).
 
-## Host sharing: `virtual-computer status`
+## Host sharing: `metacomputer status`
 
 With lume-secure and the default settings, the `host sharing` line must read
 `clipboard off  audio off  rosetta off`. It's read from inside the VM: virtio
@@ -43,7 +43,7 @@ show just that one; all three `on` is Lume's own default. The flag parsing
 and device selection have unit tests in
 [lume-secure](https://github.com/metavert-io/lume-secure).
 
-## Browser checks: `virtual-computer web …`
+## Browser checks: `metacomputer web …`
 
 `compare`, `responsive`, `a11y` and `open-untrusted` serve as their own
 smoke tests. The pages in `tests/fixtures/site/` cover the edge cases:
@@ -52,13 +52,13 @@ smoke tests. The pages in `tests/fixtures/site/` cover the edge cases:
 - a redirecting fake sign-in page.
 
 To serve them in the VM:
-`virtual-computer put tests/fixtures/site --to '~/virtual-computer-runs'`, then
-`virtual-computer ssh ops 'cd ~/virtual-computer-runs/site && python3 -m http.server 8000 --bind 127.0.0.1'`.
+`metacomputer put tests/fixtures/site --to '~/metacomputer-runs'`, then
+`metacomputer ssh ops 'cd ~/metacomputer-runs/site && python3 -m http.server 8000 --bind 127.0.0.1'`.
 
 ## The skill, end to end: `tests/skill/run_headless.sh`
 
 This runs a headless Claude Code session from any folder, with only the
-`virtual-computer` tools and `virtual-computer` allowed, and summarizes what it did:
+`metacomputer` tools and `metacomputer` allowed, and summarizes what it did:
 - the skill it used;
 - the commands and tools it called;
 - screenshots versus structural reads;

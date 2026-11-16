@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chrome guard in the on-demand bridge (`virtual-computer mcp-lazy`), end to end.
+"""Chrome guard in the on-demand bridge (`metacomputer mcp-lazy`), end to end.
 
 Runs through the same bridge Claude Code sessions use and checks that:
   1. background keys aimed at Chrome are sent in the foreground (with a note) and work;
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(LAB, "lib"))
 from mcp_client import MCPClient  # noqa: E402
 from labconfig import GUEST_RUNS  # noqa: E402
 
-CUA = os.path.join(LAB, "bin", "virtual-computer")
+CUA = os.path.join(LAB, "bin", "metacomputer")
 PORT = 8766
 results = []
 
@@ -36,7 +36,7 @@ def ssh(cmd):
 
 
 def note(r):
-    return (r.structured or {}).get("virtual_computer_note") or ""
+    return (r.structured or {}).get("metacomputer_note") or ""
 
 
 def title(c, pid):

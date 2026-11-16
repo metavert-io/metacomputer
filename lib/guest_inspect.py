@@ -1,7 +1,7 @@
 """Read-only snapshot of the virtual computer: system, windows, processes,
 listening ports and recent files. Python 3 stdlib only.
 
-Runs INSIDE the guest as the desktop user (`virtual-computer inspect` pipes this file
+Runs INSIDE the guest as the desktop user (`metacomputer inspect` pipes this file
 to `python3 -I -` over the ops SSH key) and prints JSON. On the host,
 `guest_inspect.py --render` turns that JSON into a short text summary.
 
@@ -18,7 +18,7 @@ import time
 
 SECTIONS = ("system", "windows", "processes", "ports", "files", "browser")
 HOME = os.path.expanduser("~")
-RUNTIME = f"/run/user/{os.getuid()}/virtual-computer/session.env"
+RUNTIME = f"/run/user/{os.getuid()}/metacomputer/session.env"
 SKIP_DIRS = {"turn-"}  # per-action recording folders: many small files
 
 
@@ -78,7 +78,7 @@ def system(env):
         if line.startswith("x-scheme-handler/https="):
             browser["links"] = line.split("=", 1)[1].strip().rstrip(";")
     rec = run(["pgrep", "-u", str(os.getuid()), "-x", "ffmpeg"]).split()
-    vi = run(["/opt/virtual-computer/bin/input-reset", "--check"]).strip()
+    vi = run(["/opt/metacomputer/bin/input-reset", "--check"]).strip()
     return {
         "hostname": os.uname().nodename,
         "kernel": os.uname().release,
@@ -324,7 +324,7 @@ def render(d):
               f" (links open in {(s.get('default_browser') or {}).get('links', '?')})"]
         vp = s.get("virtual_input_pairs")
         if vp:
-            L.append(f"  leftover virtual input devices: {vp} (Chrome ignores the keyboard until `virtual-computer input-reset`)")
+            L.append(f"  leftover virtual input devices: {vp} (Chrome ignores the keyboard until `metacomputer input-reset`)")
         elif vp is None:
             L.append("  leftover virtual input devices: unknown (no xinput in this VM build)")
     w = d.get("windows")

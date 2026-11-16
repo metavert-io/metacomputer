@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=virtual-computer session init
+Name=metacomputer session init
 Comment=Publish the session environment for Cua Driver, stop blanking, start the loopback VNC view
-Exec=/opt/virtual-computer/bin/session-init
+Exec=/opt/metacomputer/bin/session-init
 X-GNOME-Autostart-enabled=true
 NoDisplay=true

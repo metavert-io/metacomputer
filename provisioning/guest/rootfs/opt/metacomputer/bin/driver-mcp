@@ -2,11 +2,11 @@
 # driver-mcp: the forced command behind the host's MCP SSH key.
 # Runs Cua Driver's MCP server over stdio against the automation user's XFCE
 # session. stdout carries JSON-RPC only; diagnostics go to stderr.
-RUN="/run/user/$(id -u)/virtual-computer"
+RUN="/run/user/$(id -u)/metacomputer"
 i=0
 while [ ! -s "$RUN/session.env" ] && [ "$i" -lt 90 ]; do sleep 1; i=$((i + 1)); done
 if [ ! -s "$RUN/session.env" ]; then
-  echo "virtual-computer: the desktop session is not up (no $RUN/session.env)" >&2
+  echo "metacomputer: the desktop session is not up (no $RUN/session.env)" >&2
   exit 1
 fi
 set -a

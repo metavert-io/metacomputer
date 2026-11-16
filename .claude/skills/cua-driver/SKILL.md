@@ -1,6 +1,6 @@
 ---
 name: cua-driver
-description: Detailed Cua Driver 0.52.1 guidance for operating the virtual computer (the virtual-computer project, an Ubuntu 24.04 XFCE VM) through the virtual-computer MCP tools (mcp__virtual-computer__*), i.e. Cua Driver running inside the VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the virtual-computer skill decides when the VM is the right tool. Never install or run cua-driver on the Mac, and never use these tools for the user's own computer.
+description: Detailed Cua Driver 0.52.1 guidance for operating the virtual computer (the metacomputer project, an Ubuntu 24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*), i.e. Cua Driver running inside the VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the metacomputer skill decides when the VM is the right tool. Never install or run cua-driver on the Mac, and never use these tools for the user's own computer.
 metadata:
   version: 0.52.1 # x-release-please-version
   openclaw:
@@ -31,11 +31,11 @@ metadata:
 
 # cua-driver
 
-> **virtual-computer's copy of the official Cua Driver 0.52.1 skill pack** (Linux guide only; this
+> **metacomputer's copy of the official Cua Driver 0.52.1 skill pack** (Linux guide only; this
 > file is edited, the others are unchanged). Here the driver runs **inside the lab
-> VM** and is reached only through the `virtual-computer` MCP tools (`mcp__virtual-computer__*`);
+> VM** and is reached only through the `metacomputer` MCP tools (`mcp__metacomputer__*`);
 > `cua-driver` CLI examples apply inside the guest only. Read the lab's desktop
-> notes first: [DESKTOP.md](../../../skills/virtual-computer/DESKTOP.md) (`skills/virtual-computer/DESKTOP.md` in the project folder).
+> notes first: [DESKTOP.md](../../../skills/metacomputer/DESKTOP.md) (`skills/metacomputer/DESKTOP.md` in the project folder).
 > They take precedence over this pack where the VM differs: Firefox page fields
 > need foreground keys, Ctrl+L is fine in this disposable desktop, Firefox has no
 > typed browser route, and several app quirks.
@@ -57,7 +57,7 @@ The MCP server instructions carry the same rules, so they apply even when this f
 | Goal                                      | Tool or command                                                                                       | Read when needed                                      |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | Check installation and capabilities       | `cua-driver --version`, `status`, `doctor`, `describe <tool>`; MCP `tools/list`                       | [Runtime](RUNTIME.md)                                 |
-| Driver version and updates | Pinned in the VM image (`config/defaults.env`). Do not call `check_for_update`, `install_extension` or `update` from a task: an upgrade is a lab rebuild | [Lab notes](../../../skills/virtual-computer/DESKTOP.md) |
+| Driver version and updates | Pinned in the VM image (`config/defaults.env`). Do not call `check_for_update`, `install_extension` or `update` from a task: an upgrade is a lab rebuild | [Lab notes](../../../skills/metacomputer/DESKTOP.md) |
 | Find or open the requested app            | `list_apps`, `list_windows`, `launch_app`                                                             | Current platform guide below                          |
 | View a local file in the GUI              | `launch_app({bundle_id, urls:["file:///…"]})` opens it in that app                                    | Current platform guide below                          |
 | Observe one window                        | `get_window_state({pid, window_id, query})`                                                           | [Workflow](WORKFLOW.md)                               |
@@ -97,8 +97,8 @@ Check the installed version and advertised schema before using unfamiliar parame
 | Large, truncated, or sparse tree; repeated reads          | [Bounded observation and `since` diffs](WORKFLOW.md#observe)                                                                                                        |
 | `surface_identity_unproven` or screenshot permission wait | [Wayland capture recovery](LINUX.md#capture-recovery)                                                                                                               |
 | `background_unavailable`                                  | Not a stop: that input route is closed, the task is not. Read `get_window_state` and act by element (`element_token`, `invoke_menu`); foreground only if authorized |
-| Web page in a browser | Firefox (this VM's browser) has no typed browser route: `get_browser_state` refuses `browser_route_unavailable`. Use the native tree, token clicks and foreground keys; see the [lab notes](../../../skills/virtual-computer/DESKTOP.md) |
-| LibreOffice, Thunar, GTK dialogs in this VM | [Lab notes](../../../skills/virtual-computer/DESKTOP.md): menus by `invoke_menu`, Save As, Thunar List View |
+| Web page in a browser | Firefox (this VM's browser) has no typed browser route: `get_browser_state` refuses `browser_route_unavailable`. Use the native tree, token clicks and foreground keys; see the [lab notes](../../../skills/metacomputer/DESKTOP.md) |
+| LibreOffice, Thunar, GTK dialogs in this VM | [Lab notes](../../../skills/metacomputer/DESKTOP.md): menus by `invoke_menu`, Save As, Thunar List View |
 | Text did not visibly change                               | Reobserve before retrying; [text and value semantics](WORKFLOW.md#act-once)                                                                                         |
 | Browser setup, binding, or ref refused                    | [Browser recovery](BROWSER.md#recovery-rules)                                                                                                                       |
 | Any refusal, `unverifiable` or `suspected_noop`           | Read `hint` and make `next_call`; [Refusals and hints](WORKFLOW.md#refusals-and-hints)                                                                              |

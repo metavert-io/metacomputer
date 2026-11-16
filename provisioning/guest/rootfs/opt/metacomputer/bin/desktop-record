@@ -2,11 +2,11 @@
 # desktop-record start NAME [FPS] | stop | status
 # Whole-desktop MP4 recording of the guest's X display (ffmpeg x11grab, visible
 # pointer). Independent of who drives the desktop, so it captures any task.
-# Files land in ~/virtual-computer-runs/manual/; the host pulls them with
-# `virtual-computer recordings --sync`.
+# Files land in ~/metacomputer-runs/manual/; the host pulls them with
+# `metacomputer recordings --sync`.
 set -eu
-RUN="/run/user/$(id -u)/virtual-computer"
-DIR="$HOME/virtual-computer-runs/manual"
+RUN="/run/user/$(id -u)/metacomputer"
+DIR="$HOME/metacomputer-runs/manual"
 PIDF="$RUN/desktop-record.pid"
 CUR="$RUN/desktop-record.current"
 mkdir -p "$DIR"

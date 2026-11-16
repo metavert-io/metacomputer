@@ -1,4 +1,4 @@
-# virtual-computer
+# metacomputer
 
 Give Claude Code a computer of its own: a disposable Ubuntu desktop that runs
 as a virtual machine on your Mac, which Claude sees and operates the way a
@@ -21,7 +21,7 @@ Under the hood:
 - **[Cua Driver](https://github.com/trycua/cua)** runs inside the VM: an MCP
   server for the desktop (accessibility trees, input, screenshots, recording)
   that Claude Code reaches over SSH.
-- **A Claude Code skill, `virtual-computer`,** decides when a task belongs on
+- **A Claude Code skill, `metacomputer`,** decides when a task belongs on
   the virtual computer (and when it's your own Mac, which this never
   touches), runs the task, checks the result, and hands back the evidence.
 
@@ -34,8 +34,8 @@ You need:
 - about 15 GB of free disk.
 
 ```bash
-git clone https://github.com/metavert-io/virtual-computer.git
-cd virtual-computer
+git clone https://github.com/metavert-io/metacomputer.git
+cd metacomputer
 ./install.sh
 ```
 
@@ -48,8 +48,8 @@ The installer asks at most four questions:
 Everything else is automatic:
 - Lume, at a pinned and verified version;
 - this Mac's settings (`config/local.env`);
-- the `virtual-computer` command, with the short alias `vcomp`;
-- the skill, and the `virtual-computer` MCP server registered for every Claude Code project.
+- the `metacomputer` command, with the short alias `mcomp`;
+- the skill, and the `metacomputer` MCP server registered for every Claude Code project.
 
 `./install.sh --yes` takes the defaults without asking.
 
@@ -58,8 +58,8 @@ cloud image and the Cua Driver release, checks their signatures and
 checksums, provisions the desktop, and takes a clean snapshot. Then:
 
 ```bash
-virtual-computer start     # boot it (about 12 s)
-virtual-computer test      # six recorded GUI checks: calculator, browsers, LibreOffice, Chrome
+metacomputer start     # boot it (about 12 s)
+metacomputer test      # six recorded GUI checks: calculator, browsers, LibreOffice, Chrome
 ```
 
 Restart any open Claude Code sessions, and ask for a virtual computer.
@@ -76,7 +76,7 @@ tools. The skill doesn't boot a VM for those.
 
 ## Commands
 
-`virtual-computer` (installed at `~/.local/bin/virtual-computer`; `vcomp` is a short alias):
+`metacomputer` (installed at `~/.local/bin/metacomputer`; `mcomp` is a short alias):
 
 | Command | What it does |
 | --- | --- |
@@ -93,7 +93,7 @@ tools. The skill doesn't boot a VM for those.
 | `test [A-F]` | The GUI smoke suite, each test recorded |
 | `where` | Project, config and results folders |
 
-`virtual-computer help` lists everything.
+`metacomputer help` lists everything.
 
 ## Browsers
 
@@ -106,17 +106,17 @@ work a browser three ways:
 | **page** | Works on the page's own elements through Chrome's tools, in the background: fastest and exact, handles dropdowns, uploads, downloads and dialogs | Chrome |
 | **hybrid** | Reads and checks through the page, acts with real clicks and key-by-key typing that show in a recording | Chrome |
 
-- **Choosing:** say it in the request ("in Chrome", "drive the page directly"), or set defaults with `virtual-computer browser`.
+- **Choosing:** say it in the request ("in Chrome", "drive the page directly"), or set defaults with `metacomputer browser`.
 - **Signing in:** the VM holds none of your accounts. When a task needs a login, Claude asks you to sign in yourself through the live view and never types your credentials.
 
 ## Watching and taking over
 
-`virtual-computer view` prints how to connect. A VNC server in the VM is reachable
+`metacomputer view` prints how to connect. A VNC server in the VM is reachable
 only at `127.0.0.1:5977` on your Mac:
 - **On the Mac:** `open vnc://127.0.0.1:5977` opens Screen Sharing.
 - **From another device:** tunnel over SSH (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`), then connect a VNC client to `localhost:5977`.
 
-The password lives in `~/.ssh/virtual-computer/vnc-pass`, or in your own secret
+The password lives in `~/.ssh/metacomputer/vnc-pass`, or in your own secret
 store; see Configuration.
 
 ## Isolation and safety
@@ -124,7 +124,7 @@ store; see Configuration.
 **Your clipboard, audio and Rosetta:** Lume normally connects every VM to the Mac's clipboard (a SPICE agent port), its speakers and microphone, and Rosetta. Anything with root in the VM could use those.
 - With lume-secure (the default choice) the VM starts without all three; turn one back on with `SHARE_CLIPBOARD=on`, `SHARE_AUDIO=on` or `SHARE_ROSETTA=on`.
 - With standard Lume they're always attached.
-- `virtual-computer status` shows what the VM actually has.
+- `metacomputer status` shows what the VM actually has.
 
 **The VM's network** (enforced on the Mac by a user-mode gateway, not inside the VM):
 - It reaches the public internet and nothing private: not your Mac, your LAN or router, a tailnet, or cloud metadata.
@@ -159,21 +159,21 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 
 | Key | Default | |
 | --- | --- | --- |
-| `VM_NAME`, `BASELINE_NAME` | `virtual-computer`, `virtual-computer-baseline` | Lume VM names |
+| `VM_NAME`, `BASELINE_NAME` | `metacomputer`, `metacomputer-baseline` | Lume VM names |
 | `VM_CPU`, `VM_MEMORY` | 4, 8GB | VM size |
 | `BROWSERS` | `firefox chrome` | Browsers built into the VM |
 | `LUME` | `~/.local/bin/lume-secure` | The Lume that runs the VM (`install.sh --lume=standard` for Cua's release) |
 | `SHARE_CLIPBOARD`, `SHARE_AUDIO`, `SHARE_ROSETTA` | `off` | Turn one on to connect the VM to your Mac's clipboard, audio or Rosetta (lume-secure only; standard Lume always shares) |
-| `SSH_DIR` | `~/.ssh/virtual-computer` | SSH keys for the VM |
+| `SSH_DIR` | `~/.ssh/metacomputer` | SSH keys for the VM |
 | `VNC_PASSWORD_STORE` | `file` | `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `BROWSER`, `MODE` | `firefox`, `human` | The skill's defaults |
 
-`VC_CONFIG=/path/to/other.env virtual-computer …` uses a different settings file,
+`MCOMP_CONFIG=/path/to/other.env metacomputer …` uses a different settings file,
 for example to run a second VM side by side.
 
 ## Testing
 
-`virtual-computer test` runs six recorded GUI tests: desktop observation,
+`metacomputer test` runs six recorded GUI tests: desktop observation,
 calculator, Firefox navigation, LibreOffice, a multi-app workflow, and Chrome
 through its page tools. See [TESTING.md](TESTING.md) for those, the Chrome
 input-guard test, and the headless skill tests.
@@ -182,7 +182,7 @@ input-guard test, and the headless skill tests.
 
 ```bash
 ./install.sh --uninstall                 # removes the command, the skill and the MCP registration
-lume delete virtual-computer && lume delete virtual-computer-baseline   # the VM itself, if you want it gone
+lume delete metacomputer && lume delete metacomputer-baseline   # the VM itself, if you want it gone
 ```
 
 ## Credits and license
