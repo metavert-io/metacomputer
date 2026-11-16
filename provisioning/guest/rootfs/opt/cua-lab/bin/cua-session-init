@@ -53,7 +53,7 @@ if [ -r "$ID_IMG" ] && command -v xfconf-query >/dev/null 2>&1; then
     done
     for p in $(xfconf-query -c xfce4-panel -l 2>/dev/null | grep -E '^/plugins/plugin-[0-9]+$'); do
       if [ "$(xfconf-query -c xfce4-panel -p "$p" 2>/dev/null)" = applicationsmenu ]; then
-        xfconf-query -c xfce4-panel -p "$p/button-title" -n -t string -s "Virtual computer (claude-vc)"
+        xfconf-query -c xfce4-panel -p "$p/button-title" -n -t string -s "Virtual computer"
         xfconf-query -c xfce4-panel -p "$p/show-button-title" -n -t bool -s true
       fi
     done

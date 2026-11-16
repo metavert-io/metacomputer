@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the claude-virtual-computer guest from nothing, unattended:
+# Build the virtual-computer guest from nothing, unattended:
 #   official Ubuntu 24.04 arm64 cloud image -> raw Lume disk -> cloud-init seed
 #   (users, SSH keys, pinned host key, payload) -> first boot provisions XFCE,
 #   AT-SPI, apps and Cua Driver -> reboot into the desktop -> verify ->
@@ -19,7 +19,7 @@ say "build $TS (log: logs/build-$TS.log)"
 # --- 0. prerequisites -------------------------------------------------------
 command -v "$LUME" >/dev/null || die "lume not found ($LUME)"
 for k in admin ops mcp hostkey; do
-  [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; ssh-keygen -q -t ed25519 -N '' -C "claude-vc-$k" -f "$SSH_DIR/$k"; }
+  [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; ssh-keygen -q -t ed25519 -N '' -C "vc-$k" -f "$SSH_DIR/$k"; }
 done
 echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
 "$(dirname "$0")/build-tools.sh"
@@ -28,7 +28,7 @@ echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   if vm_exists "$vm"; then
-    [ $REPLACE -eq 1 ] || die "$vm already exists; use 'claude-vc reset' to restore it, or build --replace to rebuild"
+    [ $REPLACE -eq 1 ] || die "$vm already exists; use 'vc reset' to restore it, or build --replace to rebuild"
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
     "$LUME" delete "$vm" --force
@@ -133,7 +133,7 @@ while :; do
   [ "$st" != "$last" ] && { echo "  … $st"; last="$st"; }
   case "$st" in
     DONE) break ;;
-    FAILED) gssh admin 'sudo tail -60 /var/log/cua-lab-provision.log' || true; die "guest provisioning failed (VM left running for inspection: claude-vc ssh admin)" ;;
+    FAILED) gssh admin 'sudo tail -60 /var/log/cua-lab-provision.log' || true; die "guest provisioning failed (VM left running for inspection: vc ssh admin)" ;;
     "(ssh unavailable)") gssh admin true 2>/dev/null || true ;;
   esac
   [ $(( $(date +%s) - start )) -gt 3600 ] && die "provisioning took over an hour"
@@ -155,7 +155,7 @@ wait_session 300 || die "desktop session never became ready"
 ok "desktop session ready"
 
 # --- 5. live-view password (VNC_PASSWORD_STORE: 0600 file or your command) --
-"$LAB_ROOT/bin/claude-vc" _vnc-install
+"$LAB_ROOT/bin/vc" _vnc-install
 
 # --- 6. verify, finalize ----------------------------------------------------
 gssh ops /opt/cua-lab/bin/cua-guest-status > "$LOG_DIR/guest-status-$TS.json"
@@ -179,4 +179,4 @@ vm_stop "$VM_NAME"
 "$LUME" clone "$VM_NAME" "$BASELINE_NAME"
 rm -f "$RUN_DIR/seed.iso"
 ok "baseline $BASELINE_NAME created"
-say "build complete. Start it with: claude-vc start"
+say "build complete. Start it with: vc start"

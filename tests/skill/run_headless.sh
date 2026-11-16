@@ -15,16 +15,16 @@ mkdir -p "$OUT"
 MCP_ARGS=()
 if [ "$MODE" != "--global-mcp" ]; then
   CFG="$OUT/mcp-cua-only.json"
-  printf '{"mcpServers":{"cua-linux":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/claude-vc" > "$CFG"
+  printf '{"mcpServers":{"cua-linux":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/vc" > "$CFG"
   MCP_ARGS=(--strict-mcp-config --mcp-config "$CFG")
 fi
-vm_state() { "$LAB/bin/claude-vc" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get("vm"); print(v if isinstance(v,str) else (v or {}).get("status","?"))' 2>/dev/null; }
+vm_state() { "$LAB/bin/vc" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get("vm"); print(v if isinstance(v,str) else (v or {}).get("status","?"))' 2>/dev/null; }
 vm_before="$(vm_state)"
 start=$(date +%s)
 cd "$WORKDIR" || exit 1
 env -u CLAUDECODE claude -p "$PROMPT" ${MCP_ARGS[@]+"${MCP_ARGS[@]}"} \
   --allowedTools "Skill" "Read" "Glob" "Grep" "WebFetch" "ToolSearch" "mcp__cua-linux" \
-    "Bash($LAB/bin/claude-vc:*)" "Bash(~/.local/bin/claude-vc:*)" "Bash(claude-vc:*)" \
+    "Bash($LAB/bin/vc:*)" "Bash(~/.local/bin/vc:*)" "Bash(vc:*)" \
     "Bash(python3 $LAB/cualab/mcp_client.py:*)" \
   --max-turns 80 --output-format stream-json --verbose > "$OUT/$NAME.jsonl" 2> "$OUT/$NAME.stderr"
 vm_after="$(vm_state)"

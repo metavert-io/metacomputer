@@ -1,14 +1,17 @@
 #!/opt/homebrew/bin/python3
 """Summarize a headless session transcript (stream-json) for the skill tests:
-skill use, claude-vc commands, cua-linux tool calls, denied attempts, result.
+skill use, vc commands, cua-linux tool calls, denied attempts, result.
 
   tests/skill/analyze.py RUN.jsonl      -> prints a summary, writes RUN.summary.json
 """
 import json
+import re
 import os
 import sys
 
 path = sys.argv[1]
+# a `vc` command: bare, or ~/.local/bin/vc / <checkout>/bin/vc
+VC_CMD = re.compile(r"(^|[/\s])vc(\s|$)")
 meta_path = path[:-6] + ".meta.json"
 meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
 calls, results, final = [], {}, {}
@@ -59,12 +62,12 @@ structural = {
     "run_script": sum(1 for c in vm_calls if _tool(c) == "run_script"),
     "list_apps": sum(1 for c in vm_calls if _tool(c) == "list_apps"),
     "screenshots_desktop_or_zoom": sum(1 for c in vm_calls if _tool(c) in ("get_desktop_state", "zoom")),
-    "inspect": sum(1 for b in bash if "claude-vc inspect" in b),
+    "inspect": sum(1 for b in bash if re.search(r"(^|[/\s])vc inspect\b", b)),
     "page_tools": sum(1 for c in vm_calls if _tool(c).startswith("browser_") or _tool(c) == "get_browser_state"),
-    "web_cmds": sum(1 for b in bash if "claude-vc web " in b),
+    "web_cmds": sum(1 for b in bash if re.search(r"(^|[/\s])vc web\b", b)),
     "chrome_launch": sum(1 for c in vm_calls if "chrome" in json.dumps(c["input"]).lower()
                          and _tool(c) in ("launch_app", "browser_prepare")),
-    "bridge_notes": sum(1 for c in vm_calls if "claude-vc bridge" in results.get(c["id"], {}).get("text", "")),
+    "bridge_notes": sum(1 for c in vm_calls if "virtual-computer bridge" in results.get(c["id"], {}).get("text", "")),
 }
 usage = final.get("usage") or {}
 summary = {
@@ -72,8 +75,8 @@ summary = {
     "structural": structural,
     "tokens": {k: usage.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")},
     "skill_invoked": skills,
-    "cua_lab_commands": [b for b in bash if "claude-vc" in b],
-    "other_bash": [b for b in bash if "claude-vc" not in b],
+    "cua_lab_commands": [b for b in bash if VC_CMD.search(b)],
+    "other_bash": [b for b in bash if not VC_CMD.search(b)],
     "mcp_tools": mcp,
     "mcp_errors": mcp_errors,
     "denied": denied,
@@ -87,7 +90,7 @@ print(f"== {meta.get('name')}  VM {meta.get('vm_before')} -> {meta.get('vm_after
       f"cost=${summary['cost_usd']} {summary['duration_s']}s error={summary['is_error']}")
 print(f"   skill: {skills or '-'}")
 print(f"   structure: {structural}")
-print(f"   claude-vc: {[b[:110] for b in summary['cua_lab_commands']] or '-'}")
+print(f"   vc: {[b[:110] for b in summary['cua_lab_commands']] or '-'}")
 print(f"   mcp ({len(mcp)}): {', '.join(mcp) or '-'}")
 if mcp_errors:
     print(f"   mcp errors: {mcp_errors}")

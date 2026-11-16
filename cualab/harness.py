@@ -1,7 +1,7 @@
-"""claude-virtual-computer GUI test harness.
+"""virtual-computer GUI test harness.
 
 Each test gets one persistent MCP connection to Cua Driver in the guest (the
-same `claude-vc mcp` bridge Claude Code uses), and:
+same `vc mcp` bridge Claude Code uses), and:
   - a driver-owned recording (`start_recording` with record_video): the MP4
     (ffmpeg x11grab in the guest) plus a per-action trajectory (before/after
     accessibility state, before/after window images, click markers, action.json)
@@ -27,7 +27,7 @@ import traceback
 
 from mcp_client import LAB_ROOT, MCPClient
 
-SSH = [os.path.join(LAB_ROOT, "bin", "claude-vc"), "ssh", "ops"]
+SSH = [os.path.join(LAB_ROOT, "bin", "vc"), "ssh", "ops"]
 from labconfig import GUEST_RUNS  # noqa: E402  (guest home of the configured user)
 
 

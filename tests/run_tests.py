@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-virtual-computer GUI smoke suite: `claude-vc test [A B C D E F] [--run-id ID]`.
+"""virtual-computer GUI smoke suite: `vc test [A B C D E F] [--run-id ID]`.
 
 Each test drives the Linux guest only through Cua Driver's MCP tools (the
 same bridge Claude Code uses), records itself, and verifies the outcome
@@ -43,15 +43,15 @@ def main(argv):
             print(f"unknown test {a!r}; choose from {', '.join(TESTS)}"); return 2
         i += 1
     sel = sel or list(TESTS)
-    st = subprocess.run([os.path.join(LAB, "bin", "claude-vc"), "status", "--json"], capture_output=True, text=True)
+    st = subprocess.run([os.path.join(LAB, "bin", "vc"), "status", "--json"], capture_output=True, text=True)
     try:
         status = json.loads(st.stdout)
     except json.JSONDecodeError:
         status = {}
     if not status.get("ready"):
-        print("claude-vc: the VM is not ready (claude-vc status). Start it with: claude-vc start")
+        print("vc: the VM is not ready (vc status). Start it with: vc start")
         return 1
-    print(f"claude-vc test run {run_id}: {' '.join(sel)}")
+    print(f"vc test run {run_id}: {' '.join(sel)}")
     results = []
     for tid in sel:
         mod = importlib.import_module(TESTS[tid])
@@ -63,7 +63,7 @@ def main(argv):
                "mcp": status.get("mcp"), "results": results}
     json.dump(summary, open(os.path.join(out_dir, "summary.json"), "w"), indent=2)
     with open(os.path.join(out_dir, "summary.md"), "w") as f:
-        f.write(f"# claude-vc test run {run_id}\n\n")
+        f.write(f"# vc test run {run_id}\n\n")
         f.write("| Test | Result | Time | Actions (AT-SPI / input events) | Screenshots | Recording | Checks |\n|---|---|---|---|---|---|---|\n")
         for r in results:
             v = r.get("video") or {}

@@ -2,16 +2,16 @@
 
 Two kinds of controller can drive the VM's desktop:
 
-- On-demand bridges (`claude-vc mcp-lazy`, what Claude Code sessions use). Each
+- On-demand bridges (`vc mcp-lazy`, what Claude Code sessions use). Each
   one that has acted keeps .run/owners/<bridge-pid>.json up to date: its Claude
   Code process, the project folder, the time and name of its last tool call.
-- Direct connections (`claude-vc mcp`: the GUI tests, mcp_client.py, older
+- Direct connections (`vc mcp`: the GUI tests, mcp_client.py, older
   configs). They are found as live SSH processes using the MCP key.
 
 "Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
 so a session never blocks itself.
 
-CLI (used by bin/claude-vc):
+CLI (used by bin/vc):
   owners.py who [--json]      list controllers
   owners.py check             exit 3 (and explain) if another controller is active
   owners.py release           forget other sessions' claims (after the user agrees)
@@ -31,12 +31,12 @@ MCP_KEY_RE = re.compile(r"IdentityFile=\S*/mcp(?:\s|$)")
 
 
 def cli():
-    """How to name the claude-vc command in messages: the installed launcher
-    (~/.local/bin/claude-vc) when it points at this checkout, else the path."""
-    own = os.path.join(LAB, "bin", "claude-vc")
-    link = os.path.expanduser("~/.local/bin/claude-vc")
+    """How to name the vc command in messages: the installed launcher
+    (~/.local/bin/vc) when it points at this checkout, else the path."""
+    own = os.path.join(LAB, "bin", "vc")
+    link = os.path.expanduser("~/.local/bin/vc")
     if os.path.exists(link) and os.path.realpath(link) == os.path.realpath(own):
-        return "~/.local/bin/claude-vc"
+        return "~/.local/bin/vc"
     return own
 
 
@@ -143,7 +143,7 @@ def claims():
 # --- direct connections --------------------------------------------------------
 
 def direct_connections(table):
-    """Live `claude-vc mcp` SSH connections not owned by an on-demand bridge."""
+    """Live `vc mcp` SSH connections not owned by an on-demand bridge."""
     out = []
     for pid, (ppid, comm) in table.items():
         if os.path.basename(comm) != "ssh":

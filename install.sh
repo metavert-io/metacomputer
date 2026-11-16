@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh: set up claude-virtual-computer on this Mac (Apple silicon).
+# install.sh: set up virtual-computer on this Mac (Apple silicon).
 #
 #   ./install.sh               interactive; asks at most four questions
 #   ./install.sh --yes         accept the defaults (Chrome included, build now)
@@ -7,7 +7,7 @@
 #   ./install.sh --lume=standard   Cua's notarized Lume instead of lume-secure (the
 #                              VM then always shares your clipboard, audio and Rosetta)
 #   ./install.sh --no-build    set everything up but don't build the VM yet
-#   ./install.sh --no-claude   don't touch Claude Code (skill, MCP server, claude-vc command)
+#   ./install.sh --no-claude   don't touch Claude Code (skill, MCP server, vc command)
 #   ./install.sh --uninstall   remove the Claude Code hooks this installed (the VM stays)
 #
 # What it does (each step is skipped when already done):
@@ -15,7 +15,7 @@
 #   2. installs Lume, the VM runner: lume-secure (default; built from the pinned
 #      tag, can leave out clipboard/audio/Rosetta sharing) or Cua's release
 #   3. writes config/local.env, this Mac's settings (asks whether to add Chrome)
-#   4. links the `claude-vc` command, the `virtual-computer` skill and the
+#   4. links the `vc` command, the `virtual-computer` skill and the
 #      `cua-linux` MCP server into Claude Code, for every project
 #   5. builds the VM (asks; about 10 minutes, unattended)
 set -Eeuo pipefail
@@ -47,14 +47,14 @@ link_points_here() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
 trap 'printf "%s\n" "${r}install: stopped at line $LINENO: $BASH_COMMAND${o}" "Details: the newest file in $ROOT/logs/ (for a build), or the messages above. Fix it and run ./install.sh again; finished steps are skipped." >&2' ERR
 
 SKILL_LINK="$HOME/.claude/skills/virtual-computer"
-CMD_LINK="$HOME/.local/bin/claude-vc"
+CMD_LINK="$HOME/.local/bin/vc"
 
 # --- uninstall ---------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
   step "Removing the Claude Code hooks for $ROOT"
-  link_points_here "$CMD_LINK" "$ROOT/bin/claude-vc" && rm "$CMD_LINK" && ok "removed $CMD_LINK"
+  link_points_here "$CMD_LINK" "$ROOT/bin/vc" && rm "$CMD_LINK" && ok "removed $CMD_LINK"
   link_points_here "$SKILL_LINK" "$ROOT/skills/virtual-computer" && rm "$SKILL_LINK" && ok "removed the virtual-computer skill"
-  if command -v claude >/dev/null 2>&1 && claude mcp get cua-linux 2>/dev/null | grep -q "$ROOT/bin/claude-vc"; then
+  if command -v claude >/dev/null 2>&1 && claude mcp get cua-linux 2>/dev/null | grep -q "$ROOT/bin/vc"; then
     claude mcp remove cua-linux -s user >/dev/null 2>&1 && ok "removed the cua-linux MCP server"
   fi
   # shellcheck source=/dev/null
@@ -163,24 +163,24 @@ fi
 if [ "$CLAUDE" = 1 ]; then
   step "Claude Code"
   mkdir -p "$HOME/.local/bin" "$HOME/.claude/skills"
-  ln -sfn "$ROOT/bin/claude-vc" "$CMD_LINK" && ok "command: $CMD_LINK"
-  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin isn't on your PATH; add it to use 'claude-vc' directly (Claude uses the full path)" ;; esac
+  ln -sfn "$ROOT/bin/vc" "$CMD_LINK" && ok "command: $CMD_LINK"
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin isn't on your PATH; add it to use 'vc' directly (Claude uses the full path)" ;; esac
   if [ -e "$SKILL_LINK" ] && [ ! -L "$SKILL_LINK" ]; then
     warn "$SKILL_LINK exists and isn't a link; left alone (move it away and run this again to install the skill)"
   else
     ln -sfn "$ROOT/skills/virtual-computer" "$SKILL_LINK" && ok "skill: virtual-computer"
   fi
   if command -v claude >/dev/null 2>&1; then
-    if claude mcp get cua-linux 2>/dev/null | grep -q "$ROOT/bin/claude-vc"; then
+    if claude mcp get cua-linux 2>/dev/null | grep -q "$ROOT/bin/vc"; then
       ok "MCP server cua-linux already registered"
     else
       claude mcp remove cua-linux -s user >/dev/null 2>&1 || true
-      claude mcp add -s user cua-linux "$ROOT/bin/claude-vc" mcp-lazy >/dev/null \
+      claude mcp add -s user cua-linux "$ROOT/bin/vc" mcp-lazy >/dev/null \
         && ok "MCP server cua-linux registered for every project (tools appear even while the VM is off)" \
-        || warn "could not register the MCP server; run: claude mcp add -s user cua-linux $ROOT/bin/claude-vc mcp-lazy"
+        || warn "could not register the MCP server; run: claude mcp add -s user cua-linux $ROOT/bin/vc mcp-lazy"
     fi
   else
-    warn "Claude Code's 'claude' command isn't installed; after installing it, run: claude mcp add -s user cua-linux $ROOT/bin/claude-vc mcp-lazy"
+    warn "Claude Code's 'claude' command isn't installed; after installing it, run: claude mcp add -s user cua-linux $ROOT/bin/vc mcp-lazy"
   fi
 fi
 
@@ -191,22 +191,22 @@ if "$LUME_BIN" get "$VM_NAME" >/dev/null 2>&1 && "$LUME_BIN" get "$BASELINE_NAME
 elif "$LUME_BIN" get "$VM_NAME" >/dev/null 2>&1; then
   warn "$VM_NAME exists but has no clean snapshot: an earlier build didn't finish"
   if [ "$BUILD" != no ] && ask "Rebuild it from scratch (deletes the unfinished $VM_NAME)?" Y; then
-    "$ROOT/bin/claude-vc" build --replace
+    "$ROOT/bin/vc" build --replace
   else
-    echo "  Rebuild later with: claude-vc build --replace"
+    echo "  Rebuild later with: vc build --replace"
   fi
 elif [ "$BUILD" != no ] && ask "Build it now? It downloads about 600 MB and runs unattended for about 10 minutes." Y; then
-  "$ROOT/bin/claude-vc" build
+  "$ROOT/bin/vc" build
 else
-  echo "  Build it later with: claude-vc build"
+  echo "  Build it later with: vc build"
 fi
 
 step "Done"
 cat <<EOF
-  claude-vc start      boot the VM (about 12 s)
-  claude-vc test       run the GUI checks (recorded)
-  claude-vc view       watch or take over the desktop
-  claude-vc help       everything else
+  vc start      boot the VM (about 12 s)
+  vc test       run the GUI checks (recorded)
+  vc view       watch or take over the desktop
+  vc help       everything else
 In Claude Code (restart open sessions first), try:
   "Get yourself a virtual computer and tell me what's on its screen."
 EOF

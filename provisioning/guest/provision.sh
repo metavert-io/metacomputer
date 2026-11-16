@@ -152,7 +152,7 @@ FB=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 FR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 convert -size 1920x1080 xc:'#17324d' -gravity center \
     -font "$FB" -pointsize 112 -fill '#ffffff' -annotate +0-70 'VIRTUAL COMPUTER' \
-    -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "claude-virtual-computer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac" \
+    -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "virtual-computer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac" \
     "$WP" || convert -size 1920x1080 xc:'#17324d' "$WP"
 chmod 0644 "$WP"
 

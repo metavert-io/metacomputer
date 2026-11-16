@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chrome guard in the on-demand bridge (`claude-vc mcp-lazy`), end to end.
+"""Chrome guard in the on-demand bridge (`vc mcp-lazy`), end to end.
 
 Runs through the same bridge Claude Code sessions use and checks that:
   1. background keys aimed at Chrome are sent in the foreground (with a note) and work;
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(LAB, "cualab"))
 from mcp_client import MCPClient  # noqa: E402
 from labconfig import GUEST_RUNS  # noqa: E402
 
-CUA = os.path.join(LAB, "bin", "claude-vc")
+CUA = os.path.join(LAB, "bin", "vc")
 PORT = 8766
 results = []
 

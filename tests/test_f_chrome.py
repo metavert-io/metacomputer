@@ -29,7 +29,7 @@ BASE = f"http://127.0.0.1:{PORT}"
 
 
 def serve():
-    subprocess.run([os.path.join(LAB, "bin", "claude-vc"), "put", os.path.join(LAB, "tests", "fixtures", "site"),
+    subprocess.run([os.path.join(LAB, "bin", "vc"), "put", os.path.join(LAB, "tests", "fixtures", "site"),
                     "--to", GUEST_RUNS], check=True, capture_output=True)
     guest(f"cd {GUEST_RUNS}/site && (nohup python3 -m http.server {PORT} --bind 127.0.0.1 "
           f">/dev/null 2>&1 & echo $! > /tmp/cua-test-http.pid); sleep 1", check=True)
@@ -117,7 +117,7 @@ def _run(t):
     href = next((re.search(r"href=(\S+)", r.get("label") or "").group(1) for r in dom.get("refs") or []
                  if "id=dl" in (r.get("label") or "")), "download.bin")
     name = os.path.basename(href)
-    ren = subprocess.run([os.path.join(LAB, "bin", "claude-vc"), "rename",
+    ren = subprocess.run([os.path.join(LAB, "bin", "vc"), "rename",
                           f"{t.guest_dir}/files/{dl.get('download_id')}", name], capture_output=True, text=True)
     content = guest(f"cat {t.guest_dir}/files/{name}").stdout.strip()
     t.evidence["download"] = {"result": dl, "renamed_to": ren.stdout.strip(), "content": content}
