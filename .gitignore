@@ -23,4 +23,4 @@ config/*.local.env
 .DS_Store
 __pycache__/
 CLAUDE.local.md
-local/
+/local/
