@@ -35,7 +35,8 @@ SOFTWARE.
 
 | Component | Source | License |
 | --- | --- | --- |
-| Lume (VM runner) | trycua/cua release `lume-v0.7.2`, checksum pinned | MIT, © Cua AI, Inc. |
+| Lume (VM runner) | trycua/cua release `lume-v0.7.2`, checksum pinned; or built from that tag by lume-secure | MIT, © Cua AI, Inc. |
+| lume-secure | github.com/metavert-io/lume-secure (patches and build scripts), tag pinned | MIT, © Metavert LLC |
 | Cua Driver (in the VM) | trycua/cua release `cua-driver-rs-v0.52.1`, checksum pinned | MIT, © Cua AI, Inc. |
 | cua-netgw (network gateway) | built from trycua/cua source at a pinned commit (`libs/cua/netgw`) | MIT, © Cua AI, Inc.; uses gvisor-tap-vsock (Apache-2.0) |
 | go-qcow2reader (used by `tools/qcow2raw`) | github.com/lima-vm/go-qcow2reader v0.8.0, fetched by Go | Apache-2.0 |

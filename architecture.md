@@ -46,7 +46,8 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 
 | Component | Version / pin | Where | Role |
 | --- | --- | --- | --- |
-| Lume | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | VM lifecycle on Virtualization.framework; installed without its LaunchAgent; telemetry disabled |
+| lume-secure (default) | Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/lume-secure/`, wrapper `~/.local/bin/lume-secure` | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
+| Lume (alternative) | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | the same, with clipboard, audio and Rosetta always attached |
 | cua-netgw | built from trycua/cua `ca6a643` (`libs/cua/netgw`) | `vendor/bin/cua-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
 | Cua Driver | 0.52.1 linux-arm64 (sha256 `ea8229f4…`) | guest `/opt/cua-driver/0.52.1` | desktop observation/control, MCP server, recording |
 | Ubuntu | 24.04 LTS arm64 cloud image, release 20261017 (sha256 `50e24e1f…`, SHA256SUMS signed by `D2EB4462…7C81`) | VM disk | guest OS |
@@ -207,7 +208,7 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 
 | Command | Implementation |
 | --- | --- |
-| `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…`, wait for SSH, the XFCE session and an MCP handshake |
+| `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
 | `stop` | `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `cua-guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
@@ -234,12 +235,16 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
   real pointer/focus; harmless in a dedicated VM, but one controller at a time.
 - **Focused element** is not reported by the driver on Linux (0.52.1).
 - **Thunar's icon view** has no accessible items; use List View.
-- **Lume always attaches** a SPICE clipboard channel (`VZSpiceAgentPortAttachment`,
-  shares the Mac's clipboard), a virtio sound device wired to host audio,
-  and a Rosetta share. The guest has no `spice-vdagent` and `virtio_snd` is
-  blacklisted, but a root-compromised guest could start an agent and read or set
-  the Mac's clipboard while the VM runs. Don't keep secrets on the Mac's
-  clipboard while running untrusted tasks, or stop the VM.
+- **Host-sharing devices.** Lume attaches a SPICE clipboard channel
+  (`VZSpiceAgentPortAttachment`, shares the Mac's clipboard), a virtio sound
+  device wired to the host's speakers and microphone, and a Rosetta share to
+  every VM. With lume-secure (the default), `claude-vc start` leaves each out
+  unless its `SHARE_*` setting is `on`; `claude-vc status` reports what the
+  guest actually has (virtio console ports, a 0x0019 sound device, a virtiofs
+  Rosetta tag). With standard Lume they are always attached: the guest has no
+  `spice-vdagent` and `virtio_snd` is blacklisted, but a root-compromised
+  guest could start an agent and read or set the Mac's clipboard, so don't
+  keep secrets on the clipboard while it runs untrusted tasks.
 - **Guest egress is open to the public internet** (by design, for browsing);
   everything private (LAN, tailnet, the Mac) is refused on the host.
 - **Unattended upgrades** patch the working VM after each reset; refresh the

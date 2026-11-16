@@ -23,7 +23,7 @@ NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
 QCOW2RAW_BIN="$LAB_ROOT/vendor/bin/qcow2raw"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 export LUME_TELEMETRY_ENABLED=0
-LUME="${LUME:-$HOME/.local/bin/lume}"
+LUME="${LUME:-$HOME/.local/bin/lume-secure}"
 PY="${PY:-/opt/homebrew/bin/python3}"
 [ -x "$PY" ] || PY=python3
 
@@ -120,6 +120,22 @@ EOF
 }
 
 # --- VM run/stop ------------------------------------------------------------
+# Host-sharing devices: Lume attaches the SPICE clipboard port, a sound device
+# (host speakers + microphone) and the Rosetta share to every VM. A Lume with
+# the opt-out flags (lume-secure, or a Lume that adopted them) leaves out each
+# one whose SHARE_* setting isn't "on"; any other Lume always shares them.
+host_sharing_args() {
+  if "$LUME" run --help 2>&1 | grep -q -- "--no-host-sharing"; then
+    local a=""
+    [ "${SHARE_CLIPBOARD:-off}" = on ] || a="$a --no-share-clipboard"
+    [ "${SHARE_AUDIO:-off}" = on ] || a="$a --no-share-audio"
+    [ "${SHARE_ROSETTA:-off}" = on ] || a="$a --no-share-rosetta"
+    printf '%s' "$a"
+  elif [ "${SHARE_CLIPBOARD:-off}${SHARE_AUDIO:-off}${SHARE_ROSETTA:-off}" != ononon ]; then
+    warn "$LUME always shares your clipboard, audio and Rosetta with the VM; lume-secure can turn them off (README: Isolation)"
+  fi
+}
+
 vm_start() { # NAME [seed.iso]
   local name="$1" seed="${2:-}" mac
   vm_running "$name" && { ok "$name already running"; return 0; }
@@ -127,6 +143,7 @@ vm_start() { # NAME [seed.iso]
   netgw_start "$mac"
   local args="run $name --display none --vnc disabled --network gateway:$SOCK_DIR/net.sock"
   [ -n "$seed" ] && args="$args --mount $seed"
+  args="$args$(host_sharing_args)"
   # shellcheck disable=SC2086
   daemonize "$LOG_DIR/lume-$name.log" "$LUME" $args
   local i=0; while ! vm_running "$name" && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done

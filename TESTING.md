@@ -33,6 +33,16 @@ This test goes through `claude-vc mcp-lazy`, the bridge Claude Code sessions use
 Background is in
 [docs/chrome-investigation.md](docs/chrome-investigation.md).
 
+## Host sharing: `claude-vc status`
+
+With lume-secure and the default settings, the `host sharing` line must read
+`clipboard off  audio off  rosetta off`. It's read from inside the VM: virtio
+console port names, virtio device ids and virtiofs tags. Turning one setting
+`on` (e.g. `SHARE_CLIPBOARD=on` in `config/local.env`) and restarting must
+show just that one; all three `on` is Lume's own default. The flag parsing
+and device selection have unit tests in
+[lume-secure](https://github.com/metavert-io/lume-secure).
+
 ## Browser checks: `claude-vc web …`
 
 `compare`, `responsive`, `a11y` and `open-untrusted` serve as their own

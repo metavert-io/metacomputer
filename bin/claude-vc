@@ -108,7 +108,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
 
 do_status() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
-  local vm_state lease ssh_ok=false gs="{}" mcp="{}"
+  local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs=""
   vm_state="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   local base_state; base_state="$(vm_exists "$BASELINE_NAME" && echo present || echo missing)"
   local gw=false fwd=""
@@ -121,14 +121,25 @@ do_status() {
       ssh_ok=true
       gs="$(gssh ops /opt/cua-lab/bin/cua-guest-status 2>/dev/null || echo '{}')"
       mcp="$(mcp_probe 2>/dev/null || echo '{}')"
+      # What the VM actually has from the host: virtio console port names (the
+      # SPICE clipboard port), virtio device ids (0x0019 = sound) and virtiofs
+      # tags (the Rosetta share is tagged "rosetta").
+      hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
     fi
   fi
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" <<'EOF'
-import json, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp = sys.argv[1:]
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" <<'EOF'
+import json, os, sys
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume = sys.argv[1:]
 gs = json.loads(gs or "{}"); mcp = json.loads(mcp or "{}")
+sharing = None
+if hs:
+    parts = (hs.split("---") + ["", "", ""])[:3]
+    ports, devices, tags = (p.split() for p in parts)
+    sharing = {"clipboard": "com.redhat.spice.0" in ports, "audio": "0x0019" in devices,
+               "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
-       "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp}
+       "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
+       "host_sharing": sharing, "lume": lume}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -148,6 +159,10 @@ if gs:
           + ("  REBOOT REQUIRED (updates)" if gs.get('reboot_required') else ""))
 if mcp:
     print(f"mcp           {m(mcp.get('ok'))} {mcp.get('server', '')} {mcp.get('protocol', '')}  tools={mcp.get('tools', 0)}  ({mcp.get('ms', '?')} ms)")
+if sharing is not None:
+    def onoff(k): return ("\033[33mon\033[0m" if sharing[k] else "off")
+    print(f"host sharing  clipboard {onoff('clipboard')}  audio {onoff('audio')}  rosetta {onoff('rosetta')}"
+          f"   (seen from inside the VM; Lume: {os.path.basename(lume)})")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF

@@ -39,13 +39,14 @@ cd claude-virtual-computer
 ./install.sh
 ```
 
-The installer asks at most three questions:
+The installer asks at most four questions:
 1. whether to install missing tools with Homebrew (Go, GnuPG, ffmpeg);
-2. whether to put Google Chrome in the VM next to Firefox (that means accepting Google's terms);
-3. whether to build the VM now.
+2. which Lume runs the VM: [lume-secure](https://github.com/metavert-io/lume-secure) (recommended; it can keep your clipboard, microphone and Rosetta away from the VM, built from source in about a minute with Apple's Command Line Tools) or Cua's standard release;
+3. whether to put Google Chrome in the VM next to Firefox (that means accepting Google's terms);
+4. whether to build the VM now.
 
 Everything else is automatic:
-- [Lume](https://github.com/trycua/cua/tree/main/libs/lume) at a pinned, checksum-verified version;
+- Lume, at a pinned and verified version;
 - this Mac's settings (`config/local.env`);
 - the `claude-vc` command;
 - the skill, and the `cua-linux` MCP server registered for every Claude Code project.
@@ -120,6 +121,11 @@ store; see Configuration.
 
 ## Isolation and safety
 
+**Your clipboard, audio and Rosetta:** Lume normally connects every VM to the Mac's clipboard (a SPICE agent port), its speakers and microphone, and Rosetta. Anything with root in the VM could use those.
+- With lume-secure (the default choice) the VM starts without all three; turn one back on with `SHARE_CLIPBOARD=on`, `SHARE_AUDIO=on` or `SHARE_ROSETTA=on`.
+- With standard Lume they're always attached.
+- `claude-vc status` shows what the VM actually has.
+
 **The VM's network** (enforced on the Mac by a user-mode gateway, not inside the VM):
 - It reaches the public internet and nothing private: not your Mac, your LAN or router, a tailnet, or cloud metadata.
 - Every blocked attempt is logged.
@@ -156,6 +162,8 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 | `VM_NAME`, `BASELINE_NAME` | `claude-vc`, `claude-vc-baseline` | Lume VM names |
 | `VM_CPU`, `VM_MEMORY` | 4, 8GB | VM size |
 | `BROWSERS` | `firefox chrome` | Browsers built into the VM |
+| `LUME` | `~/.local/bin/lume-secure` | The Lume that runs the VM (`install.sh --lume=standard` for Cua's release) |
+| `SHARE_CLIPBOARD`, `SHARE_AUDIO`, `SHARE_ROSETTA` | `off` | Turn one on to connect the VM to your Mac's clipboard, audio or Rosetta (lume-secure only; standard Lume always shares) |
 | `SSH_DIR` | `~/.ssh/claude-vc` | SSH keys for the VM |
 | `VNC_PASSWORD_STORE` | `file` | `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `BROWSER`, `MODE` | `firefox`, `human` | The skill's defaults |
@@ -180,6 +188,8 @@ lume delete claude-vc && lume delete claude-vc-baseline   # the VM itself, if yo
 ## Credits and license
 
 Built on [Cua](https://github.com/trycua/cua) (Cua Driver, Lume and the
-network gateway; MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+network gateway; MIT), and on [lume-secure](https://github.com/metavert-io/lume-secure)
+(Lume plus opt-out host-sharing flags, proposed upstream). See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 MIT License, © 2026 Metavert LLC. See [LICENSE](LICENSE).
