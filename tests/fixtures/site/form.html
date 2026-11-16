@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Lab form</title>
+<style>body{font:16px sans-serif;margin:24px} label{display:block;margin:8px 0}</style></head>
+<body>
+<h1>Lab form</h1>
+<form id="f" onsubmit="event.preventDefault(); show();">
+  <label>Name <input id="name" name="name" aria-label="Name"></label>
+  <label>Colour
+    <select id="colour" name="colour" aria-label="Colour">
+      <option value="">choose…</option><option value="red">Red</option>
+      <option value="green">Green</option><option value="blue">Blue</option>
+    </select></label>
+  <label><input type="checkbox" id="agree" name="agree"> I agree</label>
+  <label>Attachment <input type="file" id="file" name="file" aria-label="Attachment"></label>
+  <button type="submit" id="submit">Submit</button>
+  <button type="button" id="confirm" onclick="document.getElementById('dlg').textContent = confirm('Really?') ? 'confirmed' : 'cancelled'">Ask</button>
+  <a id="dl" href="report.txt" download>Download report</a>
+  <a id="next" href="page2.html">Next page</a>
+</form>
+<p id="out" aria-live="polite">nothing yet</p>
+<p id="dlg">no dialog yet</p>
+<script>
+function show(){
+  const f = document.getElementById('file').files[0];
+  document.getElementById('out').textContent =
+    'name=' + document.getElementById('name').value +
+    ' colour=' + document.getElementById('colour').value +
+    ' agree=' + document.getElementById('agree').checked +
+    ' file=' + (f ? f.name : '-');
+}
+</script>
+</body></html>

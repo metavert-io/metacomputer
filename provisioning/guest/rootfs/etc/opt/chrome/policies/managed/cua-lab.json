@@ -1,0 +1,19 @@
+{
+  "MetricsReportingEnabled": false,
+  "UrlKeyedAnonymizedDataCollectionEnabled": false,
+  "SpellCheckServiceEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "BackgroundModeEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "PrivacySandboxPromptEnabled": false,
+  "PrivacySandboxAdTopicsEnabled": false,
+  "PrivacySandboxSiteEnabledAdsEnabled": false,
+  "PrivacySandboxAdMeasurementEnabled": false,
+  "GenAiDefaultSettings": 2,
+  "RestoreOnStartup": 5
+}

@@ -1,0 +1,9 @@
+// cua-lab: security updates (and Firefox from Mozilla) apply automatically;
+// never reboot on our own - a reboot would end an automation run.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu";
+        "site=packages.mozilla.org";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+APT::Install-Recommends "false";

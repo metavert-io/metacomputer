@@ -1,0 +1,18 @@
+[org/gnome/desktop/interface]
+toolkit-accessibility=true
+
+[org/gnome/desktop/a11y]
+always-show-universal-access-status=false
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/xfce/mousepad/preferences/file]
+session-restore='never'
+
+[org/xfce/mousepad/preferences/window]
+always-show-tabs=false

@@ -1,0 +1,49 @@
+#!/bin/sh
+# cua-desktop-record start NAME [FPS] | stop | status
+# Whole-desktop MP4 recording of the guest's X display (ffmpeg x11grab, visible
+# pointer). Independent of who drives the desktop, so it captures any task.
+# Files land in ~/cua-lab-runs/manual/; the host pulls them with
+# `cua-lab recordings --sync`.
+set -eu
+RUN="/run/user/$(id -u)/cua-lab"
+DIR="$HOME/cua-lab-runs/manual"
+PIDF="$RUN/desktop-record.pid"
+CUR="$RUN/desktop-record.current"
+mkdir -p "$DIR"
+
+alive() { [ -s "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+
+case "${1:-status}" in
+  start)
+    NAME="${2:?usage: cua-desktop-record start NAME [FPS]}"
+    FPS="${3:-20}"
+    case "$NAME" in *[!A-Za-z0-9._-]*) echo "bad name: $NAME" >&2; exit 2;; esac
+    if alive; then echo "already recording: $(cat "$CUR")" >&2; exit 1; fi
+    [ -s "$RUN/session.env" ] || { echo "desktop session not up" >&2; exit 3; }
+    set -a; . "$RUN/session.env"; set +a
+    SIZE="$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')"
+    OUT="$DIR/$NAME.mp4"
+    nohup ffmpeg -hide_banner -loglevel error -nostdin -y \
+      -f x11grab -draw_mouse 1 -framerate "$FPS" -video_size "${SIZE:-1920x1080}" -i "$DISPLAY" \
+      -c:v libx264 -preset veryfast -crf 26 -pix_fmt yuv420p -movflags +faststart \
+      "$OUT" > "$DIR/$NAME.ffmpeg.log" 2>&1 &
+    echo $! > "$PIDF"
+    echo "$OUT" > "$CUR"
+    sleep 1
+    alive || { echo "ffmpeg did not start:" >&2; cat "$DIR/$NAME.ffmpeg.log" >&2; exit 1; }
+    echo "recording $OUT (${SIZE:-1920x1080} @ ${FPS} fps)"
+    ;;
+  stop)
+    if ! alive; then echo "not recording"; exit 0; fi
+    PID="$(cat "$PIDF")"
+    kill -INT "$PID"
+    i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+    kill -0 "$PID" 2>/dev/null && kill -TERM "$PID"
+    OUT="$(cat "$CUR")"; rm -f "$PIDF" "$CUR"
+    echo "$OUT"
+    ;;
+  status)
+    if alive; then echo "recording $(cat "$CUR")"; else echo "idle"; fi
+    ;;
+  *) echo "usage: cua-desktop-record start NAME [FPS] | stop | status" >&2; exit 2 ;;
+esac

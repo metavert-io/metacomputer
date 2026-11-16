@@ -1,0 +1,83 @@
+{
+  "policies": {
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
+    "DisableProfileImport": true,
+    "DontCheckDefaultBrowser": true,
+    "NoDefaultBookmarks": true,
+    "OfferToSaveLogins": false,
+    "PasswordManagerEnabled": false,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "Homepage": {
+      "URL": "about:blank",
+      "StartPage": "homepage",
+      "Locked": false
+    },
+    "FirefoxHome": {
+      "Search": true,
+      "TopSites": false,
+      "SponsoredTopSites": false,
+      "Highlights": false,
+      "Pocket": false,
+      "SponsoredPocket": false,
+      "Snippets": false,
+      "Locked": false
+    },
+    "UserMessaging": {
+      "WhatsNew": false,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "UrlbarInterventions": false,
+      "SkipOnboarding": true,
+      "MoreFromMozilla": false,
+      "FirefoxLabs": false,
+      "Locked": true
+    },
+    "Preferences": {
+      "accessibility.force_disabled": {
+        "Value": 0,
+        "Status": "locked"
+      },
+      "browser.aboutwelcome.enabled": {
+        "Value": false,
+        "Status": "locked"
+      },
+      "browser.shell.checkDefaultBrowser": {
+        "Value": false,
+        "Status": "locked"
+      },
+      "browser.sessionstore.resume_from_crash": {
+        "Value": false,
+        "Status": "locked"
+      },
+      "browser.tabs.warnOnClose": {
+        "Value": false,
+        "Status": "default"
+      },
+      "datareporting.policy.dataSubmissionPolicyBypassNotification": {
+        "Value": true,
+        "Status": "locked"
+      },
+      "browser.translations.automaticallyPopup": {
+        "Value": false,
+        "Status": "default"
+      },
+      "media.autoplay.default": {
+        "Value": 5,
+        "Status": "default"
+      },
+      "browser.tabs.inTitlebar": {
+        "Value": 0,
+        "Status": "locked"
+      },
+      "browser.newtabpage.activity-stream.showWeather": {
+        "Value": false,
+        "Status": "locked"
+      }
+    },
+    "NewTabPage": false
+  }
+}

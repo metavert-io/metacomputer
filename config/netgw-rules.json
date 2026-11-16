@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    { "net": "10.0.0.0/8",       "accept": false, "reason": "lab:private-lan" },
+    { "net": "172.16.0.0/12",    "accept": false, "reason": "lab:private-lan" },
+    { "net": "192.168.0.0/16",   "accept": false, "reason": "lab:private-lan" },
+    { "net": "100.64.0.0/10",    "accept": false, "reason": "lab:cgnat-tailnet" },
+    { "net": "169.254.0.0/16",   "accept": false, "reason": "lab:link-local" },
+    { "net": "198.18.0.0/15",    "accept": false, "reason": "lab:benchmark-net" },
+    { "net": "240.0.0.0/4",      "accept": false, "reason": "lab:reserved" },
+    { "net": "fc00::/7",         "accept": false, "reason": "lab:ula-tailnet" },
+    { "net": "fe80::/10",        "accept": false, "reason": "lab:link-local" },
+    { "net": "0.0.0.0/0", "ports": [25, 465, 587], "proto": "tcp", "accept": false, "reason": "lab:no-smtp" },
+    { "net": "::/0",      "ports": [25, 465, 587], "proto": "tcp", "accept": false, "reason": "lab:no-smtp" }
+  ],
+  "default_accept": true,
+  "block_host_addrs": true
+}

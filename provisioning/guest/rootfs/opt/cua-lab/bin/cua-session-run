@@ -1,0 +1,14 @@
+#!/bin/sh
+# cua-session-run CMD [ARGS...]: run a command inside the automation user's
+# desktop session environment (DISPLAY, XAUTHORITY, D-Bus/AT-SPI bus).
+# Used by the host's lifecycle and diagnostic commands over SSH.
+RUN="/run/user/$(id -u)/cua-lab"
+if [ ! -s "$RUN/session.env" ]; then
+  echo "cua-lab: the desktop session is not up (no $RUN/session.env)" >&2
+  exit 3
+fi
+set -a
+. "$RUN/session.env"
+set +a
+export CUA_DRIVER_RS_TELEMETRY_ENABLED=0 CUA_TELEMETRY_ENABLED=0 CUA_DRIVER_RS_UPDATE_CHECK=0
+exec "$@"

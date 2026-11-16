@@ -1,0 +1,63 @@
+#!/bin/sh
+# cua-session-init: XFCE autostart entry for the automation user.
+#  - stops X screen blanking / DPMS for this session
+#  - publishes the session's environment to $XDG_RUNTIME_DIR/cua-lab/session.env
+#    so SSH-launched tools (Cua Driver MCP, recorder) reach this X display,
+#    its auth cookie and its D-Bus session bus (AT-SPI lives there)
+#  - starts the password-protected VNC view on :5900 (reachable only through
+#    the host gateway's 127.0.0.1 forward)
+set -u
+RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cua-lab"
+mkdir -p "$RUN" "$HOME/.cache/cua-lab"
+chmod 700 "$RUN"
+
+xset s off s noblank -dpms 2>/dev/null || true
+
+# Make sure the AT-SPI bus is up before anyone asks for a tree.
+dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus org.a11y.Bus.GetAddress >/dev/null 2>&1 || true
+
+tmp="$RUN/session.env.tmp"
+{
+  echo "DISPLAY=${DISPLAY:-:0}"
+  echo "XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}"
+  echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+  echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  echo "XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-x11}"
+  echo "XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-XFCE}"
+  echo "XDG_SESSION_ID=${XDG_SESSION_ID:-}"
+} > "$tmp" && mv "$tmp" "$RUN/session.env"
+
+if [ -s "$HOME/.config/cua-lab/vnc-pass" ] && ! pgrep -u "$(id -u)" -x x11vnc >/dev/null; then
+  x11vnc -display "${DISPLAY:-:0}" -rfbport 5900 -listen 0.0.0.0 -noipv6 \
+    -forever -shared -repeat -noxdamage -quiet \
+    -passwdfile "$HOME/.config/cua-lab/vnc-pass" \
+    -o "$HOME/.cache/cua-lab/x11vnc.log" -bg >/dev/null 2>&1 || true
+fi
+
+# Identity: every desktop screenshot and recording should say this is the
+# virtual computer, not the user's Mac: wallpaper on each monitor xfdesktop
+# knows, and a title on the panel's Applications menu (always visible).
+ID_IMG=/usr/share/backgrounds/cua-lab/virtual-computer.png
+if [ -r "$ID_IMG" ] && command -v xfconf-query >/dev/null 2>&1; then
+  (
+    i=0  # xfdesktop creates its per-monitor properties shortly after login
+    while [ $i -lt 30 ] && ! xfconf-query -c xfce4-desktop -l 2>/dev/null | grep -q '/last-image$'; do
+      sleep 0.5; i=$((i + 1))
+    done
+    for mon in $(xrandr --listmonitors 2>/dev/null | awk 'NR>1{print $NF}'); do
+      xfconf-query -c xfce4-desktop -p "/backdrop/screen0/monitor$mon/workspace0/last-image" -n -t string -s "$ID_IMG"
+      xfconf-query -c xfce4-desktop -p "/backdrop/screen0/monitor$mon/workspace0/image-style" -n -t int -s 5
+    done
+    for p in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/last-image$'); do
+      xfconf-query -c xfce4-desktop -p "$p" -s "$ID_IMG"
+    done
+    for p in $(xfconf-query -c xfce4-panel -l 2>/dev/null | grep -E '^/plugins/plugin-[0-9]+$'); do
+      if [ "$(xfconf-query -c xfce4-panel -p "$p" 2>/dev/null)" = applicationsmenu ]; then
+        xfconf-query -c xfce4-panel -p "$p/button-title" -n -t string -s "Virtual computer (claude-vc)"
+        xfconf-query -c xfce4-panel -p "$p/show-button-title" -n -t bool -s true
+      fi
+    done
+  ) >/dev/null 2>&1 &
+fi
+
+date -Is > "$RUN/session-ready"

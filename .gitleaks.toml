@@ -1,0 +1,8 @@
+# gitleaks settings for this repository.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public signing-key fingerprints for the Ubuntu, Mozilla and Google package repositories (published values, not secrets)"
+regexTarget = "line"
+regexes = ['''_KEY_FPR=[0-9A-F]{40}''']

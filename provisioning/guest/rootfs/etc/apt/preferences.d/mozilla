@@ -1,0 +1,4 @@
+# Firefox comes from Mozilla's APT repo (arm64 .deb), not Ubuntu's snap shim.
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000

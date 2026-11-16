@@ -1,0 +1,11 @@
+# cua-lab: accessibility on for every toolkit; driver telemetry off.
+export GTK_MODULES="${GTK_MODULES:+$GTK_MODULES:}gail:atk-bridge"
+export NO_AT_BRIDGE=0
+export GNOME_ACCESSIBILITY=1
+export QT_ACCESSIBILITY=1
+export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+export SAL_USE_VCLPLUGIN=gtk3
+export MOZ_ENABLE_WAYLAND=0
+export CUA_DRIVER_RS_TELEMETRY_ENABLED=0
+export CUA_DRIVER_RS_UPDATE_CHECK=0
+export CUA_TELEMETRY_ENABLED=0
