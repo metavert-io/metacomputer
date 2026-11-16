@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""virtual-computer GUI smoke suite: `vc test [A B C D E F] [--run-id ID]`.
+"""virtual-computer GUI smoke suite: `virtual-computer test [A B C D E F] [--run-id ID]`.
 
 Each test drives the Linux guest only through Cua Driver's MCP tools (the
 same bridge Claude Code uses), records itself, and verifies the outcome
@@ -14,7 +14,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(LAB, "cualab"))
+sys.path.insert(0, os.path.join(LAB, "lib"))
 sys.path.insert(0, HERE)
 
 from harness import run_test  # noqa: E402
@@ -43,15 +43,15 @@ def main(argv):
             print(f"unknown test {a!r}; choose from {', '.join(TESTS)}"); return 2
         i += 1
     sel = sel or list(TESTS)
-    st = subprocess.run([os.path.join(LAB, "bin", "vc"), "status", "--json"], capture_output=True, text=True)
+    st = subprocess.run([os.path.join(LAB, "bin", "virtual-computer"), "status", "--json"], capture_output=True, text=True)
     try:
         status = json.loads(st.stdout)
     except json.JSONDecodeError:
         status = {}
     if not status.get("ready"):
-        print("vc: the VM is not ready (vc status). Start it with: vc start")
+        print("virtual-computer: the VM is not ready (virtual-computer status). Start it with: virtual-computer start")
         return 1
-    print(f"vc test run {run_id}: {' '.join(sel)}")
+    print(f"virtual-computer test run {run_id}: {' '.join(sel)}")
     results = []
     for tid in sel:
         mod = importlib.import_module(TESTS[tid])
@@ -63,7 +63,7 @@ def main(argv):
                "mcp": status.get("mcp"), "results": results}
     json.dump(summary, open(os.path.join(out_dir, "summary.json"), "w"), indent=2)
     with open(os.path.join(out_dir, "summary.md"), "w") as f:
-        f.write(f"# vc test run {run_id}\n\n")
+        f.write(f"# virtual-computer test run {run_id}\n\n")
         f.write("| Test | Result | Time | Actions (AT-SPI / input events) | Screenshots | Recording | Checks |\n|---|---|---|---|---|---|---|\n")
         for r in results:
             v = r.get("video") or {}

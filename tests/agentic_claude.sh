@@ -1,6 +1,6 @@
 #!/bin/bash
 # Agentic check: a fresh, headless Claude Code session whose ONLY tools are the
-# cua-linux MCP server (Cua Driver in the VM) performs a task by reasoning over
+# virtual-computer MCP server (Cua Driver in the VM) performs a task by reasoning over
 # accessibility trees and screenshots, recording itself. No scripted steps.
 #
 #   tests/agentic_claude.sh [task-file]     (default: tests/agentic/calculator.md)
@@ -13,19 +13,19 @@ TASK_FILE="${1:-$LAB/tests/agentic/calculator.md}"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT="$LAB/results/agentic-$TS"; mkdir -p "$OUT"
 NAME="agentic-$(basename "$TASK_FILE" .md)-$TS"
-GUEST_RUNS="$("$LAB/bin/vc" ssh ops 'printf %s "$HOME"')/cua-lab-runs"
+GUEST_RUNS="$("$LAB/bin/virtual-computer" ssh ops 'printf %s "$HOME"')/virtual-computer-runs"
 PROMPT="$(sed "s|@RUN_DIR@|$GUEST_RUNS/$NAME|g" "$TASK_FILE")"
 cd "$LAB"
-"$LAB/bin/vc" status >/dev/null || { echo "VM not ready (vc start)"; exit 1; }
+"$LAB/bin/virtual-computer" status >/dev/null || { echo "VM not ready (virtual-computer start)"; exit 1; }
 # env -u CLAUDECODE: allow a nested, independent Claude Code process.
 CFG="$OUT/mcp-config.json"
-printf '{"mcpServers":{"cua-linux":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/vc" > "$CFG"
+printf '{"mcpServers":{"virtual-computer":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/virtual-computer" > "$CFG"
 env -u CLAUDECODE claude -p "$PROMPT" \
   --mcp-config "$CFG" --strict-mcp-config \
-  --allowedTools "mcp__cua-linux" \
+  --allowedTools "mcp__virtual-computer" \
   --output-format json > "$OUT/transcript.json" 2> "$OUT/stderr.log" || true
 "$PY" -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 print("result:", d.get("result","")[:3000]); print("turns:", d.get("num_turns"), "cost_usd:", d.get("total_cost_usd"), "error:", d.get("is_error"))' "$OUT/transcript.json" 2>/dev/null | tee "$OUT/summary.txt" || cat "$OUT/stderr.log"
-"$LAB/bin/vc" recordings --sync >/dev/null || true
+"$LAB/bin/virtual-computer" recordings --sync >/dev/null || true
 echo "recording: recordings/guest-runs/$NAME/ ; transcript: results/agentic-$TS/transcript.json"

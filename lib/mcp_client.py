@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Minimal MCP stdio client for virtual-computer (no third-party dependencies).
 
-It launches `bin/vc mcp` -- the same SSH bridge Claude Code uses -- so
+It launches `bin/virtual-computer mcp` -- the same SSH bridge Claude Code uses -- so
 everything it does goes through Cua Driver's MCP server inside the guest.
 
-    python3 cualab/mcp_client.py --probe                 # handshake + tool count (JSON)
-    python3 cualab/mcp_client.py --tools                 # list tool names
-    python3 cualab/mcp_client.py --describe TOOL         # one tool's input schema
-    python3 cualab/mcp_client.py --call TOOL '{"k":1}'   # call a tool, print text, save images
+    python3 lib/mcp_client.py --probe                 # handshake + tool count (JSON)
+    python3 lib/mcp_client.py --tools                 # list tool names
+    python3 lib/mcp_client.py --describe TOOL         # one tool's input schema
+    python3 lib/mcp_client.py --call TOOL '{"k":1}'   # call a tool, print text, save images
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import threading
 import time
 
 LAB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BRIDGE = [os.path.join(LAB_ROOT, "bin", "vc"), "mcp"]
+BRIDGE = [os.path.join(LAB_ROOT, "bin", "virtual-computer"), "mcp"]
 PROTOCOL = "2025-06-18"
 
 

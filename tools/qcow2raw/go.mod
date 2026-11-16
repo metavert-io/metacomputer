@@ -1,4 +1,4 @@
-module cualab/qcow2raw
+module virtual-computer/qcow2raw
 
 go 1.26
 

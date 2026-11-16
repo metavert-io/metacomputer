@@ -5,7 +5,7 @@
 #   tests/skill/run_headless.sh OUT_DIR NAME WORKDIR "PROMPT" [--global-mcp]
 #
 # The session runs in WORKDIR (a folder unrelated to the lab). By default it
-# sees only the cua-linux server (same definition as the user-scope one);
+# sees only the virtual-computer server (same definition as the user-scope one);
 # --global-mcp uses the user's real MCP configuration instead.
 set -uo pipefail
 OUT="$1"; NAME="$2"; WORKDIR="$3"; PROMPT="$4"; MODE="${5:-}"
@@ -15,17 +15,17 @@ mkdir -p "$OUT"
 MCP_ARGS=()
 if [ "$MODE" != "--global-mcp" ]; then
   CFG="$OUT/mcp-cua-only.json"
-  printf '{"mcpServers":{"cua-linux":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/vc" > "$CFG"
+  printf '{"mcpServers":{"virtual-computer":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/virtual-computer" > "$CFG"
   MCP_ARGS=(--strict-mcp-config --mcp-config "$CFG")
 fi
-vm_state() { "$LAB/bin/vc" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get("vm"); print(v if isinstance(v,str) else (v or {}).get("status","?"))' 2>/dev/null; }
+vm_state() { "$LAB/bin/virtual-computer" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get("vm"); print(v if isinstance(v,str) else (v or {}).get("status","?"))' 2>/dev/null; }
 vm_before="$(vm_state)"
 start=$(date +%s)
 cd "$WORKDIR" || exit 1
 env -u CLAUDECODE claude -p "$PROMPT" ${MCP_ARGS[@]+"${MCP_ARGS[@]}"} \
-  --allowedTools "Skill" "Read" "Glob" "Grep" "WebFetch" "ToolSearch" "mcp__cua-linux" \
-    "Bash($LAB/bin/vc:*)" "Bash(~/.local/bin/vc:*)" "Bash(vc:*)" \
-    "Bash(python3 $LAB/cualab/mcp_client.py:*)" \
+  --allowedTools "Skill" "Read" "Glob" "Grep" "WebFetch" "ToolSearch" "mcp__virtual-computer" \
+    "Bash($LAB/bin/virtual-computer:*)" "Bash(~/.local/bin/virtual-computer:*)" "Bash(virtual-computer:*)" \
+    "Bash(python3 $LAB/lib/mcp_client.py:*)" \
   --max-turns 80 --output-format stream-json --verbose > "$OUT/$NAME.jsonl" 2> "$OUT/$NAME.stderr"
 vm_after="$(vm_state)"
 printf '{"name":"%s","workdir":"%s","vm_before":"%s","vm_after":"%s","wall_s":%s}\n' \

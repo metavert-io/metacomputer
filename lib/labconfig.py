@@ -26,4 +26,4 @@ def load():
 CONFIG = load()
 GUEST_USER = CONFIG.get("GUEST_USER", "cua")
 GUEST_HOME = os.path.join("/home", GUEST_USER)
-GUEST_RUNS = os.path.join(GUEST_HOME, "cua-lab-runs")
+GUEST_RUNS = os.path.join(GUEST_HOME, "virtual-computer-runs")

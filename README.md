@@ -48,8 +48,8 @@ The installer asks at most four questions:
 Everything else is automatic:
 - Lume, at a pinned and verified version;
 - this Mac's settings (`config/local.env`);
-- the `vc` command;
-- the skill, and the `cua-linux` MCP server registered for every Claude Code project.
+- the `virtual-computer` command, with the short alias `vcomp`;
+- the skill, and the `virtual-computer` MCP server registered for every Claude Code project.
 
 `./install.sh --yes` takes the defaults without asking.
 
@@ -58,8 +58,8 @@ cloud image and the Cua Driver release, checks their signatures and
 checksums, provisions the desktop, and takes a clean snapshot. Then:
 
 ```bash
-vc start     # boot it (about 12 s)
-vc test      # six recorded GUI checks: calculator, browsers, LibreOffice, Chrome
+virtual-computer start     # boot it (about 12 s)
+virtual-computer test      # six recorded GUI checks: calculator, browsers, LibreOffice, Chrome
 ```
 
 Restart any open Claude Code sessions, and ask for a virtual computer.
@@ -76,7 +76,7 @@ tools. The skill doesn't boot a VM for those.
 
 ## Commands
 
-`vc` (also at `~/.local/bin/vc`):
+`virtual-computer` (installed at `~/.local/bin/virtual-computer`; `vcomp` is a short alias):
 
 | Command | What it does |
 | --- | --- |
@@ -93,7 +93,7 @@ tools. The skill doesn't boot a VM for those.
 | `test [A-F]` | The GUI smoke suite, each test recorded |
 | `where` | Project, config and results folders |
 
-`vc help` lists everything.
+`virtual-computer help` lists everything.
 
 ## Browsers
 
@@ -106,12 +106,12 @@ work a browser three ways:
 | **page** | Works on the page's own elements through Chrome's tools, in the background: fastest and exact, handles dropdowns, uploads, downloads and dialogs | Chrome |
 | **hybrid** | Reads and checks through the page, acts with real clicks and key-by-key typing that show in a recording | Chrome |
 
-- **Choosing:** say it in the request ("in Chrome", "drive the page directly"), or set defaults with `vc browser`.
+- **Choosing:** say it in the request ("in Chrome", "drive the page directly"), or set defaults with `virtual-computer browser`.
 - **Signing in:** the VM holds none of your accounts. When a task needs a login, Claude asks you to sign in yourself through the live view and never types your credentials.
 
 ## Watching and taking over
 
-`vc view` prints how to connect. A VNC server in the VM is reachable
+`virtual-computer view` prints how to connect. A VNC server in the VM is reachable
 only at `127.0.0.1:5977` on your Mac:
 - **On the Mac:** `open vnc://127.0.0.1:5977` opens Screen Sharing.
 - **From another device:** tunnel over SSH (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`), then connect a VNC client to `localhost:5977`.
@@ -124,7 +124,7 @@ store; see Configuration.
 **Your clipboard, audio and Rosetta:** Lume normally connects every VM to the Mac's clipboard (a SPICE agent port), its speakers and microphone, and Rosetta. Anything with root in the VM could use those.
 - With lume-secure (the default choice) the VM starts without all three; turn one back on with `SHARE_CLIPBOARD=on`, `SHARE_AUDIO=on` or `SHARE_ROSETTA=on`.
 - With standard Lume they're always attached.
-- `vc status` shows what the VM actually has.
+- `virtual-computer status` shows what the VM actually has.
 
 **The VM's network** (enforced on the Mac by a user-mode gateway, not inside the VM):
 - It reaches the public internet and nothing private: not your Mac, your LAN or router, a tailnet, or cloud metadata.
@@ -168,12 +168,12 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 | `VNC_PASSWORD_STORE` | `file` | `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `BROWSER`, `MODE` | `firefox`, `human` | The skill's defaults |
 
-`VC_CONFIG=/path/to/other.env vc …` uses a different settings file,
+`VC_CONFIG=/path/to/other.env virtual-computer …` uses a different settings file,
 for example to run a second VM side by side.
 
 ## Testing
 
-`vc test` runs six recorded GUI tests: desktop observation,
+`virtual-computer test` runs six recorded GUI tests: desktop observation,
 calculator, Firefox navigation, LibreOffice, a multi-app workflow, and Chrome
 through its page tools. See [TESTING.md](TESTING.md) for those, the Chrome
 input-guard test, and the headless skill tests.
