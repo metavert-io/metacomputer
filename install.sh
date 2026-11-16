@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh: set up virtual-computer on this Mac (Apple silicon).
+# install.sh: set up metacomputer on this Mac (Apple silicon).
 #
 #   ./install.sh               interactive; asks at most four questions
 #   ./install.sh --yes         accept the defaults (Chrome included, build now)
@@ -7,7 +7,7 @@
 #   ./install.sh --lume=standard   Cua's notarized Lume instead of lume-secure (the
 #                              VM then always shares your clipboard, audio and Rosetta)
 #   ./install.sh --no-build    set everything up but don't build the VM yet
-#   ./install.sh --no-claude   don't touch Claude Code (skill, MCP server, virtual-computer command)
+#   ./install.sh --no-claude   don't touch Claude Code (skill, MCP server, metacomputer command)
 #   ./install.sh --uninstall   remove the Claude Code hooks this installed (the VM stays)
 #
 # What it does (each step is skipped when already done):
@@ -15,8 +15,8 @@
 #   2. installs Lume, the VM runner: lume-secure (default; built from the pinned
 #      tag, can leave out clipboard/audio/Rosetta sharing) or Cua's release
 #   3. writes config/local.env, this Mac's settings (asks whether to add Chrome)
-#   4. links the `virtual-computer` command, the `virtual-computer` skill and the
-#      `virtual-computer` MCP server into Claude Code, for every project
+#   4. links the `metacomputer` command, the `metacomputer` skill and the
+#      `metacomputer` MCP server into Claude Code, for every project
 #   5. builds the VM (asks; about 10 minutes, unattended)
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -44,19 +44,27 @@ ask() { # QUESTION DEFAULT(Y|N): 0 = yes
   case "${a:-$2}" in [Yy]*) return 0 ;; *) return 1 ;; esac
 }
 link_points_here() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
+# Is $1 (a link target or a command path) one of an earlier version's: inside this
+# checkout, or an old name that points nowhere (the checkout moved or was renamed)?
+old_target() {
+  case "$1" in "$ROOT"/*) return 0 ;; esac
+  [ ! -e "$1" ] || return 1
+  case "$1" in */bin/vc|*/bin/cua-lab|*/bin/virtual-computer|*/skills/virtual-computer) return 0 ;; esac
+  return 1
+}
 trap 'printf "%s\n" "${r}install: stopped at line $LINENO: $BASH_COMMAND${o}" "Details: the newest file in $ROOT/logs/ (for a build), or the messages above. Fix it and run ./install.sh again; finished steps are skipped." >&2' ERR
 
-SKILL_LINK="$HOME/.claude/skills/virtual-computer"
-CMD_LINK="$HOME/.local/bin/virtual-computer"
-ALIAS_LINK="$HOME/.local/bin/vcomp"   # short alias for typing
+SKILL_LINK="$HOME/.claude/skills/metacomputer"
+CMD_LINK="$HOME/.local/bin/metacomputer"
+ALIAS_LINK="$HOME/.local/bin/mcomp"   # short alias for typing
 
 # --- uninstall ---------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
   step "Removing the Claude Code hooks for $ROOT"
-  for l in "$CMD_LINK" "$ALIAS_LINK"; do link_points_here "$l" "$ROOT/bin/virtual-computer" && rm "$l" && ok "removed $l"; done
-  link_points_here "$SKILL_LINK" "$ROOT/skills/virtual-computer" && rm "$SKILL_LINK" && ok "removed the virtual-computer skill"
-  if command -v claude >/dev/null 2>&1 && claude mcp get virtual-computer 2>/dev/null | grep -q "$ROOT/bin/virtual-computer"; then
-    claude mcp remove virtual-computer -s user >/dev/null 2>&1 && ok "removed the virtual-computer MCP server"
+  for l in "$CMD_LINK" "$ALIAS_LINK"; do link_points_here "$l" "$ROOT/bin/metacomputer" && rm "$l" && ok "removed $l"; done
+  link_points_here "$SKILL_LINK" "$ROOT/skills/metacomputer" && rm "$SKILL_LINK" && ok "removed the metacomputer skill"
+  if command -v claude >/dev/null 2>&1 && claude mcp get metacomputer 2>/dev/null | grep -q "$ROOT/bin/metacomputer"; then
+    claude mcp remove metacomputer -s user >/dev/null 2>&1 && ok "removed the metacomputer MCP server"
   fi
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$ROOT/config/local.env" ] && . "$ROOT/config/local.env"
@@ -164,38 +172,43 @@ fi
 if [ "$CLAUDE" = 1 ]; then
   step "Claude Code"
   mkdir -p "$HOME/.local/bin" "$HOME/.claude/skills"
-  ln -sfn "$ROOT/bin/virtual-computer" "$CMD_LINK" && ok "command: $CMD_LINK"
-  if [ -e "$ALIAS_LINK" ] && ! link_points_here "$ALIAS_LINK" "$ROOT/bin/virtual-computer"; then
+  ln -sfn "$ROOT/bin/metacomputer" "$CMD_LINK" && ok "command: $CMD_LINK"
+  if [ -e "$ALIAS_LINK" ] && ! link_points_here "$ALIAS_LINK" "$ROOT/bin/metacomputer"; then
     warn "$ALIAS_LINK already exists and is something else; left alone (the full name works)"
   else
-    ln -sfn "$ROOT/bin/virtual-computer" "$ALIAS_LINK" && ok "alias: vcomp"
+    ln -sfn "$ROOT/bin/metacomputer" "$ALIAS_LINK" && ok "alias: mcomp"
   fi
-  # Names used by earlier versions of this checkout (vc, cua-lab; MCP server cua-linux).
-  for old in vc cua-lab; do
-    if link_points_here "$HOME/.local/bin/$old" "$ROOT/bin/vc"; then
-      rm "$HOME/.local/bin/$old" && ok "removed the old command name $old"
+  # Names used by earlier versions (commands vc, cua-lab, virtual-computer, vcomp; the
+  # virtual-computer skill).
+  for old in "$HOME/.local/bin/vc" "$HOME/.local/bin/cua-lab" "$HOME/.local/bin/virtual-computer" \
+             "$HOME/.local/bin/vcomp" "$HOME/.claude/skills/virtual-computer"; do
+    if [ -L "$old" ] && old_target "$(readlink "$old")"; then
+      rm "$old" && ok "removed the old name $old"
     fi
   done
-  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin isn't on your PATH; add it to use 'virtual-computer' directly (Claude uses the full path)" ;; esac
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin isn't on your PATH; add it to use 'metacomputer' directly (Claude uses the full path)" ;; esac
   if [ -e "$SKILL_LINK" ] && [ ! -L "$SKILL_LINK" ]; then
     warn "$SKILL_LINK exists and isn't a link; left alone (move it away and run this again to install the skill)"
   else
-    ln -sfn "$ROOT/skills/virtual-computer" "$SKILL_LINK" && ok "skill: virtual-computer"
+    ln -sfn "$ROOT/skills/metacomputer" "$SKILL_LINK" && ok "skill: metacomputer"
   fi
   if command -v claude >/dev/null 2>&1; then
-    if claude mcp get cua-linux 2>/dev/null | grep -q "$ROOT/bin/"; then
-      claude mcp remove cua-linux -s user >/dev/null 2>&1 && ok "removed the old MCP server name cua-linux (now virtual-computer)"
-    fi
-    if claude mcp get virtual-computer 2>/dev/null | grep -q "$ROOT/bin/virtual-computer"; then
-      ok "MCP server virtual-computer already registered"
+    for old in cua-linux virtual-computer; do  # MCP server names of earlier versions
+      cmd="$(claude mcp get "$old" 2>/dev/null | sed -n 's/^ *Command: //p' | head -1 || true)"
+      if [ -n "$cmd" ] && old_target "$cmd"; then
+        claude mcp remove "$old" -s user >/dev/null 2>&1 && ok "removed the old MCP server name $old (now metacomputer)"
+      fi
+    done
+    if claude mcp get metacomputer 2>/dev/null | grep -q "$ROOT/bin/metacomputer"; then
+      ok "MCP server metacomputer already registered"
     else
-      claude mcp remove virtual-computer -s user >/dev/null 2>&1 || true
-      claude mcp add -s user virtual-computer "$ROOT/bin/virtual-computer" mcp-lazy >/dev/null \
-        && ok "MCP server virtual-computer registered for every project (tools appear even while the VM is off)" \
-        || warn "could not register the MCP server; run: claude mcp add -s user virtual-computer $ROOT/bin/virtual-computer mcp-lazy"
+      claude mcp remove metacomputer -s user >/dev/null 2>&1 || true
+      claude mcp add -s user metacomputer "$ROOT/bin/metacomputer" mcp-lazy >/dev/null \
+        && ok "MCP server metacomputer registered for every project (tools appear even while the VM is off)" \
+        || warn "could not register the MCP server; run: claude mcp add -s user metacomputer $ROOT/bin/metacomputer mcp-lazy"
     fi
   else
-    warn "Claude Code's 'claude' command isn't installed; after installing it, run: claude mcp add -s user virtual-computer $ROOT/bin/virtual-computer mcp-lazy"
+    warn "Claude Code's 'claude' command isn't installed; after installing it, run: claude mcp add -s user metacomputer $ROOT/bin/metacomputer mcp-lazy"
   fi
 fi
 
@@ -206,22 +219,22 @@ if "$LUME_BIN" get "$VM_NAME" >/dev/null 2>&1 && "$LUME_BIN" get "$BASELINE_NAME
 elif "$LUME_BIN" get "$VM_NAME" >/dev/null 2>&1; then
   warn "$VM_NAME exists but has no clean snapshot: an earlier build didn't finish"
   if [ "$BUILD" != no ] && ask "Rebuild it from scratch (deletes the unfinished $VM_NAME)?" Y; then
-    "$ROOT/bin/virtual-computer" build --replace
+    "$ROOT/bin/metacomputer" build --replace
   else
-    echo "  Rebuild later with: virtual-computer build --replace"
+    echo "  Rebuild later with: metacomputer build --replace"
   fi
 elif [ "$BUILD" != no ] && ask "Build it now? It downloads about 600 MB and runs unattended for about 10 minutes." Y; then
-  "$ROOT/bin/virtual-computer" build
+  "$ROOT/bin/metacomputer" build
 else
-  echo "  Build it later with: virtual-computer build"
+  echo "  Build it later with: metacomputer build"
 fi
 
 step "Done"
 cat <<EOF
-  virtual-computer start      boot the VM (about 12 s)
-  virtual-computer test       run the GUI checks (recorded)
-  virtual-computer view       watch or take over the desktop
-  virtual-computer help       everything else
+  metacomputer start      boot the VM (about 12 s)
+  metacomputer test       run the GUI checks (recorded)
+  metacomputer view       watch or take over the desktop
+  metacomputer help       everything else
 In Claude Code (restart open sessions first), try:
   "Get yourself a virtual computer and tell me what's on its screen."
 EOF

@@ -1,4 +1,4 @@
-// virtual-computer: security updates (and Firefox from Mozilla) apply automatically;
+// metacomputer: security updates (and Firefox from Mozilla) apply automatically;
 // never reboot on our own - a reboot would end an automation run.
 Unattended-Upgrade::Origins-Pattern {
         "origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu";

@@ -63,11 +63,11 @@ resources:
 @APPS_LAUNCH@
   files:
     read:
-      - {dir: @HOME@/virtual-computer-runs, recursive: true}
+      - {dir: @HOME@/metacomputer-runs, recursive: true}
       - {dir: @HOME@/Inbox, recursive: true}
       - {dir: @HOME@/Downloads, recursive: true}
     write:
-      - {dir: @HOME@/virtual-computer-runs, recursive: true}
+      - {dir: @HOME@/metacomputer-runs, recursive: true}
       - {dir: @HOME@/Downloads, recursive: true}
   desktop:
     display: true

@@ -1,6 +1,6 @@
 # Security
 
-virtual-computer gives Claude Code a desktop of its own: an Ubuntu VM on
+metacomputer gives Claude Code a desktop of its own: an Ubuntu VM on
 your Mac that Claude drives through Cua Driver. The defaults already isolate
 it:
 - the VM reaches only the public internet, not your Mac or your network;
@@ -12,7 +12,7 @@ it:
 [architecture.md](architecture.md) has the design.
 
 This page covers three **optional** protections. All are off by default, so
-out of the box virtual-computer behaves the way Cua Driver does on its own.
+out of the box metacomputer behaves the way Cua Driver does on its own.
 Each one is independent; turn on any of them in `config/local.env`.
 
 | Setting | What it adds | Costs |
@@ -21,9 +21,9 @@ Each one is independent; turn on any of them in `config/local.env`.
 | `SSH_AUTH=cert` | A fresh key and a 5-minute certificate for every connection, named in the VM's log | About 30 ms per connection |
 | `DRIVER_MODE=bounded` | Cua Driver does only what a manifest lists: chosen apps, folders and sites | Less freedom: no terminal, no page tools on unlisted sites |
 
-`virtual-computer security` shows what is on, and what the VM itself has.
-`virtual-computer start` brings the VM in line with the config;
-`virtual-computer security apply` does the same without a restart.
+`metacomputer security` shows what is on, and what the VM itself has.
+`metacomputer start` brings the VM in line with the config;
+`metacomputer security apply` does the same without a restart.
 
 ## What these protect against
 
@@ -39,8 +39,8 @@ Each section says where its protection ends.
 
 ## Signed action log (`ACTION_LOG=on`)
 
-Every connection to Cua Driver goes through `virtual-computer mcp`. That
-includes Claude Code's bridge, `virtual-computer call`, `web` and the tests.
+Every connection to Cua Driver goes through `metacomputer mcp`. That
+includes Claude Code's bridge, `metacomputer call`, `web` and the tests.
 With the log on, a relay there writes one file per connection to
 `logs/actions/DAY/TIME-PID.jsonl` (private to you, 0600). The file holds:
 - who connected, from which project, and the VM's settings;
@@ -63,12 +63,12 @@ the log as safe as the passwords that might be typed. Results are never stored,
 only their hash, so a log doesn't copy what was on the screen.
 
 ```
-virtual-computer actions list            # recent sessions
-virtual-computer actions show latest     # one session, readable
-virtual-computer actions verify --all    # check every file; exit 1 if anything was changed
+metacomputer actions list            # recent sessions
+metacomputer actions show latest     # one session, readable
+metacomputer actions verify --all    # check every file; exit 1 if anything was changed
 ```
 
-`virtual-computer task finish` also copies the logs written during a task into
+`metacomputer task finish` also copies the logs written during a task into
 its results folder; copies verify like the originals.
 
 **Where it ends:**
@@ -79,13 +79,13 @@ its results folder; copies verify like the originals.
   exists as a file.
 - Deleting a whole file isn't detected. Copy the files somewhere you control
   if you need that.
-- The log covers the driver, not the `virtual-computer ssh` shells.
+- The log covers the driver, not the `metacomputer ssh` shells.
 - It records what was asked and what came back, not what the screen showed.
-  Use `virtual-computer record` for that.
+  Use `metacomputer record` for that.
 
 To verify on another machine, use the public key:
-`virtual-computer actions verify FILE --key action-log.pub`, or plain
-`ssh-keygen -Y verify` with the namespace `virtual-computer-action-log`.
+`metacomputer actions verify FILE --key action-log.pub`, or plain
+`ssh-keygen -Y verify` with the namespace `metacomputer-action-log`.
 
 ## SSH certificates (`SSH_AUTH=cert`)
 
@@ -96,13 +96,13 @@ By default the Mac reaches the VM with two static keys, `ops` (a shell) and
 - Every connection gets a fresh key and a certificate for one role, valid for
   `SSH_CERT_TTL` (5 minutes; only the sign-in must fall inside it). The
   certificate is valid only from the Mac's side of the VM network.
-- Its key ID (`vc:ROLE:USER:PROJECT:pidN`) appears in the VM's auth log for
+- Its key ID (`mcomp:ROLE:USER:PROJECT:pidN`) appears in the VM's auth log for
   every sign-in.
 - The VM decides what each role may do, whatever a certificate says.
-  `/etc/ssh/virtual-computer-principals/cua` forces the driver command for
+  `/etc/ssh/metacomputer-principals/cua` forces the driver command for
   `mcp` and allows only a plain shell for `ops`.
 - The static `ops` and `mcp` keys stop working. The maintenance account keeps
-  its key, so `virtual-computer security apply` can always switch back.
+  its key, so `metacomputer security apply` can always switch back.
 
 The tests check that each of these is refused: the static key, an expired
 certificate, one for another role, one from another CA, and one used from
@@ -151,7 +151,7 @@ How it's enforced:
 - The VM's driver wrapper refuses a manifest whose contents don't match that
   hash.
 - While bounded mode is on, the VM also refuses standard-mode driver sessions
-  (`/etc/virtual-computer/driver-policy`, owned by root).
+  (`/etc/metacomputer/driver-policy`, owned by root).
 - Claude Code's bridge launches apps named like `"firefox"` by their absolute
   path, because bounded mode accepts only paths. When a session expires, it
   tells Claude to ask you to reconnect, rather than reconnecting by itself.
@@ -166,7 +166,7 @@ How it's enforced:
   `clipboard_read` and `clipboard_write` are always refused in bounded mode.
 - In our tests with driver 0.52.1, `kill_app` refused to close apps the
   driver had launched, even with `terminate: driver_launched`. Close them from
-  their own window, or use `virtual-computer desktop-restart`.
+  their own window, or use `metacomputer desktop-restart`.
 
 ## Reporting a vulnerability
 

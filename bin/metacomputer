@@ -1,8 +1,8 @@
 #!/bin/bash
-# virtual-computer: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
+# metacomputer: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
 # that Claude Code operates through Cua Driver's MCP server.
 #
-# Usage: virtual-computer COMMAND [ARGS]     (short alias: vcomp)
+# Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
 #
 #   start | stop [--force] | restart | status [--json] | reset [--yes]
 #   who | release                  who is using the virtual computer / hand it over
@@ -36,7 +36,7 @@
 #   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
 #                                  the signed action log (ACTION_LOG=on in config/local.env)
 # stop, reset, restore, baseline and test refuse while another session is
-# using the computer (virtual-computer who); --override proceeds anyway (ask first).
+# using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
@@ -64,7 +64,7 @@ parse_flags() {
 owners_check() {
   [ "$OVERRIDE" = 1 ] && return 0
   "$PY" "$LAB_ROOT/lib/owners.py" check \
-    || die "another session is using the virtual computer (virtual-computer who). Ask before taking over; then re-run with --override, or run 'virtual-computer release' first"
+    || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
 }
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
@@ -76,10 +76,10 @@ guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
 
 abs_host_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac; }
 
-need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (virtual-computer start)"; }
+need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
 
 do_start() {
-  vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: virtual-computer build"
+  vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
     warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force
@@ -89,10 +89,10 @@ do_start() {
   wait_ssh ops 240 || die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
   sync_guest_options
-  wait_session 240 || die "XFCE session not ready (virtual-computer ssh admin; sudo virtual-computer-admin logs)"
+  wait_session 240 || die "XFCE session not ready (metacomputer ssh admin; sudo metacomputer-admin logs)"
   ok "XFCE session ready"
-  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (virtual-computer status)"
-  say "ready. Live view: virtual-computer view"
+  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (metacomputer status)"
+  say "ready. Live view: metacomputer view"
 }
 
 mcp_probe() { "$PY" "$LAB_ROOT/lib/mcp_client.py" --probe; }
@@ -104,7 +104,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   if vm_running "$VM_NAME"; then
     owners_check
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
-    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'virtual-computer record stop' to keep it"
+    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
   else
     netgw_stop
@@ -113,7 +113,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
 }
 
 do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as configured and as the VM has it
-  local json=0 apply=0 a; for a in "$@"; do case "$a" in --json) json=1 ;; apply) apply=1 ;; *) die "usage: virtual-computer security [apply] [--json]" ;; esac; done
+  local json=0 apply=0 a; for a in "$@"; do case "$a" in --json) json=1 ;; apply) apply=1 ;; *) die "usage: metacomputer security [apply] [--json]" ;; esac; done
   local vm_ssh="" vm_drv=""
   if vm_running "$VM_NAME" && gssh admin true 2>/dev/null; then
     [ "$apply" = 1 ] && sync_guest_options all
@@ -130,20 +130,20 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
 import json, os, subprocess, sys
 js, vm_ssh, vm_drv, req_err, ca_pub, logdir = sys.argv[1:]
 e = os.environ.get
-log_on = e("VC_ACTION_LOG") == "on"
-key = e("VC_ACTION_LOG_KEY", "")
+log_on = e("MCOMP_ACTION_LOG") == "on"
+key = e("MCOMP_ACTION_LOG_KEY", "")
 def fp(pub):
     if not os.path.exists(pub):
         return None
     r = subprocess.run(["ssh-keygen", "-l", "-f", pub], capture_output=True, text=True)
     return (r.stdout.split() or [None, None])[1]
 out = {
-  "action_log": {"setting": e("VC_ACTION_LOG", "off"), "text": e("VC_ACTION_LOG_TEXT", "redact"), "dir": logdir,
+  "action_log": {"setting": e("MCOMP_ACTION_LOG", "off"), "text": e("MCOMP_ACTION_LOG_TEXT", "redact"), "dir": logdir,
                  "signing_key": key, "key_fingerprint": fp(key if key.endswith(".pub") else key + ".pub")},
-  "ssh_auth": {"setting": e("VC_SSH_AUTH", "key"), "vm": vm_ssh or None, "ca_fingerprint": fp(ca_pub)},
-  "driver": {"setting": e("VC_DRIVER_MODE", "standard"),
-             "profile": (e("VC_DRIVER_MANIFEST") and "manifest: " + e("VC_DRIVER_MANIFEST")) or e("VC_DRIVER_PROFILE"),
-             "origins": e("VC_DRIVER_ORIGINS", "").split(), "expires": e("VC_DRIVER_EXPIRES"), "idle": e("VC_DRIVER_IDLE"),
+  "ssh_auth": {"setting": e("MCOMP_SSH_AUTH", "key"), "vm": vm_ssh or None, "ca_fingerprint": fp(ca_pub)},
+  "driver": {"setting": e("MCOMP_DRIVER_MODE", "standard"),
+             "profile": (e("MCOMP_DRIVER_MANIFEST") and "manifest: " + e("MCOMP_DRIVER_MANIFEST")) or e("MCOMP_DRIVER_PROFILE"),
+             "origins": e("MCOMP_DRIVER_ORIGINS", "").split(), "expires": e("MCOMP_DRIVER_EXPIRES"), "idle": e("MCOMP_DRIVER_IDLE"),
              "vm_policy": vm_drv or None, "problem": req_err.strip() or None},
 }
 if js == "1":
@@ -152,10 +152,10 @@ def y(b): return "\033[33m" + b + "\033[0m"
 a, s, d = out["action_log"], out["ssh_auth"], out["driver"]
 print("Optional hardening (all off by default, which is Cua's own behavior; SECURITY.md)")
 print(f"  action log   {y('on') if log_on else 'off'}" + (f"   text {a['text']}, signed with {a['key_fingerprint'] or 'a key made on first use'}; "
-      f"virtual-computer actions verify" if log_on else "   ACTION_LOG=on: a signed, hash-chained record of every tool call"))
+      f"metacomputer actions verify" if log_on else "   ACTION_LOG=on: a signed, hash-chained record of every tool call"))
 vm = f"   VM: {s['vm']}" if s["vm"] else ""
 print(f"  SSH          {y('certificates') if s['setting'] == 'cert' else 'static keys'}{vm}"
-      + (f"   CA {s['ca_fingerprint'] or '(made at next start)'}, each certificate valid {e('VC_SSH_CERT_TTL', '5m')}" if s["setting"] == "cert" else
+      + (f"   CA {s['ca_fingerprint'] or '(made at next start)'}, each certificate valid {e('MCOMP_SSH_CERT_TTL', '5m')}" if s["setting"] == "cert" else
          "   SSH_AUTH=cert: a short-lived certificate per connection"))
 if d["setting"] == "bounded":
     extra = f"   profile {d['profile']}" + (f" ({' '.join(d['origins'])})" if d["origins"] else "") + f", lasts {d['expires']}, idle {d['idle']}"
@@ -166,7 +166,7 @@ print(f"  driver       {y('bounded') if d['setting'] == 'bounded' else 'standard
 if d["problem"]:
     print(f"  ! {d['problem']}")
 if (s["vm"] and s["vm"] != s["setting"]) or (d["vm_policy"] and d["vm_policy"] != d["setting"]):
-    print("  ! the VM doesn't match the config yet: virtual-computer security apply (start does it too)")
+    print("  ! the VM doesn't match the config yet: metacomputer security apply (start does it too)")
 EOF
 }
 
@@ -183,9 +183,9 @@ do_status() {
     lease="$(netgw_control "lease $(vm_mac "$VM_NAME")")"
     if gssh ops true 2>/dev/null; then
       ssh_ok=true
-      # VMs built before the rename keep their helpers in /opt/cua-lab.
-      gssh ops 'test -x /opt/virtual-computer/bin/guest-status || test ! -d /opt/cua-lab' 2>/dev/null || layout=old
-      gs="$(gssh ops /opt/virtual-computer/bin/guest-status 2>/dev/null || echo '{}')"
+      # VMs built by earlier versions keep their helpers in /opt/cua-lab or /opt/virtual-computer.
+      gssh ops 'test -x /opt/metacomputer/bin/guest-status || { test ! -d /opt/cua-lab && test ! -d /opt/virtual-computer; }' 2>/dev/null || layout=old
+      gs="$(gssh ops /opt/metacomputer/bin/guest-status 2>/dev/null || echo '{}')"
       mcp="$(mcp_probe 2>/dev/null || echo '{}')"
       # What the VM actually has from the host: virtio console port names (the
       # SPICE clipboard port), virtio device ids (0x0019 = sound) and virtiofs
@@ -207,9 +207,9 @@ if hs:
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
        "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
        "host_sharing": sharing, "lume": lume, "guest_layout": layout,
-       "options": {"action_log": os.environ.get("VC_ACTION_LOG", "off"), "ssh_auth": os.environ.get("VC_SSH_AUTH", "key"),
-                   "driver_mode": os.environ.get("VC_DRIVER_MODE", "standard"),
-                   "driver_profile": os.environ.get("VC_DRIVER_PROFILE", "") if os.environ.get("VC_DRIVER_MODE") == "bounded" else None}}
+       "options": {"action_log": os.environ.get("MCOMP_ACTION_LOG", "off"), "ssh_auth": os.environ.get("MCOMP_SSH_AUTH", "key"),
+                   "driver_mode": os.environ.get("MCOMP_DRIVER_MODE", "standard"),
+                   "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None}}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -218,15 +218,15 @@ print(f"VM            {vm}    baseline: {base}")
 print(f"gateway       {m(out['gateway'])} cua-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
 if layout == "old":
-    print("guest         \033[33mbuilt by an earlier version (cua-lab layout)\033[0m: rebuild it with "
-          "'virtual-computer build --replace' (or start a new VM under another VM_NAME)")
+    print("guest         \033[33mbuilt by an earlier version (older layout)\033[0m: rebuild it with "
+          "'metacomputer build --replace' (or start a new VM under another VM_NAME)")
 if gs:
     print(f"desktop       {m(gs.get('xorg_running'))} Xorg  {m(gs.get('xfce_session_running'))} XFCE  "
           f"{m(gs.get('session_env_published'))} session env  resolution {gs.get('resolution')}")
     print(f"accessibility {m(gs.get('atspi_bus'))} AT-SPI bus  {m(gs.get('toolkit_accessibility'))} toolkit-accessibility")
     print(f"active window {gs.get('active_window_title')!r}   windows: {len(gs.get('windows', []))}")
     print(f"driver        {gs.get('driver_version')}   doctor rc={gs.get('driver_doctor_rc')}   uinput {m(gs.get('uinput_writable'))}")
-    print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (virtual-computer view)")
+    print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (metacomputer view)")
     print(f"guest         up {int(gs.get('uptime_s', 0))} s, load {' '.join(gs.get('loadavg', []))}, "
           f"{gs.get('mem_available_mb')} MB free, {gs.get('disk_free_gb')} GB disk free"
           + ("  REBOOT REQUIRED (updates)" if gs.get('reboot_required') else ""))
@@ -240,7 +240,7 @@ o = out["options"]
 if o["action_log"] == "on" or o["ssh_auth"] == "cert" or o["driver_mode"] == "bounded":
     parts = (["action log on"] if o["action_log"] == "on" else []) + (["SSH certificates"] if o["ssh_auth"] == "cert" else []) \
         + ([f"driver bounded ({o['driver_profile'] or 'manifest'})"] if o["driver_mode"] == "bounded" else [])
-    print(f"hardening     {' · '.join(parts)}   (virtual-computer security)")
+    print(f"hardening     {' · '.join(parts)}   (metacomputer security)")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -275,7 +275,7 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
   if [ "${1:-}" = "--delete" ]; then
-    ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (virtual-computer checkpoints)"
+    ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     confirm "Delete checkpoint '$2'?"
     "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
     ok "checkpoint '$2' deleted"; return 0
@@ -283,25 +283,25 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
   local name="${1:-}" replace=0; [ "${2:-}" = "--replace" ] && replace=1
   ckpt_name "$name"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
-  vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'virtual-computer stop' first"
+  vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
-  ok "checkpoint '$name' saved (restore with: virtual-computer restore $name)"
+  ok "checkpoint '$name' saved (restore with: metacomputer restore $name)"
 }
 
 do_checkpoints() {
   "$LUME" ls --format json 2>/dev/null | "$PY" -c 'import json, sys
 pre = sys.argv[1]; names = [v["name"][len(pre):] for v in json.load(sys.stdin) if v["name"].startswith(pre)]
-print("\n".join(sorted(names)) if names else "no checkpoints (virtual-computer checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
+print("\n".join(sorted(names)) if names else "no checkpoints (metacomputer checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
 }
 
 do_restore() { # NAME [--yes] [--override]
   parse_flags "$@"
   local name="${REST[0]:-}"; ckpt_name "$name"
-  vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (virtual-computer checkpoints)"
+  vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded (host recordings and results are kept)"
   restore_from "$CKPT_PREFIX$name" "checkpoint '$name'"
@@ -312,7 +312,7 @@ do_baseline() {
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   local was_running=0; vm_running "$VM_NAME" && was_running=1
-  [ $was_running = 1 ] && { do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/virtual-computer-runs/*' || true; vm_stop "$VM_NAME"; }
+  [ $was_running = 1 ] && { do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' || true; vm_stop "$VM_NAME"; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
@@ -329,24 +329,24 @@ do_record() {
   case "$sub" in
     start)
       local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}"
-      gssh ops "/opt/virtual-computer/bin/desktop-record start '$name' ${2:-20}" || die "could not start recording"
+      gssh ops "/opt/metacomputer/bin/desktop-record start '$name' ${2:-20}" || die "could not start recording"
       echo "$name" > "$RUN_DIR/manual-recording"
-      ok "recording the guest desktop as '$name' — run your task, then: virtual-computer record stop" ;;
+      ok "recording the guest desktop as '$name' — run your task, then: metacomputer record stop" ;;
     stop)
       local path name dest
-      path="$(gssh ops /opt/virtual-computer/bin/desktop-record stop)" || die "stop failed"
+      path="$(gssh ops /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
       [ "$path" = "not recording" ] && { ok "not recording"; return 0; }
       name="$(basename "$path" .mp4)"; dest="$LAB_ROOT/recordings/manual"; mkdir -p "$dest"
       gssh ops "cat '$path'" > "$dest/$name.mp4" || die "copy failed"
       "$PY" - "$dest/$name.json" "$name" <<'EOF'
 import json, sys, time
-json.dump({"name": sys.argv[2], "kind": "manual desktop recording (virtual-computer record)",
+json.dump({"name": sys.argv[2], "kind": "manual desktop recording (metacomputer record)",
            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, open(sys.argv[1], "w"), indent=2)
 EOF
       rm -f "$RUN_DIR/manual-recording"
       ok "saved recordings/manual/$name.mp4 ($(du -h "$dest/$name.mp4" | cut -f1))" ;;
-    status) gssh ops /opt/virtual-computer/bin/desktop-record status ;;
-    *) die "usage: virtual-computer record start [NAME] | stop | status" ;;
+    status) gssh ops /opt/metacomputer/bin/desktop-record status ;;
+    *) die "usage: metacomputer record start [NAME] | stop | status" ;;
   esac
 }
 
@@ -356,8 +356,8 @@ do_recordings() {
   if [ $sync = 1 ]; then
     vm_running "$VM_NAME" || die "VM is not running; nothing to sync"
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
-    gssh ops 'cd ~/virtual-computer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | tar -C "$dest" -xf - 2>/dev/null
-    ok "guest ~/virtual-computer-runs synced to recordings/guest-runs/"
+    gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | tar -C "$dest" -xf - 2>/dev/null
+    ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
   "$PY" - "$LAB_ROOT/recordings" "$n" <<'EOF'
 import json, os, subprocess, sys, time
@@ -393,14 +393,14 @@ do_inspect() { # [system|windows|processes|ports|files ...] [--minutes N] [--top
       --json) json=1 ;;
       --minutes|--top) [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "$1 needs a number"; args+=("$1" "$2"); shift ;;
       system|windows|processes|ports|files|browser|all) args+=("$1") ;;
-      *) die "usage: virtual-computer inspect [system|windows|processes|ports|files|browser ...] [--minutes N] [--top N] [--json]" ;;
+      *) die "usage: metacomputer inspect [system|windows|processes|ports|files|browser ...] [--minutes N] [--top N] [--json]" ;;
     esac
     shift
   done
   need_running
   local out
   out="$(gssh ops "python3 -I - ${args[*]+${args[*]}}" < "$LAB_ROOT/lib/guest_inspect.py")" \
-    || die "inspect failed (is the guest up? virtual-computer status)"
+    || die "inspect failed (is the guest up? metacomputer status)"
   if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render; fi
 }
 
@@ -409,7 +409,7 @@ browser_get() { # KEY DEFAULT: the value after config/defaults.env + config/loca
 }
 browser_set() { # KEY VALUE: written to this machine's config (config/local.env)
   local tmp; tmp="$(mktemp)"
-  { if [ -f "$LOCAL_CONFIG" ]; then grep -v "^$1=" "$LOCAL_CONFIG"; else echo "# This Mac's settings for virtual-computer (see config/local.env.example)"; fi
+  { if [ -f "$LOCAL_CONFIG" ]; then grep -v "^$1=" "$LOCAL_CONFIG"; else echo "# This Mac's settings for metacomputer (see config/local.env.example)"; fi
     echo "$1=$2"; } > "$tmp"
   mv "$tmp" "$LOCAL_CONFIG"
 }
@@ -421,20 +421,20 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--
       else
         echo "default browser: $b   (firefox | chrome)"
         echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome)"
-        echo "Words in a request override these. Change with: virtual-computer browser default chrome | virtual-computer browser mode page"
+        echo "Words in a request override these. Change with: metacomputer browser default chrome | metacomputer browser mode page"
       fi ;;
     default) case "${2:-}" in firefox|chrome) browser_set BROWSER "$2"; echo "default browser: $2" ;;
-                              *) die "usage: virtual-computer browser default firefox|chrome" ;; esac ;;
+                              *) die "usage: metacomputer browser default firefox|chrome" ;; esac ;;
     mode)    case "${2:-}" in human|page|hybrid) browser_set MODE "$2"; echo "default mode: $2" ;;
-                              *) die "usage: virtual-computer browser mode human|page|hybrid" ;; esac ;;
+                              *) die "usage: metacomputer browser mode human|page|hybrid" ;; esac ;;
     profiles)
       need_running
       if [ "${2:-}" = --delete ]; then
         local name="${3:-}"; shift 3 2>/dev/null || true
-        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: virtual-computer browser profiles --delete NAME [--yes]"
+        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: metacomputer browser profiles --delete NAME [--yes]"
         parse_flags "$@"
         local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
-        gssh ops "test -d '$dir'" || die "no driver profile named $name (virtual-computer browser profiles)"
+        gssh ops "test -d '$dir'" || die "no driver profile named $name (metacomputer browser profiles)"
         # [-] keeps pgrep from matching this very ssh command line
         gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" && die "profile $name is in use by a running Chrome; close it first"
         confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
@@ -442,12 +442,12 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--
       else
         gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles
       fi ;;
-    *) die "usage: virtual-computer browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
+    *) die "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
   esac
 }
 
 do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download saved under its id)
-  [ $# -eq 2 ] || die "usage: virtual-computer rename GUEST_PATH NEW_NAME"
+  [ $# -eq 2 ] || die "usage: metacomputer rename GUEST_PATH NEW_NAME"
   need_running
   local src new; src="$(guest_path "$1")" || exit 1; new="$2"
   [[ "$new" =~ ^[A-Za-z0-9][A-Za-z0-9._()+\ -]{0,127}$ ]] || die "new name: letters, digits, spaces and ._()+- only, no folders"
@@ -459,16 +459,16 @@ do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download sa
 
 do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (Chrome's keyboard)
   need_running
-  local n; n="$(gssh ops "/opt/virtual-computer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
+  local n; n="$(gssh ops "/opt/metacomputer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
   echo "$n"
 }
 
 do_desktop_restart() { # [--override]: log the desktop session out and back in (closes every app)
   parse_flags "$@"; owners_check; need_running
   say "restarting the desktop session (every open app closes)"
-  gssh admin 'sudo /usr/local/sbin/virtual-computer-admin restart-desktop' >/dev/null 2>&1 || true
+  gssh admin 'sudo /usr/local/sbin/metacomputer-admin restart-desktop' >/dev/null 2>&1 || true
   sleep 5
-  wait_session 120 || die "the desktop session did not come back (virtual-computer status)"
+  wait_session 120 || die "the desktop session did not come back (metacomputer status)"
   ok "desktop session ready"
 }
 
@@ -487,7 +487,7 @@ do_put() { # HOST_PATH... [--to GUEST_DIR]
   while [ $# -gt 0 ]; do
     case "$1" in --to) to="${2:-}"; shift 2 ;; *) files+=("$1"); shift ;; esac
   done
-  [ ${#files[@]} -gt 0 ] || die "usage: virtual-computer put HOST_PATH... [--to GUEST_DIR]"
+  [ ${#files[@]} -gt 0 ] || die "usage: metacomputer put HOST_PATH... [--to GUEST_DIR]"
   need_running
   to="$(guest_path "$to")" || exit 1
   gssh ops "mkdir -p $(printf %q "$to")" || die "cannot create $to in the guest"
@@ -504,7 +504,7 @@ do_get() { # GUEST_PATH [HOST_DIR] [--task NAME]
   while [ $# -gt 0 ]; do
     case "$1" in --task) task="${2:-}"; shift 2 ;; *) if [ -z "$src" ]; then src="$1"; else dest="$1"; fi; shift ;; esac
   done
-  [ -n "$src" ] || die "usage: virtual-computer get GUEST_PATH [HOST_DIR] [--task NAME]"
+  [ -n "$src" ] || die "usage: metacomputer get GUEST_PATH [HOST_DIR] [--task NAME]"
   need_running
   src="$(guest_path "$src")" || exit 1
   if [ -z "$dest" ]; then
@@ -528,14 +528,14 @@ do_shot() { # [HOST_PATH] [--task NAME]
     out="$dir/shot-$(date +%Y%m%d-%H%M%S).png"
   fi
   out="$(abs_host_path "$out")"; mkdir -p "$(dirname "$out")"
-  gssh ops '/opt/virtual-computer/bin/session-run import -window root png:-' > "$out" 2>/dev/null
-  [ -s "$out" ] || { rm -f "$out"; die "screenshot failed (is the desktop session up? virtual-computer status)"; }
+  gssh ops '/opt/metacomputer/bin/session-run import -window root png:-' > "$out" 2>/dev/null
+  [ -s "$out" ] || { rm -f "$out"; die "screenshot failed (is the desktop session up? metacomputer status)"; }
   echo "$out"
 }
 
 do_contact_sheet() { # MP4 [OUT.png]
   local in="${1:-}" out="${2:-}" dur rate
-  [ -f "$in" ] || die "usage: virtual-computer contact-sheet MP4 [OUT.png]"
+  [ -f "$in" ] || die "usage: metacomputer contact-sheet MP4 [OUT.png]"
   [ -n "$out" ] || out="${in%.mp4}-contact.png"
   dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" 2>/dev/null)"
   rate="$("$PY" -c 'import sys; d=float(sys.argv[1] or 0); print(f"{12/max(d,0.5):.4f}")' "${dur:-0}")" || die "unreadable video: $in"
@@ -551,7 +551,7 @@ do_task() { # start SLUG | finish NAME
       need_running
       local slug name guest host
       slug="$(printf '%s' "${1:-task}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
-      name="vc-$(date +%Y%m%d-%H%M%S)-${slug:-task}"
+      name="mcomp-$(date +%Y%m%d-%H%M%S)-${slug:-task}"
       guest="$GUEST_RUN_DIR/$name"; host="$LAB_ROOT/results/$name"
       gssh ops "mkdir -p '$guest/recording' '$guest/files'" || die "cannot create $guest in the guest"
       mkdir -p "$host"
@@ -568,7 +568,7 @@ EOF
       echo "HOST_DIR=$host" ;;
     finish)
       local name="${1:-}" host guest
-      [[ "$name" =~ ^vc-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: virtual-computer task finish vc-YYYYMMDD-HHMMSS-slug"
+      [[ "$name" =~ ^mcomp-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: metacomputer task finish mcomp-YYYYMMDD-HHMMSS-slug"
       host="$LAB_ROOT/results/$name"; guest="$GUEST_RUN_DIR/$name"; mkdir -p "$host/guest"
       if vm_running "$VM_NAME"; then
         gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | tar -C "$host/guest" -xf - 2>/dev/null \
@@ -618,7 +618,7 @@ for k, label in (("contact_sheets", "contact sheet"), ("screenshots", "screensho
 print(f"index        {os.path.join(host, 'artifacts.json')}")
 EOF
       ;;
-    *) die "usage: virtual-computer task start SLUG | finish NAME" ;;
+    *) die "usage: metacomputer task start SLUG | finish NAME" ;;
   esac
 }
 
@@ -669,7 +669,7 @@ do_vnc_install() { # make sure a live-view password exists in the configured sto
 }
 do_vnc_push() {
   [ -n "${VNC_PASSWORD:-}" ] || die "_vnc-push needs VNC_PASSWORD"
-  printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/virtual-computer; cat > ~/.config/virtual-computer/vnc-pass; pkill -x x11vnc; /opt/virtual-computer/bin/session-run /opt/virtual-computer/bin/session-init' \
+  printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/metacomputer; cat > ~/.config/metacomputer/vnc-pass; pkill -x x11vnc; /opt/metacomputer/bin/session-run /opt/metacomputer/bin/session-init' \
     || die "could not install the VNC password"
   ok "live view enabled on 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))"
 }
@@ -677,7 +677,7 @@ do_vnc_push() {
 do_where() { # paths a person or an agent may need
   echo "project   $LAB_ROOT"
   echo "config    $LOCAL_CONFIG$([ -f "$LOCAL_CONFIG" ] || echo ' (not created; defaults in use)')"
-  echo "skill     $LAB_ROOT/skills/virtual-computer"
+  echo "skill     $LAB_ROOT/skills/metacomputer"
   echo "docs      $LAB_ROOT/docs"
   echo "results   $LAB_ROOT/results"
   echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
@@ -695,7 +695,7 @@ case "$cmd" in
   who)        do_who "$@" ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
-  call)       [ $# -ge 1 ] || die "usage: virtual-computer call TOOL ['JSON']"
+  call)       [ $# -ge 1 ] || die "usage: metacomputer call TOOL ['JSON']"
               exec "$PY" "$LAB_ROOT/lib/mcp_client.py" --call "$@" ;;
   browser)    do_browser "$@" ;;
   desktop-restart) do_desktop_restart "$@" ;;
@@ -716,7 +716,7 @@ case "$cmd" in
   view)       do_view "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
-  mcp)        vm_running "$VM_NAME" || { echo "virtual-computer: VM '$VM_NAME' is not running (virtual-computer start)" >&2; exit 1; }
+  mcp)        vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
               req="$(driver_request)" || exit 1
               ssh_base mcp
               if [ "$ACTION_LOG" = on ]; then
@@ -728,9 +728,9 @@ case "$cmd" in
   security)   do_security "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
-              gssh admin "sudo /usr/local/sbin/virtual-computer-admin logs $n" 2>/dev/null ;;
+              gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null ;;
   _vnc-install) do_vnc_install ;;
   _vnc-push)  do_vnc_push ;;
   help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command '$cmd' (virtual-computer help)" ;;
+  *) die "unknown command '$cmd' (metacomputer help)" ;;
 esac

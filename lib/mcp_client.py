@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Minimal MCP stdio client for virtual-computer (no third-party dependencies).
+"""Minimal MCP stdio client for metacomputer (no third-party dependencies).
 
-It launches `bin/virtual-computer mcp` -- the same SSH bridge Claude Code uses -- so
+It launches `bin/metacomputer mcp` -- the same SSH bridge Claude Code uses -- so
 everything it does goes through Cua Driver's MCP server inside the guest.
 
     python3 lib/mcp_client.py --probe                 # handshake + tool count (JSON)
@@ -25,7 +25,7 @@ import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
 
 LAB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BRIDGE = [os.path.join(LAB_ROOT, "bin", "virtual-computer"), "mcp"]
+BRIDGE = [os.path.join(LAB_ROOT, "bin", "metacomputer"), "mcp"]
 PROTOCOL = "2025-06-18"
 
 
@@ -49,7 +49,7 @@ class MCPClient:
 
     # -- transport --------------------------------------------------------
     def start(self, timeout=90):
-        # The settings this connection starts with (VC_CONFIG may differ per client, e.g. in tests).
+        # The settings this connection starts with (MCOMP_CONFIG may differ per client, e.g. in tests).
         self.bounded = driver_profiles.bounded(labconfig.load())
         err = open(self.stderr_path, "ab") if self.stderr_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -58,7 +58,7 @@ class MCPClient:
         res = self.request("initialize", {
             "protocolVersion": PROTOCOL,
             "capabilities": {},
-            "clientInfo": {"name": "vc-harness", "version": "1.0"},
+            "clientInfo": {"name": "mcomp-harness", "version": "1.0"},
         }, timeout=timeout)
         self.server_info = res.get("serverInfo", {})
         self.protocol = res.get("protocolVersion")

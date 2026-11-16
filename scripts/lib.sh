@@ -1,22 +1,22 @@
 #!/bin/bash
-# virtual-computer host library: configuration, Lume + cua-netgw
-# lifecycle, SSH. Sourced by bin/virtual-computer and scripts/*. macOS /bin/bash 3.2.
+# metacomputer host library: configuration, Lume + cua-netgw
+# lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/defaults.env
 . "$LAB_ROOT/config/defaults.env"
-# This machine's settings (install.sh writes it; never committed). VC_CONFIG
+# This machine's settings (install.sh writes it; never committed). MCOMP_CONFIG
 # points at another file, e.g. for a separate test VM.
-LOCAL_CONFIG="${VC_CONFIG:-$LAB_ROOT/config/local.env}"
+LOCAL_CONFIG="${MCOMP_CONFIG:-$LAB_ROOT/config/local.env}"
 # shellcheck source=/dev/null
 [ -f "$LOCAL_CONFIG" ] && . "$LOCAL_CONFIG"
-GUEST_RUN_DIR="/home/$GUEST_USER/virtual-computer-runs"
+GUEST_RUN_DIR="/home/$GUEST_USER/metacomputer-runs"
 
 RUN_DIR="$LAB_ROOT/.run"
 # Unix socket paths are limited to ~104 bytes, so the gateway's sockets live
 # in a short private folder (per user, checkout and VM; the same from any
 # shell, unlike $TMPDIR), not under a possibly deep checkout.
-SOCK_DIR="/tmp/vc-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
+SOCK_DIR="/tmp/mcomp-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
 CACHE_DIR="$LAB_ROOT/.cache"
 LOG_DIR="$LAB_ROOT/logs"
 NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
@@ -29,14 +29,14 @@ PY="${PY:-/opt/homebrew/bin/python3}"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 ( umask 077; mkdir -p "$SOCK_DIR" )
-{ [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "virtual-computer: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
+{ [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "metacomputer: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
 
 c_bold=$'\033[1m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
 [ -t 1 ] || { c_bold=; c_red=; c_grn=; c_yel=; c_off=; }
-say()  { printf '%s\n' "${c_bold}virtual-computer:${c_off} $*"; }
+say()  { printf '%s\n' "${c_bold}metacomputer:${c_off} $*"; }
 ok()   { printf '%s\n' "  ${c_grn}✓${c_off} $*"; }
 warn() { printf '%s\n' "  ${c_yel}!${c_off} $*" >&2; }
-die()  { printf '%s\n' "${c_red}virtual-computer: $*${c_off}" >&2; exit 1; }
+die()  { printf '%s\n' "${c_red}metacomputer: $*${c_off}" >&2; exit 1; }
 
 # --- Lume -------------------------------------------------------------------
 lume_json() { "$LUME" get "$1" --format json 2>/dev/null; }
@@ -157,7 +157,7 @@ vm_stop() { # NAME [--force]
   local name="$1" i=0
   if vm_running "$name"; then
     if [ "${2:-}" != "--force" ]; then
-      gssh admin 'sync; sudo -n /usr/local/sbin/virtual-computer-admin poweroff' >/dev/null 2>&1 || true
+      gssh admin 'sync; sudo -n /usr/local/sbin/metacomputer-admin poweroff' >/dev/null 2>&1 || true
       while vm_running "$name" && [ $i -lt 90 ]; do sleep 1; i=$((i+1)); done
       vm_running "$name" && warn "guest did not power off within 90 s; forcing"
     fi
@@ -170,11 +170,11 @@ vm_stop() { # NAME [--force]
 # --- SSH --------------------------------------------------------------------
 # The optional hardening settings (SECURITY.md), resolved for the Python helpers.
 export_options() {
-  export VC_ACTION_LOG="$ACTION_LOG" VC_ACTION_LOG_TEXT="$ACTION_LOG_TEXT" VC_ACTION_LOG_DIR="$LOG_DIR/actions" \
-         VC_ACTION_LOG_KEY="${ACTION_LOG_KEY:-$SSH_DIR/action-log}" VC_SSH_DIR="$SSH_DIR" VC_VM_NAME="$VM_NAME" \
-         VC_SSH_AUTH="$SSH_AUTH" VC_SSH_CERT_TTL="$SSH_CERT_TTL" VC_DRIVER_MODE="$DRIVER_MODE" VC_DRIVER_PROFILE="$DRIVER_PROFILE" \
-         VC_DRIVER_MANIFEST="$DRIVER_MANIFEST" VC_DRIVER_ORIGINS="$DRIVER_ORIGINS" VC_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
-         VC_DRIVER_IDLE="$DRIVER_IDLE" VC_BROWSERS="$BROWSERS" VC_GUEST_USER="$GUEST_USER"
+  export MCOMP_ACTION_LOG="$ACTION_LOG" MCOMP_ACTION_LOG_TEXT="$ACTION_LOG_TEXT" MCOMP_ACTION_LOG_DIR="$LOG_DIR/actions" \
+         MCOMP_ACTION_LOG_KEY="${ACTION_LOG_KEY:-$SSH_DIR/action-log}" MCOMP_SSH_DIR="$SSH_DIR" MCOMP_VM_NAME="$VM_NAME" \
+         MCOMP_SSH_AUTH="$SSH_AUTH" MCOMP_SSH_CERT_TTL="$SSH_CERT_TTL" MCOMP_DRIVER_MODE="$DRIVER_MODE" MCOMP_DRIVER_PROFILE="$DRIVER_PROFILE" \
+         MCOMP_DRIVER_MANIFEST="$DRIVER_MANIFEST" MCOMP_DRIVER_ORIGINS="$DRIVER_ORIGINS" MCOMP_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
+         MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER"
 }
 
 # --- SSH_AUTH=cert: a fresh key and a short-lived certificate per connection ---
@@ -183,7 +183,7 @@ ca_pub() { case "$CA_KEY" in *.pub) echo "$CA_KEY" ;; *) echo "$CA_KEY.pub" ;; e
 ensure_ca() { # the default CA is a key file made on first use; a .pub means a key you keep in ssh-agent
   case "$CA_KEY" in *.pub) [ -f "$CA_KEY" ] || die "SSH_CA_KEY $CA_KEY not found" ; return 0 ;; esac
   [ -f "$CA_KEY" ] && return 0
-  ( umask 077; mkdir -p "$(dirname "$CA_KEY")"; ssh-keygen -q -t ed25519 -N '' -C virtual-computer-ca -f "$CA_KEY" ) \
+  ( umask 077; mkdir -p "$(dirname "$CA_KEY")"; ssh-keygen -q -t ed25519 -N '' -C metacomputer-ca -f "$CA_KEY" ) \
     || die "could not create the SSH CA key $CA_KEY"
 }
 CERT_ops=""; CERT_ops_at=0; CERT_mcp=""; CERT_mcp_at=0
@@ -196,13 +196,13 @@ cert_for() { # ROLE -> sets CERT_KEY (KEY-cert.pub beside it); reused for half i
   dir="$SOCK_DIR/certs"; ( umask 077; mkdir -p "$dir" )
   find "$dir" -type f -mmin +60 -delete 2>/dev/null
   key="$(mktemp "$dir/$role.XXXXXX")" && rm -f "$key"
-  ssh-keygen -q -t ed25519 -N '' -C "vc-$role" -f "$key" || return 1
+  ssh-keygen -q -t ed25519 -N '' -C "mcomp-$role" -f "$key" || return 1
   # The key ID appears in the VM's auth log: who asked, from which project, which process.
-  id="vc:$role:$(id -un):$(basename "$PWD" | tr -cd 'A-Za-z0-9._-' | cut -c1-40):pid$$"
+  id="mcomp:$role:$(id -un):$(basename "$PWD" | tr -cd 'A-Za-z0-9._-' | cut -c1-40):pid$$"
   case "$CA_KEY" in *.pub) agent=(-U) ;; esac
   opts=(-O clear -O source-address="$NET_GATEWAY_IP/32")
   case "$role" in
-    mcp) opts+=(-O force-command=/opt/virtual-computer/bin/driver-mcp) ;;
+    mcp) opts+=(-O force-command=/opt/metacomputer/bin/driver-mcp) ;;
     ops) opts+=(-O permit-pty) ;;
   esac
   ssh-keygen -q -s "$CA_KEY" ${agent[@]+"${agent[@]}"} -I "$id" -n "$role" -V "-2m:+${SSH_CERT_TTL:-5m}" \
@@ -248,7 +248,7 @@ wait_ssh() { # ROLE TIMEOUT_S
 wait_session() { # TIMEOUT_S
   local t="${1:-240}" start; start=$(date +%s)
   while :; do
-    gssh ops 'test -s /run/user/$(id -u)/virtual-computer/session-ready' 2>/dev/null && return 0
+    gssh ops 'test -s /run/user/$(id -u)/metacomputer/session-ready' 2>/dev/null && return 0
     [ $(( $(date +%s) - start )) -ge "$t" ] && return 1
     sleep 3
   done
@@ -260,14 +260,14 @@ driver_request() { # prints the SSH command line for the MCP role ("" = Cua's de
   local m sha
   m="$(export_options; "$PY" "$LAB_ROOT/lib/driver_profiles.py" render)" || exit 1
   sha="$(printf '%s\n' "$m" | shasum -a 256 | cut -d' ' -f1)"
-  printf '%s\n' "$m" | gssh ops "d=~/.config/virtual-computer/manifests; f=\$d/$sha.yaml; [ -f \$f ] || { mkdir -p \$d && cat > \$f.tmp && mv \$f.tmp \$f; }" \
+  printf '%s\n' "$m" | gssh ops "d=~/.config/metacomputer/manifests; f=\$d/$sha.yaml; [ -f \$f ] || { mkdir -p \$d && cat > \$f.tmp && mv \$f.tmp \$f; }" \
     || die "could not upload the driver manifest to the VM"
   echo "bounded $sha"
 }
 
 # --- keep the VM's side of SSH_AUTH and DRIVER_MODE in step with the config ----
 guest_option() { # ssh-auth|driver-policy -> the VM's current setting
-  gssh admin "sudo /usr/local/sbin/virtual-computer-admin $1 status" 2>/dev/null | tail -1
+  gssh admin "sudo /usr/local/sbin/metacomputer-admin $1 status" 2>/dev/null | tail -1
 }
 sync_guest_options() { # [all]: quiet unless something changes; skips the VM in the default setup unless "all"
   local mark="$RUN_DIR/guest-options-$VM_NAME" have all="${1:-}"
@@ -277,11 +277,11 @@ sync_guest_options() { # [all]: quiet unless something changes; skips the VM in 
     if [ "$have" != "${SSH_AUTH:-key}" ]; then
       if [ "${SSH_AUTH:-key}" = cert ]; then
         ensure_ca
-        gssh admin "sudo /usr/local/sbin/virtual-computer-admin ssh-auth cert" < "$(ca_pub)" >/dev/null \
+        gssh admin "sudo /usr/local/sbin/metacomputer-admin ssh-auth cert" < "$(ca_pub)" >/dev/null \
           && ok "SSH: the VM now accepts only short-lived certificates for ops and mcp (SSH_AUTH=cert)" \
-          || die "could not switch the VM to SSH certificates (virtual-computer logs)"
+          || die "could not switch the VM to SSH certificates (metacomputer logs)"
       else
-        gssh admin "sudo /usr/local/sbin/virtual-computer-admin ssh-auth key" >/dev/null \
+        gssh admin "sudo /usr/local/sbin/metacomputer-admin ssh-auth key" >/dev/null \
           && ok "SSH: the VM is back on its static keys (SSH_AUTH=key)" || warn "could not switch the VM back to static keys"
       fi
     fi
@@ -290,7 +290,7 @@ sync_guest_options() { # [all]: quiet unless something changes; skips the VM in 
     have="$(guest_option driver-policy)"
     case "$have" in bounded|standard) ;; *) warn "this VM can't hold a driver policy (built by an earlier version?); bounded sessions still work, but standard ones aren't refused"; have="${DRIVER_MODE:-standard}" ;; esac
     if [ "$have" != "${DRIVER_MODE:-standard}" ]; then
-      gssh admin "sudo /usr/local/sbin/virtual-computer-admin driver-policy ${DRIVER_MODE:-standard}" >/dev/null \
+      gssh admin "sudo /usr/local/sbin/metacomputer-admin driver-policy ${DRIVER_MODE:-standard}" >/dev/null \
         && ok "driver: the VM now starts Cua Driver only in ${DRIVER_MODE:-standard} mode" || warn "could not set the VM's driver policy"
     fi
   fi

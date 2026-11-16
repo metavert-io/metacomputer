@@ -47,7 +47,7 @@ def verify(path, base, pub):
 
 
 def main():
-    td = tempfile.mkdtemp(prefix="vc-alog-")
+    td = tempfile.mkdtemp(prefix="mcomp-alog-")
     try:
         base = os.path.join(td, "actions")
         key = os.path.join(td, "keys", "action-log")
@@ -110,7 +110,7 @@ def main():
         check("a copied log still verifies", v["ok"] and v["final"])
 
         # 8. the CLI
-        env = dict(os.environ, VC_ACTION_LOG_DIR=base, VC_ACTION_LOG_KEY=key)
+        env = dict(os.environ, MCOMP_ACTION_LOG_DIR=base, MCOMP_ACTION_LOG_KEY=key)
         out = subprocess.run([sys.executable, os.path.join(LAB, "lib", "actionlog.py"), "verify", "--all"],
                              capture_output=True, text=True, env=env)
         check("CLI verify --all fails when a file is tampered", out.returncode == 1 and "TAMPERED" in out.stdout, out.stdout[-300:])
@@ -124,10 +124,10 @@ def main():
         msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "click", "arguments": {"x": 5}}},
-                {"jsonrpc": "2.0", "method": "notifications/virtual-computer/refused",
+                {"jsonrpc": "2.0", "method": "notifications/metacomputer/refused",
                  "params": {"tool": "set_value", "args": {"value": "pw"}, "reason": "test refusal"}},
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "boom", "arguments": {}}}]
-        env = dict(os.environ, VC_ACTION_LOG="on", VC_ACTION_LOG_DIR=base, VC_ACTION_LOG_KEY=key)
+        env = dict(os.environ, MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=base, MCOMP_ACTION_LOG_KEY=key)
         p = subprocess.run([sys.executable, os.path.join(LAB, "lib", "mcp_relay.py"), sys.executable, fake],
                            input="".join(json.dumps(m) + "\n" for m in msgs), capture_output=True, text=True, env=env, timeout=30)
         replies = [json.loads(x) for x in p.stdout.splitlines() if x.strip()]

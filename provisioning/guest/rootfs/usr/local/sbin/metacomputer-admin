@@ -1,13 +1,13 @@
 #!/bin/sh
-# virtual-computer-admin: the only command the cuaadmin account may run with sudo
-# after provisioning (see /etc/sudoers.d/90-virtual-computer). Each verb is fixed; no
+# metacomputer-admin: the only command the cuaadmin account may run with sudo
+# after provisioning (see /etc/sudoers.d/90-metacomputer). Each verb is fixed; no
 # argument reaches a shell.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-CA=/etc/ssh/virtual-computer-ca.pub
-PRINCIPALS=/etc/ssh/virtual-computer-principals
-CERT_CONF=/etc/ssh/sshd_config.d/20-virtual-computer-cert.conf
-POLICY=/etc/virtual-computer/driver-policy
+CA=/etc/ssh/metacomputer-ca.pub
+PRINCIPALS=/etc/ssh/metacomputer-principals
+CERT_CONF=/etc/ssh/sshd_config.d/20-metacomputer-cert.conf
+POLICY=/etc/metacomputer/driver-policy
 
 reload_sshd() { # validate first; on failure undo with $1 and stop
   if ! sshd -t; then
@@ -27,7 +27,7 @@ case "${1:-}" in
     N="${2:-200}"
     case "$N" in ''|*[!0-9]*) echo "logs: N must be a number" >&2; exit 2 ;; esac
     journalctl --no-pager -b -n "$N" ;;
-  provision-log)   cat /var/log/virtual-computer-provision.log ;;
+  provision-log)   cat /var/log/metacomputer-provision.log ;;
   updates)         apt-get -q update && unattended-upgrade -v ;;
   firewall)        ufw status verbose ;;
   ssh-auth)
@@ -43,19 +43,19 @@ case "${1:-}" in
         case "$typ" in ssh-ed25519|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com) ;; *) echo "ssh-auth: expected an ed25519 or ECDSA public key on stdin" >&2; exit 2 ;; esac
         case "$b64" in ''|*[!A-Za-z0-9+/=]*) echo "ssh-auth: malformed public key" >&2; exit 2 ;; esac
         install -d -m 0755 "$PRINCIPALS"
-        printf '%s %s virtual-computer-ca\n' "$typ" "$b64" > "$CA.new"
+        printf '%s %s metacomputer-ca\n' "$typ" "$b64" > "$CA.new"
         ssh-keygen -l -f "$CA.new" >/dev/null || { rm -f "$CA.new"; echo "ssh-auth: not a valid public key" >&2; exit 2; }
         mv "$CA.new" "$CA"; chmod 0644 "$CA"
         # The guest decides what each role may do, whatever a certificate says.
-        printf '%s\n' 'restrict,pty ops' 'restrict,command="/opt/virtual-computer/bin/driver-mcp" mcp' > "$PRINCIPALS/cua"
+        printf '%s\n' 'restrict,pty ops' 'restrict,command="/opt/metacomputer/bin/driver-mcp" mcp' > "$PRINCIPALS/cua"
         chmod 0644 "$PRINCIPALS/cua"
         cat > "$CERT_CONF" <<'EOF'
-# virtual-computer SSH_AUTH=cert (virtual-computer-admin ssh-auth): the automation
+# metacomputer SSH_AUTH=cert (metacomputer-admin ssh-auth): the automation
 # user signs in only with a short-lived certificate from the host's CA, for the
-# roles listed in /etc/ssh/virtual-computer-principals/cua. Remove this file
+# roles listed in /etc/ssh/metacomputer-principals/cua. Remove this file
 # (ssh-auth key) to go back to the static keys.
-TrustedUserCAKeys /etc/ssh/virtual-computer-ca.pub
-AuthorizedPrincipalsFile /etc/ssh/virtual-computer-principals/%u
+TrustedUserCAKeys /etc/ssh/metacomputer-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/metacomputer-principals/%u
 Match User cua
 	AuthorizedKeysFile none
 EOF
@@ -67,16 +67,16 @@ EOF
         reload_sshd ":"
         rm -f "$CA" "$PRINCIPALS/cua"
         echo key ;;
-      *) echo "usage: virtual-computer-admin ssh-auth status|cert|key" >&2; exit 2 ;;
+      *) echo "usage: metacomputer-admin ssh-auth status|cert|key" >&2; exit 2 ;;
     esac ;;
   driver-policy)
     # DRIVER_MODE on the host. bounded: the MCP key/certificate starts Cua Driver
     # only in bounded mode (standard requests are refused). standard: either.
     case "${2:-}" in
       status) if [ -f "$POLICY" ] && grep -qx bounded "$POLICY"; then echo bounded; else echo standard; fi ;;
-      bounded) install -d -m 0755 /etc/virtual-computer; echo bounded > "$POLICY"; chmod 0644 "$POLICY"; echo bounded ;;
+      bounded) install -d -m 0755 /etc/metacomputer; echo bounded > "$POLICY"; chmod 0644 "$POLICY"; echo bounded ;;
       standard) rm -f "$POLICY"; echo standard ;;
-      *) echo "usage: virtual-computer-admin driver-policy status|bounded|standard" >&2; exit 2 ;;
+      *) echo "usage: metacomputer-admin driver-policy status|bounded|standard" >&2; exit 2 ;;
     esac ;;
-  *) echo "usage: virtual-computer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall|ssh-auth status|cert|key|driver-policy status|bounded|standard" >&2; exit 2 ;;
+  *) echo "usage: metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall|ssh-auth status|cert|key|driver-policy status|bounded|standard" >&2; exit 2 ;;
 esac

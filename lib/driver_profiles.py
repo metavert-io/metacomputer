@@ -2,7 +2,7 @@
 """Cua Driver capability manifests for DRIVER_MODE=bounded (off by default).
 
 The templates live in config/driver-profiles/; this fills them in from the
-settings bin/virtual-computer passes in the environment (VC_*), or reads your
+settings bin/metacomputer passes in the environment (MCOMP_*), or reads your
 own manifest (DRIVER_MANIFEST). In bounded mode Cua Driver refuses every tool
 and resource the manifest doesn't list, and launches only apps named by their
 exact absolute path; `launch_path_for` maps the names people use to those.
@@ -40,8 +40,8 @@ class ProfileError(ValueError):
 
 
 def env(name, default=""):
-    """A setting: from bin/virtual-computer's environment (VC_NAME, resolved), else the config files."""
-    v = os.environ.get("VC_" + name)
+    """A setting: from bin/metacomputer's environment (MCOMP_NAME, resolved), else the config files."""
+    v = os.environ.get("MCOMP_" + name)
     return v if v is not None else labconfig.CONFIG.get(name, default)
 
 
@@ -137,7 +137,7 @@ def main(argv):
         try:
             sys.stdout.write(render())
         except ProfileError as e:
-            print(f"virtual-computer: {e}", file=sys.stderr)
+            print(f"metacomputer: {e}", file=sys.stderr)
             return 1
         return 0
     if argv[:1] == ["launch-path"] and len(argv) == 2:

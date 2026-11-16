@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """stdio relay that records a driver connection in the signed action log.
 
-`virtual-computer mcp` runs this instead of plain ssh when ACTION_LOG=on:
+`metacomputer mcp` runs this instead of plain ssh when ACTION_LOG=on:
 
   mcp_relay.py ssh -T ...ssh arguments...
 
 Messages pass through unchanged, in order. tools/call requests and their
-responses are recorded (actionlog.py); a `notifications/virtual-computer/refused`
+responses are recorded (actionlog.py); a `notifications/metacomputer/refused`
 message from Claude Code's bridge is recorded and not passed on.
 """
 import json
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
 import owners  # noqa: E402
 
-REFUSED = "notifications/virtual-computer/refused"
+REFUSED = "notifications/metacomputer/refused"
 DROPPED = "the connection to the VM closed before this call finished"
 
 
@@ -32,8 +32,8 @@ def session_info():
            else "web" if "browser_tools" in parent else "tests" if "run_tests" in parent or "test_" in parent
            else "direct")
     return {"bridge_pid": pid, "claude_pid": owners.claude_of(pid, table), "cwd": os.getcwd(), "via": via,
-            "vm": os.environ.get("VC_VM_NAME", ""), "driver_mode": os.environ.get("VC_DRIVER_MODE", "standard"),
-            "driver_profile": os.environ.get("VC_DRIVER_PROFILE", ""), "ssh_auth": os.environ.get("VC_SSH_AUTH", "key")}
+            "vm": os.environ.get("MCOMP_VM_NAME", ""), "driver_mode": os.environ.get("MCOMP_DRIVER_MODE", "standard"),
+            "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", ""), "ssh_auth": os.environ.get("MCOMP_SSH_AUTH", "key")}
 
 
 def main(cmd):

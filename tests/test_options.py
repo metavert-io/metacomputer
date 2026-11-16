@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks for the optional hardening (SECURITY.md) against a running VM.
 
-    VC_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C]
 
 Use a test VM: this switches the VM's SSH and driver settings (through the
 maintenance account) and puts them back to the defaults at the end. Variants
@@ -26,12 +26,12 @@ import tempfile
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(LAB, "bin", "virtual-computer")
+BIN = os.path.join(LAB, "bin", "metacomputer")
 sys.path.insert(0, os.path.join(LAB, "lib"))
 from mcp_client import MCPClient, MCPError  # noqa: E402
 
-BASE = os.environ.get("VC_CONFIG") or os.path.join(LAB, "config", "local.env")
-TMP = tempfile.mkdtemp(prefix="vc-opt-")
+BASE = os.environ.get("MCOMP_CONFIG") or os.path.join(LAB, "config", "local.env")
+TMP = tempfile.mkdtemp(prefix="mcomp-opt-")
 results = []
 
 
@@ -47,31 +47,31 @@ def variant(name, *lines):
     return p
 
 
-def vc(cfg, *args, stdin=None, timeout=180):
+def mcomp(cfg, *args, stdin=None, timeout=180):
     return subprocess.run([BIN, *args], input=stdin, capture_output=True, text=True, timeout=timeout,
-                          env=dict(os.environ, VC_CONFIG=cfg))
+                          env=dict(os.environ, MCOMP_CONFIG=cfg))
 
 
 def settings(cfg):
     """SSH_DIR, SSH_PORT, GUEST_USER, NET_GATEWAY_IP, LOG_DIR, as scripts/lib.sh resolves them."""
     out = subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; printf "%s\\n" "$SSH_DIR" "$SSH_PORT" "$GUEST_USER" '
                           '"$NET_GATEWAY_IP" "$LOG_DIR" "$KNOWN_HOSTS"'],
-                         capture_output=True, text=True, env=dict(os.environ, VC_CONFIG=cfg)).stdout.split("\n")
+                         capture_output=True, text=True, env=dict(os.environ, MCOMP_CONFIG=cfg)).stdout.split("\n")
     return dict(zip(["ssh_dir", "port", "user", "gw", "logs", "known"], out))
 
 
 def client(cfg):
-    old = os.environ.get("VC_CONFIG")
-    os.environ["VC_CONFIG"] = cfg
+    old = os.environ.get("MCOMP_CONFIG")
+    os.environ["MCOMP_CONFIG"] = cfg
     try:
         c = MCPClient(cmd=[BIN, "mcp"], stderr_path=os.path.join(TMP, "mcp-stderr.log"))
         c.start(timeout=60)
         return c
     finally:
         if old is None:
-            os.environ.pop("VC_CONFIG", None)
+            os.environ.pop("MCOMP_CONFIG", None)
         else:
-            os.environ["VC_CONFIG"] = old
+            os.environ["MCOMP_CONFIG"] = old
 
 
 def raw_ssh(s, key, cert=None, cmd="true"):
@@ -92,7 +92,7 @@ def mint(s, role, ca=None, validity="-2m:+5m", source=None, force=None, name="t"
     opts = ["-O", "clear", "-O", f"source-address={source or s['gw'] + '/32'}"]
     if force:
         opts += ["-O", f"force-command={force}"]
-    subprocess.run(["ssh-keygen", "-q", "-s", ca or os.path.join(s["ssh_dir"], "ca"), "-I", f"vc:test:{name}",
+    subprocess.run(["ssh-keygen", "-q", "-s", ca or os.path.join(s["ssh_dir"], "ca"), "-I", f"mcomp:test:{name}",
                     "-n", role, "-V", validity, *opts, key + ".pub"], check=True)
     return key, key + "-cert.pub"
 
@@ -129,8 +129,8 @@ def test_a():
     check("typed text is redacted", "not-a-real-password" not in open(new[0]).read())
     check("log file is private", oct(os.stat(new[0]).st_mode & 0o777) == "0o600")
     rel = os.path.relpath(new[0], os.path.join(s["logs"], "actions"))
-    v = vc(cfg, "actions", "verify", rel)
-    check("virtual-computer actions verify: OK", v.returncode == 0 and v.stdout.startswith("OK "), v.stdout + v.stderr)
+    v = mcomp(cfg, "actions", "verify", rel)
+    check("metacomputer actions verify: OK", v.returncode == 0 and v.stdout.startswith("OK "), v.stdout + v.stderr)
 
 
 # --- B ---------------------------------------------------------------------------
@@ -139,11 +139,11 @@ def test_b():
     cert_cfg = variant("cert", "SSH_AUTH=cert")
     s = settings(cert_cfg)
     try:
-        r = vc(cert_cfg, "security", "apply")
-        r2 = vc(cert_cfg, "security", "--json")
+        r = mcomp(cert_cfg, "security", "apply")
+        r2 = mcomp(cert_cfg, "security", "--json")
         st = json.loads(r2.stdout or "{}")
         check("security apply switches the VM to certificates", (st.get("ssh_auth") or {}).get("vm") == "cert", r.stdout + r.stderr + r2.stderr)
-        r = vc(cert_cfg, "ssh", "ops", "echo cert-ok")
+        r = mcomp(cert_cfg, "ssh", "ops", "echo cert-ok")
         check("ops shell works with a certificate", r.stdout.strip() == "cert-ok", r.stderr)
         r = raw_ssh(s, os.path.join(s["ssh_dir"], "ops"), cmd="echo static")
         check("the static ops key is refused", r.returncode != 0 and "static" not in r.stdout, r.stdout)
@@ -169,12 +169,12 @@ def test_b():
         n = len(c.tools())
         c.close()
         check("the driver connection works with a certificate", n > 50, n)
-        r = vc(cert_cfg, "ssh", "admin", "sudo /usr/local/sbin/virtual-computer-admin logs 400")
-        check("certificate key IDs reach the VM's auth log", "ID vc:ops:" in r.stdout and "ID vc:mcp:" in r.stdout,
-              [line for line in r.stdout.splitlines() if "ID vc:" in line][-2:])
+        r = mcomp(cert_cfg, "ssh", "admin", "sudo /usr/local/sbin/metacomputer-admin logs 400")
+        check("certificate key IDs reach the VM's auth log", "ID mcomp:ops:" in r.stdout and "ID mcomp:mcp:" in r.stdout,
+              [line for line in r.stdout.splitlines() if "ID mcomp:" in line][-2:])
     finally:
-        r = vc(BASE, "security", "apply")
-        r2 = vc(BASE, "security", "--json")
+        r = mcomp(BASE, "security", "apply")
+        r2 = mcomp(BASE, "security", "--json")
         st = json.loads(r2.stdout or "{}")
         check("back to static keys", (st.get("ssh_auth") or {}).get("vm") == "key", r.stdout + r.stderr)
         r = raw_ssh(s, os.path.join(s["ssh_dir"], "ops"), cmd="echo static")
@@ -192,10 +192,10 @@ def test_c():
     ro = variant("ro", "DRIVER_MODE=bounded", "DRIVER_PROFILE=readonly")
     desk = variant("desk", "DRIVER_MODE=bounded", "DRIVER_PROFILE=desktop")
     s = settings(ro)
-    guest_runs = f"/home/{s['user']}/virtual-computer-runs"
+    guest_runs = f"/home/{s['user']}/metacomputer-runs"
     try:
-        r = vc(ro, "security", "apply")
-        st = json.loads(vc(ro, "security", "--json").stdout or "{}")
+        r = mcomp(ro, "security", "apply")
+        st = json.loads(mcomp(ro, "security", "--json").stdout or "{}")
         check("security apply sets the VM's floor to bounded", (st.get("driver") or {}).get("vm_policy") == "bounded", r.stdout + r.stderr)
 
         c = client(ro)
@@ -236,11 +236,11 @@ def test_c():
         c.call("stop_recording", {"session": "opt"})
         c.call("end_session", {"session": "opt"})
         c.close()
-        vc(BASE, "ssh", "ops", f"pkill -x mousepad; rm -rf {guest_runs}/opt-test; true")
+        mcomp(BASE, "ssh", "ops", f"pkill -x mousepad; rm -rf {guest_runs}/opt-test; true")
 
         # browser profile on a page served inside the VM
-        vc(BASE, "ssh", "ops", "mkdir -p /tmp/vc-opt-site && echo '<title>allowed</title><a href=x>x</a>' > /tmp/vc-opt-site/index.html"
-                               " && (nohup python3 -m http.server 8791 --bind 127.0.0.1 --directory /tmp/vc-opt-site >/dev/null 2>&1 &)")
+        mcomp(BASE, "ssh", "ops", "mkdir -p /tmp/mcomp-opt-site && echo '<title>allowed</title><a href=x>x</a>' > /tmp/mcomp-opt-site/index.html"
+                               " && (nohup python3 -m http.server 8791 --bind 127.0.0.1 --directory /tmp/mcomp-opt-site >/dev/null 2>&1 &)")
         time.sleep(1)
         br = variant("br", "DRIVER_MODE=bounded", "DRIVER_PROFILE=browser", 'DRIVER_ORIGINS="http://127.0.0.1:8791"')
         c = client(br)
@@ -265,7 +265,7 @@ def test_c():
         check("browser: desktop input is refused", denied(c.call("click", {"x": 10, "y": 10})))
         c.call("end_session", {"session": "optb"})
         c.close()
-        vc(BASE, "ssh", "ops", "pkill -f '[h]ttp.server 8791'; rm -rf /tmp/vc-opt-site; true")
+        mcomp(BASE, "ssh", "ops", "pkill -f '[h]ttp.server 8791'; rm -rf /tmp/mcomp-opt-site; true")
 
         # expiry
         man = os.path.join(TMP, "short.yaml")
@@ -280,7 +280,7 @@ def test_c():
         c.close()
 
         # a manifest changed inside the VM is refused
-        vc(BASE, "ssh", "ops", "for f in ~/.config/virtual-computer/manifests/*.yaml; do echo '# changed' >> \"$f\"; done")
+        mcomp(BASE, "ssh", "ops", "for f in ~/.config/metacomputer/manifests/*.yaml; do echo '# changed' >> \"$f\"; done")
         try:
             c = client(ro)
             c.close()
@@ -288,10 +288,10 @@ def test_c():
         except MCPError:
             err = open(os.path.join(TMP, "mcp-stderr.log")).read()
             check("a manifest changed in the VM is refused", "doesn't match its hash" in err, err[-200:])
-        vc(BASE, "ssh", "ops", "rm -rf ~/.config/virtual-computer/manifests")
+        mcomp(BASE, "ssh", "ops", "rm -rf ~/.config/metacomputer/manifests")
     finally:
-        r = vc(BASE, "security", "apply")
-        st = json.loads(vc(BASE, "security", "--json").stdout or "{}")
+        r = mcomp(BASE, "security", "apply")
+        st = json.loads(mcomp(BASE, "security", "--json").stdout or "{}")
         check("back to standard", (st.get("driver") or {}).get("vm_policy") == "standard", r.stdout + r.stderr)
         try:
             c = client(BASE)

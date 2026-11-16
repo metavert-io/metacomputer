@@ -1,5 +1,5 @@
 """Read simple KEY=VALUE settings from config/defaults.env, then this
-machine's config/local.env (or $VC_CONFIG), the same files scripts/lib.sh
+machine's config/local.env (or $MCOMP_CONFIG), the same files scripts/lib.sh
 sources. Only plain values are understood (quotes stripped, no expansion),
 which is all the Python side needs (e.g. GUEST_USER)."""
 import os
@@ -12,7 +12,7 @@ _LINE = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s#]*)")
 def load():
     vals = {}
     for p in (os.path.join(LAB, "config", "defaults.env"),
-              os.environ.get("VC_CONFIG") or os.path.join(LAB, "config", "local.env")):
+              os.environ.get("MCOMP_CONFIG") or os.path.join(LAB, "config", "local.env")):
         try:
             for line in open(p):
                 m = _LINE.match(line)
@@ -26,4 +26,4 @@ def load():
 CONFIG = load()
 GUEST_USER = CONFIG.get("GUEST_USER", "cua")
 GUEST_HOME = os.path.join("/home", GUEST_USER)
-GUEST_RUNS = os.path.join(GUEST_HOME, "virtual-computer-runs")
+GUEST_RUNS = os.path.join(GUEST_HOME, "metacomputer-runs")

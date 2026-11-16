@@ -6,13 +6,13 @@
 # The host asks for a permission mode in the SSH command line:
 #   (nothing) or "standard"   Cua Driver's default mode
 #   "bounded SHA256"          bounded mode with the capability manifest the host
-#                             uploaded to ~/.config/virtual-computer/manifests/SHA256.yaml
-# /etc/virtual-computer/driver-policy (root's; set with virtual-computer-admin
+#                             uploaded to ~/.config/metacomputer/manifests/SHA256.yaml
+# /etc/metacomputer/driver-policy (root's; set with metacomputer-admin
 # driver-policy) containing "bounded" refuses standard requests.
-RUN="/run/user/$(id -u)/virtual-computer"
+RUN="/run/user/$(id -u)/metacomputer"
 REQ="${SSH_ORIGINAL_COMMAND:-}"
-POLICY=/etc/virtual-computer/driver-policy
-fail() { echo "virtual-computer: $*" >&2; exit 1; }
+POLICY=/etc/metacomputer/driver-policy
+fail() { echo "metacomputer: $*" >&2; exit 1; }
 
 case "$REQ" in
   ""|standard) MODE=standard ;;
@@ -37,7 +37,7 @@ set +a
 export CUA_DRIVER_RS_TELEMETRY_ENABLED=0 CUA_TELEMETRY_ENABLED=0 CUA_DRIVER_RS_UPDATE_CHECK=0
 
 if [ "$MODE" = bounded ]; then
-  SRC="$HOME/.config/virtual-computer/manifests/$SHA.yaml"
+  SRC="$HOME/.config/metacomputer/manifests/$SHA.yaml"
   [ -f "$SRC" ] || fail "manifest $SHA not uploaded"
   # Use a private copy (in the session's tmpfs) whose hash matches the one the
   # host asked for. Copies from connections over a day old are cleared here.

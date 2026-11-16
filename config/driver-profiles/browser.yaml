@@ -38,10 +38,10 @@ resources:
 @ORIGINS@
   files:
     read:
-      - {dir: @HOME@/virtual-computer-runs, recursive: true}
+      - {dir: @HOME@/metacomputer-runs, recursive: true}
       - {dir: @HOME@/Inbox, recursive: true}
     write:
-      - {dir: @HOME@/virtual-computer-runs, recursive: true}
+      - {dir: @HOME@/metacomputer-runs, recursive: true}
       - {dir: @HOME@/Downloads, recursive: true}
   desktop:
     display: false

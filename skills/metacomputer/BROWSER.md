@@ -2,11 +2,11 @@
 
 Verified on Cua Driver 0.52.1 with Firefox (Mozilla's arm64 build) and Google
 Chrome 157 (Google's arm64 build) on 2026-11-16. Background:
-`docs/chrome-investigation.md` in the project folder (`virtual-computer where`).
+`docs/chrome-investigation.md` in the project folder (`metacomputer where`).
 
 ## Choose a browser and a mode
 
-Defaults come from `~/.local/bin/virtual-computer browser` (out of the box:
+Defaults come from `~/.local/bin/metacomputer browser` (out of the box:
 Firefox, human). Words in the request override them.
 
 | Mode | What Claude does | Browsers | Good for |
@@ -21,7 +21,7 @@ Firefox, human). Words in the request override them.
   - "like a person", "human-like", "realistically" → human.
   - "realistic but verified", "show it typing" → hybrid.
 - **Page or hybrid in Firefox:** the driver has no Firefox page route. Say so in one line and offer Chrome (or human mode in Firefox).
-- **Chrome not installed** (`virtual-computer inspect browser`): say so; adding it is a VM rebuild, which needs the user's OK.
+- **Chrome not installed** (`metacomputer inspect browser`): say so; adding it is a VM rebuild, which needs the user's OK.
 - **Announce the choice once, before acting**, for example: "Using the virtual computer: Chrome, page-level, throwaway profile."
 
 ## Human mode
@@ -47,7 +47,7 @@ Firefox, human). Words in the request override them.
   - Background input goes through the driver's virtual devices. Chrome ignores it, and while those devices exist Chrome ignores the keyboard altogether.
   - The bridge enforces this: it sends input aimed at Chrome in the foreground, and refuses `set_value` and `run_script` aimed at Chrome, naming the route to use.
   - Before Chrome gets keyboard input, the bridge removes devices left by earlier background actions (its note says so).
-  - Manual fix: `virtual-computer input-reset`.
+  - Manual fix: `metacomputer input-reset`.
 - **File uploads:** Chrome's file picker isn't in the accessibility tree. Use page mode.
 - **Profile:** the VM's normal Chrome profile (`~/.config/google-chrome`). It persists until a reset.
 
@@ -65,13 +65,13 @@ Use the same `session` label on every call. Refs change after each snapshot and 
 6. **Act** (all verified in the background unless noted):
    - `browser_type {ref, text}`, with `replace: true` to overwrite;
    - `browser_select {ref, label}`;
-   - `browser_set_input_files {ref, files: [guest paths]}`; copy the files in first with `virtual-computer put`;
+   - `browser_set_input_files {ref, files: [guest paths]}`; copy the files in first with `metacomputer put`;
    - `browser_click {ref, input_route: "dom_event"}`, or `{ref, delivery_mode: "foreground"}` for a trusted click (the plain background trusted click is refused on Linux);
    - dialogs: the click result says when a page opened one. Then `browser_dialog {action: "inspect"}`, followed by `{action: "accept" | "dismiss", dialog_id, delivery_mode: "foreground"}`.
 7. **Verify.** Take a fresh `semantic_v2` snapshot with a `query` for the expected text.
 8. **Downloads.**
-   - `browser_download {session, target_id, tab_id, ref, destination_root: FILES_DIR}` (the folder must exist; `virtual-computer task start` makes it).
-   - The file is saved under its `download_id`. Rename it with `virtual-computer rename FILES_DIR/<download_id> <name>`, taking the name from the link's `href` in `dom_refs_v1`.
+   - `browser_download {session, target_id, tab_id, ref, destination_root: FILES_DIR}` (the folder must exist; `metacomputer task start` makes it).
+   - The file is saved under its `download_id`. Rename it with `metacomputer rename FILES_DIR/<download_id> <name>`, taking the name from the link's `href` in `dom_refs_v1`.
 9. **Page screenshot.** `get_browser_state {..., include_screenshot: true}` returns the viewport without bringing the window forward.
 10. **Finish.** `end_session {session}` closes the browser and deletes a throwaway profile.
 
@@ -92,21 +92,21 @@ Things to know:
 - **Throwaway by default.**
 - **Named profiles,** when the user asks for one (for example "use a profile called shopping"):
   1. Launch with `{mode: "isolated_named", name: "shopping"}`.
-  2. Ask the user to sign in themselves through `virtual-computer view`, in the window Claude opened.
+  2. Ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
   3. Later sessions with the same name reuse the cookies.
 - **Never type the user's credentials.**
-- **Housekeeping:** `virtual-computer browser profiles` lists named profiles, and `virtual-computer browser profiles --delete NAME` deletes one (ask first). A VM reset removes them all.
+- **Housekeeping:** `metacomputer browser profiles` lists named profiles, and `metacomputer browser profiles --delete NAME` deletes one (ask first). A VM reset removes them all.
 - **Never attach to Chrome's normal profile.** `strategy: existing_profile` isn't enabled in this lab.
 
-## Checks that need no model: `virtual-computer web`
+## Checks that need no model: `metacomputer web`
 
 Each runs in its own throwaway browsers and writes `report.md`, `report.json` and images to a results folder.
 
 | Command | Use when the user asks… |
 | --- | --- |
-| `virtual-computer web compare URL` | "does it look the same in Firefox and Chrome": side by side, plus differences in headings, links, controls and text |
-| `virtual-computer web responsive URL [--browser chrome\|firefox] [--widths 1920,1280,768,500] [--baseline DIR]` | layouts at several widths, or "what changed since last time" (similarity scores and difference images against an earlier run's folder) |
-| `virtual-computer web a11y URL [--browser chrome\|firefox]` | an accessibility smoke check: unlabelled controls, images without text alternatives, missing headings, vague links. Chrome finds more |
-| `virtual-computer web open-untrusted URL [--watch 10]` | "what does this link do / is it safe to open": server and in-page redirects, the final page, password prompts, downloads started (which stay in the VM). Nothing on the page is clicked |
+| `metacomputer web compare URL` | "does it look the same in Firefox and Chrome": side by side, plus differences in headings, links, controls and text |
+| `metacomputer web responsive URL [--browser chrome\|firefox] [--widths 1920,1280,768,500] [--baseline DIR]` | layouts at several widths, or "what changed since last time" (similarity scores and difference images against an earlier run's folder) |
+| `metacomputer web a11y URL [--browser chrome\|firefox]` | an accessibility smoke check: unlabelled controls, images without text alternatives, missing headings, vague links. Chrome finds more |
+| `metacomputer web open-untrusted URL [--watch 10]` | "what does this link do / is it safe to open": server and in-page redirects, the final page, password prompts, downloads started (which stay in the VM). Nothing on the page is clicked |
 
 Options: `--task NAME` puts the results in that task's folder, `--record` records the screen, `--json` prints the report as JSON. `--override` runs while another session is using the computer (ask first).

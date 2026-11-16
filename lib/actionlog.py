@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Signed action log (optional; ACTION_LOG=on, off by default).
 
-Every connection to Cua Driver in the VM goes through `virtual-computer mcp`
-(Claude Code's bridge, `virtual-computer call`, `web`, the tests). With the
+Every connection to Cua Driver in the VM goes through `metacomputer mcp`
+(Claude Code's bridge, `metacomputer call`, `web`, the tests). With the
 log on, that command runs mcp_relay.py, which writes one JSON Lines file per
 connection under logs/actions/YYYY-MM-DD/: a start record (who connected,
 from which project), then every tool call exactly as it was sent to the VM,
@@ -13,7 +13,7 @@ its result summary and timing, and the calls Claude Code's bridge refused.
   removing a record breaks the chain from that point on.
 - Every 20 records, every 60 seconds with new records, and when the session
   ends, a checkpoint record signs the head of the chain with an SSH key
-  (`ssh-keygen -Y sign`, namespace virtual-computer-action-log). Records after
+  (`ssh-keygen -Y sign`, namespace metacomputer-action-log). Records after
   the last checkpoint are reported as unsigned; a file without a final
   checkpoint ended abnormally or was cut short.
 - Typed text, values and scripts are replaced by their length unless
@@ -37,8 +37,8 @@ import tempfile
 import threading
 import time
 
-NAMESPACE = "virtual-computer-action-log"
-SIGNER = "virtual-computer"
+NAMESPACE = "metacomputer-action-log"
+SIGNER = "metacomputer"
 FORMAT = 1
 ZERO = "0" * 64
 TEXT_KEYS = {"text", "value", "script", "password", "secret", "token"}
@@ -48,13 +48,13 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def settings():
-    """Resolved by bin/virtual-computer (which sources the config) and passed in the environment."""
-    ssh_dir = os.environ.get("VC_SSH_DIR") or os.path.expanduser("~/.ssh/virtual-computer")
+    """Resolved by bin/metacomputer (which sources the config) and passed in the environment."""
+    ssh_dir = os.environ.get("MCOMP_SSH_DIR") or os.path.expanduser("~/.ssh/metacomputer")
     return {
-        "on": os.environ.get("VC_ACTION_LOG", "off") == "on",
-        "keep_text": os.environ.get("VC_ACTION_LOG_TEXT", "redact") == "keep",
-        "dir": os.environ.get("VC_ACTION_LOG_DIR") or os.path.join(LAB, "logs", "actions"),
-        "key": os.environ.get("VC_ACTION_LOG_KEY") or os.path.join(ssh_dir, "action-log"),
+        "on": os.environ.get("MCOMP_ACTION_LOG", "off") == "on",
+        "keep_text": os.environ.get("MCOMP_ACTION_LOG_TEXT", "redact") == "keep",
+        "dir": os.environ.get("MCOMP_ACTION_LOG_DIR") or os.path.join(LAB, "logs", "actions"),
+        "key": os.environ.get("MCOMP_ACTION_LOG_KEY") or os.path.join(ssh_dir, "action-log"),
     }
 
 
