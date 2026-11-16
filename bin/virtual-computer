@@ -110,7 +110,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
 
 do_status() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
-  local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs=""
+  local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs="" layout=current
   vm_state="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   local base_state; base_state="$(vm_exists "$BASELINE_NAME" && echo present || echo missing)"
   local gw=false fwd=""
@@ -121,6 +121,8 @@ do_status() {
     lease="$(netgw_control "lease $(vm_mac "$VM_NAME")")"
     if gssh ops true 2>/dev/null; then
       ssh_ok=true
+      # VMs built before the rename keep their helpers in /opt/cua-lab.
+      gssh ops 'test -x /opt/virtual-computer/bin/guest-status || test ! -d /opt/cua-lab' 2>/dev/null || layout=old
       gs="$(gssh ops /opt/virtual-computer/bin/guest-status 2>/dev/null || echo '{}')"
       mcp="$(mcp_probe 2>/dev/null || echo '{}')"
       # What the VM actually has from the host: virtio console port names (the
@@ -129,9 +131,9 @@ do_status() {
       hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
     fi
   fi
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" <<'EOF'
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" <<'EOF'
 import json, os, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume = sys.argv[1:]
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout = sys.argv[1:]
 gs = json.loads(gs or "{}"); mcp = json.loads(mcp or "{}")
 sharing = None
 if hs:
@@ -141,7 +143,7 @@ if hs:
                "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
        "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
-       "host_sharing": sharing, "lume": lume}
+       "host_sharing": sharing, "lume": lume, "guest_layout": layout}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -149,6 +151,9 @@ def m(b): return "\033[32m✓\033[0m" if b else "\033[31m✗\033[0m"
 print(f"VM            {vm}    baseline: {base}")
 print(f"gateway       {m(out['gateway'])} cua-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
+if layout == "old":
+    print("guest         \033[33mbuilt by an earlier version (cua-lab layout)\033[0m: rebuild it with "
+          "'virtual-computer build --replace' (or start a new VM under another VM_NAME)")
 if gs:
     print(f"desktop       {m(gs.get('xorg_running'))} Xorg  {m(gs.get('xfce_session_running'))} XFCE  "
           f"{m(gs.get('session_env_published'))} session env  resolution {gs.get('resolution')}")
