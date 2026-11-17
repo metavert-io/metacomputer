@@ -46,7 +46,7 @@ def vm_tests():
         has_sound = bool(json.loads(gs.stdout or "{}").get("virtual_audio"))
     except ValueError:
         has_sound = False
-    print(f"(the VM {'has' if has_sound else 'has no'} virtual sound card)")
+    print(f"(the VM {'has a' if has_sound else 'has no'} virtual sound card)")
     try:
         for mode, quality, fps in (("guest", "standard", 20), ("host", "high", 30)):
             env = dict(os.environ, RECORD_TO=mode, RECORD_QUALITY=quality, RECORD_DIR=out_dir)
