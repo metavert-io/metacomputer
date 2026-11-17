@@ -57,6 +57,9 @@ if have_session:
     out["atspi_bus"] = rc == 0 and "unix:" in so
     rc, so, _ = sh(["gsettings", "get", "org.gnome.desktop.interface", "toolkit-accessibility"], env=env)
     out["toolkit_accessibility"] = so == "true"
+    # VIRTUAL_AUDIO=on: the null sink that apps play into and recordings capture.
+    rc, so, _ = sh(["pactl", "list", "short", "sinks"], env=env)
+    out["virtual_audio"] = rc == 0 and any(l.split("\t")[1:2] == ["metacomputer"] for l in so.splitlines())
     rc, so, se = sh(["/usr/local/bin/cua-driver", "doctor"], env=env, timeout=60)
     out["driver_doctor_rc"] = rc
     out["driver_doctor"] = (so + ("\n" + se if se else ""))[-4000:]

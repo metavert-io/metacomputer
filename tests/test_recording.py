@@ -41,6 +41,12 @@ def write_log(path, vm, records):
 def vm_tests():
     cli = os.path.join(LAB, "bin", "metacomputer")
     out_dir = tempfile.mkdtemp(prefix="mcomp-rec-vm-")
+    gs = subprocess.run([cli, "ssh", "ops", "/opt/metacomputer/bin/guest-status"], capture_output=True, text=True)
+    try:
+        has_sound = bool(json.loads(gs.stdout or "{}").get("virtual_audio"))
+    except ValueError:
+        has_sound = False
+    print(f"(the VM {'has a' if has_sound else 'has no'} virtual sound card)")
     try:
         for mode, quality, fps in (("guest", "standard", 20), ("host", "high", 30)):
             env = dict(os.environ, RECORD_TO=mode, RECORD_QUALITY=quality, RECORD_DIR=out_dir)
@@ -71,6 +77,8 @@ def vm_tests():
                   probe.endswith(f"{fps}/1"), probe)
             check(f"{mode}: description file", (side.get("mode"), side.get("quality"), side.get("fps")) ==
                   (mode, quality, fps), side)
+            check(f"{mode}: sound track {'present' if has_sound else 'absent'}, as the VM's sound card says",
+                  bool(side.get("audio")) == has_sound, side.get("audio"))
             check(f"{mode}: nothing else left", sorted(os.listdir(out_dir)) ==
                   sorted(set(os.listdir(out_dir)) - {name + ".mkv", name + ".stream.log"}))
             left = subprocess.run([cli, "ssh", "ops", f"ls ~/metacomputer-runs/manual/{name}.mp4 2>/dev/null"],
@@ -80,6 +88,28 @@ def vm_tests():
             if mode == "guest" and left:
                 subprocess.run([cli, "ssh", "ops", f"rm -f ~/metacomputer-runs/manual/{name}.mp4 "
                                 f"~/metacomputer-runs/manual/{name}.ffmpeg.log"], env=env, capture_output=True)
+        if has_sound:   # RECORD_AUDIO=off leaves the sound out even when the VM has it
+            cfg = os.path.join(out_dir, "quiet.env")
+            with open(cfg, "w") as f:
+                f.write(f'. "{os.environ.get("MCOMP_CONFIG") or os.path.join(LAB, "config", "local.env")}"\n'
+                        f'RECORD_TO=host\nRECORD_AUDIO=off\nRECORD_DIR="{out_dir}"\n')
+            env = dict(os.environ, MCOMP_CONFIG=cfg)
+            name = f"t-quiet-{int(time.time())}"
+            subprocess.run([cli, "record", "start", name], env=env, capture_output=True, text=True)
+            time.sleep(3)
+            subprocess.run([cli, "record", "stop"], env=env, capture_output=True, text=True)
+            side = json.load(open(os.path.join(out_dir, name + ".json"))) if os.path.exists(
+                os.path.join(out_dir, name + ".json")) else {"audio": "missing"}
+            check("RECORD_AUDIO=off: no sound track", side.get("audio") is None, side.get("audio"))
+        bad = dict(os.environ)
+        cfg = os.path.join(out_dir, "bad-audio.env")
+        with open(cfg, "w") as f:
+            f.write(f'. "{os.environ.get("MCOMP_CONFIG") or os.path.join(LAB, "config", "local.env")}"\n'
+                    f'RECORD_AUDIO="on; true"\nRECORD_DIR="{out_dir}"\n')
+        bad["MCOMP_CONFIG"] = cfg
+        r = subprocess.run([cli, "record", "start", "t-bad-audio"], env=bad, capture_output=True, text=True)
+        check("a RECORD_AUDIO other than auto/off is refused", r.returncode != 0 and "RECORD_AUDIO" in r.stderr,
+              r.stderr.strip())
         missing = os.path.join(out_dir, "no-such-parent", "child")
         env = dict(os.environ)
         cfg = os.path.join(out_dir, "missing.env")
@@ -146,6 +176,17 @@ def main():
         side = json.load(open(os.path.join(tmp, "clip.json")))
         check("without an action log: no moments, says why", out.returncode == 0 and side["moments"] == []
               and isinstance(side["action_log"], str))
+        check("a silent video has no sound track", side.get("audio") is None, side.get("audio"))
+        loud = os.path.join(tmp, "loud.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=10",
+                        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2", "-ac", "2",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", loud], check=True)
+        subprocess.run([sys.executable, REC, "sidecar", loud, "--name", "loud", "--started", str(started),
+                        "--ended", str(ended), "--fps", "10", "--quality", "high", "--mode", "host",
+                        "--vm", "showvm"], capture_output=True, text=True)
+        a = json.load(open(os.path.join(tmp, "loud.json"))).get("audio") or {}
+        check("a video with sound: its track is described", (a.get("codec"), a.get("sample_rate"), a.get("channels"))
+              == ("aac", 48000, 2), a)
         check("probe: a video has a length", subprocess.run([sys.executable, REC, "probe", mp4],
                                                          capture_output=True).returncode == 0)
         bad = os.path.join(tmp, "bad.mp4")

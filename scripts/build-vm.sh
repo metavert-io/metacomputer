@@ -28,6 +28,7 @@ echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN
 for p in $EXTRA_PACKAGES; do   # names go into the guest's provisioning script
   [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_PACKAGES: '$p' is not an Ubuntu package name"
 done
+case "${VIRTUAL_AUDIO:-off}" in on|off) ;; *) die "VIRTUAL_AUDIO must be on or off" ;; esac
 
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
@@ -63,6 +64,7 @@ case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub"
   echo "LUME_VERSION=$LUME_VERSION"; echo "CUA_SRC_COMMIT=$CUA_SRC_COMMIT"; echo "BUILD_ID=$TS"
   echo "MCOMP_BROWSERS=\"$BROWSERS\""
   echo "MCOMP_EXTRA_PACKAGES=\"$(echo $EXTRA_PACKAGES)\""
+  echo "MCOMP_VIRTUAL_AUDIO=${VIRTUAL_AUDIO:-off}"
 } > "$SEED/payload/versions.env"
 (cd "$SEED/payload" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 -czf ../payload.tgz .)
 rm -rf "$SEED/payload"

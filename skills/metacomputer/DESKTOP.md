@@ -5,6 +5,8 @@ These rules were verified on Cua Driver 0.52.1, Ubuntu 24.04 XFCE on Xorg, on 20
 ## The desktop
 
 - **Screen and layout.** One display, 1920×1080. The XFCE panel runs across the top (27 px) and a launcher dock sits at the bottom. To maximize a window: `set_window_frame {pid, window_id, x:0, y:27, width:1920, height:1000}`.
+  - It often answers "did not settle" or "unverifiable" (seen with Firefox, Thunar, Audacity and Kdenlive). The window still ends up full width and 1000 px tall, but at y=56, because the title bar is added on top. Check with `list_windows` and carry on; don't retry it.
+- **The dock ignores accessibility presses.** A real pointer click on a dock button works. `launch_app` is better anyway.
 - **Apps** (`launch_app {name, additional_arguments?}`):
   - `firefox`
   - `libreoffice` with `["--writer","--norestore"]`
@@ -133,8 +135,44 @@ End each task, and each checkpoint that matters, with a structural check rather 
   - A background `hotkey ["ctrl","s"]` (or `["ctrl","shift","s"]` for Save As) opens a working dialog.
   - Then `set_value` the full path into the name field and click `Save`.
   - LibreOffice's Save As through `invoke_menu` is fine.
+- **GTK file dialogs: `set_value` on the wrong field saves at once.** In LibreOffice and Audacity, a `set_value` that landed on a hidden field (the rename field, or the export dialog's name) made the dialog save immediately, under its default name or folder. Click the visible name field (the `text` row right under "Name:"), press Ctrl+A, type the full path, then press Return. Check the saved path afterwards.
 - **Thunar.** Icon view has no accessible items. Click the `List View` button first; files then appear as `table cell` rows, and `double_click` on a cell opens it.
 - **Closing apps.** Prefer each app's own Close or Quit control. Use `kill_app` only if the app is stuck.
+
+### Apps added with EXTRA_PACKAGES
+
+These apps aren't in the standard VM. They were verified in a VM built with `EXTRA_PACKAGES` on 2026-11-16 (Inkscape 1.2, LibreOffice Calc 24.2, Audacity 3.4, Kdenlive 23.08, pygame 2.5).
+
+- **Inkscape: never open its dialogs through accessibility actions.**
+  - `invoke_menu {path:["File","Save As..."]}` froze it, and so did pressing the Export button by token. Its "Export in progress" window stayed open, but the PNG had already been written.
+  - Use the shortcuts (Ctrl+S, Ctrl+Shift+S, Ctrl+Shift+E) and real pointer clicks.
+  - Save early, so a hang loses nothing.
+  - Canvas points, colour fields and the Fill and Stroke tabs need pixel clicks. A background click on a hidden tab's button can press the wrong one.
+  - Set the display units to px along with the document units.
+  - Inkscape 1.2 has no "Outer Glow" filter: Drop Shadow with zero offset gives the same result.
+- **Qt apps (Kdenlive): use real clicks for menus and pop-ups.**
+  - A background click on a pop-up menu item landed on a hidden "Delete Clip" button behind it. Kdenlive asked for confirmation, so nothing was lost.
+  - The timeline is QML and isn't in the accessibility tree: select clips by pixel.
+  - To place the playhead exactly, triple-click the monitor's timecode, type `HH:MM:SS:FF` and press Return.
+  - On a new project File > Save is disabled, so use Save As.
+  - Qt file dialogs take a full path typed into the name field, then Return.
+  - Kdenlive's first run warns that `frei0r-plugins` and `mediainfo` are missing. Add both to `EXTRA_PACKAGES`.
+- **Audacity:**
+  - The waveform and the timeline aren't in the tree: select by pixel.
+  - Open the menus with the keyboard (arrow keys and Return); a pointer press didn't reach an open menu.
+  - Ctrl+O and Ctrl+Shift+E (Export Audio) work with a typed path.
+  - Right-click the vertical scale to switch it to dB.
+- **LibreOffice Calc:**
+  - Cells, the chart wizard and the Save dialog's file-type list need pixel clicks or the arrow keys.
+  - Typed `\t` sometimes drops one Tab. Click the target cell before typing each value you care about.
+  - Escape doesn't deselect a chart. Click a cell before using the arrow keys, or they move the chart.
+- **SDL and pygame windows:**
+  - `get_window_state` screenshots of them are black; use `get_desktop_state`.
+  - Their contents aren't in the tree. A game that mirrors its state in the window title can be read with `list_windows`.
+  - Send keys with `press_key {scope:"desktop"}` after `bring_to_front`.
+  - A game started from a terminal by a foreground step can open behind the terminal.
+- **`get_desktop_state` with `max_image_dimension`:** later `scope:"desktop"` clicks use that smaller frame's coordinates (×1.5 for 1280). Pick one capture size and stay with it.
+- **No image viewer** comes with the standard VM. Open PNGs in Firefox, or add `ristretto` to `EXTRA_PACKAGES`.
 
 ## Recording and evidence
 

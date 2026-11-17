@@ -56,7 +56,19 @@ seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality
 is refused, the frame rate and size, the description file, that nothing is left
 behind on the Mac, and that only the guest mode leaves a copy in the VM. It also
 checks that a `RECORD_DIR` whose parent is missing (a drive that isn't
-connected) is refused rather than created.
+connected) is refused rather than created, and that a `RECORD_AUDIO` other than
+`auto` or `off` is refused. It reads whether the VM has the virtual sound card
+(`VIRTUAL_AUDIO=on`) and checks that each recording has a sound track exactly
+when it does; on such a VM it also checks that `RECORD_AUDIO=off` leaves it out.
+Without a VM, it checks that the description file describes a clip's sound track
+and reports none for a silent one.
+
+Sync between sound and picture was measured separately, by recording a full-screen
+flash and a beep started on the same frame once a second. The pulse input's
+timestamps run 55-144 ms ahead of the picture (median about 86 ms over 13 takes),
+steady within a recording but different between recordings. `desktop-record`
+delays the sound by 90 ms, so expect it within about 50 ms of the picture: fine
+for watching, but nudge it in the editor if a sound has to land on an exact frame.
 
 ## Optional hardening: `tests/test_actionlog.py`, `tests/test_options.py`
 

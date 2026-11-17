@@ -7,7 +7,7 @@
   recording.py probe FILE                print its length in seconds (exit 1 if unreadable)
 
 The sidecar (MP4 with .json in place of .mp4) says what the file is: when it
-started and ended, its settings, size, length and SHA-256. When the signed action
+started and ended, its settings, size, length, sound track (if any) and SHA-256. When the signed action
 log is on (ACTION_LOG=on), it also lists the log files that cover the recording
 and its key moments: every tool call made on this VM while it was recording, with
 its time in the video, so a moment can be found without watching it all
@@ -35,6 +35,21 @@ def probe_duration(path):
         return round(float(out.strip()), 2)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
+
+
+def probe_audio(path):
+    """The first sound track's codec, rate and channels, or None for a silent video."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                              "stream=codec_name,sample_rate,channels", "-of", "json", path],
+                             capture_output=True, text=True, timeout=60).stdout
+        st = (json.loads(out or "{}").get("streams") or [None])[0]
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    if not st:
+        return None
+    return {"codec": st.get("codec_name"), "sample_rate": int(st.get("sample_rate") or 0),
+            "channels": st.get("channels"), "source": "the VM's virtual sound card (VIRTUAL_AUDIO=on)"}
 
 
 def sha256(path):
@@ -136,6 +151,7 @@ def cmd_sidecar(a):
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(a.started)),
         "ended_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(a.ended)),
         "duration_s": probe_duration(a.mp4),
+        "audio": probe_audio(a.mp4),
         "bytes": os.path.getsize(a.mp4),
         "sha256": sha256(a.mp4),
         "clock": "the Mac's; moments are within about a second",
