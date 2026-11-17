@@ -102,6 +102,12 @@ Things to know:
 
 The user can keep passwords, one-time-code seeds and saved browser logins in a vault on the Mac. Claude uses them without ever seeing them. Background: SECURITY.md, "Secrets and logins", in the project folder.
 
+- **What this guarantees:**
+  - Values never come back to Claude, in results, logs or recordings.
+  - The fill runs in a VM account Claude can't change.
+  - Cua's page snapshots mask password fields.
+  - Usernames and one-time codes are ordinary text on the page, so snapshots and screenshots show them.
+- **What it doesn't cover:** code run as the VM's desktop user (`metacomputer ssh ops`, or the VM's terminal app) can reach Chrome's DevTools and read a filled field. Never do that, and never try to read a secret back in any other way.
 - **Never ask for a password, a code or the vault passphrase in chat.** Never type one with `type_text`, `browser_type` or a shell command.
   - If the user offers one, ask them to keep it out of the chat and store it themselves, in their own terminal: `metacomputer secrets set NAME --kind password --origin https://site --username U`.
 - **See what's stored:** `metacomputer secrets list`. It shows names, sites, usernames and which `--field`s each secret fills, never values. It works only while the vault is unlocked.
@@ -111,6 +117,7 @@ The user can keep passwords, one-time-code seeds and saved browser logins in a v
   1. Open the sign-in page in page mode (`browser_prepare`, `browser_navigate`).
   2. Focus the field with a trusted click: `browser_click {ref, delivery_mode: "foreground"}`. A `dom_event` click may not focus it.
      - Or let the fill focus it: add `--selector '#username'` (an id or name from a `dom_refs_v1` snapshot). It must match exactly one element.
+     - A selector searches the page itself, not frames or shadow roots, and there's no syntax for reaching into them. For a field inside a frame, click into it.
   3. `metacomputer secrets fill NAME --field username`.
   4. Focus the password field, then `metacomputer secrets fill NAME --field password`.
   5. For a one-time code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp`.
@@ -120,15 +127,19 @@ The user can keep passwords, one-time-code seeds and saved browser logins in a v
   - `{"ok":true,...,"chars":N}` means it was typed and checked.
   - Exit 2: refused, with the reason (wrong site, wrong field, or the user said no). Fix the cause, for example focus the right field, and try once more. Never work around a refusal.
   - Exit 4: an error, such as the VM being off, no Chrome, or no tab on that site.
+    - "Rebuild the VM to use secrets": the VM predates the fill account. Tell the user; don't work around it.
+    - "Bind again": the user runs `metacomputer secrets bind` in their own terminal.
 - **Don't read a filled field back.** A page script, or a snapshot that includes a field's value, would bring the secret into the conversation. The fill's own `chars` check is the verification.
-- **The user may need to answer.** A secret set to `each`, or a vault unlocked with `--confirm each`, waits up to 2 minutes for the user's y/N in their terminal. Tell them a confirmation is waiting.
+- **The user may need to answer.** A secret set to `each`, a vault unlocked with `--confirm each`, and every sealed-session save (and load, unless the user relaxed it) wait up to 2 minutes. The user answers by typing the secret's or session's name in their unlock terminal. Tell them a confirmation is waiting.
+  - In tmux or screen, these are refused unless the user unlocked with `--allow-multiplexer`. The reason says so: pass it on.
 - **Recordings:** password fields show dots, but usernames and codes are visible on screen. Don't record those steps unless the user wants that.
 - **To keep a login** across sessions or VMs:
   1. Use a named profile (`isolated_named`, for example `x`).
   2. Sign in: fill it as above, or let the user sign in once through `metacomputer view`.
   3. End the browser session (`end_session`): a profile Chrome is using can't be saved.
-  4. `metacomputer secrets session save NAME --profile x`.
-  5. Later, with no Chrome running on that profile: `metacomputer secrets session load NAME --profile x`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`.
+  4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
+  5. Later, with no Chrome running on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`.
+     - A session loads only under the profile name it was saved from, because the driver records that name inside the profile.
 
 ## Checks that need no model: `metacomputer web`
 

@@ -243,60 +243,111 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_guest_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
-`python3 tests/test_secrets.py` (114 checks, about 30 s) builds two copies of
-`mcomp-vault`: a release build, and a test build that runs a stub instead of `ssh`
-(`scripts/build-vault.sh --test`). The release build must not contain the test
-switches. The test types the passphrase, values and y/N answers into a
-pseudo-terminal, as a person would. It checks that:
-- `init`, `set`, `bind` and `unlock` refuse without a terminal, short or mismatched
-  passphrases, bad sites and the wrong passphrase;
-- the vault file is 0600 and holds no names or values in the clear;
+`python3 tests/test_secrets.py` (119 checks, about 45 s) builds two copies of
+`mcomp-vault`:
+- a release build, which must not contain the test switches;
+- a test build that runs a stub instead of `ssh` (`scripts/build-vault.sh --test`).
+  It refuses to run without its own `MCOMP_VAULT_DIR` outside `~/Library`, and
+  `metacomputer secrets` refuses it.
+
+The test types the passphrase, values and approvals into a pseudo-terminal, as a
+person would. It checks that:
+- `init`, `set`, `bind` and `unlock` refuse without a terminal, and refuse short or
+  mismatched passphrases, bad sites and names, and the wrong passphrase;
+- `bind` shows what it pins and pins nothing without `yes`;
+- the vault file is 0600 and holds no names or values in the clear, and a header with
+  absurd KDF rounds is refused;
 - while locked, `list` and `fill` exit 3 and nothing reaches the VM;
-- a port not served by `cua-netgw` is refused;
-- a fill's value reaches the VM side only on ssh's standard input, never on the
-  command line or in the environment;
-- ssh runs with the pinned key, port, user and host key, and no config or agent;
+- a port served by anything but the pinned gateway program is refused;
+- a fill goes to the fill account (`mcfill`) with the fill key, and its value
+  reaches the VM side only on ssh's standard input, never on the command line or in
+  the environment;
+- ssh runs with the pinned port, host key and account, and no config or agent;
+- a VM without the fill account says to rebuild;
 - the TOTP code is the current one;
 - wrong field and kind combinations are refused before anything is sent;
-- `each` approval: `n` sends only a check without the value, no answer times out;
-- sealed sessions round-trip, are encrypted, and a changed file is refused;
+- `each` approval:
+  - `y` and wrong words refuse, and send only a check without the value;
+  - the secret's name allows, and only the approved site goes with the value;
+  - a check naming another site is refused;
+  - the listener is checked again after approval;
+  - no answer times out, and a question can't outlast the unlock;
+- inside tmux, `--confirm each` won't start and confirmations are refused unless
+  `--allow-multiplexer`;
+- control and bidi characters from the VM or a hostile request reach no output,
+  terminal or log, and a VM answer holding the value (even a 6-digit code) is withheld;
+- sealed sessions:
+  - save and replace always ask, and load asks unless the passphrase-gated policy
+    says otherwise;
+  - loading into another VM asks, naming both, and loading under another profile name
+    is refused;
+  - a changed file is refused;
+  - the loader refuses `..`, absolute paths, entries outside the profile, links leading
+    outside, special files and a symlinked profile folder;
 - Ctrl-C, the time running out and the terminal closing each lock the vault;
 - through `bin/metacomputer` with `ACTION_LOG=on`, the fill is in the signed log
   and verifies;
 - no value appears in any command's output, the unlock terminal or the audit log.
 
 `MCOMP_VAULT_TEST_BIN=PATH` uses an existing test build, and
-`MCOMP_VAULT_SKIP_RELEASE=1` skips the release build.
+`MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
+tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_guest_fill.py` checks the VM side (`vault/guest_fill.py`):
-- its helpers: sites, field types, and WebSocket frames, including RFC 6455's examples;
-- the whole script against a fake Chrome DevTools server: fragmented answers,
-  pings, several tabs, cross-origin frames, focus moving during a fill, length limits;
-- the whole script against a real headless Chromium, when one is found
+`python3 tests/test_secret_fill.py` (141 checks) covers the VM side,
+`provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
+- **Its helpers:**
+  - sites and field types;
+  - `/proc/net/tcp` and `tcp6` parsing, against fixtures with decoys;
+  - DevTools `/json/version` answers and Chrome command lines;
+  - WebSocket frames, including RFC 6455's examples;
+  - redaction.
+- **The whole program against a fake Chrome DevTools server**, found through a
+  `/proc/net/tcp` fixture beside a plain web server, a silent listener and another
+  user's port. The fake models:
+  - frames, isolated worlds, `DOM.describeNode` and `SystemInfo`;
+  - a tab list that disagrees with the frame tree;
+  - cross-origin, srcdoc, sandboxed and out-of-process frames;
+  - several tabs and profiles;
+  - focus moving during a fill, length limits and invalid selectors.
+- **The whole program against a real headless Chromium**, when one is found
   (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It fills a dummy login
-  page with fields in a same-origin frame, a cross-origin frame and a shadow root.
+  page with fields in a same-origin frame, a srcdoc frame, a cross-origin frame and a
+  shadow root. It also checks a page that redefines `type`, `activeElement` and
+  `self.origin` in its own world.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` checks the fill account on
+a VM built with this version, changing nothing. It covers:
+- the forced command, whatever is asked for;
+- no terminal and no forwarding;
+- that the fill and desktop keys don't cross;
+- that the account, its program and key list are root-owned and its home is empty.
 
 What these can't cover is the VM's own Chrome, launched by the driver; see the
 manual steps below.
 
 ### In the VM (manual)
 
-1. Build and install the vault: `scripts/build-vault.sh`.
-2. In your own terminal: `metacomputer secrets init`, then
-   `metacomputer secrets set demo --kind password --origin http://localhost:8000 --username demo`
-   and `metacomputer secrets bind`.
+1. Build and install the vault (`scripts/build-vault.sh`), and build a VM with this
+   version.
+2. In your own terminal, outside tmux:
+   - `metacomputer secrets init`;
+   - `metacomputer secrets set demo --kind password --origin http://localhost:8000 --username demo`;
+   - `metacomputer secrets bind`: check the fingerprint in the live view, then type `yes`.
 3. Serve `tests/fixtures/site/` in the VM (below) and open
    `http://localhost:8000/login.html`, a dummy sign-in page, in page-mode Chrome
    with a named profile.
 4. `metacomputer secrets unlock --confirm each` in your terminal. From Claude, or
    another terminal: focus the field, then run
    `metacomputer secrets fill demo --field password --profile P`.
-5. Check: the y/N question appears, the field fills, and the result shows `chars`.
-   Submitting the page shows only the lengths of what was typed.
+5. Check:
+   - the question names the page's site, and typing `demo` allows it;
+   - the field fills and the result shows `chars`;
+   - submitting the page shows only the lengths of what was typed.
+
    Then `session save` / `session load` that profile.
 
 ## Browser checks: `metacomputer web …`
