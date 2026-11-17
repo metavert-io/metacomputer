@@ -28,7 +28,7 @@ PY="${PY:-/opt/homebrew/bin/python3}"
 [ -x "$PY" ] || PY=python3
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
-export MCOMP_RUN_DIR="$RUN_DIR" MCOMP_LOG_DIR="$LOG_DIR"   # for the Python helpers
+export MCOMP_RUN_DIR="$RUN_DIR" MCOMP_LOG_DIR="$LOG_DIR" MCOMP_SSH_PORT="$SSH_PORT"   # for the Python helpers
 ( umask 077; mkdir -p "$SOCK_DIR" )
 { [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "metacomputer: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
 

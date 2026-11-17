@@ -29,6 +29,16 @@ OWNERS_DIR = os.path.join(os.environ.get("MCOMP_RUN_DIR") or os.path.join(LAB, "
 ACTIVE_S = int(os.environ.get("MCOMP_ACTIVE_S", "600"))  # acted within 10 min = in use
 # the bridge's SSH key is <SSH_DIR>/mcp (SSH_DIR is configurable), to the loopback forward
 MCP_KEY_RE = re.compile(r"IdentityFile=\S*/mcp(?:\s|$)")
+# This VM's loopback SSH port (bin/metacomputer passes SSH_PORT). With two VMs side by side,
+# a connection to the other VM's port is not an owner of this one.
+SSH_PORT = os.environ.get("MCOMP_SSH_PORT", "")
+
+
+def for_this_vm(cmd):
+    if not SSH_PORT:
+        return True
+    return re.search(r"(?:^|\s)-p\s*" + re.escape(SSH_PORT) + r"(?:\s|$)", cmd) is not None \
+        or re.search(r"Port=" + re.escape(SSH_PORT) + r"(?:\s|$)", cmd) is not None
 
 
 def cli():
@@ -150,7 +160,7 @@ def direct_connections(table):
         if os.path.basename(comm) != "ssh":
             continue
         cmd = full_command(pid)
-        if not MCP_KEY_RE.search(cmd) or "@127.0.0.1" not in cmd:
+        if not MCP_KEY_RE.search(cmd) or "@127.0.0.1" not in cmd or not for_this_vm(cmd):
             continue
         if "mcp_lazy.py" in full_command(ppid):
             continue  # an on-demand bridge's own upstream: reported through its claim
