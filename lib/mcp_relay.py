@@ -19,6 +19,10 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
 import owners  # noqa: E402
+try:
+    import events  # noqa: E402  (the optional event stream, docs/events.md)
+except Exception:  # never let it stop the relay
+    events = None
 
 REFUSED = "notifications/metacomputer/refused"
 DROPPED = "the connection to the VM closed before this call finished"
@@ -36,8 +40,26 @@ def session_info():
             "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", ""), "ssh_auth": os.environ.get("MCOMP_SSH_AUTH", "key")}
 
 
+def actions_listener():
+    """With a sink subscribed to the opt-in `actions` family: one event per record written (tool, hashes; never
+    arguments or typed text), sent on a background thread so the relay never waits."""
+    if events is None:
+        return None
+    try:
+        if not events.wants(events.load_config(), "actions"):
+            return None
+    except Exception:
+        return None
+    cwd = os.getcwd()
+
+    def listener(rec, path):
+        e = events.action_record_event(rec, path)
+        events.emit_async(e["family"], e["type"], e["message"], e["severity"], None, e["data"], project=cwd)
+    return listener
+
+
 def main(cmd):
-    log = actionlog.ActionLog(session_info())
+    log = actionlog.ActionLog(session_info(), listener=actions_listener())
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     pending = {}            # json(id) -> tool
     plock = threading.Lock()
@@ -49,6 +71,8 @@ def main(cmd):
                 log.result(json.loads(key), tool, {"error": {"message": DROPPED}})
             pending.clear()
         log.close()
+        if events is not None:
+            events.flush_async(3.0)
 
     def on_signal(signum, _frame):
         finish()

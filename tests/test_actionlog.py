@@ -48,6 +48,10 @@ def verify(path, base, pub):
 
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-alog-")
+    # A failed verify is an event (docs/events.md): keep this test's events in its own folder, so it never
+    # reaches the sinks or the event log of the person running it.
+    os.environ.update(MCOMP_EVENTS_DIR=os.path.join(td, "events"), MCOMP_EVENTS_SPOOL=os.path.join(td, "spool"),
+                      MCOMP_LOG_DIR=os.path.join(td, "logs"))
     try:
         base = os.path.join(td, "actions")
         key = os.path.join(td, "keys", "action-log")
