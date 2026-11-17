@@ -1,37 +1,37 @@
 #!/bin/bash
-# claude-vc: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
+# vc: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
 # that Claude Code operates through Cua Driver's MCP server.
 #
-#   claude-vc start | stop [--force] | restart | status [--json] | reset [--yes]
-#   claude-vc who | release               who is using the virtual computer / hand it over
-#   claude-vc where                       project, config, skill and results folders
-#   claude-vc call TOOL ['JSON']          one Cua Driver tool call (new connection each time)
-#   claude-vc inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
+#   vc start | stop [--force] | restart | status [--json] | reset [--yes]
+#   vc who | release               who is using the virtual computer / hand it over
+#   vc where                       project, config, skill and results folders
+#   vc call TOOL ['JSON']          one Cua Driver tool call (new connection each time)
+#   vc inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
 #                                       read-only snapshot of the VM (no GUI, changes nothing)
-#   claude-vc browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
-#   claude-vc input-reset [--check]       remove the driver's leftover virtual input devices
+#   vc browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
+#   vc input-reset [--check]       remove the driver's leftover virtual input devices
 #                                       (while one exists, Chrome ignores the keyboard); prints the count
-#   claude-vc desktop-restart             log the desktop out and in again (closes every app)
-#   claude-vc rename GUEST_PATH NEW_NAME  rename a file in the VM (a download saved under its id)
-#   claude-vc web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
-#   claude-vc test [A B C D E F ...]      run the GUI smoke suite (records each test)
-#   claude-vc task start SLUG | finish NAME   one folder per task (guest + host), artifacts listed
-#   claude-vc put HOST_PATH... [--to GUEST_DIR]   copy files into the VM (default ~/Inbox)
-#   claude-vc get GUEST_PATH [HOST_DIR] [--task NAME]   copy files out of the VM
-#   claude-vc shot [HOST_PATH] [--task NAME]  screenshot of the whole VM desktop to the Mac
-#   claude-vc contact-sheet MP4 [OUT.png] 12 frames of a recording in one image
-#   claude-vc record start [NAME] | stop | status
-#   claude-vc recordings [--sync] [N]
-#   claude-vc checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
-#   claude-vc view                        how to watch / take over the desktop (VNC)
-#   claude-vc ssh [ops|admin] [CMD...]    shell into the guest
-#   claude-vc mcp                         direct stdio MCP bridge (tests, mcp_client.py)
-#   claude-vc mcp-lazy                    on-demand MCP bridge (what Claude Code sessions use)
-#   claude-vc build [--replace]           build the VM + baseline from scratch
-#   claude-vc baseline [--yes]            re-snapshot the current VM as the baseline
-#   claude-vc logs [N]                    tail host + guest logs
+#   vc desktop-restart             log the desktop out and in again (closes every app)
+#   vc rename GUEST_PATH NEW_NAME  rename a file in the VM (a download saved under its id)
+#   vc web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
+#   vc test [A B C D E F ...]      run the GUI smoke suite (records each test)
+#   vc task start SLUG | finish NAME   one folder per task (guest + host), artifacts listed
+#   vc put HOST_PATH... [--to GUEST_DIR]   copy files into the VM (default ~/Inbox)
+#   vc get GUEST_PATH [HOST_DIR] [--task NAME]   copy files out of the VM
+#   vc shot [HOST_PATH] [--task NAME]  screenshot of the whole VM desktop to the Mac
+#   vc contact-sheet MP4 [OUT.png] 12 frames of a recording in one image
+#   vc record start [NAME] | stop | status
+#   vc recordings [--sync] [N]
+#   vc checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
+#   vc view                        how to watch / take over the desktop (VNC)
+#   vc ssh [ops|admin] [CMD...]    shell into the guest
+#   vc mcp                         direct stdio MCP bridge (tests, mcp_client.py)
+#   vc mcp-lazy                    on-demand MCP bridge (what Claude Code sessions use)
+#   vc build [--replace]           build the VM + baseline from scratch
+#   vc baseline [--yes]            re-snapshot the current VM as the baseline
+#   vc logs [N]                    tail host + guest logs
 # stop, reset, restore, baseline and test refuse while another session is
-# using the computer (claude-vc who); --override proceeds anyway (ask first).
+# using the computer (vc who); --override proceeds anyway (ask first).
 set -uo pipefail
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
@@ -59,7 +59,7 @@ parse_flags() {
 owners_check() {
   [ "$OVERRIDE" = 1 ] && return 0
   "$PY" "$LAB_ROOT/cualab/owners.py" check \
-    || die "another session is using the virtual computer (claude-vc who). Ask before taking over; then re-run with --override, or run 'claude-vc release' first"
+    || die "another session is using the virtual computer (vc who). Ask before taking over; then re-run with --override, or run 'vc release' first"
 }
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
@@ -71,10 +71,10 @@ guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
 
 abs_host_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac; }
 
-need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (claude-vc start)"; }
+need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (vc start)"; }
 
 do_start() {
-  vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: claude-vc build"
+  vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: vc build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
     warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force
@@ -83,10 +83,10 @@ do_start() {
   ok "VM running (gateway policy: config/netgw-rules.json)"
   wait_ssh ops 240 || die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
-  wait_session 240 || die "XFCE session not ready (claude-vc ssh admin; sudo cua-lab-guest-admin logs)"
+  wait_session 240 || die "XFCE session not ready (vc ssh admin; sudo cua-lab-guest-admin logs)"
   ok "XFCE session ready"
-  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (claude-vc status)"
-  say "ready. Live view: claude-vc view"
+  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (vc status)"
+  say "ready. Live view: vc view"
 }
 
 mcp_probe() { "$PY" "$LAB_ROOT/cualab/mcp_client.py" --probe; }
@@ -98,7 +98,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   if vm_running "$VM_NAME"; then
     owners_check
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
-    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'claude-vc record stop' to keep it"
+    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'vc record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
   else
     netgw_stop
@@ -108,7 +108,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
 
 do_status() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
-  local vm_state lease ssh_ok=false gs="{}" mcp="{}"
+  local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs=""
   vm_state="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   local base_state; base_state="$(vm_exists "$BASELINE_NAME" && echo present || echo missing)"
   local gw=false fwd=""
@@ -121,14 +121,25 @@ do_status() {
       ssh_ok=true
       gs="$(gssh ops /opt/cua-lab/bin/cua-guest-status 2>/dev/null || echo '{}')"
       mcp="$(mcp_probe 2>/dev/null || echo '{}')"
+      # What the VM actually has from the host: virtio console port names (the
+      # SPICE clipboard port), virtio device ids (0x0019 = sound) and virtiofs
+      # tags (the Rosetta share is tagged "rosetta").
+      hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
     fi
   fi
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" <<'EOF'
-import json, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp = sys.argv[1:]
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" <<'EOF'
+import json, os, sys
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume = sys.argv[1:]
 gs = json.loads(gs or "{}"); mcp = json.loads(mcp or "{}")
+sharing = None
+if hs:
+    parts = (hs.split("---") + ["", "", ""])[:3]
+    ports, devices, tags = (p.split() for p in parts)
+    sharing = {"clipboard": "com.redhat.spice.0" in ports, "audio": "0x0019" in devices,
+               "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
-       "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp}
+       "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
+       "host_sharing": sharing, "lume": lume}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -142,12 +153,16 @@ if gs:
     print(f"accessibility {m(gs.get('atspi_bus'))} AT-SPI bus  {m(gs.get('toolkit_accessibility'))} toolkit-accessibility")
     print(f"active window {gs.get('active_window_title')!r}   windows: {len(gs.get('windows', []))}")
     print(f"driver        {gs.get('driver_version')}   doctor rc={gs.get('driver_doctor_rc')}   uinput {m(gs.get('uinput_writable'))}")
-    print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (claude-vc view)")
+    print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (vc view)")
     print(f"guest         up {int(gs.get('uptime_s', 0))} s, load {' '.join(gs.get('loadavg', []))}, "
           f"{gs.get('mem_available_mb')} MB free, {gs.get('disk_free_gb')} GB disk free"
           + ("  REBOOT REQUIRED (updates)" if gs.get('reboot_required') else ""))
 if mcp:
     print(f"mcp           {m(mcp.get('ok'))} {mcp.get('server', '')} {mcp.get('protocol', '')}  tools={mcp.get('tools', 0)}  ({mcp.get('ms', '?')} ms)")
+if sharing is not None:
+    def onoff(k): return ("\033[33mon\033[0m" if sharing[k] else "off")
+    print(f"host sharing  clipboard {onoff('clipboard')}  audio {onoff('audio')}  rosetta {onoff('rosetta')}"
+          f"   (seen from inside the VM; Lume: {os.path.basename(lume)})")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -182,7 +197,7 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
   if [ "${1:-}" = "--delete" ]; then
-    ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (claude-vc checkpoints)"
+    ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (vc checkpoints)"
     confirm "Delete checkpoint '$2'?"
     "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
     ok "checkpoint '$2' deleted"; return 0
@@ -190,25 +205,25 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
   local name="${1:-}" replace=0; [ "${2:-}" = "--replace" ] && replace=1
   ckpt_name "$name"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
-  vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'claude-vc stop' first"
+  vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'vc stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
-  ok "checkpoint '$name' saved (restore with: claude-vc restore $name)"
+  ok "checkpoint '$name' saved (restore with: vc restore $name)"
 }
 
 do_checkpoints() {
   "$LUME" ls --format json 2>/dev/null | "$PY" -c 'import json, sys
 pre = sys.argv[1]; names = [v["name"][len(pre):] for v in json.load(sys.stdin) if v["name"].startswith(pre)]
-print("\n".join(sorted(names)) if names else "no checkpoints (claude-vc checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
+print("\n".join(sorted(names)) if names else "no checkpoints (vc checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
 }
 
 do_restore() { # NAME [--yes] [--override]
   parse_flags "$@"
   local name="${REST[0]:-}"; ckpt_name "$name"
-  vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (claude-vc checkpoints)"
+  vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (vc checkpoints)"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded (host recordings and results are kept)"
   restore_from "$CKPT_PREFIX$name" "checkpoint '$name'"
@@ -238,7 +253,7 @@ do_record() {
       local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}"
       gssh ops "/opt/cua-lab/bin/cua-desktop-record start '$name' ${2:-20}" || die "could not start recording"
       echo "$name" > "$RUN_DIR/manual-recording"
-      ok "recording the guest desktop as '$name' — run your task, then: claude-vc record stop" ;;
+      ok "recording the guest desktop as '$name' — run your task, then: vc record stop" ;;
     stop)
       local path name dest
       path="$(gssh ops /opt/cua-lab/bin/cua-desktop-record stop)" || die "stop failed"
@@ -247,13 +262,13 @@ do_record() {
       gssh ops "cat '$path'" > "$dest/$name.mp4" || die "copy failed"
       "$PY" - "$dest/$name.json" "$name" <<'EOF'
 import json, sys, time
-json.dump({"name": sys.argv[2], "kind": "manual desktop recording (claude-vc record)",
+json.dump({"name": sys.argv[2], "kind": "manual desktop recording (vc record)",
            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, open(sys.argv[1], "w"), indent=2)
 EOF
       rm -f "$RUN_DIR/manual-recording"
       ok "saved recordings/manual/$name.mp4 ($(du -h "$dest/$name.mp4" | cut -f1))" ;;
     status) gssh ops /opt/cua-lab/bin/cua-desktop-record status ;;
-    *) die "usage: claude-vc record start [NAME] | stop | status" ;;
+    *) die "usage: vc record start [NAME] | stop | status" ;;
   esac
 }
 
@@ -300,14 +315,14 @@ do_inspect() { # [system|windows|processes|ports|files ...] [--minutes N] [--top
       --json) json=1 ;;
       --minutes|--top) [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "$1 needs a number"; args+=("$1" "$2"); shift ;;
       system|windows|processes|ports|files|browser|all) args+=("$1") ;;
-      *) die "usage: claude-vc inspect [system|windows|processes|ports|files|browser ...] [--minutes N] [--top N] [--json]" ;;
+      *) die "usage: vc inspect [system|windows|processes|ports|files|browser ...] [--minutes N] [--top N] [--json]" ;;
     esac
     shift
   done
   need_running
   local out
   out="$(gssh ops "python3 -I - ${args[*]+${args[*]}}" < "$LAB_ROOT/cualab/guest_inspect.py")" \
-    || die "inspect failed (is the guest up? claude-vc status)"
+    || die "inspect failed (is the guest up? vc status)"
   if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s' "$out" | "$PY" "$LAB_ROOT/cualab/guest_inspect.py" --render; fi
 }
 
@@ -316,7 +331,7 @@ browser_get() { # KEY DEFAULT: the value after config/defaults.env + config/loca
 }
 browser_set() { # KEY VALUE: written to this machine's config (config/local.env)
   local tmp; tmp="$(mktemp)"
-  { if [ -f "$LOCAL_CONFIG" ]; then grep -v "^$1=" "$LOCAL_CONFIG"; else echo "# This Mac's settings for claude-virtual-computer (see config/local.env.example)"; fi
+  { if [ -f "$LOCAL_CONFIG" ]; then grep -v "^$1=" "$LOCAL_CONFIG"; else echo "# This Mac's settings for virtual-computer (see config/local.env.example)"; fi
     echo "$1=$2"; } > "$tmp"
   mv "$tmp" "$LOCAL_CONFIG"
 }
@@ -328,20 +343,20 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--
       else
         echo "default browser: $b   (firefox | chrome)"
         echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome)"
-        echo "Words in a request override these. Change with: claude-vc browser default chrome | claude-vc browser mode page"
+        echo "Words in a request override these. Change with: vc browser default chrome | vc browser mode page"
       fi ;;
     default) case "${2:-}" in firefox|chrome) browser_set BROWSER "$2"; echo "default browser: $2" ;;
-                              *) die "usage: claude-vc browser default firefox|chrome" ;; esac ;;
+                              *) die "usage: vc browser default firefox|chrome" ;; esac ;;
     mode)    case "${2:-}" in human|page|hybrid) browser_set MODE "$2"; echo "default mode: $2" ;;
-                              *) die "usage: claude-vc browser mode human|page|hybrid" ;; esac ;;
+                              *) die "usage: vc browser mode human|page|hybrid" ;; esac ;;
     profiles)
       need_running
       if [ "${2:-}" = --delete ]; then
         local name="${3:-}"; shift 3 2>/dev/null || true
-        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: claude-vc browser profiles --delete NAME [--yes]"
+        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: vc browser profiles --delete NAME [--yes]"
         parse_flags "$@"
         local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
-        gssh ops "test -d '$dir'" || die "no driver profile named $name (claude-vc browser profiles)"
+        gssh ops "test -d '$dir'" || die "no driver profile named $name (vc browser profiles)"
         # [-] keeps pgrep from matching this very ssh command line
         gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" && die "profile $name is in use by a running Chrome; close it first"
         confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
@@ -349,12 +364,12 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--
       else
         gssh ops "python3 -I - browser" < "$LAB_ROOT/cualab/guest_inspect.py" | "$PY" "$LAB_ROOT/cualab/guest_inspect.py" --render-profiles
       fi ;;
-    *) die "usage: claude-vc browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
+    *) die "usage: vc browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
   esac
 }
 
 do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download saved under its id)
-  [ $# -eq 2 ] || die "usage: claude-vc rename GUEST_PATH NEW_NAME"
+  [ $# -eq 2 ] || die "usage: vc rename GUEST_PATH NEW_NAME"
   need_running
   local src new; src="$(guest_path "$1")" || exit 1; new="$2"
   [[ "$new" =~ ^[A-Za-z0-9][A-Za-z0-9._()+\ -]{0,127}$ ]] || die "new name: letters, digits, spaces and ._()+- only, no folders"
@@ -375,7 +390,7 @@ do_desktop_restart() { # [--override]: log the desktop session out and back in (
   say "restarting the desktop session (every open app closes)"
   gssh admin 'sudo /usr/local/sbin/cua-lab-guest-admin restart-desktop' >/dev/null 2>&1 || true
   sleep 5
-  wait_session 120 || die "the desktop session did not come back (claude-vc status)"
+  wait_session 120 || die "the desktop session did not come back (vc status)"
   ok "desktop session ready"
 }
 
@@ -394,7 +409,7 @@ do_put() { # HOST_PATH... [--to GUEST_DIR]
   while [ $# -gt 0 ]; do
     case "$1" in --to) to="${2:-}"; shift 2 ;; *) files+=("$1"); shift ;; esac
   done
-  [ ${#files[@]} -gt 0 ] || die "usage: claude-vc put HOST_PATH... [--to GUEST_DIR]"
+  [ ${#files[@]} -gt 0 ] || die "usage: vc put HOST_PATH... [--to GUEST_DIR]"
   need_running
   to="$(guest_path "$to")" || exit 1
   gssh ops "mkdir -p $(printf %q "$to")" || die "cannot create $to in the guest"
@@ -411,7 +426,7 @@ do_get() { # GUEST_PATH [HOST_DIR] [--task NAME]
   while [ $# -gt 0 ]; do
     case "$1" in --task) task="${2:-}"; shift 2 ;; *) if [ -z "$src" ]; then src="$1"; else dest="$1"; fi; shift ;; esac
   done
-  [ -n "$src" ] || die "usage: claude-vc get GUEST_PATH [HOST_DIR] [--task NAME]"
+  [ -n "$src" ] || die "usage: vc get GUEST_PATH [HOST_DIR] [--task NAME]"
   need_running
   src="$(guest_path "$src")" || exit 1
   if [ -z "$dest" ]; then
@@ -436,13 +451,13 @@ do_shot() { # [HOST_PATH] [--task NAME]
   fi
   out="$(abs_host_path "$out")"; mkdir -p "$(dirname "$out")"
   gssh ops '/opt/cua-lab/bin/cua-session-run import -window root png:-' > "$out" 2>/dev/null
-  [ -s "$out" ] || { rm -f "$out"; die "screenshot failed (is the desktop session up? claude-vc status)"; }
+  [ -s "$out" ] || { rm -f "$out"; die "screenshot failed (is the desktop session up? vc status)"; }
   echo "$out"
 }
 
 do_contact_sheet() { # MP4 [OUT.png]
   local in="${1:-}" out="${2:-}" dur rate
-  [ -f "$in" ] || die "usage: claude-vc contact-sheet MP4 [OUT.png]"
+  [ -f "$in" ] || die "usage: vc contact-sheet MP4 [OUT.png]"
   [ -n "$out" ] || out="${in%.mp4}-contact.png"
   dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" 2>/dev/null)"
   rate="$("$PY" -c 'import sys; d=float(sys.argv[1] or 0); print(f"{12/max(d,0.5):.4f}")' "${dur:-0}")" || die "unreadable video: $in"
@@ -475,7 +490,7 @@ EOF
       echo "HOST_DIR=$host" ;;
     finish)
       local name="${1:-}" host guest
-      [[ "$name" =~ ^vc-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: claude-vc task finish vc-YYYYMMDD-HHMMSS-slug"
+      [[ "$name" =~ ^vc-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: vc task finish vc-YYYYMMDD-HHMMSS-slug"
       host="$LAB_ROOT/results/$name"; guest="$GUEST_RUN_DIR/$name"; mkdir -p "$host/guest"
       if vm_running "$VM_NAME"; then
         gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | tar -C "$host/guest" -xf - 2>/dev/null \
@@ -518,7 +533,7 @@ for k, label in (("contact_sheets", "contact sheet"), ("screenshots", "screensho
 print(f"index        {os.path.join(host, 'artifacts.json')}")
 EOF
       ;;
-    *) die "usage: claude-vc task start SLUG | finish NAME" ;;
+    *) die "usage: vc task start SLUG | finish NAME" ;;
   esac
 }
 
@@ -595,7 +610,7 @@ case "$cmd" in
   who)        do_who "$@" ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
-  call)       [ $# -ge 1 ] || die "usage: claude-vc call TOOL ['JSON']"
+  call)       [ $# -ge 1 ] || die "usage: vc call TOOL ['JSON']"
               exec "$PY" "$LAB_ROOT/cualab/mcp_client.py" --call "$@" ;;
   browser)    do_browser "$@" ;;
   desktop-restart) do_desktop_restart "$@" ;;
@@ -616,7 +631,7 @@ case "$cmd" in
   view)       do_view "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
-  mcp)        vm_running "$VM_NAME" || { echo "claude-vc: VM '$VM_NAME' is not running (claude-vc start)" >&2; exit 1; }
+  mcp)        vm_running "$VM_NAME" || { echo "vc: VM '$VM_NAME' is not running (vc start)" >&2; exit 1; }
               ssh_base mcp; exec ssh -T "${SSH_ARGS[@]}" ;;
   mcp-lazy)   exec "$PY" "$LAB_ROOT/cualab/mcp_lazy.py" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
@@ -625,5 +640,5 @@ case "$cmd" in
   _vnc-install) do_vnc_install ;;
   _vnc-push)  do_vnc_push ;;
   help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command '$cmd' (claude-vc help)" ;;
+  *) die "unknown command '$cmd' (vc help)" ;;
 esac

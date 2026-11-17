@@ -29,14 +29,14 @@ DROP = {"MACOS.md", "WINDOWS.md", "EMBEDDING.md"}
 NOTES = "../../../skills/virtual-computer/DESKTOP.md"   # relative to DEST
 
 DESCRIPTION = (
-    "description: Detailed Cua Driver {ver} guidance for operating Claude's virtual computer (claude-virtual-computer, an Ubuntu "
+    "description: Detailed Cua Driver {ver} guidance for operating the virtual computer (the virtual-computer project, an Ubuntu "
     "24.04 XFCE VM) through the cua-linux MCP tools (mcp__cua-linux__*), i.e. Cua Driver running inside the "
     "VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch "
     "known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the "
     "virtual-computer skill decides when the VM is the right tool. Never install or run cua-driver on the "
     "Mac, and never use these tools for the user's own computer."
 )
-LAB_NOTE = """> **claude-virtual-computer's copy of the official Cua Driver {ver} skill pack** (Linux guide only; this
+LAB_NOTE = """> **virtual-computer's copy of the official Cua Driver {ver} skill pack** (Linux guide only; this
 > file is edited, the others are unchanged). Here the driver runs **inside the lab
 > VM** and is reached only through the `cua-linux` MCP tools (`mcp__cua-linux__*`);
 > `cua-driver` CLI examples apply inside the guest only. Read the lab's desktop

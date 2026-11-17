@@ -14,7 +14,7 @@ U="$CACHE_DIR/ubuntu-$UBUNTU_RELEASE"; mkdir -p "$U"
 # GnuPG in a short temporary home: its agent socket lives there, and socket
 # paths over ~104 characters fail (a checkout in a deep folder would).
 # Signatures are checked with gpgv against a key file, which needs no agent.
-GNUPGHOME="$(mktemp -d /tmp/cvc-gpg.XXXXXX)"; export GNUPGHOME
+GNUPGHOME="$(mktemp -d /tmp/vc-gpg.XXXXXX)"; export GNUPGHOME
 trap 'rm -rf "$GNUPGHOME"' EXIT
 
 say "Ubuntu cloud image ($UBUNTU_RELEASE)"

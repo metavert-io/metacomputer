@@ -1,13 +1,13 @@
 #!/bin/bash
-# claude-virtual-computer host library: configuration, Lume + cua-netgw
-# lifecycle, SSH. Sourced by bin/claude-vc and scripts/*. macOS /bin/bash 3.2.
+# virtual-computer host library: configuration, Lume + cua-netgw
+# lifecycle, SSH. Sourced by bin/vc and scripts/*. macOS /bin/bash 3.2.
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/defaults.env
 . "$LAB_ROOT/config/defaults.env"
-# This machine's settings (install.sh writes it; never committed). CVC_CONFIG
+# This machine's settings (install.sh writes it; never committed). VC_CONFIG
 # points at another file, e.g. for a separate test VM.
-LOCAL_CONFIG="${CVC_CONFIG:-$LAB_ROOT/config/local.env}"
+LOCAL_CONFIG="${VC_CONFIG:-$LAB_ROOT/config/local.env}"
 # shellcheck source=/dev/null
 [ -f "$LOCAL_CONFIG" ] && . "$LOCAL_CONFIG"
 GUEST_RUN_DIR="/home/$GUEST_USER/cua-lab-runs"
@@ -16,27 +16,27 @@ RUN_DIR="$LAB_ROOT/.run"
 # Unix socket paths are limited to ~104 bytes, so the gateway's sockets live
 # in a short private folder (per user, checkout and VM; the same from any
 # shell, unlike $TMPDIR), not under a possibly deep checkout.
-SOCK_DIR="/tmp/cvc-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
+SOCK_DIR="/tmp/vc-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
 CACHE_DIR="$LAB_ROOT/.cache"
 LOG_DIR="$LAB_ROOT/logs"
 NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
 QCOW2RAW_BIN="$LAB_ROOT/vendor/bin/qcow2raw"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 export LUME_TELEMETRY_ENABLED=0
-LUME="${LUME:-$HOME/.local/bin/lume}"
+LUME="${LUME:-$HOME/.local/bin/lume-secure}"
 PY="${PY:-/opt/homebrew/bin/python3}"
 [ -x "$PY" ] || PY=python3
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 ( umask 077; mkdir -p "$SOCK_DIR" )
-{ [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "claude-vc: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
+{ [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "vc: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
 
 c_bold=$'\033[1m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
 [ -t 1 ] || { c_bold=; c_red=; c_grn=; c_yel=; c_off=; }
-say()  { printf '%s\n' "${c_bold}claude-vc:${c_off} $*"; }
+say()  { printf '%s\n' "${c_bold}vc:${c_off} $*"; }
 ok()   { printf '%s\n' "  ${c_grn}✓${c_off} $*"; }
 warn() { printf '%s\n' "  ${c_yel}!${c_off} $*" >&2; }
-die()  { printf '%s\n' "${c_red}claude-vc: $*${c_off}" >&2; exit 1; }
+die()  { printf '%s\n' "${c_red}vc: $*${c_off}" >&2; exit 1; }
 
 # --- Lume -------------------------------------------------------------------
 lume_json() { "$LUME" get "$1" --format json 2>/dev/null; }
@@ -120,6 +120,22 @@ EOF
 }
 
 # --- VM run/stop ------------------------------------------------------------
+# Host-sharing devices: Lume attaches the SPICE clipboard port, a sound device
+# (host speakers + microphone) and the Rosetta share to every VM. A Lume with
+# the opt-out flags (lume-secure, or a Lume that adopted them) leaves out each
+# one whose SHARE_* setting isn't "on"; any other Lume always shares them.
+host_sharing_args() {
+  if "$LUME" run --help 2>&1 | grep -q -- "--no-host-sharing"; then
+    local a=""
+    [ "${SHARE_CLIPBOARD:-off}" = on ] || a="$a --no-share-clipboard"
+    [ "${SHARE_AUDIO:-off}" = on ] || a="$a --no-share-audio"
+    [ "${SHARE_ROSETTA:-off}" = on ] || a="$a --no-share-rosetta"
+    printf '%s' "$a"
+  elif [ "${SHARE_CLIPBOARD:-off}${SHARE_AUDIO:-off}${SHARE_ROSETTA:-off}" != ononon ]; then
+    warn "$LUME always shares your clipboard, audio and Rosetta with the VM; lume-secure can turn them off (README: Isolation)"
+  fi
+}
+
 vm_start() { # NAME [seed.iso]
   local name="$1" seed="${2:-}" mac
   vm_running "$name" && { ok "$name already running"; return 0; }
@@ -127,6 +143,7 @@ vm_start() { # NAME [seed.iso]
   netgw_start "$mac"
   local args="run $name --display none --vnc disabled --network gateway:$SOCK_DIR/net.sock"
   [ -n "$seed" ] && args="$args --mount $seed"
+  args="$args$(host_sharing_args)"
   # shellcheck disable=SC2086
   daemonize "$LOG_DIR/lume-$name.log" "$LUME" $args
   local i=0; while ! vm_running "$name" && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done

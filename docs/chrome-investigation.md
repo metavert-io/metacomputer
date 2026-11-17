@@ -7,7 +7,7 @@ drive it either like a person (accessibility tree, keys, clicks) or directly
 through the page (DOM)? Firefox stays the default either way.
 
 Setup: a separate test VM, built with a settings file of its own
-(`CVC_CONFIG=test.env claude-vc build`, with a different `VM_NAME` and
+(`VC_CONFIG=test.env vc build`, with a different `VM_NAME` and
 `BROWSERS="firefox chrome"`). The working VM and its
 baselines were not touched. Test pages were served inside the VM from
 `127.0.0.1:8000` (a form with a text field, dropdown, check box, file input,
@@ -29,7 +29,7 @@ confirm() button, download link and a second page).
   generative-AI features and default-browser prompts.
 - Firefox stays the default: XFCE's preferred browser, the https handler and
   `x-www-browser` / `gnome-www-browser` all still point at Firefox
-  (`claude-vc inspect system`).
+  (`vc inspect system`).
 - The executable is root-owned under `/opt/google/chrome/`, which is what
   the driver requires before it will launch Chrome itself.
 - A normal first launch shows Google's "Additional Terms of Service" dialog
@@ -81,7 +81,7 @@ background `type_text` into the Calculator was enough.
 
 **Fix.** `xinput remove-master` on the pair restores Chrome's keyboard at
 once, with no restart. The project ships `cua-input-reset` (guest) /
-`claude-vc input-reset`. The lazy bridge:
+`vc input-reset`. The lazy bridge:
 - sends input aimed at Chrome in the foreground;
 - refuses `set_value` and `run_script` aimed at Chrome;
 - runs the reset before Chrome's next keyboard input whenever a
@@ -112,7 +112,7 @@ else changed (`side_effects` all false except `created_profile` and
 | `browser_set_input_files` | Background, works (`file=upload.txt`) |
 | `browser_click` (trusted) | Refused in the background on Linux; works with `delivery_mode: "foreground"` |
 | `browser_click` `input_route: "dom_event"` | Background, works (check box, Submit, link to the next page) |
-| `browser_download` | Saved to the approved folder; content right, under the download's id (the result has only `download_id` and `bytes`). `claude-vc rename` gives it the name from the link's `href` (`dom_refs_v1`) |
+| `browser_download` | Saved to the approved folder; content right, under the download's id (the result has only `download_id` and `bytes`). `vc rename` gives it the name from the link's `href` (`dom_refs_v1`) |
 | `browser_dialog` | Works: the click result names the dialog it opened; `inspect`, then `accept`/`dismiss` with `delivery_mode: "foreground"` (confirm → "yes"; an alert from a synthetic click too). An earlier failure was in the first test page, not the driver |
 | Viewport screenshot (`include_screenshot`) | 8 KB PNG through Chrome, window not brought forward |
 | Legacy `page` tool | Falls back to the accessibility tree on Linux, as in Firefox (no `href`s) |

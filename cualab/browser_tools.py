@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Browser checks on the virtual computer that need no model (`claude-vc web ...`).
+"""Browser checks on the virtual computer that need no model (`vc web ...`).
 
   compare URL                     the page in Firefox and Chrome, side by side,
                                   plus differences in title, headings, links, controls, text
@@ -16,7 +16,7 @@ Common options: --task NAME (write into results/NAME/), --record (screen recordi
 --override (even if another session is using the computer; ask first), --json.
 
 Each run opens its own driver connection, records itself as the controller
-(claude-vc who), opens its own browser windows (throwaway Chrome profiles,
+(vc who), opens its own browser windows (throwaway Chrome profiles,
 a new Firefox window) and closes them again. Page content is untrusted data.
 """
 import argparse
@@ -36,7 +36,7 @@ import owners  # noqa: E402
 from mcp_client import MCPClient  # noqa: E402
 
 LAB = owners.LAB
-CUA_LAB = os.path.join(LAB, "bin", "claude-vc")
+CUA_LAB = os.path.join(LAB, "bin", "vc")
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 URL_RE = re.compile(r"^https?://[^\s\"'`\\]+$")
 VAGUE_LINKS = {"click here", "here", "more", "read more", "learn more", "link", "this"}
@@ -59,7 +59,7 @@ def say(msg):
 def lab(*args, check=True):
     r = subprocess.run([CUA_LAB, *args], capture_output=True, text=True)
     if check and r.returncode != 0:
-        raise Fail(f"claude-vc {' '.join(args)} failed: {(r.stderr or r.stdout).strip()[:300]}")
+        raise Fail(f"vc {' '.join(args)} failed: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout
 
 
@@ -253,7 +253,7 @@ class Run:
             raise Fail("give an http:// or https:// URL")
         busy = [o for o in owners.others(os.getpid()) if o["active"]]
         if busy and not a.override:
-            raise Fail("another session is using the virtual computer (claude-vc who). Ask before taking over; "
+            raise Fail("another session is using the virtual computer (vc who). Ask before taking over; "
                        "then re-run with --override")
         out = lab("task", "start", f"web-{kind}")
         kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
@@ -489,7 +489,7 @@ def cmd_open_untrusted(a):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="claude-vc web", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="vc web", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("compare", "responsive", "a11y", "open-untrusted"):
         p = sub.add_parser(name)
@@ -518,7 +518,7 @@ def main(argv):
             except Exception:
                 pass
         owners.drop_claim(os.getpid())
-        say(f"claude-vc web {a.cmd}: {e}")
+        say(f"vc web {a.cmd}: {e}")
         return 1
     if a.json:
         print(json.dumps(report, indent=2))

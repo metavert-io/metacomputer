@@ -1,4 +1,4 @@
-# claude-virtual-computer architecture
+# virtual-computer architecture
 
 A disposable Ubuntu 24.04 ARM64 XFCE desktop, running as a Lume virtual machine
 on your Mac, that Claude Code operates through Cua Driver's MCP server.
@@ -8,16 +8,16 @@ macOS; every graphical action happens inside the guest.
 ```text
 Your Mac (Apple silicon, macOS 14+) - trusted controller
 │
-├── Claude Code ──stdio──▶ bin/claude-vc mcp-lazy ─▶ bin/claude-vc mcp ──ssh──┐
+├── Claude Code ──stdio──▶ bin/vc mcp-lazy ─▶ bin/vc mcp ──ssh──┐
 │     (virtual-computer skill; one controller at a time: .run/owners/)     │
-├── tests/run_tests.py (MCP client, direct bridge `claude-vc mcp`)            │
-├── bin/claude-vc (start/stop/status/reset/test/record/recordings/view)        │
+├── tests/run_tests.py (MCP client, direct bridge `vc mcp`)            │
+├── bin/vc (start/stop/status/reset/test/record/recordings/view)        │
 │                                                                            │
 ├── cua-netgw (user-mode gateway, host-enforced egress policy)               │
 │     127.0.0.1:2277 ─▶ guest :22      127.0.0.1:5977 ─▶ guest :5900 (VNC)   │
 │     unixgram socket ◀──▶ Lume VM network device                           │
 └── Lume 0.7.2 (Apple Virtualization.framework, native arm64)               │
-      └── VM "claude-vc" (4 vCPU, 8 GB, 50 GB sparse, 1920x1080 virtio-gpu)  │
+      └── VM "virtual-computer" (4 vCPU, 8 GB, 50 GB sparse, 1920x1080 virtio-gpu)  │
             Ubuntu 24.04.x LTS arm64 (official cloud image, cloud-init)      │
             LightDM autologin ─▶ Xorg (modesetting) ─▶ XFCE 4.18             │
             user `cua` (no sudo)                                             │
@@ -46,7 +46,8 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 
 | Component | Version / pin | Where | Role |
 | --- | --- | --- | --- |
-| Lume | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | VM lifecycle on Virtualization.framework; installed without its LaunchAgent; telemetry disabled |
+| lume-secure (default) | Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/lume-secure/`, wrapper `~/.local/bin/lume-secure` | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
+| Lume (alternative) | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | the same, with clipboard, audio and Rosetta always attached |
 | cua-netgw | built from trycua/cua `ca6a643` (`libs/cua/netgw`) | `vendor/bin/cua-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
 | Cua Driver | 0.52.1 linux-arm64 (sha256 `ea8229f4…`) | guest `/opt/cua-driver/0.52.1` | desktop observation/control, MCP server, recording |
 | Ubuntu | 24.04 LTS arm64 cloud image, release 20261017 (sha256 `50e24e1f…`, SHA256SUMS signed by `D2EB4462…7C81`) | VM disk | guest OS |
@@ -59,7 +60,7 @@ and `/var/lib/cua-lab/package-versions.txt` (copied to `logs/` at build).
 
 ## Provisioning (unattended)
 
-`claude-vc build` → `scripts/build-vm.sh`:
+`vc build` → `scripts/build-vm.sh`:
 
 1. `build-tools.sh` builds cua-netgw (pinned commit) and qcow2raw.
 2. `fetch-artifacts.sh` downloads and verifies the Ubuntu image (GPG-signed
@@ -80,21 +81,21 @@ and `/var/lib/cua-lab/package-versions.txt` (copied to `logs/` at build).
 6. The host waits for the XFCE session, installs the VNC password, checks
    readiness (`cua-guest-status`), runs `finalize.sh` (narrow sudo,
    cloud-init disabled, cached user-data removed), stops the VM and clones
-   the baseline (`BASELINE_NAME`, default `claude-vc-baseline`).
+   the baseline (`BASELINE_NAME`, default `virtual-computer-baseline`).
 
 ## Desktop-control transport
 
-Claude Code sessions use `cua-linux` → `bin/claude-vc mcp-lazy`
+Claude Code sessions use `cua-linux` → `bin/vc mcp-lazy`
 (`cualab/mcp_lazy.py`), registered at user scope so it exists in every
 project. It answers `initialize` and `tools/list` from a saved copy of the
 driver's handshake (`config/driver-mcp-cache.json`, refreshed under `.run/` on
 each live connection), so the tools are listed even while the VM is off. On the
-first `tools/call` it starts the direct bridge, `bin/claude-vc mcp`, and relays
+first `tools/call` it starts the direct bridge, `bin/vc mcp`, and relays
 from then on. While the VM is off, a call returns "start it, then retry". A
 dropped connection is reopened on the next call. Its claims in `.run/owners/`
 (`cualab/owners.py`) let only one session act at a time: acting calls are
 refused while another session acted within 10 minutes, reads are always
-allowed, and `claude-vc stop/reset/restore/test` refuse too unless given
+allowed, and `vc stop/reset/restore/test` refuse too unless given
 `--override`.
 
 The bridge also guards Google Chrome (docs/chrome-investigation.md). When
@@ -109,7 +110,7 @@ So the bridge:
   `delivery_mode: "foreground"`;
 - refuses `set_value` and `run_script` aimed at Chrome;
 - notices virtual-device routes in results (`path=mpx_*`), and before the
-  next Chrome keyboard input runs `claude-vc input-reset` (the guest's
+  next Chrome keyboard input runs `vc input-reset` (the guest's
   `cua-input-reset`, `xinput remove-master`), noting it in that result.
 
 A driver session whose pair was removed can't use the background keyboard
@@ -127,7 +128,7 @@ Chrome on driver-owned profiles under
 normal profile (`existing_profile`) needs the driver's `--grant
 existing-profile`, which this lab doesn't pass.
 
-The direct bridge, `bin/claude-vc mcp`, is `ssh -T` with the
+The direct bridge, `bin/vc mcp`, is `ssh -T` with the
 `mcp` key to `cua@127.0.0.1:2277`. In the guest that key is
 `restrict,command="/opt/cua-lab/bin/cua-driver-mcp"`: no shell, no PTY, no
 forwarding. The wrapper loads the XFCE session's environment (published at
@@ -150,8 +151,8 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 
 | Credential | Where | Grants |
 | --- | --- | --- |
-| `$SSH_DIR/mcp` (default `~/.ssh/claude-vc`) | host, 0600 | `cua@guest`, forced command = Cua Driver MCP only |
-| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `claude-vc inspect` (read-only snapshot piped from `cualab/guest_inspect.py`) |
+| `$SSH_DIR/mcp` (default `~/.ssh/virtual-computer`) | host, 0600 | `cua@guest`, forced command = Cua Driver MCP only |
+| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `vc inspect` (read-only snapshot piped from `cualab/guest_inspect.py`) |
 | `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/cua-lab-guest-admin` (fixed verbs) |
 | `$SSH_DIR/hostkey` | host, 0600 | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection) |
 | VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/cua-lab/vnc-pass` 0600 | live view / takeover |
@@ -197,17 +198,17 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
    before/after accessibility state, before/after window images, click
    markers, `action.json`). The test harness uses this for every test and
    copies everything to `recordings/<run>/` and `results/<run>/<test>/guest/`.
-2. **Whole-desktop (any task, any driver):** `claude-vc record start|stop` runs
+2. **Whole-desktop (any task, any driver):** `vc record start|stop` runs
    `cua-desktop-record` (ffmpeg x11grab, visible pointer, 20 fps, H.264) and
    saves to `recordings/manual/`.
 
-`claude-vc reset` syncs `~/cua-lab-runs` from the guest before replacing the VM.
+`vc reset` syncs `~/cua-lab-runs` from the guest before replacing the VM.
 
 ## Lifecycle
 
 | Command | Implementation |
 | --- | --- |
-| `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…`, wait for SSH, the XFCE session and an MCP handshake |
+| `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
 | `stop` | `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `cua-guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
@@ -218,9 +219,9 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
 ## Known limitations
 
 - **Lume VNC is not loopback-only.** `_VZVNCServer` listens on every interface;
-  `claude-vc` always runs `--vnc disabled` and uses guest x11vnc behind the
+  `vc` always runs `--vnc disabled` and uses guest x11vnc behind the
   gateway's loopback forward instead.
-- **`lume stop` is a hard power-off for detached Linux VMs.** `claude-vc stop`
+- **`lume stop` is a hard power-off for detached Linux VMs.** `vc stop`
   shuts down from inside the guest and uses Lume's stop only as a fallback.
 - **One cua-netgw per VM run.** A gateway keeps talking to the Lume process it
   first heard from, so `start` always launches a fresh one (and kills it on
@@ -234,14 +235,18 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
   real pointer/focus; harmless in a dedicated VM, but one controller at a time.
 - **Focused element** is not reported by the driver on Linux (0.52.1).
 - **Thunar's icon view** has no accessible items; use List View.
-- **Lume always attaches** a SPICE clipboard channel (`VZSpiceAgentPortAttachment`,
-  shares the Mac's clipboard), a virtio sound device wired to host audio,
-  and a Rosetta share. The guest has no `spice-vdagent` and `virtio_snd` is
-  blacklisted, but a root-compromised guest could start an agent and read or set
-  the Mac's clipboard while the VM runs. Don't keep secrets on the Mac's
-  clipboard while running untrusted tasks, or stop the VM.
+- **Host-sharing devices.** Lume attaches a SPICE clipboard channel
+  (`VZSpiceAgentPortAttachment`, shares the Mac's clipboard), a virtio sound
+  device wired to the host's speakers and microphone, and a Rosetta share to
+  every VM. With lume-secure (the default), `vc start` leaves each out
+  unless its `SHARE_*` setting is `on`; `vc status` reports what the
+  guest actually has (virtio console ports, a 0x0019 sound device, a virtiofs
+  Rosetta tag). With standard Lume they are always attached: the guest has no
+  `spice-vdagent` and `virtio_snd` is blacklisted, but a root-compromised
+  guest could start an agent and read or set the Mac's clipboard, so don't
+  keep secrets on the clipboard while it runs untrusted tasks.
 - **Guest egress is open to the public internet** (by design, for browsing);
   everything private (LAN, tailnet, the Mac) is refused on the host.
 - **Unattended upgrades** patch the working VM after each reset; refresh the
-  baseline occasionally with `claude-vc baseline` (or rebuild) so resets start
+  baseline occasionally with `vc baseline` (or rebuild) so resets start
   current.
