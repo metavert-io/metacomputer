@@ -30,6 +30,8 @@ ssh-agent backed by hardware (ACTION_LOG_KEY=path/to/key.pub) to prevent that.
   actionlog.py list [--days N]
   actionlog.py show [FILE|latest] [--json]
   actionlog.py verify [FILE...|--all] [--key PUB]
+  actionlog.py event KIND < JSON   one record in a file of its own (metadata only; used by
+                                   `metacomputer secrets` for fills and sealed sessions)
 """
 import hashlib
 import json
@@ -314,6 +316,28 @@ def verify_file(path, base, pub):
             "project": (start.get("session") or {}).get("cwd"), "signing_key": start.get("signing_key")}
 
 
+# What `event` keeps from its input: the result `mcomp-vault fill|session` prints, which
+# never holds a value. Anything else is dropped.
+EVENT_KEYS = ("ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "reason")
+
+
+def record_event(kind, data, cfg=None):
+    """One event in a signed file of its own; returns the file's path (None when the log is off)."""
+    cfg = cfg or settings()
+    if not cfg["on"]:
+        return None
+    fields = {}
+    for k in EVENT_KEYS:
+        v = data.get(k) if isinstance(data, dict) else None
+        if isinstance(v, (bool, int)) or (isinstance(v, str) and len(v) <= 300):
+            fields[k] = v
+    log = ActionLog({"bridge_pid": os.getpid(), "cwd": os.getcwd(), "via": kind,
+                     "vm": os.environ.get("MCOMP_VM_NAME", "")}, cfg)
+    log.event(kind, **fields)
+    log.close()
+    return log.path
+
+
 def _fmt_args(a):
     s = json.dumps(a, ensure_ascii=False, separators=(",", ":"))
     return s if len(s) <= 110 else s[:107] + "..."
@@ -416,6 +440,17 @@ def main(argv):
             except Exception:
                 pass
         return 1 if bad else 0
+    if cmd == "event":
+        kind = rest[0] if rest else ""
+        if not kind.replace("_", "").isalpha() or len(kind) > 40:
+            print("usage: actionlog.py event KIND < JSON", file=sys.stderr)
+            return 2
+        try:
+            data = json.loads(sys.stdin.read() or "{}")
+        except ValueError:
+            data = {}
+        record_event(kind, data, cfg)
+        return 0
     print(__doc__)
     return 2
 

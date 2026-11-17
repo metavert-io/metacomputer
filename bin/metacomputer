@@ -45,6 +45,10 @@
 #                                  and the shell channel (VM_SHELL, SHELL_LOG)
 #   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
 #                                  the signed action log (ACTION_LOG=on in config/local.env)
+#   secrets init | set NAME ... | delete NAME | bind [VM] | unlock [--for 30m] [--confirm each]
+#                                  the vault (in your own terminal; SECURITY.md "Secrets and logins")
+#   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
+#           | session save|load NAME --profile P   use it from a session, without seeing values
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -936,6 +940,42 @@ do_where() { # paths a person or an agent may need
   echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
 }
 
+# --- secrets: mcomp-vault (scripts/build-vault.sh) holds them; this only fills in the VM ---
+VAULT_BIN="${MCOMP_VAULT_BIN:-$HOME/.local/share/metacomputer/bin/mcomp-vault}"
+secrets_log() { # KIND: put the result JSON (stdin, metadata only) in the signed action log when it's on
+  if [ "$ACTION_LOG" = on ]; then
+    export_options; "$PY" "$LAB_ROOT/lib/actionlog.py" event "$1" || warn "could not write the action log"
+  else
+    cat >/dev/null
+  fi
+}
+do_secrets() { # the vault's commands, with this VM's name, port, key and host key filled in
+  [ -x "$VAULT_BIN" ] || die "the secrets vault isn't installed: run scripts/build-vault.sh (or ./install.sh)"
+  local sub="${1:-status}" a has_vm=0 out rc
+  [ $# -gt 0 ] && shift
+  for a in "$@"; do case "$a" in --vm|--vm=*) has_vm=1 ;; esac; done
+  case "$sub" in
+    bind)
+      local vm="$VM_NAME" hk
+      if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then vm="$1"; shift; fi
+      hk="$(grep -F "[127.0.0.1]:$SSH_PORT " "$KNOWN_HOSTS" 2>/dev/null | head -1)"
+      [ -n "$hk" ] || hk="$(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub" 2>/dev/null)"
+      [ "${SSH_AUTH:-key}" = cert ] && warn "SSH_AUTH=cert: the vault signs in with the static ops key, which a VM on certificates refuses (SECURITY.md)"
+      exec "$VAULT_BIN" bind "$vm" --port "$SSH_PORT" --host-key-line "$hk" --key "$SSH_DIR/ops" --user "$GUEST_USER" "$@" ;;
+    fill|session)
+      local kind="secrets_fill"
+      if [ "$sub" = session ]; then
+        case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
+      fi
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
+      printf '%s\n' "$out"
+      printf '%s\n' "$out" | secrets_log "$kind"
+      return $rc ;;
+    *) exec "$VAULT_BIN" "$sub" "$@" ;;
+  esac
+}
+
 case "$cmd" in
   start)      do_start ;;
   stop)       do_stop "$@" ;;
@@ -990,6 +1030,7 @@ case "$cmd" in
   mcp-lazy)   export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py" ;;
   actions)    export_options; exec "$PY" "$LAB_ROOT/lib/actionlog.py" "$@" ;;
   security)   do_security "$@" ;;
+  secrets)    do_secrets "$@"; exit $? ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
               gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null ;;
