@@ -174,18 +174,6 @@ print(json.dumps({"vm": vm, "gateway": gw == "true", "ssh": ssh == "true",
 EOF
 }
 
-# --- EVENTS HOOK (secrets) ---------------------------------------------------------
-# `metacomputer secrets` lives on another branch. Once it is merged, wrap its
-# dispatch line like this so "vault locked" (exit 3) reaches the event stream:
-#     secrets) ...run it...; rc=$?; events_hook_secrets_exit "$rc"; exit "$rc" ;;
-# The vault's own events ("approval waiting", etc.) arrive through the spool
-# (architecture.md: "Event spool"), so they need no hook here.
-events_hook_secrets_exit() { # RC
-  [ "${1:-0}" = 3 ] || return 0
-  emit_event needs_you vault_locked warn "Claude needs the secrets vault, but it is locked" \
-    "Unlock it in your own terminal: metacomputer secrets unlock" "exit=3"
-}
-
 mcp_probe() { "$PY" "$LAB_ROOT/lib/mcp_client.py" --probe; }
 
 do_stop() { # [--force] (immediate power-off) [--override] (even if another session is using it)
@@ -932,6 +920,15 @@ do_where() { # paths a person or an agent may need
   echo "results   $LAB_ROOT/results"
   echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
 }
+
+# --- EVENTS HOOK (secrets) ---------------------------------------------------------
+# `metacomputer secrets` comes from another branch. When it exits 3 ("vault locked"),
+# needs_you.vault_locked goes to the event stream, however its dispatch line is
+# written (an EXIT trap, so the merge needs no edit here). Subcommands that exec the
+# vault directly (list, status, unlock, ...) never come back to run it; the paths
+# Claude uses to fill (fill, session save|load) do. The vault's own events ("approval
+# waiting", ...) come through the spool (architecture.md, "Event spool").
+if [ "$cmd" = secrets ]; then trap 'rc=$?; trap - EXIT; events_hook_secrets_exit "$rc"; exit "$rc"' EXIT; fi
 
 case "$cmd" in
   start)      do_start ;;

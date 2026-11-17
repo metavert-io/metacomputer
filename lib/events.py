@@ -664,6 +664,7 @@ def short_error(e):
 def http_post(url, body, headers, ca_pem, timeout):
     """POST without redirects or proxies. Returns (status, error)."""
     u = urlsplit(url)
+    conn = None
     try:
         if u.scheme == "https":
             conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=timeout, context=tls_context(ca_pem))
@@ -673,10 +674,12 @@ def http_post(url, body, headers, ca_pem, timeout):
         conn.request("POST", path, body=body, headers=headers)
         r = conn.getresponse()
         r.read(65536)
-        conn.close()
         return r.status, None
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError) as e:
         return None, short_error(e)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def otlp_url(url):
@@ -1522,6 +1525,7 @@ def status_info():
         out["spool_waiting"] = sum(1 for f in os.listdir(spool_dir()) if f.endswith(".json") and not f.startswith("."))
     except OSError:
         pass
+    out["spool_rejected"] = int(read_json(os.path.join(state_dir(), "spool.json"), {}).get("rejected", 0))
     try:
         out["errors"] = open(os.path.join(state_dir(), "errors.log")).read().splitlines()[-3:]
     except OSError:
@@ -1612,6 +1616,10 @@ def main(argv):
         if a.cmd == "status":
             s = status_info()
             print(json.dumps(s, indent=2) if a.json else status_line(s))
+            if not a.json and not a.line and s["errors"]:
+                print("recent problems in the event code (events-state/errors.log):")
+                for line in s["errors"]:
+                    print("  " + line)
             return 0
         if a.cmd == "drain":
             n, bad = drain(force=a.now)

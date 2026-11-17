@@ -635,6 +635,16 @@ def main():
         os.chmod(events.config_path(), 0o600)
         mc = os.path.join(LAB, "bin", "metacomputer")
         menv = dict(os.environ, MCOMP_CONFIG=cfgf)
+        trap = next(x for x in open(mc).read().splitlines() if x.startswith('if [ "$cmd" = secrets ]'))
+        rcs, n0 = [], len(local_log())
+        for code in (3, 0, 1):
+            rr = subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; cmd=secrets; {trap}\nexit {code}'],
+                                capture_output=True, text=True, env=menv, timeout=60)
+            rcs.append(rr.returncode)
+        new = local_log()[n0:]
+        check("the secrets hook: exit 3 (vault locked) sends needs_you.vault_locked and keeps the exit code; others don't",
+              rcs == [3, 0, 1] and [(e["family"], e["type"]) for e in new] == [("needs_you", "vault_locked")]
+              and "secrets unlock" in new[0]["action"], (rcs, new))
         r = subprocess.run([mc, "events", "watcher", "start"], capture_output=True, text=True, env=menv, timeout=60)
         pid = events.watcher_pid()
         check("events watcher start: a detached watcher, its pid in RUN_DIR", r.returncode == 0 and pid
