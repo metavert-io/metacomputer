@@ -141,6 +141,15 @@ func sessionLoadScript(user: String, profile: String) -> String {
 
 // MARK: - the server
 
+/// A standing approval: for one kind of use of one secret or session, until the vault locks
+/// (claudePID nil) or until that Claude Code process (pid + start time) is gone.
+struct Grant {
+    let kind: String
+    let name: String
+    let claudePID: pid_t?
+    let claudeStart: Double?
+}
+
 final class UnlockServer {
     let paths: Paths
     let key: VaultKey
@@ -151,6 +160,13 @@ final class UnlockServer {
     let expires: Date
     let runner = GuestRunner()
     var promptTimeout = 120
+    var grants: [Grant] = []
+    var stopReason: String?
+    lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
+    // audit sinks: when each may be tried next, the last problem shown, the log's size last time
+    var sinkNext: [String: Date] = [:]
+    var sinkShown: [String: String] = [:]
+    var auditSize: off_t = -1
 
     init(paths: Paths, key: VaultKey, seconds: Int, confirmEach: Bool, multiplexer: String?, allowMultiplexer: Bool) {
         self.paths = paths
@@ -171,16 +187,116 @@ final class UnlockServer {
 
     func remaining() -> Int { max(0, Int(expires.timeIntervalSinceNow)) }
 
-    /// Ask at the unlock terminal: the person types `typed` to allow. (true, nil) or (false, why).
-    func approve(_ question: String, typed: String) -> (Bool, String) {
+    // MARK: approvals
+
+    func granted(_ kind: String, _ name: String, _ who: Requester) -> String? {
+        grants.removeAll { g in g.claudePID != nil && !(Requester(clientPID: 0, clientExe: "", claudePID: g.claudePID, claudeStart: g.claudeStart, project: nil).claudeAlive) }
+        for g in grants where g.kind == kind && g.name == name {
+            if g.claudePID == nil { return "grant:unlock" }
+            if g.claudePID == who.claudePID, let a = g.claudeStart, let b = who.claudeStart, abs(a - b) < 0.001 { return "grant:session" }
+        }
+        return nil
+    }
+
+    /// Ask at the unlock terminal. The person types NAME (this use), NAME session (this
+    /// Claude Code session) or NAME unlock (until the vault locks). Returns (allowed, the
+    /// approval to record, why not).
+    func approve(_ kind: String, _ name: String, _ question: String, _ who: Requester, vm: String, site: String?) -> (Bool, String, String) {
+        if let g = granted(kind, name, who) { return (true, g, "") }
         if let m = multiplexer, !allowMultiplexer {
-            return (false, "the unlock terminal runs inside \(m), where any program can type into it, so confirmations there are refused: run unlock outside \(m) (or with --allow-multiplexer)")
+            return (false, "each:no", "the unlock terminal runs inside \(m), where any program can type into it, so confirmations there are refused: run unlock outside \(m) (or with --allow-multiplexer)")
         }
         let t = min(promptTimeout, remaining())
-        guard t > 0 else { return (false, "the vault's time is up") }
-        if askTyped(clean(question, max: 400), expected: typed, timeout: t) { return (true, "") }
-        return (false, "not allowed at the vault's terminal")
+        guard t > 0 else { return (false, "each:no", "the vault's time is up") }
+        dropEvent(type: "approval_waiting", severity: "warn", vm: vm,
+                  message: "Vault approval waiting: \(kind.replacingOccurrences(of: "_", with: " ")) of \(name)" + (site.map { " into \($0)" } ?? "")
+                    + " on VM \(vm), asked by \(who.describe)",
+                  action: "Type \(name) in the vault's terminal to allow", project: who.project,
+                  data: ["op": kind, "name": name, "site": site ?? ""])
+        guard let scope = askApproval(clean(question, max: 500), name: name, timeout: t) else {
+            return (false, "each:no", "not allowed at the vault's terminal")
+        }
+        switch scope {
+        case .unlock:
+            grants.append(Grant(kind: kind, name: name, claudePID: nil, claudeStart: nil))
+            return (true, "each:unlock", "")
+        case .session:
+            if let p = who.claudePID {
+                grants.append(Grant(kind: kind, name: name, claudePID: p, claudeStart: who.claudeStart))
+                return (true, "each:session", "")
+            }
+            say("  (not from a Claude Code session: allowed for this use only)")
+            return (true, "each:yes", "")
+        case .use:
+            return (true, "each:yes", "")
+        }
     }
+
+    /// The events hook (needs_you): one JSON file per event in the shared spool, if it exists.
+    func dropEvent(type: String, severity: String, vm: String, message: String, action: String, project: String?, data: [String: Any]) {
+        dropSpoolEvent(family: "needs_you", type: type, severity: severity, vm: vm, message: message, action: action, project: project, data: data)
+    }
+
+    // MARK: audit sinks
+
+    /// Try to deliver what's pending. force: ignore the backoff. Returns the sinks still
+    /// behind, with why, and whether any of those is required.
+    @discardableResult
+    func flushSinks(force: Bool, onlyRequired: Bool = false) -> [(String, String, Bool)] {
+        guard let p = try? load(), let sinks = p.audit_sinks, !sinks.isEmpty else { return [] }
+        var behind: [(String, String, Bool)] = []
+        for name in sinks.keys.sorted() {
+            let sink = sinks[name]!
+            if onlyRequired && !sink.required { continue }
+            if sinkBacklog(paths, name, sink) == 0 { sinkShown[name] = nil; continue }
+            if !force, let next = sinkNext[name], next > Date() {
+                behind.append((name, loadSinkState(paths, name, sink).error ?? "retrying", sink.required))
+                continue
+            }
+            if let problem = deliverSink(paths, name, sink) {
+                let failures = loadSinkState(paths, name, sink).failures
+                sinkNext[name] = Date().addingTimeInterval(min(60, pow(2, Double(min(failures, 6)))))
+                if sinkShown[name] != problem {
+                    say("\(clockTime())  audit sink \(name): can't deliver (\(problem)); retrying" + (sink.required ? "; uses are refused until it can" : ""))
+                    sinkShown[name] = problem
+                }
+                behind.append((name, problem, sink.required))
+            } else {
+                if sinkShown[name] != nil { say("\(clockTime())  audit sink \(name): delivering again") }
+                sinkShown[name] = nil
+                sinkNext[name] = nil
+            }
+        }
+        return behind
+    }
+
+    /// nil when every required sink has the record of this use before it happens; else the
+    /// refusal. With a required sink, each use is first recorded as op "begin" (what, which
+    /// secret, VM, requester) and that record must reach every required sink; the outcome
+    /// follows as its own event. Without one, nothing extra is written.
+    func requiredSinkProblem(_ op: String, _ fields: [String: Any], _ who: Requester) -> String? {
+        guard let p = try? load(), p.audit_sinks?.values.contains(where: { $0.required }) == true else { return nil }
+        var rec = fields
+        rec["op"] = "begin"
+        rec["use"] = op
+        rec["result"] = "pending"
+        rec["requester"] = who.record
+        audit(paths, rec)
+        guard let (name, why, _) = flushSinks(force: true, onlyRequired: true).first(where: { $0.2 }) else { return nil }
+        return "the required audit sink \(name) can't be reached (\(why)); uses are refused until it can"
+    }
+
+    /// Only when the audit log grew, or a sink is behind and its retry time has come.
+    func sinkTick() {
+        var st = stat()
+        let size = stat(paths.audit, &st) == 0 ? st.st_size : 0
+        if size != auditSize || sinkNext.values.contains(where: { $0 <= Date() }) {
+            auditSize = size
+            flushSinks(force: false)
+        }
+    }
+
+    // MARK: serving
 
     func serve() throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -216,7 +332,8 @@ final class UnlockServer {
         say("  TEST BUILD: honours MCOMP_VAULT_TEST_* settings; never use it for real secrets")
         #endif
         audit(paths, ["op": "unlock", "result": "ok", "until": isoTime(expires), "confirm": confirmEach ? "each" : "session",
-                      "multiplexer": multiplexer ?? "none", "pid": Int(getpid())])
+                      "multiplexer": multiplexer ?? "none", "pid": Int(getpid()), "enclave": key.usesEnclave])
+        flushSinks(force: true)
 
         var why = "locked"
         while true {
@@ -224,6 +341,7 @@ final class UnlockServer {
                 why = receivedSignal == SIGHUP ? "the terminal closed" : (receivedSignal == SIGINT ? "Ctrl-C" : "signal \(receivedSignal)")
                 break
             }
+            if let s = stopReason { why = s; break }
             if Date() >= expires { why = "time is up"; break }
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let r = poll(&pfd, 1, 500)
@@ -236,11 +354,14 @@ final class UnlockServer {
                     close(c)
                 }
             }
+            sinkTick()
         }
         close(fd)
         unlink(paths.socket)
-        key.wipeKey()
+        hub.shutdown()
         audit(paths, ["op": "lock", "result": "ok", "reason": why])
+        flushSinks(force: true)
+        key.wipeKey()
         if why == "Ctrl-C" { oprint("") }
         say("\(clockTime())  locked (\(why))")
         return Exit.ok
@@ -258,18 +379,23 @@ final class UnlockServer {
             reply(c, ["ok": false, "status": "error", "reason": "bad request"])
             return
         }
-        if Date() >= expires {
+        if Date() >= expires || stopReason != nil {
             reply(c, ["ok": false, "status": "locked", "reason": "the vault is locked"])
             return
         }
-        let who = pid > 0 ? (processPath(pid).map { URL(fileURLWithPath: $0).lastPathComponent + " " } ?? "") + "(pid \(pid))" : "an unknown process"
+        let who = Requester.of(pid)
         var res: [String: Any]
         switch op {
         case "status": res = opStatus()
         case "list": res = opList()
-        case "fill": res = opFill(req, who: who, pid: pid)
-        case "session_save": res = opSessionSave(req, who: who, pid: pid)
-        case "session_load": res = opSessionLoad(req, who: who, pid: pid)
+        case "fill": res = opFill(req, who)
+        case "session_save": res = opSessionSave(req, who)
+        case "session_load": res = opSessionLoad(req, who)
+        case "token": res = opToken(req, who)
+        case "tokens": res = opTokens()
+        case "revoke": res = opRevoke(req, who)
+        case "sinks": res = opSinks()
+        case "sink_flush": res = opSinkFlush(req)
         default: res = ["ok": false, "status": "error", "reason": "unknown request \(clean(op, max: 40))"]
         }
         setTimeouts(c, seconds: 10)
@@ -281,14 +407,24 @@ final class UnlockServer {
         _ = writeAll(c, Array((jsonLine(safe) + "\n").utf8))
     }
 
-    func load() throws -> Payload { try loadPayload(paths, key) }
+    /// The vault, re-read for every request. If its key settings changed (rekey, recover),
+    /// this unlock can't read it any more: it locks.
+    func load() throws -> Payload {
+        do { return try loadPayload(paths, key) } catch let e as VaultError {
+            if e.code == Exit.locked && stopReason == nil {
+                stopReason = "the vault's key changed (rekey or recover)"
+                say("\(clockTime())  the vault's key changed (rekey or recover): locking; unlock again")
+            }
+            throw e
+        }
+    }
 
     // MARK: status and list
 
     func opStatus() -> [String: Any] {
         ["ok": true, "status": "ok", "unlocked": true, "since": isoTime(started), "expires": isoTime(expires),
          "expires_in_s": remaining(), "confirm": confirmEach ? "each" : "session", "multiplexer": multiplexer ?? "none",
-         "pid": Int(getpid()), "build": Build.kind]
+         "pid": Int(getpid()), "build": Build.kind, "enclave": key.usesEnclave, "tokens": hub.live().count]
     }
 
     func opList() -> [String: Any] {
@@ -301,9 +437,14 @@ final class UnlockServer {
             var d: [String: Any] = ["name": n, "kind": s.kind, "origins": s.origins, "approval": s.approval,
                                     "created": s.created, "uses": s.uses,
                                     "fields": s.kind == "password" ? (s.username == nil ? ["password"] : ["password", "username"])
-                                        : (s.kind == "totp" ? ["otp"] : ["text"])]
+                                        : (s.kind == "totp" ? ["otp"] : (s.kind == "api" ? ["token"] : ["text"]))]
             if let u = s.username { d["username"] = u }
             if let l = s.last_used { d["last_used"] = l }
+            if let r = s.rotated { d["rotated"] = r }
+            if let pr = s.projects, !pr.isEmpty { d["projects"] = pr }
+            if let h = s.api_host { d["api_host"] = h }
+            if let pp = s.api_path_prefix { d["api_path_prefix"] = pp }
+            if let t = s.api_header, let (name, _, _) = splitTemplate(t) { d["api_header"] = name }
             return d
         }
         let vms: [[String: Any]] = p.vms.keys.sorted().map { n in
@@ -312,8 +453,10 @@ final class UnlockServer {
                                     "key": b.ops_key_path, "user": b.guest_user, "bound": b.bound]
             if let f = b.fill_user { d["fill_user"] = f }
             if let k = b.fill_key_path { d["fill_key"] = k }
+            if let u = b.proxy_user { d["proxy_user"] = u }
+            if let pp = b.proxy_port { d["proxy_port"] = pp }
             if let g = b.gateway_path { d["gateway"] = g }
-            if b.fill_user == nil || b.gateway_path == nil { d["needs_bind"] = true }
+            if b.fill_user == nil || b.gateway_path == nil || b.gateway_sha256 == nil { d["needs_bind"] = true }
             return d
         }
         let sessions: [[String: Any]] = p.sessions.keys.sorted().map { n in
@@ -323,12 +466,14 @@ final class UnlockServer {
             if let l = m.last_loaded { d["last_loaded"] = l }
             return d
         }
-        return ["ok": true, "status": "ok", "secrets": secrets, "vms": vms, "sessions": sessions]
+        var out: [String: Any] = ["ok": true, "status": "ok", "secrets": secrets, "vms": vms, "sessions": sessions]
+        if let r = p.session_key_rotated { out["session_key_rotated"] = r }
+        return out
     }
 
     // MARK: results
 
-    func finish(_ op: String, _ fields: [String: Any], _ res: [String: Any], pid: Int32, approval: String) -> [String: Any] {
+    func finish(_ op: String, _ fields: [String: Any], _ res: [String: Any], _ who: Requester, approval: String) -> [String: Any] {
         var out = fields
         for k in ["ok", "status", "origin", "chars", "reason", "bytes"] { if let v = res[k] { out[k] = v } }
         // How the VM typed it: "element" (into the checked element) or "keyboard" (the fallback).
@@ -339,8 +484,8 @@ final class UnlockServer {
         rec["op"] = op
         rec["result"] = status
         rec["approval"] = approval
-        rec["client_pid"] = Int(pid)
-        for k in ["origin", "chars", "reason", "bytes", "route"] { if let v = out[k] { rec[k] = v } }
+        rec["requester"] = who.record
+        for k in ["origin", "chars", "reason", "bytes", "route", "token_id", "ttl_s"] { if let v = out[k] ?? res[k] { rec[k] = v } }
         audit(paths, rec)
         var line = "          -> \(status)"
         if let o = out["origin"] as? String { line += ": \(o)" }
@@ -348,6 +493,7 @@ final class UnlockServer {
         if let b = out["bytes"] as? Int { line += ", \(b) bytes" }
         if let r = out["reason"] as? String { line += " (\(r))" }
         say(line)
+        flushSinks(force: true)
         return out
     }
 
@@ -372,40 +518,52 @@ final class UnlockServer {
         return canonicalOrigin(o) == o && allowed.contains(o)
     }
 
+    /// nil when the secret may be used for this requester's project.
+    func projectProblem(_ name: String, _ s: Secret, _ who: Requester) -> String? {
+        guard let projects = s.projects, !projects.isEmpty else { return nil }
+        if let p = who.project, insideAny(p, projects) { return nil }
+        return "\(name) is limited to Claude Code sessions in \(projects.map(tildePath).joined(separator: ", ")); this request came from \(who.describe)"
+    }
+
     // MARK: fill
 
-    func opFill(_ req: [String: Any], who: String, pid: Int32) -> [String: Any] {
+    func opFill(_ req: [String: Any], _ who: Requester) -> [String: Any] {
         var fields = echo(req, ["name", "vm", "field", "profile"])
         guard let name = req["name"] as? String, let vm = req["vm"] as? String, let field = req["field"] as? String,
               validName(name), validName(vm), ["password", "username", "otp", "text"].contains(field),
               (req["profile"] as? String).map(validName) ?? (req["profile"] == nil),
               (req["selector"] as? String)?.count ?? 0 <= 300 else {
-            return finish("fill", fields, failed("bad request"), pid: pid, approval: "-")
+            return finish("fill", fields, failed("bad request"), who, approval: "-")
         }
         let profile = req["profile"] as? String
         let selector = (req["selector"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         if let sel = selector { fields["selector"] = clean(sel, max: 300) }
         say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
-            + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who)")
+            + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who.describe)")
         let p: Payload
-        do { p = try load() } catch let e as VaultError { return finish("fill", fields, failed(e.message), pid: pid, approval: "-") } catch {
-            return finish("fill", fields, failed("cannot read the vault"), pid: pid, approval: "-")
+        do { p = try load() } catch let e as VaultError { return finish("fill", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
+            return finish("fill", fields, failed("cannot read the vault"), who, approval: "-")
         }
         guard let s = p.secrets[name] else {
-            return finish("fill", fields, failed("no secret named \(name) (metacomputer secrets list)"), pid: pid, approval: "-")
+            return finish("fill", fields, failed("no secret named \(name) (metacomputer secrets list)"), who, approval: "-")
+        }
+        if s.kind == "api" {
+            return finish("fill", fields, denied("\(name) is an api secret: use `metacomputer secrets token \(name)` and the proxy in the VM"), who, approval: "-")
         }
         let allowedFields = s.kind == "password" ? ["password", "username"] : (s.kind == "totp" ? ["otp"] : ["text"])
         guard allowedFields.contains(field) else {
-            return finish("fill", fields, denied("\(name) is a \(s.kind) secret; it fills \(allowedFields.joined(separator: " or ")), not \(field)"), pid: pid, approval: "-")
+            return finish("fill", fields, denied("\(name) is a \(s.kind) secret; it fills \(allowedFields.joined(separator: " or ")), not \(field)"), who, approval: "-")
         }
         if field == "username" && (s.username ?? "").isEmpty {
-            return finish("fill", fields, denied("\(name) has no username stored"), pid: pid, approval: "-")
+            return finish("fill", fields, denied("\(name) has no username stored"), who, approval: "-")
         }
+        if let why = projectProblem(name, s, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         guard let t = target(p, vm) else {
-            return finish("fill", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), pid: pid, approval: "-")
+            return finish("fill", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
+        if let why = requiredSinkProblem("fill", fields, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
-            return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), pid: pid, approval: "-")
+            return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
         }
         var base: [String: Any] = ["field": field]
         if let pr = profile { base["profile"] = pr }
@@ -414,25 +572,30 @@ final class UnlockServer {
 
         var approval = "session"
         if confirmEach || s.approval == "each" {
-            var chk = base
-            chk["mode"] = "check"
-            chk["origins"] = origins
-            let r: [String: Any]
-            do { r = try runner.fill(t, request: chk, value: nil, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
-                return finish("fill", fields, failed(e.message), pid: pid, approval: "each")
-            } catch { return finish("fill", fields, failed("the check failed"), pid: pid, approval: "each") }
-            guard r["ok"] as? Bool == true else { return finish("fill", fields, r, pid: pid, approval: "each") }
-            guard originOK(r, s.origins), let origin = r["origin"] as? String else {
-                return finish("fill", fields, failed("the VM reported a site outside this secret's sites; refusing"), pid: pid, approval: "each")
-            }
-            let (yes, why) = approve("  Fill \(name) (\(field)) into \(origin) on VM \(vm)"
-                                     + (profile.map { ", Chrome profile \($0)" } ?? "")
-                                     + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + "?", typed: name)
-            approval = yes ? "each:yes" : "each:no"
-            if !yes { return finish("fill", fields, denied(why), pid: pid, approval: approval) }
-            origins = [origin]   // only the site that was approved
-            if let problem = runner.listenerProblem(t) {
-                return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), pid: pid, approval: approval)
+            if let g = granted("fill", name, who) {
+                approval = g
+            } else {
+                var chk = base
+                chk["mode"] = "check"
+                chk["origins"] = origins
+                let r: [String: Any]
+                do { r = try runner.fill(t, request: chk, value: nil, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
+                    return finish("fill", fields, failed(e.message), who, approval: "each")
+                } catch { return finish("fill", fields, failed("the check failed"), who, approval: "each") }
+                guard r["ok"] as? Bool == true else { return finish("fill", fields, r, who, approval: "each") }
+                guard originOK(r, s.origins), let origin = r["origin"] as? String else {
+                    return finish("fill", fields, failed("the VM reported a site outside this secret's sites; refusing"), who, approval: "each")
+                }
+                let (yes, how, why) = approve("fill", name, "  Fill \(name) (\(field)) into \(origin) on VM \(vm)"
+                                              + (profile.map { ", Chrome profile \($0)" } ?? "")
+                                              + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "")
+                                              + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin)
+                approval = how
+                if !yes { return finish("fill", fields, denied(why), who, approval: approval) }
+                if how == "each:yes" { origins = [origin] }   // only the site that was approved, this time
+                if let problem = runner.listenerProblem(t) {
+                    return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval)
+                }
             }
         }
 
@@ -441,7 +604,7 @@ final class UnlockServer {
         case "username": value = Array((s.username ?? "").utf8)
         case "otp":
             guard let seed = base32Decode(s.value), !seed.isEmpty else {
-                return finish("fill", fields, failed("\(name)'s seed is damaged"), pid: pid, approval: approval)
+                return finish("fill", fields, failed("\(name)'s seed is damaged"), who, approval: approval)
             }
             // A code with under 3 s left could expire on its way; wait for the next one.
             let left = 30 - UInt64(Date().timeIntervalSince1970) % 30
@@ -451,20 +614,20 @@ final class UnlockServer {
         }
         defer { wipe(&value) }
         guard Date() < expires, receivedSignal == 0 else {
-            return finish("fill", fields, lockedResult("the vault locked before the value was sent"), pid: pid, approval: approval)
+            return finish("fill", fields, lockedResult("the vault locked before the value was sent"), who, approval: approval)
         }
         var req2 = base
         req2["mode"] = "fill"
         req2["origins"] = origins
         let r: [String: Any]
         do { r = try runner.fill(t, request: req2, value: value, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
-            return finish("fill", fields, failed(e.message), pid: pid, approval: approval)
+            return finish("fill", fields, failed(e.message), who, approval: approval)
         } catch {
-            return finish("fill", fields, failed("the fill failed"), pid: pid, approval: approval)
+            return finish("fill", fields, failed("the fill failed"), who, approval: approval)
         }
         if r["ok"] as? Bool == true {
             guard originOK(r, origins) else {
-                return finish("fill", fields, failed("the VM reported a site outside this secret's sites"), pid: pid, approval: approval)
+                return finish("fill", fields, failed("the VM reported a site outside this secret's sites"), who, approval: approval)
             }
             do {
                 try updateVault(paths, key) { p in
@@ -473,138 +636,242 @@ final class UnlockServer {
                 }
             } catch { say("          (couldn't record the use in the vault)") }
         }
-        return finish("fill", fields, r, pid: pid, approval: approval)
+        return finish("fill", fields, r, who, approval: approval)
+    }
+
+    // MARK: api tokens
+
+    func opToken(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        let fields = echo(req, ["name", "vm"])
+        guard let name = req["name"] as? String, let vm = req["vm"] as? String, validName(name), validName(vm) else {
+            return finish("token", fields, failed("bad request"), who, approval: "-")
+        }
+        let ttlAsked = (req["ttl_s"] as? NSNumber)?.intValue ?? 900
+        say("\(clockTime())  token for \(name) on VM \(vm) (\(ttlAsked / 60) min), asked by \(who.describe)")
+        let p: Payload
+        do { p = try load() } catch let e as VaultError { return finish("token", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
+            return finish("token", fields, failed("cannot read the vault"), who, approval: "-")
+        }
+        guard let s = p.secrets[name] else { return finish("token", fields, failed("no secret named \(name) (metacomputer secrets list)"), who, approval: "-") }
+        guard s.kind == "api", let host = s.api_host, let template = s.api_header, let (hName, hPrefix, hSuffix) = splitTemplate(template) else {
+            return finish("token", fields, denied("\(name) is a \(s.kind) secret; tokens are for api secrets (metacomputer secrets fill is for the others)"), who, approval: "-")
+        }
+        if let why = projectProblem(name, s, who) { return finish("token", fields, denied(why), who, approval: "-") }
+        guard let t = target(p, vm) else { return finish("token", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-") }
+        if let why = requiredSinkProblem("token", fields, who) { return finish("token", fields, denied(why), who, approval: "-") }
+        if let problem = runner.listenerProblem(t) {
+            return finish("token", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
+        }
+        var approval = "session"
+        if confirmEach || s.approval == "each" {
+            let (yes, how, why) = approve("token", name, "  Give the VM \(vm) a \(max(1, min(ttlAsked, remaining()) / 60))-minute token for \(name) (\(host))?\n  Asked by \(who.describe).",
+                                          who, vm: vm, site: "https://\(host)")
+            approval = how
+            if !yes { return finish("token", fields, denied(why), who, approval: approval) }
+        }
+        let listener: ProxyListener
+        do { listener = try hub.ensure(t) } catch let e as VaultError { return finish("token", fields, failed(e.message), who, approval: approval) } catch {
+            return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
+        }
+        let ttl = max(1, min(ttlAsked, 8 * 3600, remaining()))
+        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who.record)
+        let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
+        var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
+        res = finish("token", fields, res, who, approval: approval)
+        do {
+            try updateVault(paths, key) { p in
+                p.secrets[name]?.uses += 1
+                p.secrets[name]?.last_used = isoTime()
+            }
+        } catch { say("          (couldn't record the use in the vault)") }
+        res["token_id"] = tok.id
+        res["token"] = raw
+        res["base_url"] = base
+        res["header"] = "\(hName): \(hPrefix)\(raw)\(hSuffix)"
+        res["api_host"] = host
+        res["expires"] = isoTime(tok.expires)
+        res["expires_in_s"] = ttl
+        return res
+    }
+
+    func opTokens() -> [String: Any] {
+        let list: [[String: Any]] = hub.live().map { t in
+            var d: [String: Any] = ["id": t.id, "name": t.name, "vm": t.vm, "expires": isoTime(t.expires),
+                                    "expires_in_s": max(0, Int(t.expires.timeIntervalSinceNow)), "requests": t.requests]
+            if let pr = t.requester["project"] as? String { d["project"] = pr }
+            return d
+        }
+        return ["ok": true, "status": "ok", "tokens": list]
+    }
+
+    func opRevoke(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        let id = req["id"] as? String
+        guard id == nil || (id.map { matches($0, "^[0-9a-f]{8}$") } ?? false) else { return ["ok": false, "status": "error", "reason": "bad token id"] }
+        let gone = hub.revoke(id)
+        say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? " (all)") + ", asked by \(who.describe)")
+        audit(paths, ["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
+        flushSinks(force: true)
+        return ["ok": true, "status": "ok", "revoked": gone.map { $0.id }]
+    }
+
+    // MARK: audit sinks, for list / show / test
+
+    func opSinks() -> [String: Any] {
+        guard let p = try? load() else { return ["ok": false, "status": "error", "reason": "cannot read the vault"] }
+        let list: [[String: Any]] = (p.audit_sinks ?? [:]).keys.sorted().map { n in
+            let s = p.audit_sinks![n]!
+            let st = loadSinkState(paths, n, s)
+            var d: [String: Any] = ["name": n, "kind": s.kind, "url": maskedURL(s.url), "required": s.required, "created": s.created,
+                                    "headers": s.headers.compactMap { $0.first }, "delivered": st.delivered, "backlog": sinkBacklog(paths, n, s)]
+            if let e = st.error { d["error"] = e }
+            if let a = st.attempt { d["last_attempt"] = a }
+            if s.ca_pem != nil { d["ca"] = true }
+            return d
+        }
+        return ["ok": true, "status": "ok", "sinks": list]
+    }
+
+    func opSinkFlush(_ req: [String: Any]) -> [String: Any] {
+        guard let name = req["name"] as? String, let p = try? load(), let s = p.audit_sinks?[name] else {
+            return ["ok": false, "status": "error", "reason": "no such audit sink"]
+        }
+        if let why = deliverSink(paths, name, s) { return ["ok": false, "status": "error", "reason": why] }
+        return ["ok": true, "status": "ok", "delivered": loadSinkState(paths, name, s).delivered]
     }
 
     // MARK: sealed browser sessions (the desktop account)
 
     func sessionAAD(_ name: String) -> [UInt8] { Array("mcomp-session|1|\(name)".utf8) }
 
-    func sessionKey(_ p: Payload) -> [UInt8]? {
-        guard let d = Data(base64Encoded: p.session_key), d.count == 32 else { return nil }
-        return Array(d)
+    /// The archive of a sealed session, under the current session key or, while a rotation
+    /// was cut short, the previous one.
+    func openSession(_ p: Payload, _ name: String) -> [UInt8]? {
+        guard let sealed = try? readFileBytes(paths.sessions + "/\(name).sealed") else { return nil }
+        for k in [p.session_key, p.session_key_prev].compactMap({ $0 }) {
+            if let d = Data(base64Encoded: k), d.count == 32, let plain = try? openGCM(key: Array(d), combined: sealed, aad: sessionAAD(name)) {
+                return plain
+            }
+        }
+        return nil
     }
 
-    func opSessionSave(_ req: [String: Any], who: String, pid: Int32) -> [String: Any] {
+    func opSessionSave(_ req: [String: Any], _ who: Requester) -> [String: Any] {
         let fields = echo(req, ["name", "vm", "profile"])
         guard let name = req["name"] as? String, let vm = req["vm"] as? String, let profile = req["profile"] as? String,
               validName(name), validName(vm), validName(profile) else {
-            return finish("session_save", fields, failed("bad request"), pid: pid, approval: "-")
+            return finish("session_save", fields, failed("bad request"), who, approval: "-")
         }
         let replace = req["replace"] as? Bool == true
-        say("\(clockTime())  session save \(name) from profile \(profile) on VM \(vm)" + (replace ? " (replace)" : "") + ", asked by \(who)")
+        say("\(clockTime())  session save \(name) from profile \(profile) on VM \(vm)" + (replace ? " (replace)" : "") + ", asked by \(who.describe)")
         let p: Payload
-        do { p = try load() } catch let e as VaultError { return finish("session_save", fields, failed(e.message), pid: pid, approval: "-") } catch {
-            return finish("session_save", fields, failed("cannot read the vault"), pid: pid, approval: "-")
+        do { p = try load() } catch let e as VaultError { return finish("session_save", fields, failed(e.message), who, approval: "-") } catch {
+            return finish("session_save", fields, failed("cannot read the vault"), who, approval: "-")
         }
         let old = p.sessions[name]
         if old != nil && !replace {
-            return finish("session_save", fields, denied("a session named \(name) exists (--replace overwrites it, after you confirm)"), pid: pid, approval: "-")
+            return finish("session_save", fields, denied("a session named \(name) exists (--replace overwrites it, after you confirm)"), who, approval: "-")
         }
         guard let t = target(p, vm) else {
-            return finish("session_save", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), pid: pid, approval: "-")
+            return finish("session_save", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
-        guard var skey = sessionKey(p) else { return finish("session_save", fields, failed("the vault's session key is damaged"), pid: pid, approval: "-") }
-        defer { wipe(&skey) }
+        if let why = requiredSinkProblem("session_save", fields, who) { return finish("session_save", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
-            return finish("session_save", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), pid: pid, approval: "-")
+            return finish("session_save", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
         }
-        // Saving always asks: the agent starts it, and a saved login is a credential.
+        // Saving always asks (unless a standing approval covers it): the agent starts it, and a saved login is a credential.
         let question = old.map { "  Replace the sealed session \(name) (saved \($0.saved_at) from VM \($0.vm), profile \($0.profile)) with profile \(profile) from VM \(vm)?" }
             ?? "  Save Chrome profile \(profile) from VM \(vm) as the sealed session \(name)?"
-        let (yes, why) = approve(question, typed: name)
-        let approval = yes ? "each:yes" : "each:no"
-        if !yes { return finish("session_save", fields, denied(why), pid: pid, approval: approval) }
+        let (yes, approval, why) = approve("session_save", name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil)
+        if !yes { return finish("session_save", fields, denied(why), who, approval: approval) }
         if let problem = runner.listenerProblem(t) {
-            return finish("session_save", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), pid: pid, approval: approval)
+            return finish("session_save", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval)
         }
         let r: ProcResult
         do { r = try runner.opsSSH(t, remote: sessionSaveScript(user: t.binding.guest_user, profile: profile), input: [],
                                    timeout: TimeInterval(min(600, remaining())), maxStdout: 1 << 31) }
-        catch { return finish("session_save", fields, failed("cannot reach the VM"), pid: pid, approval: approval) }
+        catch { return finish("session_save", fields, failed("cannot reach the VM"), who, approval: approval) }
         var archive = r.stdout
         defer { wipe(&archive) }
         if r.interrupted || r.timedOut || r.tooLarge || r.status != 0 || archive.count < 2 || archive[0] != 0x1F || archive[1] != 0x8B {
             let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time" : r.tooLarge ? "the profile is too large"
                 : (r.stderr.isEmpty ? "exit \(r.status)" : oneLine(String(decoding: r.stderr, as: UTF8.self), max: 200))
-            return finish("session_save", fields, r.status == 4 ? denied(why) : failed(why), pid: pid, approval: approval)
+            return finish("session_save", fields, r.status == 4 ? denied(why) : failed(why), who, approval: approval)
         }
         do {
             try ensurePrivateDir(paths.sessions)
-            let sealed = try sealGCM(key: skey, plaintext: archive, aad: sessionAAD(name))
-            try writeFileAtomic(paths.sessions + "/\(name).sealed", sealed)
             let bytes = archive.count
+            let a = archive
+            // Sealed and recorded under the vault's lock, with whatever session key is current then.
             try updateVault(paths, key) { p in
+                guard let d = Data(base64Encoded: p.session_key), d.count == 32 else { throw VaultError("the vault's session key is damaged") }
+                try writeFileAtomic(paths.sessions + "/\(name).sealed", try sealGCM(key: Array(d), plaintext: a, aad: sessionAAD(name)))
                 p.sessions[name] = SessionMeta(vm: vm, profile: profile, saved_at: isoTime(), bytes: bytes, last_loaded: nil, loads: 0,
                                                approval: old?.approval)
             }
-            return finish("session_save", fields, ["ok": true, "status": "ok", "bytes": bytes], pid: pid, approval: approval)
+            return finish("session_save", fields, ["ok": true, "status": "ok", "bytes": bytes], who, approval: approval)
         } catch let e as VaultError {
-            return finish("session_save", fields, failed(e.message), pid: pid, approval: approval)
+            return finish("session_save", fields, failed(e.message), who, approval: approval)
         } catch {
-            return finish("session_save", fields, failed("cannot seal the session"), pid: pid, approval: approval)
+            return finish("session_save", fields, failed("cannot seal the session"), who, approval: approval)
         }
     }
 
-    func opSessionLoad(_ req: [String: Any], who: String, pid: Int32) -> [String: Any] {
+    func opSessionLoad(_ req: [String: Any], _ who: Requester) -> [String: Any] {
         var fields = echo(req, ["name", "vm", "profile"])
         guard let name = req["name"] as? String, let vm = req["vm"] as? String, validName(name), validName(vm),
               (req["profile"] as? String).map(validName) ?? (req["profile"] == nil) else {
-            return finish("session_load", fields, failed("bad request"), pid: pid, approval: "-")
+            return finish("session_load", fields, failed("bad request"), who, approval: "-")
         }
-        say("\(clockTime())  session load \(name) on VM \(vm), asked by \(who)")
+        say("\(clockTime())  session load \(name) on VM \(vm), asked by \(who.describe)")
         let p: Payload
-        do { p = try load() } catch let e as VaultError { return finish("session_load", fields, failed(e.message), pid: pid, approval: "-") } catch {
-            return finish("session_load", fields, failed("cannot read the vault"), pid: pid, approval: "-")
+        do { p = try load() } catch let e as VaultError { return finish("session_load", fields, failed(e.message), who, approval: "-") } catch {
+            return finish("session_load", fields, failed("cannot read the vault"), who, approval: "-")
         }
         guard let meta = p.sessions[name] else {
-            return finish("session_load", fields, failed("no saved session named \(name) (metacomputer secrets list)"), pid: pid, approval: "-")
+            return finish("session_load", fields, failed("no saved session named \(name) (metacomputer secrets list)"), who, approval: "-")
         }
         let profile = req["profile"] as? String ?? meta.profile
         fields["profile"] = profile
         // Don't forge or rewrite the driver's own records.
         guard profile == meta.profile else {
-            return finish("session_load", fields, denied("\(name) was saved from profile \(meta.profile). The driver records a profile's name inside it (.cua-driver-owned-profile.json), so the session works only under that name: leave out --profile, or use --profile \(meta.profile)"), pid: pid, approval: "-")
+            return finish("session_load", fields, denied("\(name) was saved from profile \(meta.profile). The driver records a profile's name inside it (.cua-driver-owned-profile.json), so the session works only under that name: leave out --profile, or use --profile \(meta.profile)"), who, approval: "-")
         }
         guard let t = target(p, vm) else {
-            return finish("session_load", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), pid: pid, approval: "-")
+            return finish("session_load", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
-        guard var skey = sessionKey(p) else { return finish("session_load", fields, failed("the vault's session key is damaged"), pid: pid, approval: "-") }
-        defer { wipe(&skey) }
+        if let why = requiredSinkProblem("session_load", fields, who) { return finish("session_load", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
-            return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), pid: pid, approval: "-")
+            return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
         }
         var approval = "session"
         if confirmEach || meta.approval != "session" || meta.vm != vm {
             let question = meta.vm != vm
                 ? "  Load the sealed session \(name), saved from VM \(meta.vm), into a different VM, \(vm) (profile \(profile); replaces it)?"
                 : "  Load the sealed session \(name) into profile \(profile) on VM \(vm) (replaces that profile)?"
-            let (yes, why) = approve(question, typed: name)
-            approval = yes ? "each:yes" : "each:no"
-            if !yes { return finish("session_load", fields, denied(why), pid: pid, approval: approval) }
+            // A load into another VM always asks this time, whatever was granted before.
+            let kind = meta.vm != vm ? "session_load_elsewhere:\(vm)" : "session_load"
+            let (yes, how, why) = approve(kind, name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil)
+            approval = how
+            if !yes { return finish("session_load", fields, denied(why), who, approval: approval) }
             if let problem = runner.listenerProblem(t) {
-                return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), pid: pid, approval: approval)
+                return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval)
             }
         }
-        var archive: [UInt8]
-        do {
-            let sealed = try readFileBytes(paths.sessions + "/\(name).sealed")
-            archive = try openGCM(key: skey, combined: sealed, aad: sessionAAD(name))
-        } catch {
-            return finish("session_load", fields, failed("the sealed session file is missing or was changed"), pid: pid, approval: approval)
+        guard var archive = openSession(p, name) else {
+            return finish("session_load", fields, failed("the sealed session file is missing or was changed"), who, approval: approval)
         }
         defer { wipe(&archive) }
         guard Date() < expires, receivedSignal == 0 else {
-            return finish("session_load", fields, lockedResult("the vault locked before the session was sent"), pid: pid, approval: approval)
+            return finish("session_load", fields, lockedResult("the vault locked before the session was sent"), who, approval: approval)
         }
         let r: ProcResult
         do { r = try runner.opsSSH(t, remote: sessionLoadScript(user: t.binding.guest_user, profile: profile), input: archive,
                                    timeout: TimeInterval(min(600, remaining()))) }
-        catch { return finish("session_load", fields, failed("cannot reach the VM"), pid: pid, approval: approval) }
+        catch { return finish("session_load", fields, failed("cannot reach the VM"), who, approval: approval) }
         if r.interrupted || r.timedOut || r.status != 0 {
             let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time"
                 : (r.stderr.isEmpty ? "exit \(r.status)" : oneLine(String(decoding: r.stderr, as: UTF8.self), max: 200))
-            return finish("session_load", fields, (r.status == 4 || r.status == 5) ? denied(why) : failed(why), pid: pid, approval: approval)
+            return finish("session_load", fields, (r.status == 4 || r.status == 5) ? denied(why) : failed(why), who, approval: approval)
         }
         do {
             try updateVault(paths, key) { p in
@@ -612,6 +879,60 @@ final class UnlockServer {
                 p.sessions[name]?.last_loaded = isoTime()
             }
         } catch { say("          (couldn't record the use in the vault)") }
-        return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": archive.count], pid: pid, approval: approval)
+        return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": archive.count], who, approval: approval)
     }
+}
+
+// MARK: - the events hook
+
+/// The shared events spool (architecture.md, "Event spool"): MCOMP_EVENTS_SPOOL, or (release
+/// builds) ~/Library/Application Support/metacomputer/events/spool. Made (0700) if missing;
+/// nil when it can't be used (not a plain folder of this user's).
+func eventsSpool() -> String? {
+    let env = ProcessInfo.processInfo.environment["MCOMP_EVENTS_SPOOL"] ?? ""
+    #if MCOMP_VAULT_TESTING
+    let dir = env
+    #else
+    let dir = env.isEmpty ? homeDirectory() + "/Library/Application Support/metacomputer/events/spool" : env
+    #endif
+    guard dir.hasPrefix("/") else { return nil }
+    var st = stat()
+    if lstat(dir, &st) != 0 {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    }
+    guard lstat(dir, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR, st.st_uid == getuid() else { return nil }
+    if st.st_mode & 0o077 != 0 { chmod(dir, 0o700) }
+    return dir
+}
+
+/// A spool file's name: UTC YYYYMMDDTHHMMSS.ffffffZ (fixed width, so names sort in time
+/// order), a dash, 16 random letters and digits, .json.
+func spoolFileName() -> String {
+    var tv = timeval()
+    gettimeofday(&tv, nil)
+    var t = time_t(tv.tv_sec)
+    var g = tm()
+    gmtime_r(&t, &g)
+    let stamp = String(format: "%04d%02d%02dT%02d%02d%02d.%06dZ", Int(g.tm_year) + 1900, Int(g.tm_mon) + 1, Int(g.tm_mday),
+                       Int(g.tm_hour), Int(g.tm_min), Int(g.tm_sec), Int(tv.tv_usec))
+    return stamp + "-" + randomBytes(8).map { String(format: "%02x", $0) }.joined() + ".json"
+}
+
+/// One event file, written atomically (a dot-name in the same folder, then a rename). Never
+/// blocks, never fails a request. Never a value or a token.
+func dropSpoolEvent(family: String, type: String, severity: String, vm: String, message: String, action: String,
+                    project: String?, data: [String: Any]) {
+    guard let dir = eventsSpool() else { return }
+    var ev: [String: Any] = ["family": family, "type": type, "severity": severity, "vm": clean(vm, max: 64),
+                             "message": clean(message, max: 400), "action": clean(action, max: 200),
+                             "data": (cleanAll(data, max: 200) as? [String: Any]) ?? [:]]
+    if let p = project { ev["project"] = clean(p, max: 1024) }
+    let name = spoolFileName()
+    let final = dir + "/" + name
+    let tmp = dir + "/." + name + ".tmp"
+    let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+    guard fd >= 0 else { return }
+    let ok = writeAll(fd, Array((jsonLine(ev) + "\n").utf8))
+    close(fd)
+    if !ok || rename(tmp, final) != 0 { unlink(tmp) }
 }

@@ -68,6 +68,16 @@ func sha256Hex(_ bytes: [UInt8]) -> String {
     SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
 }
 
+/// HMAC-SHA256 as lowercase hex (audit sink signatures).
+func hmacSHA256Hex(key: [UInt8], data: [UInt8]) -> String {
+    HMAC<SHA256>.authenticationCode(for: data, using: SymmetricKey(data: key)).map { String(format: "%02x", $0) }.joined()
+}
+
+func base64url(_ bytes: [UInt8]) -> String {
+    Data(bytes).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
 func sealGCM(key: [UInt8], plaintext: [UInt8], aad: [UInt8]) throws -> [UInt8] {
     let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: key), nonce: AES.GCM.Nonce(), authenticating: aad)
     guard let combined = box.combined else { throw VaultError("encryption failed") }

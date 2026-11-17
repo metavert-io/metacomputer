@@ -1,6 +1,7 @@
 // mcomp-vault: shared helpers (paths, errors, arguments, JSON, audit log).
 import Darwin
 import Foundation
+import os
 
 // Exit codes. fill/session: 0 ok, 2 denied, 3 locked, 4 error.
 enum Exit {
@@ -116,6 +117,26 @@ func userTempDir() -> String {
 
 // MARK: - file I/O
 
+/// The last `count` bytes of a file (all of it when smaller); nil when it can't be read.
+func readTail(_ path: String, _ count: Int) -> [UInt8]? {
+    let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    var st = stat()
+    guard fstat(fd, &st) == 0 else { return nil }
+    let size = Int(st.st_size)
+    let n = min(size, count)
+    var buf = [UInt8](repeating: 0, count: n)
+    var got = 0
+    while got < n {
+        let r = buf.withUnsafeMutableBytes { pread(fd, $0.baseAddress! + got, n - got, off_t(size - n + got)) }
+        if r < 0 { if errno == EINTR { continue }; return nil }
+        if r == 0 { break }
+        got += r
+    }
+    return Array(buf[0..<got])
+}
+
 func readFileBytes(_ path: String, max: Int = 1 << 31) throws -> [UInt8] {
     let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
     guard fd >= 0 else { throw VaultError("cannot read \(path): \(String(cString: strerror(errno)))") }
@@ -176,6 +197,17 @@ func withFileLock<T>(_ path: String, _ body: () throws -> T) throws -> T {
 }
 
 // MARK: - time
+
+/// Now in UTC, RFC 3339 with microseconds ("2026-11-17T18:04:05.123456Z"), as the events stream writes times.
+func auditTime() -> String {
+    var tv = timeval()
+    gettimeofday(&tv, nil)
+    var t = time_t(tv.tv_sec)
+    var g = tm()
+    gmtime_r(&t, &g)
+    return String(format: "%04d-%02d-%02dT%02d:%02d:%02d.%06dZ", Int(g.tm_year) + 1900, Int(g.tm_mon) + 1, Int(g.tm_mday),
+                  Int(g.tm_hour), Int(g.tm_min), Int(g.tm_sec), Int(tv.tv_usec))
+}
 
 func isoTime(_ d: Date = Date()) -> String {
     let f = ISO8601DateFormatter()
@@ -327,15 +359,216 @@ func cleanAll(_ v: Any, max: Int = 300) -> Any {
     return v
 }
 
-/// One JSON line per event in audit.jsonl (0600). Metadata only: never a value.
-func audit(_ paths: Paths, _ record: [String: Any]) {
+// The audit log is a hash chain: every event carries seq (one more than the event before),
+// ts, prev (the previous event's hash) and hash = sha256 of its canonical JSON without
+// "hash". Canonical JSON is what Python's json.dumps(sort_keys=True, separators=(",", ":"),
+// ensure_ascii=True) writes, so scripts/verify-audit.py can recompute every hash. Each
+// event also goes to macOS's unified log (subsystem io.metavert.metacomputer.vault), which
+// a normal user can't edit, and from the unlock process to any audit sinks (Sinks.swift).
+
+let zeroHash = String(repeating: "0", count: 64)
+
+/// JSON as Python writes it with sort_keys, compact separators and ensure_ascii.
+func canonicalJSON(_ v: Any) -> String {
+    if let s = v as? String { return canonicalString(s) }
+    if let n = v as? NSNumber {
+        if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
+        return String(n.int64Value)
+    }
+    if let a = v as? [Any] { return "[" + a.map(canonicalJSON).joined(separator: ",") + "]" }
+    if let d = v as? [String: Any] {
+        return "{" + d.keys.sorted { Array($0.unicodeScalars.map { $0.value }).lexicographicallyPrecedes($1.unicodeScalars.map { $0.value }) }
+            .map { canonicalString($0) + ":" + canonicalJSON(d[$0]!) }.joined(separator: ",") + "}"
+    }
+    return "null"
+}
+
+func canonicalString(_ s: String) -> String {
+    var out = "\""
+    for u in s.utf16 {
+        switch u {
+        case 0x22: out += "\\\""
+        case 0x5C: out += "\\\\"
+        case 0x0A: out += "\\n"
+        case 0x0D: out += "\\r"
+        case 0x09: out += "\\t"
+        case 0x08: out += "\\b"
+        case 0x0C: out += "\\f"
+        case 0x20...0x7E: out.unicodeScalars.append(Unicode.Scalar(UInt8(u)))
+        default: out += String(format: "\\u%04x", u)
+        }
+    }
+    return out + "\""
+}
+
+func eventHash(_ e: [String: Any]) -> String {
+    var x = e
+    x["hash"] = nil
+    return sha256Hex(Array(canonicalJSON(x).utf8))
+}
+
+/// The last event in the audit log: (seq, hash). A line from an earlier build without a
+/// chain counts by the hash of its bytes, so the chain still links to it.
+func lastAuditEvent(_ path: String) -> (Int, String) {
+    guard let bytes = readTail(path, 1 << 18), !bytes.isEmpty else { return (0, zeroHash) }
+    var lines = bytes.split(separator: 0x0A, omittingEmptySubsequences: true)
+    if bytes.count == 1 << 18, lines.count > 1 { lines.removeFirst() }  // a partial first line
+    guard let last = lines.last else { return (0, zeroHash) }
+    if let e = parseJSONObject(Array(last)), let seq = (e["seq"] as? NSNumber)?.intValue, let h = e["hash"] as? String {
+        return (seq, h)
+    }
+    var seq = 0
+    for l in lines.reversed() {
+        if let e = parseJSONObject(Array(l)), let s = (e["seq"] as? NSNumber)?.intValue { seq = s; break }
+    }
+    return (seq, sha256Hex(Array(last)))
+}
+
+/// Append one event (metadata only, never a value) to audit.jsonl (0600) and the unified log.
+@discardableResult
+func audit(_ paths: Paths, _ record: [String: Any]) -> [String: Any] {
     var r = (cleanAll(record) as? [String: Any]) ?? [:]
-    r["time"] = isoTime()
-    let line = Array((jsonLine(r) + "\n").utf8)
-    let fd = open(paths.audit, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
-    guard fd >= 0 else { return }
-    _ = writeAll(fd, line)
-    close(fd)
+    r["ts"] = auditTime()
+    r["id"] = UUID().uuidString.lowercased()   // the CloudEvents id: receivers drop repeated deliveries by it
+    r["time"] = nil
+    var stored: [String: Any] = r
+    _ = try? withFileLock(paths.dir + "/audit.lock") {
+        let (seq, prev) = lastAuditEvent(paths.audit)
+        r["seq"] = seq + 1
+        r["prev"] = prev
+        r["hash"] = eventHash(r)
+        let line = canonicalJSON(r)
+        let fd = open(paths.audit, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        if fd >= 0 {
+            _ = writeAll(fd, Array((line + "\n").utf8))
+            close(fd)
+        }
+        unifiedLog(line)
+        stored = r
+    }
+    return stored
+}
+
+/// Every audit event in the unified log too: `log show --predicate 'subsystem == "io.metavert.metacomputer.vault"'`.
+func unifiedLog(_ line: String) {
+    #if MCOMP_VAULT_TESTING
+    let subsystem = "io.metavert.metacomputer.vault.test"
+    #else
+    let subsystem = "io.metavert.metacomputer.vault"
+    #endif
+    Logger(subsystem: subsystem, category: "audit").log("\(line, privacy: .public)")
+}
+
+// MARK: - who is asking
+
+struct ProcEntry {
+    let pid: pid_t
+    let ppid: pid_t
+    let name: String
+    let start: Double
+}
+
+func procEntry(_ pid: pid_t) -> ProcEntry? {
+    var k = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    guard sysctl(&mib, 4, &k, &size, nil, 0) == 0, size > 0, k.kp_proc.p_pid == pid else { return nil }
+    let name = withUnsafeBytes(of: k.kp_proc.p_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    let st = k.kp_proc.p_un.__p_starttime
+    return ProcEntry(pid: pid, ppid: k.kp_eproc.e_ppid, name: name, start: Double(st.tv_sec) + Double(st.tv_usec) / 1e6)
+}
+
+func procCwd(_ pid: pid_t) -> String? {
+    var vpi = proc_vnodepathinfo()
+    guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vpi, Int32(MemoryLayout<proc_vnodepathinfo>.size)) > 0 else { return nil }
+    let s = withUnsafeBytes(of: vpi.pvi_cdir.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    return s.isEmpty ? nil : s
+}
+
+func procArgs(_ pid: pid_t) -> [String] {
+    var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+    var size = 0
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+    var buf = [UInt8](repeating: 0, count: size)
+    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return [] }
+    let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+    var i = 4
+    while i < size && buf[i] != 0 { i += 1 }
+    while i < size && buf[i] == 0 { i += 1 }
+    var out: [String] = []
+    while out.count < argc && i < size {
+        let a = i
+        while i < size && buf[i] != 0 { i += 1 }
+        out.append(String(decoding: buf[a..<i], as: UTF8.self))
+        i += 1
+    }
+    return out
+}
+
+/// Who sent a request: the client process and the nearest Claude Code process above it
+/// (a process named claude, or node running a script named claude*), with its start time
+/// and working folder (the project). Attribution only: any process running as you can
+/// arrange the same ancestry.
+struct Requester {
+    let clientPID: pid_t
+    let clientExe: String
+    let claudePID: pid_t?
+    let claudeStart: Double?
+    let project: String?
+
+    static func of(_ pid: pid_t) -> Requester {
+        let exe = pid > 0 ? (processPath(pid).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "?") : "?"
+        var p = pid
+        for _ in 0..<64 {
+            guard p > 1, let e = procEntry(p) else { break }
+            let isClaude = e.name == "claude"
+                || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
+            if isClaude && p != pid {
+                let cwd = procCwd(p).map { realPath($0) ?? $0 }
+                return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd)
+            }
+            p = e.ppid
+        }
+        return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil)
+    }
+
+    /// Is that Claude Code process still the same one (same pid, same start)?
+    var claudeAlive: Bool {
+        guard let p = claudePID, let s = claudeStart, let e = procEntry(p) else { return false }
+        return abs(e.start - s) < 0.001
+    }
+
+    var record: [String: Any] {
+        var d: [String: Any] = ["client_pid": Int(clientPID), "client": clientExe]
+        if let p = claudePID { d["claude_pid"] = Int(p) }
+        if let pr = project { d["project"] = pr }
+        return d
+    }
+
+    var describe: String {
+        if let p = claudePID {
+            return "Claude Code in \(tildePath(project ?? "?")) (pid \(p))"
+        }
+        return "\(clientExe) (pid \(clientPID)), not from Claude Code"
+    }
+}
+
+func tildePath(_ p: String) -> String {
+    let h = homeDirectory()
+    return p == h ? "~" : (p.hasPrefix(h + "/") ? "~" + p.dropFirst(h.count) : p)
+}
+
+/// The path with every symbolic link resolved, as the kernel reports a process's folder
+/// (/tmp/x -> /private/tmp/x); nil when it doesn't exist.
+func realPath(_ p: String) -> String? {
+    guard let r = realpath(p, nil) else { return nil }
+    defer { free(r) }
+    return String(cString: r)
+}
+
+/// Is folder inside (or equal to) one of the given folders?
+func insideAny(_ folder: String, _ roots: [String]) -> Bool {
+    roots.contains { folder == $0 || folder.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }
 }
 
 /// Printable text on one line, at most max characters. Anything that could move the

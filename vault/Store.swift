@@ -1,22 +1,37 @@
 // mcomp-vault: the encrypted vault file.
 //
-// vault.json (0600) = a header (format, KDF parameters, cipher) and one AES-256-GCM
-// sealed payload. The key is PBKDF2-HMAC-SHA256(passphrase, salt, >= 600k rounds);
-// the header is the sealed box's additional authenticated data, so a changed
-// header fails to open. Saving keeps the salt and rounds (a new nonce each time),
-// so an unlocked vault's key stays valid while `set`/`bind` change the file.
+// vault.json (0600) = a header and one AES-256-GCM sealed payload.
+//
+// Format 2 (envelope encryption, like a KMS data key):
+//  - a random 32-byte data key seals the payload;
+//  - the data key is sealed ("wrapped") under a key-encryption key from your passphrase:
+//    PBKDF2-HMAC-SHA256(passphrase, salt, >= 600k rounds), and, when the vault uses the
+//    Secure Enclave, also an ECDH secret between a Secure Enclave key (whose blob only
+//    this Mac's Enclave can use) and a stored peer public key, combined with HKDF;
+//  - with the Enclave, the data key is also wrapped under a one-time recovery key, which
+//    opens the vault on any Mac (`recover`).
+// Format 1 (earlier builds): the passphrase key seals the payload directly. It still
+// opens; `rekey` converts it.
+// Saving keeps the header's key settings (a new nonce each time), so an unlocked vault's
+// key stays valid while `set`/`bind` change the file.
+import CryptoKit
 import Darwin
 import Foundation
 
 struct Secret: Codable {
-    var kind: String                // password | totp | text
+    var kind: String                // password | totp | text | api
     var value: String               // totp: the seed in base32
     var username: String?
-    var origins: [String]
+    var origins: [String]           // password/totp/text: the sites it fills into
     var approval: String            // session | each
     var created: String
+    var rotated: String?            // when the value was last replaced (set --replace)
     var last_used: String?
     var uses: Int
+    var projects: [String]?         // only for requests from Claude Code sessions in these folders
+    var api_host: String?           // api: the host the proxy forwards to (host[:port])
+    var api_header: String?         // api: "Name: template with {value}"
+    var api_path_prefix: String?    // api: only paths under this
 }
 
 struct VMBinding: Codable {
@@ -26,6 +41,9 @@ struct VMBinding: Codable {
     var guest_user: String
     var fill_key_path: String?      // the fill account (mcfill): fills. nil: bound by an earlier version
     var fill_user: String?
+    var proxy_key_path: String?     // the proxy account (mcproxy): api tokens. nil: none on this VM
+    var proxy_user: String?
+    var proxy_port: Int?            // where the proxy listens inside the VM (127.0.0.1)
     var gateway_path: String?       // the program that must serve ssh_port (cua-netgw)
     var gateway_sha256: String?     // ...and its contents when bound
     var bound: String
@@ -41,17 +59,33 @@ struct SessionMeta: Codable {
     var approval: String?           // "session": loads into the same VM don't ask. nil or "each": they do
 }
 
+/// Somewhere off this Mac that receives every audit event (Sinks.swift).
+struct AuditSink: Codable {
+    var kind: String                // webhook | otlp | syslog | ntfy
+    var url: String
+    var headers: [[String]]         // [name, value]; values are never shown again
+    var required: Bool              // fail closed: no uses while it can't be reached
+    var hmac_key: String            // base64, 32 bytes
+    var ca_pem: String?             // syslog: trust only this CA
+    var created: String
+    var start_seq: Int              // events after this one are sent
+}
+
 struct Payload: Codable {
     var secrets: [String: Secret]
     var vms: [String: VMBinding]
     var session_key: String         // base64, 32 bytes: seals browser sessions
+    var session_key_prev: String?   // the previous one, only while rotate-session-key runs
+    var session_key_rotated: String?
     var sessions: [String: SessionMeta]
+    var audit_sinks: [String: AuditSink]?
     var created: String
 
     static func fresh() -> Payload {
         var k = randomBytes(32)
         defer { wipe(&k) }
-        return Payload(secrets: [:], vms: [:], session_key: Data(k).base64EncodedString(), sessions: [:], created: isoTime())
+        return Payload(secrets: [:], vms: [:], session_key: Data(k).base64EncodedString(), session_key_prev: nil,
+                       session_key_rotated: nil, sessions: [:], audit_sinks: nil, created: isoTime())
     }
 }
 
@@ -61,29 +95,54 @@ struct KDFParams: Codable, Equatable {
     var salt: String
 }
 
+struct EnclaveParams: Codable, Equatable {
+    var key: String                 // base64: the Secure Enclave key's blob (usable only by this Mac's Enclave)
+    var peer: String                // base64: a P-256 public key (x9.63); its private half was thrown away
+}
+
+struct KeyWrap: Codable, Equatable {
+    var kind: String                // passphrase | recovery
+    var sealed: String              // base64: the data key, AES-256-GCM
+}
+
 struct VaultHeader: Codable {
     var format: String
     var version: Int
     var kdf: KDFParams
     var cipher: String
     var sealed: String
+    var enclave: EnclaveParams?
+    var wraps: [KeyWrap]?
+    var created: String?
 
-    var aad: [UInt8] {
-        Array("\(format)|\(version)|\(kdf.name)|\(kdf.iterations)|\(kdf.salt)|\(cipher)".utf8)
+    /// v1: the payload's AAD. v2: what every wrap and the payload are bound to.
+    var params: String {
+        "\(format)|\(version)|\(kdf.name)|\(kdf.iterations)|\(kdf.salt)|\(cipher)"
+            + (version >= 2 ? "|enclave=\(enclave?.key ?? "-")|peer=\(enclave?.peer ?? "-")" : "")
     }
+    var payloadAAD: [UInt8] { Array((version >= 2 ? params + "|payload" : params).utf8) }
+    func wrapAAD(_ kind: String) -> [UInt8] { Array((params + "|wrap|" + kind).utf8) }
+
+    /// The parts that must stay the same for an unlocked key to still fit.
+    func sameKey(_ o: VaultHeader) -> Bool { version == o.version && kdf == o.kdf && enclave == o.enclave && wraps == o.wraps }
 }
 
 let vaultFormat = "mcomp-vault"
-let vaultVersion = 1
+let vaultVersion = 2
 
-/// The derived key, kept only by the processes that need it; wiped on lock.
-final class VaultKey {
+/// The payload key (format 2: the data key), and the header it belongs with. Kept only by
+/// the processes that need it; wiped on lock.
+final class VaultKey: @unchecked Sendable {
     var bytes: [UInt8]
-    let kdf: KDFParams
-    init(bytes: [UInt8], kdf: KDFParams) {
+    let template: VaultHeader
+    init(bytes: [UInt8], template: VaultHeader) {
         self.bytes = bytes
-        self.kdf = kdf
+        var t = template
+        t.sealed = ""
+        self.template = t
     }
+    var usesEnclave: Bool { template.enclave != nil }
+    var hasRecovery: Bool { template.wraps?.contains { $0.kind == "recovery" } ?? false }
     func wipeKey() { wipe(&bytes) }
     deinit { wipe(&bytes) }
 }
@@ -92,7 +151,8 @@ func newKDF() -> KDFParams {
     KDFParams(name: "pbkdf2-sha256", iterations: kdfIterations, salt: Data(randomBytes(16)).base64EncodedString())
 }
 
-func deriveKey(_ passphrase: [UInt8], _ kdf: KDFParams) throws -> VaultKey {
+/// PBKDF2 of the passphrase with the header's settings (refusing weak or absurd ones).
+func passphraseKey(_ passphrase: [UInt8], _ kdf: KDFParams) throws -> [UInt8] {
     guard kdf.name == "pbkdf2-sha256", kdf.iterations >= kdfMinIterations else {
         throw VaultError("the vault file's key settings are weaker than this program accepts; refusing")
     }
@@ -103,8 +163,84 @@ func deriveKey(_ passphrase: [UInt8], _ kdf: KDFParams) throws -> VaultKey {
     guard let k = pbkdf2SHA256(password: passphrase, salt: Array(salt), iterations: kdf.iterations) else {
         throw VaultError("key derivation failed")
     }
-    return VaultKey(bytes: k, kdf: kdf)
+    return k
 }
+
+// MARK: - Secure Enclave
+
+func enclaveAvailable() -> Bool { SecureEnclave.isAvailable }
+
+/// A new Enclave key and the peer it agrees with: the parameters to store, and the secret.
+func newEnclave() throws -> (EnclaveParams, [UInt8]) {
+    let se: SecureEnclave.P256.KeyAgreement.PrivateKey
+    do { se = try SecureEnclave.P256.KeyAgreement.PrivateKey() } catch {
+        throw VaultError("the Secure Enclave refused to make a key (\(error)); use --no-enclave")
+    }
+    let peer = P256.KeyAgreement.PrivateKey()
+    let shared = try se.sharedSecretFromKeyAgreement(with: peer.publicKey)
+    let secret = shared.withUnsafeBytes { Array($0) }
+    return (EnclaveParams(key: se.dataRepresentation.base64EncodedString(), peer: peer.publicKey.x963Representation.base64EncodedString()), secret)
+}
+
+/// The ECDH secret from this Mac's Enclave; fails on another Mac, or after the Enclave was reset.
+func enclaveSecret(_ e: EnclaveParams) throws -> [UInt8] {
+    guard let blob = Data(base64Encoded: e.key), let peerData = Data(base64Encoded: e.peer),
+          let peer = try? P256.KeyAgreement.PublicKey(x963Representation: peerData) else {
+        throw VaultError("the vault file's Enclave settings are damaged")
+    }
+    do {
+        #if MCOMP_VAULT_TESTING
+        // Stands in for another Mac or a reset Enclave (the blob is intact but can't be used).
+        if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_NO_ENCLAVE"] == "1" { throw VaultError("test: no Enclave") }
+        #endif
+        let se = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: blob)
+        return try se.sharedSecretFromKeyAgreement(with: peer).withUnsafeBytes { Array($0) }
+    } catch {
+        throw VaultError("this vault is bound to a Secure Enclave this Mac doesn't have (another Mac, or a reset Enclave): open it with `metacomputer secrets recover` and the recovery key")
+    }
+}
+
+func hkdf32(_ ikm: [UInt8], salt: [UInt8], info: [UInt8]) -> [UInt8] {
+    let k = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: ikm), salt: salt, info: info, outputByteCount: 32)
+    return k.withUnsafeBytes { Array($0) }
+}
+
+func hkdf32(_ ikm: [UInt8], salt: [UInt8], info: String) -> [UInt8] { hkdf32(ikm, salt: salt, info: Array(info.utf8)) }
+
+/// The key that wraps the data key, from the passphrase (and the Enclave when the vault uses it).
+func passphraseKEK(_ passphrase: [UInt8], _ h: VaultHeader) throws -> [UInt8] {
+    var p = try passphraseKey(passphrase, h.kdf)
+    defer { wipe(&p) }
+    let salt = Array(Data(base64Encoded: h.kdf.salt) ?? Data())
+    if let e = h.enclave {
+        var s = try enclaveSecret(e)
+        defer { wipe(&s) }
+        return hkdf32(p + s, salt: salt, info: "mcomp-vault|2|passphrase+enclave")
+    }
+    return hkdf32(p, salt: salt, info: "mcomp-vault|2|passphrase")
+}
+
+func recoveryKEK(_ recovery: [UInt8], _ h: VaultHeader) -> [UInt8] {
+    hkdf32(recovery, salt: Array(Data(base64Encoded: h.kdf.salt) ?? Data()), info: "mcomp-vault|2|recovery")
+}
+
+/// A recovery key: 20 random bytes as 8 groups of 4 base32 characters.
+func newRecoveryKey() -> ([UInt8], String) {
+    let b = randomBytes(20)
+    let s = base32Encode(b)
+    let groups = stride(from: 0, to: s.count, by: 4).map { i -> String in
+        let a = s.index(s.startIndex, offsetBy: i), z = s.index(a, offsetBy: min(4, s.count - i))
+        return String(s[a..<z])
+    }
+    return (b, groups.joined(separator: "-"))
+}
+
+func parseRecoveryKey(_ s: String) -> [UInt8]? {
+    guard let b = base32Decode(s.replacingOccurrences(of: "-", with: "").replacingOccurrences(of: " ", with: "")), b.count == 20 else { return nil }
+    return b
+}
+
+// MARK: - reading and writing
 
 func vaultExists(_ paths: Paths) -> Bool { fileExists(paths.vault) }
 
@@ -119,20 +255,84 @@ func readHeader(_ paths: Paths) throws -> VaultHeader {
     if st.st_mode & 0o077 != 0 { chmod(paths.vault, 0o600) }
     let bytes = try readFileBytes(paths.vault, max: 64 << 20)
     guard let h = try? JSONDecoder().decode(VaultHeader.self, from: Data(bytes)),
-          h.format == vaultFormat, h.version == vaultVersion, h.cipher == "aes-256-gcm" else {
+          h.format == vaultFormat, h.version == 1 || h.version == 2, h.cipher == "aes-256-gcm" else {
         throw VaultError("\(paths.vault) isn't a vault this program understands")
     }
+    if h.version == 2 && (h.wraps ?? []).isEmpty { throw VaultError("the vault file is damaged (no key wraps)") }
     return h
 }
 
+func unwrapDataKey(_ h: VaultHeader, kind: String, kek: [UInt8]) throws -> [UInt8] {
+    guard let w = h.wraps?.first(where: { $0.kind == kind }), let sealed = Data(base64Encoded: w.sealed) else {
+        throw VaultError(kind == "recovery" ? "this vault has no recovery key" : "the vault file is damaged (no \(kind) wrap)")
+    }
+    do { return try openGCM(key: kek, combined: Array(sealed), aad: h.wrapAAD(kind)) } catch {
+        throw VaultError(kind == "recovery" ? "wrong recovery key (or the vault file was changed)" : "wrong passphrase (or the vault file was changed)")
+    }
+}
+
+/// Open the vault with the passphrase: the key for its payload.
+func openWithPassphrase(_ paths: Paths, _ passphrase: [UInt8]) throws -> (VaultKey, Payload) {
+    let h = try readHeader(paths)
+    let key: VaultKey
+    if h.version == 1 {
+        key = VaultKey(bytes: try passphraseKey(passphrase, h.kdf), template: h)
+    } else {
+        var kek = try passphraseKEK(passphrase, h)
+        defer { wipe(&kek) }
+        key = VaultKey(bytes: try unwrapDataKey(h, kind: "passphrase", kek: kek), template: h)
+    }
+    return (key, try decryptPayload(h, key))
+}
+
+func openWithRecovery(_ paths: Paths, _ recovery: [UInt8]) throws -> (VaultKey, Payload) {
+    let h = try readHeader(paths)
+    guard h.version == 2 else { throw VaultError("this vault has no recovery key") }
+    var kek = recoveryKEK(recovery, h)
+    defer { wipe(&kek) }
+    let key = VaultKey(bytes: try unwrapDataKey(h, kind: "recovery", kek: kek), template: h)
+    return (key, try decryptPayload(h, key))
+}
+
+/// A new format-2 key setup: a fresh data key wrapped under the passphrase (with the
+/// Enclave if asked), and a recovery key when the Enclave is used. Returns the key and
+/// the recovery key's text (to show once), if any.
+func newVaultKey(passphrase: [UInt8], enclave: Bool) throws -> (VaultKey, String?) {
+    var h = VaultHeader(format: vaultFormat, version: vaultVersion, kdf: newKDF(), cipher: "aes-256-gcm", sealed: "",
+                        enclave: nil, wraps: [], created: isoTime())
+    if enclave {
+        var (params, secret) = try newEnclave()
+        wipe(&secret)
+        h.enclave = params
+    }
+    var dk = randomBytes(32)
+    defer { wipe(&dk) }
+    var kek = try passphraseKEK(passphrase, h)
+    defer { wipe(&kek) }
+    var wraps = [KeyWrap(kind: "passphrase", sealed: Data(try sealGCM(key: kek, plaintext: dk, aad: h.wrapAAD("passphrase"))).base64EncodedString())]
+    var recoveryText: String?
+    if enclave {
+        var (rk, text) = newRecoveryKey()
+        defer { wipe(&rk) }
+        var rkek = recoveryKEK(rk, h)
+        defer { wipe(&rkek) }
+        wraps.append(KeyWrap(kind: "recovery", sealed: Data(try sealGCM(key: rkek, plaintext: dk, aad: h.wrapAAD("recovery"))).base64EncodedString()))
+        recoveryText = text
+    }
+    h.wraps = wraps
+    return (VaultKey(bytes: dk, template: h), recoveryText)
+}
+
 func decryptPayload(_ header: VaultHeader, _ key: VaultKey) throws -> Payload {
-    guard header.kdf == key.kdf else { throw VaultError("the vault file changed its key settings; unlock again", code: Exit.locked) }
+    guard header.sameKey(key.template) else {
+        throw VaultError("the vault file changed its key settings (rekey or recover); unlock again", code: Exit.locked)
+    }
     guard let sealed = Data(base64Encoded: header.sealed) else { throw VaultError("the vault file is damaged") }
     var plain: [UInt8]
     do {
-        plain = try openGCM(key: key.bytes, combined: Array(sealed), aad: header.aad)
+        plain = try openGCM(key: key.bytes, combined: Array(sealed), aad: header.payloadAAD)
     } catch {
-        throw VaultError("wrong passphrase (or the vault file was changed)")
+        throw VaultError(header.version == 1 ? "wrong passphrase (or the vault file was changed)" : "the vault file was changed")
     }
     defer { wipe(&plain) }
     guard let p = try? JSONDecoder().decode(Payload.self, from: Data(plain)) else {
@@ -150,8 +350,8 @@ func savePayload(_ paths: Paths, _ key: VaultKey, _ payload: Payload) throws {
     enc.outputFormatting = [.sortedKeys]
     var plain = Array(try enc.encode(payload))
     defer { wipe(&plain) }
-    var header = VaultHeader(format: vaultFormat, version: vaultVersion, kdf: key.kdf, cipher: "aes-256-gcm", sealed: "")
-    header.sealed = Data(try sealGCM(key: key.bytes, plaintext: plain, aad: header.aad)).base64EncodedString()
+    var header = key.template
+    header.sealed = Data(try sealGCM(key: key.bytes, plaintext: plain, aad: header.payloadAAD)).base64EncodedString()
     let henc = JSONEncoder()
     henc.outputFormatting = [.sortedKeys, .prettyPrinted]
     try writeFileAtomic(paths.vault, Array(try henc.encode(header)) + [0x0A])

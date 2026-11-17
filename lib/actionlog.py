@@ -318,7 +318,7 @@ def verify_file(path, base, pub):
 
 # What `event` keeps from its input: the result `mcomp-vault fill|session` prints, which
 # never holds a value. Anything else is dropped.
-EVENT_KEYS = ("ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "reason")
+EVENT_KEYS = ("ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "reason", "token_id", "api_host", "expires_in_s")
 
 
 def record_event(kind, data, cfg=None):

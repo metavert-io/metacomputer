@@ -45,10 +45,12 @@
 #                                  and the shell channel (VM_SHELL, SHELL_LOG)
 #   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
 #                                  the signed action log (ACTION_LOG=on in config/local.env)
-#   secrets init | set NAME ... | delete NAME | bind [VM] | session policy|delete NAME
-#           | unlock [--for 30m] [--confirm each]   the vault (in your own terminal; SECURITY.md "Secrets and logins")
+#   secrets init | set NAME ... [--replace] | delete NAME | bind [VM] | session policy|delete NAME
+#           | unlock [--for 30m] [--confirm each] | rekey | recover | rotate-session-key
+#           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
-#           | session save NAME --profile P | session load NAME   use it from a session, without seeing values
+#           | session save NAME --profile P | session load NAME
+#           | token NAME [--ttl 15m] | tokens | revoke ID|--all   use it from a session, without seeing values
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -356,6 +358,11 @@ if gs:
               "fill account (mcfill) for metacomputer secrets")
     else:
         print("secrets       no fill account: built before secrets support (rebuild to use metacomputer secrets)")
+    sp = gs.get("secrets_proxy") or {}
+    if sp.get("present"):
+        print(f"api proxy     {m(sp.get('keys_root_owned'))} proxy account (mcproxy) for metacomputer secrets tokens")
+    elif sf.get("present"):
+        print("api proxy     no proxy account: built before API tokens (rebuild to use metacomputer secrets token)")
     if gs.get("virtual_audio"):
         print("sound         virtual sound card: plays into nothing, recordings include it")
     print(f"guest         up {int(gs.get('uptime_s', 0))} s, load {' '.join(gs.get('loadavg', []))}, "
@@ -974,21 +981,77 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       [ -f "$SSH_DIR/fill" ] || die "no fill key ($SSH_DIR/fill): VMs built before secrets support have no fill account. Rebuild the VM to use secrets (metacomputer build --replace, or a new VM_NAME)"
       [ "${SSH_AUTH:-key}" = cert ] && warn "SSH_AUTH=cert: sealed sessions sign in with the static ops key, which a VM on certificates refuses (fills use their own account and still work)"
       [ -f "$SSH_DIR/hostkey" ] && warn "the VM's private host key is still in $SSH_DIR/hostkey: anything that can read it can pose as the VM. Nothing on the Mac needs it after the build (newer builds delete it): delete it with rm $SSH_DIR/hostkey"
+      # API tokens reach the VM through its proxy account (mcproxy, one reverse forward); older VMs have none.
+      local proxy=()
+      if [ -f "$SSH_DIR/proxy" ]; then
+        proxy=(--proxy-key "$SSH_DIR/proxy" --proxy-user mcproxy --proxy-port "${SECRETS_PROXY_PORT:-18765}")
+      else
+        warn "no proxy key ($SSH_DIR/proxy): this VM was built before API tokens, so 'metacomputer secrets token' won't work with it until it is rebuilt (fills and sessions do)"
+      fi
       # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
       exec "$VAULT_BIN" bind "$vm" --port "$SSH_PORT" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
-        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" --gateway "$NETGW_BIN" "$@" ;;
-    fill|session)
-      local kind="secrets_fill"
+        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" --gateway "$NETGW_BIN" ${proxy[@]+"${proxy[@]}"} "$@" ;;
+    fill|session|token)
+      local kind="secrets_$sub"
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
       fi
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
       out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
       printf '%s\n' "$out"
-      printf '%s\n' "$out" | secrets_log "$kind"
+      # The action log gets metadata only: never the token itself.
+      printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
+      [ "$rc" = 3 ] && secrets_locked_event "$kind" "$out"
       return $rc ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_metadata() { # the vault's result JSON (stdin) without the token value
+  "$PY" -c 'import json,sys
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except ValueError: continue
+    if isinstance(d, dict):
+        d.pop("token", None); print(json.dumps(d, sort_keys=True))' 2>/dev/null || true
+}
+secrets_locked_event() { # KIND RESULT: a needs_you/vault_locked file in the events spool (architecture.md, "Event spool")
+  # With the event stream installed, its own EXIT hook reports this exit 3; don't report it twice.
+  declare -F events_hook_secrets_exit >/dev/null 2>&1 && return 0
+  local spool="${MCOMP_EVENTS_SPOOL:-$HOME/Library/Application Support/metacomputer/events/spool}"
+  "$PY" - "$spool" "$1" "$2" "$VM_NAME" "$PWD" >/dev/null 2>&1 <<'PYEOF' || true
+import datetime, json, os, secrets, stat, sys
+spool, kind, result, default_vm, cwd = sys.argv[1:6]
+os.makedirs(spool, mode=0o700, exist_ok=True)
+st = os.lstat(spool)
+if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+    sys.exit(0)
+try:
+    res = json.loads(result.strip().splitlines()[-1]) if result.strip() else {}
+except (ValueError, IndexError):
+    res = {}
+res = res if isinstance(res, dict) else {}
+def short(v, n=64):
+    return "".join(c for c in str(v) if c.isprintable())[:n]
+name, vm = short(res.get("name") or "?"), short(res.get("vm") or default_vm)
+what = {"secrets_fill": "fill", "secrets_token": "API token", "secrets_session_save": "session save",
+        "secrets_session_load": "session load"}.get(kind, kind)
+ev = {"family": "needs_you", "type": "vault_locked", "severity": "warn", "vm": vm, "project": cwd,
+      "message": f"metacomputer secrets is locked: the {what} for {name} on VM {vm} was refused",
+      "action": "Run metacomputer secrets unlock in your own terminal, then ask Claude to try again",
+      "data": {"op": what, "name": name}}
+now = datetime.datetime.now(datetime.timezone.utc)
+base = now.strftime("%Y%m%dT%H%M%S.%fZ") + "-" + secrets.token_hex(8) + ".json"
+tmp = os.path.join(spool, "." + base + ".tmp")
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+try:
+    os.write(fd, (json.dumps(ev, sort_keys=True) + "\n").encode())
+finally:
+    os.close(fd)
+try:
+    os.rename(tmp, os.path.join(spool, base))
+except OSError:
+    os.unlink(tmp)
+PYEOF
 }
 
 case "$cmd" in

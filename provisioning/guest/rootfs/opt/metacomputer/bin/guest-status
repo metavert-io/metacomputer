@@ -84,6 +84,24 @@ def fill_account():
 
 
 out["secrets_fill"] = fill_account()
+
+
+# The secrets API proxy account (VMs built before it have none: `metacomputer secrets token` needs a rebuild).
+def proxy_account():
+    import pwd
+    try:
+        pw = pwd.getpwnam("mcproxy")
+    except KeyError:
+        return {"present": False}
+    try:
+        st = os.stat("/etc/ssh/metacomputer-proxy/authorized_keys")
+        keys_ok = st.st_uid == 0 and not st.st_mode & 0o022
+    except OSError:
+        keys_ok = False
+    return {"present": True, "shell": pw.pw_shell, "keys_root_owned": keys_ok}
+
+
+out["secrets_proxy"] = proxy_account()
 rc, so, _ = sh(["/usr/local/bin/cua-driver", "--version"])
 out["driver_version"] = so.splitlines()[0] if so else None
 out["x11vnc_running"] = sh(["pgrep", "-u", str(UID), "-x", "x11vnc"])[0] == 0

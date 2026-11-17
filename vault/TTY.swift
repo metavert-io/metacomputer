@@ -96,32 +96,47 @@ func readPassphrase(confirm: Bool) throws -> [UInt8] {
     return p
 }
 
-/// An approval on the unlock terminal: the person types `expected` (a secret's or a
-/// session's name) to allow; anything else refuses. Anything typed before the question
-/// is discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
-func askTyped(_ question: String, expected: String, timeout: Int) -> Bool {
-    guard timeout > 0 else { return false }
+enum ApprovalScope { case use, session, unlock }
+
+/// An approval on the unlock terminal. The person types the secret's (or session's) name
+/// to allow this use, "NAME session" for this Claude Code session, or "NAME unlock" until
+/// the vault locks; anything else refuses. Anything typed before the question is
+/// discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
+func askApproval(_ question: String, name: String, timeout: Int) -> ApprovalScope? {
+    guard let answer = askLine(question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
+                               + "\(name) unlock: until the vault locks). Anything else refuses: ", timeout: timeout) else { return nil }
+    let words = answer.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+    guard words.first == name else { return nil }
+    switch words.count == 1 ? "" : words.dropFirst().joined(separator: " ") {
+    case "": return .use
+    case "session": return .session
+    case "unlock": return .unlock
+    default: return nil
+    }
+}
+
+/// One answer typed on the terminal (nil: none in time, or interrupted).
+func askLine(_ question: String, timeout: Int) -> String? {
+    guard timeout > 0 else { return nil }
     _ = tcflush(0, TCIFLUSH)
-    eprintRaw(question + "\n  Type \(expected) to allow (anything else refuses): ")
+    eprintRaw(question)
     let deadline = Date().addingTimeInterval(TimeInterval(timeout))
     var line = [UInt8]()
     while Date() < deadline {
-        if receivedSignal != 0 { eprint(""); return false }
+        if receivedSignal != 0 { eprint(""); return nil }
         var pfd = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
         let r = poll(&pfd, 1, 500)
-        if r < 0 { if errno == EINTR { continue }; return false }
+        if r < 0 { if errno == EINTR { continue }; return nil }
         if r == 0 { continue }
-        if pfd.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 && pfd.revents & Int16(POLLIN) == 0 { return false }
+        if pfd.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 && pfd.revents & Int16(POLLIN) == 0 { return nil }
         var c: UInt8 = 0
         let n = read(0, &c, 1)
-        if n <= 0 { return false }
-        if c == 0x0A {
-            return String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces) == expected
-        }
-        if line.count < 80 { line.append(c) }
+        if n <= 0 { return nil }
+        if c == 0x0A { return String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces) }
+        if line.count < 120 { line.append(c) }
     }
     eprint("\n  (no answer in \(timeout) s: not allowed)")
-    return false
+    return nil
 }
 
 /// The name of the terminal multiplexer (or scriptable terminal) this process runs in, or

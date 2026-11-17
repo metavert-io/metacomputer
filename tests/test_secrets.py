@@ -162,7 +162,7 @@ import json, os, sys
 LOG = {log!r}
 argv = sys.argv[1:]
 remote = argv[-1] if argv else ""
-dest = argv[-2] if len(argv) > 1 else ""
+dest = next((a for a in argv if a.endswith("@127.0.0.1")), "")
 rec = {{"argv": argv, "env": dict(os.environ), "user": dest.split("@")[0]}}
 kh = next((a.split("=", 1)[1] for a in argv if a.startswith("UserKnownHostsFile=")), None)
 rec["known_hosts"] = open(kh).read() if kh and os.path.exists(kh) else None
@@ -200,6 +200,20 @@ if rec["user"] == "mcfill":
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req["value"]),
                "route": "element"}}
     print(json.dumps(out))
+elif rec["user"] == "mcproxy":
+    # The API proxy's tunnel: say the reverse forward is up (as ssh -o LogLevel=DEBUG1 does), then stay.
+    rec["kind"] = "proxy:tunnel"
+    rec["pid"] = os.getpid()
+    log()
+    if os.path.exists(os.path.join(d, "no-proxy-account")):
+        sys.stderr.write("mcproxy@127.0.0.1: Permission denied (publickey).\n")
+        sys.exit(255)
+    fwd = argv[argv.index("-R") + 1] if "-R" in argv else "?"
+    sys.stderr.write("debug1: remote forward success for: listen " + fwd.rsplit(":", 2)[0] + ", connect " + fwd.split(":", 2)[2] + "\n")
+    sys.stderr.flush()
+    import time
+    while True:
+        time.sleep(60)
 elif "-czf -" in remote:
     rec["kind"] = "session:save"
     sys.stdout.buffer.write(open(os.path.join(d, "archive.tgz"), "rb").read())

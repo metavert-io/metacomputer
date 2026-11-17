@@ -3,32 +3,47 @@ import Darwin
 import Foundation
 
 let usageText = """
-mcomp-vault: credentials for the metacomputer VM, used without ever reaching Claude.
+mcomp-vault: credentials for the metacomputer VM, used without passing through the conversation.
 (Usually run as `metacomputer secrets ...`, which fills in the current VM.)
 
 In your own terminal (these ask for the vault passphrase):
-  init                                   create the vault
+  init [--no-enclave]                    create the vault (bound to this Mac's Secure Enclave when it has one;
+                                         prints a one-time recovery key)
   set NAME --kind password|totp|text --origin https://site [--origin ...]
-      [--username U] [--approval session|each]      store a secret (the value is typed, not echoed)
+      [--username U] [--approval session|each] [--project DIR ...] [--replace]
+  set NAME --kind api --api-host api.example.com [--header 'Authorization: Bearer {value}']
+      [--api-path-prefix /v1/] [--approval session|each] [--project DIR ...] [--replace]
+                                         store a secret (the value is typed, not echoed); --replace rotates it
   delete NAME                            remove a secret
-  bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U
-      --ops-key PATH --ops-user U --gateway PATH   pin how to reach a VM (you confirm with "yes")
+  bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U
+      [--proxy-key PATH --proxy-user U --proxy-port N] --gateway PATH
+                                         pin how to reach a VM (you confirm with "yes")
+  rekey [--enclave | --no-enclave]       new passphrase, new data key (and a new recovery key)
+  recover [--no-enclave]                 open the vault with its recovery key; set a new passphrase
+  rotate-session-key                     re-encrypt every sealed browser session under a new key
   session policy NAME --approval session|each      whether loading a sealed session asks first
   session delete NAME                    remove a sealed browser session
+  audit-sink add NAME --kind webhook|otlp|syslog|ntfy --url URL|ask [--header 'Name: value|{ask}' ...]
+      [--ca FILE] [--required]           send every audit event off this Mac (prints its key once;
+                                         `ask` and {ask} are typed with the echo off)
+  audit-sink show NAME --key | remove NAME
   unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]
                                          serve requests from this terminal until Ctrl-C or the time is up
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
-  list [--json]                          names, kinds, sites, approval, use counts (never values)
+  list [--json]                          names, kinds, sites, approval, age, use counts (never values)
   fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]
                                          type a value into the focused field of the VM's page-mode Chrome
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
   session load NAME --vm VM [--profile P]            put a sealed profile back, under its own name
+  token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
+  tokens [--json]   revoke ID|--all      live tokens; end them
+  audit-sink list | show NAME | test NAME
 
 Any time:
   status [--json]    audit [--tail N] [--json]    selftest    version [--json]
 
-fill and session: exit 0 ok, 2 refused, 3 locked, 4 error.
+fill, session and token: exit 0 ok, 2 refused, 3 locked, 4 error.
 """
 
 func runMain(_ argv: [String]) -> Int32 {
@@ -55,10 +70,17 @@ func runMain(_ argv: [String]) -> Int32 {
         case "set": return try cmdSet(paths, rest)
         case "delete": return try cmdDelete(paths, rest)
         case "bind": return try cmdBind(paths, rest)
+        case "rekey": return try cmdRekey(paths, rest)
+        case "recover": return try cmdRecover(paths, rest)
+        case "rotate-session-key": return try cmdRotateSessionKey(paths, rest)
         case "unlock": return try cmdUnlock(paths, rest)
         case "list": return try cmdList(paths, rest)
         case "fill": return try cmdFill(paths, rest)
         case "session": return try cmdSession(paths, rest)
+        case "token": return try cmdToken(paths, rest)
+        case "tokens": return try cmdTokens(paths, rest)
+        case "revoke": return try cmdRevoke(paths, rest)
+        case "audit-sink": return try cmdAuditSink(paths, rest)
         case "status": return try cmdStatus(paths, rest)
         case "audit": return try cmdAudit(paths, rest)
         case "selftest": return selftest()
@@ -79,42 +101,34 @@ func runMain(_ argv: [String]) -> Int32 {
 
 /// Ask for the passphrase and open the vault with it (the key is the caller's).
 func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
-    let header = try readHeader(paths)
+    _ = try readHeader(paths)
     var pass = try readPassphrase(confirm: false)
     defer { wipe(&pass) }
-    let key = try deriveKey(pass, header.kdf)
-    let payload = try decryptPayload(header, key)
-    return (key, payload)
+    return try openWithPassphrase(paths, pass)
 }
 
-// MARK: - init / set / delete / bind
-
-func cmdInit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    _ = try parseArgs(argv, values: [])
-    try requireTTY("init")
-    try ensurePrivateDir(paths.dir)
-    guard !vaultExists(paths) else { throw VaultError("a vault already exists at \(paths.vault)") }
-    installPromptSignalHandlers()
-    var pass = try readPassphrase(confirm: true)
-    defer { wipe(&pass) }
-    let key = try deriveKey(pass, newKDF())
-    try withFileLock(paths.lock) {
-        guard !vaultExists(paths) else { throw VaultError("a vault already exists at \(paths.vault)") }
-        try savePayload(paths, key, Payload.fresh())
-    }
-    audit(paths, ["op": "init", "result": "ok"])
-    oprint("Created the vault at \(paths.vault).")
-    oprint("Next: metacomputer secrets set NAME --kind password --origin https://site.example --username you")
-    return Exit.ok
+/// The age of an ISO time, like "12 days".
+func age(_ iso: String?) -> String? {
+    guard let s = iso else { return nil }
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    guard let d = f.date(from: s) else { return nil }
+    let days = Int(Date().timeIntervalSince(d) / 86400)
+    return days == 0 ? "today" : (days == 1 ? "1 day ago" : "\(days) days ago")
 }
+
+// MARK: - set / delete
 
 func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["kind", "origin", "username", "approval"])
-    guard a.positional.count == 1 else { throw usageError("usage: set NAME --kind password|totp|text --origin https://site [--username U] [--approval session|each]") }
+    let a = try parseArgs(argv, values: ["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix"],
+                          flags: ["replace"])
+    guard a.positional.count == 1 else {
+        throw usageError("usage: set NAME --kind password|totp|text|api ... (mcomp-vault help)")
+    }
     let name = a.positional[0]
-    guard validName(name) else { throw usageError("names: letters, digits, '.', '_' and '-' (1-64)") }
+    guard validName(name) else { throw usageError("names: letters, digits, '.', '_' and '-' (1-64), not starting with '-'") }
     let kind = a.last("kind") ?? ""
-    guard ["password", "totp", "text"].contains(kind) else { throw usageError("--kind password, totp or text") }
+    guard ["password", "totp", "text", "api"].contains(kind) else { throw usageError("--kind password, totp, text or api") }
     var origins: [String] = []
     for o in a.all("origin") {
         guard let c = canonicalOrigin(o) else {
@@ -122,7 +136,28 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         }
         if !origins.contains(c) { origins.append(c) }
     }
-    guard !origins.isEmpty else { throw usageError("at least one --origin https://site is needed: a secret fills only into the sites it names") }
+    var apiHost: String?, apiHeader: String?, apiPrefix: String?
+    if kind == "api" {
+        guard origins.isEmpty else { throw usageError("--origin is for secrets typed into pages; api secrets name --api-host") }
+        guard let h = a.last("api-host")?.lowercased(), matches(h, "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$") else {
+            throw usageError("--api-host: the API's host name, like api.example.com (no scheme or path; :port allowed)")
+        }
+        apiHost = h
+        let template = a.last("header") ?? "Authorization: Bearer {value}"
+        guard splitTemplate(template) != nil, clean(template, max: 400) == template else {
+            throw usageError("--header: 'Name: text with {value}' (once), like 'Authorization: Bearer {value}' or 'x-api-key: {value}'")
+        }
+        apiHeader = template
+        if let p = a.last("api-path-prefix") {
+            guard p.hasPrefix("/"), clean(p, max: 200) == p, !p.contains("..") else { throw usageError("--api-path-prefix: a path like /v1/") }
+            apiPrefix = p
+        }
+    } else {
+        guard a.last("api-host") == nil, a.last("header") == nil, a.last("api-path-prefix") == nil else {
+            throw usageError("--api-host, --header and --api-path-prefix go with --kind api")
+        }
+        guard !origins.isEmpty else { throw usageError("at least one --origin https://site is needed: a secret fills only into the sites it names") }
+    }
     let approval = a.last("approval") ?? "session"
     guard ["session", "each"].contains(approval) else { throw usageError("--approval session or each") }
     let username = a.last("username")
@@ -130,12 +165,21 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard kind == "password" else { throw usageError("--username goes with --kind password") }
         guard !u.isEmpty, u.count <= 256, clean(u, max: 256) == u else { throw usageError("--username: 1-256 printable characters") }
     }
+    var projects: [String] = []
+    for p in a.all("project") {
+        var isDir: ObjCBool = false
+        let full = realPath(absolutePath(p)) ?? ""
+        guard clean(full, max: 4096) == full, FileManager.default.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue else {
+            throw usageError("--project \(p): an existing folder")
+        }
+        if !projects.contains(full) { projects.append(full) }
+    }
     try requireTTY("set")
     installPromptSignalHandlers()
     let (key, existing) = try unlockKey(paths)
-    if existing.secrets[name] != nil {
-        let a = readVisible("A secret named \(name) exists. Replace it? [y/N] ").lowercased()
-        guard a == "y" || a == "yes" else { throw VaultError("left unchanged") }
+    let old = existing.secrets[name]
+    if old != nil && !a.has("replace") {
+        throw VaultError("a secret named \(name) exists: add --replace to rotate its value (or delete it first)")
     }
     var value: [UInt8]
     switch kind {
@@ -150,6 +194,8 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         var seed = try parseTOTPSeed(String(decoding: raw, as: UTF8.self))
         value = Array(base32Encode(seed).utf8)
         wipe(&seed)
+    case "api":
+        value = try readHidden("API key for \(name) (\(apiHost!)): ")
     default:
         value = try readHidden("Value for \(name): ")
     }
@@ -157,13 +203,26 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     guard !value.isEmpty, value.count <= 4096, String(validating: value, as: UTF8.self) != nil else {
         throw VaultError("the value must be 1-4096 bytes of text")
     }
+    if kind == "api", value.count < 8 || !value.allSatisfy({ (0x21...0x7E).contains($0) }) {
+        throw VaultError("an API key is at least 8 printable ASCII characters, without spaces")
+    }
     let stored = String(decoding: value, as: UTF8.self)
+    let now = isoTime()
     try updateVault(paths, key) { p in
         p.secrets[name] = Secret(kind: kind, value: stored, username: username, origins: origins, approval: approval,
-                                 created: isoTime(), last_used: nil, uses: 0)
+                                 created: old?.created ?? now, rotated: old == nil ? nil : now, last_used: old?.last_used,
+                                 uses: old?.uses ?? 0, projects: projects.isEmpty ? nil : projects,
+                                 api_host: apiHost, api_header: apiHeader, api_path_prefix: apiPrefix)
     }
-    audit(paths, ["op": "set", "result": "ok", "name": name, "kind": kind, "origins": origins, "approval_mode": approval])
-    oprint("Saved \(name) (\(kind)) for \(origins.joined(separator: ", "))" + (approval == "each" ? "; every use asks at the unlock terminal." : "."))
+    var rec: [String: Any] = ["op": old == nil ? "set" : "rotate", "result": "ok", "name": name, "kind": kind, "approval_mode": approval]
+    if !origins.isEmpty { rec["origins"] = origins }
+    if let h = apiHost { rec["api_host"] = h }
+    if !projects.isEmpty { rec["projects"] = projects }
+    audit(paths, rec)
+    let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
+    oprint((old == nil ? "Saved" : "Rotated") + " \(name) (\(kind)) for \(where_)"
+           + (projects.isEmpty ? "" : ", only for Claude Code sessions in \(projects.map(tildePath).joined(separator: ", "))")
+           + (approval == "each" ? "; every use asks at the unlock terminal." : "."))
     return Exit.ok
 }
 
@@ -180,6 +239,8 @@ func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     oprint("Deleted \(name).")
     return Exit.ok
 }
+
+// MARK: - bind
 
 /// A path bind will show and pin: printable text only, so it can't disguise itself on the terminal.
 func checkPrintablePath(_ p: String, _ flag: String) throws {
@@ -200,8 +261,9 @@ func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
 }
 
 func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U --gateway PATH"
-    let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "gateway"])
+    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] --gateway PATH"
+    let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user",
+                                         "proxy-port", "gateway"])
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
     guard let ps = a.last("port"), let port = Int(ps), port >= 1, port <= 65535 else { throw usageError("--port: the VM's SSH port on 127.0.0.1") }
@@ -212,6 +274,14 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let fillKey = try checkKeyFile(fk, "fill-key"), opsKey = try checkKeyFile(ok, "ops-key")
     guard let fillUser = a.last("fill-user"), validUser(fillUser) else { throw usageError("--fill-user: the VM's fill account (mcfill)") }
     guard let opsUser = a.last("ops-user"), validUser(opsUser) else { throw usageError("--ops-user: the VM's desktop user (e.g. cua)") }
+    var proxyKey: String?, proxyUser: String?, proxyPort: Int?
+    if let pk = a.last("proxy-key") {
+        proxyKey = try checkKeyFile(pk, "proxy-key")
+        guard let pu = a.last("proxy-user"), validUser(pu) else { throw usageError("--proxy-user: the VM's proxy account (mcproxy)") }
+        guard let pp = a.last("proxy-port").flatMap({ Int($0) }), pp >= 1024, pp <= 65535 else { throw usageError("--proxy-port: the proxy's port inside the VM") }
+        proxyUser = pu
+        proxyPort = pp
+    }
     guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (cua-netgw)") }
     try checkPrintablePath(absolutePath(g), "gateway")
     let gateway = URL(fileURLWithPath: absolutePath(g)).resolvingSymlinksInPath().path
@@ -231,6 +301,8 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
       host key      \(fp) (\(hostKey.split(separator: " ").first ?? ""))
       fills         as \(fillUser), key \(fillKey)
       sessions      as \(opsUser), key \(opsKey)
+    """ + (proxyUser.map { "\n  api tokens    as \($0), key \(proxyKey!), proxy at 127.0.0.1:\(proxyPort!) in the VM" } ?? "\n  api tokens    (none: this VM has no proxy account)") + """
+
       gateway       \(gateway) (sha256 \(gwHash)...)
     Check the host key on the VM itself before you agree: in the live view (metacomputer view),
     open a terminal in the VM and run
@@ -241,10 +313,12 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     guard answer == "yes" else { throw VaultError("not pinned") }
     let (key, _) = try unlockKey(paths)
     let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
-                      fill_key_path: fillKey, fill_user: fillUser, gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime())
+                      fill_key_path: fillKey, fill_user: fillUser, proxy_key_path: proxyKey, proxy_user: proxyUser, proxy_port: proxyPort,
+                      gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime())
     try updateVault(paths, key) { p in p.vms[vm] = b }
-    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway])
-    oprint("Bound VM \(vm): 127.0.0.1:\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser), gateway \(gateway)")
+    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway, "proxy": proxyUser != nil])
+    oprint("Bound VM \(vm): 127.0.0.1:\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser)"
+           + (proxyUser.map { ", api tokens as \($0)" } ?? "") + ", gateway \(gateway)")
     return Exit.ok
 }
 
@@ -323,11 +397,25 @@ func exitFor(_ res: [String: Any]) -> Int32 {
     }
 }
 
-func printResult(_ res: [String: Any]) {
+func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "reason"]) {
     var out: [String: Any] = [:]
-    for k in ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "reason"] { if let v = res[k] { out[k] = v } }
+    for k in keys { if let v = res[k] { out[k] = v } }
     if out["ok"] == nil { out["ok"] = false }
     oprint(jsonLine((cleanAll(out) as? [String: Any]) ?? ["ok": false]))
+}
+
+/// A use refused because the vault is locked: recorded, and said in the client's output.
+func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
+    var rec = fields
+    rec["op"] = op
+    rec["result"] = "locked"
+    audit(paths, rec)
+    var out = fields
+    out["ok"] = false
+    out["reason"] = "locked"
+    printResult(out, ["ok", "name", "vm", "field", "profile", "reason"])
+    eprint("mcomp-vault: \(lockedHint(paths))")
+    return Exit.locked
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
@@ -349,13 +437,60 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
-        audit(paths, ["op": "fill", "result": "locked", "name": name, "vm": vm, "field": field])
-        printResult(["ok": false, "name": name, "vm": vm, "field": field, "reason": "locked"])
-        eprint("mcomp-vault: \(lockedHint(paths))")
-        return Exit.locked
+        return lockedUse(paths, "fill", ["name": name, "vm": vm, "field": field])
     }
     printResult(res)
     return exitFor(res)
+}
+
+func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: ["vm", "ttl"])
+    guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
+        throw usageError("usage: token NAME --vm VM [--ttl 15m]")
+    }
+    guard let ttl = parseDuration(a.last("ttl") ?? "15m"), ttl <= 8 * 3600 else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }
+    let name = a.positional[0]
+    let res: [String: Any]
+    do { res = try request(paths, ["op": "token", "name": name, "vm": vm, "ttl_s": ttl], timeout: 300) } catch ClientError.locked {
+        return lockedUse(paths, "token", ["name": name, "vm": vm])
+    }
+    printResult(res, ["ok", "name", "vm", "token_id", "token", "base_url", "header", "api_host", "expires", "expires_in_s", "reason"])
+    return exitFor(res)
+}
+
+func cmdTokens(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let res: [String: Any]
+    do { res = try request(paths, ["op": "tokens"], timeout: 15) } catch ClientError.locked {
+        if a.has("json") { oprint(jsonLine(["ok": false, "reason": "locked", "tokens": []])) } else { oprint("The vault is locked: no tokens are live.") }
+        return Exit.locked
+    }
+    let list = res["tokens"] as? [[String: Any]] ?? []
+    if a.has("json") { oprint(jsonPretty(["tokens": list])); return Exit.ok }
+    oprint(list.isEmpty ? "No live tokens." : "Live tokens:")
+    for t in list {
+        oprint(clean("  \(t["id"] ?? "")  \(t["name"] ?? "") on VM \(t["vm"] ?? ""), \(t["expires_in_s"] ?? 0) s left, \(t["requests"] ?? 0) requests"
+                     + ((t["project"] as? String).map { ", for Claude Code in \(tildePath($0))" } ?? ""), max: 300))
+    }
+    return Exit.ok
+}
+
+func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: [], flags: ["all"])
+    guard a.has("all") != (a.positional.count == 1), a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }) else {
+        throw usageError("usage: revoke ID | revoke --all")
+    }
+    var req: [String: Any] = ["op": "revoke"]
+    if let id = a.positional.first { req["id"] = id }
+    do {
+        let res = try request(paths, req, timeout: 15)
+        let gone = res["revoked"] as? [String] ?? []
+        oprint(gone.isEmpty ? "No such live token." : "Revoked \(gone.joined(separator: ", ")).")
+        return Exit.ok
+    } catch ClientError.locked {
+        oprint("The vault is locked: no tokens are live.")
+        return Exit.ok
+    }
 }
 
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
@@ -403,10 +538,7 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if a.has("replace") { req["replace"] = true }
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 1800) } catch ClientError.locked {
-        audit(paths, ["op": "session_\(sub)", "result": "locked", "name": name, "vm": vm, "profile": profile ?? ""])
-        printResult(["ok": false, "name": name, "vm": vm, "profile": profile ?? "", "reason": "locked"])
-        eprint("mcomp-vault: \(lockedHint(paths))")
-        return Exit.locked
+        return lockedUse(paths, "session_\(sub)", ["name": name, "vm": vm, "profile": profile ?? ""])
     }
     printResult(res)
     return exitFor(res)
@@ -425,29 +557,35 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         return Exit.error
     }
     if a.has("json") {
-        oprint(jsonPretty(["secrets": res["secrets"] ?? [], "vms": res["vms"] ?? [], "sessions": res["sessions"] ?? []]))
+        var out: [String: Any] = ["secrets": res["secrets"] ?? [], "vms": res["vms"] ?? [], "sessions": res["sessions"] ?? []]
+        if let r = res["session_key_rotated"] { out["session_key_rotated"] = r }
+        oprint(jsonPretty(out))
         return Exit.ok
     }
     let secrets = res["secrets"] as? [[String: Any]] ?? []
     oprint(secrets.isEmpty ? "No secrets yet (metacomputer secrets set ...)." : "Secrets:")
     for s in secrets {
-        let fields = (s["fields"] as? [String] ?? []).joined(separator: "/")
+        let kind = s["kind"] as? String ?? ""
+        let use = kind == "api" ? "[token] https://\(s["api_host"] ?? "")\(s["api_path_prefix"] ?? "") (\(s["api_header"] ?? "") header)"
+            : "[--field \((s["fields"] as? [String] ?? []).joined(separator: "/"))] sites \((s["origins"] as? [String] ?? []).joined(separator: " "))"
         let user = (s["username"] as? String).map { " user \($0)" } ?? ""
         let used = (s["last_used"] as? String).map { "last used \($0)" } ?? "never used"
-        oprint("  \(s["name"] ?? "")  \(s["kind"] ?? "") [--field \(fields)]\(user)  sites \((s["origins"] as? [String] ?? []).joined(separator: " "))"
-               + "  approval \(s["approval"] ?? "")  \(s["uses"] ?? 0) uses, \(used)")
+        let ages = "created \(age(s["created"] as? String) ?? "?")" + ((s["rotated"] as? String).flatMap { age($0) }.map { ", rotated \($0)" } ?? ", never rotated")
+        let projects = (s["projects"] as? [String]).map { "  only in \($0.map(tildePath).joined(separator: ", "))" } ?? ""
+        oprint(clean("  \(s["name"] ?? "")  \(kind) \(use)\(user)  approval \(s["approval"] ?? "")  \(ages)  \(s["uses"] ?? 0) uses, \(used)\(projects)", max: 600))
     }
     let vms = res["vms"] as? [[String: Any]] ?? []
     if !vms.isEmpty { oprint("VMs:") }
     for v in vms {
-        oprint("  \(v["name"] ?? "")  127.0.0.1:\(v["ssh_port"] ?? "")  host key \(v["host_key"] ?? "")  fills as \(v["fill_user"] ?? "-")"
-               + "  sessions as \(v["user"] ?? "")" + (v["needs_bind"] != nil ? "  (bound by an earlier version: bind again)" : ""))
+        oprint(clean("  \(v["name"] ?? "")  127.0.0.1:\(v["ssh_port"] ?? "")  host key \(v["host_key"] ?? "")  fills as \(v["fill_user"] ?? "-")"
+                     + "  sessions as \(v["user"] ?? "")" + ((v["proxy_user"] as? String).map { "  api tokens as \($0)" } ?? "")
+                     + (v["needs_bind"] != nil ? "  (bound by an earlier version: bind again)" : ""), max: 400))
     }
     let sessions = res["sessions"] as? [[String: Any]] ?? []
-    if !sessions.isEmpty { oprint("Sealed browser sessions:") }
+    if !sessions.isEmpty { oprint("Sealed browser sessions:" + ((res["session_key_rotated"] as? String).flatMap { age($0) }.map { " (key rotated \($0))" } ?? "")) }
     for s in sessions {
-        oprint("  \(s["name"] ?? "")  profile \(s["profile"] ?? "") from VM \(s["vm"] ?? ""), saved \(s["saved_at"] ?? ""), \(s["bytes"] ?? 0) bytes, "
-               + "loaded \(s["loads"] ?? 0)x, approval \(s["approval"] ?? "each")")
+        oprint(clean("  \(s["name"] ?? "")  profile \(s["profile"] ?? "") from VM \(s["vm"] ?? ""), saved \(s["saved_at"] ?? ""), \(s["bytes"] ?? 0) bytes, "
+                     + "loaded \(s["loads"] ?? 0)x, approval \(s["approval"] ?? "each")", max: 400))
     }
     return Exit.ok
 }
@@ -456,17 +594,25 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let a = try parseArgs(argv, values: [], flags: ["json"])
     var out: [String: Any] = ["vault": paths.vault, "socket": paths.socket, "exists": vaultExists(paths), "build": Build.kind,
                               "unlocked": false]
+    if let h = try? readHeader(paths) {
+        out["format"] = h.version
+        out["enclave"] = h.enclave != nil
+        out["recovery_key"] = h.wraps?.contains { $0.kind == "recovery" } ?? false
+    }
     if let res = try? request(paths, ["op": "status"], timeout: 10), res["ok"] as? Bool == true {
         out["unlocked"] = true
-        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer"] { if let v = res[k] { out[k] = v } }
+        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer", "tokens"] { if let v = res[k] { out[k] = v } }
     }
     if a.has("json") { oprint(jsonLine(out)); return Exit.ok }
     if !(out["exists"] as? Bool ?? false) {
         oprint("vault:    none yet (\(paths.vault)); create it with: metacomputer secrets init")
     } else if out["unlocked"] as? Bool == true {
-        oprint("vault:    unlocked until \(out["expires"] ?? "?") (\(out["expires_in_s"] ?? 0) s left; confirm \(out["confirm"] ?? "?"); pid \(out["pid"] ?? "?"))")
+        oprint("vault:    unlocked until \(out["expires"] ?? "?") (\(out["expires_in_s"] ?? 0) s left; confirm \(out["confirm"] ?? "?"); pid \(out["pid"] ?? "?"); \(out["tokens"] ?? 0) live tokens)")
     } else {
         oprint("vault:    locked (the user unlocks it with: metacomputer secrets unlock, in their own terminal)")
+    }
+    if out["exists"] as? Bool == true {
+        oprint("keys:     format \(out["format"] ?? "?"), " + ((out["enclave"] as? Bool == true) ? "bound to this Mac's Secure Enclave, with a recovery key" : "passphrase only (no Secure Enclave)"))
     }
     oprint("file:     \(paths.vault)")
     oprint("socket:   \(paths.socket)")
@@ -484,12 +630,14 @@ func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     for l in lines {
         if a.has("json") { oprint(clean(String(l), max: 4000)); continue }
         guard let r = parseJSONObject(Array(l.utf8)) else { continue }
-        var s = "\(r["time"] ?? "")  \(r["op"] ?? "")"
+        var s = "#\(r["seq"] ?? "-") \(r["ts"] ?? r["time"] ?? "")  \(r["op"] ?? "")"
         for k in ["name", "field", "vm", "profile"] { if let v = r[k] { s += " \(k)=\(v)" } }
         s += "  -> \(r["result"] ?? "")"
         if let o = r["origin"] { s += " \(o)" }
         if let c = r["chars"] { s += " (\(c) chars)" }
+        if let st = r["status"] { s += " HTTP \(st)" }
         if let ap = r["approval"] as? String, ap != "-" { s += " [approval \(ap)]" }
+        if let rq = r["requester"] as? [String: Any], let p = rq["project"] as? String { s += " [Claude Code in \(tildePath(p))]" }
         if let why = r["reason"] { s += ": \(why)" }
         oprint(clean(s, max: 600))
     }
@@ -497,7 +645,7 @@ func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdVersion(_ argv: [String]) -> Int32 {
-    let info: [String: Any] = ["build": Build.kind, "source": buildSourceHash]
+    let info: [String: Any] = ["build": Build.kind, "source": buildSourceHash, "enclave_available": enclaveAvailable()]
     if argv.contains("--json") { oprint(jsonLine(info)) } else {
         oprint("mcomp-vault \(Build.kind) build, source \(buildSourceHash)")
     }
@@ -525,6 +673,12 @@ func selftest() -> Int32 {
           == "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
     check("PBKDF2-SHA256 c=4096", pbkdf2SHA256(password: Array("password".utf8), salt: Array("salt".utf8), iterations: 4096).map(sha256HexRaw)
           == "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a")
+    // HMAC-SHA256 (RFC 4231 test case 2) and HKDF-SHA256 (RFC 5869 test case 1).
+    check("HMAC-SHA256 RFC 4231 #2", hmacSHA256Hex(key: Array("Jefe".utf8), data: Array("what do ya want for nothing?".utf8))
+          == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+    check("HKDF-SHA256 RFC 5869 #1", sha256HexRaw(hkdf32([UInt8](repeating: 0x0b, count: 22), salt: hexToBytes("000102030405060708090a0b0c"),
+                                                         info: hexToBytes("f0f1f2f3f4f5f6f7f8f9")))
+          == "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf")
     // AES-256-GCM round trip, and a changed byte or wrong AAD refused.
     let k = randomBytes(32), msg = Array("round trip".utf8), aad = Array("aad".utf8)
     let sealed = (try? sealGCM(key: k, plaintext: msg, aad: aad)) ?? []
@@ -539,6 +693,8 @@ func selftest() -> Int32 {
     for (enc, dec) in b32 { check("base32 '\(enc)'", base32Decode(enc) == Array(dec.utf8)) }
     check("base32 encode", base32Encode(Array("foobar".utf8)) == "MZXW6YTBOI")
     check("base32 rejects '1'", base32Decode("MZXW1") == nil)
+    let (rk, rkText) = newRecoveryKey()
+    check("recovery key round trip", parseRecoveryKey(rkText) == rk && parseRecoveryKey(rkText.lowercased().replacingOccurrences(of: "-", with: " ")) == rk)
     check("otpauth URI", (try? parseTOTPSeed("otpauth://totp/Example:a?secret=JBSWY3DPEHPK3PXP&issuer=Example")) == base32Decode("JBSWY3DPEHPK3PXP"))
     check("otpauth SHA256 refused", (try? parseTOTPSeed("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256")) == nil)
     // Origins.
@@ -562,8 +718,14 @@ func selftest() -> Int32 {
     check("clean: C1, bidi and zero-width", clean("a\u{9B}b\u{202E}c\u{200B}d") == "a?b?c?d")
     check("clean: newlines and length", clean("a\nb\r\tc") == "a b  c" && clean("abcdef", max: 3) == "abc...")
     check("prompt text: whitespace collapsed, capped", promptText("a  \n b\tc", max: 80) == "a b c" && promptText(String(repeating: "x", count: 200), max: 80).count == 83)
-    check("KDF rounds out of range refused", (try? deriveKey(Array("x".utf8), KDFParams(name: "pbkdf2-sha256", iterations: 1 << 40,
-                                                                                         salt: Data(randomBytes(16)).base64EncodedString()))) == nil)
+    check("KDF rounds out of range refused", (try? passphraseKey(Array("x".utf8), KDFParams(name: "pbkdf2-sha256", iterations: 1 << 40,
+                                                                                          salt: Data(randomBytes(16)).base64EncodedString()))) == nil)
+    // Canonical JSON, as Python's json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True) writes it.
+    let sample: [String: Any] = ["b": 1, "a": [true, false, "x\"y\\z\n\u{7f}é😀"] as [Any], "c": ["n": -2] as [String: Any]]
+    check("canonical JSON", canonicalJSON(sample)
+          == "{\"a\":[true,false,\"x\\\"y\\\\z\\n\\u007f\\u00e9\\ud83d\\ude00\"],\"b\":1,\"c\":{\"n\":-2}}")
+    check("API header templates", splitTemplate("Authorization: Bearer {value}").map { "\($0.0)|\($0.1)|\($0.2)" } == "Authorization|Bearer |"
+          && splitTemplate("x-api-key: {value}") != nil && splitTemplate("x: {value}{value}") == nil && splitTemplate("x: none") == nil)
     oprint(failures == 0 ? "selftest: all passed (\(Build.kind) build)" : "selftest: \(failures) failed")
     return failures == 0 ? Exit.ok : Exit.failed
 }

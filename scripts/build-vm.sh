@@ -24,7 +24,7 @@ say "build $TS (log: logs/build-$TS.log)"
 
 # --- 0. prerequisites -------------------------------------------------------
 command -v "$LUME" >/dev/null || die "lume not found ($LUME)"
-for k in admin ops mcp fill hostkey; do   # fill: the secrets fill account (mcfill)
+for k in admin ops mcp fill proxy hostkey; do   # fill, proxy: the secrets accounts (mcfill, mcproxy)
   # A finished build deletes the host key's private half (below), so a rebuild makes a new
   # host key: drop the old .pub with it (bind the secrets vault again afterwards).
   [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; rm -f "$SSH_DIR/$k.pub"; ssh-keygen -q -t ed25519 -N '' -C "mcomp-$k" -f "$SSH_DIR/$k"; }
@@ -64,6 +64,7 @@ cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
 cp "$CACHE_DIR/mozilla/repo-signing-key.gpg" "$SEED/payload/mozilla-repo-signing-key.gpg"
 cp "$SSH_DIR/fill.pub" "$SEED/payload/fill.pub"   # the fill account's key (provision.sh installs it under /etc)
+cp "$SSH_DIR/proxy.pub" "$SEED/payload/proxy.pub" # the proxy account's key (likewise)
 case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub" "$SEED/payload/google-linux-signing-key.pub" ;; esac
 {
   echo "GUEST_USER=$GUEST_USER"; echo "ADMIN_USER=$ADMIN_USER"
@@ -74,6 +75,7 @@ case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub"
   echo "MCOMP_BROWSERS=\"$BROWSERS\""
   echo "MCOMP_EXTRA_PACKAGES=\"$(echo $EXTRA_PACKAGES)\""
   echo "MCOMP_VIRTUAL_AUDIO=${VIRTUAL_AUDIO:-off}"
+  echo "SECRETS_PROXY_PORT=${SECRETS_PROXY_PORT:-18765}"
 } > "$SEED/payload/versions.env"
 (cd "$SEED/payload" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 -czf ../payload.tgz .)
 rm -rf "$SEED/payload"
