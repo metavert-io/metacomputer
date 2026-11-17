@@ -43,9 +43,10 @@ setup() { # NAME FPS QUALITY AUDIO -> sets NAME FPS SIZE ENC VQ AIN AENC; loads 
      && pactl list short sinks 2>/dev/null | awk '$2 == "metacomputer" {f = 1} END {exit !f}'; then
     VQ="-thread_queue_size 512"
     AIN="-thread_queue_size 2048 -f pulse -sample_rate 48000 -channels 2 -i metacomputer.monitor"
-    # The pulse input's timestamps run about 100 ms ahead of x11grab's (measured
-    # with a flash + beep on the same frame: the beep landed 82-117 ms early over
-    # six takes); delaying the sound 90 ms puts it within a frame of the picture.
+    # The pulse input's timestamps run ahead of x11grab's: with a flash and a beep
+    # on the same frame, the beep landed 55-144 ms early (median about 86 ms over
+    # 13 takes; steady within a take, different between takes). Delaying the sound
+    # 90 ms centres it: expect sound within about 50 ms of the picture.
     AENC="-af adelay=90:all=1 -c:a aac -b:a 192k"
     WITH=", with sound"
   fi
