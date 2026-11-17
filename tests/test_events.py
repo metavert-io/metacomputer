@@ -645,6 +645,16 @@ def main():
         check("the secrets hook: exit 3 (vault locked) sends needs_you.vault_locked and keeps the exit code; others don't",
               rcs == [3, 0, 1] and [(e["family"], e["type"]) for e in new] == [("needs_you", "vault_locked")]
               and "secrets unlock" in new[0]["action"], (rcs, new))
+        btrap = re.search(r"^trap 'rc=\$\?;.*?' EXIT$", open(os.path.join(LAB, "scripts", "build-vm.sh")).read(), re.M | re.S)
+        rcs, n0 = [], len(local_log())
+        for body in ("true", 'die "boom"'):
+            rr = subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; set -Eeuo pipefail; {btrap.group(0)}\n{body}'],
+                                capture_output=True, text=True, env=menv, timeout=60)
+            rcs.append(rr.returncode)
+        new = local_log()[n0:]
+        check("build-vm.sh's exit trap: build_done when it succeeds, build_failed (error) when it dies",
+              btrap and rcs == [0, 1] and [(e["type"], e["severity"]) for e in new]
+              == [("build_done", "info"), ("build_failed", "error")], (rcs, new))
         r = subprocess.run([mc, "events", "watcher", "start"], capture_output=True, text=True, env=menv, timeout=60)
         pid = events.watcher_pid()
         check("events watcher start: a detached watcher, its pid in RUN_DIR", r.returncode == 0 and pid

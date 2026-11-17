@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks for the optional hardening (SECURITY.md) against a running VM.
 
-    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [E] [F]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [F]
 
 Use a test VM: this switches the VM's SSH and driver settings (through the
 maintenance account) and puts them back to the defaults at the end. Variants
@@ -16,11 +16,6 @@ C  DRIVER_MODE=bounded: readonly refuses input; desktop launches listed apps
    (by name, mapped to their path) and refuses the terminal and page tools;
    browser opens only listed origins; an expired or tampered manifest and a
    standard request (the VM's floor) are refused; back to standard at the end.
-E  The event stream (docs/events.md; run it by name, it isn't in the default set): with a
-   local webhook receiver in a temporary events folder, `record stop` sends task
-   .recording_stopped, `notify` sends needs_you, a blocked connection from the VM reaches
-   security within one watcher cycle, and `web open-untrusted` on a sign-in page sends
-   security.untrusted_link with origins only. Changes nothing in the VM.
 F  metacomputer sh: runs in the VM as the desktop user with the desktop's
    environment; exit codes, stdin/--file/--cwd/arguments, a detached GUI app
    the driver can read, background programs, --timeout, an interrupted run,
@@ -489,6 +484,17 @@ def test_f():
         sh(BASE, "--override", "-c", f"pkill -x mousepad; pkill -f 'sleep 6[1-4].5'; rm -f {marker} /tmp/mcomp-optf-mousepad.log; true")
 
 
+def main(argv):
+    which = [a.upper() for a in argv] or ["A", "B", "C", "F"]
+    try:
+        for k in which:
+            {"A": test_a, "B": test_b, "C": test_c, "E": test_e, "F": test_f}[k]()
+    finally:
+        shutil.rmtree(TMP, ignore_errors=True)
+    print(f"\n{sum(results)}/{len(results)} checks passed")
+    return 0 if results and all(results) else 1
+
+
 # --- E ---------------------------------------------------------------------------
 class Receiver:
     """A local webhook receiver for test E (the events go nowhere else)."""
@@ -526,6 +532,11 @@ class Receiver:
 
 
 def test_e():
+    """E: the event stream (docs/events.md), run by name (python3 tests/test_options.py E); not in the default
+    set. With a local webhook receiver in a temporary events folder: `record stop` sends task.recording_stopped,
+    `notify` sends needs_you, a blocked connection from the VM reaches security within one watcher cycle, and
+    `web open-untrusted` on a sign-in page sends security.untrusted_link with origins only. Changes nothing in
+    the VM."""
     print("E  event stream (a local receiver in a temporary events folder; the VM's settings don't change)")
     env = {"MCOMP_EVENTS_DIR": os.path.join(TMP, "events"), "MCOMP_EVENTS_SPOOL": os.path.join(TMP, "events-spool")}
     saved = {k: os.environ.get(k) for k in env}
@@ -612,17 +623,6 @@ def test_e():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-
-def main(argv):
-    which = [a.upper() for a in argv] or ["A", "B", "C", "F"]
-    try:
-        for k in which:
-            {"A": test_a, "B": test_b, "C": test_c, "E": test_e, "F": test_f}[k]()
-    finally:
-        shutil.rmtree(TMP, ignore_errors=True)
-    print(f"\n{sum(results)}/{len(results)} checks passed")
-    return 0 if results and all(results) else 1
 
 
 if __name__ == "__main__":

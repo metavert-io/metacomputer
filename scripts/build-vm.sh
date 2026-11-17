@@ -10,6 +10,9 @@
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
+# The optional event stream (docs/events.md): build_done or build_failed, however the build ends.
+trap 'rc=$?; if [ $rc = 0 ]; then emit_event lifecycle build_done info "The virtual computer $VM_NAME was built" "metacomputer start";
+      else emit_event lifecycle build_failed error "Building the virtual computer $VM_NAME failed (exit $rc)" "see ${BUILD_LOG:-the newest logs/build-*.log}" "exit=$rc"; fi' EXIT
 REPLACE=0; [ "${1:-}" = "--replace" ] && REPLACE=1
 TS="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="$LOG_DIR/build-$TS.log"

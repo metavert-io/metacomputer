@@ -281,7 +281,7 @@ local log, `$LOG_DIR/events.jsonl`.
 ```text
 emitters                                  lib/events.py                          sinks
 bin/metacomputer (start, stop, reset,  ┐   clean → number (seq, under a lock)   ┌ webhook (CloudEvents)
-  record stop, task finish, build, …)  │   → local log                          │ otlp (Collector)
+  record stop, task finish; build-vm)  │   → local log                          │ otlp (Collector)
 lib/mcp_lazy.py (in use, Chrome guard, ├─▶ → each matching sink's backlog ──────┤ syslog+tls
   bounded refusals, controllers)       │   → send now, 3 s per sink;            └ ntfy
 lib/mcp_relay.py (action-log records)  │     else retry with backoff, in order

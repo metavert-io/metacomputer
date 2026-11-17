@@ -94,6 +94,34 @@ To verify on another machine, use the public key:
 `metacomputer actions verify FILE --key action-log.pub`, or plain
 `ssh-keygen -Y verify` with the namespace `metacomputer-action-log`.
 
+## Event stream (`metacomputer events`, optional)
+
+`metacomputer events sink add` sends events to a webhook, an OpenTelemetry
+Collector, a syslog server over TLS or ntfy: when Claude is blocked on you,
+when a task or recording finishes, security signals (blocked connections, the
+Chrome guard, a failed `actions verify`, what `web open-untrusted` found) and
+the VM's lifecycle and health. [docs/events.md](docs/events.md) has the
+details. Off by default: with no sink, nothing is sent.
+
+**What is sent:** tool names, counts, file paths on the Mac, project folder
+paths, the VM's and the Mac's short names, and origins (scheme, host, port) of
+web pages. **What isn't:** typed text, passwords, tokens, page contents,
+screenshots, URL queries and fragments, the live-view password, or sink header
+values. Every string is cleaned before it is logged or sent, including events
+other programs hand in through the spool.
+
+**Where it ends:**
+- The sink configuration (`~/.config/metacomputer/events.json`, 0600) is
+  readable by anything that runs as you, Claude included. Give sinks
+  ingest-only, low-scope tokens, or keep the real credentials in a relay or a
+  local OpenTelemetry Collector. `sink list` and `sink show` never print
+  header values.
+- Claude changes sinks only when you ask, and has you run `sink add` yourself
+  when a token is involved.
+- It is best effort, at least once, not an audit trail: anyone with your login
+  can change its backlog and logs. The signed action log above is the
+  tamper-evident record.
+
 ## SSH certificates (`SSH_AUTH=cert`)
 
 By default the Mac reaches the VM with two static keys, `ops` (a shell) and
@@ -255,34 +283,6 @@ Settings:
   pass the check.
 - `--read-only` isn't enforced; it only skips the one-controller check and
   leaves out the desktop's environment.
-
-## Event stream (`metacomputer events`, optional)
-
-`metacomputer events sink add` sends events to a webhook, an OpenTelemetry
-Collector, a syslog server over TLS or ntfy: when Claude is blocked on you,
-when a task or recording finishes, security signals (blocked connections, the
-Chrome guard, a failed `actions verify`, what `web open-untrusted` found) and
-the VM's lifecycle and health. [docs/events.md](docs/events.md) has the
-details. Off by default: with no sink, nothing is sent.
-
-**What is sent:** tool names, counts, file paths on the Mac, project folder
-paths, the VM's and the Mac's short names, and origins (scheme, host, port) of
-web pages. **What isn't:** typed text, passwords, tokens, page contents,
-screenshots, URL queries and fragments, the live-view password, or sink header
-values. Every string is cleaned before it is logged or sent, including events
-other programs hand in through the spool.
-
-**Where it ends:**
-- The sink configuration (`~/.config/metacomputer/events.json`, 0600) is
-  readable by anything that runs as you, Claude included. Give sinks
-  ingest-only, low-scope tokens, or keep the real credentials in a relay or a
-  local OpenTelemetry Collector. `sink list` and `sink show` never print
-  header values.
-- Claude changes sinks only when you ask, and has you run `sink add` yourself
-  when a token is involved.
-- It is best effort, at least once, not an audit trail: anyone with your login
-  can change its backlog and logs. The signed action log above is the
-  tamper-evident record.
 
 ## Reporting a vulnerability
 

@@ -31,6 +31,11 @@
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
 #   ssh [ops|admin] [CMD...]       shell into the guest
+#   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
+#                                  tell the user Claude is blocked on them (through the event sinks)
+#   events [status | sink add|list|show|test|remove | tail [N] | emit FAMILY TYPE --message TEXT
+#          | drain | watcher start|stop|status]
+#                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
 #   mcp                            direct stdio MCP bridge (tests, mcp_client.py)
 #   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use)
 #   build [--replace]              build the VM + baseline from scratch
@@ -40,11 +45,6 @@
 #                                  and the shell channel (VM_SHELL, SHELL_LOG)
 #   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
 #                                  the signed action log (ACTION_LOG=on in config/local.env)
-#   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
-#                                  tell the user Claude is blocked on them (through the event sinks)
-#   events [status | sink add|list|show|test|remove | tail [N] | emit FAMILY TYPE --message TEXT
-#          | drain | watcher start|stop|status]
-#                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -54,6 +54,15 @@ LIB="$(dirname "$SELF")/../scripts/lib.sh"
 . "$LIB"
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
+
+# --- EVENTS HOOK (secrets) ---------------------------------------------------------
+# `metacomputer secrets` comes from another branch. When it exits 3 ("vault locked"),
+# needs_you.vault_locked goes to the event stream, however its dispatch line is
+# written (an EXIT trap, so the merge needs no edit here). Subcommands that exec the
+# vault directly (list, status, unlock, ...) never come back to run it; the paths
+# Claude uses to fill (fill, session save|load) do. The vault's own events ("approval
+# waiting", ...) come through the spool (architecture.md, "Event spool").
+if [ "$cmd" = secrets ]; then trap 'rc=$?; trap - EXIT; events_hook_secrets_exit "$rc"; exit "$rc"' EXIT; fi
 
 confirm() { # PROMPT
   [ "${ASSUME_YES:-0}" = 1 ] && return 0
@@ -921,15 +930,6 @@ do_where() { # paths a person or an agent may need
   echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
 }
 
-# --- EVENTS HOOK (secrets) ---------------------------------------------------------
-# `metacomputer secrets` comes from another branch. When it exits 3 ("vault locked"),
-# needs_you.vault_locked goes to the event stream, however its dispatch line is
-# written (an EXIT trap, so the merge needs no edit here). Subcommands that exec the
-# vault directly (list, status, unlock, ...) never come back to run it; the paths
-# Claude uses to fill (fill, session save|load) do. The vault's own events ("approval
-# waiting", ...) come through the spool (architecture.md, "Event spool").
-if [ "$cmd" = secrets ]; then trap 'rc=$?; trap - EXIT; events_hook_secrets_exit "$rc"; exit "$rc"' EXIT; fi
-
 case "$cmd" in
   start)      do_start ;;
   stop)       do_stop "$@" ;;
@@ -940,6 +940,14 @@ case "$cmd" in
   test)       parse_flags "$@"; owners_check
               exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
   who)        do_who "$@" ;;
+  notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
+  events)     export_options
+              if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
+              "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?
+              # A first sink added while the computer runs: start the watcher now rather than at the next start.
+              if [ $rc = 0 ] && [ "${1:-}" = sink ] && [ "${2:-}" = add ] && vm_running "$VM_NAME"; then events_watcher_start; fi
+              exit $rc ;;
+  _health)    do_health ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
   call)       [ $# -ge 1 ] || die "usage: metacomputer call TOOL ['JSON']"
@@ -975,18 +983,7 @@ case "$cmd" in
   mcp-lazy)   export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py" ;;
   actions)    export_options; exec "$PY" "$LAB_ROOT/lib/actionlog.py" "$@" ;;
   security)   do_security "$@" ;;
-  notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
-  events)     export_options
-              if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
-              "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?
-              # A first sink added while the computer runs: start the watcher now rather than at the next start.
-              if [ $rc = 0 ] && [ "${1:-}" = sink ] && [ "${2:-}" = add ] && vm_running "$VM_NAME"; then events_watcher_start; fi
-              exit $rc ;;
-  _health)    do_health ;;
-  build)      "$LAB_ROOT/scripts/build-vm.sh" "$@"; rc=$?
-              if [ $rc = 0 ]; then emit_event lifecycle build_done info "The virtual computer $VM_NAME was built" "metacomputer start"
-              else emit_event lifecycle build_failed error "Building the virtual computer $VM_NAME failed (exit $rc)" "see the newest logs/build-*.log" "exit=$rc"; fi
-              exit $rc ;;
+  build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
               gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null ;;
   _vnc-install) do_vnc_install ;;
