@@ -325,7 +325,7 @@ func exitFor(_ res: [String: Any]) -> Int32 {
 
 func printResult(_ res: [String: Any]) {
     var out: [String: Any] = [:]
-    for k in ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "reason"] { if let v = res[k] { out[k] = v } }
+    for k in ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "reason"] { if let v = res[k] { out[k] = v } }
     if out["ok"] == nil { out["ok"] = false }
     oprint(jsonLine((cleanAll(out) as? [String: Any]) ?? ["ok": false]))
 }

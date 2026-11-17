@@ -331,6 +331,8 @@ final class UnlockServer {
     func finish(_ op: String, _ fields: [String: Any], _ res: [String: Any], pid: Int32, approval: String) -> [String: Any] {
         var out = fields
         for k in ["ok", "status", "origin", "chars", "reason", "bytes"] { if let v = res[k] { out[k] = v } }
+        // How the VM typed it: "element" (into the checked element) or "keyboard" (the fallback).
+        if let r = res["route"] as? String, ["element", "keyboard"].contains(r) { out["route"] = r }
         out = (cleanAll(out) as? [String: Any]) ?? fields
         let status = out["status"] as? String ?? "error"
         var rec = fields
@@ -338,7 +340,7 @@ final class UnlockServer {
         rec["result"] = status
         rec["approval"] = approval
         rec["client_pid"] = Int(pid)
-        for k in ["origin", "chars", "reason", "bytes"] { if let v = out[k] { rec[k] = v } }
+        for k in ["origin", "chars", "reason", "bytes", "route"] { if let v = out[k] { rec[k] = v } }
         audit(paths, rec)
         var line = "          -> \(status)"
         if let o = out["origin"] as? String { line += ": \(o)" }

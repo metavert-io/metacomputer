@@ -197,7 +197,8 @@ if rec["user"] == "mcfill":
     elif req.get("mode") == "check":
         out = {{"ok": True, "mode": "check", "field": req["field"], "origin": req["origins"][0]}}
     else:
-        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req["value"])}}
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req["value"]),
+               "route": "element"}}
     print(json.dumps(out))
 elif "-czf -" in remote:
     rec["kind"] = "session:save"
@@ -553,8 +554,8 @@ def run(td, procs):
           and "contents changed" in js(r).get("reason", "") and "bind` again" in js(r).get("reason", ""), r.stdout)
     r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
     res = js(r)
-    check("fill a password: exit 0, chars reported", r.returncode == 0 and res.get("ok") is True and res.get("chars") == len(PW_VALUE)
-          and res.get("origin") == SITE, r.stdout + r.stderr)
+    check("fill a password: exit 0, chars and the typing route reported", r.returncode == 0 and res.get("ok") is True
+          and res.get("chars") == len(PW_VALUE) and res.get("origin") == SITE and res.get("route") == "element", r.stdout + r.stderr)
     c = calls()[-1]
     sent = json.loads(c["stdin"])
     check("the fill goes to the fill account (mcfill) with the fill key", c["user"] == "mcfill"
