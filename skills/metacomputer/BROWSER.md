@@ -110,3 +110,12 @@ Each runs in its own throwaway browsers and writes `report.md`, `report.json` an
 | `metacomputer web open-untrusted URL [--watch 10]` | "what does this link do / is it safe to open": server and in-page redirects, the final page, password prompts, downloads started (which stay in the VM). Nothing on the page is clicked |
 
 Options: `--task NAME` puts the results in that task's folder, `--record` records the screen, `--json` prints the report as JSON. `--override` runs while another session is using the computer (ask first).
+
+`open-untrusted` also sends what it found (password prompts, downloads, a redirect to another site) to the user's event sinks, if they set any up. Don't `notify` about it again.
+
+## When a page needs the user
+
+- **What counts:** a sign-in, a CAPTCHA, a one-time code, or an approval only they can give.
+- **Run `metacomputer notify`** with the site's name (not the link) and what to do, for example: `metacomputer notify "Sign-in needed at example.com to export the invoices" --why login --action "Sign in through the live view (metacomputer view), then tell Claude to carry on"`.
+- **Say it in your reply, then wait.** [EVENTS.md](EVENTS.md) has the `--why` values and what's sent automatically.
+- **Never solve a CAPTCHA through another service,** and never look for a way around a sign-in.

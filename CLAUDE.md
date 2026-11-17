@@ -51,6 +51,14 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   as an acting call for the one-controller rule. The VM is untrusted: keep the
   Mac side's wire limits, deadline, strict reply schema and terminal escaping
   (docs/shell.md, "A VM that misbehaves").
+- Optional event stream (docs/events.md): `metacomputer notify` when blocked
+  on the user; `metacomputer events sink …` only when the user asks (it
+  decides what leaves the Mac). Off by default and best effort: an emitter
+  must never fail or block its command (`emit_event` in `scripts/lib.sh`,
+  `events.emit` / `emit_async` in Python). New event fields go through
+  `lib/events.py`'s cleaning; never put typed text, tokens or URL queries in
+  an event. Other programs hand in events through the spool (architecture.md,
+  "Event spool").
 
 ## Useful commands
 
@@ -60,6 +68,7 @@ metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-o
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
 metacomputer security [apply] | actions list|show|verify   # optional hardening, signed action log
 metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop user (docs/shell.md)
+metacomputer notify "TEXT" --why login --action "…" | events status|tail|sink list   # optional event stream
 metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
 metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --describe TOOL
 ```
@@ -75,9 +84,10 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
   `status` says to rebuild them.
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
-  `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py` and
-  `python3 tests/test_ssh_options.py` (no VM),
-  `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
+  `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
+  `python3 tests/test_ssh_options.py` and `python3 tests/test_events.py` (no VM),
+  `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings; `E` is the event
+  stream). See TESTING.md.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),
 docs/chrome-investigation.md, and `.claude/skills/cua-driver/` (the

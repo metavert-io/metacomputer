@@ -183,6 +183,34 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
+## Event stream: `tests/test_events.py`, `tests/test_options.py E`
+
+`python3 tests/test_events.py` needs no VM (78 checks, about 10 s). It keeps
+everything in a temporary folder and runs a local receiver for each kind: an
+HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
+CA, made with `openssl` (the syslog checks are skipped without it). It checks:
+- sinks are added, listed, shown and removed; the config is private; header values and ntfy topics are never printed; plain http off the Mac, syslog without TLS and credentials in URLs are refused;
+- four sinks receive the same events in order, in each format: CloudEvents with a valid HMAC signature, OTLP/HTTP JSON, RFC 5424 over TLS with octet counting, ntfy;
+- family and minimum-severity filters, and the opt-in `actions` family;
+- cleaning: control characters and escape sequences, URL queries and credentials, secret-looking keys, size caps, a sink's header value and the live-view password;
+- the spool, including invalid and oversized files;
+- a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
+- eight processes emitting at once; debounce; `notify`;
+- the watcher's pieces (blocked connections batched a minute at a time, health changes), `events watcher start|stop`, and the bridge's hooks (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
+- the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
+- the bash helper, including a broken config that must not fail the command, and the exit hook for `metacomputer secrets` ("vault locked").
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py E` runs against a
+running VM, with its own temporary events folder and a local webhook receiver,
+so your own sinks get nothing. It changes nothing in the VM (a test page in
+`/tmp` is removed afterwards). It checks:
+- `metacomputer _health` (the watcher's probe) answers without MCP;
+- `record start` / `record stop` sends `task.recording_stopped` with the recording's details (the test recording is deleted afterwards);
+- `notify` sends `needs_you.login` with the action;
+- a blocked connection from the VM (`curl` to `10.255.255.254:9`) reaches the receiver as `security.blocked_connections` within one watcher cycle (if a watcher already runs for that VM, the test drives one cycle with `events watch --once` instead);
+- `web open-untrusted` on `tests/fixtures/site/signin.html` sends `security.untrusted_link` with the password field and origins only;
+- nothing the receiver got holds a URL query or the live-view password.
+
 ## Browser checks: `metacomputer web …`
 
 `compare`, `responsive`, `a11y` and `open-untrusted` serve as their own

@@ -227,7 +227,8 @@ Every connection the guest opens is checked on the host:
   benchmark/reserved ranges, outbound SMTP
 - everything else (the public internet): allowed
 
-Blocked attempts are logged to `logs/netgw-blocked.jsonl`. Inbound: there is
+Blocked attempts are logged to `logs/netgw-blocked.jsonl` (with an event
+sink configured, the event watcher reports new ones; see "Event stream"). Inbound: there is
 no route to the guest at all except the two forwards, which listen on
 127.0.0.1 only. The guest's ufw additionally admits only 22 and 5900 from the
 gateway address. There is no vmnet bridge, so the guest never appears on
@@ -266,6 +267,90 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
 
 The VMs are not started at login and no LaunchAgent or daemon was added.
+With an event sink configured, `start` also starts the event watcher (a
+detached process, like cua-netgw) and `stop` stops it; see below.
+
+## Event stream (optional)
+
+`lib/events.py` ([docs/events.md](docs/events.md)) sends events to sinks the
+user adds with `metacomputer events sink add`: a CloudEvents webhook signed
+with HMAC-SHA256, OTLP/HTTP JSON logs, RFC 5424 syslog over TLS (RFC 5425
+framing) or ntfy. With no sink, nothing is sent and events only reach the
+local log, `$LOG_DIR/events.jsonl`.
+
+```text
+emitters                                  lib/events.py                          sinks
+bin/metacomputer (start, stop, reset,  ┐   clean → number (seq, under a lock)   ┌ webhook (CloudEvents)
+  record stop, task finish, build, …)  │   → local log                          │ otlp (Collector)
+lib/mcp_lazy.py (in use, Chrome guard, ├─▶ → each matching sink's backlog ──────┤ syslog+tls
+  bounded refusals, controllers)       │   → send now, 3 s per sink;            └ ntfy
+lib/mcp_relay.py (action-log records)  │     else retry with backoff, in order
+actionlog verify, web open-untrusted   │
+metacomputer notify (Claude)           ┘
+spool files (the secrets vault, …)  ──▶ taken on every emission and by the watcher
+events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
+```
+
+- **Where it runs.** In the process that emits: commands emit before they
+  return (at most about 3 s, sinks in parallel); the two bridges emit on a
+  background thread so a tool call never waits. A sink in its backoff isn't
+  tried at all.
+- **State.** `~/.config/metacomputer/events.json` (sinks, 0600) and
+  `events-state/` beside it: the sequence counter and a global lock, per sink
+  an append-only backlog file, its delivery status and its own lock, debounce
+  marks, and the watcher's place in the gateway log. Events are appended to
+  backlogs under the global lock, in sequence order; one process at a time
+  sends a sink's backlog, under that sink's lock. `MCOMP_EVENTS_DIR` moves all
+  of it.
+- **The watcher.** `events.py watch`, started by `start` when a sink exists
+  (pid in `$RUN_DIR/events-watcher.pid`). Every 30 s: the spool, due
+  backlogs, and new lines of `$LOG_DIR/netgw-blocked.jsonl` (destination,
+  port, protocol, reason; batched to one event a minute). Every 5 min:
+  `metacomputer _health` (Lume state, gateway, SSH, `guest-status`, the desktop
+  recording), with one event per change. It never opens an MCP connection.
+- **Cleaning.** Every string loses control characters, escape sequences, URL
+  queries, fragments and credentials, and any sink header value or the VNC
+  password; secret-looking keys are dropped from `data`; sizes are capped.
+
+### Event spool
+
+The contract for programs that produce events without calling metacomputer,
+such as the secrets vault ("approval waiting", "vault locked"):
+
+- **Folder:** `~/Library/Application Support/metacomputer/events/spool/`, or
+  `$MCOMP_EVENTS_SPOOL`. The producer creates it if missing, 0700. Files
+  in it must be regular files owned by the same user; anything else is
+  skipped.
+- **One file per event,** named `<time>-<random>.json`, where `<time>` is UTC
+  `YYYYMMDDTHHMMSS.ffffffZ` (fixed width, so names sort in time order) and
+  `<random>` is at least 8 letters or digits.
+- **Written atomically:** write the content to a name that starts with `.` or
+  doesn't end in `.json` (for example `.<name>.tmp`) in the same folder, then
+  rename it to the final name. Such temporary names are never read.
+- **Content:** one UTF-8 JSON object of at most 64 KB:
+
+  | Field | Required | |
+  | --- | --- | --- |
+  | `family` | yes | `needs_you`, `task`, `security`, `lifecycle` or `actions` |
+  | `type` | yes | lowercase letters, digits and `_`, at most 40 (`^[a-z0-9][a-z0-9_]{0,39}$`) |
+  | `message` | yes | one line for a person |
+  | `severity` | no | `info`, `warn` or `error`; default by family (`needs_you` and `security` warn, the others info) |
+  | `vm` | no | the VM's name; default: the VM of the process that takes the file |
+  | `action` | no | what the person should do |
+  | `data` | no | a small object |
+  | `project` | no | a folder path |
+
+  Other fields are ignored. The event's time is the file's modification time.
+- **Taking them:** on every emission and every watcher cycle, under the
+  global lock, oldest name first (up to 500 per pass). A valid file is
+  cleaned like any event (so a producer can't leak a URL query or a
+  secret-looking key through it), numbered, logged, queued for each matching
+  sink, then deleted; delivery then follows the sinks' backlogs. An invalid or
+  oversized file is deleted and counted (`events status --json`,
+  `spool_rejected`).
+- **Guarantees:** at least once to each sink, in order with everything else.
+  Files wait in the spool while nothing runs (no command, no watcher). With no
+  sink configured, taken events reach only the local log.
 
 ## Known limitations
 
