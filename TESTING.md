@@ -247,7 +247,7 @@ connection to the VM and checks:
 
 Both need no VM, and every value in them is a dummy.
 
-`python3 tests/test_secrets.py` (119 checks, about 45 s) builds two copies of
+`python3 tests/test_secrets.py` (127 checks, about 50 s) builds two copies of
 `mcomp-vault`:
 - a release build, which must not contain the test switches;
 - a test build that runs a stub instead of `ssh` (`scripts/build-vault.sh --test`).
@@ -258,11 +258,15 @@ The test types the passphrase, values and approvals into a pseudo-terminal, as a
 person would. It checks that:
 - `init`, `set`, `bind` and `unlock` refuse without a terminal, and refuse short or
   mismatched passphrases, bad sites and names, and the wrong passphrase;
-- `bind` shows what it pins and pins nothing without `yes`;
+- `bind` shows what it pins, pins nothing without `yes`, refuses paths with control or
+  invisible characters, and (through `bin/metacomputer`) warns while the VM's private
+  host key is still on the Mac;
 - the vault file is 0600 and holds no names or values in the clear, and a header with
   absurd KDF rounds is refused;
 - while locked, `list` and `fill` exit 3 and nothing reaches the VM;
-- a port served by anything but the pinned gateway program is refused;
+- a port served by anything but the pinned gateway program is refused. A stand-in
+  `cua-netgw`, compiled by the test, passes, and is refused once its file's contents
+  change; both refusals say to bind again;
 - a fill goes to the fill account (`mcfill`) with the fill key, and its value
   reaches the VM side only on ssh's standard input, never on the command line or in
   the environment;
@@ -272,12 +276,13 @@ person would. It checks that:
 - wrong field and kind combinations are refused before anything is sent;
 - `each` approval:
   - `y` and wrong words refuse, and send only a check without the value;
+  - the question shows the Chrome profile and the selector (one line, at most 80 characters);
   - the secret's name allows, and only the approved site goes with the value;
   - a check naming another site is refused;
   - the listener is checked again after approval;
   - no answer times out, and a question can't outlast the unlock;
-- inside tmux, `--confirm each` won't start and confirmations are refused unless
-  `--allow-multiplexer`;
+- inside tmux (and with `$WEZTERM_PANE` or `$KITTY_LISTEN_ON`), `--confirm each` won't
+  start and confirmations are refused unless `--allow-multiplexer`;
 - control and bidi characters from the VM or a hostile request reach no output,
   terminal or log, and a VM answer holding the value (even a 6-digit code) is withheld;
 - sealed sessions:
@@ -297,7 +302,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_secret_fill.py` (141 checks) covers the VM side,
+`python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -308,16 +313,25 @@ tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 - **The whole program against a fake Chrome DevTools server**, found through a
   `/proc/net/tcp` fixture beside a plain web server, a silent listener and another
   user's port. The fake models:
-  - frames, isolated worlds, `DOM.describeNode` and `SystemInfo`;
-  - a tab list that disagrees with the frame tree;
+  - frames with loader ids, isolated worlds, `DOM.describeNode` and `SystemInfo`;
+  - a tab list, or a page's own world, that disagrees with the frame tree;
   - cross-origin, srcdoc, sandboxed and out-of-process frames;
-  - several tabs and profiles;
-  - focus moving during a fill, length limits and invalid selectors.
+  - several tabs;
+  - profiles found from the browser's command line (`SystemInfo.getInfo`), from its
+    pid and `/proc`, or from `Browser.getBrowserCommandLine`, and a failure that
+    says what each route answered;
+  - a reload between the check and the typing (nothing typed) and a navigation during
+    it (reported);
+  - the keyboard route when a page won't take `execCommand`;
+  - focus moving or lost, length limits and invalid selectors;
+  - no known desktop user (nothing filled), and a hung browser (the deadline).
 - **The whole program against a real headless Chromium**, when one is found
-  (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It fills a dummy login
-  page with fields in a same-origin frame, a srcdoc frame, a cross-origin frame and a
-  shadow root. It also checks a page that redefines `type`, `activeElement` and
-  `self.origin` in its own world.
+  (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:
+  - fills a dummy login page, through the element itself, with fields in a same-origin
+    frame, a srcdoc frame, a cross-origin frame and a shadow root;
+  - finds the profile from the browser's own command line, with no `/proc`;
+  - checks a page that redefines `type`, `activeElement` and `self.origin` in its own
+    world.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` checks the fill account on
 a VM built with this version, changing nothing. It covers:
@@ -344,7 +358,8 @@ manual steps below.
    another terminal: focus the field, then run
    `metacomputer secrets fill demo --field password --profile P`.
 5. Check:
-   - the question names the page's site, and typing `demo` allows it;
+   - the question names the page's site and the profile, and typing `demo` allows it;
+   - with `--profile`, a failure lists what each route answered;
    - the field fills and the result shows `chars`;
    - submitting the page shows only the lengths of what was typed.
 

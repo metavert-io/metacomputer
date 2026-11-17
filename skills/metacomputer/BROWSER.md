@@ -100,14 +100,18 @@ Things to know:
 
 ## Signing in: `metacomputer secrets`
 
-The user can keep passwords, one-time-code seeds and saved browser logins in a vault on the Mac. Claude uses them without ever seeing them. Background: SECURITY.md, "Secrets and logins", in the project folder.
+The user can keep passwords, one-time-code seeds and saved browser logins in a vault on the Mac. Claude uses them without the values passing through the conversation. Background: SECURITY.md, "Secrets and logins", in the project folder.
 
-- **What this guarantees:**
-  - Values never come back to Claude, in results, logs or recordings.
+- **What this does in normal use:**
+  - Values don't come back to Claude, in results, logs or recordings.
+  - Every use waits for the user's unlock, and their typed approval when a secret asks for it.
   - The fill runs in a VM account Claude can't change.
   - Cua's page snapshots mask password fields.
   - Usernames and one-time codes are ordinary text on the page, so snapshots and screenshots show them.
-- **What it doesn't cover:** code run as the VM's desktop user (`metacomputer ssh ops`, or the VM's terminal app) can reach Chrome's DevTools and read a filled field. Never do that, and never try to read a secret back in any other way.
+- **What it can't stop: a hostile agent.**
+  - Code run as the VM's desktop user (`metacomputer ssh ops`, `put`, the VM's terminal app) can pose as Chrome's DevTools to receive a fill, or read a filled field back.
+  - Driving the browser can reveal a field: a site's "show password" button, Chrome's developer tools (F12), a `javascript:` address.
+  - **Never do any of these, and never try to see a secret in any other way.** If a page shows a secret anyway (for example after a "show password" click), don't read it out, and tell the user.
 - **Never ask for a password, a code or the vault passphrase in chat.** Never type one with `type_text`, `browser_type` or a shell command.
   - If the user offers one, ask them to keep it out of the chat and store it themselves, in their own terminal: `metacomputer secrets set NAME --kind password --origin https://site --username U`.
 - **See what's stored:** `metacomputer secrets list`. It shows names, sites, usernames and which `--field`s each secret fills, never values. It works only while the vault is unlocked.

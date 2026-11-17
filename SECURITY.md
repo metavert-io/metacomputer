@@ -29,8 +29,9 @@ mode turns it off, and its optional logging.
 `metacomputer security apply` does the same without a restart.
 
 A fourth section, [Secrets and logins](#secrets-and-logins-metacomputer-secrets),
-covers `metacomputer secrets`: letting Claude sign in to sites in the VM without
-ever seeing your passwords or codes.
+covers `metacomputer secrets`: letting Claude sign in to sites in the VM without your
+passwords or codes passing through the conversation, and what that does and doesn't
+protect against.
 
 ## What these protect against
 
@@ -353,7 +354,18 @@ Settings:
 Some tasks need a login. A password typed into the conversation lands in the
 transcript, and from there in logs and perhaps recordings. `metacomputer secrets`
 lets Claude use a password, a one-time code or a saved browser login inside the VM
-without the value ever reaching Claude. You allow it from your own terminal.
+without the value passing through the conversation, and only when you allow it from
+your own terminal.
+
+**The limit, up front.** This keeps values out of Claude's view in normal operation,
+and every use waits for you. It is not a wall against a deliberately hostile agent.
+- By default Claude also has a shell in the VM as the desktop user, and Chrome runs as
+  that user. Code running there can pose as Chrome's DevTools to receive a fill, or
+  read a filled field back.
+- Driving the browser can reveal a field too: a site's "show password" button, Chrome's
+  developer tools, a `javascript:` address.
+
+"What doesn't hold" below has the details and how to narrow them.
 
 It ships in this repository. It needs no password manager, no other secrets tool and
 not the macOS Keychain. It has two parts:
@@ -384,17 +396,24 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
 - `--approval each` makes every use of that secret ask you first.
   `unlock --confirm each` does that for every use of every secret. To allow a use,
   you type the secret's name (not just "y").
-- **`bind`** shows what it will pin: the VM's SSH port, its host key's fingerprint,
-  the fill and desktop accounts and their keys, and the gateway program. These come
-  from files any program of yours can change (the config, `known_hosts`), so check
-  the fingerprint on the VM itself before you type `yes`: in the live view
+- **`bind` pins the VM.** It shows:
+  - the VM's SSH port and its host key's fingerprint;
+  - the fill and desktop accounts and their keys;
+  - the gateway program, by path and contents (sha256).
+
+  These come from files any program of yours can change (the config, `known_hosts`).
+  Check the fingerprint on the VM itself before you type `yes`: in the live view
   (`metacomputer view`), open a terminal in the VM and run
-  `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
-- **Unlock in a plain terminal window, not inside tmux or screen.** In a multiplexer,
-  any program of yours can type into the pane (`tmux send-keys`, `screen -X stuff`),
-  including the answer to a confirmation. `unlock` warns when it detects one (from
-  `$TMUX`, `$STY` or its parent processes). Uses that need a confirmation are refused
-  there, and `--confirm each` won't start, unless you add `--allow-multiplexer`.
+  `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Bind again after rebuilding the
+  VM (a new host key), moving the checkout or rebuilding the gateway.
+- **Unlock in a plain terminal window, not inside a multiplexer.** In one, any program
+  of yours can type into the pane, including the answer to a confirmation:
+  `tmux send-keys`, `screen -X stuff`, `wezterm cli send-text`, `kitty @ send-text`.
+  - `unlock` warns when it sees one: `$TMUX`, `$STY`, `$ZELLIJ`, `$WEZTERM_PANE`,
+    `$KITTY_LISTEN_ON`, or a tmux, screen, zellij, byobu, dtach or abduco parent process.
+  - There, uses that need a confirmation are refused, and `--confirm each` won't
+    start, unless you add `--allow-multiplexer`.
+  - The list isn't complete; see "What doesn't hold".
 
 ### How a fill works
 
@@ -407,13 +426,15 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    - the field fits its kind: `password` and `username` for a password, `otp` for
      a TOTP seed (it works out the current 6-digit code), `text` for text;
    - the VM is bound;
-   - the program listening on the VM's SSH port is named `cua-netgw` and is the
-     gateway program pinned at bind (the kernel's path for that process).
+   - the program listening on the VM's SSH port is named `cua-netgw`, is the gateway
+     program pinned at bind (the kernel's path for that process), and that file still
+     has the contents pinned at bind.
 4. If the secret or the unlock says `each`, it first asks the VM to check the page
-   without the value. It then asks in your terminal, naming the real site, for example:
-   `Fill x-login (password) into https://x.com on VM metacomputer?`. You type the
-   secret's name to allow it. No answer within 120 seconds, or before the unlock's
-   time runs out, counts as no.
+   without the value. It then asks in your terminal, naming the real site, the Chrome
+   profile and any selector, for example:
+   `Fill x-login (password) into https://x.com on VM metacomputer?`.
+   - You type the secret's name to allow it.
+   - No answer within 120 seconds, or before the unlock's time runs out, counts as no.
    - After you allow it, only that site is sent with the value.
    - The listener is checked again before the value goes.
 5. It runs `/usr/bin/ssh` with the pinned port and host key, ignoring your SSH config
@@ -421,14 +442,20 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    request, value included, to ssh's standard input.
 6. In the VM, sshd runs one program for that account, `secret-fill`, whatever is
    asked for. It:
-   - finds Chrome's DevTools among the desktop user's listeners on 127.0.0.1;
-   - takes every frame's site from the browser (`Page.getFrameTree`);
-   - finds the focused element frame by frame in isolated worlds, which page
-     scripts can't reach or redefine;
+   - finds Chrome's DevTools among the desktop user's listeners on 127.0.0.1. With
+     `--profile`, it picks the one whose command line names that profile;
+   - takes every frame's site from the browser (`Page.getFrameTree`) and checks it
+     against `self.origin` inside that frame's isolated world;
+   - finds the focused element frame by frame in isolated worlds, which page scripts
+     can't reach or redefine;
    - checks the tab's site, the site of the frame the field is in, and the element's
      type;
-   - types the value (`Input.insertText`), and checks that the same element now
-     holds that many characters.
+   - confirms the frames still hold the same documents;
+   - types the value into that very element, inside its own document;
+   - checks that the same element now holds that many characters, and that no frame
+     on the way navigated.
+
+   It gives up after 40 seconds.
 7. Claude gets back only the outcome, for example
    `{"ok":true,"field":"password","origin":"https://x.com","chars":16}`, or a refusal
    and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error.
@@ -442,8 +469,8 @@ can use it, so it's safe to leave on:
 - its key list is root-owned, under `/etc/ssh/metacomputer-fill/`;
 - sshd forces `secret-fill`, which is root-owned, for it.
 
-The desktop account, which Claude's shell (`metacomputer ssh ops`) and the driver
-use, can't change the program, read its input or alter its environment.
+It fills nothing unless it can tell which user runs the desktop, from the root-owned
+`/etc/metacomputer/fill.conf`.
 
 **Sealed browser logins.**
 - `metacomputer secrets session save NAME --profile P` packs one of the driver's
@@ -467,28 +494,44 @@ use, can't change the program, read its input or alter its environment.
 
 ### What holds by default
 
-- **Values never reach Claude.** They never appear in:
+- **In normal operation, values stay out of Claude's view.** They don't appear in:
   - the conversation or transcript;
-  - command output and replies;
+  - command output or the vault's replies;
   - the vault's audit log or the signed action log;
-  - recordings, for passwords (see "On the screen" below).
+  - Claude's normal tool results.
 
-  They're never put on a command line or in an environment variable. A VM answer
-  that contains the value (at any length, even a 6-digit code) is withheld.
-- **The fill runs in an account Claude can't change.** It's not the desktop account
-  that Claude's shell and the driver use (above).
-- **Cua's page snapshots mask password fields.** Checked with Cua Driver 0.52.1:
-  `semantic_v2` and `dom_refs_v1` snapshots don't contain a password field's value.
-  The driver has no tool for running arbitrary page scripts. Usernames and one-time
-  codes are ordinary text on the page, and snapshots show them.
-- **Using a secret needs you.** The vault is locked until you unlock it in your own
+  Cua's page snapshots mask password fields (checked with Cua Driver 0.52.1: neither
+  `semantic_v2` nor `dom_refs_v1` contains a password field's value), and the driver
+  has no tool for running page scripts.
+  - On screen and in recordings, passwords show as dots.
+  - Usernames and one-time codes are ordinary text on the page, so snapshots,
+    screenshots and recordings show them.
+  - Values are never put on a command line or in an environment variable. A VM answer
+    that contains the value (at any length, even a 6-digit code) is withheld.
+- **Every use waits for you.** The vault is locked until you unlock it in your own
   terminal with its passphrase.
   - It locks again on Ctrl-C, when its time is up, or when that terminal closes.
   - Your terminal shows every request and its outcome, never the values.
+  - With `each`, you confirm each use by typing its name.
   - Adding, changing or deleting a secret, binding a VM and relaxing a session's
     approval each need the passphrase again, even while the vault is unlocked.
-- **Confirmation per use, when you want it:** `--approval each`, or
-  `unlock --confirm each`. You confirm by typing the name.
+- **The request travels to a program Claude can't change or read from.** The value
+  goes from the vault over SSH to `secret-fill` in the fill account. Nothing the desktop
+  account does can alter that program, see its input or change its environment. What
+  `secret-fill` then talks to, Chrome's DevTools, runs as the desktop user (see below).
+- **Wrong site or wrong field is refused.** A fill is refused when:
+  - the tab isn't on one of the secret's sites;
+  - the focused field is in a frame from another site, or one the fill can't look into;
+  - the field doesn't fit. A password goes only into a password field, a username
+    into a text, email or phone field, and a code into a text, phone or number field.
+
+  These checks use the browser's view, so a page's own scripts can't fake them. The
+  value goes into the element that was checked, in the same document, and a navigation
+  in between is refused or reported. Asking for a field the secret doesn't have is
+  refused before anything reaches the VM.
+- **A pinned VM.** The vault connects only:
+  - to the VM you bound, with its pinned host key, accounts and keys;
+  - when the pinned gateway program (path and contents) is the one listening on that port.
 - **Text from the VM or a client can't drive your terminal.** Before anything is
   printed in the unlock terminal, written to the audit log or sent back, these are
   removed:
@@ -496,19 +539,8 @@ use, can't change the program, read its input or alter its environment.
   - format characters (bidi overrides, zero-width);
   - other non-printing characters.
 
-  Names are validated. A site the VM reports must be one of the secret's, written
-  exactly as stored.
-- **Wrong site or wrong field is refused.** A fill is refused when:
-  - the tab isn't on one of the secret's sites;
-  - the focused field is in a frame from another site, or one the fill can't look into;
-  - the field doesn't fit. A password goes only into a password field, a username
-    into a text, email or phone field, and a code into a text, phone or number field.
-
-  These checks use the browser's view, so a page's own scripts can't fake them.
-  Asking for a field the secret doesn't have is refused before anything reaches the VM.
-- **A pinned VM.** The vault connects only to the VM you bound: its port and pinned
-  host key, with the pinned accounts and keys. It connects only when the pinned
-  gateway program is the one listening on that port.
+  Names and bind's paths are validated. A site the VM reports must be one of the
+  secret's, written exactly as stored.
 - **Encrypted at rest.**
   - `vault.json` is sealed with AES-256-GCM. Its key comes from your passphrase
     through PBKDF2-HMAC-SHA256 (600,000 rounds, random salt).
@@ -528,6 +560,30 @@ use, can't change the program, read its input or alter its environment.
 
 ### What doesn't hold
 
+- **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
+  ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
+  user, and so does code started that way. Such code can:
+  - **pose as Chrome's DevTools** on 127.0.0.1 and receive a fill. Nothing the fill
+    account can check rules this out: the listener's answers, including the command line
+    used for `--profile`, are its own;
+  - **read a filled field back** from the real Chrome through its DevTools.
+- **An agent that drives the browser to reveal a field**, with no shell at all:
+  - a site's "show password" button turns the field into plain text, which snapshots,
+    screenshots and recordings then show;
+  - Chrome's own developer tools (F12, `devtools://` pages) can read any field;
+  - so can a `javascript:` address typed into the address bar.
+- **Narrowing those two.**
+  - Deny Claude `metacomputer ssh` (and `put`) in Claude Code's permissions, and use
+    `DRIVER_MODE=bounded` with the `desktop` profile (no terminal app). That removes
+    the easy shell routes, not the browser ones.
+  - The VM's managed Chrome policy doesn't turn off developer tools:
+    `DeveloperToolsAvailability` might also close the debugging port the driver relies
+    on (unconfirmed).
+  - It doesn't block `javascript:` addresses either: that would break sites that use
+    them.
+  - Even so, the agent gets a value only by going after it on purpose, each use still
+    waits for your unlock (and for your typed approval with `each`), and your terminal
+    and the audit log show every fill.
 - **An agent that controls your Mac shell.** Claude Code runs as you. An agent bent
   on harm could:
   - kill the unlock process;
@@ -536,45 +592,49 @@ use, can't change the program, read its input or alter its environment.
   - copy `vault.json` and try to guess the passphrase offline. Use a long one;
   - put back an older copy of `vault.json` (older secrets or bindings); the vault
     can't tell;
-  - tamper with the VM;
-  - run its own copy of the pinned gateway program (cua-netgw passes the listener
-    check by name and path) on the VM's port while the VM is off. The pinned host key
-    still stops a fill, since that gateway can't prove it's the VM.
+  - tamper with the VM, or read it: the VM's disk image (in Lume's VM folder) is
+    readable by your account.
+  - **Pose as the VM.** The gateway pin can't tell a copy of the real cua-netgw,
+    started by the agent on the VM's port, from the VM's own. Only the pinned host key
+    then stops a fill, and the private half of that key exists only in the VM:
+    - builds delete the Mac's copy, `$SSH_DIR/hostkey`;
+    - for a VM built earlier, delete it yourself (`metacomputer secrets bind` reminds
+      you);
+    - an agent that reads the key out of the VM's disk image can still pose as the VM,
+      so this only raises the bar.
 
   The terminal requirement keeps values off pipes and command lines. It isn't a
   barrier against your own account, since a program can open a pseudo-terminal.
-- **Code running in the VM as the desktop user.** Chrome runs as the desktop
-  account, which Claude's shell (`metacomputer ssh ops`) and the terminal app in the
-  VM also use. Code run that way can:
-  - talk to Chrome's DevTools on 127.0.0.1 and read a filled field back;
-  - pose as Chrome's DevTools to receive a fill.
-
-  The fill account stops anyone reading or redirecting the value on its way to
-  Chrome. It can't protect the value once it's in a browser that account controls.
-  To narrow this, deny Claude `metacomputer ssh` in Claude Code's permissions and use
-  `DRIVER_MODE=bounded` with the `desktop` profile (no terminal app).
 - **A compromised guest kernel or root** can do anything in the VM, including
   replacing `secret-fill`. Values go only to the VM you bound, but what happens
   inside it is up to the VM.
 - **A page on the allowed site sees what's typed.** A filled value is visible to the
   page's own scripts and to its extensions. A site you name is trusted with the value.
-  - If the focus moves between the check and the typing, the fill reports it
-    afterwards; it can't prevent it.
-  - Once typed, the value is the page's and Chrome's, as if typed by hand. Chrome
-    may keep ordinary text fields (not password fields) in the profile's session
-    files, and a sealed login carries those along.
-- **Keystroke injection into a multiplexed unlock terminal.** See above. With
-  `--allow-multiplexer`, a confirmation can be forged. On a Mac you sit at, apps with
-  Accessibility or Automation access can also type into any window, but macOS asks
-  you before granting either.
+  Once typed, the value is the page's and Chrome's, as if typed by hand. Chrome may
+  keep ordinary text fields (not password fields) in the profile's session files, and
+  a sealed login carries those along.
+- **Keystroke injection into the unlock terminal.**
+  - With `--allow-multiplexer`, a confirmation can be forged.
+  - Detection is a list. It doesn't catch:
+    - an editor's built-in terminal (VS Code and the like, which extensions can type
+      into);
+    - `ssh localhost` run inside tmux (the chain of parent processes breaks);
+    - terminals scripted through AppleScript (Terminal.app's `do script`, iTerm2's
+      `write text`).
+  - On a Mac you sit at, apps with Accessibility or Automation access can type into
+    windows. macOS asks the first time an app wants that access, not every time.
+  - Unlock in a plain terminal window you watch.
 - **On the screen.** Password fields show dots. Usernames, one-time codes and text
   values are visible on the VM's screen, in screenshots and in recordings.
 - **Page-mode Chrome only.** Fills need Chrome that the driver started with
   `browser_prepare`, which has a DevTools port. Firefox and Chrome in human mode
   (the normal profile) aren't supported.
-- **Telling profiles apart.** With `--profile P`, the fill account asks each DevTools
-  for its browser's process id and reads that process's `--user-data-dir`. Without a
-  profile, it matches tabs by site only, and refuses when that's ambiguous.
+- **Telling profiles apart is self-reported.** With `--profile P`, the fill account
+  asks each DevTools for its browser's command line and reads `--user-data-dir` from
+  it. It uses `SystemInfo.getInfo` first, then the browser's process id with
+  `/proc/PID/cmdline`, then `Browser.getBrowserCommandLine`; a failure says what each
+  route answered. Without a profile, it matches tabs by site only, and refuses when
+  that's ambiguous.
 - **`SSH_AUTH=cert`.** Fills use their own account and work. Sealed sessions sign in
   with the static `ops` key, which a VM on certificates refuses.
 - **The audit log isn't secret or tamper-evident.** It names your secrets and their

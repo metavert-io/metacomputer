@@ -192,7 +192,7 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 | `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) and the shell channel, `metacomputer sh` |
 | `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/metacomputer-admin` (fixed verbs) |
 | `$SSH_DIR/fill` | host, 0600; used by the secrets vault | `mcfill@guest`, the fill account: forced command `/opt/metacomputer/bin/secret-fill`, no TTY, no forwarding; key list root-owned in `/etc/ssh/metacomputer-fill/` |
-| `$SSH_DIR/hostkey` | host, 0600 | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection) |
+| `$SSH_DIR/hostkey` | host, 0600, during the build only | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection); a finished build deletes the private half from the Mac (`hostkey.pub` stays), and a rebuild makes a new key |
 | VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/metacomputer/vnc-pass` 0600 | live view / takeover |
 
 With `SSH_AUTH=cert` (optional; [SECURITY.md](SECURITY.md)), `ops` and `mcp` sign in with a fresh key and a short-lived
@@ -221,7 +221,7 @@ own, `mcomp-vault`: a Swift program in `vault/`, installed to
 secrets fill ...`) talks only to `mcomp-vault unlock`, which runs in the user's own
 terminal and holds the decrypted vault. The unlock process:
 - checks the request;
-- checks that the VM's port is served by the pinned cua-netgw binary;
+- checks that the VM's port is served by the pinned cua-netgw binary (its path and contents);
 - asks the user when the secret says so (they type its name);
 - runs `/usr/bin/ssh` with the pinned endpoint as the VM's fill account, `mcfill`,
   writing the value to ssh's standard input.
