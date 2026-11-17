@@ -104,11 +104,11 @@ the following. These are **always on**:
 | **lume-secure** (the installer's default) | Lume attaches your Mac's clipboard, its speakers and microphone, and Rosetta to every VM. [lume-secure](https://github.com/metavert-io/lume-secure) is Lume 0.7.2 plus `--no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta` and `--no-host-sharing`, and metacomputer starts the VM without all three unless you turn one on. `metacomputer status` reports what the VM actually has, read from inside it. |
 | **Public internet only** | The VM's network is a user-mode gateway on the Mac (Cua's `cua-netgw`) that checks every connection the VM opens. It refuses your Mac, your LAN and router, Tailscale and CGNAT addresses, link-local and cloud-metadata addresses, and outbound mail ports. Blocked attempts are logged. |
 | **Nothing listens off loopback** | SSH and the live view are forwarded only to `127.0.0.1` on your Mac. Lume's own VNC server, which listens on every interface, is never started. The live view is a password-protected VNC server inside the VM, and the VM's firewall admits it only from the gateway. |
-| **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. Three keys for three roles: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance. No forwarding of any kind. |
-| **Narrow accounts** | The desktop user has no sudo. After the build, the maintenance account can run only one root script with a fixed list of verbs, cloud-init is turned off, and its cached user-data (which held the host key) is deleted. Both accounts have locked passwords. |
+| **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, and `fill` can only run the `metacomputer secrets` fill program as its own locked account. No forwarding of any kind. |
+| **Narrow accounts** | The desktop user has no sudo. After the build, the maintenance account can run only one root script with a fixed list of verbs, cloud-init is turned off, and its cached user-data (which held the host key) is deleted. All accounts have locked passwords. |
 | **Verified inputs** | The Ubuntu image (signed `SHA256SUMS`, pinned signing key and image digest), the Cua Driver release (pinned SHA-256, cross-checked against the release's checksums and checked again inside the VM), Lume (pinned checksum, or lume-secure's pinned tag and commit), and the Mozilla and Google repository keys (pinned fingerprints). The VM never downloads Cua components itself. |
 | **Less in the guest** | No snaps. No clipboard agent (`spice-vdagent` is removed) and the virtio sound driver is blacklisted, a second layer for when standard Lume attaches those devices. No shared folders. Cua Driver's telemetry and update checks are off, and so is Lume's telemetry. Browser policies turn off telemetry and password saving in both browsers, and sign-in and sync in Chrome. Security updates install automatically, without automatic reboots. |
-| **Page text is data** | The skill and the MCP server's own instructions tell Claude that pages, documents, window titles and accessibility text are data, never instructions. Claude never types your passwords; it asks you to sign in through the live view. `metacomputer web open-untrusted` opens a link in a throwaway Chrome profile without clicking anything on it. |
+| **Page text is data** | The skill and the MCP server's own instructions tell Claude that pages, documents, window titles and accessibility text are data, never instructions. Claude never asks you for a password: you sign in through the live view yourself, or keep the credential in metacomputer's own vault and approve its use (below). `metacomputer web open-untrusted` opens a link in a throwaway Chrome profile without clicking anything on it. |
 | **Your Mac stays yours** | Nothing here can see or control your Mac's screen. The VM's wallpaper and menu say VIRTUAL COMPUTER, so every screenshot and recording shows which machine it is. |
 
 Three more protections are **opt-in**. They're off by default, so out of the
@@ -120,6 +120,21 @@ them in `config/local.env`; `metacomputer security` shows what's on.
 | `ACTION_LOG=on` | A signed, hash-chained log of every tool call sent to the VM. Each record carries the hash of the one before it, and the chain's head is signed with an SSH key (`ssh-keygen -Y sign`) every 20 records, every minute with new activity, and at the end. By default, typed text is recorded as its length only. `metacomputer actions verify` finds edited, inserted, reordered or removed records. |
 | `SSH_AUTH=cert` | A fresh key and a 5-minute SSH certificate for every connection, limited to one role and to the Mac's side of the VM network. Its key ID (`mcomp:ROLE:USER:PROJECT:pidN`) appears in the VM's auth log. The static `ops` and `mcp` keys stop working. |
 | `DRIVER_MODE=bounded` | Cua Driver's bounded mode: every call must fit a capability manifest of tools, apps, folders and websites, with a time limit. Profiles `readonly`, `desktop` (no terminal) and `browser` (only the sites you list), or your own manifest. The Mac asks for the manifest by its SHA-256, and the VM refuses a manifest that doesn't match and, while bounded, any standard session. |
+
+**Credentials without pasting them into a chat.** `metacomputer secrets` is a small vault
+that ships with metacomputer and depends on nothing else: no password manager, no
+Keychain entries, no other tools. You store a password, a 2FA (TOTP) seed or a saved
+browser login once, in your own terminal. To use one, you unlock the vault in your
+terminal (and, if you choose, approve each use by typing its name). Claude then asks the
+vault to type it into the field it has focused, and gets back only "filled, N characters":
+- the value never passes through Claude's context, the transcript, logs or recordings;
+- it goes only to the site you allowed, and only into the right kind of field;
+- in the VM, it travels through a separate, locked account Claude can't change.
+
+It keeps credentials out of Claude's hands in normal operation. It doesn't make a
+deliberately hostile agent harmless: one with a shell in the VM, or one that clicks a
+site's "show password" button, can still get at a value once it's in the browser.
+[SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets) says exactly what holds and what doesn't.
 
 None of this protects against someone who already controls your Mac account:
 they can change the config, read the keys and drive the VM directly.
@@ -284,6 +299,42 @@ metacomputer browser profiles                    # named Chrome profiles in the 
 metacomputer browser profiles --delete shopping  # asks first
 ```
 
+### Use saved passwords and 2FA codes
+
+- "Sign in to the demo site as me with the `demo` login, then do X."
+- "Log in to example.com; the code for its 2FA is in the vault as `example-otp`."
+- "Keep this signed-in session so tomorrow's run doesn't have to log in again."
+
+You set this up once, in your own terminal. Claude can't do these steps:
+
+```bash
+./scripts/build-vault.sh                 # or ./install.sh, which builds it too
+metacomputer secrets init                # creates the vault; asks for a passphrase
+metacomputer secrets set example --kind password --origin https://example.com --username you@example.com
+metacomputer secrets set example-otp --kind totp --origin https://example.com    # the base32 seed
+metacomputer secrets bind                # pins the VM; compare the fingerprint, then type yes
+metacomputer secrets unlock --for 1h     # keep this terminal open while Claude works
+```
+
+Then Claude:
+1. opens the site in page-mode Chrome;
+2. clicks into the field;
+3. runs `metacomputer secrets fill example --field username`, then `--field password` and `--field otp`.
+
+How it works:
+- **The unlock terminal:** it prints each request and its outcome, never the values. Close it, or press Ctrl-C, and the vault locks.
+- **Approving each use:** add `--approval each` to `set` (or `--confirm each` to `unlock`), and every use waits for you to type the secret's name in that terminal.
+- **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset.
+- **What Claude can see:** `metacomputer secrets list` shows names, sites and use counts, never values. `metacomputer secrets audit` shows the history.
+
+Limits to know:
+- Fills need the page-mode Chrome that Cua Driver starts, not Firefox.
+- The VM needs to be built with this version, which adds the locked fill account. Older VMs say so and refuse.
+- Usernames and one-time codes are visible on the page once typed; passwords show as dots.
+- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so `--confirm each` refuses there.
+
+The full model is in [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
+
 ### Check a page in both browsers, at several widths, for accessibility
 
 These checks are scripted: they need no model and write `report.md`,
@@ -353,7 +404,7 @@ larger). `RECORD_TO=host` streams the recording to the Mac while it runs, so
 nothing builds up on the VM's disk. `RECORD_DIR` can be any folder, such as
 an external drive.
 
-Recordings capture the whole screen. Claude never types your passwords, and
+Recordings capture the whole screen. Passwords filled by `metacomputer secrets` show as dots (usernames and codes are visible), and
 with the driver's recorder it passes any other sensitive value it types to
 `redact_values`, or leaves those steps out of the recording.
 
@@ -539,6 +590,9 @@ alias). `metacomputer help` prints the same list with every option.
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
 | `security [apply] [--json]` | The optional hardening, as configured and as the VM has it |
 | `actions list\|show\|verify` | The signed action log (`ACTION_LOG=on`) |
+| `secrets init\|set\|delete\|bind\|unlock` | The credentials vault: commands you run in your own terminal (they ask for the vault passphrase) |
+| `secrets list\|fill\|session save\|session load` | What Claude uses while the vault is unlocked; values never come back |
+| `secrets status\|audit\|selftest` | Locked or unlocked, the history of uses (no values), the vault's self-test |
 | `test [A-F]` | The GUI smoke suite, each test recorded |
 | `call TOOL ['JSON']` | One Cua Driver tool call, on a new connection |
 | `ssh [ops\|admin] [CMD...]` | A shell in the VM (`ops` is the desktop user) |
@@ -644,9 +698,10 @@ private files are 0600):
 | `hostkey` | The VM's own SSH host key, generated on the Mac and pinned in `known_hosts`, so strict checking applies from the first connection |
 | `vnc-pass` | The live-view password (or your own store, with `VNC_PASSWORD_STORE=command`) |
 
-The VM's SSH accepts keys only, for `cua` and `cuaadmin` only, with root login
-and every kind of forwarding off. Both accounts have locked passwords, and no
-macOS credentials are used anywhere.
+The VM's SSH accepts keys only, for `cua`, `cuaadmin` and the locked fill account
+`mcfill` (which can only run the secrets fill program), with root login and every
+kind of forwarding off. All accounts have locked passwords, and no macOS
+credentials are used anywhere.
 
 **Your Mac.** Cua Driver isn't installed on it, and nothing in this project
 can see or control its screen. The VM isn't started at login, and no
@@ -670,6 +725,7 @@ LaunchAgent or daemon is added.
 **Cua Driver 0.52.1 on this desktop** (details in [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md)):
 - **No Firefox page route.** Page tools (`get_browser_state` and the `browser_*` tools) work only with Chrome, so page and hybrid modes need Chrome.
 - **The focused element isn't reported** on Linux. Claude proves focus with a fresh read.
+- **Secrets need page-mode Chrome** and a VM built with this version (it has the locked fill account). See [Use saved passwords and 2FA codes](#use-saved-passwords-and-2fa-codes).
 - **Firefox ignores background typing.** Text entry in Firefox uses foreground input, which moves the real pointer and focus.
 - **Chrome ignores background input,** and while the driver's virtual input devices exist it ignores the keyboard altogether. The bridge sends input aimed at Chrome in the foreground, refuses `set_value` and `run_script` aimed at it, and removes leftover devices before Chrome needs the keyboard ([docs/chrome-investigation.md](docs/chrome-investigation.md)).
 - **Opening modal dialogs through accessibility actions can freeze GTK apps.** Mousepad's Save As through its menu, and Inkscape's dialogs, stopped answering; keyboard shortcuts work.

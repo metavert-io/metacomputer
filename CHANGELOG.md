@@ -6,7 +6,14 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- `metacomputer secrets`: a self-contained vault for website passwords, 2FA (TOTP) codes and sealed browser logins. Claude fills them into page-mode Chrome without the values reaching its context, the transcript, logs or recordings. You unlock it in your own terminal and can approve each use. VMs built with this version have a locked fill account that Claude can't modify. See SECURITY.md for exactly what holds and what doesn't.
+
+### Changed
+- After a successful build, the VM's private SSH host key is deleted from the Mac; only the public key and `known_hosts` are kept.
+
+### Fixed
+- Two VMs side by side: a session on one VM no longer makes the other refuse every tool call ("in use by another controller").
 
 ## [0.1.0] - 2026-11-17
 
