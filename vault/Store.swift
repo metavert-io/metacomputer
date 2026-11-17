@@ -22,9 +22,11 @@ struct Secret: Codable {
 struct VMBinding: Codable {
     var ssh_port: Int
     var host_key_line: String       // "TYPE BASE64"
-    var ops_key_path: String
+    var ops_key_path: String        // the desktop account: sealed browser sessions
     var guest_user: String
-    var gateway_path: String?
+    var fill_key_path: String?      // the fill account (mcfill): fills. nil: bound by an earlier version
+    var fill_user: String?
+    var gateway_path: String?       // the program that must serve ssh_port (cua-netgw)
     var bound: String
 }
 
@@ -35,6 +37,7 @@ struct SessionMeta: Codable {
     var bytes: Int
     var last_loaded: String?
     var loads: Int
+    var approval: String?           // "session": loads into the same VM don't ask. nil or "each": they do
 }
 
 struct Payload: Codable {
@@ -91,6 +94,9 @@ func newKDF() -> KDFParams {
 func deriveKey(_ passphrase: [UInt8], _ kdf: KDFParams) throws -> VaultKey {
     guard kdf.name == "pbkdf2-sha256", kdf.iterations >= kdfMinIterations else {
         throw VaultError("the vault file's key settings are weaker than this program accepts; refusing")
+    }
+    guard kdf.iterations <= kdfMaxIterations else {
+        throw VaultError("the vault file's key settings are out of range (\(kdf.iterations) rounds); refusing")
     }
     guard let salt = Data(base64Encoded: kdf.salt), salt.count >= 16 else { throw VaultError("the vault file is damaged (salt)") }
     guard let k = pbkdf2SHA256(password: passphrase, salt: Array(salt), iterations: kdf.iterations) else {

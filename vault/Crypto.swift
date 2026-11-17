@@ -8,6 +8,7 @@ import Security
 
 let kdfIterations = 600_000
 let kdfMinIterations = 600_000
+let kdfMaxIterations = 50_000_000      // a damaged or hostile header can't make unlock hang or crash
 
 func randomBytes(_ n: Int) -> [UInt8] {
     var b = [UInt8](repeating: 0, count: n)
@@ -35,7 +36,7 @@ func wipe(_ d: inout Data) {
 }
 
 func pbkdf2SHA256(password: [UInt8], salt: [UInt8], iterations: Int, length: Int = 32) -> [UInt8]? {
-    guard !password.isEmpty, !salt.isEmpty, iterations > 0 else { return nil }
+    guard !password.isEmpty, !salt.isEmpty, iterations > 0, iterations <= Int(UInt32.max) else { return nil }
     var out = [UInt8](repeating: 0, count: length)
     let rc = password.withUnsafeBytes { pw in
         salt.withUnsafeBytes { s in

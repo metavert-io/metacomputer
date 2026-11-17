@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks for the optional hardening (SECURITY.md) against a running VM.
 
-    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [F]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [D] [F]
 
 Use a test VM: this switches the VM's SSH and driver settings (through the
 maintenance account) and puts them back to the defaults at the end. Variants
@@ -16,6 +16,10 @@ C  DRIVER_MODE=bounded: readonly refuses input; desktop launches listed apps
    (by name, mapped to their path) and refuses the terminal and page tools;
    browser opens only listed origins; an expired or tampered manifest and a
    standard request (the VM's floor) are refused; back to standard at the end.
+D  The secrets fill account (mcfill; changes nothing): the fill key runs only
+   secret-fill whatever is asked, with no terminal and no forwarding; the fill key
+   doesn't work for the desktop user nor the ops key for mcfill; the account, its
+   program and its key list are root-owned and its home is empty.
 F  metacomputer sh: runs in the VM as the desktop user with the desktop's
    environment; exit codes, stdin/--file/--cwd/arguments, a detached GUI app
    the driver can read, background programs, --timeout, an interrupted run,
@@ -484,11 +488,58 @@ def test_f():
         sh(BASE, "--override", "-c", f"pkill -x mousepad; pkill -f 'sleep 6[1-4].5'; rm -f {marker} /tmp/mcomp-optf-mousepad.log; true")
 
 
+# --- D ---------------------------------------------------------------------------
+def as_user(s, key, user, stdin=b"", cmd="id", extra=()):
+    args = ["ssh", "-T", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", f"IdentityFile={key}",
+            "-o", f"UserKnownHostsFile={s['known']}", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR", "-p", s["port"], *extra, f"{user}@127.0.0.1", cmd]
+    return subprocess.run(args, input=stdin, capture_output=True, timeout=60)
+
+
+def last_json(r):
+    try:
+        return json.loads(r.stdout.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+
+
+def test_d():
+    print("D  secrets fill account (mcfill)")
+    s = settings(BASE)
+    fill, ops = os.path.join(s["ssh_dir"], "fill"), os.path.join(s["ssh_dir"], "ops")
+    if not os.path.exists(fill):
+        check("the fill key exists (a VM built with secrets support)", False, fill)
+        return
+    r = as_user(s, fill, "mcfill", stdin=b"not json\n", cmd="id; cat /etc/shadow")
+    check("the fill key runs only secret-fill, whatever command is asked for",
+          r.returncode == 0 and last_json(r).get("reason") == "bad request" and b"uid=" not in r.stdout, r.stdout + r.stderr)
+    req = json.dumps({"mode": "check", "field": "password", "origins": ["https://example.com"]}).encode() + b"\n"
+    res = last_json(as_user(s, fill, "mcfill", stdin=req))
+    check("a check answers in JSON (no Chrome, or no tab on the site)", res.get("ok") is False
+          and any(t in res.get("reason", "") for t in ("no Chrome", "no open tab")), res)
+    r = as_user(s, fill, "mcfill", stdin=b"x\n", extra=("-tt",))
+    check("no terminal for the fill account", b"PTY allocation request failed" in r.stderr, r.stderr)
+    r = as_user(s, fill, "mcfill", extra=("-W", "127.0.0.1:22"))
+    check("no forwarding for the fill account", r.returncode != 0, r.stderr)
+    check("the ops key doesn't sign in as mcfill", as_user(s, ops, "mcfill").returncode == 255)
+    check("the fill key doesn't sign in as the desktop user", as_user(s, fill, s["user"]).returncode == 255)
+    r = raw_ssh(s, ops, cmd="getent passwd mcfill | cut -d: -f6,7; "
+                "stat -c '%U %a %n' /opt/metacomputer/bin/secret-fill /etc/ssh/metacomputer-fill/authorized_keys "
+                "/var/lib/metacomputer/fill-home /etc/metacomputer/fill.conf; ls -A /var/lib/metacomputer/fill-home | wc -l; "
+                "test -w /opt/metacomputer/bin/secret-fill && echo WRITABLE; true")
+    out = r.stdout
+    check("mcfill: root-owned empty home, dash, no password shell", "/var/lib/metacomputer/fill-home:/bin/sh" in out, out)
+    check("secret-fill, the key list and fill.conf are root-owned and not writable by the desktop user",
+          "root 755 /opt/metacomputer/bin/secret-fill" in out and "root 644 /etc/ssh/metacomputer-fill/authorized_keys" in out
+          and "root 755 /var/lib/metacomputer/fill-home" in out and "root 644 /etc/metacomputer/fill.conf" in out
+          and "WRITABLE" not in out and out.strip().splitlines()[-1].strip() == "0", out)
+
+
 def main(argv):
-    which = [a.upper() for a in argv] or ["A", "B", "C", "F"]
+    which = [a.upper() for a in argv] or ["A", "B", "C", "D", "F"]
     try:
         for k in which:
-            {"A": test_a, "B": test_b, "C": test_c, "E": test_e, "F": test_f}[k]()
+            {"A": test_a, "B": test_b, "C": test_c, "D": test_d, "E": test_e, "F": test_f}[k]()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} checks passed")

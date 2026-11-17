@@ -24,7 +24,7 @@ say "build $TS (log: logs/build-$TS.log)"
 
 # --- 0. prerequisites -------------------------------------------------------
 command -v "$LUME" >/dev/null || die "lume not found ($LUME)"
-for k in admin ops mcp hostkey; do
+for k in admin ops mcp fill hostkey; do   # fill: the secrets fill account (mcfill)
   [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; ssh-keygen -q -t ed25519 -N '' -C "mcomp-$k" -f "$SSH_DIR/$k"; }
 done
 echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
@@ -61,6 +61,7 @@ SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"; mkdir -p "$SEED/payloa
 cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
 cp "$CACHE_DIR/mozilla/repo-signing-key.gpg" "$SEED/payload/mozilla-repo-signing-key.gpg"
+cp "$SSH_DIR/fill.pub" "$SEED/payload/fill.pub"   # the fill account's key (provision.sh installs it under /etc)
 case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub" "$SEED/payload/google-linux-signing-key.pub" ;; esac
 {
   echo "GUEST_USER=$GUEST_USER"; echo "ADMIN_USER=$ADMIN_USER"

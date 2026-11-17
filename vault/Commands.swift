@@ -11,18 +11,19 @@ In your own terminal (these ask for the vault passphrase):
   set NAME --kind password|totp|text --origin https://site [--origin ...]
       [--username U] [--approval session|each]      store a secret (the value is typed, not echoed)
   delete NAME                            remove a secret
-  bind VM --port P --host-key-line LINE --key PATH --user U [--gateway PATH]
-                                         pin how to reach a VM
+  bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U
+      --ops-key PATH --ops-user U --gateway PATH   pin how to reach a VM (you confirm with "yes")
+  session policy NAME --approval session|each      whether loading a sealed session asks first
   session delete NAME                    remove a sealed browser session
-  unlock [--for 30m] [--confirm session|each]
+  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]
                                          serve requests from this terminal until Ctrl-C or the time is up
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, use counts (never values)
   fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]
                                          type a value into the focused field of the VM's page-mode Chrome
-  session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM
-  session load NAME --vm VM --profile P              put a sealed profile back into the VM
+  session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
+  session load NAME --vm VM [--profile P]            put a sealed profile back, under its own name
 
 Any time:
   status [--json]    audit [--tail N] [--json]    selftest    version [--json]
@@ -32,9 +33,22 @@ fill and session: exit 0 ok, 2 refused, 3 locked, 4 error.
 
 func runMain(_ argv: [String]) -> Int32 {
     signal(SIGPIPE, SIG_IGN)
+    hardenProcess()
     let paths = Paths.current()
     guard let cmd = argv.first else { oprint(usageText); return Exit.ok }
     let rest = Array(argv.dropFirst())
+    #if MCOMP_VAULT_TESTING
+    // A test build never touches a real vault: it needs its own folder, outside ~/Library.
+    if !["selftest", "version", "help", "-h", "--help"].contains(cmd) {
+        let d = ProcessInfo.processInfo.environment["MCOMP_VAULT_DIR"] ?? ""
+        let lib = URL(fileURLWithPath: homeDirectory() + "/Library").resolvingSymlinksInPath().path + "/"
+        let resolved = URL(fileURLWithPath: absolutePath(d.isEmpty ? "/" : d)).resolvingSymlinksInPath().path + "/"
+        if d.isEmpty || resolved.hasPrefix(lib) {
+            eprint("mcomp-vault: this is a TEST build; it runs only with MCOMP_VAULT_DIR set to a folder outside ~/Library")
+            return Exit.failed
+        }
+    }
+    #endif
     do {
         switch cmd {
         case "init": return try cmdInit(paths, rest)
@@ -114,7 +128,7 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let username = a.last("username")
     if let u = username {
         guard kind == "password" else { throw usageError("--username goes with --kind password") }
-        guard !u.isEmpty, u.count <= 256, !u.contains("\n") else { throw usageError("--username: 1-256 characters on one line") }
+        guard !u.isEmpty, u.count <= 256, clean(u, max: 256) == u else { throw usageError("--username: 1-256 printable characters") }
     }
     try requireTTY("set")
     installPromptSignalHandlers()
@@ -167,51 +181,78 @@ func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     return Exit.ok
 }
 
-func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["port", "host-key-line", "key", "user", "gateway"])
-    guard a.positional.count == 1, validName(a.positional[0]) else {
-        throw usageError("usage: bind VM --port P --host-key-line LINE --key PATH --user U [--gateway PATH]")
+/// An SSH private key file for bind: a plain path (ssh gets it on its command line), 0600.
+func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
+    let p = absolutePath(raw)
+    guard !p.contains(where: { $0 == " " || $0 == "\"" || $0 == "'" || $0 == "\t" }) else {
+        throw usageError("--\(flag): a path without spaces or quotes")
     }
+    var st = stat()
+    guard stat(p, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { throw VaultError("no key file at \(p)") }
+    guard st.st_mode & 0o077 == 0 else { throw VaultError("\(p) is readable by others (chmod 600 it)") }
+    return p
+}
+
+func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U --gateway PATH"
+    let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "gateway"])
+    guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
     guard let ps = a.last("port"), let port = Int(ps), port >= 1, port <= 65535 else { throw usageError("--port: the VM's SSH port on 127.0.0.1") }
     guard let hkl = a.last("host-key-line"), let hostKey = normalizeHostKey(hkl) else {
         throw usageError("--host-key-line: the VM's public host key ('ssh-ed25519 AAAA...', or its known_hosts line)")
     }
-    guard let kp = a.last("key") else { throw usageError("--key: the SSH key for the VM's desktop user (ops)") }
-    let keyPath = absolutePath(kp)
-    guard !keyPath.contains(where: { $0 == " " || $0 == "\"" || $0 == "'" || $0 == "\t" }) else {
-        throw usageError("--key: a path without spaces or quotes")
-    }
-    var st = stat()
-    guard stat(keyPath, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { throw VaultError("no key file at \(keyPath)") }
-    guard st.st_mode & 0o077 == 0 else { throw VaultError("\(keyPath) is readable by others (chmod 600 it)") }
-    guard let user = a.last("user"), validUser(user) else { throw usageError("--user: the VM's desktop user (e.g. cua)") }
-    var gateway: String?
-    if let g = a.last("gateway"), !g.isEmpty {
-        gateway = absolutePath(g)
-        guard fileExists(gateway!) else { throw VaultError("no gateway program at \(gateway!)") }
-    }
+    guard let fk = a.last("fill-key"), let ok = a.last("ops-key") else { throw usageError(usage) }
+    let fillKey = try checkKeyFile(fk, "fill-key"), opsKey = try checkKeyFile(ok, "ops-key")
+    guard let fillUser = a.last("fill-user"), validUser(fillUser) else { throw usageError("--fill-user: the VM's fill account (mcfill)") }
+    guard let opsUser = a.last("ops-user"), validUser(opsUser) else { throw usageError("--ops-user: the VM's desktop user (e.g. cua)") }
+    guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (cua-netgw)") }
+    let gateway = URL(fileURLWithPath: absolutePath(g)).resolvingSymlinksInPath().path
+    guard access(gateway, X_OK) == 0, !gateway.contains("\n") else { throw VaultError("no gateway program at \(gateway)") }
+    let gwHash = (try? readFileBytes(gateway, max: 512 << 20)).map { String(sha256Hex($0).prefix(16)) } ?? "?"
     try requireTTY("bind")
     installPromptSignalHandlers()
+
+    // These settings come from files any program of yours can change (the config, known_hosts),
+    // so the person checks them here before they're pinned.
+    let fp = hostKeyFingerprint(hostKey)
+    oprint("""
+    About to pin VM \(vm):
+      SSH port      127.0.0.1:\(port)
+      host key      \(fp) (\(hostKey.split(separator: " ").first ?? ""))
+      fills         as \(fillUser), key \(fillKey)
+      sessions      as \(opsUser), key \(opsKey)
+      gateway       \(gateway) (sha256 \(gwHash)...)
+    Check the host key on the VM itself before you agree: in the live view (metacomputer view),
+    open a terminal in the VM and run
+      ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+    Its SHA256 fingerprint must be the one above. If it isn't, don't pin it.
+    """)
+    let answer = readVisible("Type yes to pin these settings: ")
+    guard answer == "yes" else { throw VaultError("not pinned") }
     let (key, _) = try unlockKey(paths)
-    let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: keyPath, guest_user: user, gateway_path: gateway, bound: isoTime())
+    let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
+                      fill_key_path: fillKey, fill_user: fillUser, gateway_path: gateway, bound: isoTime())
     try updateVault(paths, key) { p in p.vms[vm] = b }
-    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": hostKeyFingerprint(hostKey)])
-    oprint("Bound VM \(vm): \(user)@127.0.0.1:\(port), host key \(hostKeyFingerprint(hostKey)), key \(keyPath)"
-           + (gateway.map { ", gateway \($0)" } ?? ""))
+    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway])
+    oprint("Bound VM \(vm): 127.0.0.1:\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser), gateway \(gateway)")
     return Exit.ok
 }
 
 // MARK: - unlock
 
 func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["for", "confirm"])
-    guard a.positional.isEmpty else { throw usageError("usage: unlock [--for 30m] [--confirm session|each]") }
+    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer"])
+    guard a.positional.isEmpty else { throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]") }
     let dur = a.last("for") ?? "30m"
     guard let seconds = parseDuration(dur), seconds <= 12 * 3600 else { throw usageError("--for: like 90s, 30m or 2h (at most 12h)") }
     let confirm = a.last("confirm") ?? "session"
     guard ["session", "each"].contains(confirm) else { throw usageError("--confirm session or each") }
     try requireTTY("unlock")
+    let mux = terminalMultiplexer()
+    if let m = mux, confirm == "each", !a.has("allow-multiplexer") {
+        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), or add --allow-multiplexer if you accept that")
+    }
     try ensurePrivateDir(paths.dir)
     _ = try readHeader(paths)
     _ = try unixAddress(paths.socket)
@@ -221,13 +262,14 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if flock(lfd, LOCK_EX | LOCK_NB) != 0 {
         let other = (try? readFileBytes(paths.unlockLock, max: 64)).map { String(decoding: $0, as: UTF8.self) } ?? "?"
         close(lfd)
-        throw VaultError("the vault is already unlocked in another terminal (pid \(other.trimmingCharacters(in: .whitespacesAndNewlines)))")
+        throw VaultError("the vault is already unlocked in another terminal (pid \(clean(other.trimmingCharacters(in: .whitespacesAndNewlines), max: 12)))")
     }
     ftruncate(lfd, 0)
     _ = writeAll(lfd, Array("\(getpid())\n".utf8))
     installPromptSignalHandlers()
     let (key, _) = try unlockKey(paths)
-    let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each")
+    let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each",
+                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"))
     let rc = try server.serve()
     ftruncate(lfd, 0)
     close(lfd)
@@ -276,7 +318,7 @@ func printResult(_ res: [String: Any]) {
     var out: [String: Any] = [:]
     for k in ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "reason"] { if let v = res[k] { out[k] = v } }
     if out["ok"] == nil { out["ok"] = false }
-    oprint(jsonLine(out))
+    oprint(jsonLine((cleanAll(out) as? [String: Any]) ?? ["ok": false]))
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
@@ -308,8 +350,25 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    guard let sub = argv.first else { throw usageError("usage: session save|load NAME --vm VM --profile P | session delete NAME") }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile"], flags: ["replace"])
+    let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] | policy NAME --approval session|each | delete NAME"
+    guard let sub = argv.first else { throw usageError(usage) }
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval"], flags: ["replace"])
+    if sub == "policy" {
+        guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
+            throw usageError("usage: session policy NAME --approval session|each")
+        }
+        let name = a.positional[0]
+        try requireTTY("session policy")
+        installPromptSignalHandlers()
+        let (key, existing) = try unlockKey(paths)
+        guard existing.sessions[name] != nil else { throw VaultError("no saved session named \(name)") }
+        try updateVault(paths, key) { p in p.sessions[name]?.approval = ap }
+        audit(paths, ["op": "session_policy", "result": "ok", "name": name, "approval_mode": ap])
+        oprint(ap == "session"
+               ? "Loading \(name) into the VM it was saved from no longer asks (other VMs and replacing it still do)."
+               : "Loading \(name) asks at the unlock terminal each time.")
+        return Exit.ok
+    }
     if sub == "delete" {
         guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError("usage: session delete NAME") }
         let name = a.positional[0]
@@ -323,18 +382,20 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         oprint("Deleted the sealed session \(name).")
         return Exit.ok
     }
-    guard sub == "save" || sub == "load" else { throw usageError("usage: session save|load NAME --vm VM --profile P | session delete NAME") }
-    guard a.positional.count == 1, let vm = a.last("vm"), let profile = a.last("profile"),
-          validName(a.positional[0]), validName(vm), validName(profile) else {
-        throw usageError("usage: session \(sub) NAME --vm VM --profile P")
+    guard sub == "save" || sub == "load" else { throw usageError(usage) }
+    let profile = a.last("profile")
+    guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm),
+          profile.map(validName) ?? (sub == "load") else {
+        throw usageError(sub == "save" ? "usage: session save NAME --vm VM --profile P [--replace]" : "usage: session load NAME --vm VM [--profile P]")
     }
     let name = a.positional[0]
-    var req: [String: Any] = ["op": "session_\(sub)", "name": name, "vm": vm, "profile": profile]
+    var req: [String: Any] = ["op": "session_\(sub)", "name": name, "vm": vm]
+    if let p = profile { req["profile"] = p }
     if a.has("replace") { req["replace"] = true }
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 1800) } catch ClientError.locked {
-        audit(paths, ["op": "session_\(sub)", "result": "locked", "name": name, "vm": vm, "profile": profile])
-        printResult(["ok": false, "name": name, "vm": vm, "profile": profile, "reason": "locked"])
+        audit(paths, ["op": "session_\(sub)", "result": "locked", "name": name, "vm": vm, "profile": profile ?? ""])
+        printResult(["ok": false, "name": name, "vm": vm, "profile": profile ?? "", "reason": "locked"])
         eprint("mcomp-vault: \(lockedHint(paths))")
         return Exit.locked
     }
@@ -370,12 +431,14 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let vms = res["vms"] as? [[String: Any]] ?? []
     if !vms.isEmpty { oprint("VMs:") }
     for v in vms {
-        oprint("  \(v["name"] ?? "")  \(v["user"] ?? "")@127.0.0.1:\(v["ssh_port"] ?? "")  host key \(v["host_key"] ?? "")")
+        oprint("  \(v["name"] ?? "")  127.0.0.1:\(v["ssh_port"] ?? "")  host key \(v["host_key"] ?? "")  fills as \(v["fill_user"] ?? "-")"
+               + "  sessions as \(v["user"] ?? "")" + (v["needs_bind"] != nil ? "  (bound by an earlier version: bind again)" : ""))
     }
     let sessions = res["sessions"] as? [[String: Any]] ?? []
     if !sessions.isEmpty { oprint("Sealed browser sessions:") }
     for s in sessions {
-        oprint("  \(s["name"] ?? "")  profile \(s["profile"] ?? "") from VM \(s["vm"] ?? ""), saved \(s["saved_at"] ?? ""), \(s["bytes"] ?? 0) bytes, loaded \(s["loads"] ?? 0)x")
+        oprint("  \(s["name"] ?? "")  profile \(s["profile"] ?? "") from VM \(s["vm"] ?? ""), saved \(s["saved_at"] ?? ""), \(s["bytes"] ?? 0) bytes, "
+               + "loaded \(s["loads"] ?? 0)x, approval \(s["approval"] ?? "each")")
     }
     return Exit.ok
 }
@@ -386,7 +449,7 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                               "unlocked": false]
     if let res = try? request(paths, ["op": "status"], timeout: 10), res["ok"] as? Bool == true {
         out["unlocked"] = true
-        for k in ["expires", "expires_in_s", "confirm", "pid", "since"] { if let v = res[k] { out[k] = v } }
+        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer"] { if let v = res[k] { out[k] = v } }
     }
     if a.has("json") { oprint(jsonLine(out)); return Exit.ok }
     if !(out["exists"] as? Bool ?? false) {
@@ -410,7 +473,7 @@ func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     guard fileExists(paths.audit) else { oprint("No audit records yet (\(paths.audit))."); return Exit.ok }
     let lines = String(decoding: try readFileBytes(paths.audit, max: 256 << 20), as: UTF8.self).split(separator: "\n").suffix(max(1, n))
     for l in lines {
-        if a.has("json") { oprint(String(l)); continue }
+        if a.has("json") { oprint(clean(String(l), max: 4000)); continue }
         guard let r = parseJSONObject(Array(l.utf8)) else { continue }
         var s = "\(r["time"] ?? "")  \(r["op"] ?? "")"
         for k in ["name", "field", "vm", "profile"] { if let v = r[k] { s += " \(k)=\(v)" } }
@@ -419,15 +482,15 @@ func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if let c = r["chars"] { s += " (\(c) chars)" }
         if let ap = r["approval"] as? String, ap != "-" { s += " [approval \(ap)]" }
         if let why = r["reason"] { s += ": \(why)" }
-        oprint(s)
+        oprint(clean(s, max: 600))
     }
     return Exit.ok
 }
 
 func cmdVersion(_ argv: [String]) -> Int32 {
-    let info: [String: Any] = ["build": Build.kind, "source": buildSourceHash, "guest_script_sha256": sha256Hex(Array(guestFillScript.utf8))]
+    let info: [String: Any] = ["build": Build.kind, "source": buildSourceHash]
     if argv.contains("--json") { oprint(jsonLine(info)) } else {
-        oprint("mcomp-vault \(Build.kind) build, source \(buildSourceHash), guest script \(info["guest_script_sha256"]!)")
+        oprint("mcomp-vault \(Build.kind) build, source \(buildSourceHash)")
     }
     return Exit.ok
 }
@@ -484,7 +547,13 @@ func selftest() -> Int32 {
     check("host key from known_hosts line", normalizeHostKey("[127.0.0.1]:2277 ssh-ed25519 \(b64)") == "ssh-ed25519 \(b64)")
     check("host key with the wrong type refused", normalizeHostKey("ssh-rsa \(b64)") == nil)
     check("names", validName("x-login.1") && !validName("a/b") && !validName("..") && !validName(""))
-    check("guest script built in", guestFillScript.contains("def main()") && guestFillScript.count > 1000)
+    check("names can't start with '-'", !validName("-x") && !validName("--profile") && validName("x-"))
+    // Text from the VM or a client can't drive the terminal.
+    check("clean: escape sequences", clean("ok\u{1B}[2J\u{1B}]0;t\u{07}x") == "ok?[2J?]0;t?x")
+    check("clean: C1, bidi and zero-width", clean("a\u{9B}b\u{202E}c\u{200B}d") == "a?b?c?d")
+    check("clean: newlines and length", clean("a\nb\r\tc") == "a b  c" && clean("abcdef", max: 3) == "abc...")
+    check("KDF rounds out of range refused", (try? deriveKey(Array("x".utf8), KDFParams(name: "pbkdf2-sha256", iterations: 1 << 40,
+                                                                                         salt: Data(randomBytes(16)).base64EncodedString()))) == nil)
     oprint(failures == 0 ? "selftest: all passed (\(Build.kind) build)" : "selftest: \(failures) failed")
     return failures == 0 ? Exit.ok : Exit.failed
 }

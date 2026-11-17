@@ -227,7 +227,8 @@ func matches(_ s: String, _ pattern: String) -> Bool {
     s.range(of: pattern, options: .regularExpression) != nil
 }
 
-func validName(_ s: String) -> Bool { matches(s, "^[A-Za-z0-9._-]{1,64}$") && s != "." && s != ".." }
+/// Secret, VM, session and profile names: letters, digits, '.', '_', '-'; not starting with '-'.
+func validName(_ s: String) -> Bool { matches(s, "^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$") && s != "." && s != ".." }
 
 func validUser(_ s: String) -> Bool { matches(s, "^[a-z_][a-z0-9_-]{0,31}$") }
 
@@ -318,9 +319,17 @@ func parseArgs(_ argv: [String], values valueFlags: Set<String>, flags boolFlags
 
 // MARK: - audit log
 
+/// Strings (also inside arrays and objects) made safe to print with clean().
+func cleanAll(_ v: Any, max: Int = 300) -> Any {
+    if let s = v as? String { return clean(s, max: max) }
+    if let a = v as? [Any] { return a.map { cleanAll($0, max: max) } }
+    if let d = v as? [String: Any] { return d.mapValues { cleanAll($0, max: max) } }
+    return v
+}
+
 /// One JSON line per event in audit.jsonl (0600). Metadata only: never a value.
 func audit(_ paths: Paths, _ record: [String: Any]) {
-    var r = record
+    var r = (cleanAll(record) as? [String: Any]) ?? [:]
     r["time"] = isoTime()
     let line = Array((jsonLine(r) + "\n").utf8)
     let fd = open(paths.audit, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
@@ -329,8 +338,38 @@ func audit(_ paths: Paths, _ record: [String: Any]) {
     close(fd)
 }
 
-/// Keep a message short and on one line (for the terminal, results and the audit log).
-func oneLine(_ s: String, max: Int = 300) -> String {
-    let flat = s.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-    return flat.count > max ? String(flat.prefix(max)) + "..." : flat
+/// Printable text on one line, at most max characters. Anything that could move the
+/// cursor, change colours or reorder text on a terminal goes: C0 and C1 controls, DEL,
+/// format characters (bidi overrides, zero-width), line and paragraph separators,
+/// private-use and unassigned code points. Tabs and newlines become spaces, the rest '?'.
+/// Every string that came from the VM, a client or the system is passed through this
+/// before it's printed in the unlock terminal, written to the audit log or sent back.
+func clean(_ s: String, max: Int = 300) -> String {
+    var out = String.UnicodeScalarView()
+    var n = 0
+    for u in s.unicodeScalars {
+        if n >= max { break }
+        switch u.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate, .unassigned:
+            out.append(u == "\n" || u == "\r" || u == "\t" ? " " : "?")
+        default:
+            out.append(u)
+        }
+        n += 1
+    }
+    let r = String(out)
+    return s.unicodeScalars.count > max ? r + "..." : r
+}
+
+/// Keep a message short, printable and on one line (terminal, results, audit log).
+func oneLine(_ s: String, max: Int = 300) -> String { clean(s, max: max) }
+
+/// No core dumps (they would hold the decrypted vault) and no debugger, even one of yours.
+func hardenProcess() {
+    var rl = rlimit(rlim_cur: 0, rlim_max: 0)
+    _ = setrlimit(RLIMIT_CORE, &rl)
+    typealias PtraceFn = @convention(c) (Int32, pid_t, UnsafeMutableRawPointer?, Int32) -> Int32
+    if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ptrace") {   // RTLD_DEFAULT
+        _ = unsafeBitCast(sym, to: PtraceFn.self)(31, 0, nil, 0)              // PT_DENY_ATTACH
+    }
 }

@@ -119,10 +119,15 @@ func processPath(_ pid: Int32) -> String? {
     return n > 0 ? stringFromCBuffer(buf) : nil
 }
 
+
 /// The VM's SSH port on this Mac is a forward served by the gateway, cua-netgw
-/// (scripts/lib.sh netgw_render). Anything else listening there is refused.
-/// Returns nil when it's the gateway, else why not (and whether it's a refusal).
+/// (scripts/lib.sh netgw_render). The program listening there must have that name and
+/// be the gateway binary pinned at bind (its path, as the kernel reports it).
+/// Returns nil when it is, else why not (and whether it's a refusal).
 func checkListener(port: Int, gatewayPath: String?, allowedNames: [String]) -> (reason: String, denied: Bool)? {
+    guard let want = gatewayPath, !want.isEmpty else {
+        return ("this VM was bound by an earlier version without its gateway: run `metacomputer secrets bind` again", false)
+    }
     let r = runProcess("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpc"], env: helperEnv(), stdin: [], timeout: 15)
     var procs: [(pid: Int32, name: String)] = []
     var pid: Int32 = -1
@@ -133,16 +138,14 @@ func checkListener(port: Int, gatewayPath: String?, allowedNames: [String]) -> (
     if procs.isEmpty {
         return ("nothing listens on 127.0.0.1:\(port): is the VM running? (metacomputer start)", false)
     }
+    let pinned = URL(fileURLWithPath: want).resolvingSymlinksInPath().path
     for p in procs {
         guard allowedNames.contains(p.name) else {
-            return ("127.0.0.1:\(port) is served by '\(p.name)' (pid \(p.pid)), not the VM's gateway (\(allowedNames.joined(separator: ", "))); refusing", true)
+            return ("127.0.0.1:\(port) is served by '\(clean(p.name, max: 40))' (pid \(p.pid)), not the VM's gateway (\(allowedNames.joined(separator: ", "))); refusing", true)
         }
-        if let want = gatewayPath, !want.isEmpty {
-            let have = processPath(p.pid).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
-            let pinned = URL(fileURLWithPath: want).resolvingSymlinksInPath().path
-            guard have == pinned else {
-                return ("127.0.0.1:\(port) is served by \(have ?? "an unknown program"), not the pinned gateway \(pinned); refusing", true)
-            }
+        let have = processPath(p.pid).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        guard have == pinned else {
+            return ("127.0.0.1:\(port) is served by \(clean(have ?? "an unknown program", max: 200)), not the pinned gateway \(clean(pinned, max: 200)); refusing", true)
         }
     }
     return nil
@@ -158,36 +161,36 @@ struct GuestTarget {
 /// POSIX shell single quotes.
 func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+/// What `fill` runs in the VM. sshd forces it for the fill account whatever is asked for;
+/// naming it keeps the intent readable in the guest's logs.
+let secretFillCommand = "/opt/metacomputer/bin/secret-fill"
+
 final class GuestRunner {
     let sshPath: String
     let listenerNames: [String]
-    let checkGatewayPath: Bool
 
     init() {
         var ssh = "/usr/bin/ssh"
         var names = ["cua-netgw"]
-        var gatewayPath = true
         #if MCOMP_VAULT_TESTING
         // Test builds only (scripts/build-vault.sh --test): a stub instead of ssh, and
-        // other listener names. Release builds don't contain these lines.
+        // other listener names (the pinned gateway path is still checked). Release builds
+        // don't contain these lines.
         let env = ProcessInfo.processInfo.environment
         if let s = env["MCOMP_VAULT_TEST_SSH"], !s.isEmpty { ssh = s }
-        if let l = env["MCOMP_VAULT_TEST_LISTENERS"], !l.isEmpty {
-            names = l.split(separator: ",").map(String.init)
-            gatewayPath = false
-        }
+        if let l = env["MCOMP_VAULT_TEST_LISTENERS"], !l.isEmpty { names = l.split(separator: ",").map(String.init) }
         #endif
         sshPath = ssh
         listenerNames = names
-        checkGatewayPath = gatewayPath
     }
 
     func listenerProblem(_ t: GuestTarget) -> (reason: String, denied: Bool)? {
-        checkListener(port: t.binding.ssh_port, gatewayPath: checkGatewayPath ? t.binding.gateway_path : nil, allowedNames: listenerNames)
+        checkListener(port: t.binding.ssh_port, gatewayPath: t.binding.gateway_path, allowedNames: listenerNames)
     }
 
-    /// ssh to the pinned endpoint, running `remote`, with `input` on its stdin.
-    func ssh(_ t: GuestTarget, remote: String, input: [UInt8], timeout: TimeInterval, maxStdout: Int = 1 << 20) throws -> ProcResult {
+    /// ssh to the pinned endpoint as user with key, running `remote`, with `input` on its stdin.
+    func ssh(_ t: GuestTarget, user: String, key: String, remote: String, input: [UInt8], timeout: TimeInterval,
+             maxStdout: Int = 1 << 20) throws -> ProcResult {
         let dir = userTempDir() + "/mcomp-vault-\(getpid())-\(UInt32.random(in: 0...UInt32.max))"
         guard mkdir(dir, 0o700) == 0 else { throw VaultError("cannot make a temporary folder", code: Exit.error) }
         let kh = dir + "/known_hosts"
@@ -195,22 +198,31 @@ final class GuestRunner {
             unlink(kh)
             rmdir(dir)
         }
-        let line = "[127.0.0.1]:\(t.binding.ssh_port) \(t.binding.host_key_line)\n"
-        try writeFileAtomic(kh, Array(line.utf8))
         let b = t.binding
+        try writeFileAtomic(kh, Array("[127.0.0.1]:\(b.ssh_port) \(b.host_key_line)\n".utf8))
         let args = ["-F", "/dev/null", "-T",
-                    "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(b.ops_key_path)",
+                    "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(key)",
                     "-o", "UserKnownHostsFile=\(kh)", "-o", "StrictHostKeyChecking=yes",
                     "-o", "GlobalKnownHostsFile=/dev/null", "-o", "UpdateHostKeys=no", "-o", "CheckHostIP=no",
                     "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
                     "-o", "ClearAllForwardings=yes", "-o", "PasswordAuthentication=no",
                     "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
-                    "-p", "\(b.ssh_port)", "\(b.guest_user)@127.0.0.1", remote]
-        return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: timeout, maxStdout: maxStdout)
+                    "-p", "\(b.ssh_port)", "\(user)@127.0.0.1", remote]
+        return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout)
     }
 
-    /// Run the embedded guest script (vault/guest_fill.py) with one JSON request.
-    func guestFill(_ t: GuestTarget, request: [String: Any], value: [UInt8]?) throws -> [String: Any] {
+    /// The desktop account (sealed browser sessions).
+    func opsSSH(_ t: GuestTarget, remote: String, input: [UInt8], timeout: TimeInterval, maxStdout: Int = 1 << 20) throws -> ProcResult {
+        try ssh(t, user: t.binding.guest_user, key: t.binding.ops_key_path, remote: remote, input: input, timeout: timeout, maxStdout: maxStdout)
+    }
+
+    /// One request to the VM's secret-fill, as the fill account. The value (if any) goes
+    /// only to ssh's standard input.
+    func fill(_ t: GuestTarget, request: [String: Any], value: [UInt8]?, timeout: TimeInterval) throws -> [String: Any] {
+        guard let user = t.binding.fill_user, let key = t.binding.fill_key_path else {
+            return ["ok": false, "status": "error",
+                    "reason": "VM \(t.vm) was bound by an earlier version without the fill account: run `metacomputer secrets bind` again"]
+        }
         var req = request
         var valueString: String?
         if let v = value { valueString = String(decoding: v, as: UTF8.self); req["value"] = valueString }
@@ -221,20 +233,23 @@ final class GuestRunner {
         var inputBytes = Array(encoded) + [0x0A]
         wipe(&encoded)
         defer { wipe(&inputBytes) }
-        let r = try ssh(t, remote: "python3 -I -c " + shellQuote(guestFillScript), input: inputBytes, timeout: 60)
-        var stdout = String(decoding: r.stdout, as: UTF8.self)
+        let r = try ssh(t, user: user, key: key, remote: secretFillCommand, input: inputBytes, timeout: timeout)
         var stderr = String(decoding: r.stderr, as: UTF8.self)
-        // Never pass the value on, whatever came back.
-        if let v = valueString, v.count >= 4 {
-            stdout = stdout.replacingOccurrences(of: v, with: "[redacted]")
-            stderr = stderr.replacingOccurrences(of: v, with: "[redacted]")
-        }
+        if let v = valueString, !v.isEmpty { stderr = stderr.replacingOccurrences(of: v, with: "[redacted]") }
         if r.interrupted { return ["ok": false, "status": "error", "reason": "interrupted (the vault is locking)"] }
-        if r.timedOut { return ["ok": false, "status": "error", "reason": "the VM didn't answer within 60 s"] }
-        let last = stdout.split(separator: "\n").last.map(String.init) ?? ""
+        if r.timedOut { return ["ok": false, "status": "error", "reason": "the VM didn't answer in time"] }
+        if r.status == 255 && stderr.contains("Permission denied") {
+            return ["ok": false, "status": "error",
+                    "reason": "the VM refused the fill account (\(user)). VMs built before secrets support have none: rebuild the VM to use secrets (or bind again if its keys changed)"]
+        }
+        let last = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
         guard var out = parseJSONObject(Array(last.utf8)), out["ok"] is Bool else {
             let why = stderr.isEmpty ? "exit \(r.status)" : oneLine(stderr, max: 200)
             return ["ok": false, "status": "error", "reason": "the VM side failed (\(why))"]
+        }
+        // Never pass the value on, whatever came back: any string holding it, at any length.
+        if let v = valueString, !v.isEmpty, out.values.contains(where: { ($0 as? String)?.contains(v) == true }) {
+            return ["ok": false, "status": "error", "reason": "result withheld (it contained the value)"]
         }
         let ok = out["ok"] as? Bool ?? false
         out["status"] = ok ? "ok" : ((out["denied"] as? Bool ?? false) ? "denied" : "error")

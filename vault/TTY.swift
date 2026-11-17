@@ -96,11 +96,13 @@ func readPassphrase(confirm: Bool) throws -> [UInt8] {
     return p
 }
 
-/// y/N on the unlock terminal. Anything typed before the question is discarded; no
-/// answer within the timeout, Ctrl-C or the terminal closing all mean no.
-func askYesNo(_ question: String, timeout: Int) -> Bool {
+/// An approval on the unlock terminal: the person types `expected` (a secret's or a
+/// session's name) to allow; anything else refuses. Anything typed before the question
+/// is discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
+func askTyped(_ question: String, expected: String, timeout: Int) -> Bool {
+    guard timeout > 0 else { return false }
     _ = tcflush(0, TCIFLUSH)
-    eprintRaw(question + " [y/N] ")
+    eprintRaw(question + "\n  Type \(expected) to allow (anything else refuses): ")
     let deadline = Date().addingTimeInterval(TimeInterval(timeout))
     var line = [UInt8]()
     while Date() < deadline {
@@ -114,11 +116,35 @@ func askYesNo(_ question: String, timeout: Int) -> Bool {
         let n = read(0, &c, 1)
         if n <= 0 { return false }
         if c == 0x0A {
-            let a = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces).lowercased()
-            return a == "y" || a == "yes"
+            return String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces) == expected
         }
-        if line.count < 16 { line.append(c) }
+        if line.count < 80 { line.append(c) }
     }
     eprint("\n  (no answer in \(timeout) s: not allowed)")
     return false
+}
+
+/// The name of the terminal multiplexer this process runs in (tmux, screen, zellij), or
+/// nil. Any program of the user's can type into a multiplexer's panes (tmux send-keys,
+/// screen -X stuff), so a confirmation typed there can be forged.
+func terminalMultiplexer() -> String? {
+    let env = ProcessInfo.processInfo.environment
+    if env["TMUX"] != nil { return "tmux" }
+    if env["STY"] != nil { return "screen" }
+    if env["ZELLIJ"] != nil { return "zellij" }
+    let known = ["tmux", "screen", "zellij", "byobu"]
+    var pid = getppid()
+    for _ in 0..<64 {
+        guard pid > 1 else { break }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { break }
+        let name = withUnsafeBytes(of: info.kp_proc.p_comm) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }.lowercased()
+        if let k = known.first(where: { name == $0 || name.hasPrefix($0 + ":") || name.hasPrefix($0 + "-") }) { return k }
+        pid = info.kp_eproc.e_ppid
+    }
+    return nil
 }
