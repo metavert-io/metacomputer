@@ -121,6 +121,26 @@ if [ -n "${MCOMP_EXTRA_PACKAGES:-}" ]; then
   dpkg-query -W -f='${Package} ${Version}\n' "${EXTRA[@]}" | tee -a "$STATE/package-versions.txt"
 fi
 
+if [ "${MCOMP_VIRTUAL_AUDIO:-off}" = on ]; then
+  step "virtual sound card (VIRTUAL_AUDIO=on): one PulseAudio sink that plays into nothing"
+  # No hardware is involved: virtio_snd stays blacklisted (rootfs/etc/modprobe.d),
+  # so the only sink is this null sink, and desktop-record captures its monitor.
+  "${APT[@]}" install --no-install-recommends pulseaudio pulseaudio-utils libasound2-plugins
+  purge_unwanted
+  install -d -o "$GUSER" -g "$GUSER" -m 0755 "/home/$GUSER/.config/pulse"
+  cat > "/home/$GUSER/.config/pulse/default.pa" <<'PA'
+# metacomputer (VIRTUAL_AUDIO=on): the system defaults plus a sound card that plays
+# into nothing. Desktop recordings capture its monitor (metacomputer.monitor).
+.include /etc/pulse/default.pa
+load-module module-null-sink sink_name=metacomputer sink_properties=device.description=Virtual-sound-card
+set-default-sink metacomputer
+PA
+  chown "$GUSER:$GUSER" "/home/$GUSER/.config/pulse/default.pa"
+  # ALSA-only programs (PortAudio in Audacity, aplay) play through PulseAudio too.
+  printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
+  dpkg-query -W -f='${Package} ${Version}\n' pulseaudio libasound2-plugins | tee -a "$STATE/package-versions.txt"
+fi
+
 step "Cua Driver ${CUA_DRIVER_VERSION} (linux-arm64) from the host-verified payload"
 TARBALL="$PAYLOAD/$CUA_DRIVER_TARBALL"
 echo "$CUA_DRIVER_SHA256  $TARBALL" | sha256sum -c -

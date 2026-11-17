@@ -126,6 +126,7 @@ store; see Configuration.
 - With lume-secure (the default choice) the VM starts without all three; turn one back on with `SHARE_CLIPBOARD=on`, `SHARE_AUDIO=on` or `SHARE_ROSETTA=on`.
 - With standard Lume they're always attached.
 - `metacomputer status` shows what the VM actually has.
+- `VIRTUAL_AUDIO=on` is separate: it gives the VM a sound card of its own that plays into nothing, so apps have working sound and recordings capture it. It never connects to the Mac's speakers or microphone.
 
 **The VM's network** (enforced on the Mac by a user-mode gateway, not inside the VM):
 - It reaches the public internet and nothing private: not your Mac, your LAN or router, a tailnet, or cloud metadata.
@@ -171,6 +172,7 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 | `VM_CPU`, `VM_MEMORY` | 4, 8GB | VM size |
 | `BROWSERS` | `firefox chrome` | Browsers built into the VM |
 | `EXTRA_PACKAGES` | (none) | More Ubuntu packages built into the VM, e.g. `inkscape libreoffice-calc` |
+| `VIRTUAL_AUDIO` | `off` | `on`: a sound card inside the VM that plays into nothing, so apps have sound and recordings capture it (next build) |
 | `LUME` | `~/.local/bin/lume-secure` | The Lume that runs the VM (`install.sh --lume=standard` for Cua's release) |
 | `SHARE_CLIPBOARD`, `SHARE_AUDIO`, `SHARE_ROSETTA` | `off` | Turn one on to connect the VM to your Mac's clipboard, audio or Rosetta (lume-secure only; standard Lume always shares) |
 | `SSH_DIR` | `~/.ssh/metacomputer` | SSH keys for the VM |
@@ -178,6 +180,7 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 | `BROWSER`, `MODE` | `firefox`, `human` | The skill's defaults |
 | `RECORD_FPS`, `RECORD_QUALITY` | 20, `standard` | Desktop recordings; `high` is sharp enough to edit into videos (several times larger) |
 | `RECORD_TO`, `RECORD_DIR` | `guest`, `recordings/manual/` | `host` streams the recording to the Mac while it runs, so nothing builds up on the VM's disk; `RECORD_DIR` can be any folder, such as an external drive |
+| `RECORD_AUDIO` | `auto` | `auto`: recordings include the VM's sound when it has the virtual sound card; `off`: video only |
 | `ACTION_LOG` | `off` | `on`: signed log of every tool call ([SECURITY.md](SECURITY.md)) |
 | `SSH_AUTH` | `key` | `cert`: short-lived SSH certificates instead of static keys |
 | `DRIVER_MODE`, `DRIVER_PROFILE` | `standard`, `desktop` | `bounded`: Cua Driver limited to a profile (`readonly`, `desktop`, `browser` with `DRIVER_ORIGINS`) or your own `DRIVER_MANIFEST` |

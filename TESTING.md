@@ -56,7 +56,12 @@ seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality
 is refused, the frame rate and size, the description file, that nothing is left
 behind on the Mac, and that only the guest mode leaves a copy in the VM. It also
 checks that a `RECORD_DIR` whose parent is missing (a drive that isn't
-connected) is refused rather than created.
+connected) is refused rather than created, and that a `RECORD_AUDIO` other than
+`auto` or `off` is refused. It reads whether the VM has the virtual sound card
+(`VIRTUAL_AUDIO=on`) and checks that each recording has a sound track exactly
+when it does; on such a VM it also checks that `RECORD_AUDIO=off` leaves it out.
+Without a VM, it checks that the description file describes a clip's sound track
+and reports none for a silent one.
 
 ## Optional hardening: `tests/test_actionlog.py`, `tests/test_options.py`
 

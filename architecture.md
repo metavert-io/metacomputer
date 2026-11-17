@@ -255,6 +255,9 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
   `spice-vdagent` and `virtio_snd` is blacklisted, but a root-compromised
   guest could start an agent and read or set the Mac's clipboard, so don't
   keep secrets on the clipboard while it runs untrusted tasks.
+  `VIRTUAL_AUDIO=on` doesn't change this: it adds PulseAudio inside the guest
+  with a single null sink (apps play into it, `desktop-record` captures its
+  monitor), and `virtio_snd` stays blacklisted.
 - **Guest egress is open to the public internet** (by design, for browsing);
   everything private (LAN, tailnet, the Mac) is refused on the host.
 - **Unattended upgrades** patch the working VM after each reset; refresh the

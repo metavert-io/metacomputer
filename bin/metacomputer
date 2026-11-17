@@ -232,6 +232,8 @@ if gs:
     print(f"active window {gs.get('active_window_title')!r}   windows: {len(gs.get('windows', []))}")
     print(f"driver        {gs.get('driver_version')}   doctor rc={gs.get('driver_doctor_rc')}   uinput {m(gs.get('uinput_writable'))}")
     print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (metacomputer view)")
+    if gs.get("virtual_audio"):
+        print("sound         virtual sound card: plays into nothing, recordings include it")
     print(f"guest         up {int(gs.get('uptime_s', 0))} s, load {' '.join(gs.get('loadavg', []))}, "
           f"{gs.get('mem_available_mb')} MB free, {gs.get('disk_free_gb')} GB disk free"
           + ("  REBOOT REQUIRED (updates)" if gs.get('reboot_required') else ""))
@@ -352,9 +354,10 @@ do_record() {
     start)
       need_running
       local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}" fps="${2:-${RECORD_FPS:-20}}" quality="${RECORD_QUALITY:-standard}"
-      local mode="${RECORD_TO:-guest}" dir started
+      local mode="${RECORD_TO:-guest}" audio="${RECORD_AUDIO:-auto}" dir started
       [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "recording names use letters, digits, . _ - only"
       case "$quality" in standard|high) ;; *) die "RECORD_QUALITY must be standard or high" ;; esac
+      case "$audio" in auto|off) ;; *) die "RECORD_AUDIO must be auto or off" ;; esac
       case "$mode" in guest|host) ;; *) die "RECORD_TO must be guest or host" ;; esac
       [ -s "$state" ] && die "already recording ($(sed -n 's/^name=//p' "$state")); metacomputer record stop first"
       dir="$(record_dir)" || exit 1
@@ -363,7 +366,7 @@ do_record() {
       if [ "$mode" = host ]; then
         # The VM encodes and streams; this Mac saves it as it arrives (detached, so it
         # outlives this command). stop ends ffmpeg in the VM, which ends the stream.
-        daemonize "$dir/$name.stream.log" "$SELF" _record-pipe "$name" "$fps" "$quality" "$dir/$name.mkv"
+        daemonize "$dir/$name.stream.log" "$SELF" _record-pipe "$name" "$fps" "$quality" "$dir/$name.mkv" "$audio"
         local pid=$! i=0
         while [ $i -lt 20 ]; do
           gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$" && break
@@ -379,7 +382,7 @@ do_record() {
           "$name" "$dir" "$pid" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality), streaming to $dir/ — run your task, then: metacomputer record stop"
       else
-        gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality" || die "could not start recording"
+        gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio" || die "could not start recording"
         printf 'name=%s\nmode=guest\ndir=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
           "$name" "$dir" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality) — run your task, then: metacomputer record stop"
@@ -433,9 +436,9 @@ do_record() {
   esac
 }
 
-do_record_pipe() { # NAME FPS QUALITY OUT.mkv (internal: the detached half of RECORD_TO=host)
+do_record_pipe() { # NAME FPS QUALITY OUT.mkv [AUDIO] (internal: the detached half of RECORD_TO=host)
   ssh_base ops
-  exec ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3" > "$4"
+  exec ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" > "$4"
 }
 
 do_recordings() {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# desktop-record start NAME [FPS] [QUALITY] | stream NAME [FPS] [QUALITY] | stop | status
+# desktop-record start NAME [FPS] [QUALITY] [AUDIO] | stream NAME [FPS] [QUALITY] [AUDIO] | stop | status
 # Whole-desktop recording of the guest's X display (ffmpeg x11grab, visible
 # pointer). Independent of who drives the desktop, so it captures any task.
 #   start   an MP4 in ~/metacomputer-runs/manual/; the host copies it at stop
@@ -8,6 +8,8 @@
 #           (RECORD_TO=host): nothing builds up on the VM's disk. `stop` ends it.
 # QUALITY: standard (small files, enough to see what happened) or high (sharp
 # enough to edit into videos; several times larger).
+# AUDIO: auto (include the VM's sound when it has the virtual sound card,
+# VIRTUAL_AUDIO=on; nothing else is ever captured) or off (video only, the default).
 set -eu
 RUN="/run/user/$(id -u)/metacomputer"
 DIR="$HOME/metacomputer-runs/manual"
@@ -17,8 +19,8 @@ mkdir -p "$DIR"
 
 alive() { [ -s "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 
-setup() { # NAME FPS QUALITY -> sets NAME FPS SIZE ENC; loads the session's DISPLAY
-  NAME="$1"; FPS="${2:-20}"; QUALITY="${3:-standard}"
+setup() { # NAME FPS QUALITY AUDIO -> sets NAME FPS SIZE ENC VQ AIN AENC; loads the session's DISPLAY
+  NAME="$1"; FPS="${2:-20}"; QUALITY="${3:-standard}"; AUDIO="${4:-off}"
   case "$NAME" in ''|*[!A-Za-z0-9._-]*) echo "bad name: $NAME" >&2; exit 2;; esac
   case "$FPS" in ''|*[!0-9]*) echo "bad fps: $FPS" >&2; exit 2;; esac
   [ "$FPS" -ge 1 ] && [ "$FPS" -le 60 ] || { echo "fps must be 1-60" >&2; exit 2; }
@@ -29,37 +31,47 @@ setup() { # NAME FPS QUALITY -> sets NAME FPS SIZE ENC; loads the session's DISP
     high) ENC="-preset veryfast -crf 16 -g $((FPS * 2))" ;;
     *) echo "quality must be standard or high" >&2; exit 2 ;;
   esac
+  case "$AUDIO" in auto|off) ;; *) echo "audio must be auto or off" >&2; exit 2 ;; esac
   if alive; then echo "already recording: $(cat "$CUR")" >&2; exit 1; fi
   [ -s "$RUN/session.env" ] || { echo "desktop session not up" >&2; exit 3; }
   set -a; . "$RUN/session.env"; set +a
   SIZE="$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')"
   SIZE="${SIZE:-1920x1080}"
+  # Sound: only the virtual sound card's own output (the null sink's monitor).
+  VQ=""; AIN=""; AENC=""; WITH=""
+  if [ "$AUDIO" = auto ] && command -v pactl >/dev/null 2>&1 \
+     && pactl list short sinks 2>/dev/null | awk '$2 == "metacomputer" {f = 1} END {exit !f}'; then
+    VQ="-thread_queue_size 512"
+    AIN="-thread_queue_size 2048 -f pulse -sample_rate 48000 -channels 2 -i metacomputer.monitor"
+    AENC="-c:a aac -b:a 192k"
+    WITH=", with sound"
+  fi
 }
 
 case "${1:-status}" in
   start)
-    setup "${2:-}" "${3:-}" "${4:-}"
+    setup "${2:-}" "${3:-}" "${4:-}" "${5:-}"
     OUT="$DIR/$NAME.mp4"
     # shellcheck disable=SC2086
     nohup ffmpeg -hide_banner -loglevel error -nostdin -y \
-      -f x11grab -draw_mouse 1 -framerate "$FPS" -video_size "$SIZE" -i "$DISPLAY" \
-      -c:v libx264 $ENC -pix_fmt yuv420p -movflags +faststart \
+      $VQ -f x11grab -draw_mouse 1 -framerate "$FPS" -video_size "$SIZE" -i "$DISPLAY" $AIN \
+      -c:v libx264 $ENC -pix_fmt yuv420p $AENC -movflags +faststart \
       "$OUT" > "$DIR/$NAME.ffmpeg.log" 2>&1 &
     echo $! > "$PIDF"
     echo "$OUT" > "$CUR"
     sleep 1
     alive || { echo "ffmpeg did not start:" >&2; cat "$DIR/$NAME.ffmpeg.log" >&2; exit 1; }
-    echo "recording $OUT ($SIZE @ ${FPS} fps, $QUALITY)"
+    echo "recording $OUT ($SIZE @ ${FPS} fps, $QUALITY$WITH)"
     ;;
   stream)
-    setup "${2:-}" "${3:-}" "${4:-}"
+    setup "${2:-}" "${3:-}" "${4:-}" "${5:-}"
     [ -t 1 ] && { echo "stream writes video to stdout; redirect it" >&2; exit 2; }
     echo $$ > "$PIDF"          # exec keeps the PID, so stop signals ffmpeg itself
     echo "stream:$NAME" > "$CUR"
     # shellcheck disable=SC2086
     exec ffmpeg -hide_banner -loglevel error -nostdin \
-      -f x11grab -draw_mouse 1 -framerate "$FPS" -video_size "$SIZE" -i "$DISPLAY" \
-      -c:v libx264 $ENC -pix_fmt yuv420p -f matroska - 2> "$DIR/$NAME.ffmpeg.log"
+      $VQ -f x11grab -draw_mouse 1 -framerate "$FPS" -video_size "$SIZE" -i "$DISPLAY" $AIN \
+      -c:v libx264 $ENC -pix_fmt yuv420p $AENC -f matroska - 2> "$DIR/$NAME.ffmpeg.log"
     ;;
   stop)
     if ! alive; then rm -f "$PIDF" "$CUR"; echo "not recording"; exit 0; fi
@@ -73,5 +85,5 @@ case "${1:-status}" in
   status)
     if alive; then echo "recording $(cat "$CUR")"; else echo "idle"; fi
     ;;
-  *) echo "usage: desktop-record start NAME [FPS] [QUALITY] | stream NAME [FPS] [QUALITY] | stop | status" >&2; exit 2 ;;
+  *) echo "usage: desktop-record start NAME [FPS] [QUALITY] [AUDIO] | stream NAME [FPS] [QUALITY] [AUDIO] | stop | status" >&2; exit 2 ;;
 esac
