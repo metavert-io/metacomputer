@@ -1,37 +1,39 @@
 #!/bin/bash
-# vc: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
+# metacomputer: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
 # that Claude Code operates through Cua Driver's MCP server.
 #
-#   vc start | stop [--force] | restart | status [--json] | reset [--yes]
-#   vc who | release               who is using the virtual computer / hand it over
-#   vc where                       project, config, skill and results folders
-#   vc call TOOL ['JSON']          one Cua Driver tool call (new connection each time)
-#   vc inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
-#                                       read-only snapshot of the VM (no GUI, changes nothing)
-#   vc browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
-#   vc input-reset [--check]       remove the driver's leftover virtual input devices
-#                                       (while one exists, Chrome ignores the keyboard); prints the count
-#   vc desktop-restart             log the desktop out and in again (closes every app)
-#   vc rename GUEST_PATH NEW_NAME  rename a file in the VM (a download saved under its id)
-#   vc web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
-#   vc test [A B C D E F ...]      run the GUI smoke suite (records each test)
-#   vc task start SLUG | finish NAME   one folder per task (guest + host), artifacts listed
-#   vc put HOST_PATH... [--to GUEST_DIR]   copy files into the VM (default ~/Inbox)
-#   vc get GUEST_PATH [HOST_DIR] [--task NAME]   copy files out of the VM
-#   vc shot [HOST_PATH] [--task NAME]  screenshot of the whole VM desktop to the Mac
-#   vc contact-sheet MP4 [OUT.png] 12 frames of a recording in one image
-#   vc record start [NAME] | stop | status
-#   vc recordings [--sync] [N]
-#   vc checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
-#   vc view                        how to watch / take over the desktop (VNC)
-#   vc ssh [ops|admin] [CMD...]    shell into the guest
-#   vc mcp                         direct stdio MCP bridge (tests, mcp_client.py)
-#   vc mcp-lazy                    on-demand MCP bridge (what Claude Code sessions use)
-#   vc build [--replace]           build the VM + baseline from scratch
-#   vc baseline [--yes]            re-snapshot the current VM as the baseline
-#   vc logs [N]                    tail host + guest logs
+# Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
+#
+#   start | stop [--force] | restart | status [--json] | reset [--yes]
+#   who | release                  who is using the virtual computer / hand it over
+#   where                          project, config, skill and results folders
+#   call TOOL ['JSON']             one Cua Driver tool call (new connection each time)
+#   inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
+#                                  read-only snapshot of the VM (no GUI, changes nothing)
+#   browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
+#   input-reset [--check]          remove the driver's leftover virtual input devices
+#                                  (while one exists, Chrome ignores the keyboard); prints the count
+#   desktop-restart                log the desktop out and in again (closes every app)
+#   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
+#   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
+#   test [A B C D E F ...]         run the GUI smoke suite (records each test)
+#   task start SLUG | finish NAME  one folder per task (guest + host), artifacts listed
+#   put HOST_PATH... [--to GUEST_DIR]          copy files into the VM (default ~/Inbox)
+#   get GUEST_PATH [HOST_DIR] [--task NAME]    copy files out of the VM
+#   shot [HOST_PATH] [--task NAME] screenshot of the whole VM desktop to the Mac
+#   contact-sheet MP4 [OUT.png]    12 frames of a recording in one image
+#   record start [NAME] | stop | status
+#   recordings [--sync] [N]
+#   checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
+#   view                           how to watch / take over the desktop (VNC)
+#   ssh [ops|admin] [CMD...]       shell into the guest
+#   mcp                            direct stdio MCP bridge (tests, mcp_client.py)
+#   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use)
+#   build [--replace]              build the VM + baseline from scratch
+#   baseline [--yes]               re-snapshot the current VM as the baseline
+#   logs [N]                       tail host + guest logs
 # stop, reset, restore, baseline and test refuse while another session is
-# using the computer (vc who); --override proceeds anyway (ask first).
+# using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
@@ -58,8 +60,8 @@ parse_flags() {
 # One controller at a time: refuse while another session is using the computer.
 owners_check() {
   [ "$OVERRIDE" = 1 ] && return 0
-  "$PY" "$LAB_ROOT/cualab/owners.py" check \
-    || die "another session is using the virtual computer (vc who). Ask before taking over; then re-run with --override, or run 'vc release' first"
+  "$PY" "$LAB_ROOT/lib/owners.py" check \
+    || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
 }
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
@@ -71,10 +73,10 @@ guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
 
 abs_host_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac; }
 
-need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (vc start)"; }
+need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
 
 do_start() {
-  vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: vc build"
+  vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
     warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force
@@ -83,13 +85,13 @@ do_start() {
   ok "VM running (gateway policy: config/netgw-rules.json)"
   wait_ssh ops 240 || die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
-  wait_session 240 || die "XFCE session not ready (vc ssh admin; sudo cua-lab-guest-admin logs)"
+  wait_session 240 || die "XFCE session not ready (metacomputer ssh admin; sudo metacomputer-admin logs)"
   ok "XFCE session ready"
-  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (vc status)"
-  say "ready. Live view: vc view"
+  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (metacomputer status)"
+  say "ready. Live view: metacomputer view"
 }
 
-mcp_probe() { "$PY" "$LAB_ROOT/cualab/mcp_client.py" --probe; }
+mcp_probe() { "$PY" "$LAB_ROOT/lib/mcp_client.py" --probe; }
 
 do_stop() { # [--force] (immediate power-off) [--override] (even if another session is using it)
   parse_flags "$@"
@@ -98,7 +100,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   if vm_running "$VM_NAME"; then
     owners_check
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
-    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'vc record stop' to keep it"
+    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
   else
     netgw_stop
@@ -108,7 +110,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
 
 do_status() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
-  local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs=""
+  local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs="" layout=current
   vm_state="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   local base_state; base_state="$(vm_exists "$BASELINE_NAME" && echo present || echo missing)"
   local gw=false fwd=""
@@ -119,7 +121,9 @@ do_status() {
     lease="$(netgw_control "lease $(vm_mac "$VM_NAME")")"
     if gssh ops true 2>/dev/null; then
       ssh_ok=true
-      gs="$(gssh ops /opt/cua-lab/bin/cua-guest-status 2>/dev/null || echo '{}')"
+      # VMs built by earlier versions keep their helpers in /opt/cua-lab or /opt/virtual-computer.
+      gssh ops 'test -x /opt/metacomputer/bin/guest-status || { test ! -d /opt/cua-lab && test ! -d /opt/virtual-computer; }' 2>/dev/null || layout=old
+      gs="$(gssh ops /opt/metacomputer/bin/guest-status 2>/dev/null || echo '{}')"
       mcp="$(mcp_probe 2>/dev/null || echo '{}')"
       # What the VM actually has from the host: virtio console port names (the
       # SPICE clipboard port), virtio device ids (0x0019 = sound) and virtiofs
@@ -127,9 +131,9 @@ do_status() {
       hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
     fi
   fi
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" <<'EOF'
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" <<'EOF'
 import json, os, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume = sys.argv[1:]
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout = sys.argv[1:]
 gs = json.loads(gs or "{}"); mcp = json.loads(mcp or "{}")
 sharing = None
 if hs:
@@ -139,7 +143,7 @@ if hs:
                "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
        "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
-       "host_sharing": sharing, "lume": lume}
+       "host_sharing": sharing, "lume": lume, "guest_layout": layout}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -147,13 +151,16 @@ def m(b): return "\033[32m✓\033[0m" if b else "\033[31m✗\033[0m"
 print(f"VM            {vm}    baseline: {base}")
 print(f"gateway       {m(out['gateway'])} cua-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
+if layout == "old":
+    print("guest         \033[33mbuilt by an earlier version (older layout)\033[0m: rebuild it with "
+          "'metacomputer build --replace' (or start a new VM under another VM_NAME)")
 if gs:
     print(f"desktop       {m(gs.get('xorg_running'))} Xorg  {m(gs.get('xfce_session_running'))} XFCE  "
           f"{m(gs.get('session_env_published'))} session env  resolution {gs.get('resolution')}")
     print(f"accessibility {m(gs.get('atspi_bus'))} AT-SPI bus  {m(gs.get('toolkit_accessibility'))} toolkit-accessibility")
     print(f"active window {gs.get('active_window_title')!r}   windows: {len(gs.get('windows', []))}")
     print(f"driver        {gs.get('driver_version')}   doctor rc={gs.get('driver_doctor_rc')}   uinput {m(gs.get('uinput_writable'))}")
-    print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (vc view)")
+    print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (metacomputer view)")
     print(f"guest         up {int(gs.get('uptime_s', 0))} s, load {' '.join(gs.get('loadavg', []))}, "
           f"{gs.get('mem_available_mb')} MB free, {gs.get('disk_free_gb')} GB disk free"
           + ("  REBOOT REQUIRED (updates)" if gs.get('reboot_required') else ""))
@@ -197,7 +204,7 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
   if [ "${1:-}" = "--delete" ]; then
-    ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (vc checkpoints)"
+    ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     confirm "Delete checkpoint '$2'?"
     "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
     ok "checkpoint '$2' deleted"; return 0
@@ -205,25 +212,25 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
   local name="${1:-}" replace=0; [ "${2:-}" = "--replace" ] && replace=1
   ckpt_name "$name"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
-  vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'vc stop' first"
+  vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
-  ok "checkpoint '$name' saved (restore with: vc restore $name)"
+  ok "checkpoint '$name' saved (restore with: metacomputer restore $name)"
 }
 
 do_checkpoints() {
   "$LUME" ls --format json 2>/dev/null | "$PY" -c 'import json, sys
 pre = sys.argv[1]; names = [v["name"][len(pre):] for v in json.load(sys.stdin) if v["name"].startswith(pre)]
-print("\n".join(sorted(names)) if names else "no checkpoints (vc checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
+print("\n".join(sorted(names)) if names else "no checkpoints (metacomputer checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
 }
 
 do_restore() { # NAME [--yes] [--override]
   parse_flags "$@"
   local name="${REST[0]:-}"; ckpt_name "$name"
-  vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (vc checkpoints)"
+  vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded (host recordings and results are kept)"
   restore_from "$CKPT_PREFIX$name" "checkpoint '$name'"
@@ -234,7 +241,7 @@ do_baseline() {
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   local was_running=0; vm_running "$VM_NAME" && was_running=1
-  [ $was_running = 1 ] && { do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/cua-lab-runs/*' || true; vm_stop "$VM_NAME"; }
+  [ $was_running = 1 ] && { do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' || true; vm_stop "$VM_NAME"; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
@@ -251,24 +258,24 @@ do_record() {
   case "$sub" in
     start)
       local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}"
-      gssh ops "/opt/cua-lab/bin/cua-desktop-record start '$name' ${2:-20}" || die "could not start recording"
+      gssh ops "/opt/metacomputer/bin/desktop-record start '$name' ${2:-20}" || die "could not start recording"
       echo "$name" > "$RUN_DIR/manual-recording"
-      ok "recording the guest desktop as '$name' — run your task, then: vc record stop" ;;
+      ok "recording the guest desktop as '$name' — run your task, then: metacomputer record stop" ;;
     stop)
       local path name dest
-      path="$(gssh ops /opt/cua-lab/bin/cua-desktop-record stop)" || die "stop failed"
+      path="$(gssh ops /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
       [ "$path" = "not recording" ] && { ok "not recording"; return 0; }
       name="$(basename "$path" .mp4)"; dest="$LAB_ROOT/recordings/manual"; mkdir -p "$dest"
       gssh ops "cat '$path'" > "$dest/$name.mp4" || die "copy failed"
       "$PY" - "$dest/$name.json" "$name" <<'EOF'
 import json, sys, time
-json.dump({"name": sys.argv[2], "kind": "manual desktop recording (vc record)",
+json.dump({"name": sys.argv[2], "kind": "manual desktop recording (metacomputer record)",
            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, open(sys.argv[1], "w"), indent=2)
 EOF
       rm -f "$RUN_DIR/manual-recording"
       ok "saved recordings/manual/$name.mp4 ($(du -h "$dest/$name.mp4" | cut -f1))" ;;
-    status) gssh ops /opt/cua-lab/bin/cua-desktop-record status ;;
-    *) die "usage: vc record start [NAME] | stop | status" ;;
+    status) gssh ops /opt/metacomputer/bin/desktop-record status ;;
+    *) die "usage: metacomputer record start [NAME] | stop | status" ;;
   esac
 }
 
@@ -278,8 +285,8 @@ do_recordings() {
   if [ $sync = 1 ]; then
     vm_running "$VM_NAME" || die "VM is not running; nothing to sync"
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
-    gssh ops 'cd ~/cua-lab-runs 2>/dev/null && tar -cf - . 2>/dev/null' | tar -C "$dest" -xf - 2>/dev/null
-    ok "guest ~/cua-lab-runs synced to recordings/guest-runs/"
+    gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | tar -C "$dest" -xf - 2>/dev/null
+    ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
   "$PY" - "$LAB_ROOT/recordings" "$n" <<'EOF'
 import json, os, subprocess, sys, time
@@ -315,15 +322,15 @@ do_inspect() { # [system|windows|processes|ports|files ...] [--minutes N] [--top
       --json) json=1 ;;
       --minutes|--top) [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "$1 needs a number"; args+=("$1" "$2"); shift ;;
       system|windows|processes|ports|files|browser|all) args+=("$1") ;;
-      *) die "usage: vc inspect [system|windows|processes|ports|files|browser ...] [--minutes N] [--top N] [--json]" ;;
+      *) die "usage: metacomputer inspect [system|windows|processes|ports|files|browser ...] [--minutes N] [--top N] [--json]" ;;
     esac
     shift
   done
   need_running
   local out
-  out="$(gssh ops "python3 -I - ${args[*]+${args[*]}}" < "$LAB_ROOT/cualab/guest_inspect.py")" \
-    || die "inspect failed (is the guest up? vc status)"
-  if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s' "$out" | "$PY" "$LAB_ROOT/cualab/guest_inspect.py" --render; fi
+  out="$(gssh ops "python3 -I - ${args[*]+${args[*]}}" < "$LAB_ROOT/lib/guest_inspect.py")" \
+    || die "inspect failed (is the guest up? metacomputer status)"
+  if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render; fi
 }
 
 browser_get() { # KEY DEFAULT: the value after config/defaults.env + config/local.env
@@ -331,7 +338,7 @@ browser_get() { # KEY DEFAULT: the value after config/defaults.env + config/loca
 }
 browser_set() { # KEY VALUE: written to this machine's config (config/local.env)
   local tmp; tmp="$(mktemp)"
-  { if [ -f "$LOCAL_CONFIG" ]; then grep -v "^$1=" "$LOCAL_CONFIG"; else echo "# This Mac's settings for virtual-computer (see config/local.env.example)"; fi
+  { if [ -f "$LOCAL_CONFIG" ]; then grep -v "^$1=" "$LOCAL_CONFIG"; else echo "# This Mac's settings for metacomputer (see config/local.env.example)"; fi
     echo "$1=$2"; } > "$tmp"
   mv "$tmp" "$LOCAL_CONFIG"
 }
@@ -343,33 +350,33 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--
       else
         echo "default browser: $b   (firefox | chrome)"
         echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome)"
-        echo "Words in a request override these. Change with: vc browser default chrome | vc browser mode page"
+        echo "Words in a request override these. Change with: metacomputer browser default chrome | metacomputer browser mode page"
       fi ;;
     default) case "${2:-}" in firefox|chrome) browser_set BROWSER "$2"; echo "default browser: $2" ;;
-                              *) die "usage: vc browser default firefox|chrome" ;; esac ;;
+                              *) die "usage: metacomputer browser default firefox|chrome" ;; esac ;;
     mode)    case "${2:-}" in human|page|hybrid) browser_set MODE "$2"; echo "default mode: $2" ;;
-                              *) die "usage: vc browser mode human|page|hybrid" ;; esac ;;
+                              *) die "usage: metacomputer browser mode human|page|hybrid" ;; esac ;;
     profiles)
       need_running
       if [ "${2:-}" = --delete ]; then
         local name="${3:-}"; shift 3 2>/dev/null || true
-        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: vc browser profiles --delete NAME [--yes]"
+        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: metacomputer browser profiles --delete NAME [--yes]"
         parse_flags "$@"
         local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
-        gssh ops "test -d '$dir'" || die "no driver profile named $name (vc browser profiles)"
+        gssh ops "test -d '$dir'" || die "no driver profile named $name (metacomputer browser profiles)"
         # [-] keeps pgrep from matching this very ssh command line
         gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" && die "profile $name is in use by a running Chrome; close it first"
         confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
         gssh ops "rm -rf -- '$dir'" && echo "deleted profile $name"
       else
-        gssh ops "python3 -I - browser" < "$LAB_ROOT/cualab/guest_inspect.py" | "$PY" "$LAB_ROOT/cualab/guest_inspect.py" --render-profiles
+        gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles
       fi ;;
-    *) die "usage: vc browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
+    *) die "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
   esac
 }
 
 do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download saved under its id)
-  [ $# -eq 2 ] || die "usage: vc rename GUEST_PATH NEW_NAME"
+  [ $# -eq 2 ] || die "usage: metacomputer rename GUEST_PATH NEW_NAME"
   need_running
   local src new; src="$(guest_path "$1")" || exit 1; new="$2"
   [[ "$new" =~ ^[A-Za-z0-9][A-Za-z0-9._()+\ -]{0,127}$ ]] || die "new name: letters, digits, spaces and ._()+- only, no folders"
@@ -381,27 +388,27 @@ do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download sa
 
 do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (Chrome's keyboard)
   need_running
-  local n; n="$(gssh ops "/opt/cua-lab/bin/cua-input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
+  local n; n="$(gssh ops "/opt/metacomputer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
   echo "$n"
 }
 
 do_desktop_restart() { # [--override]: log the desktop session out and back in (closes every app)
   parse_flags "$@"; owners_check; need_running
   say "restarting the desktop session (every open app closes)"
-  gssh admin 'sudo /usr/local/sbin/cua-lab-guest-admin restart-desktop' >/dev/null 2>&1 || true
+  gssh admin 'sudo /usr/local/sbin/metacomputer-admin restart-desktop' >/dev/null 2>&1 || true
   sleep 5
-  wait_session 120 || die "the desktop session did not come back (vc status)"
+  wait_session 120 || die "the desktop session did not come back (metacomputer status)"
   ok "desktop session ready"
 }
 
 do_who() {
   local st; st="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
-  if [ "${1:-}" = "--json" ]; then exec "$PY" "$LAB_ROOT/cualab/owners.py" who --json; fi
+  if [ "${1:-}" = "--json" ]; then exec "$PY" "$LAB_ROOT/lib/owners.py" who --json; fi
   echo "virtual computer: $st"
   if [ "$st" = running ]; then
     gssh ops 'pgrep -u "$(id -u)" -x ffmpeg >/dev/null && echo "recording: yes (a screen recording is running)" || echo "recording: no"' 2>/dev/null
   fi
-  "$PY" "$LAB_ROOT/cualab/owners.py" who
+  "$PY" "$LAB_ROOT/lib/owners.py" who
 }
 
 do_put() { # HOST_PATH... [--to GUEST_DIR]
@@ -409,7 +416,7 @@ do_put() { # HOST_PATH... [--to GUEST_DIR]
   while [ $# -gt 0 ]; do
     case "$1" in --to) to="${2:-}"; shift 2 ;; *) files+=("$1"); shift ;; esac
   done
-  [ ${#files[@]} -gt 0 ] || die "usage: vc put HOST_PATH... [--to GUEST_DIR]"
+  [ ${#files[@]} -gt 0 ] || die "usage: metacomputer put HOST_PATH... [--to GUEST_DIR]"
   need_running
   to="$(guest_path "$to")" || exit 1
   gssh ops "mkdir -p $(printf %q "$to")" || die "cannot create $to in the guest"
@@ -426,7 +433,7 @@ do_get() { # GUEST_PATH [HOST_DIR] [--task NAME]
   while [ $# -gt 0 ]; do
     case "$1" in --task) task="${2:-}"; shift 2 ;; *) if [ -z "$src" ]; then src="$1"; else dest="$1"; fi; shift ;; esac
   done
-  [ -n "$src" ] || die "usage: vc get GUEST_PATH [HOST_DIR] [--task NAME]"
+  [ -n "$src" ] || die "usage: metacomputer get GUEST_PATH [HOST_DIR] [--task NAME]"
   need_running
   src="$(guest_path "$src")" || exit 1
   if [ -z "$dest" ]; then
@@ -450,14 +457,14 @@ do_shot() { # [HOST_PATH] [--task NAME]
     out="$dir/shot-$(date +%Y%m%d-%H%M%S).png"
   fi
   out="$(abs_host_path "$out")"; mkdir -p "$(dirname "$out")"
-  gssh ops '/opt/cua-lab/bin/cua-session-run import -window root png:-' > "$out" 2>/dev/null
-  [ -s "$out" ] || { rm -f "$out"; die "screenshot failed (is the desktop session up? vc status)"; }
+  gssh ops '/opt/metacomputer/bin/session-run import -window root png:-' > "$out" 2>/dev/null
+  [ -s "$out" ] || { rm -f "$out"; die "screenshot failed (is the desktop session up? metacomputer status)"; }
   echo "$out"
 }
 
 do_contact_sheet() { # MP4 [OUT.png]
   local in="${1:-}" out="${2:-}" dur rate
-  [ -f "$in" ] || die "usage: vc contact-sheet MP4 [OUT.png]"
+  [ -f "$in" ] || die "usage: metacomputer contact-sheet MP4 [OUT.png]"
   [ -n "$out" ] || out="${in%.mp4}-contact.png"
   dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" 2>/dev/null)"
   rate="$("$PY" -c 'import sys; d=float(sys.argv[1] or 0); print(f"{12/max(d,0.5):.4f}")' "${dur:-0}")" || die "unreadable video: $in"
@@ -473,7 +480,7 @@ do_task() { # start SLUG | finish NAME
       need_running
       local slug name guest host
       slug="$(printf '%s' "${1:-task}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
-      name="vc-$(date +%Y%m%d-%H%M%S)-${slug:-task}"
+      name="mcomp-$(date +%Y%m%d-%H%M%S)-${slug:-task}"
       guest="$GUEST_RUN_DIR/$name"; host="$LAB_ROOT/results/$name"
       gssh ops "mkdir -p '$guest/recording' '$guest/files'" || die "cannot create $guest in the guest"
       mkdir -p "$host"
@@ -490,7 +497,7 @@ EOF
       echo "HOST_DIR=$host" ;;
     finish)
       local name="${1:-}" host guest
-      [[ "$name" =~ ^vc-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: vc task finish vc-YYYYMMDD-HHMMSS-slug"
+      [[ "$name" =~ ^mcomp-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: metacomputer task finish mcomp-YYYYMMDD-HHMMSS-slug"
       host="$LAB_ROOT/results/$name"; guest="$GUEST_RUN_DIR/$name"; mkdir -p "$host/guest"
       if vm_running "$VM_NAME"; then
         gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | tar -C "$host/guest" -xf - 2>/dev/null \
@@ -533,7 +540,7 @@ for k, label in (("contact_sheets", "contact sheet"), ("screenshots", "screensho
 print(f"index        {os.path.join(host, 'artifacts.json')}")
 EOF
       ;;
-    *) die "usage: vc task start SLUG | finish NAME" ;;
+    *) die "usage: metacomputer task start SLUG | finish NAME" ;;
   esac
 }
 
@@ -584,7 +591,7 @@ do_vnc_install() { # make sure a live-view password exists in the configured sto
 }
 do_vnc_push() {
   [ -n "${VNC_PASSWORD:-}" ] || die "_vnc-push needs VNC_PASSWORD"
-  printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/cua-lab; cat > ~/.config/cua-lab/vnc-pass; pkill -x x11vnc; /opt/cua-lab/bin/cua-session-run /opt/cua-lab/bin/cua-session-init' \
+  printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/metacomputer; cat > ~/.config/metacomputer/vnc-pass; pkill -x x11vnc; /opt/metacomputer/bin/session-run /opt/metacomputer/bin/session-init' \
     || die "could not install the VNC password"
   ok "live view enabled on 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))"
 }
@@ -592,7 +599,7 @@ do_vnc_push() {
 do_where() { # paths a person or an agent may need
   echo "project   $LAB_ROOT"
   echo "config    $LOCAL_CONFIG$([ -f "$LOCAL_CONFIG" ] || echo ' (not created; defaults in use)')"
-  echo "skill     $LAB_ROOT/skills/virtual-computer"
+  echo "skill     $LAB_ROOT/skills/metacomputer"
   echo "docs      $LAB_ROOT/docs"
   echo "results   $LAB_ROOT/results"
   echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
@@ -610,14 +617,14 @@ case "$cmd" in
   who)        do_who "$@" ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
-  call)       [ $# -ge 1 ] || die "usage: vc call TOOL ['JSON']"
-              exec "$PY" "$LAB_ROOT/cualab/mcp_client.py" --call "$@" ;;
+  call)       [ $# -ge 1 ] || die "usage: metacomputer call TOOL ['JSON']"
+              exec "$PY" "$LAB_ROOT/lib/mcp_client.py" --call "$@" ;;
   browser)    do_browser "$@" ;;
   desktop-restart) do_desktop_restart "$@" ;;
   input-reset) do_input_reset "$@" ;;
   rename)     do_rename "$@" ;;
-  web)        exec "$PY" "$LAB_ROOT/cualab/browser_tools.py" "$@" ;;
-  release)    "$PY" "$LAB_ROOT/cualab/owners.py" release ;;
+  web)        exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
+  release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;
   get)        do_get "$@" ;;
   shot)       do_shot "$@" ;;
@@ -631,14 +638,14 @@ case "$cmd" in
   view)       do_view "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
-  mcp)        vm_running "$VM_NAME" || { echo "vc: VM '$VM_NAME' is not running (vc start)" >&2; exit 1; }
+  mcp)        vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
               ssh_base mcp; exec ssh -T "${SSH_ARGS[@]}" ;;
-  mcp-lazy)   exec "$PY" "$LAB_ROOT/cualab/mcp_lazy.py" ;;
+  mcp-lazy)   exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
-              gssh admin "sudo /usr/local/sbin/cua-lab-guest-admin logs $n" 2>/dev/null ;;
+              gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null ;;
   _vnc-install) do_vnc_install ;;
   _vnc-push)  do_vnc_push ;;
   help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown command '$cmd' (vc help)" ;;
+  *) die "unknown command '$cmd' (metacomputer help)" ;;
 esac

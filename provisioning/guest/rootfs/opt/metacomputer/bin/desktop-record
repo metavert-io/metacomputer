@@ -1,12 +1,12 @@
 #!/bin/sh
-# cua-desktop-record start NAME [FPS] | stop | status
+# desktop-record start NAME [FPS] | stop | status
 # Whole-desktop MP4 recording of the guest's X display (ffmpeg x11grab, visible
 # pointer). Independent of who drives the desktop, so it captures any task.
-# Files land in ~/cua-lab-runs/manual/; the host pulls them with
-# `cua-lab recordings --sync`.
+# Files land in ~/metacomputer-runs/manual/; the host pulls them with
+# `metacomputer recordings --sync`.
 set -eu
-RUN="/run/user/$(id -u)/cua-lab"
-DIR="$HOME/cua-lab-runs/manual"
+RUN="/run/user/$(id -u)/metacomputer"
+DIR="$HOME/metacomputer-runs/manual"
 PIDF="$RUN/desktop-record.pid"
 CUR="$RUN/desktop-record.current"
 mkdir -p "$DIR"
@@ -15,7 +15,7 @@ alive() { [ -s "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 
 case "${1:-status}" in
   start)
-    NAME="${2:?usage: cua-desktop-record start NAME [FPS]}"
+    NAME="${2:?usage: desktop-record start NAME [FPS]}"
     FPS="${3:-20}"
     case "$NAME" in *[!A-Za-z0-9._-]*) echo "bad name: $NAME" >&2; exit 2;; esac
     if alive; then echo "already recording: $(cat "$CUR")" >&2; exit 1; fi
@@ -45,5 +45,5 @@ case "${1:-status}" in
   status)
     if alive; then echo "recording $(cat "$CUR")"; else echo "idle"; fi
     ;;
-  *) echo "usage: cua-desktop-record start NAME [FPS] | stop | status" >&2; exit 2 ;;
+  *) echo "usage: desktop-record start NAME [FPS] | stop | status" >&2; exit 2 ;;
 esac

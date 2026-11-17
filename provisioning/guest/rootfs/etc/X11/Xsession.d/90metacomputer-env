@@ -1,4 +1,4 @@
-# cua-lab: accessibility on for every toolkit; driver telemetry off.
+# metacomputer: accessibility on for every toolkit; driver telemetry off.
 export GTK_MODULES="${GTK_MODULES:+$GTK_MODULES:}gail:atk-bridge"
 export NO_AT_BRIDGE=0
 export GNOME_ACCESSIBILITY=1

@@ -1,12 +1,12 @@
 #!/bin/sh
-# cua-input-reset [--check]: remove the virtual master pointer/keyboard pairs
+# input-reset [--check]: remove the virtual master pointer/keyboard pairs
 # ("CUA v1.…") that Cua Driver's background input route leaves in the X
 # session. While one exists, Google Chrome ignores all keyboard input
 # (Firefox and GTK apps don't care). Removing them restores Chrome at once.
 # A driver session that created a pair can't use its background keyboard
 # route again until it reconnects (its next such action errors, nothing else).
 # --check only counts them. Prints the number found (and removed).
-S=/opt/cua-lab/bin/cua-session-run
+S=/opt/metacomputer/bin/session-run
 command -v xinput >/dev/null || { echo "xinput not installed" >&2; exit 2; }
 ids=$($S xinput list --short 2>/dev/null | LC_ALL=C.UTF-8 grep -E 'CUA v1\.[^[]*pointer[[:space:]]+id=[0-9]+[[:space:]]+\[master pointer' | grep -o 'id=[0-9]*' | cut -d= -f2)
 n=0; for id in $ids; do n=$((n + 1)); done

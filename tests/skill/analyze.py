@@ -1,6 +1,6 @@
 #!/opt/homebrew/bin/python3
 """Summarize a headless session transcript (stream-json) for the skill tests:
-skill use, vc commands, cua-linux tool calls, denied attempts, result.
+skill use, metacomputer commands, metacomputer tool calls, denied attempts, result.
 
   tests/skill/analyze.py RUN.jsonl      -> prints a summary, writes RUN.summary.json
 """
@@ -10,8 +10,8 @@ import os
 import sys
 
 path = sys.argv[1]
-# a `vc` command: bare, or ~/.local/bin/vc / <checkout>/bin/vc
-VC_CMD = re.compile(r"(^|[/\s])vc(\s|$)")
+# a `metacomputer` command: bare, or ~/.local/bin/metacomputer / <checkout>/bin/metacomputer
+MCOMP_CMD = re.compile(r"(^|[/\s])metacomputer(\s|$)")
 meta_path = path[:-6] + ".meta.json"
 meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
 calls, results, final = [], {}, {}
@@ -38,15 +38,15 @@ for line in open(path):
 
 skills = [c["input"].get("skill") for c in calls if c["name"] == "Skill"]
 bash = [c["input"].get("command", "") for c in calls if c["name"] == "Bash"]
-mcp = [c["name"].replace("mcp__cua-linux__", "") for c in calls if c["name"].startswith("mcp__cua-linux__")]
+mcp = [c["name"].replace("mcp__metacomputer__", "") for c in calls if c["name"].startswith("mcp__metacomputer__")]
 denied = [{"tool": c["name"], "input": json.dumps(c["input"])[:160], "why": results[c["id"]]["text"][:160]}
           for c in calls if c["id"] in results and results[c["id"]]["error"]
           and ("permission" in results[c["id"]]["text"].lower() or "denied" in results[c["id"]]["text"].lower()
                or "not allowed" in results[c["id"]]["text"].lower())]
-mcp_errors = [{"tool": c["name"].replace("mcp__cua-linux__", ""), "text": results[c["id"]]["text"][:160]}
-              for c in calls if c["name"].startswith("mcp__cua-linux__") and c["id"] in results and results[c["id"]]["error"]]
-vm_calls = [c for c in calls if c["name"].startswith("mcp__cua-linux__")]
-def _tool(c): return c["name"].replace("mcp__cua-linux__", "")
+mcp_errors = [{"tool": c["name"].replace("mcp__metacomputer__", ""), "text": results[c["id"]]["text"][:160]}
+              for c in calls if c["name"].startswith("mcp__metacomputer__") and c["id"] in results and results[c["id"]]["error"]]
+vm_calls = [c for c in calls if c["name"].startswith("mcp__metacomputer__")]
+def _tool(c): return c["name"].replace("mcp__metacomputer__", "")
 reads = [c for c in vm_calls if _tool(c) == "get_window_state"]
 named_steps = sum(1 for c in vm_calls if _tool(c) == "run_steps"
                   for st in c["input"].get("steps", []) if isinstance(st, dict) and "tool" not in st)
@@ -62,12 +62,12 @@ structural = {
     "run_script": sum(1 for c in vm_calls if _tool(c) == "run_script"),
     "list_apps": sum(1 for c in vm_calls if _tool(c) == "list_apps"),
     "screenshots_desktop_or_zoom": sum(1 for c in vm_calls if _tool(c) in ("get_desktop_state", "zoom")),
-    "inspect": sum(1 for b in bash if re.search(r"(^|[/\s])vc inspect\b", b)),
+    "inspect": sum(1 for b in bash if re.search(r"(^|[/\s])metacomputer inspect\b", b)),
     "page_tools": sum(1 for c in vm_calls if _tool(c).startswith("browser_") or _tool(c) == "get_browser_state"),
-    "web_cmds": sum(1 for b in bash if re.search(r"(^|[/\s])vc web\b", b)),
+    "web_cmds": sum(1 for b in bash if re.search(r"(^|[/\s])metacomputer web\b", b)),
     "chrome_launch": sum(1 for c in vm_calls if "chrome" in json.dumps(c["input"]).lower()
                          and _tool(c) in ("launch_app", "browser_prepare")),
-    "bridge_notes": sum(1 for c in vm_calls if "virtual-computer bridge" in results.get(c["id"], {}).get("text", "")),
+    "bridge_notes": sum(1 for c in vm_calls if "metacomputer bridge" in results.get(c["id"], {}).get("text", "")),
 }
 usage = final.get("usage") or {}
 summary = {
@@ -75,8 +75,8 @@ summary = {
     "structural": structural,
     "tokens": {k: usage.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")},
     "skill_invoked": skills,
-    "cua_lab_commands": [b for b in bash if VC_CMD.search(b)],
-    "other_bash": [b for b in bash if not VC_CMD.search(b)],
+    "mcomp_commands": [b for b in bash if MCOMP_CMD.search(b)],
+    "other_bash": [b for b in bash if not MCOMP_CMD.search(b)],
     "mcp_tools": mcp,
     "mcp_errors": mcp_errors,
     "denied": denied,
@@ -90,7 +90,7 @@ print(f"== {meta.get('name')}  VM {meta.get('vm_before')} -> {meta.get('vm_after
       f"cost=${summary['cost_usd']} {summary['duration_s']}s error={summary['is_error']}")
 print(f"   skill: {skills or '-'}")
 print(f"   structure: {structural}")
-print(f"   vc: {[b[:110] for b in summary['cua_lab_commands']] or '-'}")
+print(f"   metacomputer: {[b[:110] for b in summary['mcomp_commands']] or '-'}")
 print(f"   mcp ({len(mcp)}): {', '.join(mcp) or '-'}")
 if mcp_errors:
     print(f"   mcp errors: {mcp_errors}")

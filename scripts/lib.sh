@@ -1,22 +1,22 @@
 #!/bin/bash
-# virtual-computer host library: configuration, Lume + cua-netgw
-# lifecycle, SSH. Sourced by bin/vc and scripts/*. macOS /bin/bash 3.2.
+# metacomputer host library: configuration, Lume + cua-netgw
+# lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../config/defaults.env
 . "$LAB_ROOT/config/defaults.env"
-# This machine's settings (install.sh writes it; never committed). VC_CONFIG
+# This machine's settings (install.sh writes it; never committed). MCOMP_CONFIG
 # points at another file, e.g. for a separate test VM.
-LOCAL_CONFIG="${VC_CONFIG:-$LAB_ROOT/config/local.env}"
+LOCAL_CONFIG="${MCOMP_CONFIG:-$LAB_ROOT/config/local.env}"
 # shellcheck source=/dev/null
 [ -f "$LOCAL_CONFIG" ] && . "$LOCAL_CONFIG"
-GUEST_RUN_DIR="/home/$GUEST_USER/cua-lab-runs"
+GUEST_RUN_DIR="/home/$GUEST_USER/metacomputer-runs"
 
 RUN_DIR="$LAB_ROOT/.run"
 # Unix socket paths are limited to ~104 bytes, so the gateway's sockets live
 # in a short private folder (per user, checkout and VM; the same from any
 # shell, unlike $TMPDIR), not under a possibly deep checkout.
-SOCK_DIR="/tmp/vc-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
+SOCK_DIR="/tmp/mcomp-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
 CACHE_DIR="$LAB_ROOT/.cache"
 LOG_DIR="$LAB_ROOT/logs"
 NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
@@ -29,14 +29,14 @@ PY="${PY:-/opt/homebrew/bin/python3}"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 ( umask 077; mkdir -p "$SOCK_DIR" )
-{ [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "vc: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
+{ [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "metacomputer: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
 
 c_bold=$'\033[1m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
 [ -t 1 ] || { c_bold=; c_red=; c_grn=; c_yel=; c_off=; }
-say()  { printf '%s\n' "${c_bold}vc:${c_off} $*"; }
+say()  { printf '%s\n' "${c_bold}metacomputer:${c_off} $*"; }
 ok()   { printf '%s\n' "  ${c_grn}✓${c_off} $*"; }
 warn() { printf '%s\n' "  ${c_yel}!${c_off} $*" >&2; }
-die()  { printf '%s\n' "${c_red}vc: $*${c_off}" >&2; exit 1; }
+die()  { printf '%s\n' "${c_red}metacomputer: $*${c_off}" >&2; exit 1; }
 
 # --- Lume -------------------------------------------------------------------
 lume_json() { "$LUME" get "$1" --format json 2>/dev/null; }
@@ -157,7 +157,7 @@ vm_stop() { # NAME [--force]
   local name="$1" i=0
   if vm_running "$name"; then
     if [ "${2:-}" != "--force" ]; then
-      gssh admin 'sync; sudo -n /usr/local/sbin/cua-lab-guest-admin poweroff' >/dev/null 2>&1 || true
+      gssh admin 'sync; sudo -n /usr/local/sbin/metacomputer-admin poweroff' >/dev/null 2>&1 || true
       while vm_running "$name" && [ $i -lt 90 ]; do sleep 1; i=$((i+1)); done
       vm_running "$name" && warn "guest did not power off within 90 s; forcing"
     fi
@@ -191,7 +191,7 @@ wait_ssh() { # ROLE TIMEOUT_S
 wait_session() { # TIMEOUT_S
   local t="${1:-240}" start; start=$(date +%s)
   while :; do
-    gssh ops 'test -s /run/user/$(id -u)/cua-lab/session-ready' 2>/dev/null && return 0
+    gssh ops 'test -s /run/user/$(id -u)/metacomputer/session-ready' 2>/dev/null && return 0
     [ $(( $(date +%s) - start )) -ge "$t" ] && return 1
     sleep 3
   done

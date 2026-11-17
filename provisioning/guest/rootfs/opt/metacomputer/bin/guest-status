@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""cua-guest-status: one JSON object describing the guest's readiness for
-desktop automation. Runs as the automation user (host: `cua-lab status`)."""
+"""guest-status: one JSON object describing the guest's readiness for
+desktop automation. Runs as the automation user (host: `metacomputer status`)."""
 import json, os, subprocess, time
 
 UID = os.getuid()
-RUN = f"/run/user/{UID}/cua-lab"
+RUN = f"/run/user/{UID}/metacomputer"
 
 
 def sh(cmd, env=None, timeout=15):

@@ -1,4 +1,4 @@
-module cualab/qcow2raw
+module metacomputer/qcow2raw
 
 go 1.26
 

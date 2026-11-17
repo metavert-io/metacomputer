@@ -7,7 +7,7 @@
 - keeps the Linux guide only (what `cua-driver skills install` does on a Linux
   host) and copies the other files unchanged;
 - edits SKILL.md for the lab: the description and a note point Claude at the
-  VM (mcp__cua-linux tools) and at the lab's desktop notes, rows that are wrong
+  VM (mcp__metacomputer tools) and at the lab's desktop notes, rows that are wrong
   in this VM are replaced, links to the removed platform guides are dropped.
 
 Each edit asserts the upstream text it replaces, so an upstream rewrite fails
@@ -26,21 +26,21 @@ import tempfile
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEST = os.path.join(LAB, ".claude", "skills", "cua-driver")
 DROP = {"MACOS.md", "WINDOWS.md", "EMBEDDING.md"}
-NOTES = "../../../skills/virtual-computer/DESKTOP.md"   # relative to DEST
+NOTES = "../../../skills/metacomputer/DESKTOP.md"   # relative to DEST
 
 DESCRIPTION = (
-    "description: Detailed Cua Driver {ver} guidance for operating the virtual computer (the virtual-computer project, an Ubuntu "
-    "24.04 XFCE VM) through the cua-linux MCP tools (mcp__cua-linux__*), i.e. Cua Driver running inside the "
+    "description: Detailed Cua Driver {ver} guidance for operating the virtual computer (the metacomputer project, an Ubuntu "
+    "24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*), i.e. Cua Driver running inside the "
     "VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch "
     "known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the "
-    "virtual-computer skill decides when the VM is the right tool. Never install or run cua-driver on the "
+    "metacomputer skill decides when the VM is the right tool. Never install or run cua-driver on the "
     "Mac, and never use these tools for the user's own computer."
 )
-LAB_NOTE = """> **virtual-computer's copy of the official Cua Driver {ver} skill pack** (Linux guide only; this
+LAB_NOTE = """> **metacomputer's copy of the official Cua Driver {ver} skill pack** (Linux guide only; this
 > file is edited, the others are unchanged). Here the driver runs **inside the lab
-> VM** and is reached only through the `cua-linux` MCP tools (`mcp__cua-linux__*`);
+> VM** and is reached only through the `metacomputer` MCP tools (`mcp__metacomputer__*`);
 > `cua-driver` CLI examples apply inside the guest only. Read the lab's desktop
-> notes first: [DESKTOP.md]({notes}) (`skills/virtual-computer/DESKTOP.md` in the project folder).
+> notes first: [DESKTOP.md]({notes}) (`skills/metacomputer/DESKTOP.md` in the project folder).
 > They take precedence over this pack where the VM differs: Firefox page fields
 > need foreground keys, Ctrl+L is fine in this disposable desktop, Firefox has no
 > typed browser route, and several app quirks.

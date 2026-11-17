@@ -1,15 +1,15 @@
 #!/bin/bash
-# cua-lab guest provisioning. Runs once as root from cloud-init (runcmd) on the
+# metacomputer guest provisioning. Runs once as root from cloud-init (runcmd) on the
 # first boot of a fresh Ubuntu 24.04 cloud image. Everything it installs comes
 # from Ubuntu's archive, Mozilla's APT repo, or the host-verified payload on
 # the cloud-init seed disk (mounted at $PAYLOAD). It ends by writing
-# /var/lib/cua-lab/provisioned; cloud-init's power_state then reboots into the
-# XFCE desktop. On failure it writes /var/lib/cua-lab/failed and leaves the VM
-# running so the host can collect /var/log/cua-lab-provision.log over SSH.
+# /var/lib/metacomputer/provisioned; cloud-init's power_state then reboots into the
+# XFCE desktop. On failure it writes /var/lib/metacomputer/failed and leaves the VM
+# running so the host can collect /var/log/metacomputer-provision.log over SSH.
 set -Eeuo pipefail
-PAYLOAD="${1:-/opt/cua-lab-payload}"
-LOG=/var/log/cua-lab-provision.log
-STATE=/var/lib/cua-lab
+PAYLOAD="${1:-/opt/metacomputer-payload}"
+LOG=/var/log/metacomputer-provision.log
+STATE=/var/lib/metacomputer
 mkdir -p "$STATE"
 exec > >(tee -a "$LOG") 2>&1
 trap 'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"; date -Is > "$STATE/failed"' ERR
@@ -78,7 +78,7 @@ PKGS=(
 firefox --version || true
 dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core gnome-calculator xserver-xorg-core xfce4-session lightdm ffmpeg | tee "$STATE/package-versions.txt"
 
-case " ${CUA_LAB_BROWSERS:-firefox} " in *" chrome "*)
+case " ${MCOMP_BROWSERS:-firefox} " in *" chrome "*)
   step "Google Chrome (optional; Firefox stays the default browser)"
   # Google's official arm64 .deb from its APT repo; the host verified the
   # signing key's fingerprint against the pinned one (config/lab.env).
@@ -96,7 +96,7 @@ Signed-By: /etc/apt/keyrings/google-chrome.asc
 SRC
   "${APT[@]}" update
   "${APT[@]}" install --no-install-recommends google-chrome-stable
-  # Policies (rootfs: /etc/opt/chrome/policies/managed/cua-lab.json) turn off
+  # Policies (rootfs: /etc/opt/chrome/policies/managed/metacomputer.json) turn off
   # sign-in, sync, metrics, password saving and default-browser prompts.
   for alt in x-www-browser gnome-www-browser; do
     ff="$(update-alternatives --list "$alt" 2>/dev/null | grep -m1 firefox || true)"
@@ -126,10 +126,10 @@ step "users, groups, permissions"
 getent group autologin >/dev/null || groupadd -r autologin
 usermod -aG autologin,input,video,audio "$GUSER"
 install -d -o "$GUSER" -g "$GUSER" -m 0750 "/home/$GUSER"
-install -d -o "$GUSER" -g "$GUSER" -m 0755 "/home/$GUSER/cua-lab-runs" "/home/$GUSER/Documents"
+install -d -o "$GUSER" -g "$GUSER" -m 0755 "/home/$GUSER/metacomputer-runs" "/home/$GUSER/Documents"
 # Desktop-user config shipped in rootfs/home/$GUSER (xfconf, autostart, mime).
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
-install -d -m 0700 -o "$GUSER" -g "$GUSER" "/home/$GUSER/.config/cua-lab"
+install -d -m 0700 -o "$GUSER" -g "$GUSER" "/home/$GUSER/.config/metacomputer"
 # XFCE panel: seed the default layout so first login has no "which panel?" prompt.
 PANEL_XML="/home/$GUSER/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
 if [ ! -f "$PANEL_XML" ] && [ -f /etc/xdg/xfce4/panel/default.xml ]; then
@@ -141,18 +141,18 @@ LO_DIR="/home/$GUSER/.config/libreoffice/4/user"
 install -d -o "$GUSER" -g "$GUSER" -m 0700 "$LO_DIR"
 sed "s/@LO_VERSION@/$LO_VER/g" "$PAYLOAD/templates/registrymodifications.xcu" > "$LO_DIR/registrymodifications.xcu"
 chown -R "$GUSER:$GUSER" "/home/$GUSER/.config/libreoffice"
-chmod 0755 /opt/cua-lab/bin/* /usr/local/sbin/cua-lab-guest-admin
-chown root:root /usr/local/sbin/cua-lab-guest-admin
+chmod 0755 /opt/metacomputer/bin/* /usr/local/sbin/metacomputer-admin
+chown root:root /usr/local/sbin/metacomputer-admin
 
 step "identity wallpaper (desktop screenshots and recordings say this is the virtual computer)"
-# Applied at each login by cua-session-init, with the Applications-menu title.
-install -d -m 0755 /usr/share/backgrounds/cua-lab
-WP=/usr/share/backgrounds/cua-lab/virtual-computer.png
+# Applied at each login by session-init, with the Applications-menu title.
+install -d -m 0755 /usr/share/backgrounds/metacomputer
+WP=/usr/share/backgrounds/metacomputer/metacomputer.png
 FB=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 FR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 convert -size 1920x1080 xc:'#17324d' -gravity center \
     -font "$FB" -pointsize 112 -fill '#ffffff' -annotate +0-70 'VIRTUAL COMPUTER' \
-    -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "virtual-computer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac" \
+    -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "metacomputer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac" \
     "$WP" || convert -size 1920x1080 xc:'#17324d' "$WP"
 chmod 0644 "$WP"
 
@@ -174,8 +174,8 @@ sshd -t
 ufw --force reset >/dev/null
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow in on enp0s1 from "$NET_GATEWAY_IP" to any port 22 proto tcp comment 'cua-lab ssh via host gateway'
-ufw allow in on enp0s1 from "$NET_GATEWAY_IP" to any port 5900 proto tcp comment 'cua-lab vnc via host gateway'
+ufw allow in on enp0s1 from "$NET_GATEWAY_IP" to any port 22 proto tcp comment 'metacomputer ssh via host gateway'
+ufw allow in on enp0s1 from "$NET_GATEWAY_IP" to any port 5900 proto tcp comment 'metacomputer vnc via host gateway'
 ufw --force enable
 ufw status verbose
 
@@ -193,7 +193,7 @@ systemctl enable unattended-upgrades.service apt-daily.timer apt-daily-upgrade.t
 unattended-upgrade --dry-run 2>&1 | tail -3 || true
 
 step "locale + versions"
-mkdir -p /etc/cua-lab
+mkdir -p /etc/metacomputer
 locale-gen en_US.UTF-8 >/dev/null
 update-locale LANG=en_US.UTF-8
 {
@@ -202,8 +202,8 @@ update-locale LANG=en_US.UTF-8
   echo "UBUNTU=$(. /etc/os-release; echo "$VERSION")"
   echo "KERNEL=$(uname -r)"
   echo "CUA_DRIVER_BINARY=$(/usr/local/bin/cua-driver --version 2>&1 | head -1)"
-} > /etc/cua-lab/versions
-chmod 0644 /etc/cua-lab/versions
+} > /etc/metacomputer/versions
+chmod 0644 /etc/metacomputer/versions
 
 date -Is > "$STATE/provisioned"
 step "provisioning complete; cloud-init will reboot into the desktop"

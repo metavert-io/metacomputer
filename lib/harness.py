@@ -1,7 +1,7 @@
-"""virtual-computer GUI test harness.
+"""metacomputer GUI test harness.
 
 Each test gets one persistent MCP connection to Cua Driver in the guest (the
-same `vc mcp` bridge Claude Code uses), and:
+same `metacomputer mcp` bridge Claude Code uses), and:
   - a driver-owned recording (`start_recording` with record_video): the MP4
     (ffmpeg x11grab in the guest) plus a per-action trajectory (before/after
     accessibility state, before/after window images, click markers, action.json)
@@ -27,7 +27,7 @@ import traceback
 
 from mcp_client import LAB_ROOT, MCPClient
 
-SSH = [os.path.join(LAB_ROOT, "bin", "vc"), "ssh", "ops"]
+SSH = [os.path.join(LAB_ROOT, "bin", "metacomputer"), "ssh", "ops"]
 from labconfig import GUEST_RUNS  # noqa: E402  (guest home of the configured user)
 
 
@@ -42,7 +42,7 @@ def guest(cmd: str, timeout=60, check=False) -> subprocess.CompletedProcess:
 
 def guest_session(cmd: str, timeout=60) -> subprocess.CompletedProcess:
     """Like guest(), inside the desktop session environment (DISPLAY etc.)."""
-    return guest("/opt/cua-lab/bin/cua-session-run sh -c " + shlex.quote(cmd), timeout=timeout)
+    return guest("/opt/metacomputer/bin/session-run sh -c " + shlex.quote(cmd), timeout=timeout)
 
 
 class Step(Exception):

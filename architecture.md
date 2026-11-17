@@ -1,4 +1,4 @@
-# virtual-computer architecture
+# metacomputer architecture
 
 A disposable Ubuntu 24.04 ARM64 XFCE desktop, running as a Lume virtual machine
 on your Mac, that Claude Code operates through Cua Driver's MCP server.
@@ -8,20 +8,20 @@ macOS; every graphical action happens inside the guest.
 ```text
 Your Mac (Apple silicon, macOS 14+) - trusted controller
 │
-├── Claude Code ──stdio──▶ bin/vc mcp-lazy ─▶ bin/vc mcp ──ssh──┐
-│     (virtual-computer skill; one controller at a time: .run/owners/)     │
-├── tests/run_tests.py (MCP client, direct bridge `vc mcp`)            │
-├── bin/vc (start/stop/status/reset/test/record/recordings/view)        │
+├── Claude Code ──stdio──▶ bin/metacomputer mcp-lazy ─▶ bin/metacomputer mcp ──ssh──┐
+│     (metacomputer skill; one controller at a time: .run/owners/)     │
+├── tests/run_tests.py (MCP client, direct bridge `metacomputer mcp`)            │
+├── bin/metacomputer (start/stop/status/reset/test/record/recordings/view)        │
 │                                                                            │
 ├── cua-netgw (user-mode gateway, host-enforced egress policy)               │
 │     127.0.0.1:2277 ─▶ guest :22      127.0.0.1:5977 ─▶ guest :5900 (VNC)   │
 │     unixgram socket ◀──▶ Lume VM network device                           │
 └── Lume 0.7.2 (Apple Virtualization.framework, native arm64)               │
-      └── VM "virtual-computer" (4 vCPU, 8 GB, 50 GB sparse, 1920x1080 virtio-gpu)  │
+      └── VM "metacomputer" (4 vCPU, 8 GB, 50 GB sparse, 1920x1080 virtio-gpu)  │
             Ubuntu 24.04.x LTS arm64 (official cloud image, cloud-init)      │
             LightDM autologin ─▶ Xorg (modesetting) ─▶ XFCE 4.18             │
             user `cua` (no sudo)                                             │
-            ├── /opt/cua-lab/bin/cua-driver-mcp ◀────────────────────────────┘
+            ├── /opt/metacomputer/bin/driver-mcp ◀────────────────────────────┘
             │     └── cua-driver 0.52.1 mcp (stdio; X11/EWMH, XTest, uinput,
             │         AT-SPI over the session D-Bus, ffmpeg x11grab recording)
             ├── AT-SPI2 registry on the session bus (toolkit-accessibility on)
@@ -55,12 +55,12 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 | Firefox | Mozilla APT repo (arm64 .deb; key `35BAA0B3…15A3`) | guest | default browser (no snaps in the guest) |
 | Google Chrome | Google's APT repo (arm64 .deb; key `EB4C1BFD…4796`), optional (`BROWSERS`) | guest | second browser; the driver's page tools |
 
-Exact package versions installed in the guest are in `/etc/cua-lab/versions`
-and `/var/lib/cua-lab/package-versions.txt` (copied to `logs/` at build).
+Exact package versions installed in the guest are in `/etc/metacomputer/versions`
+and `/var/lib/metacomputer/package-versions.txt` (copied to `logs/` at build).
 
 ## Provisioning (unattended)
 
-`vc build` → `scripts/build-vm.sh`:
+`metacomputer build` → `scripts/build-vm.sh`:
 
 1. `build-tools.sh` builds cua-netgw (pinned commit) and qcow2raw.
 2. `fetch-artifacts.sh` downloads and verifies the Ubuntu image (GPG-signed
@@ -79,23 +79,23 @@ and `/var/lib/cua-lab/package-versions.txt` (copied to `logs/` at build).
    installs the driver, configures autologin, accessibility, no screen
    blanking/locking, uinput, sshd, ufw, unattended-upgrades) and reboots.
 6. The host waits for the XFCE session, installs the VNC password, checks
-   readiness (`cua-guest-status`), runs `finalize.sh` (narrow sudo,
+   readiness (`guest-status`), runs `finalize.sh` (narrow sudo,
    cloud-init disabled, cached user-data removed), stops the VM and clones
-   the baseline (`BASELINE_NAME`, default `virtual-computer-baseline`).
+   the baseline (`BASELINE_NAME`, default `metacomputer-baseline`).
 
 ## Desktop-control transport
 
-Claude Code sessions use `cua-linux` → `bin/vc mcp-lazy`
-(`cualab/mcp_lazy.py`), registered at user scope so it exists in every
+Claude Code sessions use `metacomputer` → `bin/metacomputer mcp-lazy`
+(`lib/mcp_lazy.py`), registered at user scope so it exists in every
 project. It answers `initialize` and `tools/list` from a saved copy of the
 driver's handshake (`config/driver-mcp-cache.json`, refreshed under `.run/` on
 each live connection), so the tools are listed even while the VM is off. On the
-first `tools/call` it starts the direct bridge, `bin/vc mcp`, and relays
+first `tools/call` it starts the direct bridge, `bin/metacomputer mcp`, and relays
 from then on. While the VM is off, a call returns "start it, then retry". A
 dropped connection is reopened on the next call. Its claims in `.run/owners/`
-(`cualab/owners.py`) let only one session act at a time: acting calls are
+(`lib/owners.py`) let only one session act at a time: acting calls are
 refused while another session acted within 10 minutes, reads are always
-allowed, and `vc stop/reset/restore/test` refuse too unless given
+allowed, and `metacomputer stop/reset/restore/test` refuse too unless given
 `--override`.
 
 The bridge also guards Google Chrome (docs/chrome-investigation.md). When
@@ -110,8 +110,8 @@ So the bridge:
   `delivery_mode: "foreground"`;
 - refuses `set_value` and `run_script` aimed at Chrome;
 - notices virtual-device routes in results (`path=mpx_*`), and before the
-  next Chrome keyboard input runs `vc input-reset` (the guest's
-  `cua-input-reset`, `xinput remove-master`), noting it in that result.
+  next Chrome keyboard input runs `metacomputer input-reset` (the guest's
+  `input-reset`, `xinput remove-master`), noting it in that result.
 
 A driver session whose pair was removed can't use the background keyboard
 route again until it reconnects; its next such call returns an error.
@@ -120,7 +120,7 @@ Browsers: Firefox (Mozilla's APT repo) is the default. Google Chrome comes
 from Google's APT repo (`BROWSERS`, key fingerprint pinned in
 `config/defaults.env` and checked on the host). Its own repo management is turned
 off (`/etc/default/google-chrome`), and managed policies
-(`/etc/opt/chrome/policies/managed/cua-lab.json`) turn off sign-in, sync,
+(`/etc/opt/chrome/policies/managed/metacomputer.json`) turn off sign-in, sync,
 metrics, password saving and default-browser prompts. The driver's page
 tools (`browser_prepare` with `allow_launch` + an isolated profile) launch
 Chrome on driver-owned profiles under
@@ -128,11 +128,11 @@ Chrome on driver-owned profiles under
 normal profile (`existing_profile`) needs the driver's `--grant
 existing-profile`, which this lab doesn't pass.
 
-The direct bridge, `bin/vc mcp`, is `ssh -T` with the
+The direct bridge, `bin/metacomputer mcp`, is `ssh -T` with the
 `mcp` key to `cua@127.0.0.1:2277`. In the guest that key is
-`restrict,command="/opt/cua-lab/bin/cua-driver-mcp"`: no shell, no PTY, no
+`restrict,command="/opt/metacomputer/bin/driver-mcp"`: no shell, no PTY, no
 forwarding. The wrapper loads the XFCE session's environment (published at
-login to `$XDG_RUNTIME_DIR/cua-lab/session.env`: `DISPLAY`, `XAUTHORITY`,
+login to `$XDG_RUNTIME_DIR/metacomputer/session.env`: `DISPLAY`, `XAUTHORITY`,
 `DBUS_SESSION_BUS_ADDRESS`) and execs `cua-driver mcp`. MCP's stdio stream is
 carried end to end by SSH; each MCP connection owns one driver runtime.
 Nothing on the Mac drives the Mac's own desktop: Cua Driver is not
@@ -151,11 +151,11 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 
 | Credential | Where | Grants |
 | --- | --- | --- |
-| `$SSH_DIR/mcp` (default `~/.ssh/virtual-computer`) | host, 0600 | `cua@guest`, forced command = Cua Driver MCP only |
-| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `vc inspect` (read-only snapshot piped from `cualab/guest_inspect.py`) |
-| `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/cua-lab-guest-admin` (fixed verbs) |
+| `$SSH_DIR/mcp` (default `~/.ssh/metacomputer`) | host, 0600 | `cua@guest`, forced command = Cua Driver MCP only |
+| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) |
+| `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/metacomputer-admin` (fixed verbs) |
 | `$SSH_DIR/hostkey` | host, 0600 | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection) |
-| VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/cua-lab/vnc-pass` 0600 | live view / takeover |
+| VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/metacomputer/vnc-pass` 0600 | live view / takeover |
 
 Guest accounts have locked passwords; SSH is key-only with `AllowUsers cua cuaadmin`.
 No macOS credentials are used anywhere.
@@ -198,11 +198,11 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
    before/after accessibility state, before/after window images, click
    markers, `action.json`). The test harness uses this for every test and
    copies everything to `recordings/<run>/` and `results/<run>/<test>/guest/`.
-2. **Whole-desktop (any task, any driver):** `vc record start|stop` runs
-   `cua-desktop-record` (ffmpeg x11grab, visible pointer, 20 fps, H.264) and
+2. **Whole-desktop (any task, any driver):** `metacomputer record start|stop` runs
+   `desktop-record` (ffmpeg x11grab, visible pointer, 20 fps, H.264) and
    saves to `recordings/manual/`.
 
-`vc reset` syncs `~/cua-lab-runs` from the guest before replacing the VM.
+`metacomputer reset` syncs `~/metacomputer-runs` from the guest before replacing the VM.
 
 ## Lifecycle
 
@@ -210,7 +210,7 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | --- | --- |
 | `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
 | `stop` | `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
-| `status` | Lume state, gateway + forwards, DHCP lease, SSH, `cua-guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe |
+| `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
 
@@ -219,9 +219,9 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
 ## Known limitations
 
 - **Lume VNC is not loopback-only.** `_VZVNCServer` listens on every interface;
-  `vc` always runs `--vnc disabled` and uses guest x11vnc behind the
+  `metacomputer` always runs `--vnc disabled` and uses guest x11vnc behind the
   gateway's loopback forward instead.
-- **`lume stop` is a hard power-off for detached Linux VMs.** `vc stop`
+- **`lume stop` is a hard power-off for detached Linux VMs.** `metacomputer stop`
   shuts down from inside the guest and uses Lume's stop only as a fallback.
 - **One cua-netgw per VM run.** A gateway keeps talking to the Lume process it
   first heard from, so `start` always launches a fresh one (and kills it on
@@ -238,8 +238,8 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
 - **Host-sharing devices.** Lume attaches a SPICE clipboard channel
   (`VZSpiceAgentPortAttachment`, shares the Mac's clipboard), a virtio sound
   device wired to the host's speakers and microphone, and a Rosetta share to
-  every VM. With lume-secure (the default), `vc start` leaves each out
-  unless its `SHARE_*` setting is `on`; `vc status` reports what the
+  every VM. With lume-secure (the default), `metacomputer start` leaves each out
+  unless its `SHARE_*` setting is `on`; `metacomputer status` reports what the
   guest actually has (virtio console ports, a 0x0019 sound device, a virtiofs
   Rosetta tag). With standard Lume they are always attached: the guest has no
   `spice-vdagent` and `virtio_snd` is blacklisted, but a root-compromised
@@ -248,5 +248,5 @@ The VMs are not started at login and no LaunchAgent or daemon was added.
 - **Guest egress is open to the public internet** (by design, for browsing);
   everything private (LAN, tailnet, the Mac) is refused on the host.
 - **Unattended upgrades** patch the working VM after each reset; refresh the
-  baseline occasionally with `vc baseline` (or rebuild) so resets start
+  baseline occasionally with `metacomputer baseline` (or rebuild) so resets start
   current.

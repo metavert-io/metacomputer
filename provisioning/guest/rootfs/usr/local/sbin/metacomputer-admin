@@ -1,6 +1,6 @@
 #!/bin/sh
-# cua-lab-guest-admin: the only command the cuaadmin account may run with sudo
-# after provisioning (see /etc/sudoers.d/90-cua-lab). Each verb is fixed; no
+# metacomputer-admin: the only command the cuaadmin account may run with sudo
+# after provisioning (see /etc/sudoers.d/90-metacomputer). Each verb is fixed; no
 # argument reaches a shell.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -13,8 +13,8 @@ case "${1:-}" in
     N="${2:-200}"
     case "$N" in ''|*[!0-9]*) echo "logs: N must be a number" >&2; exit 2 ;; esac
     journalctl --no-pager -b -n "$N" ;;
-  provision-log)   cat /var/log/cua-lab-provision.log ;;
+  provision-log)   cat /var/log/metacomputer-provision.log ;;
   updates)         apt-get -q update && unattended-upgrade -v ;;
   firewall)        ufw status verbose ;;
-  *) echo "usage: cua-lab-guest-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall" >&2; exit 2 ;;
+  *) echo "usage: metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall" >&2; exit 2 ;;
 esac
