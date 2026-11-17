@@ -104,7 +104,7 @@ the following. These are **always on**:
 | **lume-secure** (the installer's default) | Lume attaches your Mac's clipboard, its speakers and microphone, and Rosetta to every VM. [lume-secure](https://github.com/metavert-io/lume-secure) is Lume 0.7.2 plus `--no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta` and `--no-host-sharing`, and metacomputer starts the VM without all three unless you turn one on. `metacomputer status` reports what the VM actually has, read from inside it. |
 | **Public internet only** | The VM's network is a user-mode gateway on the Mac (Cua's `cua-netgw`) that checks every connection the VM opens. It refuses your Mac, your LAN and router, Tailscale and CGNAT addresses, link-local and cloud-metadata addresses, and outbound mail ports. Blocked attempts are logged. |
 | **Nothing listens off loopback** | SSH and the live view are forwarded only to `127.0.0.1` on your Mac. Lume's own VNC server, which listens on every interface, is never started. The live view is a password-protected VNC server inside the VM, and the VM's firewall admits it only from the gateway. |
-| **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, and `fill` can only run the `metacomputer secrets` fill program as its own locked account. No forwarding of any kind. |
+| **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, `fill` can only run the `metacomputer secrets` fill program as its own locked account, and `proxy` can only open one port on the VM's loopback for the secrets API proxy. No other forwarding of any kind. |
 | **Narrow accounts** | The desktop user has no sudo. After the build, the maintenance account can run only one root script with a fixed list of verbs, cloud-init is turned off, and its cached user-data (which held the host key) is deleted. All accounts have locked passwords. |
 | **Verified inputs** | The Ubuntu image (signed `SHA256SUMS`, pinned signing key and image digest), the Cua Driver release (pinned SHA-256, cross-checked against the release's checksums and checked again inside the VM), Lume (pinned checksum, or lume-secure's pinned tag and commit), and the Mozilla and Google repository keys (pinned fingerprints). The VM never downloads Cua components itself. |
 | **Less in the guest** | No snaps. No clipboard agent (`spice-vdagent` is removed) and the virtio sound driver is blacklisted, a second layer for when standard Lume attaches those devices. No shared folders. Cua Driver's telemetry and update checks are off, and so is Lume's telemetry. Browser policies turn off telemetry and password saving in both browsers, and sign-in and sync in Chrome. Security updates install automatically, without automatic reboots. |
@@ -123,18 +123,33 @@ them in `config/local.env`; `metacomputer security` shows what's on.
 
 **Credentials without pasting them into a chat.** `metacomputer secrets` is a small vault
 that ships with metacomputer and depends on nothing else: no password manager, no
-Keychain entries, no other tools. You store a password, a 2FA (TOTP) seed or a saved
-browser login once, in your own terminal. To use one, you unlock the vault in your
-terminal (and, if you choose, approve each use by typing its name). Claude then asks the
-vault to type it into the field it has focused, and gets back only "filled, N characters":
-- the value never passes through Claude's context, the transcript, logs or recordings;
-- it goes only to the site you allowed, and only into the right kind of field;
-- in the VM, it travels through a separate, locked account Claude can't change.
+Keychain entries, no other tools. You store a password, a 2FA (TOTP) seed, a saved
+browser login or an API key once, in your own terminal. To use one, you unlock the vault
+in your terminal, and you can choose to approve each use by typing its name.
+- **Logins and 2FA codes.** Claude asks the vault to type the value into the field it
+  has focused, and gets back only "filled, N characters". The value never passes
+  through Claude's context, the transcript, logs or recordings. It goes only to the
+  sites you allowed, only into the right kind of field, and in the VM through a
+  separate, locked account Claude can't change.
+- **API keys.** The key never enters the VM. A program there gets a short-lived token
+  for a proxy on your Mac, which puts the real key into requests to that one API host.
+  If the API sends the key back in an answer, the proxy blanks it out.
+- **Keys.** By default the vault file is encrypted under your passphrase together with
+  a key held in this Mac's Secure Enclave, so a copy taken elsewhere can't be opened
+  with the passphrase alone. A recovery key, shown once, opens it on another Mac.
+- **An audit trail.** Every use, refusal and change goes into a hash-chained log and
+  macOS's unified log, and can be sent off the Mac as it happens. A sink you mark as
+  required stops every use while it can't be reached.
+- **Who asked.** Your terminal and the log name the Claude Code session and project
+  behind each request. That's attribution, not isolation: everything runs as you, so a
+  hostile program of yours could pose as another session.
 
 It keeps credentials out of Claude's hands in normal operation. It doesn't make a
 deliberately hostile agent harmless: one with a shell in the VM, or one that clicks a
 site's "show password" button, can still get at a value once it's in the browser.
-[SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets) says exactly what holds and what doesn't.
+[SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets) says exactly what
+holds and what doesn't, and
+[compares it with AWS KMS, Secrets Manager and HashiCorp Vault](SECURITY.md#if-you-know-aws-kms-secrets-manager-or-hashicorp-vault).
 
 None of this protects against someone who already controls your Mac account:
 they can change the config, read the keys and drive the VM directly.
@@ -148,7 +163,8 @@ rest.
 - About 15 GB of free disk for the VM and its clean snapshot (the installer warns below 20 GB). The build downloads about 600 MB.
 - Memory for the VM: it gets 4 vCPUs and 8 GB by default, or 4 GB on a Mac with less than 16 GB.
 - [Homebrew](https://brew.sh), to install any missing tools: git, curl, Go, GnuPG, ffmpeg and Python 3.
-- Apple's Command Line Tools (`xcode-select --install`), to build lume-secure. Without them, use `--lume=standard`.
+- Apple's Command Line Tools (`xcode-select --install`), to build lume-secure and the secrets vault. Without them, use `--lume=standard`.
+- For `metacomputer secrets` only: macOS 15 or later. Everything else works without it.
 - [Claude Code](https://claude.com/claude-code), for the skill and the MCP server.
 - Optional: Google Chrome in the VM. Installing it means accepting [Google's terms](https://www.google.com/chrome/terms/).
 
@@ -173,7 +189,7 @@ The installer asks at most four questions:
 | `--lume=secure` / `--lume=standard` | Choose the Lume without being asked |
 | `--no-build` | Set everything up but don't build the VM yet |
 | `--no-claude` | Don't touch Claude Code (no command links, skill or MCP server) |
-| `--uninstall` | Remove the command, the skill and the MCP registration (the VM stays) |
+| `--uninstall` | Remove the command, the skill, the MCP registration and the vault program (the VM and your vault file stay) |
 
 Everything else is automatic. Each step is skipped when it's already done, so
 running `./install.sh` again is safe.
@@ -182,6 +198,7 @@ running `./install.sh` again is safe.
 - **The command** `~/.local/bin/metacomputer` and its alias `mcomp`.
 - **The skill**, linked at `~/.claude/skills/metacomputer`.
 - **The MCP server** `metacomputer`, registered at user scope (`claude mcp add -s user metacomputer …/bin/metacomputer mcp-lazy`).
+- **The secrets vault program**, `~/.local/share/metacomputer/bin/mcomp-vault`, built from `vault/` by `scripts/build-vault.sh` (skipped, with a note, before macOS 15 or without `swiftc`).
 
 The build then runs unattended for about 10 minutes, sometimes longer. It
 downloads Ubuntu's cloud image and the Cua Driver release, checks their
@@ -305,16 +322,21 @@ metacomputer browser profiles --delete shopping  # asks first
 - "Log in to example.com; the code for its 2FA is in the vault as `example-otp`."
 - "Keep this signed-in session so tomorrow's run doesn't have to log in again."
 
-You set this up once, in your own terminal. Claude can't do these steps:
+You set this up once, in your own terminal. Claude can't do these steps, and never
+asks you for a passphrase, password or code in the chat:
 
 ```bash
 ./scripts/build-vault.sh                 # or ./install.sh, which builds it too
-metacomputer secrets init                # creates the vault; asks for a passphrase
+metacomputer secrets init                # creates the vault; asks for a passphrase; prints a recovery key once
 metacomputer secrets set example --kind password --origin https://example.com --username you@example.com
 metacomputer secrets set example-otp --kind totp --origin https://example.com    # the base32 seed
 metacomputer secrets bind                # pins the VM; compare the fingerprint, then type yes
 metacomputer secrets unlock --for 1h     # keep this terminal open while Claude works
 ```
+
+Values are typed with the echo off, never on a command line. Write the recovery key
+down and keep it away from this Mac. `set` on a name that already exists refuses unless
+you add `--replace` (see [Rotate keys and keep an audit trail](#rotate-keys-and-keep-an-audit-trail)).
 
 Then Claude:
 1. opens the site in page-mode Chrome;
@@ -322,18 +344,112 @@ Then Claude:
 3. runs `metacomputer secrets fill example --field username`, then `--field password` and `--field otp`.
 
 How it works:
-- **The unlock terminal:** it prints each request and its outcome, never the values. Close it, or press Ctrl-C, and the vault locks.
-- **Approving each use:** add `--approval each` to `set` (or `--confirm each` to `unlock`), and every use waits for you to type the secret's name in that terminal.
+- **The unlock terminal:** it prints each request, who asked and the outcome, never the values. Close it, or press Ctrl-C, and the vault locks.
+- **Approving each use:** add `--approval each` to `set` (or `--confirm each` to `unlock`), and every use waits for you in that terminal. It shows the secret, the site and who asked (for example `Asked by Claude Code in ~/Projects/foo`). What you type decides how far the answer reaches:
+  - `NAME`: this use only;
+  - `NAME session`: this use and later uses of that secret from the same Claude Code session;
+  - `NAME unlock`: every use of that secret until the vault locks.
+- **Limiting a secret to a project:** `set ... --project DIR` refuses requests from Claude Code sessions working outside that folder. Like the "who asked" line, this keeps honest sessions apart; it isn't a wall, since any program of yours can pose as a Claude Code session.
 - **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset.
-- **What Claude can see:** `metacomputer secrets list` shows names, sites and use counts, never values. `metacomputer secrets audit` shows the history.
+- **What Claude can see:** `metacomputer secrets list` shows names, kinds, sites, usernames, approval, project limits, ages and use counts, never values. `metacomputer secrets audit` shows the history.
 
 Limits to know:
 - Fills need the page-mode Chrome that Cua Driver starts, not Firefox.
 - The VM needs to be built with this version, which adds the locked fill account. Older VMs say so and refuse.
 - Usernames and one-time codes are visible on the page once typed; passwords show as dots.
-- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so `--confirm each` refuses there.
+- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so uses that need your answer are refused there unless you unlock with `--allow-multiplexer`.
 
 The full model is in [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
+
+### Use an API key from the VM without the VM seeing it
+
+- "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there."
+- "Test the app in the VM against the real API, using the `openai` key from my vault."
+
+You store the key once, in your own terminal. It goes in a request header (by default
+`Authorization: Bearer <key>`):
+
+```bash
+metacomputer secrets set openai --kind api --api-host api.openai.com
+metacomputer secrets set example-api --kind api --api-host api.example.com --header 'x-api-key: {value}' --api-path-prefix /v1/
+```
+
+Then Claude asks for a token and points the program in the VM at the proxy:
+
+```bash
+metacomputer secrets token openai --ttl 15m   # prints the token, its id and base_url http://127.0.0.1:18765/openai/ (inside the VM)
+metacomputer secrets tokens                   # the live tokens
+metacomputer secrets revoke ID                # end one now (--all for every one)
+```
+
+The program in the VM sends its requests to that base URL with the token where the key
+would go. The proxy on your Mac checks the token and the path, puts the real key in,
+and sends the request on to that API's host only, over HTTPS. It never follows a
+redirect. If an answer contains the key, the proxy replaces it with
+`[key withheld by metacomputer secrets]`.
+
+- A token lasts 15 minutes by default and at most 8 hours, and every token ends when the vault locks.
+- A token is a bearer credential: whatever holds it can call that API as you until it ends. It can't get the key or reach another host.
+- The key is withheld only when the answer contains an exact copy; an API that sent it back encoded would hand it over.
+- The VM needs the proxy account, which VMs built before API tokens don't have. `token` says so; rebuild the VM.
+
+### Rotate keys and keep an audit trail
+
+- "Which of my secrets haven't been rotated in a while?" (`metacomputer secrets list` shows each one's age)
+- "Are the vault's audit sinks delivering?" (`metacomputer secrets audit-sink list`)
+- "Check that the vault's audit log hasn't been changed." (`scripts/verify-audit.py`)
+
+Rotating is up to you; nothing rotates on a schedule. These run in your own terminal
+and ask for the passphrase:
+
+```bash
+metacomputer secrets set openai --kind api --api-host api.openai.com --replace   # a new value, recorded as a rotation
+metacomputer secrets rekey                 # new passphrase, data key, Enclave key and recovery key
+metacomputer secrets rotate-session-key    # re-encrypt every sealed browser login under a new key
+```
+
+**The Secure Enclave and the recovery key.** By default `init` binds the vault to
+this Mac's Secure Enclave (when it has one) and prints a recovery key once. The
+Enclave key never leaves the chip, so a copy of the vault file can't be opened
+elsewhere with the passphrase alone.
+- `metacomputer secrets recover` opens the vault with the recovery key, on another Mac or after this Mac's Enclave is reset, and sets a new passphrase and keys.
+- `rekey --enclave` moves a passphrase-only vault onto this Mac's Enclave; `rekey --no-enclave` moves it off.
+- `init --no-enclave` makes a passphrase-only vault, which opens on any Mac with the passphrase.
+
+**The audit log.** Every unlock, lock, use, refusal, proxied API request and change is
+one line in `audit.jsonl` in the vault folder, with names, sites, outcomes and who asked,
+never values or tokens. Each line carries the hash of the one before it, and each event
+also goes to macOS's unified log:
+
+```bash
+metacomputer secrets audit --tail 20
+python3 scripts/verify-audit.py ~/Library/Application\ Support/metacomputer/audit.jsonl
+log show --predicate 'subsystem == "io.metavert.metacomputer.vault"' --last 1d
+```
+
+`verify-audit.py` recomputes every hash and checks the chain and the sequence, so a
+changed or missing line shows. Your own account could still rewrite the whole file
+consistently. Copies sent off the Mac as events happen are what make it tamper-evident.
+There are four kinds of these **audit sinks**, all optional:
+
+| Kind | Sends to |
+| --- | --- |
+| `webhook` | Any HTTPS endpoint, one signed POST per event |
+| `otlp` | An OpenTelemetry collector or service (OTLP/HTTP logs), signed |
+| `syslog` | A SIEM or rsyslog, over TLS |
+| `ntfy` | Your phone, through ntfy |
+
+```bash
+metacomputer secrets audit-sink add siem --kind syslog --url syslog+tls://siem.example:6514 --required
+metacomputer secrets audit-sink add phone --kind ntfy --url ask     # the topic is typed, not echoed
+```
+
+- `--required` fails closed: each use is first recorded and must reach every required sink before it goes ahead. While one can't be reached, fills, tokens and session saves and loads are refused, and proxied API requests get 503.
+- `scripts/verify-audit.py --key KEY FILE...` also checks what a sink received: its signatures, hashes, chain and gaps.
+- Adding or removing a sink needs your terminal and the passphrase; `audit-sink list` and `audit-sink test NAME` work from anywhere.
+
+[SECURITY.md](SECURITY.md#the-audit-log-and-sending-it-off-this-mac) has the event
+fields, each sink's format, an OCSF mapping and collector examples.
 
 ### Check a page in both browsers, at several widths, for accessibility
 
@@ -404,9 +520,10 @@ larger). `RECORD_TO=host` streams the recording to the Mac while it runs, so
 nothing builds up on the VM's disk. `RECORD_DIR` can be any folder, such as
 an external drive.
 
-Recordings capture the whole screen. Passwords filled by `metacomputer secrets` show as dots (usernames and codes are visible), and
-with the driver's recorder it passes any other sensitive value it types to
-`redact_values`, or leaves those steps out of the recording.
+Recordings capture the whole screen. Passwords filled by `metacomputer secrets`
+show as dots, but usernames and codes are visible. With the driver's recorder,
+Claude passes any other sensitive value it types to `redact_values`, or leaves
+those steps out of the recording.
 
 ### Move files in and out
 
@@ -590,9 +707,12 @@ alias). `metacomputer help` prints the same list with every option.
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
 | `security [apply] [--json]` | The optional hardening, as configured and as the VM has it |
 | `actions list\|show\|verify` | The signed action log (`ACTION_LOG=on`) |
-| `secrets init\|set\|delete\|bind\|unlock` | The credentials vault: commands you run in your own terminal (they ask for the vault passphrase) |
+| `secrets init\|set\|delete\|bind\|unlock` | The credentials vault: commands you run in your own terminal (they ask for the vault passphrase or a value); `set` on an existing name needs `--replace` |
+| `secrets rekey\|recover\|rotate-session-key` | New keys, or opening the vault with its recovery key (your own terminal) |
+| `secrets audit-sink add\|remove\|show NAME --key` | Off-Mac copies of the audit log, and a sink's signing key (your own terminal) |
 | `secrets list\|fill\|session save\|session load` | What Claude uses while the vault is unlocked; values never come back |
-| `secrets status\|audit\|selftest` | Locked or unlocked, the history of uses (no values), the vault's self-test |
+| `secrets token NAME [--ttl 15m]`, `secrets tokens`, `secrets revoke ID\|--all` | A short-lived API token and the proxy's URL in the VM; the live tokens; end them |
+| `secrets status\|audit\|selftest`, `secrets audit-sink list\|test NAME` | Locked or unlocked, the history of uses (no values), the vault's self-test; the sinks and their backlog |
 | `test [A-F]` | The GUI smoke suite, each test recorded |
 | `call TOOL ['JSON']` | One Cua Driver tool call, on a new connection |
 | `ssh [ops\|admin] [CMD...]` | A shell in the VM (`ops` is the desktop user) |
@@ -620,6 +740,7 @@ instead.
 | `BROWSERS` | `firefox chrome` | Browsers built in; `firefox` alone leaves Chrome out |
 | `EXTRA_PACKAGES` | (none) | More Ubuntu packages, e.g. `inkscape libreoffice-calc` |
 | `VIRTUAL_AUDIO` | `off` | `on`: a sound card inside the VM that plays into nothing |
+| `SECRETS_PROXY_PORT` | `18765` | The port inside the VM (on its loopback) where the secrets API proxy appears |
 
 **Lume and host sharing:**
 
@@ -695,13 +816,21 @@ private files are 0600):
 | `mcp` | The desktop user `cua`, with a forced command: Cua Driver's MCP server only. No shell, no PTY, no forwarding |
 | `ops` | A shell as `cua` (no sudo, no forwarding), for status, file copies and `inspect` |
 | `admin` | The maintenance account `cuaadmin`, which after the build may use sudo only for `/usr/local/sbin/metacomputer-admin` and its fixed verbs |
+| `fill` | The locked account `mcfill`, for `metacomputer secrets` fills: sshd forces its one root-owned program, with no TTY and no forwarding |
+| `proxy` | The locked account `mcproxy`, for API tokens: no command and no TTY; it may open only one reverse forward, to `127.0.0.1:18765` inside the VM |
 | `hostkey` | The VM's own SSH host key, generated on the Mac and pinned in `known_hosts`, so strict checking applies from the first connection |
 | `vnc-pass` | The live-view password (or your own store, with `VNC_PASSWORD_STORE=command`) |
 
-The VM's SSH accepts keys only, for `cua`, `cuaadmin` and the locked fill account
-`mcfill` (which can only run the secrets fill program), with root login and every
-kind of forwarding off. All accounts have locked passwords, and no macOS
-credentials are used anywhere.
+The VM's SSH accepts keys only, for `cua`, `cuaadmin`, `mcfill` and `mcproxy`, with
+root login and every kind of forwarding off apart from `mcproxy`'s one reverse forward.
+All accounts have locked passwords, and no macOS credentials are used anywhere.
+After a successful build, the VM's private host key is deleted from the Mac.
+
+**The one way the VM can open a connection to your Mac** is the secrets API proxy,
+and only while you use it. When the vault is unlocked and Claude asks for a token, the
+vault opens that reverse forward, so the proxy appears at `127.0.0.1:18765` inside the
+VM (`SECRETS_PROXY_PORT`). It accepts only valid tokens, sends requests only to each
+secret's own API host, and stops when the vault locks.
 
 **Your Mac.** Cua Driver isn't installed on it, and nothing in this project
 can see or control its screen. The VM isn't started at login, and no
@@ -725,7 +854,6 @@ LaunchAgent or daemon is added.
 **Cua Driver 0.52.1 on this desktop** (details in [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md)):
 - **No Firefox page route.** Page tools (`get_browser_state` and the `browser_*` tools) work only with Chrome, so page and hybrid modes need Chrome.
 - **The focused element isn't reported** on Linux. Claude proves focus with a fresh read.
-- **Secrets need page-mode Chrome** and a VM built with this version (it has the locked fill account). See [Use saved passwords and 2FA codes](#use-saved-passwords-and-2fa-codes).
 - **Firefox ignores background typing.** Text entry in Firefox uses foreground input, which moves the real pointer and focus.
 - **Chrome ignores background input,** and while the driver's virtual input devices exist it ignores the keyboard altogether. The bridge sends input aimed at Chrome in the foreground, refuses `set_value` and `run_script` aimed at it, and removes leftover devices before Chrome needs the keyboard ([docs/chrome-investigation.md](docs/chrome-investigation.md)).
 - **Opening modal dialogs through accessibility actions can freeze GTK apps.** Mousepad's Save As through its menu, and Inkscape's dialogs, stopped answering; keyboard shortcuts work.
@@ -738,6 +866,13 @@ LaunchAgent or daemon is added.
 - Manifests in driver 0.52.1 can't grant the clipboard tools, so they are always refused.
 - `kill_app` refused to close apps the driver had launched; close them from their own window or with `metacomputer desktop-restart`.
 - The `desktop` profile lists the standard apps only. Apps added with `EXTRA_PACKAGES` need your own `DRIVER_MANIFEST`.
+
+**Secrets** (`metacomputer secrets`; [SECURITY.md](SECURITY.md#what-doesnt-hold) has the full list):
+- Fills need page-mode Chrome and a VM built with the locked fill account; API tokens need the proxy account too. Older VMs say so; rebuild them. See [Use saved passwords and 2FA codes](#use-saved-passwords-and-2fa-codes).
+- It isn't a wall against a deliberately hostile agent. With a shell in the VM (the default), code can pose as Chrome's DevTools to receive a fill, or read a filled field back. Driving the browser can reveal a field too: a "show password" button, Chrome's developer tools, a `javascript:` address.
+- One user and one operator. Everything runs as your macOS user, so who asked, `NAME session` and `--project` are attribution that any program of yours can fake, and the person who unlocks also approves.
+- No hardware module holds the data key. The Secure Enclave key takes part only in opening the vault; while it's unlocked, the unlock process holds the data key.
+- The API key behind a token is the one you stored, not a credential minted for each use.
 
 **Recording:** the sound in whole-desktop recordings is within about 50 ms of
 the picture. That's fine for watching; nudge it in an editor if a sound must
@@ -766,6 +901,11 @@ serves one VM process (so `start` launches a fresh one).
 | lume-secure won't build | It needs Apple's Command Line Tools (`xcode-select --install`). Or use `./install.sh --lume=standard`. |
 | `metacomputer: command not found` | Add `~/.local/bin` to your `PATH`, or use the full path. |
 | `record start` refuses `RECORD_DIR` | Its parent folder doesn't exist, usually a drive that isn't connected. |
+| `metacomputer secrets` says the vault is locked | Run `metacomputer secrets unlock` in your own terminal, and keep it open. |
+| `secrets set` says a secret with that name exists | Add `--replace` to rotate its value, or delete it first. |
+| Fills and tokens are refused because a required audit sink can't be reached | `metacomputer secrets audit-sink list` shows its last error. Fix the receiver, or remove the sink in your own terminal. |
+| A program in the VM gets 401 from the proxy | The token expired or was revoked: ask for a new one. |
+| `secrets token` or `fill` says to rebuild the VM | The VM predates the proxy or fill account: `metacomputer build --replace`, then `metacomputer secrets bind` again. |
 
 ## Testing
 
@@ -780,16 +920,20 @@ go to `results/`, `recordings/` and `screenshots/` (all ignored by git).
 | `python3 tests/test_recording.py` | nothing (`--vm` for a test VM) | Recording description files and key moments; both recording modes and sound |
 | `python3 tests/test_actionlog.py` | nothing | Tamper detection in the action log; the relay passes messages through unchanged |
 | `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py` | a separate test VM | The action log, SSH certificates and bounded mode; it switches that VM's SSH and driver settings |
+| `python3 tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py` | nothing | The secrets vault: fills, keys and rotation, approvals and requesters, API tokens and the proxy, audit sinks, and the VM's fill program |
 | `tests/skill/run_headless.sh` | the VM, API usage | The skill end to end in a headless Claude Code session |
 
 ## Uninstall
 
 ```bash
 metacomputer stop
-./install.sh --uninstall      # removes the command, the alias, the skill and the MCP registration
+./install.sh --uninstall      # removes the command, the alias, the skill, the MCP registration and the vault program
 ```
 
-That leaves the VM, its keys and Lume in place. To remove them too (with
+Your secrets vault stays in `~/Library/Application Support/metacomputer/`. Delete
+that folder only if you no longer need anything in it.
+
+The VM, its keys and Lume stay in place too. To remove them (with
 standard Lume, use `lume` in place of `lume-secure`, and remove
 `~/.local/share/lume` and `~/.local/bin/lume` instead):
 

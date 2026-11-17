@@ -8,9 +8,16 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ### Added
 - `metacomputer secrets`: a self-contained vault for website passwords, 2FA (TOTP) codes and sealed browser logins. Claude fills them into page-mode Chrome without the values reaching its context, the transcript, logs or recordings. You unlock it in your own terminal and can approve each use. VMs built with this version have a locked fill account that Claude can't modify. See SECURITY.md for exactly what holds and what doesn't.
+- API keys through a proxy: `metacomputer secrets set NAME --kind api --api-host HOST` stores a key, and `secrets token NAME [--ttl 15m]` gives a program in the VM a short-lived token for a proxy at `127.0.0.1:18765` inside it. The proxy adds the real key on the Mac, sends requests only to that host, and withholds the key if the API echoes it back. Tokens last at most 8 hours and end when the vault locks; `secrets tokens` lists them and `secrets revoke ID|--all` ends them. VMs built with this version have a locked proxy account for it (rebuild older VMs to use tokens).
+- Secure Enclave binding: `secrets init` binds the vault to this Mac's Secure Enclave when it has one and prints a one-time recovery key. `secrets recover` opens the vault with that key on another Mac; `rekey --enclave` and `rekey --no-enclave` move a vault onto or off the Enclave; `init --no-enclave` makes a passphrase-only vault.
+- Rotation: `secrets set ... --replace` records a rotation and `secrets list` shows each secret's age; `secrets rekey` changes the passphrase and every key (the old recovery key stops working); `secrets rotate-session-key` re-encrypts sealed browser logins.
+- The vault's audit log is hash-chained and copied to macOS's unified log; `scripts/verify-audit.py` checks it. Audit sinks (`secrets audit-sink add`) send every event off the Mac as it happens, as signed webhooks, OTLP logs, syslog over TLS or ntfy messages; a `--required` sink must receive each use before it goes ahead.
+- Requesters and approval scopes: the unlock terminal and the audit log name the Claude Code session and project behind each request. When a use needs approval, typing `NAME session` or `NAME unlock` extends it to that session or until the vault locks, and `set --project DIR` limits a secret to sessions in that folder. This is attribution, not isolation.
+- The skill's `SECRETS.md`: how Claude signs in, keeps a login and uses API tokens, and what it must never do.
 
 ### Changed
 - After a successful build, the VM's private SSH host key is deleted from the Mac; only the public key and `known_hosts` are kept.
+- `metacomputer secrets set` on a name that already exists now refuses unless you add `--replace`.
 
 ### Fixed
 - Two VMs side by side: a session on one VM no longer makes the other refuse every tool call ("in use by another controller").
