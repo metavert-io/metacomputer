@@ -28,6 +28,10 @@ mode turns it off, and its optional logging.
 `metacomputer start` brings the VM in line with the config;
 `metacomputer security apply` does the same without a restart.
 
+A fourth section, [Secrets and logins](#secrets-and-logins-metacomputer-secrets),
+covers `metacomputer secrets`: letting Claude sign in to sites in the VM without
+ever seeing your passwords or codes.
+
 ## What these protect against
 
 The main risk with a computer-use agent is **prompt injection**. A web page, a
@@ -343,6 +347,187 @@ Settings:
   pass the check.
 - `--read-only` isn't enforced; it only skips the one-controller check and
   leaves out the desktop's environment.
+
+## Secrets and logins (`metacomputer secrets`)
+
+Some tasks need a login. A password typed into the conversation lands in the
+transcript, and from there in logs and perhaps recordings. `metacomputer secrets`
+lets Claude use a password, a one-time code or a saved browser login inside the VM
+without the value ever reaching Claude. You allow it from your own terminal.
+
+It ships in this repository (`vault/`, built by `scripts/build-vault.sh`, which
+`install.sh` runs). It needs no password manager, no other secrets tool and not the
+macOS Keychain. It needs macOS 15 and Apple's Command Line Tools (`swiftc`).
+
+### Setting it up
+
+Run these yourself, in your own terminal (they refuse to run without one):
+
+```
+metacomputer secrets init                   # choose a vault passphrase (12+ characters)
+metacomputer secrets set x-login --kind password --origin https://x.com --username you
+metacomputer secrets set x-2fa --kind totp --origin https://x.com    # base32 seed or otpauth:// address
+metacomputer secrets bind                   # pin this VM: its SSH port, host key, key and user
+metacomputer secrets unlock --for 1h        # keep this terminal open while Claude works
+```
+
+- Values are typed with the echo off, never on a command line. A password is asked
+  for twice.
+- Each secret names the exact sites it may go to (`--origin`, repeatable): scheme,
+  host and port, with no path. `http://127.0.0.1:PORT` and `http://localhost:PORT`
+  are accepted for testing.
+- `--approval each` makes every use of that secret ask you first.
+  `unlock --confirm each` does that for every use of every secret.
+
+### How a fill works
+
+1. Claude clicks into the field in the VM's Chrome (page mode), then runs
+   `metacomputer secrets fill x-login --field password`.
+2. That command asks the unlock process over a Unix socket in the vault folder.
+   The socket is 0600, and the unlock process checks that the caller is your user.
+3. The unlock process checks the request:
+   - the secret exists;
+   - the field fits its kind: `password` and `username` for a password, `otp` for
+     a TOTP seed (it works out the current 6-digit code), `text` for text;
+   - the VM is bound;
+   - the program listening on the VM's SSH port is the VM's gateway, `cua-netgw`.
+4. If the secret or the unlock says `each`, it asks in your terminal:
+   `Allow fill of x-login (password) into https://x.com on VM metacomputer? [y/N]`.
+   No answer within 120 seconds counts as no.
+5. It runs `/usr/bin/ssh` with the pinned port, key, user and host key, ignoring
+   your SSH config and agent. It writes the request, value included, to ssh's
+   standard input.
+6. In the VM, a script built into the vault program does the rest:
+   - finds the tab on an allowed site through Chrome's DevTools port;
+   - checks the focused field: the tab's site, the site of the frame the field is
+     in, and the element's type;
+   - types the value there (`Input.insertText`);
+   - checks that the field now holds that many characters.
+7. Claude gets back only the outcome, for example
+   `{"ok":true,"field":"password","origin":"https://x.com","chars":16}`, or a refusal
+   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error.
+
+**Sealed browser logins.**
+- `metacomputer secrets session save NAME --profile P` packs one of the driver's
+  named Chrome profiles in the VM (cookies and site storage, not caches). It
+  encrypts the profile with a key kept inside the vault and stores it on the Mac.
+- `session load NAME --profile P` puts it back, into that VM or another bound one.
+  A load counts as a use, so approval rules apply.
+- Both refuse while a Chrome is using that profile.
+- The VM as built here has no desktop keyring, so Chrome encrypts its cookies with
+  its built-in key. A sealed login should therefore work on another VM built the same way.
+
+### What it protects
+
+- **Values never reach Claude.** They never appear in:
+  - the conversation or transcript;
+  - command output;
+  - the vault's audit log or the signed action log.
+
+  They're never put on a command line or in an environment variable. The vault's
+  script in the VM never prints them or writes them to disk.
+- **Using a secret needs you.** The vault is locked until you unlock it in your
+  own terminal with its passphrase.
+  - It locks again on Ctrl-C, when its time is up, or when that terminal closes.
+  - Your terminal shows every request and its outcome, never the values.
+  - Adding, changing or deleting a secret, and binding a VM, each need the
+    passphrase again, even while the vault is unlocked.
+- **Confirmation per use, when you want it:** `--approval each`, or
+  `unlock --confirm each`.
+- **Wrong site or wrong field is refused.** A fill is refused when:
+  - the tab isn't on one of the secret's sites;
+  - the focused field is in a frame from another site, including any frame the
+    page can't look into;
+  - the field doesn't fit. A password goes only into a password field, a username
+    into a text, email or phone field, and a code into a text, phone or number field.
+
+  Asking for a field the secret doesn't have is refused before anything reaches the VM.
+- **A pinned VM.** The vault connects only to the VM you bound: its port and
+  pinned host key, with its key and user. It connects only when the VM's gateway is
+  the program listening on that port.
+- **Encrypted at rest.**
+  - `vault.json` is sealed with AES-256-GCM. Its key comes from your passphrase
+    through PBKDF2-HMAC-SHA256 (600,000 rounds, random salt).
+  - Names, sites and VM bindings are encrypted too, and `list` works only while
+    the vault is unlocked.
+  - Sealed browser logins are encrypted with a random key kept inside the vault.
+- **The VM-side script can't be swapped through the repository.** It's compiled
+  into the vault program, so editing `vault/guest_fill.py` changes nothing until
+  you rebuild.
+- **The program resists other processes.** It's signed with the hardened runtime,
+  so your other processes can't attach a debugger to it or load code into it.
+- **An audit trail.** `audit.jsonl` (0600; `metacomputer secrets audit`) records
+  every use, refusal, unlock and lock: names, sites, outcomes and character counts,
+  never values. With `ACTION_LOG=on`, fills and sealed-session saves and loads run
+  through `metacomputer secrets` also go in the signed action log.
+
+### Where it ends
+
+- **It doesn't stop a malicious agent that has your shell.** Claude Code runs as
+  you. An agent bent on harm could:
+  - kill the unlock process;
+  - replace the vault program or the `metacomputer` command, so your next unlock
+    runs its code and captures the passphrase;
+  - copy `vault.json` and try to guess the passphrase offline. Use a long one;
+  - tamper with the VM.
+
+  The terminal requirement keeps values off pipes and command lines. It isn't a
+  barrier against your own account, since a program can open a pseudo-terminal.
+  Someone with your account could also put back an older copy of `vault.json`, and
+  the vault can't tell.
+- **A compromised VM can lie.** The VM side reports the tab's site and the field.
+  Code running in the VM as the desktop user (or as root) could claim any site and
+  keep the value. Values go only to the VM you bound, but what happens inside it is
+  up to the VM.
+- **The page sees what's typed.** A filled value is visible to the page's own
+  scripts, to its extensions, and to anything with access to the page, including
+  Claude's page tools: a page snapshot or script could read a filled field back.
+  Use `each` when that matters.
+  - A site you name is trusted with the value. A bad page on that site can take it.
+  - If the focus moves to another field between the check and the typing, the
+    fill reports it afterwards; it can't prevent it.
+  - Once typed, the value is the page's and Chrome's, as if typed by hand. Chrome
+    may keep ordinary text fields (not password fields) in the profile's session
+    files, and a sealed login carries those along.
+- **It's on the screen.** Password fields show dots. Usernames, one-time codes and
+  text values are visible on the VM's screen, in screenshots and in recordings.
+- **Page-mode Chrome only.** Fills need Chrome that the driver started with
+  `browser_prepare`, which has a DevTools port. Firefox and Chrome in human mode
+  (the normal profile) aren't supported.
+- **`SSH_AUTH=cert` isn't supported yet.** The vault signs in with the static `ops`
+  key, which a VM on certificates refuses.
+- **The audit log isn't secret or tamper-evident.** It names your secrets and their
+  sites (never values), anyone with your account can read it, and deleting it isn't
+  detected. The signed action log is the tamper-evident record.
+- **A sealed login is a login.** Anyone who loads it is signed in, so treat it like
+  the password.
+- **Memory.** While unlocked, the unlock process holds the decrypted vault. When it
+  locks, it overwrites the copies it controls and exits. Swift and Foundation make
+  copies it can't reach. The hardened runtime keeps your other processes out of
+  its memory.
+
+### Commands and files
+
+| Command | Where | What it does |
+| --- | --- | --- |
+| `init`, `set`, `delete`, `bind`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `unlock [--for 30m] [--confirm each]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h) or the terminal closing |
+| `list [--json]` | anywhere, while unlocked | Names, kinds, sites, usernames, approval, use counts; never values |
+| `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element first) |
+| `session save\|load NAME --profile P [--replace]` | anywhere | Seal a Chrome profile from the VM, or put one back |
+| `status`, `audit [--tail N]`, `selftest` | anywhere | State, the audit log, and the program's own checks (TOTP, PBKDF2, AES-GCM test vectors) |
+
+`metacomputer secrets ...` fills in the current VM (`--vm`); `bind` takes its port,
+host key, key and user from the config (`MCOMP_CONFIG` for another VM).
+
+- **Vault folder:** `~/Library/Application Support/metacomputer/` (0700), or
+  `MCOMP_VAULT_DIR`. It holds `vault.json`, `vault.sock`, `audit.jsonl` and
+  `sessions/*.sealed`.
+- **Program:** `~/.local/share/metacomputer/bin/mcomp-vault`, or `MCOMP_VAULT_BIN`.
+  Rebuild it with `scripts/build-vault.sh`.
+- **Test builds:** `scripts/build-vault.sh --test PATH` builds a copy for the tests
+  that accepts a stand-in for `ssh`. It's never installed, and release builds don't
+  contain that code.
 
 ## Reporting a vulnerability
 

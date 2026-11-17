@@ -211,6 +211,25 @@ No macOS credentials are used anywhere. On the Mac, every connection to the VM
 connection sharing, local commands and proxies turned off
 (`tests/test_ssh_options.py`).
 
+## Secrets (`metacomputer secrets`)
+
+Website passwords, TOTP seeds and sealed Chrome profiles live in a vault of their
+own, `mcomp-vault`: a Swift program in `vault/`, installed to
+`~/.local/share/metacomputer/bin/` by `scripts/build-vault.sh`, with its data in
+`~/Library/Application Support/metacomputer/`. Claude's side (`metacomputer
+secrets fill ...`) talks only to `mcomp-vault unlock`, which runs in the user's own
+terminal and holds the decrypted vault. The unlock process:
+- checks the request;
+- checks that the VM's port is served by cua-netgw;
+- asks the user when the secret says so;
+- runs `/usr/bin/ssh` with the pinned endpoint, writing the value to ssh's
+  standard input;
+- runs the guest script built into the binary (`vault/guest_fill.py`), which types
+  the value into the focused field of the driver's Chrome over DevTools after
+  checking the field's site and type.
+
+Only the outcome comes back. Threat model and limits: [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
+
 ## Network
 
 Lume runs the VM in `gateway:` mode: its network device is a datagram socket

@@ -243,13 +243,70 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
+## Secrets vault: `tests/test_secrets.py`, `tests/test_guest_fill.py`
+
+Both need no VM, and every value in them is a dummy.
+
+`python3 tests/test_secrets.py` (114 checks, about 30 s) builds two copies of
+`mcomp-vault`: a release build, and a test build that runs a stub instead of `ssh`
+(`scripts/build-vault.sh --test`). The release build must not contain the test
+switches. The test types the passphrase, values and y/N answers into a
+pseudo-terminal, as a person would. It checks that:
+- `init`, `set`, `bind` and `unlock` refuse without a terminal, short or mismatched
+  passphrases, bad sites and the wrong passphrase;
+- the vault file is 0600 and holds no names or values in the clear;
+- while locked, `list` and `fill` exit 3 and nothing reaches the VM;
+- a port not served by `cua-netgw` is refused;
+- a fill's value reaches the VM side only on ssh's standard input, never on the
+  command line or in the environment;
+- ssh runs with the pinned key, port, user and host key, and no config or agent;
+- the TOTP code is the current one;
+- wrong field and kind combinations are refused before anything is sent;
+- `each` approval: `n` sends only a check without the value, no answer times out;
+- sealed sessions round-trip, are encrypted, and a changed file is refused;
+- Ctrl-C, the time running out and the terminal closing each lock the vault;
+- through `bin/metacomputer` with `ACTION_LOG=on`, the fill is in the signed log
+  and verifies;
+- no value appears in any command's output, the unlock terminal or the audit log.
+
+`MCOMP_VAULT_TEST_BIN=PATH` uses an existing test build, and
+`MCOMP_VAULT_SKIP_RELEASE=1` skips the release build.
+
+`python3 tests/test_guest_fill.py` checks the VM side (`vault/guest_fill.py`):
+- its helpers: sites, field types, and WebSocket frames, including RFC 6455's examples;
+- the whole script against a fake Chrome DevTools server: fragmented answers,
+  pings, several tabs, cross-origin frames, focus moving during a fill, length limits;
+- the whole script against a real headless Chromium, when one is found
+  (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It fills a dummy login
+  page with fields in a same-origin frame, a cross-origin frame and a shadow root.
+
+What these can't cover is the VM's own Chrome, launched by the driver; see the
+manual steps below.
+
+### In the VM (manual)
+
+1. Build and install the vault: `scripts/build-vault.sh`.
+2. In your own terminal: `metacomputer secrets init`, then
+   `metacomputer secrets set demo --kind password --origin http://localhost:8000 --username demo`
+   and `metacomputer secrets bind`.
+3. Serve `tests/fixtures/site/` in the VM (below) and open
+   `http://localhost:8000/login.html`, a dummy sign-in page, in page-mode Chrome
+   with a named profile.
+4. `metacomputer secrets unlock --confirm each` in your terminal. From Claude, or
+   another terminal: focus the field, then run
+   `metacomputer secrets fill demo --field password --profile P`.
+5. Check: the y/N question appears, the field fills, and the result shows `chars`.
+   Submitting the page shows only the lengths of what was typed.
+   Then `session save` / `session load` that profile.
+
 ## Browser checks: `metacomputer web …`
 
 `compare`, `responsive`, `a11y` and `open-untrusted` serve as their own
 smoke tests. The pages in `tests/fixtures/site/` cover the edge cases:
 - a form with every control;
 - a page with planted accessibility problems;
-- a redirecting fake sign-in page.
+- a redirecting fake sign-in page;
+- a dummy sign-in page for `metacomputer secrets fill` (`login.html`).
 
 To serve them in the VM:
 `metacomputer put tests/fixtures/site --to '~/metacomputer-runs'`, then

@@ -92,11 +92,43 @@ Things to know:
 - **Throwaway by default.**
 - **Named profiles,** when the user asks for one (for example "use a profile called shopping"):
   1. Launch with `{mode: "isolated_named", name: "shopping"}`.
-  2. Ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
+  2. Sign in: fill it from the vault (next section), or ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
   3. Later sessions with the same name reuse the cookies.
-- **Never type the user's credentials.**
+- **Never type the user's credentials yourself.** Use `metacomputer secrets` (next section).
 - **Housekeeping:** `metacomputer browser profiles` lists named profiles, and `metacomputer browser profiles --delete NAME` deletes one (ask first). A VM reset removes them all.
 - **Never attach to Chrome's normal profile.** `strategy: existing_profile` isn't enabled in this lab.
+
+## Signing in: `metacomputer secrets`
+
+The user can keep passwords, one-time-code seeds and saved browser logins in a vault on the Mac. Claude uses them without ever seeing them. Background: SECURITY.md, "Secrets and logins", in the project folder.
+
+- **Never ask for a password, a code or the vault passphrase in chat.** Never type one with `type_text`, `browser_type` or a shell command.
+  - If the user offers one, ask them to keep it out of the chat and store it themselves, in their own terminal: `metacomputer secrets set NAME --kind password --origin https://site --username U`.
+- **See what's stored:** `metacomputer secrets list`. It shows names, sites, usernames and which `--field`s each secret fills, never values. It works only while the vault is unlocked.
+- **Locked (exit 3):** ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. If there's no vault yet, the message says so: ask them to run `metacomputer secrets init` and `set` themselves.
+- **Only page-mode Chrome.** Fills work in Chrome launched with `browser_prepare`, not in Firefox or human-mode Chrome.
+- **To fill a login:**
+  1. Open the sign-in page in page mode (`browser_prepare`, `browser_navigate`).
+  2. Focus the field with a trusted click: `browser_click {ref, delivery_mode: "foreground"}`. A `dom_event` click may not focus it.
+     - Or let the fill focus it: add `--selector '#username'` (an id or name from a `dom_refs_v1` snapshot). It must match exactly one element.
+  3. `metacomputer secrets fill NAME --field username`.
+  4. Focus the password field, then `metacomputer secrets fill NAME --field password`.
+  5. For a one-time code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp`.
+  6. With a named profile, add `--profile P` to each fill.
+  7. Submit with a click, then check the signed-in page with a fresh snapshot.
+- **Read the result.**
+  - `{"ok":true,...,"chars":N}` means it was typed and checked.
+  - Exit 2: refused, with the reason (wrong site, wrong field, or the user said no). Fix the cause, for example focus the right field, and try once more. Never work around a refusal.
+  - Exit 4: an error, such as the VM being off, no Chrome, or no tab on that site.
+- **Don't read a filled field back.** A page script, or a snapshot that includes a field's value, would bring the secret into the conversation. The fill's own `chars` check is the verification.
+- **The user may need to answer.** A secret set to `each`, or a vault unlocked with `--confirm each`, waits up to 2 minutes for the user's y/N in their terminal. Tell them a confirmation is waiting.
+- **Recordings:** password fields show dots, but usernames and codes are visible on screen. Don't record those steps unless the user wants that.
+- **To keep a login** across sessions or VMs:
+  1. Use a named profile (`isolated_named`, for example `x`).
+  2. Sign in: fill it as above, or let the user sign in once through `metacomputer view`.
+  3. End the browser session (`end_session`): a profile Chrome is using can't be saved.
+  4. `metacomputer secrets session save NAME --profile x`.
+  5. Later, with no Chrome running on that profile: `metacomputer secrets session load NAME --profile x`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`.
 
 ## Checks that need no model: `metacomputer web`
 
