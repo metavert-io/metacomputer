@@ -157,6 +157,16 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 | `$SSH_DIR/hostkey` | host, 0600 | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection) |
 | VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/metacomputer/vnc-pass` 0600 | live view / takeover |
 
+With `SSH_AUTH=cert` (optional; [SECURITY.md](SECURITY.md)), `ops` and `mcp` sign in with a fresh key and a short-lived
+certificate from `$SSH_DIR/ca` per connection (`scripts/lib.sh` `cert_for`):
+- principal = role, key ID `mcomp:ROLE:USER:PROJECT:pidN`;
+- `source-address` = the gateway, and the `mcp` certificate carries a `force-command`;
+- the guest trusts that CA through `/etc/ssh/sshd_config.d/20-metacomputer-cert.conf`;
+- the guest sets each role's options in `/etc/ssh/metacomputer-principals/cua`, and turns off `cua`'s
+  authorized keys.
+
+`metacomputer-admin ssh-auth cert|key` switches it, and `start` and `security apply` call it.
+
 Guest accounts have locked passwords; SSH is key-only with `AllowUsers cua cuaadmin`.
 No macOS credentials are used anywhere.
 

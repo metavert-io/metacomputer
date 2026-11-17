@@ -4,6 +4,20 @@
 # argument reaches a shell.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CA=/etc/ssh/metacomputer-ca.pub
+PRINCIPALS=/etc/ssh/metacomputer-principals
+CERT_CONF=/etc/ssh/sshd_config.d/20-metacomputer-cert.conf
+POLICY=/etc/metacomputer/driver-policy
+
+reload_sshd() { # validate first; on failure undo with $1 and stop
+  if ! sshd -t; then
+    eval "$1"
+    echo "ssh-auth: sshd rejected the new settings; nothing changed" >&2
+    exit 1
+  fi
+  systemctl reload ssh
+}
+
 case "${1:-}" in
   restart-desktop) systemctl restart lightdm ;;
   reboot)          systemctl reboot ;;
@@ -16,5 +30,53 @@ case "${1:-}" in
   provision-log)   cat /var/log/metacomputer-provision.log ;;
   updates)         apt-get -q update && unattended-upgrade -v ;;
   firewall)        ufw status verbose ;;
-  *) echo "usage: metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall" >&2; exit 2 ;;
+  ssh-auth)
+    # SSH_AUTH on the host. cert: the automation user (cua) signs in only with a
+    # short-lived certificate from the host's CA (the CA's public key on stdin);
+    # its static keys stop working. key: back to the static keys. The
+    # maintenance account (cuaadmin) always uses its key.
+    case "${2:-}" in
+      status) if [ -f "$CERT_CONF" ]; then echo cert; else echo key; fi ;;
+      cert)
+        line="$(head -c 4096 | head -n 1)"
+        typ="$(printf '%s' "$line" | cut -d' ' -f1)"; b64="$(printf '%s' "$line" | cut -d' ' -f2)"
+        case "$typ" in ssh-ed25519|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com) ;; *) echo "ssh-auth: expected an ed25519 or ECDSA public key on stdin" >&2; exit 2 ;; esac
+        case "$b64" in ''|*[!A-Za-z0-9+/=]*) echo "ssh-auth: malformed public key" >&2; exit 2 ;; esac
+        install -d -m 0755 "$PRINCIPALS"
+        printf '%s %s metacomputer-ca\n' "$typ" "$b64" > "$CA.new"
+        ssh-keygen -l -f "$CA.new" >/dev/null || { rm -f "$CA.new"; echo "ssh-auth: not a valid public key" >&2; exit 2; }
+        mv "$CA.new" "$CA"; chmod 0644 "$CA"
+        # The guest decides what each role may do, whatever a certificate says.
+        printf '%s\n' 'restrict,pty ops' 'restrict,command="/opt/metacomputer/bin/driver-mcp" mcp' > "$PRINCIPALS/cua"
+        chmod 0644 "$PRINCIPALS/cua"
+        cat > "$CERT_CONF" <<'EOF'
+# metacomputer SSH_AUTH=cert (metacomputer-admin ssh-auth): the automation
+# user signs in only with a short-lived certificate from the host's CA, for the
+# roles listed in /etc/ssh/metacomputer-principals/cua. Remove this file
+# (ssh-auth key) to go back to the static keys.
+TrustedUserCAKeys /etc/ssh/metacomputer-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/metacomputer-principals/%u
+Match User cua
+	AuthorizedKeysFile none
+EOF
+        chmod 0644 "$CERT_CONF"
+        reload_sshd "rm -f '$CERT_CONF'"
+        echo cert ;;
+      key)
+        rm -f "$CERT_CONF"
+        reload_sshd ":"
+        rm -f "$CA" "$PRINCIPALS/cua"
+        echo key ;;
+      *) echo "usage: metacomputer-admin ssh-auth status|cert|key" >&2; exit 2 ;;
+    esac ;;
+  driver-policy)
+    # DRIVER_MODE on the host. bounded: the MCP key/certificate starts Cua Driver
+    # only in bounded mode (standard requests are refused). standard: either.
+    case "${2:-}" in
+      status) if [ -f "$POLICY" ] && grep -qx bounded "$POLICY"; then echo bounded; else echo standard; fi ;;
+      bounded) install -d -m 0755 /etc/metacomputer; echo bounded > "$POLICY"; chmod 0644 "$POLICY"; echo bounded ;;
+      standard) rm -f "$POLICY"; echo standard ;;
+      *) echo "usage: metacomputer-admin driver-policy status|bounded|standard" >&2; exit 2 ;;
+    esac ;;
+  *) echo "usage: metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall|ssh-auth status|cert|key|driver-policy status|bounded|standard" >&2; exit 2 ;;
 esac

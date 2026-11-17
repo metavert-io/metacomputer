@@ -1,16 +1,50 @@
 #!/bin/sh
-# driver-mcp: the forced command behind the host's MCP SSH key.
+# driver-mcp: the forced command behind the host's MCP SSH key (or certificate).
 # Runs Cua Driver's MCP server over stdio against the automation user's XFCE
 # session. stdout carries JSON-RPC only; diagnostics go to stderr.
+#
+# The host asks for a permission mode in the SSH command line:
+#   (nothing) or "standard"   Cua Driver's default mode
+#   "bounded SHA256"          bounded mode with the capability manifest the host
+#                             uploaded to ~/.config/metacomputer/manifests/SHA256.yaml
+# /etc/metacomputer/driver-policy (root's; set with metacomputer-admin
+# driver-policy) containing "bounded" refuses standard requests.
 RUN="/run/user/$(id -u)/metacomputer"
+REQ="${SSH_ORIGINAL_COMMAND:-}"
+POLICY=/etc/metacomputer/driver-policy
+fail() { echo "metacomputer: $*" >&2; exit 1; }
+
+case "$REQ" in
+  ""|standard) MODE=standard ;;
+  "bounded "*)
+    MODE=bounded; SHA="${REQ#bounded }"
+    case "$SHA" in
+      *[!0-9a-f]*|"") fail "bad manifest id" ;;
+    esac
+    [ "${#SHA}" -eq 64 ] || fail "bad manifest id" ;;
+  *) fail "unknown driver request (expected 'standard' or 'bounded SHA256')" ;;
+esac
+if [ "$MODE" = standard ] && [ -f "$POLICY" ] && grep -qx bounded "$POLICY"; then
+  fail "this virtual computer accepts only bounded driver sessions (DRIVER_MODE=bounded on the host)"
+fi
+
 i=0
 while [ ! -s "$RUN/session.env" ] && [ "$i" -lt 90 ]; do sleep 1; i=$((i + 1)); done
-if [ ! -s "$RUN/session.env" ]; then
-  echo "metacomputer: the desktop session is not up (no $RUN/session.env)" >&2
-  exit 1
-fi
+[ -s "$RUN/session.env" ] || fail "the desktop session is not up (no $RUN/session.env)"
 set -a
 . "$RUN/session.env"
 set +a
 export CUA_DRIVER_RS_TELEMETRY_ENABLED=0 CUA_TELEMETRY_ENABLED=0 CUA_DRIVER_RS_UPDATE_CHECK=0
+
+if [ "$MODE" = bounded ]; then
+  SRC="$HOME/.config/metacomputer/manifests/$SHA.yaml"
+  [ -f "$SRC" ] || fail "manifest $SHA not uploaded"
+  # Use a private copy (in the session's tmpfs) whose hash matches the one the
+  # host asked for. Copies from connections over a day old are cleared here.
+  find "$RUN" -maxdepth 1 -name 'manifest-*.yaml' -mmin +1440 -delete 2>/dev/null
+  M="$RUN/manifest-$$.yaml"
+  (umask 077; cp "$SRC" "$M") || fail "cannot copy the manifest"
+  [ "$(sha256sum "$M" | cut -d' ' -f1)" = "$SHA" ] || { rm -f "$M"; fail "manifest $SHA doesn't match its hash"; }
+  export CUA_DRIVER_PERMISSION_MODE=bounded CUA_DRIVER_CAPABILITY_MANIFEST_FILE="$M" CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED=1
+fi
 exec /usr/local/bin/cua-driver mcp

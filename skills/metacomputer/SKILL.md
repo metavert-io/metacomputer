@@ -101,6 +101,12 @@ Do everything else directly with normal tools: code, builds, tests, git, files, 
 - **`browser_prepare` only launches Claude's own Chrome** (`allow_launch: true` with an `isolated_new` or `isolated_named` profile). Never use `strategy: existing_profile`.
 - **Chrome input:** the bridge sends input aimed at Chrome in the foreground and refuses `set_value` and `run_script` aimed at it. Follow the route it names. If Chrome stops taking typing, run `metacomputer input-reset`.
 - **No root in the VM.** The desktop user `cua` has no sudo, so only user-level installs work.
+- **The user's hardening settings are theirs to change.** `metacomputer security` shows them. Change `config/local.env` or run `security apply` only when the user asks, never to get around a limit; never edit or delete `logs/actions/`.
+  - **Bounded driver** (`DRIVER_MODE=bounded`): a call refused as "outside the capability manifest" is the user's limit. Say what was refused and that the user can allow it (another `DRIVER_PROFILE`, or their own `DRIVER_MANIFEST`); never try another route to the same effect.
+    - Launch apps by name as usual; the bridge passes the absolute path that bounded mode needs.
+    - In this mode, the `browser` profile has only page tools, the other profiles have no page tools, and no profile has the clipboard tools.
+    - When the bridge says the bounded session has ended, ask the user to reconnect (`/mcp`).
+  - **Action log** (`ACTION_LOG=on`): every call is recorded, with typed text redacted by default. `metacomputer actions show latest` shows what was sent.
 
 ## Also available
 

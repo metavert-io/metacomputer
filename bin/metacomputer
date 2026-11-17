@@ -32,6 +32,9 @@
 #   build [--replace]              build the VM + baseline from scratch
 #   baseline [--yes]               re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
+#   security [apply] [--json]      the optional hardening: action log, SSH certificates, bounded driver
+#   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
+#                                  the signed action log (ACTION_LOG=on in config/local.env)
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -85,6 +88,7 @@ do_start() {
   ok "VM running (gateway policy: config/netgw-rules.json)"
   wait_ssh ops 240 || die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
+  sync_guest_options
   wait_session 240 || die "XFCE session not ready (metacomputer ssh admin; sudo metacomputer-admin logs)"
   ok "XFCE session ready"
   mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (metacomputer status)"
@@ -106,6 +110,64 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
     netgw_stop
   fi
   ok "stopped"
+}
+
+do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as configured and as the VM has it
+  local json=0 apply=0 a; for a in "$@"; do case "$a" in --json) json=1 ;; apply) apply=1 ;; *) die "usage: metacomputer security [apply] [--json]" ;; esac; done
+  local vm_ssh="" vm_drv=""
+  if vm_running "$VM_NAME" && gssh admin true 2>/dev/null; then
+    [ "$apply" = 1 ] && sync_guest_options all
+    vm_ssh="$(guest_option ssh-auth)"; vm_drv="$(guest_option driver-policy)"
+  elif [ "$apply" = 1 ]; then
+    die "the virtual computer is off; start it (start applies these settings too)"
+  fi
+  local req="" req_err=""
+  if [ "${DRIVER_MODE:-standard}" = bounded ]; then
+    req_err="$(export_options; "$PY" "$LAB_ROOT/lib/driver_profiles.py" render 2>&1 >/dev/null)" || true
+  fi
+  export_options
+  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" <<'EOF'
+import json, os, subprocess, sys
+js, vm_ssh, vm_drv, req_err, ca_pub, logdir = sys.argv[1:]
+e = os.environ.get
+log_on = e("MCOMP_ACTION_LOG") == "on"
+key = e("MCOMP_ACTION_LOG_KEY", "")
+def fp(pub):
+    if not os.path.exists(pub):
+        return None
+    r = subprocess.run(["ssh-keygen", "-l", "-f", pub], capture_output=True, text=True)
+    return (r.stdout.split() or [None, None])[1]
+out = {
+  "action_log": {"setting": e("MCOMP_ACTION_LOG", "off"), "text": e("MCOMP_ACTION_LOG_TEXT", "redact"), "dir": logdir,
+                 "signing_key": key, "key_fingerprint": fp(key if key.endswith(".pub") else key + ".pub")},
+  "ssh_auth": {"setting": e("MCOMP_SSH_AUTH", "key"), "vm": vm_ssh or None, "ca_fingerprint": fp(ca_pub)},
+  "driver": {"setting": e("MCOMP_DRIVER_MODE", "standard"),
+             "profile": (e("MCOMP_DRIVER_MANIFEST") and "manifest: " + e("MCOMP_DRIVER_MANIFEST")) or e("MCOMP_DRIVER_PROFILE"),
+             "origins": e("MCOMP_DRIVER_ORIGINS", "").split(), "expires": e("MCOMP_DRIVER_EXPIRES"), "idle": e("MCOMP_DRIVER_IDLE"),
+             "vm_policy": vm_drv or None, "problem": req_err.strip() or None},
+}
+if js == "1":
+    print(json.dumps(out, indent=2)); sys.exit(0)
+def y(b): return "\033[33m" + b + "\033[0m"
+a, s, d = out["action_log"], out["ssh_auth"], out["driver"]
+print("Optional hardening (all off by default, which is Cua's own behavior; SECURITY.md)")
+print(f"  action log   {y('on') if log_on else 'off'}" + (f"   text {a['text']}, signed with {a['key_fingerprint'] or 'a key made on first use'}; "
+      f"metacomputer actions verify" if log_on else "   ACTION_LOG=on: a signed, hash-chained record of every tool call"))
+vm = f"   VM: {s['vm']}" if s["vm"] else ""
+print(f"  SSH          {y('certificates') if s['setting'] == 'cert' else 'static keys'}{vm}"
+      + (f"   CA {s['ca_fingerprint'] or '(made at next start)'}, each certificate valid {e('MCOMP_SSH_CERT_TTL', '5m')}" if s["setting"] == "cert" else
+         "   SSH_AUTH=cert: a short-lived certificate per connection"))
+if d["setting"] == "bounded":
+    extra = f"   profile {d['profile']}" + (f" ({' '.join(d['origins'])})" if d["origins"] else "") + f", lasts {d['expires']}, idle {d['idle']}"
+else:
+    extra = "   DRIVER_MODE=bounded: Cua Driver runs only what a manifest lists"
+vmd = f"   VM: {d['vm_policy']}" if d["vm_policy"] else ""
+print(f"  driver       {y('bounded') if d['setting'] == 'bounded' else 'standard'}{vmd}{extra}")
+if d["problem"]:
+    print(f"  ! {d['problem']}")
+if (s["vm"] and s["vm"] != s["setting"]) or (d["vm_policy"] and d["vm_policy"] != d["setting"]):
+    print("  ! the VM doesn't match the config yet: metacomputer security apply (start does it too)")
+EOF
 }
 
 do_status() {
@@ -131,6 +193,7 @@ do_status() {
       hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
     fi
   fi
+  export_options
   "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" <<'EOF'
 import json, os, sys
 js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout = sys.argv[1:]
@@ -143,7 +206,10 @@ if hs:
                "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
        "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
-       "host_sharing": sharing, "lume": lume, "guest_layout": layout}
+       "host_sharing": sharing, "lume": lume, "guest_layout": layout,
+       "options": {"action_log": os.environ.get("MCOMP_ACTION_LOG", "off"), "ssh_auth": os.environ.get("MCOMP_SSH_AUTH", "key"),
+                   "driver_mode": os.environ.get("MCOMP_DRIVER_MODE", "standard"),
+                   "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None}}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -170,6 +236,11 @@ if sharing is not None:
     def onoff(k): return ("\033[33mon\033[0m" if sharing[k] else "off")
     print(f"host sharing  clipboard {onoff('clipboard')}  audio {onoff('audio')}  rosetta {onoff('rosetta')}"
           f"   (seen from inside the VM; Lume: {os.path.basename(lume)})")
+o = out["options"]
+if o["action_log"] == "on" or o["ssh_auth"] == "cert" or o["driver_mode"] == "bounded":
+    parts = (["action log on"] if o["action_log"] == "on" else []) + (["SSH certificates"] if o["ssh_auth"] == "cert" else []) \
+        + ([f"driver bounded ({o['driver_profile'] or 'manifest'})"] if o["driver_mode"] == "bounded" else [])
+    print(f"hardening     {' · '.join(parts)}   (metacomputer security)")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -505,6 +576,13 @@ EOF
       else
         warn "the virtual computer is off; listing what is already on the Mac"
       fi
+      # Action-log files written while the task ran (ACTION_LOG=on).
+      if [ -d "$LOG_DIR/actions" ]; then
+        local a
+        while IFS= read -r a; do
+          mkdir -p "$host/actions" && cp "$a" "$host/actions/$(basename "$(dirname "$a")")-$(basename "$a")"
+        done < <(find "$LOG_DIR/actions" -name '*.jsonl' -newer "$host/task.json" 2>/dev/null)
+      fi
       local v
       while IFS= read -r v; do
         [ -n "$v" ] && do_contact_sheet "$v" >/dev/null 2>&1 || true
@@ -639,8 +717,15 @@ case "$cmd" in
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
   mcp)        vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
-              ssh_base mcp; exec ssh -T "${SSH_ARGS[@]}" ;;
-  mcp-lazy)   exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py" ;;
+              req="$(driver_request)" || exit 1
+              ssh_base mcp
+              if [ "$ACTION_LOG" = on ]; then
+                export_options; exec "$PY" "$LAB_ROOT/lib/mcp_relay.py" ssh -T "${SSH_ARGS[@]}" ${req:+"$req"}
+              fi
+              exec ssh -T "${SSH_ARGS[@]}" ${req:+"$req"} ;;
+  mcp-lazy)   export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py" ;;
+  actions)    export_options; exec "$PY" "$LAB_ROOT/lib/actionlog.py" "$@" ;;
+  security)   do_security "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
               gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null ;;
