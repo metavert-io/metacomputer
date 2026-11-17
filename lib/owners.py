@@ -24,7 +24,8 @@ import sys
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OWNERS_DIR = os.path.join(LAB, ".run", "owners")
+# bin/metacomputer passes this VM's RUN_DIR (config/defaults.env), so two VMs keep separate owners.
+OWNERS_DIR = os.path.join(os.environ.get("MCOMP_RUN_DIR") or os.path.join(LAB, ".run"), "owners")
 ACTIVE_S = int(os.environ.get("MCOMP_ACTIVE_S", "600"))  # acted within 10 min = in use
 # the bridge's SSH key is <SSH_DIR>/mcp (SSH_DIR is configurable), to the loopback forward
 MCP_KEY_RE = re.compile(r"IdentityFile=\S*/mcp(?:\s|$)")

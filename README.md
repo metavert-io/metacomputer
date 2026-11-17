@@ -90,6 +90,7 @@ tools. The skill doesn't boot a VM for those.
 | `browser [default firefox\|chrome] [mode human\|page\|hybrid]` | What the skill uses unless you say otherwise; Chrome profiles |
 | `view` | Watch or take over the desktop (VNC on loopback) |
 | `checkpoint` / `restore` | Saved states of the stopped VM |
+| `record start [NAME]` / `record stop` / `record moments FILE` | Record the whole desktop to an MP4 with a description file; with the action log on, its key moments (each tool call and its time in the video) |
 | `test [A-F]` | The GUI smoke suite, each test recorded |
 | `where` | Project, config and results folders |
 
@@ -169,17 +170,23 @@ writes this Mac's settings to `config/local.env`, which is never committed;
 | `VM_NAME`, `BASELINE_NAME` | `metacomputer`, `metacomputer-baseline` | Lume VM names |
 | `VM_CPU`, `VM_MEMORY` | 4, 8GB | VM size |
 | `BROWSERS` | `firefox chrome` | Browsers built into the VM |
+| `EXTRA_PACKAGES` | (none) | More Ubuntu packages built into the VM, e.g. `inkscape libreoffice-calc` |
 | `LUME` | `~/.local/bin/lume-secure` | The Lume that runs the VM (`install.sh --lume=standard` for Cua's release) |
 | `SHARE_CLIPBOARD`, `SHARE_AUDIO`, `SHARE_ROSETTA` | `off` | Turn one on to connect the VM to your Mac's clipboard, audio or Rosetta (lume-secure only; standard Lume always shares) |
 | `SSH_DIR` | `~/.ssh/metacomputer` | SSH keys for the VM |
 | `VNC_PASSWORD_STORE` | `file` | `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `BROWSER`, `MODE` | `firefox`, `human` | The skill's defaults |
+| `RECORD_FPS`, `RECORD_QUALITY` | 20, `standard` | Desktop recordings; `high` is sharp enough to edit into videos (several times larger) |
+| `RECORD_TO`, `RECORD_DIR` | `guest`, `recordings/manual/` | `host` streams the recording to the Mac while it runs, so nothing builds up on the VM's disk; `RECORD_DIR` can be any folder, such as an external drive |
 | `ACTION_LOG` | `off` | `on`: signed log of every tool call ([SECURITY.md](SECURITY.md)) |
 | `SSH_AUTH` | `key` | `cert`: short-lived SSH certificates instead of static keys |
 | `DRIVER_MODE`, `DRIVER_PROFILE` | `standard`, `desktop` | `bounded`: Cua Driver limited to a profile (`readonly`, `desktop`, `browser` with `DRIVER_ORIGINS`) or your own `DRIVER_MANIFEST` |
 
 `MCOMP_CONFIG=/path/to/other.env metacomputer …` uses a different settings file,
-for example to run a second VM side by side.
+for example to run a second VM side by side. Give that VM its own `VM_NAME`,
+`BASELINE_NAME`, `SSH_DIR`, `SSH_PORT`, `VNC_PORT`, `RUN_DIR` and `LOG_DIR`
+(see [config/local.env.example](config/local.env.example)), so the two don't
+share a gateway, a lock or logs.
 
 ## Testing
 

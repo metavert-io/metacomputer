@@ -38,7 +38,7 @@ import owners  # noqa: E402
 
 LAB = owners.LAB
 MCOMP_CLI = os.path.join(LAB, "bin", "metacomputer")
-RUN = os.path.join(LAB, ".run")
+RUN = os.environ.get("MCOMP_RUN_DIR") or os.path.join(LAB, ".run")
 SEED_CACHE = os.path.join(LAB, "config", "driver-mcp-cache.json")
 LIVE_CACHE = os.path.join(RUN, "driver-mcp-cache.json")
 

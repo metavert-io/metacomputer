@@ -53,7 +53,7 @@ def settings():
     return {
         "on": os.environ.get("MCOMP_ACTION_LOG", "off") == "on",
         "keep_text": os.environ.get("MCOMP_ACTION_LOG_TEXT", "redact") == "keep",
-        "dir": os.environ.get("MCOMP_ACTION_LOG_DIR") or os.path.join(LAB, "logs", "actions"),
+        "dir": os.environ.get("MCOMP_ACTION_LOG_DIR") or os.path.join(os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB, "logs"), "actions"),
         "key": os.environ.get("MCOMP_ACTION_LOG_KEY") or os.path.join(ssh_dir, "action-log"),
     }
 
