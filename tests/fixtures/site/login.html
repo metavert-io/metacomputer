@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dummy sign-in (metacomputer secrets test)</title>
+<style>
+  body { font: 16px sans-serif; margin: 40px; }
+  label { display: block; margin: 12px 0 4px; }
+  input { font: inherit; padding: 6px; width: 280px; }
+  iframe { width: 340px; height: 90px; border: 1px dashed #888; margin-top: 16px; }
+  #result { margin-top: 20px; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>Dummy sign-in</h1>
+<p>A test page for <code>metacomputer secrets fill</code>. Nothing is sent anywhere;
+the result line shows only lengths, never what was typed.</p>
+<form id="login" onsubmit="return signIn()">
+  <label for="username">Username</label>
+  <input id="username" name="username" type="email" autocomplete="username">
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password">
+  <label for="code">One-time code</label>
+  <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code">
+  <p><button id="submit" type="submit">Sign in</button></p>
+</form>
+<p>A field in a frame on this site (fills are allowed):</p>
+<iframe id="same-site" title="same-site frame" srcdoc='<label>Frame password <input id="frame-password" type="password"></label>'></iframe>
+<div id="result" role="status"></div>
+<script>
+function signIn() {
+  const u = document.getElementById('username').value;
+  const p = document.getElementById('password').value;
+  const c = document.getElementById('code').value;
+  document.getElementById('result').textContent =
+    'Signed in: username ' + u.length + ' characters, password ' + p.length + ' characters, code ' + c.length + ' digits';
+  return false;
+}
+</script>
+</body>
+</html>
