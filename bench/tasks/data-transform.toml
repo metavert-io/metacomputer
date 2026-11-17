@@ -1,0 +1,22 @@
+id = "data-transform"
+title = "Data: per-category totals from a 240-row CSV (a shell does this best)"
+apps = []
+route = "shell"
+files = ["data"]
+prompt = """
+In the virtual computer there's a CSV of transactions at ~/bench/data/transactions.csv. Make
+~/bench/out/category-totals.csv with the header row "category,total" and one row per category
+with the sum of its amounts (two decimals), sorted by total from largest to smallest.
+"""
+check = """
+want = [("transport", 3241.19), ("books", 3189.54), ("dining", 2975.16), ("utilities", 2875.58),
+        ("pharmacy", 2847.75), ("groceries", 2652.02), ("garden", 2462.98)]
+rows = csv_rows("~/bench/out/category-totals.csv")
+rows = [r for r in (rows or []) if any(x.strip() for x in r)]
+C.add("file with header", 0.2, bool(rows) and [x.strip() for x in rows[0]] == ["category", "total"], rows[:1])
+got = [(r[0].strip(), num(r[1])) for r in rows[1:] if len(r) >= 2]
+C.add("categories", 0.2, sorted(c for c, _ in got) == sorted(c for c, _ in want), [c for c, _ in got])
+C.add("totals", 0.4, dict(got) and all(abs((dict(got).get(c) or 0) - t) < 0.006 for c, t in want), got[:3])
+C.add("largest first", 0.2, [c for c, _ in got] == [c for c, _ in want])
+C.add("two decimals", 0.0, all(len(r[1].strip().split(".")[-1]) == 2 for r in rows[1:] if len(r) >= 2))
+"""

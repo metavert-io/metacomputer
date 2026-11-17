@@ -1,0 +1,9 @@
+Project: Lantern Street mural
+Owner: Bo Carver
+Status: draft
+Due: 2027-03-01
+
+Tasks
+- Sketch final design
+- Order paint samples
+- Book scaffold for two days

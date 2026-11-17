@@ -1,0 +1,20 @@
+id = "ff-form"
+title = "Firefox: fill and submit a sign-up form"
+apps = ["firefox"]
+route = "ax"
+serve = true
+prompt = """
+In Firefox, open http://localhost:8000/signup.html and create an account for Mira Okafor with the
+email mira.okafor@example.com on the Team plan, ticking "Send me the newsletter" (and nothing
+else), then submit the form.
+"""
+check = """
+subs = [r for r in requests_log() if r["path"] == "/submit"]
+r = subs[-1] if subs else {}
+C.add("submitted", 0.1, bool(subs), len(subs))
+C.add("name", 0.2, field(r, "name") == "Mira Okafor", field(r, "name"))
+C.add("email", 0.2, field(r, "email") == "mira.okafor@example.com", field(r, "email"))
+C.add("plan Team", 0.2, field(r, "plan") == "team", field(r, "plan"))
+C.add("newsletter only", 0.2, field(r, "newsletter") == "on" and field(r, "updates") is None)
+C.add("from Firefox", 0.1, "Firefox" in r.get("agent", ""), r.get("agent", "")[:40])
+"""

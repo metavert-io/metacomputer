@@ -1,0 +1,20 @@
+id = "chrome-form"
+title = "Chrome: shipping form with a dropdown and radio buttons"
+apps = ["google-chrome"]
+route = "ax"
+serve = true
+prompt = """
+In Google Chrome, fill in the shipping form at http://localhost:8000/shipping.html for
+Jonas Weber, 41 Alder Lane, Port Hadley, postal code K2P 1L4, country Canada, with Express
+shipping and no gift wrap, and submit it.
+"""
+check = """
+sub = [r for r in requests_log() if r["path"] == "/ship"]
+r = sub[-1] if sub else {}
+C.add("submitted", 0.1, bool(sub), len(sub))
+for k, v, w in [("fullname", "Jonas Weber", 0.12), ("street", "41 Alder Lane", 0.12), ("city", "Port Hadley", 0.12),
+                ("postal", "K2P 1L4", 0.12), ("country", "CA", 0.12), ("speed", "express", 0.12)]:
+    C.add(k, w, (field(r, k) or "").strip() == v, field(r, k))
+C.add("no gift wrap", 0.06, bool(sub) and field(r, "giftwrap") is None)
+C.add("from Chrome", 0.1, "Chrome" in r.get("agent", ""), r.get("agent", "")[:40])
+"""

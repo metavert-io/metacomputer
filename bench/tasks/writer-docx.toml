@@ -1,0 +1,20 @@
+id = "writer-docx"
+title = "Writer: find and replace, save a copy as Word .docx"
+apps = ["libreoffice-writer"]
+route = "ax"
+timeout_s = 720
+files = ["docs"]
+setup = """
+to_odf odt ~/bench/docs/memo.txt ~/bench/docs && rm ~/bench/docs/memo.txt
+"""
+prompt = """
+Open ~/bench/docs/memo.odt in LibreOffice Writer, replace every "ACME" with "Northwind", and save
+a copy in Word format as ~/bench/out/memo.docx.
+"""
+check = """
+p = "~/bench/out/memo.docx"
+ok = C.add("saved as .docx", 0.2, is_zip(p))
+t = docx_text(p) if ok else ""
+C.add("four Northwind", 0.4, t.count("Northwind") == 4, t.count("Northwind"))
+C.add("no ACME left", 0.4, ok and "ACME" not in t, t.count("ACME"))
+"""

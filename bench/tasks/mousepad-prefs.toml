@@ -1,0 +1,13 @@
+id = "mousepad-prefs"
+title = "Mousepad preferences: line numbers on, tab width 4"
+apps = ["mousepad"]
+route = "ax"
+prompt = """
+Change two of Mousepad's preferences: turn on line numbers, and set the tab width to 4.
+"""
+check = """
+ln = gsetting("org.xfce.mousepad.preferences.view", "show-line-numbers")
+tw = gsetting("org.xfce.mousepad.preferences.view", "tab-width")
+C.add("line numbers on", 0.5, ln == "true", ln)
+C.add("tab width 4", 0.5, (tw or "").split()[-1:] == ["4"], tw)
+"""

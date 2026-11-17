@@ -1,0 +1,23 @@
+id = "multi-calc-writer"
+title = "Calc to Writer: a SUM in Calc, the total in a new Writer document"
+apps = ["libreoffice-calc", "libreoffice-writer"]
+requires = ["calc"]
+route = "mixed"
+timeout_s = 840
+files = ["sheets/budget.csv"]
+setup = """
+to_odf ods ~/bench/budget.csv ~/bench/sheets && rm ~/bench/budget.csv
+"""
+prompt = """
+Open ~/bench/sheets/budget.ods in LibreOffice Calc and work out the total of the Amount column
+with a SUM formula there. Then make a new LibreOffice Writer document containing the single
+sentence "The total event budget is X." where X is that total with two decimals, and save it as
+~/bench/out/budget-note.odt.
+"""
+check = """
+p = "~/bench/out/budget-note.odt"
+ok = C.add("saved as .odt", 0.2, is_zip(p))
+text = " ".join(b[3] for b in odt_blocks(p)[0]) if ok else ""
+C.add("sentence", 0.2, "The total event budget is" in text, text[:80])
+C.add("total 5486.45", 0.6, "5486.45" in text.replace(",", ""), text[:80])
+"""

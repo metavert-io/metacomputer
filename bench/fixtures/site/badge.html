@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Visitor badge</title>
+<style>body{font-family:sans-serif;margin:2em} canvas{display:block;margin:1em 0;border:1px solid #444} input{font-size:1em;padding:.3em}</style></head>
+<body>
+<h1>Visitor badge</h1>
+<p>Your visitor code is printed on the badge below. Type it into the box to check in.</p>
+<canvas id="b" width="420" height="180" aria-hidden="true"></canvas>
+<form method="get" action="/code">
+  <label for="code">Visitor code</label> <input id="code" name="code" type="text" autocomplete="off">
+  <button type="submit">Check in</button>
+</form>
+<script>
+(function () {
+  var k = [84, 97, 55, 64, 85, 93].map(function (n, i) { return String.fromCharCode(n - (i % 2 ? 9 : 3)); });
+  var c = document.getElementById("b").getContext("2d");
+  c.fillStyle = "#1f4e79"; c.fillRect(0, 0, 420, 180);
+  c.fillStyle = "#ffd166"; c.fillRect(14, 14, 392, 152);
+  c.fillStyle = "#1f4e79"; c.font = "bold 64px monospace"; c.textAlign = "center"; c.textBaseline = "middle";
+  c.fillText(k.join(""), 210, 92);
+})();
+</script>
+</body></html>

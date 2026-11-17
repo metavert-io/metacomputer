@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Shipping details - Tallgrass Outfitters</title>
+<style>body{font-family:sans-serif;margin:2em;max-width:36em} label{display:block;margin:.8em 0 .2em} input[type=text],select{font-size:1em;padding:.3em;width:20em} fieldset{margin:1em 0}</style></head>
+<body>
+<h1>Shipping details</h1>
+<form method="post" action="/ship">
+  <label for="fullname">Full name</label><input id="fullname" name="fullname" type="text" autocomplete="off">
+  <label for="street">Street address</label><input id="street" name="street" type="text" autocomplete="off">
+  <label for="city">City</label><input id="city" name="city" type="text" autocomplete="off">
+  <label for="postal">Postal code</label><input id="postal" name="postal" type="text" autocomplete="off">
+  <label for="country">Country</label>
+  <select id="country" name="country">
+    <option value="">Choose a country</option>
+    <option value="AU">Australia</option>
+    <option value="CA">Canada</option>
+    <option value="DE">Germany</option>
+    <option value="MX">Mexico</option>
+    <option value="US">United States</option>
+  </select>
+  <fieldset><legend>Shipping speed</legend>
+    <label><input type="radio" name="speed" value="standard" checked> Standard (5-8 days)</label>
+    <label><input type="radio" name="speed" value="express"> Express (1-2 days)</label>
+  </fieldset>
+  <label><input type="checkbox" name="giftwrap"> Gift wrap</label>
+  <p><button type="submit">Continue to payment</button></p>
+</form>
+</body></html>

@@ -1,0 +1,18 @@
+id = "chrome-nav"
+title = "Chrome: navigate by links to a product page and press a button"
+apps = ["google-chrome"]
+route = "ax"
+serve = true
+prompt = """
+In Google Chrome, go to http://localhost:8000/catalog/, open the "Kestrel Valley Trail Map"
+product page by following the catalog's link, and press its Reserve button.
+"""
+check = """
+log = requests_log()
+res = [r for r in log if r["path"] == "/reserve"]
+C.add("reserved Kestrel Valley", 0.5, any(field(r, "item") == "kestrel-valley" for r in res), [field(r, "item") for r in res])
+C.add("no other item reserved", 0.1, bool(res) and all(field(r, "item") == "kestrel-valley" for r in res))
+page = [r for r in log if r["path"] == "/catalog/kestrel-valley.html"]
+C.add("reached by the catalog link", 0.2, any(r["referer"].rstrip("/").endswith("/catalog") or r["referer"].endswith("/catalog/index.html") for r in page), [r["referer"] for r in page])
+C.add("from Chrome", 0.2, bool(res) and all("Chrome" in r.get("agent", "") for r in res), [r.get("agent", "")[:30] for r in res])
+"""

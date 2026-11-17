@@ -1,0 +1,24 @@
+id = "thunar-organize"
+title = "Thunar: new folder, move files into it, rename a file"
+apps = ["thunar"]
+route = "ax"
+files = ["inbox"]
+setup = """
+for n in holiday-1 holiday-2 scan; do python3 -c 'import sys,zlib,struct
+def ch(t,d): return struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)&0xffffffff)
+sys.stdout.buffer.write(b"\\x89PNG\\r\\n\\x1a\\n"+ch(b"IHDR",struct.pack(">IIBBBBB",1,1,8,2,0,0,0))+ch(b"IDAT",zlib.compress(b"\\x00\\x10\\x80\\x30"))+ch(b"IEND",b""))' > ~/bench/inbox/$n.png; done
+"""
+prompt = """
+Use the Thunar file manager to tidy ~/bench/inbox: make a folder called "images" inside it, move
+the three .png files into that folder, and rename notes.txt to meeting-notes.txt.
+"""
+check = """
+import os
+d = path("~/bench/inbox")
+C.add("images folder", 0.2, os.path.isdir(d + "/images"))
+pngs = ["holiday-1.png", "holiday-2.png", "scan.png"]
+moved = all(os.path.isfile(f"{d}/images/{p}") for p in pngs) and not any(os.path.exists(f"{d}/{p}") for p in pngs)
+C.add("pngs moved", 0.4, moved, sorted(os.listdir(d)))
+C.add("notes renamed", 0.3, not os.path.exists(d + "/notes.txt") and (read(d + "/meeting-notes.txt", "") or "").startswith("Agenda for the Thursday sync"))
+C.add("readme untouched", 0.1, read(d + "/readme.md") == "# Inbox\\nThings to sort later.\\n")
+"""

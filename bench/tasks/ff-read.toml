@@ -1,0 +1,17 @@
+id = "ff-read"
+title = "Firefox: read a value from a table, enter it on another page"
+apps = ["firefox"]
+route = "ax"
+serve = true
+prompt = """
+In Firefox, open http://localhost:8000/orders.html and find the total of order A-1042. Then open
+http://localhost:8000/answer.html, enter the order number and that total, and submit the form.
+"""
+check = """
+ans = [r for r in requests_log() if r["path"] == "/answer"]
+r = ans[-1] if ans else {}
+C.add("answer submitted", 0.2, bool(ans), len(ans))
+C.add("order number", 0.1, (field(r, "order") or "").strip().upper().lstrip("#") == "A-1042", field(r, "order"))
+C.add("total 1284.60", 0.6, num(field(r, "total")) == 1284.6, field(r, "total"))
+C.add("from Firefox", 0.1, "Firefox" in r.get("agent", ""), r.get("agent", "")[:40])
+"""
