@@ -128,17 +128,21 @@ events_watcher_pid() {
 events_watcher_start() {
   "$PY" "$LAB_ROOT/lib/events.py" has-sinks 2>/dev/null || return 0
   [ -n "$(events_watcher_pid)" ] && return 0
+  ( umask 077; : >> "$LOG_DIR/events-watcher.log" ); chmod 600 "$LOG_DIR/events-watcher.log" 2>/dev/null
   ( export_options; daemonize "$LOG_DIR/events-watcher.log" "$PY" "$LAB_ROOT/lib/events.py" watch )
   local i=0; while [ -z "$(events_watcher_pid)" ] && [ $i -lt 20 ]; do sleep 0.25; i=$((i + 1)); done
   if [ -n "$(events_watcher_pid)" ]; then ok "event watcher running (metacomputer events status)"
   else warn "the event watcher did not start (see $LOG_DIR/events-watcher.log)"; fi
 }
 events_watcher_stop() {
-  local p i=0; p="$(events_watcher_pid)"
+  local p i=0 target; p="$(events_watcher_pid)"
   if [ -n "$p" ]; then
-    kill "$p" 2>/dev/null
+    # The watcher leads its own process group (daemonize), so signal the group: a health probe it
+    # started (metacomputer _health and its ssh) stops with it.
+    target="$p"; [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" = "$p" ] && target="-$p"
+    kill -TERM -- "$target" 2>/dev/null
     while kill -0 "$p" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
-    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    kill -0 "$p" 2>/dev/null && kill -9 -- "$target" 2>/dev/null
   fi
   rm -f "$RUN_DIR/events-watcher.pid"
 }
@@ -918,6 +922,9 @@ do_vnc_push() {
   [ -n "${VNC_PASSWORD:-}" ] || die "_vnc-push needs VNC_PASSWORD"
   printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/metacomputer; cat > ~/.config/metacomputer/vnc-pass; pkill -x x11vnc; /opt/metacomputer/bin/session-run /opt/metacomputer/bin/session-init' \
     || die "could not install the VNC password"
+  # The event stream redacts it wherever it appears, also when it lives in your own secret store
+  # (VNC_PASSWORD_STORE=command): only its length and a 3-byte keyed tag are kept (docs/events.md).
+  printf '%s\n' "$VNC_PASSWORD" | ( export_options; "$PY" "$LAB_ROOT/lib/events.py" _remember-redaction vnc ) >/dev/null 2>&1 || true
   ok "live view enabled on 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))"
 }
 

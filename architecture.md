@@ -297,20 +297,35 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
   tried at all.
 - **State.** `~/.config/metacomputer/events.json` (sinks, 0600) and
   `events-state/` beside it: the sequence counter and a global lock, per sink
-  an append-only backlog file, its delivery status and its own lock, debounce
-  marks, and the watcher's place in the gateway log. Events are appended to
-  backlogs under the global lock, in sequence order; one process at a time
-  sends a sink's backlog, under that sink's lock. `MCOMP_EVENTS_DIR` moves all
-  of it.
+  an append-only backlog file, a count of what was queued, its delivery status
+  and its own lock, debounce marks, the rate-limit buckets, redaction tags, and
+  the watcher's place in the gateway log. Events are appended to backlogs under
+  the global lock, in sequence order; one process at a time sends a sink's
+  backlog, under that sink's lock. `MCOMP_EVENTS_DIR` moves all of it.
+- **Origin and limits.** Each event records the code path that made it
+  (`cli`, `bridge`, `watcher`, `spool`). A token bucket per family lets at most
+  10 events in 10 minutes reach the sinks; the rest are logged locally and
+  summed up in one `suppressed` event (the `actions` family, sink tests and
+  sink-change announcements are exempt).
+- **Sink changes.** `events sink add` and `remove` need a terminal on stdin and
+  announce the change (`security.sink_added`/`sink_removed`) to every sink that
+  existed before it.
 - **The watcher.** `events.py watch`, started by `start` when a sink exists
   (pid in `$RUN_DIR/events-watcher.pid`). Every 30 s: the spool, due
-  backlogs, and new lines of `$LOG_DIR/netgw-blocked.jsonl` (destination,
-  port, protocol, reason; batched to one event a minute). Every 5 min:
-  `metacomputer _health` (Lume state, gateway, SSH, `guest-status`, the desktop
-  recording), with one event per change. It never opens an MCP connection.
-- **Cleaning.** Every string loses control characters, escape sequences, URL
-  queries, fragments and credentials, and any sink header value or the VNC
-  password; secret-looking keys are dropped from `data`; sizes are capped.
+  backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
+  (destination, port, protocol, reason; batched to one event a minute, slowing
+  to once an hour for the same destinations). Every 5 min: `metacomputer
+  _health` (Lume state, gateway, SSH, `guest-status`, the desktop recording),
+  with one event per change and a 30-minute quiet period for a condition that
+  comes back. Each step runs on its own, so one failing doesn't stop the others.
+  Its pidfile stays locked while it runs (one watcher per VM). It never opens
+  an MCP connection.
+- **Cleaning.** Every string loses control and invisible characters, escape
+  sequences, and links' credentials, path parameters, queries and fragments (to
+  the next space, also without a scheme); sink header values, signing keys,
+  secret URL parts and the VNC password are redacted; secret-looking keys are
+  dropped from `data`; sizes are capped. Text from inside the VM goes only into
+  `data`, never into a message.
 
 ### Event spool
 
@@ -340,14 +355,16 @@ such as the secrets vault ("approval waiting", "vault locked"):
   | `data` | no | a small object |
   | `project` | no | a folder path |
 
-  Other fields are ignored. The event's time is the file's modification time.
+  Other fields are ignored (an `origin` in the file too: these events always
+  say `spool`). The event's time is the file's modification time.
 - **Taking them:** on every emission and every watcher cycle, under the
-  global lock, oldest name first (up to 500 per pass). A valid file is
+  global lock, oldest name first (up to 500 per pass, counted after skipping
+  temporary names). Spool events count toward their family's rate limit. A valid file is
   cleaned like any event (so a producer can't leak a URL query or a
   secret-looking key through it), numbered, logged, queued for each matching
   sink, then deleted; delivery then follows the sinks' backlogs. An invalid or
-  oversized file is deleted and counted (`events status --json`,
-  `spool_rejected`).
+  oversized file, or one that can't be recorded, is deleted and counted
+  (`events status --json`, `spool_rejected`) without stopping the others.
 - **Guarantees:** at least once to each sink, in order with everything else.
   Files wait in the spool while nothing runs (no command, no watcher). With no
   sink configured, taken events reach only the local log.

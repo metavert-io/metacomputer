@@ -116,7 +116,7 @@ Do everything else directly with normal tools: code, builds, tests, git, files, 
   3. Wait, or carry on with what doesn't depend on it.
 - **Keep both texts to one line each and specific.** Never include a secret, a code or a full URL.
 - **Don't duplicate what's sent automatically:** finished tasks and recordings, security signals, the computer's lifecycle and health, and the bridge's own refusals.
-- **Sinks decide what leaves the Mac.** Add, change or remove one only when the user asks. When a token is involved, give the user the `metacomputer events sink add …` command to run in their own terminal.
+- **Sinks decide what leaves the Mac.** Changing them works only from the user's own terminal. When they ask, give them the `metacomputer events sink add …` command to run there.
 - **Details,** the `--why` table and examples: [EVENTS.md](EVENTS.md).
 
 ## Also available

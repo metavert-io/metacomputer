@@ -189,12 +189,17 @@ emit_event() { # FAMILY TYPE SEVERITY MESSAGE ACTION [KEY=VALUE ...] (ACTION may
     "$PY" "$LAB_ROOT/lib/events.py" emit "$fam" "$typ" --severity "$sev" --message "$msg" \
       ${act:+--action "$act"} ${f[@]+"${f[@]}"} --quiet ) >/dev/null 2>&1 || true
 }
-# EVENTS HOOK (secrets): `metacomputer secrets` exits 3 when the vault is locked.
-# bin/metacomputer calls this from an EXIT trap for that command (see there).
+# EVENTS HOOK (secrets): `metacomputer secrets` exits 3 when the vault isn't unlocked (or
+# doesn't exist yet). bin/metacomputer calls this from an EXIT trap for that command (see
+# there). Quiet when you ran it yourself at a terminal, and at most once in 5 minutes.
 events_hook_secrets_exit() { # RC
   [ "${1:-0}" = 3 ] || return 0
-  emit_event needs_you vault_locked warn "Claude needs the secrets vault, but it is locked" \
-    "Unlock it in your own terminal: metacomputer secrets unlock" "exit=3"
+  [ -t 0 ] && return 0
+  ( export_options
+    "$PY" "$LAB_ROOT/lib/events.py" emit needs_you vault_locked --severity warn --debounce 300 --quiet \
+      --message "The secrets vault isn't unlocked (or doesn't exist yet), so Claude can't fill a login" \
+      --action "In your own terminal: metacomputer secrets unlock (or secrets init, if there's no vault yet)" \
+      --field exit=3 ) >/dev/null 2>&1 || true
 }
 
 # --- SSH_AUTH=cert: a fresh key and a short-lived certificate per connection ---

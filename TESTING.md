@@ -72,7 +72,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (79 checks, about 10 s). It keeps
+`python3 tests/test_events.py` needs no VM (122 checks, about 40 s). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -85,7 +85,19 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - eight processes emitting at once; debounce; `notify`;
 - the watcher's pieces (blocked connections batched a minute at a time, health changes), `events watcher start|stop`, and the bridge's hooks (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
 - the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
-- the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds.
+- the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds;
+- the review's fixes, one or more checks each:
+  - malformed addresses in `open-untrusted`;
+  - query redaction whatever the query holds, also without a scheme;
+  - the driver's and the VM's text kept out of messages;
+  - the rate limit and its summary; slower repeats of blocked connections; quiet health flapping; repeated `notify` and `emit`;
+  - sink changes refused without a terminal, asked at one, and announced to the existing sinks (the removed one included);
+  - more secret-looking keys; signing keys, topics and remembered values redacted; lone surrogates and invisible characters;
+  - odd gateway records; a failing watcher step; ports out of range; one watcher per VM;
+  - temporary spool names; events left at a bridge's exit; a lost sequence counter; debounce only after recording;
+  - what `--replace` says; `origin`; an ntfy `?auth=`; a refused event inside an OTLP batch; the byte cap; `sink test` behind a slow backlog.
+
+Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py E` runs against a
 running VM, with its own temporary events folder and a local webhook receiver,

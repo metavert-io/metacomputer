@@ -546,8 +546,15 @@ def test_e():
     started_watcher = False
     rec_files = []
     try:
-        r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "events.py"), "sink", "add", "etest", "--kind",
-                            "webhook", "--url", f"http://127.0.0.1:{rx.port}/e"], capture_output=True, text=True)
+        import pty
+        m, s_ = pty.openpty()              # adding a sink needs a terminal
+        try:
+            r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "events.py"), "sink", "add", "etest", "--kind",
+                                "webhook", "--url", f"http://127.0.0.1:{rx.port}/e", "--yes"], capture_output=True,
+                               text=True, stdin=s_)
+        finally:
+            os.close(s_)
+            os.close(m)
         check("a webhook sink in a temporary events folder", r.returncode == 0, r.stdout + r.stderr)
         h = json.loads(mcomp(BASE, "_health").stdout or "{}")
         check("_health (what the watcher probes): running, SSH, desktop ready, no MCP",

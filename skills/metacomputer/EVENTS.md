@@ -30,14 +30,15 @@ Run it the moment you stop to wait for a person, every time:
   - In a conversation, stop and ask. When the user says go on, read the screen again: it changed while you waited, and element tokens from before are stale.
   - In an unattended run, do the parts of the task that don't depend on the blocked step, or end the run with a clear report of where you stopped. If you check back, wait minutes between checks, not seconds.
   - Never work around the block: no other sign-in route, no CAPTCHA services, no clicking through a dialog you wouldn't accept.
-- **Once per block.** Don't send the same notify again while you wait. Send a new one only when something changes, for example the sign-in worked and a 2FA prompt followed.
+- **Once per block.** Don't send the same notify again while you wait (the same text within 5 minutes isn't sent anyway). Send a new one only when something changes, for example the sign-in worked and a 2FA prompt followed.
+- **Limits.** At most 10 events of a family reach the sinks per 10 minutes; the rest wait in the local log and are summed up later. Another reason to notify only when it matters.
 
 ## Sent automatically: don't duplicate
 
 metacomputer sends these itself, so don't call `notify` for them:
 - **The bridge refused a call because another controller is using the computer** (its error says "in use by another controller"). `needs_you.in_use` went out. Ask in chat.
 - **Bounded mode keeps refusing the same call.** `needs_you.refused` goes out once it repeats. Tell the user what was refused, as the Rules in SKILL.md say.
-- **`metacomputer secrets fill` or `secrets session save|load` exits 3, "vault locked".** `needs_you.vault_locked` went out. Ask in chat for the unlock.
+- **`metacomputer secrets fill` or `secrets session save|load` exits 3** (the vault isn't unlocked, or doesn't exist yet). `needs_you.vault_locked` went out. Ask in chat for the unlock (or `secrets init`).
 - **The secrets vault waiting for the user's typed confirmation.** The vault sends its own event (`needs_you.approval_waiting`). Tell the user in chat that a confirmation is waiting.
 - **Finished work:** `metacomputer task finish` (the task, how long it took, its videos and files) and `metacomputer record stop` (the recording saved, or failed). When the user asked to hear when it's done, finishing the task is the message. Only if the work had no task folder, send `~/.local/bin/metacomputer events emit task finished --message "what is done and where the results are"`. Don't use `notify` for that: it's for being blocked.
 - **Security signals:** connections from the VM that the gateway blocked, the Chrome guard's refusals, a failed `actions verify`, and what `web open-untrusted` found (password prompts, downloads, a redirect to another site).
@@ -46,12 +47,15 @@ metacomputer sends these itself, so don't call `notify` for them:
 ## Sinks: only when the user asks
 
 - **Reading is fine any time:** `metacomputer events status`, `events sink list`, `events tail`. They never show header values.
-- **Changing them decides what leaves the Mac, and where.** Add, change or remove a sink only when the user explicitly asks, for example "send my events to ntfy" or "set up Datadog". Before you run it, say which families will be sent.
+- **You can't change sinks, and must not try.** `events sink add` and `remove` decide what leaves the Mac, so they work only from the user's own terminal and refuse without one. Never get around that (no `script`, no pseudo-terminals, no editing `events.json`).
+- **When the user asks** (for example "send my events to ntfy" or "set up Datadog"):
+  1. Give them the exact command to run in their own terminal, and say which families it sends.
+  2. Every change is announced to their existing sinks as `security.sink_added` or `sink_removed`, so tell them to expect that.
+  3. Afterwards you may run `metacomputer events sink test NAME` and report the result.
 - **Tokens:**
   - Never put a token from the chat into a command.
-  - When a sink needs one (an Authorization header, an API key), give the user the command to run in their own terminal. Use `--header-env`, so the token stays out of shell history: `metacomputer events sink add phone --kind ntfy --url https://ntfy.sh/TOPIC --header-env 'Authorization=Bearer $NTFY_TOKEN' --families needs_you,task`.
+  - When a sink needs one (an Authorization header, an API key), use `--header-env` in the command you give them, so the token stays out of shell history: `metacomputer events sink add phone --kind ntfy --url https://ntfy.sh/TOPIC --header-env 'Authorization=Bearer $NTFY_TOKEN' --families needs_you,task`.
   - If they pasted a token into the chat anyway, say it's now in the transcript and suggest replacing it. Don't use it.
-- **Without a token** (a local Collector at `http://127.0.0.1:4318`, an ntfy topic the user gave you), you may run `sink add` yourself when asked. Then run `metacomputer events sink test NAME` and report the result.
 - **Recommend ingest-only, low-scope tokens.** The sink file is readable by anything running as the user, you included.
 - **Which kind:**
   - their phone: `ntfy`;

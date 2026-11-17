@@ -438,6 +438,8 @@ def cmd_a11y(a):
 
 def origin(url):
     """scheme://host[:port] of a URL: no path, query or credentials (what the event stream may carry)."""
+    if not isinstance(url, str):
+        return None
     try:
         u = urlsplit(url or "")
         if u.scheme not in ("http", "https") or not u.hostname:
@@ -449,20 +451,30 @@ def origin(url):
 
 
 def site(url):
-    h = (urlsplit(url or "").hostname or "").lower()
+    if not isinstance(url, str):
+        return ""
+    try:
+        h = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:                      # a malformed address from the page or its server
+        return ""
     return h[4:] if h.startswith("www.") else h
 
 
 def untrusted_findings(start, chain, seen, final_url, password_fields, asked, downloads):
     """What open-untrusted found that matters (a password field, a download, ending on another site), by
-    origin only, or None. This is what reaches the event stream."""
+    origin only, or None. This is what reaches the event stream. Every address here came from the untrusted
+    server or page, so a malformed one is skipped rather than trusted."""
     visited, cur = [], start
     for c in chain:
-        if c.get("location"):
-            cur = urljoin(cur, c["location"])
+        loc = c.get("location")
+        if isinstance(loc, str) and loc:
+            try:
+                cur = urljoin(cur, loc)
+            except ValueError:
+                continue
             visited.append(cur)
     for st in seen:
-        visited += [u for u, _ in st.get("tabs") or [] if u]
+        visited += [u for u, _ in st.get("tabs") or [] if isinstance(u, str) and u]
     final = final_url or (visited[-1] if visited else start)
     off_site = bool(origin(final)) and site(final) != site(start)
     reasons = []
@@ -518,7 +530,11 @@ def cmd_open_untrusted(a):
     new_files = sorted(x for x in after - before if x)
     passwords = [r for r in page["dom"] if "type=password" in (r.get("label") or "")]
     asked = [u for st in seen if st.get("password_fields") for u, _ in st["tabs"][:1]]
-    findings = untrusted_findings(a.url, chain, seen, page["url"], len(passwords), asked, new_files)
+    try:
+        findings = untrusted_findings(a.url, chain, seen, page["url"], len(passwords), asked, new_files)
+    except Exception as e:      # the report matters more than the event summary
+        say(f"warning: could not summarise the findings for the event stream ({e!r})")
+        findings = None
     report = {"url": a.url, "server_redirects": chain, "browser_changes": seen, "findings": findings,
               "final": {"url": page["url"], "title": page["title"]},
               "password_fields": len(passwords), "asked_for_password_on": asked, "forms_fields": sum(1 for r in page["dom"] if r.get("node") in ("input", "textarea", "select")),

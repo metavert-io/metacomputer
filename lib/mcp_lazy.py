@@ -158,24 +158,28 @@ class Bridge:
         if events is None:
             return
         try:
-            events.emit_async(family, type_, message, severity, action, data, project=os.getcwd(), debounce=debounce)
+            events.emit_async(family, type_, message, severity, action, data, project=os.getcwd(), debounce=debounce,
+                              origin="bridge")
         except Exception as e:
             self.note(f"event failed: {e!r}")
 
     def bounded_refused(self, tool, res):
-        """Cua Driver refused a call in bounded mode. Once it repeats, the user may need to allow it."""
+        """Cua Driver refused a call in bounded mode. Once the same tool is refused again within 5 minutes, the
+        user may need to allow it. The driver's text comes from inside the VM, so it never goes into the
+        message (only the tool's name does); a cleaned copy goes in data. One event per tool per 5 minutes."""
+        tool = re.sub(r"[^A-Za-z0-9_.-]", "", str(tool))[:40] or "a tool"
         texts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
-        reason = " ".join(" ".join(texts).split())[:200]
-        key = (tool, reason[:120])
+        reason = " ".join(" ".join(t for t in texts if isinstance(t, str)).split())[:200]
         now = time.time()
-        hist = [t for t in self.refusals.get(key, []) if now - t < REPEAT_S] + [now]
-        self.refusals[key] = hist
+        hist = [t for t in self.refusals.get(tool, []) if now - t < REPEAT_S] + [now]
+        self.refusals[tool] = hist
         if len(hist) >= 2:
             self.event("needs_you", "refused",
-                       f"Cua Driver's bounded mode keeps refusing {tool} ({len(hist)} times in 5 min): {reason}",
+                       f"Cua Driver's bounded mode keeps refusing {tool} (outside the capability manifest)",
                        action="Allow it (another DRIVER_PROFILE, or your own DRIVER_MANIFEST), or tell Claude another "
                               "way to do the task",
-                       data={"tool": tool, "reason": reason, "count": len(hist)}, debounce=f"{tool}:{reason[:120]}")
+                       data={"tool": tool, "driver_said": reason, "count": len(hist)},
+                       debounce=f"bridge{self.pid}:{tool}")
 
     # --- transport ---------------------------------------------------------
     def send(self, msg):
@@ -332,7 +336,8 @@ class Bridge:
             return
         if res.get("isError") and BOUNDED_END_RE.search(json.dumps(res.get("content") or [])[:4000]):
             res.setdefault("content", []).append({"type": "text", "text": BOUNDED_END})
-        elif res.get("isError") and BOUNDED_REFUSED_RE.search(json.dumps(res.get("content") or [])[:4000]):
+        elif (res.get("isError") and driver_profiles.bounded()
+              and BOUNDED_REFUSED_RE.search(json.dumps(res.get("content") or [])[:4000])):
             self.bounded_refused(tool or "a tool", res)
         if tool in ("list_windows", "launch_app", "get_window_state", "list_apps"):
             self.learn_apps(res.get("structuredContent") or {})

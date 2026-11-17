@@ -108,7 +108,25 @@ paths, the VM's and the Mac's short names, and origins (scheme, host, port) of
 web pages. **What isn't:** typed text, passwords, tokens, page contents,
 screenshots, URL queries and fragments, the live-view password, or sink header
 values. Every string is cleaned before it is logged or sent, including events
-other programs hand in through the spool.
+other programs hand in through the spool. Text that comes from inside the VM
+(the driver's refusals, its health report) never goes into a message, only into
+`data`, cleaned.
+
+**Changing where events go:** `events sink add` and `remove` (and `--replace`)
+work only from a terminal and ask first, so an agent or a script without one
+can't add a sink that sends your events elsewhere, or remove yours. Every change
+is announced as `security.sink_added` or `sink_removed` to the local log and to
+every sink that existed before it, the removed one included.
+
+**Noise limits:** at most 10 events per family per 10 minutes reach the sinks;
+the rest are in the local log and summed up in one `suppressed` event. Repeated
+blocked-connection reports slow down (up to once an hour), a flapping health
+condition is announced once per 30 minutes, and `notify` doesn't repeat itself
+within 5 minutes.
+
+**Telling real events from made-up ones:** each event's `origin` (`cli`,
+`bridge`, `watcher`, `spool`) is set by the code path that made it. Anything that
+runs as you can call `metacomputer events emit`, but those events say `cli`.
 
 **Where it ends:**
 - The sink configuration (`~/.config/metacomputer/events.json`, 0600) is
@@ -116,8 +134,13 @@ other programs hand in through the spool.
   ingest-only, low-scope tokens, or keep the real credentials in a relay or a
   local OpenTelemetry Collector. `sink list` and `sink show` never print
   header values.
-- Claude changes sinks only when you ask, and has you run `sink add` yourself
-  when a token is involved.
+- The terminal check stops a program that has no terminal. One running as you
+  can fake a terminal (`script`, for example), or edit the configuration file
+  directly; the announcement to your existing sinks is what tells you.
+- Claude doesn't add or remove sinks: when you ask, it gives you the command to
+  run in your own terminal, with `--header-env` when a token is involved.
+- Webhook signatures cover the body, not the time of sending: drop repeated
+  event ids to stop replays (docs/events.md).
 - It is best effort, at least once, not an audit trail: anyone with your login
   can change its backlog and logs. The signed action log above is the
   tamper-evident record.
