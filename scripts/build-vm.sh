@@ -25,6 +25,10 @@ echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN
 "$(dirname "$0")/build-tools.sh"
 "$(dirname "$0")/fetch-artifacts.sh"
 
+for p in $EXTRA_PACKAGES; do   # names go into the guest's provisioning script
+  [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_PACKAGES: '$p' is not an Ubuntu package name"
+done
+
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   if vm_exists "$vm"; then
@@ -58,6 +62,7 @@ case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub"
   echo "UBUNTU_IMAGE=$UBUNTU_IMAGE"; echo "UBUNTU_RELEASE=$UBUNTU_RELEASE"
   echo "LUME_VERSION=$LUME_VERSION"; echo "CUA_SRC_COMMIT=$CUA_SRC_COMMIT"; echo "BUILD_ID=$TS"
   echo "MCOMP_BROWSERS=\"$BROWSERS\""
+  echo "MCOMP_EXTRA_PACKAGES=\"$(echo $EXTRA_PACKAGES)\""
 } > "$SEED/payload/versions.env"
 (cd "$SEED/payload" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 -czf ../payload.tgz .)
 rm -rf "$SEED/payload"

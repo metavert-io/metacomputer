@@ -73,8 +73,11 @@ PKGS=(
 )
 "${APT[@]}" install --no-install-recommends "${PKGS[@]}"
 # Nothing that locks the screen or syncs the host clipboard may be present.
-"${APT[@]}" purge light-locker xfce4-screensaver xscreensaver spice-vdagent 2>/dev/null || true
-"${APT[@]}" autoremove --purge
+purge_unwanted() {
+  "${APT[@]}" purge light-locker xfce4-screensaver xscreensaver spice-vdagent 2>/dev/null || true
+  "${APT[@]}" autoremove --purge
+}
+purge_unwanted
 firefox --version || true
 dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core gnome-calculator xserver-xorg-core xfce4-session lightdm ffmpeg | tee "$STATE/package-versions.txt"
 
@@ -106,6 +109,17 @@ SRC
   dpkg-query -W -f='${Package} ${Version}\n' google-chrome-stable | tee -a "$STATE/package-versions.txt"
   ;;
 esac
+
+if [ -n "${MCOMP_EXTRA_PACKAGES:-}" ]; then
+  step "extra packages (EXTRA_PACKAGES): $MCOMP_EXTRA_PACKAGES"
+  read -r -a EXTRA <<< "$MCOMP_EXTRA_PACKAGES"
+  for p in "${EXTRA[@]}"; do
+    [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || { echo "not a package name: $p"; false; }
+  done
+  "${APT[@]}" install --no-install-recommends "${EXTRA[@]}"
+  purge_unwanted
+  dpkg-query -W -f='${Package} ${Version}\n' "${EXTRA[@]}" | tee -a "$STATE/package-versions.txt"
+fi
 
 step "Cua Driver ${CUA_DRIVER_VERSION} (linux-arm64) from the host-verified payload"
 TARBALL="$PAYLOAD/$CUA_DRIVER_TARBALL"

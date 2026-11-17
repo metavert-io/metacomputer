@@ -12,13 +12,13 @@ LOCAL_CONFIG="${MCOMP_CONFIG:-$LAB_ROOT/config/local.env}"
 [ -f "$LOCAL_CONFIG" ] && . "$LOCAL_CONFIG"
 GUEST_RUN_DIR="/home/$GUEST_USER/metacomputer-runs"
 
-RUN_DIR="$LAB_ROOT/.run"
+RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"   # RUN_DIR / LOG_DIR: config/defaults.env
 # Unix socket paths are limited to ~104 bytes, so the gateway's sockets live
 # in a short private folder (per user, checkout and VM; the same from any
 # shell, unlike $TMPDIR), not under a possibly deep checkout.
 SOCK_DIR="/tmp/mcomp-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
 CACHE_DIR="$LAB_ROOT/.cache"
-LOG_DIR="$LAB_ROOT/logs"
+LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
 NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
 QCOW2RAW_BIN="$LAB_ROOT/vendor/bin/qcow2raw"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
@@ -28,6 +28,7 @@ PY="${PY:-/opt/homebrew/bin/python3}"
 [ -x "$PY" ] || PY=python3
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
+export MCOMP_RUN_DIR="$RUN_DIR" MCOMP_LOG_DIR="$LOG_DIR"   # for the Python helpers
 ( umask 077; mkdir -p "$SOCK_DIR" )
 { [ -d "$SOCK_DIR" ] && [ ! -L "$SOCK_DIR" ] && [ -O "$SOCK_DIR" ]; } || { echo "metacomputer: unsafe socket folder $SOCK_DIR" >&2; exit 1; }
 

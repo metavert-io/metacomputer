@@ -231,7 +231,7 @@ def main(argv):
         except Exception as e:  # noqa: BLE001
             print(json.dumps({"ok": False, "error": str(e)}))
             return 1
-    with MCPClient(stderr_path=os.path.join(LAB_ROOT, "logs", "mcp-client-stderr.log")) as c:
+    with MCPClient(stderr_path=os.path.join(os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB_ROOT, "logs"), "mcp-client-stderr.log")) as c:
         if argv[0] == "--tools":
             for t in c.tools():
                 print(f"{t['name']:28s} {(t.get('description') or '').splitlines()[0][:110]}")

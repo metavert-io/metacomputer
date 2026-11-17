@@ -22,7 +22,8 @@
 #   get GUEST_PATH [HOST_DIR] [--task NAME]    copy files out of the VM
 #   shot [HOST_PATH] [--task NAME] screenshot of the whole VM desktop to the Mac
 #   contact-sheet MP4 [OUT.png]    12 frames of a recording in one image
-#   record start [NAME] | stop | status
+#   record start [NAME] [FPS] | stop | status | moments FILE
+#                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR)
 #   recordings [--sync] [N]
 #   checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
 #   view                           how to watch / take over the desktop (VNC)
@@ -104,6 +105,10 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   if vm_running "$VM_NAME"; then
     owners_check
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
+    if [ -s "$RUN_DIR/manual-recording" ]; then
+      say "finishing the desktop recording first"
+      do_record stop || warn "could not finish the recording (metacomputer record stop)"
+    fi
     gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
   else
@@ -324,30 +329,113 @@ do_baseline() {
   [ $was_running = 1 ] && do_start
 }
 
+record_dir() { # the folder on the Mac for recordings (RECORD_DIR); made if only the last part is missing
+  local d="${RECORD_DIR:-$LAB_ROOT/recordings/manual}"
+  if [ ! -d "$d" ]; then
+    # Only the last folder is created: a missing parent usually means a drive that isn't connected.
+    [ -d "$(dirname "$d")" ] || die "RECORD_DIR $d: its parent folder doesn't exist (is the drive connected?)"
+    mkdir "$d" || die "cannot create RECORD_DIR $d"
+  fi
+  printf '%s' "$d"
+}
+
+record_sidecar() { # MP4 NAME STARTED ENDED FPS QUALITY MODE
+  "$PY" "$LAB_ROOT/lib/recording.py" sidecar "$1" --name "$2" --started "$3" --ended "$4" --fps "$5" \
+    --quality "$6" --mode "$7" --vm "$VM_NAME" --actions-dir "$LOG_DIR/actions" >/dev/null \
+    || warn "could not write the description file for $1"
+}
+
 do_record() {
   local sub="${1:-status}"; shift || true
+  local state="$RUN_DIR/manual-recording"
   case "$sub" in
     start)
-      local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}"
-      gssh ops "/opt/metacomputer/bin/desktop-record start '$name' ${2:-20}" || die "could not start recording"
-      echo "$name" > "$RUN_DIR/manual-recording"
-      ok "recording the guest desktop as '$name' — run your task, then: metacomputer record stop" ;;
+      need_running
+      local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}" fps="${2:-${RECORD_FPS:-20}}" quality="${RECORD_QUALITY:-standard}"
+      local mode="${RECORD_TO:-guest}" dir started
+      [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "recording names use letters, digits, . _ - only"
+      case "$quality" in standard|high) ;; *) die "RECORD_QUALITY must be standard or high" ;; esac
+      case "$mode" in guest|host) ;; *) die "RECORD_TO must be guest or host" ;; esac
+      [ -s "$state" ] && die "already recording ($(sed -n 's/^name=//p' "$state")); metacomputer record stop first"
+      dir="$(record_dir)" || exit 1
+      [ -e "$dir/$name.mp4" ] || [ -e "$dir/$name.mkv" ] && die "$dir/$name.mp4 already exists; pick another name"
+      started="$("$PY" -c 'import time; print(f"{time.time():.2f}")')"
+      if [ "$mode" = host ]; then
+        # The VM encodes and streams; this Mac saves it as it arrives (detached, so it
+        # outlives this command). stop ends ffmpeg in the VM, which ends the stream.
+        daemonize "$dir/$name.stream.log" "$SELF" _record-pipe "$name" "$fps" "$quality" "$dir/$name.mkv"
+        local pid=$! i=0
+        while [ $i -lt 20 ]; do
+          gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$" && break
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.5; i=$((i + 1))
+        done
+        if ! gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$"; then
+          kill "$pid" 2>/dev/null; sleep 1
+          cat "$dir/$name.stream.log" >&2 2>/dev/null; rm -f "$dir/$name.mkv"
+          die "could not start streaming the recording"
+        fi
+        printf 'name=%s\nmode=host\ndir=%s\npid=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
+          "$name" "$dir" "$pid" "$started" "$fps" "$quality" > "$state"
+        ok "recording the guest desktop as '$name' (${fps} fps, $quality), streaming to $dir/ — run your task, then: metacomputer record stop"
+      else
+        gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality" || die "could not start recording"
+        printf 'name=%s\nmode=guest\ndir=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
+          "$name" "$dir" "$started" "$fps" "$quality" > "$state"
+        ok "recording the guest desktop as '$name' (${fps} fps, $quality) — run your task, then: metacomputer record stop"
+      fi ;;
     stop)
-      local path name dest
-      path="$(gssh ops /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
-      [ "$path" = "not recording" ] && { ok "not recording"; return 0; }
-      name="$(basename "$path" .mp4)"; dest="$LAB_ROOT/recordings/manual"; mkdir -p "$dest"
-      gssh ops "cat '$path'" > "$dest/$name.mp4" || die "copy failed"
-      "$PY" - "$dest/$name.json" "$name" <<'EOF'
-import json, sys, time
-json.dump({"name": sys.argv[2], "kind": "manual desktop recording (metacomputer record)",
-           "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, open(sys.argv[1], "w"), indent=2)
-EOF
-      rm -f "$RUN_DIR/manual-recording"
-      ok "saved recordings/manual/$name.mp4 ($(du -h "$dest/$name.mp4" | cut -f1))" ;;
-    status) gssh ops /opt/metacomputer/bin/desktop-record status ;;
-    *) die "usage: metacomputer record start [NAME] | stop | status" ;;
+      local name mode dir pid started fps quality ended path i=0 out
+      if [ ! -s "$state" ]; then
+        # A recording started some other way (or before this version): stop it and copy it.
+        path="$(gssh ops /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
+        case "$path" in "not recording") ok "not recording"; return 0 ;; stream:*) die "a streamed recording was running without this Mac's record of it; it stopped (see RECORD_DIR for a .mkv)" ;; esac
+        name="$(basename "$path" .mp4)"; dir="$(record_dir)" || exit 1
+        gssh ops "cat '$path'" > "$dir/$name.mp4" || die "copy failed"
+        ok "saved $dir/$name.mp4 ($(du -h "$dir/$name.mp4" | cut -f1))"; return 0
+      fi
+      name="$(sed -n 's/^name=//p' "$state")"; mode="$(sed -n 's/^mode=//p' "$state")"; dir="$(sed -n 's/^dir=//p' "$state")"
+      pid="$(sed -n 's/^pid=//p' "$state")"; started="$(sed -n 's/^started=//p' "$state")"
+      fps="$(sed -n 's/^fps=//p' "$state")"; quality="$(sed -n 's/^quality=//p' "$state")"
+      path="$(gssh ops /opt/metacomputer/bin/desktop-record stop 2>/dev/null)" || path="(VM unreachable)"
+      ended="$("$PY" -c 'import time; print(f"{time.time():.2f}")')"
+      out="$dir/$name.mp4"
+      if [ "$mode" = host ]; then
+        while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
+        [ -s "$dir/$name.mkv" ] || { rm -f "$state"; die "the stream saved nothing (see $dir/$name.stream.log)"; }
+        # Same video, in an MP4 that players and editors open at once (no re-encoding).
+        if ffmpeg -hide_banner -loglevel error -nostdin -y -i "$dir/$name.mkv" -c copy -movflags +faststart "$out" \
+           && [ -n "$("$PY" "$LAB_ROOT/lib/recording.py" probe "$out" 2>/dev/null)" ]; then
+          rm -f "$dir/$name.mkv"
+          [ -s "$dir/$name.stream.log" ] || rm -f "$dir/$name.stream.log"
+        else
+          rm -f "$out"; rm -f "$state"
+          die "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
+        fi
+      else
+        case "$path" in */"$name.mp4") ;; *) rm -f "$state"; die "the VM's recorder said: $path" ;; esac
+        gssh ops "cat '$path'" > "$out" || { rm -f "$state"; die "copy failed (the file stays in the VM: $path)"; }
+      fi
+      rm -f "$state"
+      record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode"
+      ok "saved $out ($(du -h "$out" | cut -f1)); its description: ${out%.mp4}.json" ;;
+    status)
+      if [ -s "$state" ]; then
+        echo "recording $(sed -n 's/^name=//p' "$state") ($(sed -n 's/^mode=//p' "$state"), to $(sed -n 's/^dir=//p' "$state"))"
+      else
+        gssh ops /opt/metacomputer/bin/desktop-record status
+      fi ;;
+    moments)
+      local f="${1:-}"; [ -n "$f" ] || die "usage: metacomputer record moments RECORDING.mp4|.json"
+      "$PY" "$LAB_ROOT/lib/recording.py" moments "${f%.mp4}.json" ;;
+    *) die "usage: metacomputer record start [NAME] [FPS] | stop | status | moments FILE" ;;
   esac
+}
+
+do_record_pipe() { # NAME FPS QUALITY OUT.mkv (internal: the detached half of RECORD_TO=host)
+  ssh_base ops
+  exec ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3" > "$4"
 }
 
 do_recordings() {
@@ -359,11 +447,13 @@ do_recordings() {
     gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | tar -C "$dest" -xf - 2>/dev/null
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
-  "$PY" - "$LAB_ROOT/recordings" "$n" <<'EOF'
+  "$PY" - "$LAB_ROOT/recordings" "$n" "${RECORD_DIR:-}" <<'EOF'
 import json, os, subprocess, sys, time
-root, n = sys.argv[1], int(sys.argv[2])
-vids = []
-for d, _, fs in os.walk(root):
+root, n, extra = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+vids, roots = [], [root]
+if extra and os.path.isdir(extra) and not os.path.realpath(extra).startswith(os.path.realpath(root) + os.sep):
+    roots.append(extra)   # RECORD_DIR outside this checkout
+for d, _, fs in (w for r in roots for w in os.walk(r)):
     for f in fs:
         if f.endswith(".mp4"):
             p = os.path.join(d, f); vids.append((os.path.getmtime(p), p))
@@ -382,7 +472,7 @@ for mt, p in vids[:n]:
     try: dur = f"{float(dur):6.1f}s"
     except ValueError: dur = "   ?  "
     print(f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(mt))}  {dur}  {os.path.getsize(p)/2**20:6.1f} MB  "
-          f"{os.path.relpath(p, os.path.dirname(root))}  {task}")
+          f"{os.path.relpath(p, os.path.dirname(root)) if p.startswith(root + os.sep) else p}  {task}")
 EOF
 }
 
@@ -712,6 +802,7 @@ case "$cmd" in
   checkpoints) do_checkpoints ;;
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;
+  _record-pipe) do_record_pipe "$@" ;;
   recordings) do_recordings "$@" ;;
   view)       do_view "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift

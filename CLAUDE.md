@@ -20,6 +20,9 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   `output_dir` under `~/metacomputer-runs/<name>/` in the guest and `record_video: true`,
   then `stop_recording`, then `metacomputer recordings --sync` to copy it to the Mac.
   Pass secrets you type to `redact_values` (or don't record those steps).
+  For a whole-desktop video that doesn't depend on the MCP connection:
+  `metacomputer record start NAME` / `record stop` (settings `RECORD_*`; the
+  description file beside the MP4 lists key moments when `ACTION_LOG=on`).
 - Work from structure: `list_windows` / `metacomputer inspect` to find things,
   `get_window_state` with `include_screenshot: false` (and `since` after
   acting) to read, `run_steps` with role/name targets and `expect` checks
@@ -45,7 +48,7 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
 ## Useful commands
 
 ```bash
-metacomputer start | stop | status | reset | test [A-F] | record start|stop | recordings [--sync] | view | where
+metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view | where
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
 metacomputer security [apply] | actions list|show|verify   # optional hardening, signed action log
@@ -64,7 +67,7 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
   `status` says to rebuild them.
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
-  `python3 tests/test_actionlog.py` (no VM), `tests/test_options.py` (test VM only;
+  `python3 tests/test_actionlog.py` and `python3 tests/test_recording.py` (no VM), `tests/test_options.py` (test VM only;
   it switches the VM's SSH and driver settings). See TESTING.md.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),

@@ -43,6 +43,21 @@ show just that one; all three `on` is Lume's own default. The flag parsing
 and device selection have unit tests in
 [lume-secure](https://github.com/metavert-io/lume-secure).
 
+## Recordings: `tests/test_recording.py`
+
+`python3 tests/test_recording.py` needs no VM. It makes a short video and an
+action log with calls before, during and after it, and on another VM, then checks
+the description file: settings, length, size and hash, and that the key moments
+are exactly this VM's calls during the recording at the right times.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm` also records six
+seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality,
+20 fps, and `RECORD_TO=host` at high quality, 30 fps. It checks that a second start
+is refused, the frame rate and size, the description file, that nothing is left
+behind on the Mac, and that only the guest mode leaves a copy in the VM. It also
+checks that a `RECORD_DIR` whose parent is missing (a drive that isn't
+connected) is refused rather than created.
+
 ## Optional hardening: `tests/test_actionlog.py`, `tests/test_options.py`
 
 `python3 tests/test_actionlog.py` needs no VM (16 checks). It writes logs to a
