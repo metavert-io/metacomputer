@@ -192,6 +192,7 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 | `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) and the shell channel, `metacomputer sh` |
 | `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/metacomputer-admin` (fixed verbs) |
 | `$SSH_DIR/fill` | host, 0600; used by the secrets vault | `mcfill@guest`, the fill account: forced command `/opt/metacomputer/bin/secret-fill`, no TTY, no forwarding; key list root-owned in `/etc/ssh/metacomputer-fill/` |
+| `$SSH_DIR/proxy` | host, 0600; used by the secrets vault | `mcproxy@guest`, the proxy account: one reverse forward to the guest's `127.0.0.1:SECRETS_PROXY_PORT` (18765) and nothing else (`nologin`, no TTY, no local forwarding); key list root-owned in `/etc/ssh/metacomputer-proxy/` with `restrict,port-forwarding,permitlisten=...` |
 | `$SSH_DIR/hostkey` | host, 0600, during the build only | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection); a finished build deletes the private half from the Mac (`hostkey.pub` stays), and a rebuild makes a new key |
 | VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/metacomputer/vnc-pass` 0600 | live view / takeover |
 
@@ -205,17 +206,18 @@ certificate from `$SSH_DIR/ca` per connection (`scripts/lib.sh` `cert_for`):
 
 `metacomputer-admin ssh-auth cert|key` switches it, and `start` and `security apply` call it.
 
-Guest accounts have locked passwords; SSH is key-only with `AllowUsers cua cuaadmin mcfill`.
+Guest accounts have locked passwords; SSH is key-only with `AllowUsers cua cuaadmin mcfill mcproxy`.
 No macOS credentials are used anywhere. On the Mac, every connection to the VM
 (`scripts/lib.sh` `ssh_base`) runs with `-F /dev/null`, so no `~/.ssh/config`
 `Host` block applies, and with agent, X11, port and tunnel forwarding,
 connection sharing, local commands and proxies turned off
-(`tests/test_ssh_options.py`).
+(`tests/test_ssh_options.py`). The secrets vault starts its own ssh (`/usr/bin/ssh`
+with `-F none` and the pinned host key as `KnownHostsCommand` arguments, never a file).
 
 ## Secrets (`metacomputer secrets`)
 
-Website passwords, TOTP seeds and sealed Chrome profiles live in a vault of their
-own, `mcomp-vault`: a Swift program in `vault/`, installed to
+Website passwords, TOTP seeds, API keys and sealed Chrome profiles live in a vault of
+their own, `mcomp-vault`: a Swift program in `vault/`, installed to
 `~/.local/share/metacomputer/bin/` by `scripts/build-vault.sh`, with its data in
 `~/Library/Application Support/metacomputer/`. Claude's side (`metacomputer
 secrets fill ...`) talks only to `mcomp-vault unlock`, which runs in the user's own
@@ -234,7 +236,35 @@ account. The program:
 - types the value into that element.
 
 Sealed browser sessions are copied to and from the VM as the desktop user.
-Only the outcome comes back. Threat model and limits: [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
+Only the outcome comes back.
+
+The rest of the vault, briefly (details in SECURITY.md):
+- **Keys** (`vault/Store.swift`, `KeyCommands.swift`): the contents are sealed under a
+  random data key, wrapped under the passphrase (PBKDF2) combined through HKDF with an
+  ECDH secret from a Secure Enclave P-256 key, and again under a one-time recovery key.
+  `rekey`, `recover` and `rotate-session-key` rewrite them.
+- **API proxy** (`vault/Proxy.swift`): `token NAME` makes the unlock process listen on
+  the Mac's 127.0.0.1 (a random port) and run `ssh -N -R 127.0.0.1:18765:127.0.0.1:PORT`
+  as `mcproxy`, so the VM reaches it at `http://127.0.0.1:18765/NAME/`. It checks the
+  short-lived token, puts the real key in the secret's header, calls `https://<api-host>`
+  (no redirects followed, no proxies), streams the answer back with any copy of the key
+  blanked, and audits each request. Tokens and tunnels end with the unlock.
+- **Requesters** (`vault/Util.swift`, `Requester`): the client's pid
+  (`LOCAL_PEERPID`) and its parents up to the nearest Claude Code process name the
+  session and project, for the prompt, the audit log, `NAME session` grants and
+  `--project` limits. Attribution, not isolation.
+- **Audit** (`vault/Util.swift`, `Sinks.swift`, `SinkCommands.swift`): `audit.jsonl`
+  is hash-chained (`seq`, `prev`, `hash`, `id`) and mirrored to the unified log; the
+  unlock process delivers it, in order and at least once, to any number of webhook
+  (CloudEvents), OTLP/HTTP JSON, syslog-over-TLS and ntfy sinks, each with its own HMAC
+  key and delivery state (`sinks/`). `scripts/verify-audit.py` checks the log and sink
+  captures.
+- **Needs-you files**: while a question waits, the unlock process drops an
+  `approval_waiting` file into the event spool
+  (`~/Library/Application Support/metacomputer/events/spool/`); `bin/metacomputer`
+  drops `vault_locked` on exit 3.
+
+Threat model and limits: [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
 ## Network
 

@@ -243,7 +243,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -302,6 +302,37 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
+`python3 tests/test_vault_ops.py` (124 checks, about 90 s) reuses that stub and
+pseudo-terminal for the rest of the vault:
+- **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
+  recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
+  working); on a Mac whose Enclave can't use the key (a test-build switch), only the
+  recovery key opens the vault, and `recover`, then `rekey --enclave`, move it back; a
+  changed header breaks every wrap;
+- **rotation:** `set` over a secret needs `--replace`; `list` shows ages;
+  `rotate-session-key` re-encrypts sealed sessions, which still load;
+- **audit:** the hash chain, `scripts/verify-audit.py` (a changed or removed event
+  fails), the unified log;
+- **audit sinks, all four at once** against local receivers: webhook (CloudEvents,
+  signature, user header), OTLP (`/v1/logs`, attributes, a header typed with `{ask}`),
+  syslog over TLS with a throwaway CA passed with `--ca` (and refused without it), and
+  ntfy (JSON publishing, its URL typed with `ask`). Each gets every event since it was
+  added, in order, identical to the local log; captures verify with their own key and
+  fail with another's; an optional sink that's down stops nothing and catches up in
+  order; a required one refuses uses (and proxied requests) until it's back; removing
+  one leaves the others;
+- **requesters** through a stand-in process named `claude`: the prompt and audit name
+  its project and pid; `NAME session`, `NAME unlock` and plain `NAME` last as long as
+  they should; `--project` limits;
+- **API tokens** against a local plain-HTTP upstream (a test-build switch): the real
+  header swapped in (Bearer and `x-api-key`), the key withheld from echoed answers
+  (also split across reads), path limits, redirects, hop-by-hop headers, expiry,
+  `revoke`, a VM without the proxy account, the tunnel's ssh arguments, the action log
+  holding only the token's id, and the proxy and tunnels gone after the vault locks
+  (a `rekey` while unlocked);
+- **the events spool:** `approval_waiting` while a question waits, `vault_locked` from
+  `bin/metacomputer` on exit 3, file names and a folder made if missing.
+
 `python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
@@ -333,12 +364,15 @@ tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
   - checks a page that redefines `type`, `activeElement` and `self.origin` in its own
     world.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` checks the fill account on
-a VM built with this version, changing nothing. It covers:
-- the forced command, whatever is asked for;
-- no terminal and no forwarding;
-- that the fill and desktop keys don't cross;
-- that the account, its program and key list are root-owned and its home is empty.
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` checks the fill and proxy
+accounts on a VM built with this version, changing nothing. It covers:
+- the fill account's forced command, whatever is asked for;
+- no terminal and no forwarding for it;
+- the proxy key opening its one reverse forward (a request in the VM reaches the Mac),
+  bound to the VM's loopback only; any other port refused; no command (nologin), no
+  terminal, no local forwarding;
+- that the fill, proxy, ops and desktop keys don't cross;
+- that the accounts, their programs and key lists are root-owned and their homes empty.
 
 What these can't cover is the VM's own Chrome, launched by the driver; see the
 manual steps below.
@@ -364,6 +398,14 @@ manual steps below.
    - submitting the page shows only the lengths of what was typed.
 
    Then `session save` / `session load` that profile.
+6. API tokens (needs a VM built with this version, bound again):
+   - `metacomputer secrets set httpbin --kind api --api-host httpbin.org --header 'Authorization: Bearer {value}'`
+     (type any dummy key of 8+ characters);
+   - `metacomputer secrets token httpbin` and, in the VM, `curl -s -H "Authorization:
+     Bearer <token>" http://127.0.0.1:18765/httpbin/anything`: httpbin echoes the
+     headers it received, and the `Authorization` header there reads `Bearer [key
+     withheld by metacomputer secrets]`, the proxy having blanked the real key it sent;
+   - `metacomputer secrets revoke --all`, and the same request gets 401.
 
 ## Browser checks: `metacomputer web …`
 

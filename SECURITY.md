@@ -30,8 +30,10 @@ mode turns it off, and its optional logging.
 
 A fourth section, [Secrets and logins](#secrets-and-logins-metacomputer-secrets),
 covers `metacomputer secrets`: letting Claude sign in to sites in the VM without your
-passwords or codes passing through the conversation, and what that does and doesn't
-protect against.
+passwords or codes passing through the conversation, and use API keys without the keys
+ever entering the VM; how its keys, approvals and audit log work (including off-Mac
+copies, and how it compares with AWS KMS, Secrets Manager and HashiCorp Vault); and
+what that does and doesn't protect against.
 
 ## What these protect against
 
@@ -351,11 +353,12 @@ Settings:
 
 ## Secrets and logins (`metacomputer secrets`)
 
-Some tasks need a login. A password typed into the conversation lands in the
-transcript, and from there in logs and perhaps recordings. `metacomputer secrets`
-lets Claude use a password, a one-time code or a saved browser login inside the VM
-without the value passing through the conversation, and only when you allow it from
-your own terminal.
+Some tasks need a login or an API key. A password typed into the conversation lands
+in the transcript, and from there in logs and perhaps recordings. `metacomputer secrets`
+lets Claude use a password, a one-time code, a saved browser login or an API key inside
+the VM without the value passing through the conversation, and only when you allow it
+from your own terminal. An API key never enters the VM at all: the VM gets a
+short-lived token for a proxy that adds the key on the way out.
 
 **The limit, up front.** This keeps values out of Claude's view in normal operation,
 and every use waits for you. It is not a wall against a deliberately hostile agent.
@@ -373,23 +376,33 @@ not the macOS Keychain. It has two parts:
   (which `install.sh` runs). It needs macOS 15 and Apple's Command Line Tools
   (`swiftc`).
 - **In the VM:** a fill account and its program, `/opt/metacomputer/bin/secret-fill`,
-  installed when the VM is built. VMs built before this have neither: rebuild one to
-  use secrets.
+  and a proxy account for API tokens, installed when the VM is built. VMs built before
+  this have neither: rebuild one to use secrets (VMs built before API tokens have only
+  the fill account: rebuild for tokens).
 
 ### Setting it up
 
 Run these yourself, in your own terminal (they refuse to run without one):
 
 ```
-metacomputer secrets init                   # choose a vault passphrase (12+ characters)
+metacomputer secrets init                   # choose a vault passphrase (12+ characters); note the recovery key
 metacomputer secrets set x-login --kind password --origin https://x.com --username you
 metacomputer secrets set x-2fa --kind totp --origin https://x.com    # base32 seed or otpauth:// address
+metacomputer secrets set openai --kind api --api-host api.openai.com   # sent as Authorization: Bearer <key>
 metacomputer secrets bind                   # pin this VM (you check its host key and type yes)
 metacomputer secrets unlock --for 1h        # keep this terminal open while Claude works
 ```
 
+- `init` binds the vault to this Mac's Secure Enclave when it has one and prints a
+  one-time **recovery key**: write it down and keep it away from this Mac ("Keys, the
+  Secure Enclave and rotation" below). `--no-enclave` makes a passphrase-only vault.
 - Values are typed with the echo off, never on a command line. A password is asked
-  for twice.
+  for twice. Changing an existing secret's value needs `--replace` (a rotation).
+- An API secret names its host (`--api-host`), the header it goes in (`--header
+  'x-api-key: {value}'`; the default is `Authorization: Bearer {value}`) and optionally
+  a path prefix (`--api-path-prefix /v1/`). See "API keys" below.
+- `--project DIR` (repeatable) limits a secret to Claude Code sessions working in that
+  folder or below it ("Who is asking" below).
 - Each secret names the exact sites it may go to (`--origin`, repeatable): scheme,
   host and port, with no path. `http://127.0.0.1:PORT` and `http://localhost:PORT`
   are accepted for testing.
@@ -431,9 +444,11 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
      has the contents pinned at bind.
 4. If the secret or the unlock says `each`, it first asks the VM to check the page
    without the value. It then asks in your terminal, naming the real site, the Chrome
-   profile and any selector, for example:
-   `Fill x-login (password) into https://x.com on VM metacomputer?`.
-   - You type the secret's name to allow it.
+   profile, any selector and who asked, for example:
+   `Fill x-login (password) into https://x.com on VM metacomputer?`
+   `Asked by Claude Code in ~/Projects/foo (pid 4242).`
+   - You type the secret's name to allow this use, `NAME session` for this Claude
+     Code session, or `NAME unlock` until the vault locks ("Who is asking" below).
    - No answer within 120 seconds, or before the unlock's time runs out, counts as no.
    - After you allow it, only that site is sent with the value.
    - The listener is checked again before the value goes.
@@ -492,6 +507,304 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   its built-in key. A sealed login should therefore also work on another VM built the
   same way (restoring into the same VM is verified; another VM isn't yet).
 
+### Who is asking, and how long an approval lasts
+
+The unlock process asks the kernel which process is on the other end of its socket
+(`LOCAL_PEERPID`) and walks up that process's parents to the nearest Claude Code
+process (one named `claude`, or `node` running Claude Code's script). That process's
+pid, start time and folder (its project) are the **requester**:
+- your terminal shows it: `Asked by Claude Code in ~/Projects/foo (pid 4242)`;
+- the audit log records it (`requester`: `client`, `client_pid`, `claude_pid`,
+  `project`), and so does the waiting-for-you event;
+- a request from anything else says so: `python3 (pid 99), not from Claude Code`.
+
+When a use needs your approval, what you type decides how long it lasts:
+
+| You type | Allows |
+| --- | --- |
+| `NAME` | this use only |
+| `NAME session` | this use, and later uses of that secret from the same Claude Code process (same pid and start time) until it exits or the vault locks. From something that isn't Claude Code, this use only |
+| `NAME unlock` | every use of that secret, from anyone, until the vault locks |
+
+Anything else refuses. A grant covers the same kind of use of that one secret on its
+own sites; it never widens them. `--project DIR` on a secret refuses requests whose
+Claude Code process works outside DIR (or that come from no Claude Code process).
+
+**This is attribution and scoping, not isolation.** Every process involved runs as
+you. Any program of yours can name itself `claude`, change folder, or run under a real
+Claude Code process. The requester keeps honest sessions apart and tells you which one
+asked; it doesn't stop a hostile process of yours.
+
+### API keys: short-lived tokens through a proxy
+
+The key stays on the Mac. The VM gets a token that works only through the vault's
+proxy, only for that secret's host, only while the vault is unlocked, and only until
+it expires.
+
+1. Claude runs `metacomputer secrets token openai [--ttl 15m]` (at most 8 hours, and
+   never past the unlock's end). An `each` secret asks you first: `Give the VM
+   metacomputer a 15-minute token for openai (api.openai.com)?`
+2. On the first token for a VM, the unlock process starts the proxy: a listener on the
+   Mac's 127.0.0.1 (a random port), and an SSH reverse forward that makes it appear at
+   **127.0.0.1:18765 inside the VM** (`SECRETS_PROXY_PORT`). The forward signs in as
+   the VM's proxy account, `mcproxy`, with its own key (`$SSH_DIR/proxy`), the pinned
+   port and host key, after the same gateway check as a fill.
+3. Claude gets back the token (`mct_` and 192 random bits), its id and the base URL,
+   `http://127.0.0.1:18765/openai/`. A program in the VM sends its requests there with
+   the token where the key would go (`Authorization: Bearer mct_...`, or the secret's
+   own header, or `X-Metacomputer-Token`).
+4. For each request the proxy:
+   - checks the token: this secret, this VM, not expired, not revoked (401 otherwise);
+   - checks the path: under `--api-path-prefix` if set, no `.` or `..` segments, no
+     encoded slashes (403 otherwise);
+   - sends it to `https://<api-host><path>` with the real header in place of the token,
+     checking the server's certificate against the system's trust;
+   - drops hop-by-hop headers (and any named in `Connection`), the token header and
+     `Proxy-Authorization`, and passes the rest, body included;
+   - never follows a redirect: one to another host comes back as 502, one on the same
+     host comes back with its `Location` pointing through the proxy;
+   - streams the answer back, replacing every exact copy of the key in its headers
+     and body with `[key withheld by metacomputer secrets]` (an echo endpoint such as
+     httpbin.org/anything would otherwise hand the key to the VM);
+   - audits it: method, host, path without the query, status, bytes, token id and how
+     many copies were withheld. Never bodies or headers.
+5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
+   when the vault locks: the proxy and its SSH forwards stop. `tokens` lists the live
+   ones (id, secret, VM, time left, requests, requester).
+
+**The proxy account**, like the fill account, is always present on VMs built with this
+version, and does nothing else:
+- a locked system account with no password and no TTY; a session runs `nologin`;
+- its key list is root-owned, under `/etc/ssh/metacomputer-proxy/`, and limits the key
+  with `restrict,port-forwarding,permitlisten="127.0.0.1:18765"`;
+- sshd (`16-metacomputer-proxy.conf`) allows it remote forwarding to that one loopback
+  address only: no local forwarding, agent, X11 or tunnels.
+
+A VM without it (built before API tokens) refuses the sign-in, and `token` fails
+closed, saying to rebuild the VM.
+
+**What a token is.** Whoever holds it can call that API as you, through the proxy,
+until it ends: that's its purpose. It can't get the key out of the proxy, reach any
+other host or path prefix, or outlive the unlock. The proxy's Mac end listens on
+127.0.0.1, where your other processes can reach it too, with the token.
+
+### Keys, the Secure Enclave and rotation
+
+- **How the vault is keyed.** `vault.json` is encrypted (AES-256-GCM) with a random
+  256-bit data key. The file holds that data key twice, wrapped:
+  - under a key derived (HKDF-SHA256) from your passphrase (PBKDF2-HMAC-SHA256,
+    600,000 rounds, random salt) together with an ECDH secret from a P-256 key in this
+    Mac's **Secure Enclave**. That key can't leave the chip; the file holds only its
+    encrypted handle and a public key. It needs no Touch ID or password prompt, so
+    unlocking over SSH works (checked on an Apple-silicon Mac);
+  - under the **recovery key**: 160 random bits, shown once by `init` (and by `rekey`
+    and `recover`) as eight groups of four letters and digits. Nothing stores it.
+- Every wrap and the contents are bound to the header (KDF settings, salt, Enclave
+  handle), so a changed header opens nothing.
+- **What the Enclave adds:** a copy of `vault.json` taken elsewhere can't be opened or
+  guessed at with the passphrase alone. It doesn't slow guessing on this Mac by a
+  process of yours, which can use the Enclave key too.
+- **The recovery key** opens the vault without the Enclave: on another Mac, or after
+  this Mac's Enclave is reset (erasing the Mac, for example). Run `metacomputer secrets
+  recover` and type it; you choose a new passphrase, and the vault gets a new data key,
+  a new Enclave key (if that Mac has one; `--no-enclave` otherwise) and a new recovery
+  key. Anyone with the recovery key and the file can open the vault, without the
+  passphrase: keep it offline.
+- `init --no-enclave`: passphrase only, no recovery key; the file then opens on any Mac
+  with the passphrase.
+
+**Rotation:**
+- `set NAME ... --replace` changes a value and records a rotation; `list` shows each
+  secret's age: `created 40 days ago, rotated today` or `never rotated`.
+- `rekey` (old passphrase, then the new one twice): new passphrase, new salt, new data
+  key, new Enclave key and a new recovery key; the old recovery key stops working. A
+  running unlock notices the key change and locks itself. `rekey --enclave` moves a
+  passphrase-only vault onto this Mac's Enclave; `--no-enclave` the other way.
+- `rotate-session-key` (passphrase): a new key for sealed browser logins; each one is
+  re-encrypted under it. If it's cut short, the previous key still opens the ones not
+  yet done, and running it again finishes.
+- An audit sink's signing key: remove the sink and add it again.
+
+### The audit log, and sending it off this Mac
+
+`audit.jsonl` (0600) gets one line per event: unlock and lock, every use and refusal,
+each proxied API request, every change (`set`, `rotate`, `delete`, `bind`, `rekey`,
+`recover`, sinks). Never values or tokens. Each line is canonical JSON (keys sorted,
+no spaces, ASCII), and each event is chained to the one before:
+
+| Field | What |
+| --- | --- |
+| `id` | a UUID per event; receivers drop repeated deliveries by it |
+| `seq` | 1, 2, 3, ... with no gaps |
+| `ts` | UTC, RFC 3339 with microseconds |
+| `prev` | the previous event's `hash` (64 zeros for the first) |
+| `hash` | SHA-256 of this event's canonical JSON without `hash` |
+| `op` | `unlock`, `lock`, `fill`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `set`, `rotate`, `delete`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test` |
+| `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` |
+| `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
+| `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `grant:session` / `grant:unlock` (covered by one), `-` |
+| `requester` | `client`, `client_pid`, `claude_pid`, `project` |
+| `reason` | why it was refused or failed |
+| `chars`, `bytes`, `route` | how much was typed or sealed, and how |
+| `method`, `host`, `path`, `status`, `token_id`, `key_withheld` | a proxied API request (the path without its query) |
+
+- `python3 scripts/verify-audit.py audit.jsonl` recomputes every hash and checks the
+  chain and the sequence. Changing or removing a line shows. Your account can still
+  rewrite the whole file consistently: the off-Mac copies below are what make it
+  tamper-evident.
+- Every event also goes to macOS's unified log: `log show --predicate 'subsystem ==
+  "io.metavert.metacomputer.vault"' --last 1d`.
+
+**Audit sinks** send every event somewhere else as it happens. Four kinds, all
+optional, any number at once. They use the same wrappings as metacomputer's optional
+event stream (family `vault`, type the `op`), so one receiver and one verifier serve
+both:
+
+| Kind | Sends | URL |
+| --- | --- | --- |
+| `webhook` | one POST per event, a CloudEvents 1.0 JSON in structured mode (`Content-Type: application/cloudevents+json; charset=utf-8`): `id` the event's UUID, `source` `metacomputer/<host>`, `subject` the VM, `type` `io.metavert.metacomputer.vault.<op>`, `time`, `data` the event. Signed: `X-Metacomputer-Signature: sha256=<HMAC of the body>` | `https://...` |
+| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added unless the URL ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
+| `syslog` | RFC 5424 over TLS, octet-counted (RFC 5425), up to 100 messages a connection: facility user, severity 6 info, 4 warn, 3 error; APP-NAME `metacomputer-vault`, PROCID `-`, MSGID the op; structured data `[metacomputer@32473 seq family vm id hash prev sig]` (32473 is the enterprise number for documentation, RFC 5612); MSG the event's line, no byte-order mark | `syslog+tls://host:6514` |
+| `ntfy` | ntfy's JSON publishing to the server's root: `topic` (the URL's last part), `title` `<vm> - vault: <op>`, `message` one line such as `#42 fill name=x-login field=password vm=metacomputer -> ok https://x.com [Claude in ~/Projects/foo]`, `priority` 4 for refusals and errors, 3 otherwise, `tags`. No signature | `https://ntfy.sh/<topic>` |
+
+```
+metacomputer secrets audit-sink add siem --kind syslog --url syslog+tls://siem.example:6514 [--ca ca.pem] --required
+metacomputer secrets audit-sink add otel --kind otlp --url http://127.0.0.1:4318
+metacomputer secrets audit-sink add phone --kind ntfy --url ask      # the topic is typed, not echoed
+metacomputer secrets audit-sink add hec --kind webhook --url https://splunk.example:8088/services/collector/raw \
+    --header 'Authorization: {ask}'                                  # "Splunk <token>", typed
+```
+
+- `add` and `remove` need your terminal and the passphrase; `add` prints the sink's
+  own signing key once, 32 random bytes in base64 (the HMAC-SHA256 uses the decoded
+  bytes, not the text), and `audit-sink show NAME --key` shows it again with the
+  passphrase. `list` (masked URLs, backlog, last error) and `test
+  NAME` (deliver now) work from anywhere.
+- `--url ask` and a header value of `{ask}` are typed with the echo off, so a secret in
+  them stays off the command line. URLs are https, or http for 127.0.0.1 and localhost
+  only (a local collector); syslog is TLS only, checked against the system's trust or
+  only the CA in `--ca FILE` (its PEM is kept in the sink's settings), with the host
+  name always checked. Redirects aren't followed and no proxy is used.
+- **Delivery.** The unlock process sends each sink its events in order, at least once
+  (after a failed attempt, a batch may arrive twice: drop duplicates by `id`), retrying with
+  backoff up to a minute. Events made while the vault is locked go at the next unlock.
+  A sink starts with the event that added it. It stops at a break in the local chain,
+  naming the `seq`, rather than send events past it.
+- **`--required` fails closed.** With a required sink, each use is first recorded as
+  `begin` (what, which secret, the VM, the requester), and that record must reach every
+  required sink before the use goes ahead; the outcome follows as its own event. While
+  one can't be reached, fills, tokens and session saves and loads are refused (exit 2)
+  and proxied requests get 503. Optional sinks never stop anything; removing one leaves
+  the others as they were.
+- **Checking a copy.** `scripts/verify-audit.py --key KEY FILE...` checks signatures,
+  hashes, the chain and gaps in what a sink received: webhook and OTLP captures as JSON
+  lines `{"signature": "<X-Metacomputer-Signature>", "body": "<request body>"}`,
+  syslog as one message per line. Standard library only.
+
+**In OCSF terms** the closest class is API Activity (`class_uid` 6003, category
+Application Activity). A suggested mapping; fields without a clear home go in
+`unmapped`:
+
+| OCSF | From the event |
+| --- | --- |
+| `activity_id` | 2 Read for `fill`, `token`, `api`, `session_load`; 1 Create for `set`, `init`, `audit_sink_add`; 3 Update for `rotate`, `rekey`, `recover`, `rotate_session_key`, `bind`, `session_save`; 4 Delete for `delete`, `revoke`, `audit_sink_remove`; 99 Other for the rest |
+| `api.operation` | `op` |
+| `time` | `ts` (as epoch milliseconds) |
+| `metadata.uid`, `metadata.sequence` | `id`, `seq` |
+| `metadata.product.name` | `metacomputer-vault` |
+| `status_id` / `status` | 1 Success for `ok`; 2 Failure for `denied`, `locked`, `error` (`pending` for `begin`: 0 Unknown) |
+| `status_detail` | `reason` |
+| `severity_id` | 1 Informational for `ok`, 2 Low for `denied` and `locked`, 3 Medium for `error` |
+| `actor.process.pid`, `actor.process.name` | `requester.client_pid`, `requester.client` |
+| `actor.process.parent_process.pid` | `requester.claude_pid` (an ancestor, not always the direct parent) |
+| `resources[]` | `{type: "secret", name: name}`, `{type: "vm", name: vm}` |
+| `dst_endpoint.hostname` | `host` (API requests) or the host of `origin` (fills) |
+| `http_request.http_method`, `http_request.url.path` | `method`, `path` |
+| `api.request.uid` | `token_id` |
+| `unmapped` | `field`, `chars`, `approval`, `hash`, `prev`, `requester.project`, `status` (the API's HTTP status), `key_withheld` |
+
+**Sending it to ...**
+- **Anywhere an OpenTelemetry Collector reaches.** Run a Collector (contrib build) on
+  this Mac, listening on 127.0.0.1 only, and add an `otlp` sink pointing at it:
+
+  ```yaml
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 127.0.0.1:4318
+  exporters:
+    awss3:                      # S3; a bucket with Object Lock (compliance mode) keeps each object unchangeable
+      s3uploader: {region: us-east-1, s3_bucket: my-audit-bucket, s3_prefix: metacomputer}
+      marshaler: otlp_json
+  service:
+    pipelines:
+      logs: {receivers: [otlp], exporters: [awss3]}
+  ```
+
+  Other exporters in the same place: `awscloudwatchlogs` (CloudWatch Logs),
+  `googlecloud` (Cloud Logging), `splunk_hec` (Splunk), `otlphttp` with endpoint
+  `http://<loki>:3100/otlp` (Grafana Loki), `syslog` (rsyslog or a SIEM over TLS).
+- **Straight to a service that takes OTLP/HTTP with JSON**: an `otlp` sink with its URL
+  and `--header 'Authorization: {ask}'`.
+- **A SIEM or rsyslog that takes syslog over TLS** (RFC 5425; rsyslog's `imtcp` with
+  `gtls`, syslog-ng's `tls()`, most SIEM collectors): a `syslog` sink, `--ca` if its
+  certificate isn't from a public CA.
+- **Splunk HEC's raw endpoint, a serverless function, anything that takes a POST**: a
+  `webhook` sink.
+- **Your phone**: an `ntfy` sink (ntfy.sh or your own server; the topic works like a
+  password, so `--url ask`, and `--header 'Authorization: {ask}'` for an access token).
+
+### Telling you it waits (the events spool)
+
+metacomputer leaves a small JSON file in `~/Library/Application Support/metacomputer/events/spool/`
+(made 0700 if missing; `MCOMP_EVENTS_SPOOL` names another folder) for its optional
+event stream, or any notifier, to pick up and deliver. One file per event, named
+`<UTC YYYYMMDDTHHMMSS.ffffffZ>-<random>.json`, written under a dot-name and then
+renamed:
+- `approval_waiting` (family `needs_you`, severity `warn`), from the unlock
+  process while a question waits for you: which secret, the use, the site, the VM and
+  the requester's project, with the action `Type NAME in the vault's terminal to allow`;
+- `vault_locked` (`needs_you`, `warn`), from `metacomputer secrets fill|session|token`
+  when the vault is locked, with the action `Run metacomputer secrets unlock in your
+  own terminal` (with the event stream installed, its own hook reports this instead).
+
+Fields: `family`, `type`, `severity`, `vm`, `message`, `action`, `project` (the
+requester's folder), `data`. Never a value or a token. Writing one never blocks or
+fails a request.
+
+### If you know AWS KMS, Secrets Manager or HashiCorp Vault
+
+| There | Here |
+| --- | --- |
+| A KMS key never leaves KMS; you call `Sign` or `Decrypt` and get only the result | A fill or a token uses the value (typed into the page, or added to the API request by the proxy); Claude gets only the outcome |
+| Envelope encryption: a data key encrypted under the KMS key | `vault.json`'s data key, wrapped under the passphrase plus the Secure Enclave key, and again under the recovery key |
+| Key policies, grant constraints and encryption context limit how a key is used | Each secret's sites (`--origin`), field kinds, API host and path prefix, `--project`; the pinned VM (host key, gateway program and contents, accounts) |
+| MFA-protected API calls (`aws:MultiFactorAuthPresent`) | Typing the secret's name in the unlock terminal (`--approval each`, `--confirm each`), with a scope: this use, this session, until lock |
+| Vault's seal and unseal | `unlock --for` (at most 12 h); everything stops at lock, including tokens |
+| Leases and TTLs, short-lived credentials from STS or the instance metadata service | API tokens: `--ttl`, at most 8 h and never past the unlock; `revoke`; usable only through the proxy |
+| Secrets Manager rotation | `set --replace` (recorded; `list` shows ages), `rekey`, `rotate-session-key`. You rotate; nothing rotates on a schedule |
+| CloudTrail; Vault's audit devices (with HMAC'd fields) | `audit.jsonl` (hash-chained), the unified log, and audit sinks with HMAC signatures; `--required` like an audit device that must succeed |
+| An IAM principal or a Vault token's identity | The macOS user; the requester (Claude Code process, project) is attribution |
+
+**Where it differs, honestly:**
+- **No HSM holds the data key.** The Secure Enclave key only takes part in opening the
+  vault. While unlocked, the unlock process holds the data key and decrypts values to
+  use them; KMS never releases key material.
+- **One principal.** Everything runs as your macOS user, including Claude Code. The
+  requester is attribution and scoping that any process of yours can fake; sessions
+  aren't isolated from each other.
+- **The consumer shares the agent's trust domain.** Chrome in the VM receives the value,
+  and by default Claude has a shell as the same desktop user ("What doesn't hold").
+  An API key is better off: it never enters the VM.
+- **A single operator.** No separation of duties, no quorum, no central policy: the
+  person who unlocks also approves. One file on one Mac; back up `vault.json` and keep
+  the recovery key.
+- **The upstream key is static.** Tokens are short-lived, but the API key behind them
+  is the one you stored, not a credential minted for each use (no dynamic secrets).
+- **No certification.** CryptoKit and CommonCrypto primitives, not a FIPS-validated
+  module.
+
 ### What holds by default
 
 - **In normal operation, values stay out of Claude's view.** They don't appear in:
@@ -542,11 +855,15 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   Names and bind's paths are validated. A site the VM reports must be one of the
   secret's, written exactly as stored.
 - **Encrypted at rest.**
-  - `vault.json` is sealed with AES-256-GCM. Its key comes from your passphrase
-    through PBKDF2-HMAC-SHA256 (600,000 rounds, random salt).
-  - Names, sites and VM bindings are encrypted too, and `list` works only while
-    the vault is unlocked.
+  - `vault.json` is sealed with AES-256-GCM under a random data key, which opens only
+    with your passphrase (PBKDF2-HMAC-SHA256, 600,000 rounds, random salt) and, by
+    default, this Mac's Secure Enclave, or with the recovery key.
+  - Names, sites, VM bindings and audit sinks are encrypted too, and `list` works only
+    while the vault is unlocked.
   - Sealed browser logins are encrypted with a random key kept inside the vault.
+- **API keys never enter the VM.** The VM gets a token that works only through the
+  proxy, for that one host, while the vault is unlocked and until it expires; a copy
+  of the key in an answer is withheld.
 - **The program resists other processes.**
   - It's signed with the hardened runtime, so your other processes can't load code
     into it.
@@ -554,9 +871,11 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   - Test builds, which accept a stand-in for `ssh`, never install and won't open a
     vault in `~/Library`. `metacomputer secrets` won't run one.
 - **An audit trail.** `audit.jsonl` (0600; `metacomputer secrets audit`) records
-  every use, refusal, unlock and lock: names, sites, outcomes and character counts,
-  never values. With `ACTION_LOG=on`, fills and sealed-session saves and loads run
-  through `metacomputer secrets` also go in the signed action log.
+  every use, refusal, unlock and lock: names, sites, outcomes, requesters and
+  character counts, never values. It's hash-chained, copied to the unified log, and,
+  with audit sinks, sent off this Mac as it happens. With `ACTION_LOG=on`, fills,
+  tokens (their ids) and sealed-session saves and loads run through `metacomputer
+  secrets` also go in the signed action log.
 
 ### What doesn't hold
 
@@ -589,7 +908,8 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   - kill the unlock process;
   - replace the vault program or the `metacomputer` command, so your next unlock
     runs its code and captures the passphrase;
-  - copy `vault.json` and try to guess the passphrase offline. Use a long one;
+  - copy `vault.json` and try to guess the passphrase. With the Secure Enclave, only
+    on this Mac, where the Enclave key is; without it, anywhere. Use a long one;
   - put back an older copy of `vault.json` (older secrets or bindings); the vault
     can't tell;
   - tamper with the VM, or read it: the VM's disk image (in Lume's VM folder) is
@@ -637,9 +957,19 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   that's ambiguous.
 - **`SSH_AUTH=cert`.** Fills use their own account and work. Sealed sessions sign in
   with the static `ops` key, which a VM on certificates refuses.
-- **The audit log isn't secret or tamper-evident.** It names your secrets and their
-  sites (never values), anyone with your account can read it, and deleting it isn't
-  detected. The signed action log is the tamper-evident record.
+- **The local audit log isn't secret, and only partly tamper-evident.** It names your
+  secrets, sites and projects (never values), and anyone with your account can read
+  it. The chain shows a changed or missing line, but your account can rewrite the
+  whole file, or delete it. What an audit sink has received can't be changed from
+  here, and the signed action log is another record.
+- **Requesters can be faked by your own processes.** Who asked, `NAME session` grants
+  and `--project` rest on process names, parents and folders, all of which a program
+  running as you controls ("Who is asking").
+- **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac
+  (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends. The
+  key is withheld from answers only as an exact copy: an API that returned it encoded
+  (in base64, say) would hand it over. What the API itself does with your requests is
+  up to the API.
 - **A sealed login is a login.** Anyone who loads it is signed in, so treat it like
   the password.
 - **Memory.** While unlocked, the unlock process holds the decrypted vault. When it
@@ -650,27 +980,37 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
 
 | Command | Where | What it does |
 | --- | --- | --- |
-| `init`, `set`, `delete`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
-| `unlock [--for 30m] [--confirm each] [--allow-multiplexer]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h) or the terminal closing |
-| `list [--json]` | anywhere, while unlocked | Names, kinds, sites, usernames, approval, use counts; never values |
+| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `rekey [--enclave\|--no-enclave]`, `recover [--no-enclave]`, `rotate-session-key` | your terminal | New keys; open with the recovery key ("Keys, the Secure Enclave and rotation") |
+| `audit-sink add\|remove NAME`, `audit-sink show NAME --key` | your terminal | Off-Mac copies of the audit log, and a sink's signing key |
+| `unlock [--for 30m] [--confirm each] [--allow-multiplexer]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
+| `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
+| `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
+| `audit-sink list`, `audit-sink show NAME`, `audit-sink test NAME` | anywhere | Sinks, their backlog and last error (URLs masked); deliver now |
 | `status`, `audit [--tail N]`, `selftest` | anywhere | State, the audit log, and the program's own checks |
 
 `metacomputer secrets ...` fills in the current VM (`--vm`). `bind` takes its port,
-host key, keys, accounts and gateway from the config (`MCOMP_CONFIG` for another VM).
+host key, keys, accounts and gateway from the config (`MCOMP_CONFIG` for another VM),
+and the proxy account too when `$SSH_DIR/proxy` exists.
 
 - **Vault folder:** `~/Library/Application Support/metacomputer/` (0700), or
-  `MCOMP_VAULT_DIR`. It holds `vault.json`, `vault.sock`, `audit.jsonl` and
-  `sessions/*.sealed`.
+  `MCOMP_VAULT_DIR`. It holds `vault.json`, `vault.sock`, `audit.jsonl`,
+  `sessions/*.sealed` and `sinks/` (each sink's delivery state).
+- **Events spool:** `~/Library/Application Support/metacomputer/events/spool/` (made
+  0700 if missing; `MCOMP_EVENTS_SPOOL`), for the event stream to take.
 - **Program:** `~/.local/share/metacomputer/bin/mcomp-vault`, or `MCOMP_VAULT_BIN`.
-  Rebuild it with `scripts/build-vault.sh`.
+  Rebuild it with `scripts/build-vault.sh`. `scripts/verify-audit.py` checks audit
+  logs and sink captures.
 - **In the VM:**
-  - `secret-fill`, `15-metacomputer-fill.conf` and `/etc/ssh/metacomputer-fill/` come
-    from `provisioning/guest`.
-  - The fill key, `$SSH_DIR/fill`, is made by `scripts/build-vm.sh`.
+  - `secret-fill`, `15-metacomputer-fill.conf`, `16-metacomputer-proxy.conf`,
+    `/etc/ssh/metacomputer-fill/` and `/etc/ssh/metacomputer-proxy/` come from
+    `provisioning/guest`.
+  - The fill and proxy keys, `$SSH_DIR/fill` and `$SSH_DIR/proxy`, are made by
+    `scripts/build-vm.sh`; the proxy's port in the VM is `SECRETS_PROXY_PORT` (18765).
   - Changing the repository's copies affects only VMs built afterwards.
-  - `metacomputer status` shows whether a VM has the fill account.
+  - `metacomputer status` shows whether a VM has the fill and proxy accounts.
 
 ## Reporting a vulnerability
 

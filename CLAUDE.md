@@ -36,10 +36,13 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Never
   send background input or `set_value` to Chrome (the lazy bridge enforces
   it); `metacomputer input-reset` if Chrome ignores typing.
-- Logins: never ask for or type passwords, codes or the vault passphrase. Use
-  `metacomputer secrets list` / `fill NAME --field password|username|otp` in
-  page-mode Chrome (`skills/metacomputer/BROWSER.md`); if it says locked, ask the
-  user to run `metacomputer secrets unlock` in their own terminal.
+- Logins, 2FA codes and API keys: never ask for or type passwords, codes, keys or
+  the vault passphrase. Use `metacomputer secrets list` / `fill NAME --field
+  password|username|otp` in page-mode Chrome, and `token NAME` (a short-lived token and
+  the proxy URL inside the VM) for API keys; never put a real key in the VM
+  (`skills/metacomputer/SECRETS.md`). If it says locked, ask the user to run
+  `metacomputer secrets unlock` in their own terminal. Only the user runs `init`,
+  `set`, `bind`, `unlock`, `rekey`, `recover` and `audit-sink add|remove`.
 - Don't reset or rebuild the VM without being asked (`metacomputer reset` restores
   the baseline; host recordings/results are kept).
 - Optional hardening (SECURITY.md): `ACTION_LOG`, `SSH_AUTH`, `DRIVER_MODE`.
@@ -75,7 +78,7 @@ metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-re
 metacomputer security [apply] | actions list|show|verify   # optional hardening, signed action log
 metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop user (docs/shell.md)
 metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
-metacomputer secrets list | fill NAME --field password | status   # logins without seeing values
+metacomputer secrets list | fill NAME --field password | token NAME | status   # logins and API keys without seeing values
 metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --describe TOOL
 ```
 
@@ -91,12 +94,15 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
-  `python3 tests/test_ssh_options.py`, `python3 tests/test_secrets.py` and `python3 tests/test_secret_fill.py` (no VM),
+  `python3 tests/test_ssh_options.py`, `python3 tests/test_secrets.py`, `python3 tests/test_vault_ops.py` and
+  `python3 tests/test_secret_fill.py` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
   it with `scripts/build-vault.sh`. Values must never reach output, logs or a
-  command line; keep `tests/test_secrets.py` passing.
+  command line; keep `tests/test_secrets.py` and `tests/test_vault_ops.py` passing.
+  Its audit sinks use the same wrappings as the event stream (CloudEvents, OTLP,
+  syslog, ntfy) and its needs_you files follow the event spool contract.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),
 docs/chrome-investigation.md, and `.claude/skills/cua-driver/` (the

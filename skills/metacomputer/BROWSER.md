@@ -92,58 +92,18 @@ Things to know:
 - **Throwaway by default.**
 - **Named profiles,** when the user asks for one (for example "use a profile called shopping"):
   1. Launch with `{mode: "isolated_named", name: "shopping"}`.
-  2. Sign in: fill it from the vault (next section), or ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
+  2. Sign in: fill it from the vault ([SECRETS.md](SECRETS.md)), or ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
   3. Later sessions with the same name reuse the cookies.
-- **Never type the user's credentials yourself.** Use `metacomputer secrets` (next section).
+- **Never type the user's credentials yourself.** Use `metacomputer secrets` ([SECRETS.md](SECRETS.md)).
 - **Housekeeping:** `metacomputer browser profiles` lists named profiles, and `metacomputer browser profiles --delete NAME` deletes one (ask first). A VM reset removes them all.
 - **Never attach to Chrome's normal profile.** `strategy: existing_profile` isn't enabled in this lab.
 
 ## Signing in: `metacomputer secrets`
 
-The user can keep passwords, one-time-code seeds and saved browser logins in a vault on the Mac. Claude uses them without the values passing through the conversation. Background: SECURITY.md, "Secrets and logins", in the project folder.
-
-- **What this does in normal use:**
-  - Values don't come back to Claude, in results, logs or recordings.
-  - Every use waits for the user's unlock, and their typed approval when a secret asks for it.
-  - The fill runs in a VM account Claude can't change.
-  - Cua's page snapshots mask password fields.
-  - Usernames and one-time codes are ordinary text on the page, so snapshots and screenshots show them.
-- **What it can't stop: a hostile agent.**
-  - Code run as the VM's desktop user (`metacomputer ssh ops`, `put`, the VM's terminal app) can pose as Chrome's DevTools to receive a fill, or read a filled field back.
-  - Driving the browser can reveal a field: a site's "show password" button, Chrome's developer tools (F12), a `javascript:` address.
-  - **Never do any of these, and never try to see a secret in any other way.** If a page shows a secret anyway (for example after a "show password" click), don't read it out, and tell the user.
-- **Never ask for a password, a code or the vault passphrase in chat.** Never type one with `type_text`, `browser_type` or a shell command.
-  - If the user offers one, ask them to keep it out of the chat and store it themselves, in their own terminal: `metacomputer secrets set NAME --kind password --origin https://site --username U`.
-- **See what's stored:** `metacomputer secrets list`. It shows names, sites, usernames and which `--field`s each secret fills, never values. It works only while the vault is unlocked.
-- **Locked (exit 3):** ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. If there's no vault yet, the message says so: ask them to run `metacomputer secrets init` and `set` themselves.
-- **Only page-mode Chrome.** Fills work in Chrome launched with `browser_prepare`, not in Firefox or human-mode Chrome.
-- **To fill a login:**
-  1. Open the sign-in page in page mode (`browser_prepare`, `browser_navigate`).
-  2. Focus the field with a trusted click: `browser_click {ref, delivery_mode: "foreground"}`. A `dom_event` click may not focus it.
-     - Or let the fill focus it: add `--selector '#username'` (an id or name from a `dom_refs_v1` snapshot). It must match exactly one element.
-     - A selector searches the page itself, not frames or shadow roots, and there's no syntax for reaching into them. For a field inside a frame, click into it.
-  3. `metacomputer secrets fill NAME --field username`.
-  4. Focus the password field, then `metacomputer secrets fill NAME --field password`.
-  5. For a one-time code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp`.
-  6. With a named profile, add `--profile P` to each fill.
-  7. Submit with a click, then check the signed-in page with a fresh snapshot.
-- **Read the result.**
-  - `{"ok":true,...,"chars":N}` means it was typed and checked.
-  - Exit 2: refused, with the reason (wrong site, wrong field, or the user said no). Fix the cause, for example focus the right field, and try once more. Never work around a refusal.
-  - Exit 4: an error, such as the VM being off, no Chrome, or no tab on that site.
-    - "Rebuild the VM to use secrets": the VM predates the fill account. Tell the user; don't work around it.
-    - "Bind again": the user runs `metacomputer secrets bind` in their own terminal.
-- **Don't read a filled field back.** A page script, or a snapshot that includes a field's value, would bring the secret into the conversation. The fill's own `chars` check is the verification.
-- **The user may need to answer.** A secret set to `each`, a vault unlocked with `--confirm each`, and every sealed-session save (and load, unless the user relaxed it) wait up to 2 minutes. The user answers by typing the secret's or session's name in their unlock terminal. Tell them a confirmation is waiting.
-  - In tmux or screen, these are refused unless the user unlocked with `--allow-multiplexer`. The reason says so: pass it on.
-- **Recordings:** password fields show dots, but usernames and codes are visible on screen. Don't record those steps unless the user wants that.
-- **To keep a login** across sessions or VMs:
-  1. Use a named profile (`isolated_named`, for example `x`).
-  2. Sign in: fill it as above, or let the user sign in once through `metacomputer view`.
-  3. End the browser session (`end_session`): a profile Chrome is using can't be saved.
-  4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
-  5. Later, with no Chrome running on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`.
-     - A session loads only under the profile name it was saved from, because the driver records that name inside the profile.
+Logins, 2FA codes, saved sessions and API keys come from the user's vault, without the values passing through the conversation: read [SECRETS.md](SECRETS.md) before signing in, keeping someone signed in, or using an API key in the VM. In short:
+- fills work only in page-mode Chrome: focus the field, then `metacomputer secrets fill NAME --field username|password|otp`;
+- never type, ask for or read back a password, code, key or the vault passphrase;
+- exit 3 (locked): ask the user to run `metacomputer secrets unlock` in their own terminal.
 
 ## Checks that need no model: `metacomputer web`
 
