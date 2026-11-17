@@ -25,7 +25,9 @@ say "build $TS (log: logs/build-$TS.log)"
 # --- 0. prerequisites -------------------------------------------------------
 command -v "$LUME" >/dev/null || die "lume not found ($LUME)"
 for k in admin ops mcp fill hostkey; do   # fill: the secrets fill account (mcfill)
-  [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; ssh-keygen -q -t ed25519 -N '' -C "mcomp-$k" -f "$SSH_DIR/$k"; }
+  # A finished build deletes the host key's private half (below), so a rebuild makes a new
+  # host key: drop the old .pub with it (bind the secrets vault again afterwards).
+  [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; rm -f "$SSH_DIR/$k.pub"; ssh-keygen -q -t ed25519 -N '' -C "mcomp-$k" -f "$SSH_DIR/$k"; }
 done
 echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
 "$(dirname "$0")/build-tools.sh"
@@ -193,4 +195,9 @@ vm_stop "$VM_NAME"
 "$LUME" clone "$VM_NAME" "$BASELINE_NAME"
 rm -f "$RUN_DIR/seed.iso"
 ok "baseline $BASELINE_NAME created"
+# The VM's private host key now lives only in its disk and the baseline (reset restores
+# it from there). On the Mac only the public half is needed (known_hosts, the secrets
+# vault's pin); anything able to read the private half could pose as the VM.
+rm -f "$SSH_DIR/hostkey"
+ok "removed the VM's private host key from $SSH_DIR (the VM keeps it; a rebuild makes a new one)"
 say "build complete. Start it with: metacomputer start"

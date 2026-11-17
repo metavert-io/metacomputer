@@ -128,9 +128,13 @@ class FakeChrome:
     """Chrome's DevTools as secret-fill sees it: /json/version, /json/list, a browser socket
     (SystemInfo) and page sockets that answer for a model of frames and focus."""
 
-    def __init__(self, pages, pid=4242, browser="Chrome/150.0"):
+    def __init__(self, pages, pid=4242, browser="Chrome/150.0", routes=None):
         self.pages, self.pid, self.browser = pages, pid, browser
-        self.inserted, self.unmasked, self.pongs = [], 0, 0
+        # What the browser endpoint answers about its command line (absent: that call fails).
+        self.browser_routes = routes if routes is not None else {
+            "getInfo": "/opt/google/chrome/chrome --remote-debugging-port=0 --password-store=basic "
+                       "--user-data-dir=/home/u/.local/state/cua-driver/browser-profiles/p1 about:blank"}
+        self.inserted, self.unmasked, self.pongs, self.routes = [], 0, 0, []
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -210,7 +214,7 @@ class FakeChrome:
 
     def tree(self, page, fid):
         f = page["frames"][fid]
-        node = {"frame": {"id": fid, "securityOrigin": f["origin"], "url": f["url"]}}
+        node = {"frame": {"id": fid, "securityOrigin": f["origin"], "url": f["url"], "loaderId": f.get("loader", "L-" + fid)}}
         kids = [k for k, v in page["frames"].items() if v.get("parent") == fid]
         if kids:
             node["childFrames"] = [self.tree(page, k) for k in kids]
@@ -218,13 +222,28 @@ class FakeChrome:
 
     def answer(self, page, method, params):
         if page is None:
+            b = self.browser_routes
+            if method == "SystemInfo.getInfo":
+                if "getInfo" not in b:
+                    raise LookupError("GPU info not available")
+                return {"gpu": {}, "modelName": "", "modelVersion": "", "commandLine": b["getInfo"]}
             if method == "SystemInfo.getProcessInfo":
                 return {"processInfo": [{"type": "renderer", "id": self.pid + 1}, {"type": "browser", "id": self.pid}]}
+            if method == "Browser.getBrowserCommandLine":
+                if "automation" not in b:
+                    raise LookupError("Command line not returned because --enable-automation not set.")
+                return {"arguments": b["automation"]}
             return {}
         frames = page["frames"]
         ctx_of = {fid: 100 + i for i, fid in enumerate(frames)}
         fid_of = {v: k for k, v in ctx_of.items()}
         if method == "Page.getFrameTree":
+            page["tree_calls"] = page.get("tree_calls", 0) + 1
+            if page.get("hang"):
+                time.sleep(60)
+            if page.get("reload_after") and page["tree_calls"] > page["reload_after"]:
+                for f in frames.values():
+                    f["loader"] = "L-new"
             return {"frameTree": self.tree(page, "F0")}
         if method == "Page.createIsolatedWorld":
             fid = params["frameId"]
@@ -243,7 +262,7 @@ class FakeChrome:
                     return {"result": {"type": "object", "subtype": "null", "value": None}}
                 return {"result": {"type": "object", "subtype": "node", "objectId": "el:" + fid}}
             if "mcomp:frame-origin" in e:
-                return {"result": {"type": "string", "value": fr.get("self_origin")}}
+                return {"result": {"type": "string", "value": fr.get("self_origin", fr["origin"])}}
             if "mcomp:focus-selector" in e:
                 n = page.get("selector_matches", 1)
                 if n == 1:
@@ -265,7 +284,27 @@ class FakeChrome:
                 return {"result": {"type": "boolean", "value": True}}
             if "mcomp:value-length" in fn:
                 return {"result": {"type": "number", "value": sf.utf16_len(page.get("value", ""))}}
+            if "mcomp:is-focused" in fn:
+                return {"result": {"type": "boolean", "value": True}}
+            if "mcomp:insert" in fn:
+                if page.get("lost_focus"):
+                    return {"result": {"type": "object", "value": {"done": False, "focus": False}}}
+                if page.get("no_exec"):
+                    return {"result": {"type": "object", "value": {"done": False, "focus": True}}}
+                text = params["arguments"][0]["value"]
+                self.inserted.append((page["id"], text))
+                self.routes.append("element")
+                page["value"] = text[:page["maxlen"]] if page.get("maxlen") else text
+                if page.get("moves_focus"):
+                    page["backend"] = 99
+                if page.get("insert_error"):
+                    raise LookupError("cannot insert " + text)
+                if page.get("navigate_on_insert"):
+                    for f in frames.values():
+                        f["loader"] = "L-new"
+                return {"result": {"type": "object", "value": {"done": True, "focus": True}}}
         if method == "Input.insertText":
+            self.routes.append("keyboard")
             self.inserted.append((page["id"], params["text"]))
             v = page.get("value", "") + params["text"]
             page["value"] = v[:page["maxlen"]] if page.get("maxlen") else v
@@ -291,8 +330,10 @@ def page(pid="A", url=SITE + "/login", frames=None, **kw):
     return p
 
 
-def run_script(req, net=(), uid=UID, proc_root="/nonexistent"):
-    args = [sys.executable, "-I", SCRIPT, "--desktop-uid", str(uid), "--proc-root", proc_root]
+def run_script(req, net=(), uid=UID, proc_root="/nonexistent", extra=()):
+    args = [sys.executable, "-I", SCRIPT, "--proc-root", proc_root, *extra]
+    if uid is not None:
+        args += ["--desktop-uid", str(uid)]
     for n in net:
         args += ["--proc-net", n]
     r = subprocess.run(args, input=json.dumps(req).encode(), capture_output=True, timeout=60,
@@ -334,11 +375,11 @@ def fake_suite(td):
         open(p, "w").write("\n".join(lines) + "\n")
         return [p]
 
-    def scenario(name, pages, req, expect, **chrome_kw):
+    def scenario(name, pages, req, expect, uid=UID, extra=(), **chrome_kw):
         chrome = FakeChrome(pages, **chrome_kw)
         base = {"mode": "fill", "field": "password", "origins": [SITE], "value": VALUE}
         base.update(req)
-        res, raw = run_script(base, net_for(chrome.port), proc_root=proc)
+        res, raw = run_script(base, net_for(chrome.port), uid=uid, proc_root=proc, extra=extra)
         check(f"fake: {name}", expect(res, chrome), json.dumps(res)[:240])
         check(f"fake: {name}: value not in the output", VALUE not in raw)
         if chrome.unmasked:
@@ -346,9 +387,27 @@ def fake_suite(td):
         chrome.close()
         return chrome
 
-    c = scenario("fills the focused password field", [page()], {},
-                 lambda r, c: r.get("ok") and r.get("chars") == len(VALUE) and r.get("origin") == SITE and c.inserted == [("A", VALUE)])
+    c = scenario("fills the focused password field, through the element itself", [page()], {},
+                 lambda r, c: r.get("ok") and r.get("chars") == len(VALUE) and r.get("origin") == SITE and c.inserted == [("A", VALUE)]
+                 and r.get("route") == "element" and c.routes == ["element"])
     check("fake: answered the server's pings", c.pongs >= 1)
+    scenario("a page that won't take execCommand: the keyboard route, after re-checking", [page(no_exec=True)], {},
+             lambda r, c: r.get("ok") and r.get("route") == "keyboard" and c.routes == ["keyboard"])
+    scenario("the field lost the focus just before the fill: nothing typed", [page(lost_focus=True)], {},
+             lambda r, c: r.get("denied") and "lost the focus" in r["reason"] and not c.inserted)
+    scenario("the page reloaded between the check and the typing: nothing typed", [page(reload_after=1)], {},
+             lambda r, c: r.get("denied") and "changed after the check" in r["reason"] and not c.inserted)
+    scenario("the page navigated during the typing: reported", [page(navigate_on_insert=True)], {},
+             lambda r, c: r.get("ok") is False and not r.get("denied") and "the page changed during the fill" in r["reason"])
+    scenario("the browser and the page's own world disagree about the site: refused",
+             [page(frames={"F0": {"origin": SITE, "url": SITE, "self_origin": EVIL, "active": {"element": PW}}})], {},
+             lambda r, c: r.get("denied") and "no confirmed site" in r["reason"] and not c.inserted)
+    scenario("without the desktop user's uid, nothing is filled (fail closed)", [page()], {},
+             lambda r, c: r.get("ok") is False and "which user runs the desktop" in r["reason"] and not c.inserted, uid=None)
+    t0 = time.time()
+    scenario("an overall deadline: a hung browser can't keep it waiting with the value", [page(hang=True)], {},
+             lambda r, c: r.get("ok") is False and "ran out of time" in r["reason"] and time.time() - t0 < 15,
+             extra=("--deadline", "3"))
     scenario("check mode types nothing", [page()], {"mode": "check", "value": None},
              lambda r, c: r.get("ok") and r.get("mode") == "check" and not c.inserted)
     scenario("no tab on an allowed site", [page(url="https://other.example/")], {},
@@ -390,6 +449,8 @@ def fake_suite(td):
              lambda r, c: r.get("ok") is False and not r.get("denied") and "focus moved" in r["reason"])
     scenario("length limit reported", [page(maxlen=4)], {}, lambda r, c: r.get("ok") is False and "holds 4 characters" in r["reason"])
     scenario("an error answer to the typing never repeats the value", [page(insert_error=True)], {},
+             lambda r, c: r.get("ok") is False and "nothing was typed" in r.get("reason", ""))
+    scenario("...nor on the keyboard route", [page(insert_error=True, no_exec=True)], {},
              lambda r, c: r.get("ok") is False and r.get("reason") == "Input.insertText failed")
     scenario("non-ASCII value counted in UTF-16", [page()], {"value": "Dümmy-✓-\U0001F600"},
              lambda r, c: r.get("ok") and r.get("chars") == sf.utf16_len("Dümmy-✓-\U0001F600"))
@@ -401,10 +462,20 @@ def fake_suite(td):
              lambda r, c: r.get("denied") and "isn't valid CSS" in r["reason"] and not c.inserted)
     scenario("a target that isn't a tab is ignored", [page(type="service_worker")], {},
              lambda r, c: r.get("denied") and "no open tab" in r["reason"])
-    scenario("profile: the Chrome whose --user-data-dir matches", [page()], {"profile": "p1"},
-             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)])
-    scenario("profile: another profile's Chrome isn't used", [page()], {"profile": "p2"},
-             lambda r, c: r.get("ok") is False and "no Chrome is running on profile p2" in r["reason"] and not c.inserted)
+    scenario("profile: from the browser's command line (SystemInfo.getInfo), no /proc needed", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)], pid=999999)
+    scenario("profile: from the browser pid and /proc when getInfo fails", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)], routes={})
+    scenario("profile: from getBrowserCommandLine when that's the one that answers", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)], pid=999999,
+             routes={"automation": ["--remote-debugging-port=0", "--user-data-dir=/x/browser-profiles/p1"]})
+    scenario("profile: when no route works, the reason says why for each", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") is False and "no Chrome is running on profile p1" in r["reason"]
+             and "getInfo: Failed" in r["reason"] and "/proc/999999/cmdline: FileNotFoundError" in r["reason"]
+             and "getBrowserCommandLine: Failed" in r["reason"] and not c.inserted, pid=999999, routes={})
+    scenario("profile: another profile's Chrome isn't used (and the reason names it)", [page()], {"profile": "p2"},
+             lambda r, c: r.get("ok") is False and "no Chrome is running on profile p2" in r["reason"] and "profile p1" in r["reason"]
+             and not c.inserted)
     scenario("a DevTools-like server for another browser is ignored", [page()], {},
              lambda r, c: r.get("ok") is False and "no Chrome with DevTools" in r["reason"] and not c.inserted, browser="Firefox/140")
 
@@ -521,8 +592,11 @@ def chrome_suite(td, chrome):
 
         def wait_for(js):
             for _ in range(50):
-                if h.value(js):
-                    return True
+                try:
+                    if h.value(js):
+                        return True
+                except sf.Failed:      # not loaded yet
+                    pass
                 time.sleep(0.2)
             return False
         wait_for("document.readyState === 'complete' && !!document.getElementById('same').contentDocument"
@@ -536,12 +610,14 @@ def chrome_suite(td, chrome):
                 req["selector"] = selector
             if profile:
                 req["profile"] = profile
-            res, raw = run_script(req, [net], uid=os.getuid(), proc_root=proc_root)
+            # No /proc here: the profile comes from the browser's own command line (SystemInfo.getInfo).
+            res, raw = run_script(req, [net], uid=os.getuid(), proc_root="/nonexistent")
             check(f"chrome: {field} via {(focus_js or selector or '')[:48]}: value not in the output", value not in raw)
             return res
 
         r = fill("document.getElementById('pw').focus()")
-        check("chrome: fills a password field", r.get("ok") and r.get("chars") == len(VALUE) and r.get("origin") == site, r)
+        check("chrome: fills a password field, through the element itself", r.get("ok") and r.get("chars") == len(VALUE)
+              and r.get("origin") == site and r.get("route") == "element", r)
         check("chrome: the page holds the value", h.value(f"document.getElementById('pw').value === {json.dumps(VALUE)}"))
         r = fill("document.getElementById('pw').focus()", value="Second-Dummy-77", profile="real")
         check("chrome: a second fill replaces the first; the profile is found from the browser's pid", r.get("ok")

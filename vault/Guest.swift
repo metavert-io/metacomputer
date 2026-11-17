@@ -120,12 +120,15 @@ func processPath(_ pid: Int32) -> String? {
 }
 
 
+let rebindHint = "if you moved the checkout or rebuilt the gateway, run `metacomputer secrets bind` again"
+
 /// The VM's SSH port on this Mac is a forward served by the gateway, cua-netgw
-/// (scripts/lib.sh netgw_render). The program listening there must have that name and
-/// be the gateway binary pinned at bind (its path, as the kernel reports it).
+/// (scripts/lib.sh netgw_render). The program listening there must have that name, be
+/// the gateway binary pinned at bind (its path, as the kernel reports it), and that file
+/// must still have the contents pinned at bind (sha256).
 /// Returns nil when it is, else why not (and whether it's a refusal).
-func checkListener(port: Int, gatewayPath: String?, allowedNames: [String]) -> (reason: String, denied: Bool)? {
-    guard let want = gatewayPath, !want.isEmpty else {
+func checkListener(port: Int, gatewayPath: String?, gatewaySHA256: String?, allowedNames: [String]) -> (reason: String, denied: Bool)? {
+    guard let want = gatewayPath, !want.isEmpty, let wantHash = gatewaySHA256, !wantHash.isEmpty else {
         return ("this VM was bound by an earlier version without its gateway: run `metacomputer secrets bind` again", false)
     }
     let r = runProcess("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpc"], env: helperEnv(), stdin: [], timeout: 15)
@@ -145,10 +148,18 @@ func checkListener(port: Int, gatewayPath: String?, allowedNames: [String]) -> (
         }
         let have = processPath(p.pid).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
         guard have == pinned else {
-            return ("127.0.0.1:\(port) is served by \(clean(have ?? "an unknown program", max: 200)), not the pinned gateway \(clean(pinned, max: 200)); refusing", true)
+            return ("127.0.0.1:\(port) is served by \(clean(have ?? "an unknown program", max: 200)), not the pinned gateway \(clean(pinned, max: 200)); refusing (\(rebindHint))", true)
         }
     }
+    guard let bytes = try? readFileBytes(pinned, max: 512 << 20), sha256Hex(bytes) == wantHash else {
+        return ("the gateway program \(clean(pinned, max: 200)) isn't the one pinned at bind (its contents changed); refusing (\(rebindHint))", true)
+    }
     return nil
+}
+
+/// sha256 of a file, for pinning the gateway.
+func fileSHA256(_ path: String) -> String? {
+    (try? readFileBytes(path, max: 512 << 20)).map(sha256Hex)
 }
 
 // MARK: - ssh
@@ -185,7 +196,8 @@ final class GuestRunner {
     }
 
     func listenerProblem(_ t: GuestTarget) -> (reason: String, denied: Bool)? {
-        checkListener(port: t.binding.ssh_port, gatewayPath: t.binding.gateway_path, allowedNames: listenerNames)
+        checkListener(port: t.binding.ssh_port, gatewayPath: t.binding.gateway_path, gatewaySHA256: t.binding.gateway_sha256,
+                      allowedNames: listenerNames)
     }
 
     /// ssh to the pinned endpoint as user with key, running `remote`, with `input` on its stdin.

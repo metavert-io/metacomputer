@@ -211,6 +211,26 @@ log()
 '''
 
 
+GATEWAY_C = r"""
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <unistd.h>
+/* A stand-in for cua-netgw: listens on 127.0.0.1:PORT and waits. */
+int main(int argc, char **argv) {
+    int s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    struct sockaddr_in a = {0};
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(atoi(argv[1]));
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) || listen(s, 4)) return 1;
+    for (;;) pause();
+}
+"""
+
+
 def tarball(entries):
     """A .tar.gz from (name, kind, data-or-target) entries."""
     buf = io.BytesIO()
@@ -247,7 +267,8 @@ def main():
                 os.waitpid(p.pid, 0)
             except (OSError, ChildProcessError):
                 pass
-            p.close()
+            if isinstance(p, Pty):
+                p.close()
         shutil.rmtree(td, ignore_errors=True)
         # the (empty) socket folder scripts/lib.sh made for this test's VM name
         h = subprocess.run(["shasum"], input=f"{LAB}:testvm".encode(), capture_output=True).stdout.decode()[:8]
@@ -330,6 +351,24 @@ def run(td, procs):
     stub = os.path.join(stubdir, "ssh")
     open(stub, "w").write(STUB.format(python=sys.executable, log=stub_log))
     os.chmod(stub, 0o755)
+    # A stand-in gateway named cua-netgw, built here, so the default name check and the
+    # pinned path and contents are checked for real.
+    gwdir = os.path.join(td, "gw")
+    os.makedirs(gwdir)
+    open(os.path.join(gwdir, "gw.c"), "w").write(GATEWAY_C)
+    gw = os.path.join(gwdir, "cua-netgw")
+    r = subprocess.run(["cc", "-o", gw, os.path.join(gwdir, "gw.c")], capture_output=True, text=True)
+    check("a stand-in gateway named cua-netgw builds", r.returncode == 0, r.stderr)
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    gw_port = probe.getsockname()[1]
+    probe.close()
+    gw_proc = subprocess.Popen([gw, str(gw_port)])
+    procs.append(gw_proc)
+    for _ in range(50):
+        if subprocess.run(["/usr/sbin/lsof", "-nP", f"-iTCP:{gw_port}", "-sTCP:LISTEN"], capture_output=True).returncode == 0:
+            break
+        time.sleep(0.1)
     archive = tarball([("prof1", "dir", None), ("prof1/Default", "dir", None),
                        ("prof1/Default/Cookies", "file", b"dummy-cookie-jar-5150" * 50)])
     open(os.path.join(stubdir, "archive.tgz"), "wb").write(archive)
@@ -439,15 +478,22 @@ def run(td, procs):
     rc, out = tty([mc, "secrets", "bind", "--gateway", my_exe], [("Type yes to pin these settings", "y\n")], extra=wrapper)
     check("bind shows what it will pin, and anything but 'yes' pins nothing", rc != 0 and "not pinned" in out and fp in out
           and "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub" in out and os.path.basename(my_exe) in out and "mcfill" in out, out)
+    check("metacomputer secrets bind warns while the VM's private host key is still on the Mac", "private host key is still in" in out, out)
     rc, out = tty([mc, "secrets", "bind", "--gateway", my_exe], [("Type yes to pin these settings", "yes\n"), ("Vault passphrase", PASS + "\n")],
                   extra=wrapper)
     check("metacomputer secrets bind pins this VM from the config after 'yes'", rc == 0 and f"Bound VM testvm: 127.0.0.1:{port}" in out
           and "fills as mcfill" in out and "sessions as cua" in out, out)
     common = ["--host-key-line", hostkey, "--fill-key", sshdir + "/fill", "--fill-user", "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua"]
-    for vm, p, gw in (("testvm2", port, my_exe), ("deadvm", 9, my_exe), ("wronggw", port, "/bin/sh")):
-        rc, out = tty([BIN, "bind", vm, "--port", str(p), *common, "--gateway", gw],
+    for vm, p, g in (("testvm2", port, my_exe), ("deadvm", 9, my_exe), ("wronggw", port, "/bin/sh"), ("gwvm", gw_port, gw)):
+        rc, out = tty([BIN, "bind", vm, "--port", str(p), *common, "--gateway", g],
                       [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
         check(f"bind {vm}", rc == 0, out)
+    odd = sshdir + "/fill‮x"
+    shutil.copy(sshdir + "/fill", odd)
+    os.chmod(odd, 0o600)
+    r = client("bind", "oddvm", "--port", str(port), "--host-key-line", hostkey, "--fill-key", odd, "--fill-user", "mcfill",
+               "--ops-key", sshdir + "/ops", "--ops-user", "cua", "--gateway", my_exe)
+    check("bind refuses a path with invisible or control characters", r.returncode == 64 and "invisible" in r.stderr)
     raw = open(vdir + "/vault.json").read()
     check("the vault file holds no names or values in the clear",
           not any(v in raw for v in VALUES + [USERNAME, "web-login", "testvm", SITE]))
@@ -491,11 +537,20 @@ def run(td, procs):
     check("Ctrl-C locks the vault", lock(u1) == 0 and not os.path.exists(sock))
 
     # --- unlock 2: the stub stands in for the VM -----------------------------------------------
-    T = {"MCOMP_VAULT_TEST_LISTENERS": my_name, "MCOMP_VAULT_TEST_PROMPT_TIMEOUT": "3"}
+    T = {"MCOMP_VAULT_TEST_LISTENERS": f"{my_name},cua-netgw", "MCOMP_VAULT_TEST_PROMPT_TIMEOUT": "3"}
     u2 = start_unlock(["--for", "10m", *allow], T)
     r = client("fill", "web-login", "--vm", "wronggw", "--field", "password")
-    check("fill refused when the listener isn't the pinned gateway program", r.returncode == 2
-          and "not the pinned gateway" in js(r).get("reason", ""), r.stdout)
+    check("fill refused when the listener isn't the pinned gateway program (and says to bind again)", r.returncode == 2
+          and "not the pinned gateway" in js(r).get("reason", "") and "bind` again" in js(r).get("reason", ""), r.stdout)
+    r = client("fill", "web-login", "--vm", "gwvm", "--field", "password")
+    check("fill through a listener named cua-netgw at the pinned path with the pinned contents", r.returncode == 0, r.stdout)
+    changed = gw + ".new"
+    shutil.copy(gw, changed)
+    open(changed, "ab").write(b"\0changed")
+    os.replace(changed, gw)          # the running gateway keeps its old file; the path now holds other contents
+    r = client("fill", "web-login", "--vm", "gwvm", "--field", "password")
+    check("fill refused when the gateway file's contents changed since bind", r.returncode == 2
+          and "contents changed" in js(r).get("reason", "") and "bind` again" in js(r).get("reason", ""), r.stdout)
     r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
     res = js(r)
     check("fill a password: exit 0, chars reported", r.returncode == 0 and res.get("ok") is True and res.get("chars") == len(PW_VALUE)
@@ -561,8 +616,9 @@ def run(td, procs):
 
     # each-use approval: type the secret's name
     n = len(calls())
-    proc = background("fill", "web-each", "--vm", "testvm", "--field", "password", "--selector", "#pw")
-    u2.expect(f"Fill web-each (password) into {SITE} on VM testvm, selector #pw?")
+    proc = background("fill", "web-each", "--vm", "testvm", "--field", "password", "--profile", "prof1", "--selector",
+                      "form   #pw\n" + "x" * 200)
+    u2.expect(f"Fill web-each (password) into {SITE} on VM testvm, Chrome profile prof1, selector 'form #pw " + "x" * 71 + "...'?")
     u2.expect("Type web-each to allow")
     u2.send("y\n")
     rc, out, _ = finish(proc)
@@ -730,6 +786,9 @@ def run(td, procs):
     M = {"TMUX": "/tmp/tmux-test/default,1,0", "MCOMP_VAULT_TEST_LISTENERS": my_name}
     rc, out = tty([BIN, "unlock", "--confirm", "each"], [("runs inside tmux", None)], extra=M)
     check("unlock --confirm each is refused inside tmux", rc != 0 and "--allow-multiplexer" in out)
+    for var, name in (("WEZTERM_PANE", "WezTerm"), ("KITTY_LISTEN_ON", "kitty")):
+        rc, out = tty([BIN, "unlock", "--confirm", "each"], [(f"runs inside {name}", None)], extra={var: "1"})
+        check(f"...and inside {name} (${var})", rc != 0)
     u4 = start_unlock((), M)
     u4.expect("WARNING: this terminal runs inside tmux")
     n = len(calls())

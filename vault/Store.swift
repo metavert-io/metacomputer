@@ -27,6 +27,7 @@ struct VMBinding: Codable {
     var fill_key_path: String?      // the fill account (mcfill): fills. nil: bound by an earlier version
     var fill_user: String?
     var gateway_path: String?       // the program that must serve ssh_port (cua-netgw)
+    var gateway_sha256: String?     // ...and its contents when bound
     var bound: String
 }
 

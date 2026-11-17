@@ -383,7 +383,8 @@ final class UnlockServer {
         let profile = req["profile"] as? String
         let selector = (req["selector"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         if let sel = selector { fields["selector"] = clean(sel, max: 300) }
-        say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (selector.map { ", selector \($0)" } ?? "") + ", asked by \(who)")
+        say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
+            + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who)")
         let p: Payload
         do { p = try load() } catch let e as VaultError { return finish("fill", fields, failed(e.message), pid: pid, approval: "-") } catch {
             return finish("fill", fields, failed("cannot read the vault"), pid: pid, approval: "-")
@@ -423,7 +424,8 @@ final class UnlockServer {
                 return finish("fill", fields, failed("the VM reported a site outside this secret's sites; refusing"), pid: pid, approval: "each")
             }
             let (yes, why) = approve("  Fill \(name) (\(field)) into \(origin) on VM \(vm)"
-                                     + (selector.map { ", selector \($0)" } ?? "") + "?", typed: name)
+                                     + (profile.map { ", Chrome profile \($0)" } ?? "")
+                                     + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + "?", typed: name)
             approval = yes ? "each:yes" : "each:no"
             if !yes { return finish("fill", fields, denied(why), pid: pid, approval: approval) }
             origins = [origin]   // only the site that was approved

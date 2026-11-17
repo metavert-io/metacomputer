@@ -181,9 +181,15 @@ func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     return Exit.ok
 }
 
+/// A path bind will show and pin: printable text only, so it can't disguise itself on the terminal.
+func checkPrintablePath(_ p: String, _ flag: String) throws {
+    guard clean(p, max: 4096) == p else { throw usageError("--\(flag): the path has control or invisible characters; refusing") }
+}
+
 /// An SSH private key file for bind: a plain path (ssh gets it on its command line), 0600.
 func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
     let p = absolutePath(raw)
+    try checkPrintablePath(p, flag)
     guard !p.contains(where: { $0 == " " || $0 == "\"" || $0 == "'" || $0 == "\t" }) else {
         throw usageError("--\(flag): a path without spaces or quotes")
     }
@@ -207,9 +213,12 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     guard let fillUser = a.last("fill-user"), validUser(fillUser) else { throw usageError("--fill-user: the VM's fill account (mcfill)") }
     guard let opsUser = a.last("ops-user"), validUser(opsUser) else { throw usageError("--ops-user: the VM's desktop user (e.g. cua)") }
     guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (cua-netgw)") }
+    try checkPrintablePath(absolutePath(g), "gateway")
     let gateway = URL(fileURLWithPath: absolutePath(g)).resolvingSymlinksInPath().path
-    guard access(gateway, X_OK) == 0, !gateway.contains("\n") else { throw VaultError("no gateway program at \(gateway)") }
-    let gwHash = (try? readFileBytes(gateway, max: 512 << 20)).map { String(sha256Hex($0).prefix(16)) } ?? "?"
+    try checkPrintablePath(gateway, "gateway")
+    guard access(gateway, X_OK) == 0 else { throw VaultError("no gateway program at \(gateway)") }
+    guard let gwSHA = fileSHA256(gateway) else { throw VaultError("cannot read the gateway program at \(gateway)") }
+    let gwHash = String(gwSHA.prefix(16))
     try requireTTY("bind")
     installPromptSignalHandlers()
 
@@ -232,7 +241,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     guard answer == "yes" else { throw VaultError("not pinned") }
     let (key, _) = try unlockKey(paths)
     let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
-                      fill_key_path: fillKey, fill_user: fillUser, gateway_path: gateway, bound: isoTime())
+                      fill_key_path: fillKey, fill_user: fillUser, gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime())
     try updateVault(paths, key) { p in p.vms[vm] = b }
     audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway])
     oprint("Bound VM \(vm): 127.0.0.1:\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser), gateway \(gateway)")
@@ -552,6 +561,7 @@ func selftest() -> Int32 {
     check("clean: escape sequences", clean("ok\u{1B}[2J\u{1B}]0;t\u{07}x") == "ok?[2J?]0;t?x")
     check("clean: C1, bidi and zero-width", clean("a\u{9B}b\u{202E}c\u{200B}d") == "a?b?c?d")
     check("clean: newlines and length", clean("a\nb\r\tc") == "a b  c" && clean("abcdef", max: 3) == "abc...")
+    check("prompt text: whitespace collapsed, capped", promptText("a  \n b\tc", max: 80) == "a b c" && promptText(String(repeating: "x", count: 200), max: 80).count == 83)
     check("KDF rounds out of range refused", (try? deriveKey(Array("x".utf8), KDFParams(name: "pbkdf2-sha256", iterations: 1 << 40,
                                                                                          salt: Data(randomBytes(16)).base64EncodedString()))) == nil)
     oprint(failures == 0 ? "selftest: all passed (\(Build.kind) build)" : "selftest: \(failures) failed")

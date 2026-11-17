@@ -124,15 +124,18 @@ func askTyped(_ question: String, expected: String, timeout: Int) -> Bool {
     return false
 }
 
-/// The name of the terminal multiplexer this process runs in (tmux, screen, zellij), or
-/// nil. Any program of the user's can type into a multiplexer's panes (tmux send-keys,
-/// screen -X stuff), so a confirmation typed there can be forged.
+/// The name of the terminal multiplexer (or scriptable terminal) this process runs in, or
+/// nil. Any program of the user's can type into such a pane (tmux send-keys, screen -X
+/// stuff, wezterm cli send-text, kitty @ send-text), so a confirmation typed there can be
+/// forged. This is a list of known ones, not a proof of absence (SECURITY.md).
 func terminalMultiplexer() -> String? {
     let env = ProcessInfo.processInfo.environment
     if env["TMUX"] != nil { return "tmux" }
     if env["STY"] != nil { return "screen" }
     if env["ZELLIJ"] != nil { return "zellij" }
-    let known = ["tmux", "screen", "zellij", "byobu"]
+    if env["WEZTERM_PANE"] != nil { return "WezTerm" }
+    if env["KITTY_LISTEN_ON"] != nil { return "kitty (remote control)" }
+    let known = ["tmux", "screen", "zellij", "byobu", "dtach", "abduco"]
     var pid = getppid()
     for _ in 0..<64 {
         guard pid > 1 else { break }

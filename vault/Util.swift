@@ -364,6 +364,11 @@ func clean(_ s: String, max: Int = 300) -> String {
 /// Keep a message short, printable and on one line (terminal, results, audit log).
 func oneLine(_ s: String, max: Int = 300) -> String { clean(s, max: max) }
 
+/// A client's text (a selector) inside a question: printable, runs of spaces collapsed, short.
+func promptText(_ s: String, max: Int) -> String {
+    clean(clean(s, max: 4096).split(whereSeparator: { $0 == " " }).joined(separator: " "), max: max)
+}
+
 /// No core dumps (they would hold the decrypted vault) and no debugger, even one of yours.
 func hardenProcess() {
     var rl = rlimit(rlim_cur: 0, rlim_max: 0)

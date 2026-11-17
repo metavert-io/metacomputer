@@ -973,6 +973,7 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       [ -n "$hk" ] || hk="$(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub" 2>/dev/null)"
       [ -f "$SSH_DIR/fill" ] || die "no fill key ($SSH_DIR/fill): VMs built before secrets support have no fill account. Rebuild the VM to use secrets (metacomputer build --replace, or a new VM_NAME)"
       [ "${SSH_AUTH:-key}" = cert ] && warn "SSH_AUTH=cert: sealed sessions sign in with the static ops key, which a VM on certificates refuses (fills use their own account and still work)"
+      [ -f "$SSH_DIR/hostkey" ] && warn "the VM's private host key is still in $SSH_DIR/hostkey: anything that can read it can pose as the VM. Nothing on the Mac needs it after the build (newer builds delete it): delete it with rm $SSH_DIR/hostkey"
       # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
       exec "$VAULT_BIN" bind "$vm" --port "$SSH_PORT" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
         --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" --gateway "$NETGW_BIN" "$@" ;;
