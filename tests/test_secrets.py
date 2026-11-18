@@ -201,6 +201,11 @@ if rec["user"] == "mcfill":
                "route": "element"}}
     elif flag("badtype-next"):
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": "16", "route": "element"}}
+    elif flag("origin-last-next"):
+        # The tab is on the secret's last site (an identity provider's, in tests/test_vault_approvals.py).
+        out = {{"ok": True, "mode": req["mode"], "field": req["field"], "origin": req["origins"][-1]}}
+        if req.get("mode") == "fill":
+            out.update({{"chars": len(req["value"]), "route": "element"}})
     elif flag("extra-next"):
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req.get("value") or ""),
                "route": "element", "extra": {{"note": "dropped"}}, "debug": [1, 2]}}

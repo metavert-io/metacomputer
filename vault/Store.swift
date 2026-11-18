@@ -61,6 +61,7 @@ struct SessionMeta: Codable {
     var last_loaded: String?
     var loads: Int
     var approval: String?           // "session": loads into the same VM don't ask. nil or "each": they do
+    var identity_provider: Bool? = nil   // holds an identity provider's sign-in: every load asks, whatever the policy
 }
 
 /// Somewhere off this Mac that receives every audit event (Sinks.swift).
@@ -89,6 +90,7 @@ struct Payload: Codable {
     // The last audit seq written before the audit key existed (a vault from an earlier version,
     // or a log older than this vault): records up to it are legacy, unverified, not forgeries.
     var audit_key_since: Int? = nil
+    var rules: [UnattendedRule]? = nil      // unattended rules (Approvals.swift): uses that don't ask, until they expire
 
     /// A new vault. `boundary`: the audit log's last seq now (records before the vault are legacy).
     static func fresh(boundary: Int) -> Payload {

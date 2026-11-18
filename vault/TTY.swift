@@ -98,13 +98,18 @@ func readPassphrase(confirm: Bool) throws -> [UInt8] {
 
 enum ApprovalScope { case use, session, unlock }
 
-/// An approval on the unlock terminal. The person types the secret's (or session's) name
-/// to allow this use, "NAME session" for this Claude Code session, or "NAME unlock" until
-/// the vault locks; anything else refuses. Anything typed before the question is
-/// discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
-func askApproval(_ question: String, name: String, timeout: Int) -> ApprovalScope? {
-    guard let answer = askLine(question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
-                               + "\(name) unlock: until the vault locks). Anything else refuses: ", timeout: timeout) else { return nil }
+/// The prompt of an approval on the unlock terminal. The person types the secret's (or session's)
+/// name to allow this use, "NAME session" for this Claude Code session, or "NAME unlock" until the
+/// vault locks; anything else refuses (approvalAnswer). The unlock process reads the answer while it
+/// also serves `approve ID` / `deny ID` (Server.swift, waitForDecision); anything typed before the
+/// question is discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
+func approvalPrompt(_ question: String, name: String) -> String {
+    question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
+        + "\(name) unlock: until the vault locks). Anything else refuses: "
+}
+
+/// What a line typed at an approval prompt allows (nil: it refuses).
+func approvalAnswer(_ answer: String, name: String) -> ApprovalScope? {
     let words = answer.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
     guard words.first == name else { return nil }
     switch words.count == 1 ? "" : words.dropFirst().joined(separator: " ") {
@@ -113,30 +118,6 @@ func askApproval(_ question: String, name: String, timeout: Int) -> ApprovalScop
     case "unlock": return .unlock
     default: return nil
     }
-}
-
-/// One answer typed on the terminal (nil: none in time, or interrupted).
-func askLine(_ question: String, timeout: Int) -> String? {
-    guard timeout > 0 else { return nil }
-    _ = tcflush(0, TCIFLUSH)
-    eprintRaw(question)
-    let deadline = Date().addingTimeInterval(TimeInterval(timeout))
-    var line = [UInt8]()
-    while Date() < deadline {
-        if receivedSignal != 0 { eprint(""); return nil }
-        var pfd = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
-        let r = poll(&pfd, 1, 500)
-        if r < 0 { if errno == EINTR { continue }; return nil }
-        if r == 0 { continue }
-        if pfd.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 && pfd.revents & Int16(POLLIN) == 0 { return nil }
-        var c: UInt8 = 0
-        let n = read(0, &c, 1)
-        if n <= 0 { return nil }
-        if c == 0x0A { return String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces) }
-        if line.count < 120 { line.append(c) }
-    }
-    eprint("\n  (no answer in \(timeout) s: not allowed)")
-    return nil
 }
 
 /// The name of the terminal multiplexer (or scriptable terminal) this process runs in, or

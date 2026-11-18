@@ -794,7 +794,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -930,6 +930,35 @@ pseudo-terminal for the rest of the vault:
   folder made if missing); on exit 3 through `bin/metacomputer`, one `vault_locked`
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
+
+`python3 tests/test_vault_approvals.py` (77 checks, about 3 minutes) reuses the same stub
+and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
+macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
+person at it, and without it there is none. It covers:
+- **request ids:** `requests` (id, secret, site, VM, masked username, age, no challenge),
+  `approve ID` with the dialog, `deny ID`, the terminal still answering, a timeout, and
+  `status`/`list` answered while a question waits while another fill waits its turn;
+- **that no program can approve:** a raw `approve` with a forged passphrase proof, or
+  claiming any other method, or for a request that doesn't exist; `approve --passphrase`
+  without a terminal, and on a pseudo-terminal (as `script` makes one) with the wrong
+  passphrase; a proof made for other text by a stand-in on the socket, and one kept from
+  an earlier request; a cancelled dialog; a test build without the stand-in; a raw
+  `rule_add` without the dialog; and, by behaviour, that a release build ignores the
+  stand-in (`selftest --local-auth` with `MCOMP_VAULT_LOCAL_AUTH=noninteractive`, which
+  reaches the real framework without showing a dialog);
+- **identity providers:** a `session` secret asks on one; `NAME session` / `NAME unlock`
+  there cover one use; a secret with one among its sites goes ahead on its other site
+  with the value sent only there; an API token for one asks;
+- **`login`:** one question, then username and password into their own fields on the
+  checked site; a client-chosen request id, never reused;
+- **unattended rules:** `--for` required (at most 30 days), none for identity providers,
+  covering only sessions in the project (and requests passed on for one with
+  `--on-behalf-pid`, never one claimed from inside another session), site rules, removal,
+  expiry, `--passphrase` with and without the right passphrase;
+- **`unlock --touch-id`:** the dialog allows or refuses; inside tmux a typed answer
+  doesn't approve;
+- **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit
+  --verify` and `verify-audit.py` on the log with the new records.
 
 `python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.

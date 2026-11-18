@@ -254,13 +254,14 @@ func clockTime(_ d: Date = Date()) -> String {
     return f.string(from: d)
 }
 
-/// "90s", "30m", "2h" -> seconds.
+/// "90s", "30m", "2h", "7d" -> seconds (each caller sets its own maximum).
 func parseDuration(_ s: String) -> Int? {
-    guard let unit = s.last, let n = Int(s.dropLast()), n > 0 else { return nil }
+    guard let unit = s.last, let n = Int(s.dropLast()), n > 0, n <= 1_000_000 else { return nil }
     switch unit {
     case "s": return n
     case "m": return n * 60
     case "h": return n * 3600
+    case "d": return n * 86400
     default: return nil
     }
 }
@@ -568,14 +569,20 @@ struct Requester {
     let claudePID: pid_t?
     let claudeStart: Double?
     let project: String?
+    // A request passed on by a program outside every Claude Code session (the metacomputer hub, which
+    // runs detached) for the Claude Code process it names: that program, shown beside the requester.
+    var viaPID: pid_t? = nil
+    var viaExe: String? = nil
 
     static func of(_ pid: pid_t) -> Requester {
         let exe = pid > 0 ? (processPath(pid).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "?") : "?"
         var p = pid
         for _ in 0..<64 {
             guard p > 1, let e = procEntry(p) else { break }
+            // Claude Code from the native installer runs as its version file (.../claude/versions/2.1.325).
             let isClaude = e.name == "claude"
                 || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
+                || (processPath(p).map { matches($0, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") } ?? false)
             if isClaude && p != pid {
                 let cwd = procCwd(p).map { realPath($0) ?? $0 }
                 return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd)
@@ -583,6 +590,20 @@ struct Requester {
             p = e.ppid
         }
         return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil)
+    }
+
+    /// Who asked, when the client says it asks for another process (`on_behalf_pid`). Honoured only
+    /// when the client itself runs outside every Claude Code session and the process it names runs
+    /// inside one: a command from a Claude Code session is always that session's own. Attribution, like
+    /// the rest: a program of yours outside Claude Code can name any live Claude Code process.
+    static func of(_ pid: pid_t, onBehalf: pid_t?) -> Requester {
+        let direct = of(pid)
+        guard direct.claudePID == nil, let ob = onBehalf, ob > 1, ob != pid, procEntry(ob) != nil else { return direct }
+        var r = of(ob)
+        guard r.claudePID != nil else { return direct }
+        r.viaPID = pid
+        r.viaExe = direct.clientExe
+        return r
     }
 
     /// Is that Claude Code process still the same one (same pid, same start)?
@@ -595,13 +616,15 @@ struct Requester {
         var d: [String: Any] = ["client_pid": Int(clientPID), "client": clientExe]
         if let p = claudePID { d["claude_pid"] = Int(p) }
         if let pr = project { d["project"] = pr }
+        if let v = viaPID { d["via"] = ["client_pid": Int(v), "client": viaExe ?? "?"] as [String: Any] }
         return d
     }
 
     /// One printable line (a folder or program name can hold a newline or terminal codes).
     var describe: String {
         if let p = claudePID {
-            return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))", max: 300)
+            return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))"
+                         + (viaPID.map { ", through \(viaExe ?? "?") (pid \($0))" } ?? ""), max: 300)
         }
         return clean("\(clientExe) (pid \(clientPID)), not from Claude Code", max: 300)
     }
