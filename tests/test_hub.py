@@ -214,6 +214,11 @@ for line in sys.stdin:
         for _ in range(int(a.get("size", 100))):
             send({"jsonrpc": "2.0", "method": "notifications/progress", "params": "not an object"})
         ok(mid, "after the bad messages")
+    elif name == "commas":               # a big text full of commas, brackets and colons: few values
+        ok(mid, "a,[b]{c}:" * int(a.get("size", 1000)))
+    elif name == "toomany":              # an answer with more values than the hub takes
+        out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"content":[{"type":"text","text":"x"}],'
+                  '"v":[' + ",".join(["0"] * int(a.get("size", 10))) + ']}}\n'); out.flush()
     elif name == "deep":                 # a small line nested far deeper than any parser recursion
         out.write("[" * int(a.get("size", 100000)) + "\n"); out.flush()
         out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"deep":' + "[" * 5000 + "]" * 5000 + '}}\n')
@@ -271,7 +276,7 @@ def setup_driver():
     extra = {"type": "object", "properties": {"session": {"type": "string"}, "s": {"type": "number"},
                                               "size": {"type": "integer"}, "tag": {"type": "string"}}}
     for n in ("whoami", "echo", "slow", "big", "huge", "nonl", "die", "deaf", "expire", "listchange", "flood",
-              "stderrflood", "deep", "badflood"):
+              "stderrflood", "deep", "badflood", "commas", "toomany"):
         tools.append({"name": n, "description": "test tool", "inputSchema": extra})
     json.dump(tools, open(os.path.join(STATE, "tools.json"), "w"))
     open(FAKE, "w").write(FAKE_DRIVER)
@@ -1278,8 +1283,9 @@ def deep_checks():
     h = client(r)
     res = h.call("deep", {})
     again = h.call("whoami", {})
-    check("the hub skips a 100,000-deep line and a 5,000-deep answer from the driver; its reader lives on",
-          not res.is_error and "after the deep lines" in res.text and again.structured.get("driver_pid"), res.text[:200])
+    check("the hub skips a 100,000-deep line and answers the call a 5,000-deep answer names with an error; its "
+          "reader lives on", res.is_error and res.structured.get("code") == "answer_too_complex"
+          and again.structured.get("driver_pid"), res.text[:200])
     s = mcp_hub.connect_or_start(r.env, start=False)
     f = s.makefile("rb")
     s.sendall((json.dumps({"jsonrpc": "2.0", "id": 0, "method": "metacomputer/hello",
@@ -1847,6 +1853,27 @@ def status_claim_checks():
     clear_claims()
 
 
+# --- third round ---------------------------------------------------------------------------
+def answer_limit_checks():
+    print("#6: values are counted outside strings, and an answer over the limit is answered, not dropped")
+    clear_claims()
+    r = Running()
+    h = client(r)
+    res = h.call("commas", {"size": 400_000})
+    check("a 3.6 MB text with 1.6 million commas, brackets and colons (a handful of values) passes whole",
+          not res.is_error and res.text.count(",") == 400_000, res.text[:120])
+    t0 = time.time()
+    res = h.call("toomany", {"size": 1_100_000})
+    took = time.time() - t0
+    check("an answer with more values than the hub takes gets an error at once, not a wait until the client gives up",
+          res.is_error and res.structured.get("code") == "answer_too_complex" and took < 10, (took, res.text[:120]))
+    check("…and it isn't counted as the driver breaking the protocol (same connection, nothing counted)",
+          not h.call("whoami", {}).is_error and not r.hub._bad_upstream, list(r.hub._bad_upstream))
+    h.close()
+    r.stop()
+    clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -1881,6 +1908,7 @@ def main():
         token2_checks()
         batch2_checks()
         status_claim_checks()
+        answer_limit_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)

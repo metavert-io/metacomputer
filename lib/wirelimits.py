@@ -8,15 +8,19 @@ each message with a size limit; this module adds what a size limit doesn't cover
   a reader thread would die and leave its connection open and silent. Here it is a
   ValueError like any other bad message, and anything nested deeper than
   MAX_JSON_DEPTH is refused too, so later code (json.dumps, walks over a result)
-  never meets a structure that deep. A message that could hold more than
+  never meets a structure that deep. A message that would hold more than
   MAX_JSON_NODES values is refused before it's parsed, so a small frame can't
-  turn into millions of Python objects.
+  turn into millions of Python objects; the count skips strings, so text full of
+  commas or brackets (a CSV, source code, a page) isn't taken for structure. Both
+  refusals are LimitError, so a reader can tell a message that is only too big for
+  it (and answer the request it belongs to) from one that isn't JSON at all.
 - StderrTail: a child's stderr (SSH carries the VM's) drained without growing: the
   last few kilobytes stay in memory for error messages, and a log file gets at most
   a fixed number of bytes.
 """
 import json
 import os
+import re
 import threading
 
 MAX_JSON_DEPTH = 100          # MCP messages nest a handful of levels; Python's parser gives up near 1000
@@ -25,18 +29,47 @@ STDERR_KEEP = 64 << 10        # what an error message can quote from a child's s
 STDERR_FILE_MAX = 1 << 20     # what a child's stderr may add to its log file
 
 
+class LimitError(ValueError):
+    """A message over a content limit (too many values, nested too deeply), as opposed to one that isn't JSON."""
+
+
+_QUOTE_S = re.compile(r'(\\*)"')
+_QUOTE_B = re.compile(rb'(\\*)"')
+
+
+def _structural(seg):
+    if isinstance(seg, (bytes, bytearray)):
+        return seg.count(b"[") + seg.count(b"{") + seg.count(b",") + seg.count(b":")
+    return seg.count("[") + seg.count("{") + seg.count(",") + seg.count(":")
+
+
 def _brackets(data):
     if isinstance(data, (bytes, bytearray)):
         return data.count(b"[") + data.count(b"{")
     return data.count("[") + data.count("{")
 
 
-def _nodes(data):
-    """An upper bound on the values a JSON text holds: every container opens with [ or {, and every value
-    after the first in a container follows a comma (counted in strings too, so it can only overcount)."""
-    if isinstance(data, (bytes, bytearray)):
-        return data.count(b"[") + data.count(b"{") + data.count(b",")
-    return data.count("[") + data.count("{") + data.count(",")
+def _nodes(data, limit=None):
+    """An upper bound on the Python objects a JSON text becomes: the top value, and one more for every container
+    ([ or {), every value after the first in a container (a comma) and every object key (a colon), counted outside
+    strings. When the same count over the whole text (strings included, so never lower) is within limit, that's
+    the answer; otherwise strings are skipped in one pass over the quotes, each quote's run of backslashes saying
+    whether it ends a string."""
+    quick = 1 + _structural(data)
+    if limit is not None and quick <= limit:
+        return quick
+    pat = _QUOTE_B if isinstance(data, (bytes, bytearray)) else _QUOTE_S
+    total, start, inside = 1, 0, False
+    for m in pat.finditer(data):
+        if inside:
+            if not len(m.group(1)) % 2:          # not escaped: the string ends here
+                inside, start = False, m.end()
+        else:
+            total += _structural(data[start:m.start()])
+            inside = True
+    if not inside:
+        total += _structural(data[start:])
+    return total
 
 
 def _children(o):
@@ -62,19 +95,19 @@ def depth_exceeds(obj, limit):
 
 
 def loads(data, max_depth=None, max_nodes=None):
-    """json.loads for a message off the wire. Raises ValueError (never RecursionError) when it isn't JSON, holds more
-    than max_nodes values (MAX_JSON_NODES, checked before anything is parsed) or nests deeper than max_depth
-    (MAX_JSON_DEPTH)."""
+    """json.loads for a message off the wire. Raises ValueError (never RecursionError) when it isn't JSON, and
+    LimitError (a ValueError) when it would hold more than max_nodes values (MAX_JSON_NODES, checked before anything
+    is parsed) or nests deeper than max_depth (MAX_JSON_DEPTH)."""
     limit = MAX_JSON_DEPTH if max_depth is None else max_depth
     nodes = MAX_JSON_NODES if max_nodes is None else max_nodes
-    if _nodes(data) > nodes:
-        raise ValueError(f"JSON with more than {nodes:,} values")
+    if _nodes(data, nodes) > nodes:
+        raise LimitError(f"JSON with more than {nodes:,} values")
     try:
         obj = json.loads(data)
     except RecursionError:
-        raise ValueError("JSON nested too deeply") from None
+        raise LimitError("JSON nested too deeply") from None
     if _brackets(data) > limit and depth_exceeds(obj, limit):   # the count is a cheap upper bound on the depth
-        raise ValueError(f"JSON nested more than {limit} levels deep")
+        raise LimitError(f"JSON nested more than {limit} levels deep")
     return obj
 
 
