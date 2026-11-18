@@ -191,6 +191,9 @@ export_options() {
   # environment win over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
          MCOMP_HUB_IDLE="${HUB_IDLE:-10m}"
+  # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
+  # lessons switch, an isolated store for tests).
+  export MCOMP_LESSONS="${MCOMP_LESSONS:-${LESSONS:-on}}" MCOMP_LESSONS_DIR="${MCOMP_LESSONS_DIR:-${LESSONS_DIR:-}}"
 }
 
 # --- the optional event stream (docs/events.md; off until a sink is added) ------

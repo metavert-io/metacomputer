@@ -55,6 +55,10 @@
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | tokens | revoke ID|--all   use it from a session, without seeing values
+#   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
+#         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
+#                                  mine your own sessions for repeated mistakes; approved lessons reach
+#                                  every new session's instructions as advice (docs/learn.md)
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -298,6 +302,11 @@ out = {
              "vm_policy": vm_drv or None, "problem": req_err.strip() or None},
   "shell": vm_shell.describe_settings(),
 }
+try:
+    import learn_store
+    out["lessons"] = learn_store.summary()
+except Exception:
+    out["lessons"] = None
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0)
 def y(b): return "\033[33m" + b + "\033[0m"
@@ -333,6 +342,9 @@ else:
           + ("; VM_SHELL=on allows it in bounded mode" if sh["setting"] == "auto" else ""))
 for pr in sh["problems"]:
     print(f"  ! {pr}")
+if out["lessons"] is not None:
+    print("Lessons (metacomputer learn: notes you approved, sent as advice; no guard reads them; docs/learn.md)")
+    print(f"  lessons      {learn_store.status_line(out['lessons'])}   (metacomputer learn list)")
 EOF
 }
 
@@ -394,6 +406,12 @@ out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.s
                    "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None},
        "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None,
        "hub": hub or None}
+sys.path.insert(0, lib)
+try:
+    import learn_store
+    out["lessons"] = learn_store.summary()
+except Exception:
+    out["lessons"] = None
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -463,6 +481,8 @@ if ev.get("sinks"):
     sys.path.insert(0, lib)
     import events
     print(f"events        {events.status_line(ev)}   (metacomputer events)")
+if out["lessons"] is not None:
+    print(f"lessons       {learn_store.status_line(out['lessons'])}   (metacomputer learn list)")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -1190,6 +1210,7 @@ case "$cmd" in
   actions)    export_options; exec "$PY" "$LAB_ROOT/lib/actionlog.py" "$@" ;;
   security)   do_security "$@" ;;
   secrets)    do_secrets "$@"; exit $? ;;
+  learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"
               { tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null

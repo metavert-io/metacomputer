@@ -129,6 +129,7 @@ you about changes:
 | `security` | `sink_config_changed` | warn | `events.json` was changed other than through `events sink` (or can't be read any more); sent to the sinks of the last configuration `events sink` wrote, kept until each has it | `added`, `removed`, `changed` (name, kind, masked URL, families each), `readable` |
 | `security` | `chrome_input_refused` | warn | The bridge's Chrome guard refused `set_value` or `run_script` aimed at Chrome; once per session and tool per 5 min | tool (never the value) |
 | `security` | `actions_verify_failed` | error | `metacomputer actions verify` found a changed log | files that failed, how many were checked |
+| `security` | `lesson_approved`, `lesson_edited`, `lesson_removed` | warn | `metacomputer learn approve`, `add`, `edit` or `remove` changed what every new session gets in its MCP instructions (docs/learn.md) | the lesson's id, a short title (at most 60 characters), its source (built-in, claude-draft, edited, you) and how many are active. Never the lesson's text. |
 | `security` | `untrusted_link` | warn | `web open-untrusted` found a password field, a download, or that the link ended on another site. The message is fixed words; hosts only in data | summary, start and final origin (scheme, host, port only, and only hosts made of letters, digits, dots and dashes, or IP addresses), password fields, the number of downloads, origins passed through |
 | `lifecycle` | `started`, `stopped`, `reset`, `restored`, `checkpoint`, `baseline`, `build_done`, `build_failed` | info (build_failed: error) | those commands | checkpoint name, what it was restored from |
 | `lifecycle` | `controller_connected`, `controller_released` | info | A Claude Code session's first acting call; the session ending; `metacomputer release` | bridge and Claude Code process ids |
@@ -169,7 +170,7 @@ Every sink gets the same event, in its own wrapping:
 | `seq` | A number per user on this Mac, increasing. Each sink receives events in this order. |
 | `time` | UTC, RFC 3339 with microseconds. |
 | `family`, `type`, `severity` | As in the table above; severity is `info`, `warn` or `error`. |
-| `origin` | Which code path made it, set by that code and never by the caller: `cli` (a metacomputer command's own code: task finish, record stop, actions verify, open-untrusted, sink changes), `bridge` (Claude Code's bridge or the action-log relay), `watcher`, `spool` (another program), `claude` (`metacomputer notify`, Claude's own channel), or `script` (`metacomputer events emit`, used by your scripts and metacomputer's own shell hooks; anything that can run a command can call it). This tells apart metacomputer's code paths; it isn't proof against a program running as you. Types that only metacomputer's own code makes are refused from `events emit` and the spool: `suppressed` in any family, the `actions` family, `needs_you.in_use` and `refused`, `security.chrome_input_refused`, `blocked_connections`, `sink_added`, `sink_removed` and `sink_config_changed`, `lifecycle.controller_connected`, `controller_released`, `health` and `test`. |
+| `origin` | Which code path made it, set by that code and never by the caller: `cli` (a metacomputer command's own code: task finish, record stop, actions verify, open-untrusted, sink changes), `bridge` (Claude Code's bridge or the action-log relay), `watcher`, `spool` (another program), `claude` (`metacomputer notify`, Claude's own channel), or `script` (`metacomputer events emit`, used by your scripts and metacomputer's own shell hooks; anything that can run a command can call it). This tells apart metacomputer's code paths; it isn't proof against a program running as you. Types that only metacomputer's own code makes are refused from `events emit` and the spool: `suppressed` in any family, the `actions` family, `needs_you.in_use` and `refused`, `security.chrome_input_refused`, `blocked_connections`, `sink_added`, `sink_removed` and `sink_config_changed`, `lesson_approved`, `lesson_edited` and `lesson_removed`, `lifecycle.controller_connected`, `controller_released`, `health` and `test`. |
 | `vm` | The VM's name (`VM_NAME`). |
 | `project` | The folder of the Claude Code session that caused it, when known (its working folder); else the command's current folder. In real events this is the full path. |
 | `message` | One line for a person. |
@@ -559,7 +560,8 @@ For every class: `time` ← `time` (as epoch milliseconds), `metadata.uid` ←
 io.metavert.metacomputer.needs_you.{login,captcha,2fa,dialog,approval,other,in_use,refused,vault_locked,approval_waiting}
 io.metavert.metacomputer.task.{finished,recording_stopped,recording_failed}
 io.metavert.metacomputer.security.{blocked_connections,chrome_input_refused,actions_verify_failed,untrusted_link,
-                                   sink_added,sink_removed,sink_config_changed,sink_changes}
+                                   sink_added,sink_removed,sink_config_changed,sink_changes,
+                                   lesson_approved,lesson_edited,lesson_removed}
 io.metavert.metacomputer.<family>.suppressed   (the rate limit's summary, in any family)
 io.metavert.metacomputer.lifecycle.{started,stopped,reset,restored,checkpoint,baseline,build_done,build_failed,
                                     controller_connected,controller_released,health,test}

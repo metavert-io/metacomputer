@@ -89,6 +89,13 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   an event. Other programs hand in events through the spool (architecture.md,
   "Event spool"). Tests: `python3 tests/test_events.py` (no VM) and
   `tests/test_options.py E` (VM).
+- Lessons (`metacomputer learn`, docs/learn.md; `lib/learn*.py`,
+  `lib/transcripts.py`): proposals come only from structured fields (classes,
+  counts, tool names, app names from a fixed list); never copy text from a
+  transcript or the VM into a proposal, a lesson or the draft summary. Free text
+  needs the user's terminal; only a private store is loaded; no guard may read the
+  lessons (the hub's one reader is `learned_notes()`). Approve an ID from a chat
+  only when the user names it. Tests: `python3 tests/test_learn.py` (no VM).
 
 ## Useful commands
 
@@ -103,6 +110,7 @@ metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
 metacomputer secrets list | fill NAME --field password | token NAME | status   # logins and API keys without seeing values
 metacomputer call [--session NAME] [--json|--raw] TOOL '{json}'   # through the hub; or: python3 lib/mcp_client.py --tools | --describe TOOL
 metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
+metacomputer learn report | review | approve ID | list   # lessons from your own sessions (docs/learn.md)
 ```
 
 ## Working on this repository
@@ -137,7 +145,7 @@ metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
-  `test_bench_workdir`, `test_vm_runner`, `test_plugin` (no VM),
+  `test_bench_workdir`, `test_vm_runner`, `test_plugin`, `test_learn` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild

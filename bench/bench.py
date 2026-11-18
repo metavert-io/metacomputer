@@ -21,6 +21,8 @@ baseline before every task). Switches (flag or environment variable):
   --budget / BENCH_BUDGET          per-task cap in USD (default 3; a task file may set its own)
   --cap / BENCH_CAP                total cap in USD for the run (default 60)
   --reset / BENCH_RESET            each | none    (reset the VM before each task)
+  --lessons / BENCH_LESSONS        off | on       (the lessons approved with `metacomputer learn`, from
+                                                   MCOMP_LESSONS_DIR or the default store; default off)
 """
 import argparse
 import datetime
@@ -54,7 +56,8 @@ PREFIX = ("Use your virtual computer (the metacomputer) for this. Leave the virt
 SHELL_FORBID = ("\n\nDon't use a shell inside the virtual computer for this (no `metacomputer ssh` or "
                 "`metacomputer sh`): work through its desktop.")
 DEFAULTS = {"model": "claude-opus-5-5", "skill": os.path.join(LAB, "skills", "metacomputer"), "shell": "allow",
-            "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each"}
+            "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each",
+            "lessons": "off"}
 
 
 def log(msg):
@@ -248,6 +251,7 @@ def prepare_workdir(run_id, sw):
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
+    env.update(lessons_env(sw))
     json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
               open(cfg, "w"))
     return work, cfg, shim
@@ -274,6 +278,28 @@ def session_args(t, sw, cfg):
     return args, budget
 
 
+def lessons_env(sw):
+    """The lessons switch for the session's MCP server: MCOMP_LESSONS on|off, and the store it reads
+    (MCOMP_LESSONS_DIR as this run has it, else the default store)."""
+    env = {"MCOMP_LESSONS": sw.get("lessons") or "off"}
+    if os.environ.get("MCOMP_LESSONS_DIR"):
+        env["MCOMP_LESSONS_DIR"] = os.environ["MCOMP_LESSONS_DIR"]
+    return env
+
+
+def lessons_record(sw):
+    """What the sessions get: how many lessons and a hash of the exact instruction text (lib/learn_store.py)."""
+    import hashlib
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    import learn_store
+    env = dict(os.environ, **lessons_env(sw))
+    text = learn_store.instructions_text(env)
+    s = learn_store.summary(env)
+    return {"lessons_count": s["delivered"] if text else 0,
+            "lessons_hash": hashlib.sha256(text.encode()).hexdigest()[:12] if text else None,
+            "lessons_problem": s["problem"]}
+
+
 def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     args, budget = session_args(t, sw, cfg)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -282,6 +308,7 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
+    env.update(lessons_env(sw))
     timeout = int(t.get("timeout_s", 600))
     events, times = [], []
     t0 = time.time()
@@ -351,8 +378,8 @@ def switches_from(a):
         sw[k] = v if v not in (None, "") else os.environ.get("BENCH_" + k.upper(), d)
     sw["skill"] = os.path.abspath(os.path.expanduser(sw["skill"]))
     if sw["shell"] not in ("allow", "forbid") or sw["coord_guard"] not in ("on", "off") or sw["reset"] not in ("each", "none") \
-            or sw["hub"] not in ("", "on", "off"):
-        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none)")
+            or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off"):
+        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off)")
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
     return sw
@@ -377,7 +404,7 @@ def cmd_run(a):
     claude_v = subprocess.run([trusted_claude(), "--version"], capture_output=True, text=True).stdout.strip()
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
-            "switches": dict(sw, skill_hash=skill_hash(sw["skill"]),
+            "switches": dict(sw, skill_hash=skill_hash(sw["skill"]), **lessons_record(sw),
                              coord_guard_in_bridge=os.path.exists(os.path.join(LAB, "lib", "mcp_hub.py"))
                              and "MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_hub.py")).read()),
             "tasks": [t["id"] for t in tasks],

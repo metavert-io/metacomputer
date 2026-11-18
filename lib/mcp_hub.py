@@ -347,6 +347,18 @@ def tool_names_hash(tools):
     return hashlib.sha256("\n".join(sorted(str(t.get("name")) for t in tools or [])).encode()).hexdigest()[:16]
 
 
+def learned_notes(env=None):
+    """The lessons the user approved with `metacomputer learn` (lib/learn_store.py), as instruction text that
+    goes after HABITS, or "" (none, LESSONS=off, or a store that isn't private). Advice for the model only:
+    no guard reads them. Never fails."""
+    try:
+        import learn_store
+        text = learn_store.instructions_text(env)
+        return text + "\n\n" if text else ""
+    except Exception:
+        return ""
+
+
 def initialize_result(cache, want=None, live_init=None):
     """The initialize answer: the driver's own handshake (cached or live), with who this server is in front."""
     inits = (cache or {}).get("initialize") or {}
@@ -355,7 +367,7 @@ def initialize_result(cache, want=None, live_init=None):
         res = {"protocolVersion": want or "2025-06-18", "capabilities": {"tools": {}},
                "serverInfo": {"name": "cua-driver", "version": pinned_version() or "unknown"}}
     res = json.loads(json.dumps(res))
-    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + (res.get("instructions") or "")
+    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + learned_notes() + (res.get("instructions") or "")
     res.setdefault("capabilities", {}).setdefault("tools", {})["listChanged"] = True
     return res
 

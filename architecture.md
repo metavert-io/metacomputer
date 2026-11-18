@@ -705,6 +705,45 @@ such as the secrets vault ("approval waiting", "vault locked"):
   Files wait in the spool while nothing runs (no command, no watcher). With no
   sink configured, taken events reach only the local log.
 
+## Learning from sessions (`metacomputer learn`)
+
+`metacomputer learn` ([docs/learn.md](docs/learn.md)) closes a loop on the Mac:
+mine the user's own sessions, propose lessons, have the user approve them, give
+them to later sessions, and measure the difference.
+
+```text
+~/.claude/projects/**/*.jsonl ─┐                     ┌─▶ built-in templates (lib/learn.py)
+saved stream-json transcripts ─┤                     │   └─ --draft-with-claude: claude -p, counts only
+results/bench/*/transcript ────┼─▶ lib/learn_mine.py ┤
+LOG_DIR/actions/, events.jsonl ┘   (structured only)  └─▶ proposals.json ──approve──▶ lessons.json
+                                                                                       (0700/0600, private)
+mcp_lazy / hub: initialize ─▶ IDENTITY + HABITS + learned_notes() + the driver's text
+```
+
+- **Reading** (`lib/transcripts.py`, shared with `tests/skill/analyze.py`): both
+  transcript formats, Claude Code's session files and headless stream-json, into
+  an ordered list of tool calls with results and times. A file is parsed only if
+  it holds a tool_use of a metacomputer tool (either prefix); the others are only
+  scanned for that marker. A session saved both ways is counted once.
+- **Mining** (`lib/learn_mine.py`): each failed driver call gets a class from fixed
+  patterns over the driver's and the hub's messages (for a `run_steps` report, its
+  failing step's line), each action a route (tool, target kind, delivery mode,
+  scope), each call an app from a fixed list (learned from `list_windows`,
+  `launch_app` and read results by window id and pid). It keeps only those, counts
+  and times; the VM's text is never copied. Transcripts are mined one at a time.
+- **Proposals** (`lib/learn.py`): templates keyed by pattern, filled with counts and
+  fixed names; optional drafts from one tool-less `claude -p` session that gets the
+  structured summary only, checked before they are proposed.
+- **Store** (`lib/learn_store.py`): `~/.local/share/metacomputer/lessons/`
+  (`LESSONS_DIR`), written atomically under a lock, read only when private.
+- **Delivery**: `mcp_hub.initialize_result()` appends `learned_notes()` after the
+  habits. Claude Code's bridge (`mcp-lazy`) answers `initialize` itself, from its
+  own environment, so the lessons and `LESSONS` follow each client (the benchmark's
+  `--lessons` switch relies on this); the hub does the same for the clients it
+  answers. No guard reads the store, and lessons aren't part of the hub's settings.
+- **Measuring**: `learn bench` runs `bench/bench.py run --lessons off`, then `on`,
+  on a test VM, and compares the two with `bench/report.py`.
+
 ## Known limitations
 
 - **Lume VNC is not loopback-only.** `_VZVNCServer` listens on every interface;

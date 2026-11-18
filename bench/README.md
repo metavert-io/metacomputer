@@ -128,6 +128,7 @@ version and the model.
 | `--budget USD` | `BENCH_BUDGET` | `3` | Per-task cap (`--max-budget-usd`); a task file can set `budget_usd` |
 | `--cap USD` | `BENCH_CAP` | `60` | The whole run's cap: a task doesn't start if its budget could take the total over |
 | `--reset each\|none` | `BENCH_RESET` | `each` | Reset the VM to its baseline before every task |
+| `--lessons on\|off` | `BENCH_LESSONS` | `off` | `on`: the sessions' MCP instructions carry the lessons approved with `metacomputer learn` (from `MCOMP_LESSONS_DIR`, else the default store), passed as `MCOMP_LESSONS`; `run.json` records how many and a hash of the exact text (`lessons_count`, `lessons_hash`). `metacomputer learn bench` runs off, then on, and compares them (docs/learn.md) |
 
 On screen size: the VM's display device offers many modes (from 1280x800 up to
 4096x2160), and `xrandr` switches between them while the VM runs. The desktop
