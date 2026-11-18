@@ -56,7 +56,7 @@ Firefox, human). Words in the request override them.
 Use the same `session` label on every call. Refs change after each snapshot and each navigation.
 
 1. **Launch.** `browser_prepare {session: S, allow_launch: true, profile: {mode: "isolated_new"}}` launches Chrome on a throwaway profile and returns `prepared_pid`. Use `{mode: "isolated_named", name: N}` only when the user wants a profile kept (see Profiles).
-2. **Window.** `list_windows {pid}`, then maximize it: `set_window_frame {x:0, y:27, width:1920, height:1000}`.
+2. **Window.** `list_windows {pid}` gives its `window_id`. It opens about half the screen wide; maximize it (`set_window_frame {x:0, y:27, width:1920, height:1000}`) only for a recording or a look at the page, since the page tools don't need it.
 3. **Bind.** `get_browser_state {pid, window_id, session}` returns `target_id` and `tab_id`. Go on only when it says `binding_quality: "exact"` and `mutation_allowed: true`.
 4. **Navigate.** `browser_navigate {target_id, tab_id, session, url}`. Only `http`, `https` and `about:` work.
 5. **Read.**
