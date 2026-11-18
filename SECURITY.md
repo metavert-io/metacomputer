@@ -842,23 +842,24 @@ Application Activity). A suggested mapping; fields without a clear home go in
 - **Your phone**: an `ntfy` sink (ntfy.sh or your own server; the topic works like a
   password, so `--url ask`, and `--header 'Authorization: {ask}'` for an access token).
 
-### Telling you it waits (the events spool)
+### Telling you it waits (events)
 
-metacomputer leaves a small JSON file in `~/Library/Application Support/metacomputer/events/spool/`
-(made 0700 if missing; `MCOMP_EVENTS_SPOOL` names another folder) for its optional
-event stream, or any notifier, to pick up and deliver. One file per event, named
-`<UTC YYYYMMDDTHHMMSS.ffffffZ>-<random>.json`, written under a dot-name and then
-renamed:
-- `approval_waiting` (family `needs_you`, severity `warn`), from the unlock
-  process while a question waits for you: which secret, the use, the site, the VM and
-  the requester's project, with the action `Type NAME in the vault's terminal to allow`;
-- `vault_locked` (`needs_you`, `warn`), from `metacomputer secrets fill|session|token`
-  when the vault is locked, with the action `Run metacomputer secrets unlock in your
-  own terminal` (with the event stream installed, its own hook reports this instead).
-
-Fields: `family`, `type`, `severity`, `vm`, `message`, `action`, `project` (the
-requester's folder), `data`. Never a value or a token. Writing one never blocks or
-fails a request.
+The vault tells metacomputer's event stream ([docs/events.md](docs/events.md)) when
+something waits for you:
+- `needs_you.approval_waiting` (severity `warn`), from the unlock process while a
+  question waits for you: which secret, the use, the site, the VM and the requester's
+  project, with the action `Type NAME in the vault's terminal to allow`. The unlock
+  process leaves it as a file in the event spool,
+  `~/Library/Application Support/metacomputer/events/spool/` (made 0700 if missing;
+  `MCOMP_EVENTS_SPOOL` names another folder), one file per event, named
+  `<UTC YYYYMMDDTHHMMSS.ffffffZ>-<random>.json`, written under a dot-name and then
+  renamed; the event stream takes it from there. Fields: `family`, `type`,
+  `severity`, `vm`, `message`, `action`, `project` (the requester's folder), `data`.
+  Never a value or a token, and writing it never blocks or fails a request.
+- `needs_you.vault_locked`, when `metacomputer secrets fill`, `session save|load` or
+  `token` exits 3 because the vault is locked: the event stream's own exit hook in
+  `bin/metacomputer` reports it (once, at most every 5 minutes, and not when you ran
+  the command yourself at a terminal).
 
 ### If you know AWS KMS, Secrets Manager or HashiCorp Vault
 

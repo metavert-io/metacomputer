@@ -555,7 +555,10 @@ def run(td, procs):
     conf = os.path.join(td, "ops-vm.env")
     open(conf, "w").write(f'VM_NAME=opsvm\nSSH_PORT={port}\nSSH_DIR="{sshdir}"\nRUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\n'
                           f'ACTION_LOG=on\nACTION_LOG_KEY="{sshdir}/action-log"\nGUEST_USER=cua\n')
-    wrapper = {"MCOMP_CONFIG": conf, "MCOMP_VAULT_BIN": BIN, "MCOMP_VAULT_ALLOW_TEST_BUILD": "1", "MCOMP_EVENTS_SPOOL": spool}
+    # MCOMP_EVENTS_DIR: the event stream's settings and state in a folder of the test's own (no sinks), so
+    # nothing reaches the user's real event sinks.
+    wrapper = {"MCOMP_CONFIG": conf, "MCOMP_VAULT_BIN": BIN, "MCOMP_VAULT_ALLOW_TEST_BUILD": "1", "MCOMP_EVENTS_SPOOL": spool,
+               "MCOMP_EVENTS_DIR": os.path.join(td, "events-cfg")}
     mc = os.path.join(LAB, "bin/metacomputer")
     rc, out = tty([mc, "secrets", "bind", "--gateway", my_exe], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")],
                   extra=wrapper)
@@ -569,28 +572,23 @@ def run(td, procs):
                   [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
     check("bind a second VM with a proxy account", rc == 0, out)
 
-    # --- 4. locked: exit 3 and the events spool ---------------------------------------------------------
+    # --- 4. locked: exit 3, and one needs_you/vault_locked event from the event stream's exit hook -------------
+    def locked_events():
+        lp = os.path.join(td, "logs", "events.jsonl")
+        evs = [json.loads(l) for l in open(lp)] if os.path.exists(lp) else []
+        return [e for e in evs if e.get("family") == "needs_you" and e.get("type") == "vault_locked"]
     r = subprocess.run([mc, "secrets", "fill", "web-login", "--field", "password"], capture_output=True, text=True,
-                       env=dict(env, **wrapper), timeout=120)
+                       env=dict(env, **wrapper), timeout=120, stdin=subprocess.DEVNULL)
     outputs.append(r.stdout + r.stderr)
-    evs = [e for e in spool_events() if e.get("type") == "vault_locked"]
-    check("metacomputer secrets fill while locked: exit 3 and a vault_locked event in the spool", r.returncode == 3 and len(evs) == 1
-          and evs[0].get("family") == "needs_you" and evs[0].get("severity") == "warn" and evs[0].get("vm") == "opsvm"
-          and "web-login" in evs[0].get("message", "") and "unlock" in evs[0].get("action", "") and evs[0].get("project"),
+    evs = locked_events()
+    check("metacomputer secrets fill while locked: exit 3 and one needs_you/vault_locked event (the event stream's hook)",
+          r.returncode == 3 and len(evs) == 1 and evs[0].get("severity") == "warn" and "unlock" in (evs[0].get("action") or ""),
           (r.returncode, evs))
-    r = subprocess.run([mc, "secrets", "token", "api1"], capture_output=True, text=True, env=dict(env, **wrapper), timeout=120)
-    check("metacomputer secrets token while locked: exit 3, another event", r.returncode == 3
-          and len([e for e in spool_events() if e.get("type") == "vault_locked"]) == 2)
-    names = os.listdir(spool)
-    check("spool files: <UTC YYYYMMDDTHHMMSS.ffffffZ>-<random>.json, no temp files left",
-          all(SPOOL_NAME.fullmatch(n) for n in names), names)
-    fresh = os.path.join(td, "new-spool", "spool")
-    r = subprocess.run([mc, "secrets", "fill", "web-login", "--field", "password"], capture_output=True, text=True,
-                       env=dict(env, **dict(wrapper, MCOMP_EVENTS_SPOOL=fresh)), timeout=120)
-    check("a missing spool folder is made (0700), with the event in it", r.returncode == 3 and os.path.isdir(fresh)
-          and (os.stat(fresh).st_mode & 0o777) == 0o700 and len([n for n in os.listdir(fresh) if SPOOL_NAME.fullmatch(n)]) == 1)
-    for f in glob.glob(os.path.join(spool, "*.json")):
-        os.remove(f)
+    r = subprocess.run([mc, "secrets", "token", "api1"], capture_output=True, text=True, env=dict(env, **wrapper), timeout=120,
+                       stdin=subprocess.DEVNULL)
+    check("metacomputer secrets token while locked: exit 3, and still just one vault_locked (no second report, no spool file "
+          "of the wrapper's own)", r.returncode == 3 and len(locked_events()) == 1
+          and not any(e.get("type") == "vault_locked" for e in spool_events()), (r.returncode, len(locked_events())))
 
     # --- 5. rekey and recover ----------------------------------------------------------------------------
     salt0 = hdr["kdf"].get("salt")
@@ -1048,8 +1046,7 @@ def run(td, procs):
     check("verify-audit.py reports the tamper notice in a capture", r.returncode == 1 and "tamper notice" in r.stdout, r.stdout)
 
     # --- 7. requester identities, approval scopes, projects ---------------------------------------------
-    for f in glob.glob(os.path.join(spool, "*.json")):
-        os.remove(f)
+    shutil.rmtree(spool, ignore_errors=True)       # the unlock process makes the spool folder itself when it's missing
     p, outs = as_claude(proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
                         ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
     u.expect("Type web-each to allow")
@@ -1060,8 +1057,14 @@ def run(td, procs):
     check("while it waits, a needs_you/approval_waiting event is in the spool (which secret, the VM, the project; what to type)", ev
           and ev[0].get("family") == "needs_you" and ev[0].get("vm") == "opsvm" and "web-each" in ev[0].get("message", "")
           and ev[0].get("project") == proj1 and ev[0].get("action") == "Type web-each in the vault's terminal to allow"
-          and all(SPOOL_NAME.fullmatch(n) for n in os.listdir(spool))
+          and all(SPOOL_NAME.fullmatch(n) for n in os.listdir(spool)) and (os.stat(spool).st_mode & 0o777) == 0o700
           and not any(v in json.dumps(ev) for v in VALUES), ev)
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    import events as mcevents   # the merged event stream's own spool parser
+    taken = mcevents.spool_event(ev[0], time.time()) if ev else None
+    check("the event stream takes the vault's spool file as is (needs_you/approval_waiting isn't reserved or refused)",
+          taken is not None and taken["family"] == "needs_you" and taken["type"] == "approval_waiting" and taken["origin"] == "spool",
+          taken)
     u.send("web-each session\n")
     res = claude_results(p, outs)
     check("'NAME session': this use and the next from the same Claude Code process, without asking again",

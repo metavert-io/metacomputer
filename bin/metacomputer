@@ -1001,7 +1001,7 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       printf '%s\n' "$out"
       # The action log gets metadata only: never the token itself.
       printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
-      [ "$rc" = 3 ] && secrets_locked_event "$kind" "$out"
+      # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
       return $rc ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
@@ -1013,45 +1013,6 @@ for line in sys.stdin:
     except ValueError: continue
     if isinstance(d, dict):
         d.pop("token", None); print(json.dumps(d, sort_keys=True))' 2>/dev/null || true
-}
-secrets_locked_event() { # KIND RESULT: a needs_you/vault_locked file in the events spool (architecture.md, "Event spool")
-  # With the event stream installed, its own EXIT hook reports this exit 3; don't report it twice.
-  declare -F events_hook_secrets_exit >/dev/null 2>&1 && return 0
-  local spool="${MCOMP_EVENTS_SPOOL:-$HOME/Library/Application Support/metacomputer/events/spool}"
-  "$PY" - "$spool" "$1" "$2" "$VM_NAME" "$PWD" >/dev/null 2>&1 <<'PYEOF' || true
-import datetime, json, os, secrets, stat, sys
-spool, kind, result, default_vm, cwd = sys.argv[1:6]
-os.makedirs(spool, mode=0o700, exist_ok=True)
-st = os.lstat(spool)
-if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-    sys.exit(0)
-try:
-    res = json.loads(result.strip().splitlines()[-1]) if result.strip() else {}
-except (ValueError, IndexError):
-    res = {}
-res = res if isinstance(res, dict) else {}
-def short(v, n=64):
-    return "".join(c for c in str(v) if c.isprintable())[:n]
-name, vm = short(res.get("name") or "?"), short(res.get("vm") or default_vm)
-what = {"secrets_fill": "fill", "secrets_token": "API token", "secrets_session_save": "session save",
-        "secrets_session_load": "session load"}.get(kind, kind)
-ev = {"family": "needs_you", "type": "vault_locked", "severity": "warn", "vm": vm, "project": cwd,
-      "message": f"metacomputer secrets is locked: the {what} for {name} on VM {vm} was refused",
-      "action": "Run metacomputer secrets unlock in your own terminal, then ask Claude to try again",
-      "data": {"op": what, "name": name}}
-now = datetime.datetime.now(datetime.timezone.utc)
-base = now.strftime("%Y%m%dT%H%M%S.%fZ") + "-" + secrets.token_hex(8) + ".json"
-tmp = os.path.join(spool, "." + base + ".tmp")
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-try:
-    os.write(fd, (json.dumps(ev, sort_keys=True) + "\n").encode())
-finally:
-    os.close(fd)
-try:
-    os.rename(tmp, os.path.join(spool, base))
-except OSError:
-    os.unlink(tmp)
-PYEOF
 }
 
 case "$cmd" in

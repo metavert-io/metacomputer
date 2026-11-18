@@ -487,7 +487,8 @@ def run(td, procs):
     conf = os.path.join(td, "test-vm.env")
     open(conf, "w").write(f'VM_NAME=testvm\nSSH_PORT={port}\nSSH_DIR="{sshdir}"\nRUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\n'
                           f'ACTION_LOG=on\nACTION_LOG_KEY="{sshdir}/action-log"\nGUEST_USER=cua\n')
-    wrapper = {"MCOMP_CONFIG": conf, "MCOMP_VAULT_BIN": BIN, "MCOMP_VAULT_ALLOW_TEST_BUILD": "1"}
+    wrapper = {"MCOMP_CONFIG": conf, "MCOMP_VAULT_BIN": BIN, "MCOMP_VAULT_ALLOW_TEST_BUILD": "1",
+               "MCOMP_EVENTS_DIR": os.path.join(td, "events-cfg")}   # never the user's own event sinks
     mc = os.path.join(LAB, "bin/metacomputer")
     r = subprocess.run([mc, "secrets", "status"], capture_output=True, text=True,
                        env=dict(env, MCOMP_CONFIG=conf, MCOMP_VAULT_BIN=BIN), timeout=60)

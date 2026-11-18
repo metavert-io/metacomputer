@@ -362,8 +362,10 @@ pseudo-terminal for the rest of the vault:
   required sink isn't forwarded; the request parser refusing overflowing chunk sizes, huge or
   doubled Content-Length, CL with TE, other transfer codings, bare CR/LF, NULs, folded
   headers, absolute URIs, CONNECT and HTTP/2.0, with the unlock process still serving;
-- **the events spool:** `approval_waiting` while a question waits, `vault_locked` from
-  `bin/metacomputer` on exit 3, file names and a folder made if missing.
+- **events:** an `approval_waiting` spool file while a question waits (its name, a
+  folder made if missing); on exit 3 through `bin/metacomputer`, one `vault_locked`
+  event from the event stream's hook (in a test events folder) and no spool file of
+  the wrapper's own.
 
 `python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.

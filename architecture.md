@@ -264,10 +264,11 @@ The rest of the vault, briefly (details in SECURITY.md):
   MAC), and, for a required sink, waits for that sink to acknowledge the `begin` record
   of each use. `scripts/verify-audit.py` checks the log and sink captures;
   `audit --verify` checks the MACs.
-- **Needs-you files**: while a question waits, the unlock process drops an
-  `approval_waiting` file into the event spool
-  (`~/Library/Application Support/metacomputer/events/spool/`); `bin/metacomputer`
-  drops `vault_locked` on exit 3.
+- **Needs-you events**: while a question waits, the unlock process drops a
+  `needs_you.approval_waiting` file into the event spool
+  (`~/Library/Application Support/metacomputer/events/spool/`, under the "Event spool"
+  contract below); on exit 3 (locked), the event stream's exit hook in
+  `bin/metacomputer` reports `needs_you.vault_locked`.
 
 Threat model and limits: [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
