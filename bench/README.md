@@ -290,8 +290,9 @@ screenshots come from the skill: main's skill had gained a section on pixels
 since `hub-on` (screenshot-only reads before pixel clicks), so this comparison
 is not of the driver alone.
 
-A session that uses `metacomputer sh` can stop a run that was started from
-inside Claude Code ("another controller is using …"): the session's claim is
-credited to the Claude Code process that started the runner, which outlives the
-session. Run the same `--run-id` again once `metacomputer who` shows that claim
-idle (ten minutes) to carry on.
+A session's claims go with that session: Claude Code is recognized however it's
+installed, including the native installer's `~/.local/share/claude/versions/X.Y.Z`
+(before 2026-11-18 that one wasn't, so a run started from inside Claude Code could
+stop with "another controller is using …" after a task that used `metacomputer sh`).
+If a run stops on another controller anyway, `metacomputer who` names it; run the
+same `--run-id` again once it's idle.
