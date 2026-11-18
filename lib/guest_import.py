@@ -76,6 +76,10 @@ class _TarInfo(tarfile.TarInfo):
     budget for the stream (ImportLimit)."""
 
     def _proc_member(self, tf):
+        if not isinstance(self.size, int) or self.size < 0:
+            # base-256 sizes can be negative, and some tarfile versions (3.9) read such a payload as empty
+            # without moving on, while it would subtract from the budgets below: refused on every version
+            raise ImportLimit(f"a tar header with a negative size ({self.size})")
         if self.type == tarfile.GNUTYPE_SPARSE:
             raise ImportLimit("a GNU sparse entry (`tar -cf` makes none)")
         if self.type not in EXT_TYPES:

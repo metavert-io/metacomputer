@@ -479,6 +479,33 @@ def hostile_metadata_checks(td):
     check("every extension header counts against one metadata budget for the stream",
           isinstance(rep.failure, gi.ImportLimit) and "metadata budget" in str(rep.failure) and rep.files < 60,
           (rep.failure, rep.files))
+    # A negative size (base-256 in the size field) would subtract from those budgets where tarfile accepts it
+    # (Python 3.9 does): refused first, whatever the Python.
+    neg = negative_size(tarfile.TarInfo.create_pax_global_header({"comment": "x"})[:512], -(1 << 30))
+    gh = tarfile.TarInfo.create_pax_global_header({"comment": "y" * 30000})
+    body = b"".join(gh + bare_member(f"f{i}.txt") for i in range(20))   # 600 KB of global pax, never in a row
+    rep = gi.import_tar(io.BytesIO(neg + body + one_member()), dest())
+    check("a tar header with a negative size is refused before any budget counts it",
+          isinstance(rep.failure, gi.ImportLimit) and "negative" in str(rep.failure), rep.failure)
+    rep = gi.import_tar(io.BytesIO(negative_size(one_member()[:512], -512) + b"\0" * 1024), dest())
+    check("…for an ordinary entry too", isinstance(rep.failure, gi.ImportLimit) and "negative" in str(rep.failure),
+          rep.failure)
+
+
+def bare_member(name, data=b"ok\n"):
+    """One file entry (header and data blocks), with no end-of-archive blocks after it."""
+    ti = tarfile.TarInfo(name)
+    ti.size = len(data)
+    return ti.tobuf(tarfile.USTAR_FORMAT) + data.ljust(512, b"\0")
+
+
+def negative_size(header, size):
+    """A 512-byte tar header with its size field set to a negative number (base-256), checksum fixed."""
+    h = bytearray(header[:512])
+    h[124:136] = b"\xff" + (256 ** 11 + size).to_bytes(11, "big")
+    h[148:156] = b" " * 8
+    h[148:156] = b"%06o\0 " % sum(h)
+    return bytes(h)
 
 
 PRODUCER = r'''

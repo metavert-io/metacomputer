@@ -139,8 +139,10 @@ server, the CLI and an SDK share, so references and state carry over.
 - **One per VM.** `RUN_DIR/hub/hub.pid` is held under `flock` while the hub runs;
   a second hub for the same VM exits (code 3). A client that finds no socket
   starts one (`mcp_hub.py serve`, detached, logging to `LOG_DIR/hub.log`,
-  rotated at 5 MB while it runs, with one old copy and repeated notes of one kind
-  summarized past five a minute) and waits for its socket. A client whose settings differ (another `ACTION_LOG`,
+  rotated at 5 MB while it runs, with one old copy; past five notes of one kind
+  in a minute the rest are counted, with a few examples, in a summary line written
+  when the minute ends, a driver connection closes or the hub stops) and waits for
+  its socket. A client whose settings differ (another `ACTION_LOG`,
   `DRIVER_MODE`, `COORD_GUARD`, …) is refused while others use the hub; when
   it's alone the hub restarts with that client's settings.
 - **When it ends.** After `HUB_IDLE` (10 minutes) with no client, no call in
@@ -180,21 +182,41 @@ server, the CLI and an SDK share, so references and state carry over.
   connection, failing every call in flight. A driver that doesn't take a message
   within 30 s is dropped the same way, so a stuck VM can't hold every client's
   call forever. JSON nested more than 100 levels deep, or with more than a
-  million values (counted before parsing), is a bad line, skipped
-  (`lib/wirelimits.py`, whose depth check keeps one iterator per level; the
-  readers' cleanup runs whatever stops them). So is a message of the wrong
-  shape (an id, method or params of the wrong type); past 50 bad lines in a
-  minute the hub closes the driver connection like an oversized one. What
+  million values (counted before parsing, outside strings: the top value,
+  containers, commas and colons; strings are skipped in one linear pass with
+  `find()`, no regular expression), isn't parsed (`lib/wirelimits.py`'s
+  `LimitError`; its depth check keeps one iterator per level; the readers'
+  cleanup runs whatever stops them). When such a line's top-level `id` names
+  one of the hub's requests (`c<client>.<n>`; `wirelimits.top_level_id`, one
+  linear pass following nesting outside strings, so nested ids and ids inside
+  strings never count, and two ids or anything but one complete object give
+  none), that request is answered at once with an error (`answer_too_complex`);
+  otherwise it's a bad line, skipped, and no request is touched. So is a
+  message of the wrong shape (an id, method or params of the wrong type); past
+  50 bad lines in a minute on one driver connection (each counted on its own)
+  the hub closes it like an oversized one. What
   the driver can make the hub keep is capped regardless of message size: a tool
   list refresh stops after 50 pages, 2,000 tools, 16 MB, 60 s or a repeated
   cursor (the earlier list stays); pid, window and snapshot maps and screenshot
   layouts keep the newest few thousand entries, and a layout keeps only checked
-  geometry, at most 256 windows each and 32,768 in all. The driver connection's stderr
+  geometry, at most 256 windows each (a longer list is marked incomplete) and
+  32,768 in all. The driver connection's stderr
   is drained on a thread into a 64 KB tail (what error messages quote) and at
   most 1 MB per connection in `RUN_DIR/hub/upstream.stderr`.
 - **Reconnecting.** When the driver connection drops (the VM stopped or
   restarted), every pending request fails with a plain message, everything the
   hub learned about that runtime is forgotten, and the next call reconnects.
+  Each driver connection runs in a process group of its own (the relay and its
+  SSH, or SSH alone); the hub ends a connection by ending the group (SIGTERM,
+  3 s for the relay to sign its log, then SIGKILL) before it fails that
+  connection's calls, and keeps each connection's process by generation until its
+  reader is done, so a connection it no longer uses for new calls (after a
+  bounded session ended) can still be ended. Ending runs once per connection
+  under a lock (the lease keeper, the reader and shutdown may all ask), waits
+  for the leader without reaping it (`waitid(WNOWAIT)`, or kqueue), and reaps it
+  only after the group's SIGKILL, so the group id can't be reused while it's
+  signalled; nothing else reaps it (liveness comes from the reader seeing the end
+  of the output), and a leader reaped elsewhere means no signal at all.
 
 With `MCP_HUB=off` the same core runs inside each client instead, over a
 socketpair: Claude Code's bridge and `metacomputer call` each have their own
@@ -222,12 +244,14 @@ no refusals), and the GUI and option tests pass with both on.
   hub holds the computer for them in a claim of its own (kind `lease`,
   `.run/owners/<hub pid>.json`), written before the client's claim is dropped,
   both under the owners lock (if it can't be written, the client's claim stays
-  until a later write works). A keeper thread rewrites it while those calls run,
-  so it stays active; it's dropped when the last of them is answered or the
+  until a later write works, and meanwhile the hub's own record of the lease
+  counts as another controller). A keeper thread rewrites it while those calls
+  run, so it stays active; it's dropped when the last of them is answered or the
   driver connection closes, and past the activity window (`MCOMP_ACTIVE_S`) the
-  keeper closes the driver connection first, so nothing keeps acting after the
-  computer is let go. Removing a request, assigning it to a lease and finishing
-  it happen under one lock. An acting call another controller still has running
+  keeper looks again at which of its calls still run and ends the connections
+  they were sent on (their generations, not whichever is current), so nothing
+  keeps acting after the computer is let go. Removing a request, assigning it to
+  a lease and finishing it happen under one lock. An acting call another controller still has running
   counts as busy even without its claim file (`who` and the refusal describe
   it). A lease isn't another controller to the same client process or its Claude
   Code session. `metacomputer stop/reset/restore/test`
@@ -247,10 +271,12 @@ no refusals), and the GUI and option tests pass with both on.
     resolved: any that's Chrome makes the call Chrome's; a token from a read the
     hub doesn't have is refused whatever else the call names
     (`element_token_unknown`: read the window again), a window id the driver
-    doesn't list is refused (`window_unknown`), and a token whose app differs from
-    the pid or window the call names is refused (`target_conflict`). A
-    `run_steps` step is judged on its own target when it names one, else on its
-    batch's;
+    doesn't list is refused (`window_unknown`), and a pid, window id and token
+    that don't all belong to one app are refused (`target_conflict`). A
+    `run_steps` step is judged on its own target when it names one; one that
+    names none runs, in the driver, in the window the last step that named one
+    acted in (or the batch's), and the hub judges it the same way, the stricter
+    verdict counting where both could apply;
   - rewrites input tools and `run_steps` aimed at Chrome to
     `delivery_mode: "foreground"`;
   - refuses `set_value` and `run_script` aimed at Chrome;
@@ -311,7 +337,9 @@ which a batch shares (it's reused until the next action is passed on, at most
 1 s). Layouts are kept per driver session and window and forgotten when the
 driver connection drops. When the hub saw no screenshot for that session and
 window, or `list_windows` fails, the action is passed on and the driver's own
-checks decide. Not covered: popup menus (`list_windows` doesn't list them),
+checks decide. When the layout at the screenshot or now had more windows than a
+layout keeps (256), the action is refused instead (`too_many_windows`): a window
+left out could be the target or what covers it. Not covered: popup menus (`list_windows` doesn't list them),
 windows named only by title in a batch step, `run_script`'s `[x, y]`
 targets, and `parallel_mouse_drag`'s paths. The active window isn't reported by `list_windows`, and on its own it
 doesn't change where a point lands; a window raised over the point is caught
@@ -328,7 +356,8 @@ to move, resize, open, close or raise a window is refused before anything runs
 - a press on the desktop frame (`scope: "desktop"`: a title bar, its buttons,
   a window edge);
 - a click on a dialog's button named by role and name (OK, Cancel, Close,
-  Save, Open, Apply, Yes, No, Don't Save, …);
+  Save, Open, Apply, Yes, No, Don't Save, …), or on a window's own control
+  (Maximize, Minimize, Restore, Full screen);
 - `press_key` / `hotkey` with Super, Meta, Alt or Hyper (window-manager
   shortcuts), a function key (F11 is full screen), Ctrl with N, W, Q, O, S
   or P (new, close, quit; the open, save and print dialogs), or Escape (closes
@@ -339,8 +368,11 @@ The rule is narrow on purpose: a single plain click inside a window, typing
 don't count, although a click or Return can open or close a dialog, because
 the benchmark's own batches put pixel clicks after them (click a field,
 Ctrl+A, type, Return, click the next field). Checked against the 373 recorded
-benchmark batches: the rule refuses none of them; counting Return would refuse
-three. The refusal says to send the steps up to
+benchmark batches: the rule refuses none of them; counting single clicks would
+refuse 10, Return 3 and typed newlines 2. So a plain pixel click on a title-bar
+button an app draws inside its window, or Return accepting a dialog, can still
+change what later pixels in the same batch hit; the driver's own frame checks
+are what's left for those. The refusal says to send the steps up to
 that one on their own, take a fresh screenshot and aim from it.
 
 The direct bridge, `bin/metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1`, is

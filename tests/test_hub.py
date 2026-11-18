@@ -67,8 +67,10 @@ results = []
 # A stand-in for Cua Driver's MCP server. Windows come from STATE/windows.json (the test moves them);
 # snapshots, sessions and recordings live as long as the process; every message is logged.
 FAKE_DRIVER = r'''
-import json, os, sys, time
+import json, os, signal, sys, time
 STATE = sys.argv[1]
+if os.environ.get("FAKE_IGNORE_TERM"):     # a driver (or the SSH under a relay) that ignores SIGTERM
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 TOOLS = json.load(open(os.path.join(STATE, "tools.json")))
 PNG = "iVBORw0KGgo="
 snaps, sessions, recording = {}, set(), {}
@@ -214,6 +216,20 @@ for line in sys.stdin:
         for _ in range(int(a.get("size", 100))):
             send({"jsonrpc": "2.0", "method": "notifications/progress", "params": "not an object"})
         ok(mid, "after the bad messages")
+    elif name == "commas":               # a big text full of commas, brackets and colons: few values
+        ok(mid, "a,[b]{c}:" * int(a.get("size", 1000)))
+    elif name == "toomany":              # an answer with more values than the hub takes
+        out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"content":[{"type":"text","text":"x"}],'
+                  '"v":[' + ",".join(["0"] * int(a.get("size", 10))) + ']}}\n'); out.flush()
+    elif name == "hold":                 # takes the call and doesn't answer it (its id is kept for the next two)
+        open(os.path.join(STATE, "held"), "w").write(json.dumps(mid))
+    elif name in ("nestedid", "nestedonly"):   # an answer over the hub's limits naming the held call's id inside it
+        held = json.load(open(os.path.join(STATE, "held")))
+        top = ('"id":' + json.dumps(mid) + ',') if name == "nestedid" else ""
+        out.write('{"jsonrpc":"2.0",' + top + '"result":{"content":[{"type":"text","text":"x"}],"rows":[{"id":'
+                  + json.dumps(held) + '}],"v":[' + ",".join(["0"] * int(a.get("size", 10))) + ']}}\n'); out.flush()
+        if name == "nestedonly":
+            ok(mid, "after the nested id")
     elif name == "deep":                 # a small line nested far deeper than any parser recursion
         out.write("[" * int(a.get("size", 100000)) + "\n"); out.flush()
         out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"deep":' + "[" * 5000 + "]" * 5000 + '}}\n')
@@ -271,7 +287,7 @@ def setup_driver():
     extra = {"type": "object", "properties": {"session": {"type": "string"}, "s": {"type": "number"},
                                               "size": {"type": "integer"}, "tag": {"type": "string"}}}
     for n in ("whoami", "echo", "slow", "big", "huge", "nonl", "die", "deaf", "expire", "listchange", "flood",
-              "stderrflood", "deep", "badflood"):
+              "stderrflood", "deep", "badflood", "commas", "toomany", "hold", "nestedid", "nestedonly"):
         tools.append({"name": n, "description": "test tool", "inputSchema": extra})
     json.dump(tools, open(os.path.join(STATE, "tools.json"), "w"))
     open(FAKE, "w").write(FAKE_DRIVER)
@@ -1278,8 +1294,9 @@ def deep_checks():
     h = client(r)
     res = h.call("deep", {})
     again = h.call("whoami", {})
-    check("the hub skips a 100,000-deep line and a 5,000-deep answer from the driver; its reader lives on",
-          not res.is_error and "after the deep lines" in res.text and again.structured.get("driver_pid"), res.text[:200])
+    check("the hub skips a 100,000-deep line and answers the call a 5,000-deep answer names with an error; its "
+          "reader lives on", res.is_error and res.structured.get("code") == "answer_too_complex"
+          and again.structured.get("driver_pid"), res.text[:200])
     s = mcp_hub.connect_or_start(r.env, start=False)
     f = s.makefile("rb")
     s.sendall((json.dumps({"jsonrpc": "2.0", "id": 0, "method": "metacomputer/hello",
@@ -1847,6 +1864,413 @@ def status_claim_checks():
     clear_claims()
 
 
+# --- third round ---------------------------------------------------------------------------
+def answer_limit_checks():
+    print("#6: values are counted outside strings, and an answer over the limit is answered, not dropped")
+    clear_claims()
+    r = Running()
+    h = client(r)
+    res = h.call("commas", {"size": 400_000})
+    check("a 3.6 MB text with 1.6 million commas, brackets and colons (a handful of values) passes whole",
+          not res.is_error and res.text.count(",") == 400_000, res.text[:120])
+    t0 = time.time()
+    res = h.call("toomany", {"size": 1_100_000})
+    took = time.time() - t0
+    check("an answer with more values than the hub takes gets an error at once, not a wait until the client gives up",
+          res.is_error and res.structured.get("code") == "answer_too_complex" and took < 10, (took, res.text[:120]))
+    check("…and it isn't counted as the driver breaking the protocol (same connection, nothing counted)",
+          not h.call("whoami", {}).is_error and not r.hub._bad_upstream, list(r.hub._bad_upstream))
+    h.close()
+    r.stop()
+    clear_claims()
+
+
+def wait_until(cond, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return cond()
+
+
+def lease_files():
+    return [c for c in owners.claims() if c.get("kind") == "lease"]
+
+
+# A stand-in for the action log's relay: the driver runs as its child (here it shares the relay's stdout, as an
+# SSH that outlives its relay would keep the connection open) and ignores SIGTERM; the relay notes its SIGTERM.
+TREE_RELAY = r'''
+import os, signal, subprocess, sys
+mark = sys.argv[1]
+child = subprocess.Popen(sys.argv[2:], env=dict(os.environ, FAKE_IGNORE_TERM="1"))
+open(os.path.join(mark, "child.pid"), "w").write(str(child.pid))
+def term(*_):
+    open(os.path.join(mark, "finalized"), "w").write("1")
+    os._exit(0)
+signal.signal(signal.SIGTERM, term)
+child.wait()
+'''
+
+
+def lease3_checks():
+    print("#2-#4: a lease ends its own connection's whole process tree, and counts even when it couldn't be written")
+    clear_claims()
+    saved = (mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, getattr(mcp_hub, "TRANSPORT_GRACE_S", None))
+    mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S = 0.2, 3, 1.0
+    real = owners.write_claim
+    try:
+        # #2: the bounded session ended (the hub dropped that connection as current) while a leased call still runs
+        # on it; a new connection serves the next call. At the lease's end, the old one is ended, never the new one.
+        r = Running()
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        old = h.call("whoami", {}).structured["driver_pid"]
+        h.call("slow", {"s": 60})
+        h.close()
+        wait_until(lambda: r.hub.leases, 5)
+        r.hub.bounded_ended()
+        h2 = client(r)
+        new = h2.call("whoami", {}).structured.get("driver_pid")
+        gone = wait_until(lambda: not r.hub.leases and not lease_files(), 15)
+        check("past its longest life a lease ends the connection its calls run on (an earlier one), not the current one",
+              gone and old != new and not owners.alive(old) and owners.alive(new), (gone, old, new, owners.alive(old),
+                                                                                     owners.alive(new)))
+        h2.close()
+        r.stop()
+        clear_claims()
+        # #3: the lease can't be written and the client exits (its own claim goes with its process): the hub's
+        # record of the running call still holds the computer for everyone else
+        r = Running()
+        owners.write_claim = lambda pid, *a, **k: (_ for _ in ()).throw(OSError("disk full")) \
+            if k.get("kind") == "lease" else real(pid, *a, **k)
+        sub = subprocess.Popen([PY, "-c", (
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import mcomp_sdk\n"
+            "h = mcomp_sdk.Hub(env=json.loads(sys.argv[2]), kind='sdk', timeout=1).connect()\n"
+            "h.call('slow', {'s': 30}); h.close()\n"), os.path.join(LAB, "lib"), json.dumps(r.env)])
+        sub.wait(30)
+        wait_until(lambda: r.hub.leases, 5)
+        owners.claims()                              # (drops the claims of processes that are gone)
+        stranger = mcp_hub.Client(r.hub, None, 99999)
+        stranger.mine, stranger.claude, stranger.holder = set(), None, 99999
+        busy = r.hub.busy_others(stranger)
+        check("a lease that couldn't be written still holds the computer after its client exited (the hub's record "
+              "counts, not only the files)", any(o.get("claim") == "lease" for o in busy)
+              and not os.path.exists(owners.claim_path(sub.pid)) and not lease_files(), busy)
+        owners.write_claim = real
+        r.stop()
+        clear_claims()
+        # #4: the transport is a tree (a relay with the driver under it). Past the lease's life the hub ends all of
+        # it, letting the relay finish first, and lets go only after nothing of it runs.
+        mark = os.path.join(TD, "tree-mark")
+        os.makedirs(mark, exist_ok=True)
+        relay = os.path.join(TD, "tree_relay.py")
+        open(relay, "w").write(TREE_RELAY)
+        r = Running(MCOMP_HUB_DRIVER_CMD=json.dumps([PY, relay, mark, PY, FAKE, STATE]))
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        h.call("slow", {"s": 60})
+        h.close()
+        wait_until(lambda: r.hub.leases, 5)
+        child = int(open(os.path.join(mark, "child.pid")).read())
+        seen = {}
+
+        def released():
+            if not r.hub.leases and not lease_files():
+                seen.setdefault("child_alive", owners.alive(child))
+                return True
+            return False
+        gone = wait_until(released, 15)
+        check("past its life a lease ends the whole transport (the relay may finish, then SIGKILL for what ignored "
+              "SIGTERM), and lets go only after it's all gone", gone and seen.get("child_alive") is False
+              and os.path.exists(os.path.join(mark, "finalized")) and not owners.alive(child),
+              (gone, seen, os.path.exists(os.path.join(mark, "finalized")), owners.alive(child)))
+        r.stop()
+    finally:
+        owners.write_claim = real
+        mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S = saved[0], saved[1]
+        if saved[2] is not None:
+            mcp_hub.TRANSPORT_GRACE_S = saved[2]
+        clear_claims()
+
+
+def chrome_batch_checks():
+    print("#5: a batch step that names no window inherits the last one named; every target hint must agree")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running()
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="cb")
+    h.call("list_windows", {})
+    n0 = len(tool_calls("run_steps"))
+    res = h.call("run_steps", {"steps": [{"click": {"app": "Google-chrome", "role": "button", "name": "Go"}},
+                                         {"set_value": {"role": "textfield", "name": "q", "value": "x"}}]})
+    check("set_value in a step that inherits Chrome from an earlier step is refused (nothing runs)",
+          res.is_error and "set_value" in res.text and len(tool_calls("run_steps")) == n0, res.text[:160])
+    res = h.call("run_steps", {"steps": [{"click": {"app": "Google-chrome", "role": "button", "name": "Go"}},
+                                         {"type_text": {"text": "hi"}}]})
+    sent = tool_calls("run_steps", n0)
+    steps = sent[-1]["msg"]["params"]["arguments"]["steps"] if sent else []
+    check("…and typing in that inherited Chrome window goes in the foreground",
+          not res.is_error and steps and steps[1]["type_text"].get("delivery_mode") == "foreground", steps)
+    snap = h.call("get_window_state", {"pid": 50, "window_id": W}).structured.get("snapshot_id")
+    n1 = len(calls())
+    a = h.call("click", {"element_token": f"{snap}:2", "pid": 10, "window_id": W})
+    b = h.call("click", {"pid": 10, "window_id": W, "x": 5, "y": 5})
+    sent = [c["msg"]["params"]["name"] for c in tool_calls(None, n1)]
+    check("a token, pid and window_id must all agree: one that matches only one of the others is refused, and so "
+          "is a pid with another app's window (target_conflict)",
+          a.is_error and a.structured.get("code") == "target_conflict" and b.is_error
+          and b.structured.get("code") == "target_conflict" and "click" not in sent, (a.text[:100], b.text[:100], sent))
+    h.close()
+    r.stop()
+    clear_claims()
+
+
+def coord_incomplete_checks():
+    print("#7: a layout cut at its window cap can't vouch for pixels")
+    clear_claims()
+    many = [win(1000 + i, 900 + i, "Xterm", 5 * (i % 50), 400 + 5 * (i // 50), 40, 40) for i in range(300)]
+    set_windows(many + BASE_WINDOWS)                 # the target comes after the cap
+    r = Running()
+    h = client(r, "call", session="ci")
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    n0 = len(tool_calls("click"))
+    res = h.call("click", {"pid": 50, "window_id": W, "x": 10, "y": 10})
+    check("with more windows open than a layout keeps, pixel input is refused (too_many_windows), not passed unchecked",
+          res.is_error and res.structured.get("code") == "too_many_windows" and len(tool_calls("click")) == n0,
+          res.text[:160])
+    ok = h.call("click", {"pid": 50, "window_id": W, "role": "button", "name": "Bold"})
+    check("…while targets by role and name go on as before", not ok.is_error, ok.text[:120])
+    set_windows(BASE_WINDOWS)
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    res = h.call("click", {"pid": 50, "window_id": W, "x": 10, "y": 10})
+    check("…and with the windows back under the cap, pixels from a fresh screenshot pass", not res.is_error,
+          res.text[:120])
+    h.close()
+    r.stop()
+    clear_claims()
+
+
+def batch3_checks():
+    print("#8: a window's own controls named in a batch; ordinary clicks and Return stay allowed (documented)")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running()
+    h = client(r, "call", session="b3")
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    n0 = len(tool_calls("run_steps"))
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"click": {"role": "button", "name": "Maximize"}}, {"click": {"x": 10, "y": 10}}]})
+    check("pixels after a click on the window's Maximize button by role and name are refused before the batch runs",
+          res.is_error and res.structured.get("code") == "pixels_after_window_change"
+          and len(tool_calls("run_steps")) == n0, res.text[:160])
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"click": {"x": 5, "y": 5}}, {"type_text": {"text": "a\n"}}, {"press_key": {"key": "Return"}},
+        {"click": {"x": 10, "y": 10}}]})
+    check("…while a plain click, typed newlines and Return before pixels still pass (the residual SECURITY.md names)",
+          not res.is_error, res.text[:160])
+    h.close()
+    r.stop()
+    clear_claims()
+
+
+def notes_checks():
+    print("#11: notes left out are counted and summarized, and a driver's bad messages count per connection")
+    saved = (mcp_hub.NOTE_WINDOW_S, mcp_hub.BAD_UPSTREAM_MAX)
+    try:
+        mcp_hub.NOTE_WINDOW_S = 1.0
+        r = Running()
+        log = mcp_hub.paths(r.env)["log"]
+        for i in range(8):
+            r.hub.note(f"odd thing {i}", kind="test burst")
+        time.sleep(1.8)                              # nothing more of that kind comes
+        text = open(log).read()
+        check("notes past the limit are summarized when their window ends, with their count and examples, even if "
+              "no other note of that kind follows", "3 more notes like 'test burst'" in text and "odd thing 5" in text
+              and "odd thing 7" not in text.split("3 more notes")[0], text[-400:])
+        mcp_hub.NOTE_WINDOW_S = 600.0
+        for i in range(8):
+            r.hub.note(f"later thing {i}", kind="test burst 2")
+        h = client(r)
+        h.call("die", {})                            # the driver connection ends
+        time.sleep(0.5)
+        text = open(log).read()
+        check("…and when a driver connection closes, what was left out so far is summarized at once",
+              "3 more notes like 'test burst 2'" in text, text[-400:])
+        mcp_hub.BAD_UPSTREAM_MAX = 40
+        a = h.call("badflood", {"size": 30})
+        h.call("die", {})
+        b = h.call("badflood", {"size": 30})
+        check("a driver's bad messages are counted per connection: 30 on one and 30 on the next aren't 'more than 40'",
+              not a.is_error and not b.is_error and "after the bad messages" in b.text, (a.text[:80], b.text[:80]))
+        h.close()
+        r.stop()
+    finally:
+        mcp_hub.NOTE_WINDOW_S, mcp_hub.BAD_UPSTREAM_MAX = saved
+
+
+def linear_scan_checks():
+    print("#36: skipping strings to count values is one linear pass")
+    data = ('["' + "," * 1_100_000 + "\\\\" * 30_000 + 'x"]').encode()
+    t0 = time.time()
+    n = wirelimits._nodes(data, wirelimits.MAX_JSON_NODES)
+    took = time.time() - t0
+    check("a string of 1.1 million commas ending in 60,000 backslashes is counted well under a second (one value "
+          "in an array)", n == 2 and took < 1.0, (n, took))
+    t0 = time.time()
+    n = wirelimits._nodes(('{"a":"' + '\\"' * 400_000 + '","b":[' + "0," * 600_000 + '0]}').encode(), 10)
+    took = time.time() - t0
+    check("…and so is one of 400,000 escaped quotes before 600,001 real values", n == 600_006 and took < 1.0,
+          (n, took))
+
+
+def answer_id_checks():
+    print("#36: an over-limit answer completes only the call its top-level id names")
+    clear_claims()
+    r = Running()
+    hb = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=4).connect()
+    box = {}
+    held = os.path.join(STATE, "held")
+    if os.path.exists(held):
+        os.remove(held)
+    th = threading.Thread(target=lambda: box.setdefault("b", hb.call("hold", {})), daemon=True)
+    th.start()
+    wait_until(lambda: os.path.exists(held), 5)
+    key = json.load(open(held))
+    ha = client(r)
+    res = ha.call("nestedid", {"size": 1_100_000})
+    still = key in r.hub.pending
+    check("an over-limit answer for one call with another pending call's id nested inside it completes only its own",
+          res.is_error and res.structured.get("code") == "answer_too_complex" and still, (res.text[:80], still))
+    log = mcp_hub.paths(r.env)["log"]
+    noted = lambda: open(log).read().count("with no call of ours as its top-level id")  # noqa: E731
+    bad0 = noted()
+    res = ha.call("nestedonly", {"size": 1_100_000})
+    still = key in r.hub.pending
+    check("…and one with no top-level id completes no call: it counts as an unusable message",
+          not res.is_error and still and noted() == bad0 + 1, (res.text[:80], still, bad0, noted()))
+    th.join(8)
+    b = box.get("b")
+    check("…while the held call is left to end normally (here its client's own timeout), not 'too complex'",
+          b is not None and b.is_error and "answer_too_complex" not in json.dumps(b.structured or {}), b and b.text[:80])
+    ha.close()
+    hb.close()
+    r.stop()
+    clear_claims()
+    # the action-log relay records a result only for the call the top-level id names, too
+    adir = os.path.join(TD, "actions-nested")
+    r = Running(MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=adir, MCOMP_ACTION_LOG_KEY=os.path.join(TD, "keys", "alog2"))
+    r.hub.spawn = lambda: subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_relay.py"), PY, FAKE, STATE],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           env=dict(r.env, MCOMP_ACTION_LOG="on"), start_new_session=True)
+    os.remove(held)
+    hb = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=2).connect()
+    threading.Thread(target=lambda: hb.call("hold", {}), daemon=True).start()
+    wait_until(lambda: os.path.exists(held), 5)
+    ha = client(r)
+    ha.call("nestedid", {"size": 1_100_000})
+    time.sleep(0.3)
+    import actionlog
+    files = actionlog.files(adir)
+    recs = [json.loads(x) for x in open(files[-1])] if files else []
+    results = {x.get("tool"): x for x in recs if x.get("type") == "result"}
+    check("…and the action-log relay records a result for that call only (the held one is still running)",
+          "nestedid" in results and "hold" not in results, sorted(results))
+    ha.close()
+    hb.close()
+    r.stop()
+    clear_claims()
+    ids = (wirelimits.top_level_id(b'{"jsonrpc":"2.0","id":"c1.2","result":{"rows":[{"id":"c2.2"}]}}'),
+           wirelimits.top_level_id(b'{"jsonrpc":"2.0","result":{"rows":[{"id":"c2.2"}]}}'),
+           wirelimits.top_level_id(b'{"id":"c1.2","id":"c2.2"}'), wirelimits.top_level_id(b'[{"id":"c1.2"}]'),
+           wirelimits.top_level_id(b'{"a":"\\"id\\":\\"c2.2\\"","id":"c1.3"}'))
+    check("top_level_id takes only the top-level object's id: never a nested one or one in a string, and not two",
+          ids == ("c1.2", None, None, None, "c1.3"), ids)
+
+
+def transport_cleanup_checks():
+    print("#36: ending a connection signals only its own process group, once, wherever it's called from")
+    hub = mcp_hub.Hub(env=env(MCOMP_RUN_DIR=os.path.join(TD, "run-tc")))
+    mark = os.path.join(TD, "tc-mark")
+    os.makedirs(mark, exist_ok=True)
+    relay = os.path.join(TD, "tree_relay.py")
+    open(relay, "w").write(TREE_RELAY)
+    hub.env["MCOMP_HUB_DRIVER_CMD"] = json.dumps([PY, relay, mark, PY, FAKE, STATE])
+    saved = mcp_hub.TRANSPORT_GRACE_S
+    mcp_hub.TRANSPORT_GRACE_S = 1.0
+    real = os.killpg
+    sent = []
+    try:
+        proc = hub._spawn_bridge()
+        proc.mcomp_lock = threading.Lock()
+        wait_until(lambda: os.path.exists(os.path.join(mark, "child.pid")), 5)
+        child = int(open(os.path.join(mark, "child.pid")).read())
+
+        def spy(pgid, sig):
+            sent.append((sig, proc.returncode))
+            return real(pgid, sig)
+        os.killpg = spy
+        ths = [threading.Thread(target=hub._end_transport, args=(proc, True)) for _ in range(3)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join(30)
+        wait_until(lambda: not owners.alive(child), 3)   # (launchd reaps the killed child)
+        sigs = [s for s, _ in sent]
+        check("three cleanups at once (keeper, reader, shutdown): one SIGTERM, one SIGKILL, never a signal once the "
+              "leader is reaped, and the whole group gone", sigs.count(signal.SIGTERM) == 1
+              and sigs.count(signal.SIGKILL) == 1 and all(rc is None for _, rc in sent)
+              and proc.returncode is not None and not owners.alive(child), (sent, proc.returncode, owners.alive(child)))
+        other = subprocess.Popen(["sleep", "0"], start_new_session=True)
+        other.mcomp_pgid = other.pid
+        other.wait()                                 # reaped elsewhere: its number may be anyone's now
+        del sent[:]
+        hub._end_transport(other, True)
+        check("…and a connection whose leader was already reaped gets no signal at all", sent == [], sent)
+    finally:
+        os.killpg = real
+        mcp_hub.TRANSPORT_GRACE_S = saved
+
+
+def partial_checks():
+    print("#36: a stale lease file doesn't stand in for an unwritten lease; bad messages count per connection")
+    clear_claims()
+    real = owners.write_claim
+    r = Running()
+    try:
+        sub = subprocess.Popen([PY, "-c", (
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import mcomp_sdk\n"
+            "h = mcomp_sdk.Hub(env=json.loads(sys.argv[2]), kind='sdk', timeout=1).connect()\n"
+            "h.call('slow', {'s': 30}); h.close()\n"), os.path.join(LAB, "lib"), json.dumps(r.env)])
+        sub.wait(30)
+        wait_until(lambda: lease_files(), 5)
+        owners.write_claim = lambda pid, *a, **k: (_ for _ in ()).throw(OSError("disk full")) \
+            if k.get("kind") == "lease" else real(pid, *a, **k)
+        with owners.lock():
+            r.hub._refresh_leases()                  # the refresh fails: the hub's lease is unwritten now
+        path = owners.claim_path(r.hub.pid)
+        rec = json.load(open(path))
+        rec["last_call"] = time.time() - 2 * owners.ACTIVE_S     # and the earlier file has gone stale
+        json.dump(rec, open(path, "w"))
+        stranger = mcp_hub.Client(r.hub, None, 99999)
+        stranger.mine, stranger.claude, stranger.holder = set(), None, 99999
+        busy = r.hub.busy_others(stranger)
+        check("an unwritten lease still counts when the only file left is a stale one from an earlier write",
+              any(o.get("claim") == "lease" and o.get("active") for o in busy), busy)
+    finally:
+        owners.write_claim = real
+        r.stop()
+        clear_claims()
+    saved = mcp_hub.BAD_UPSTREAM_MAX
+    mcp_hub.BAD_UPSTREAM_MAX = 40
+    try:
+        hub = mcp_hub.Hub(env=env(MCOMP_RUN_DIR=os.path.join(TD, "run-bad")))
+        hung = [hub._bad_upstream_message(1 if i % 2 else 2, "not JSON") for i in range(100)]
+        check("bad messages alternating between an old connection and the current one still reach the hang-up "
+              "(each connection counted on its own)", any(hung), hung.count(True))
+    finally:
+        mcp_hub.BAD_UPSTREAM_MAX = saved
+
+
 def main():
     setup_driver()
     try:
@@ -1881,6 +2305,16 @@ def main():
         token2_checks()
         batch2_checks()
         status_claim_checks()
+        answer_limit_checks()
+        lease3_checks()
+        chrome_batch_checks()
+        coord_incomplete_checks()
+        batch3_checks()
+        notes_checks()
+        linear_scan_checks()
+        answer_id_checks()
+        transport_cleanup_checks()
+        partial_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)

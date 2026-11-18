@@ -84,6 +84,8 @@ LEASE_TICK_S = 1.0                  # how often the lease keeper looks
 LEASE_REFRESH_S = 60.0              # a lease's claim is rewritten this often while its calls run (it stays active)
 LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub ends the driver runtime, and only then
                                                                # lets the computer go
+TRANSPORT_GRACE_S = 3.0             # ending a driver connection: SIGTERM to its process group (the relay signs its log),
+                                    # this long to exit, then SIGKILL to whatever of the group is left
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
 LIVE_WINDOWS_TTL_S = 1.0            # list_windows reused within one batch, never across an action
 DIRECT_TTL_S = 3.0                  # direct SSH connections (owners.py) are looked up at most this often
@@ -135,6 +137,15 @@ OVERSIZE_MSG = ("The virtual computer sent a message larger than the hub accepts
                 "connection to it. Call again; element tokens from earlier reads are stale.").format(MAX_UPSTREAM_MSG >> 20)
 PROTOCOL_MSG = ("The virtual computer kept sending messages the hub can't use, so the hub closed its connection to "
                 "it. Call again; element tokens from earlier reads are stale.")
+LIMIT_MSG = ("The call reached the virtual computer, but its answer was too complex for the hub to take (more than "
+             "{:,} values, or nested more than {} levels deep), so none of it was used; if it was an action, check "
+             "its outcome with a small read. Ask for less: a query or a smaller region instead of the whole tree, or "
+             "read a file through `metacomputer sh`.").format(
+                 wirelimits.MAX_JSON_NODES, wirelimits.MAX_JSON_DEPTH)
+# The ids the hub gives its own requests (forward: c<client>.<n>; ask_up: mcomp-hub-<n>). A message too complex to
+# parse answers the request its top-level "id" names (wirelimits.top_level_id), which then gets LIMIT_MSG instead of
+# waiting until it times out; ids anywhere else in it (a page's element ids, say) never count.
+HUB_ID_RE = re.compile(r"c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12}")
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
 BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
 REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
@@ -188,9 +199,9 @@ WINDOW_UNKNOWN = (
     "the call is aimed at (input to Chrome has to go in the foreground, and set_value to Chrome is refused). Run "
     "list_windows and use a current window_id with its pid.")
 TARGET_CONFLICT = (
-    "Refused by the metacomputer bridge: this element_token belongs to another app than the pid or window_id the "
-    "call also names, so it can't tell where the input would go. Read the window again (get_window_state) and use "
-    "that read's tokens with its own pid and window_id.")
+    "Refused by the metacomputer bridge: the pid, window_id and element_token this call names belong to different "
+    "apps, so it can't tell where the input would go. Read the window again (get_window_state) and use that read's "
+    "tokens with its own pid and window_id.")
 UNKNOWN_TARGET = {"token": (TOKEN_UNKNOWN, TOKEN_CODE), "window": (WINDOW_UNKNOWN, "window_unknown"),
                   "conflict": (TARGET_CONFLICT, "target_conflict")}
 
@@ -219,6 +230,9 @@ FKEY_RE = re.compile(r"^f(?:[1-9]|[12][0-9]|3[0-5])$")
 # Buttons that open or close a dialog, when a step names its target by role and name.
 DIALOG_BUTTON_RE = re.compile(r"^(?:ok|cancel|close|save|save as\W*|open|apply|yes|no|insert|print|delete|replace all|"
                               r"don.?t save|discard|keep current format|use .{1,40} format!?|done|finish|next)\b", re.I)
+# A window's own controls, when a step names one by role and name (a title bar's buttons, an app's full-screen button).
+WINDOW_BUTTON_RE = re.compile(r"^(?:maximi[sz]e|minimi[sz]e|restore|unmaximi[sz]e|full ?screen|exit full ?screen)\b",
+                              re.I)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -657,9 +671,11 @@ class Hub:
         self._refresh_again = False
         self._refresh_last = 0.0
         self._lease_keeper = None   # the thread that refreshes leases and ends a runtime past LEASE_MAX_S
-        self._bad_upstream = collections.deque()   # times of unusable messages from the driver (BAD_UPSTREAM_*)
+        self.gen_procs = {}         # driver connection generation -> its process, until that connection's reader is done
+                                    # (a lease's calls run in their own generation, which may no longer be self.up)
+        self._bad_upstream = {}     # driver connection generation -> times of its unusable messages (BAD_UPSTREAM_*)
         self.log_lock = threading.Lock()
-        self._note_kinds = {}       # kind -> [window start, notes written, notes left out] (NOTE_REPEAT_MAX)
+        self._note_kinds = {}       # kind -> its window: start, written, left out, examples, timer (NOTE_REPEAT_MAX)
         self.log = None
         self.log_bytes = 0
         self._open_log()
@@ -686,33 +702,76 @@ class Hub:
 
     def note(self, text, kind=None):
         """A line in hub.log. Notes of one kind (a misbehaving driver's, say) are written at most NOTE_REPEAT_MAX times
-        per NOTE_WINDOW_S, then counted; and the file is rotated at LOG_MAX while the hub runs, so nothing the VM
-        does can fill the disk through it."""
+        per NOTE_WINDOW_S; the rest are counted, with a few different examples, and one summary line says so when the
+        window ends (a timer), when a driver connection closes and when the hub stops (flush_notes), so nothing is
+        lost silently. The file is rotated at LOG_MAX while the hub runs, so nothing the VM does can fill the disk
+        through it."""
         now = time.monotonic()
         lines = []
         with self.log_lock:
             if kind is not None:
-                st = self._note_kinds.setdefault(kind, [now, 0, 0])
-                if now - st[0] >= NOTE_WINDOW_S:
-                    if st[2]:
-                        lines.append(f"({st[2]} more notes like '{kind}' in the last {int(now - st[0])} s were left out)")
-                    st[:] = [now, 0, 0]
-                if st[1] >= NOTE_REPEAT_MAX:
-                    st[2] += 1
+                st = self._note_kinds.get(kind)
+                if st is None or now - st["t0"] >= NOTE_WINDOW_S:
+                    if st is not None:
+                        lines += self._note_summary(kind, st, now)
+                    st = self._note_kinds[kind] = {"t0": now, "written": 0, "left": 0, "examples": [], "timer": None}
+                if st["written"] >= NOTE_REPEAT_MAX:
+                    st["left"] += 1
+                    ex = clean(text, 160)
+                    if len(st["examples"]) < 3 and ex not in st["examples"]:
+                        st["examples"].append(ex)
+                    if st["timer"] is None:          # the summary comes when the window ends, more notes or not
+                        t = threading.Timer(max(0.0, st["t0"] + NOTE_WINDOW_S - now), self._flush_kind, args=(kind, st))
+                        t.daemon = True
+                        st["timer"] = t
+                        t.start()
+                    self._write_lines(lines)
                     return
-                st[1] += 1
+                st["written"] += 1
             lines.append(text)
-            if not self.log:
+            self._write_lines(lines)
+
+    def _note_summary(self, kind, st, now):
+        """The summary line for a window of left-out notes (caller holds log_lock), and the window closed."""
+        if st.get("timer") is not None:
+            st["timer"].cancel()
+            st["timer"] = None
+        if not st["left"]:
+            return []
+        n, st["left"] = st["left"], 0
+        ex = "; for example: " + " | ".join(st["examples"]) if st["examples"] else ""
+        st["examples"] = []
+        return [f"({n} more notes like '{kind}' in the last {max(1, int(now - st['t0']))} s were left out{ex})"]
+
+    def _flush_kind(self, kind, st):
+        with self.log_lock:
+            if self._note_kinds.get(kind) is st:
+                st["timer"] = None
+                self._write_lines(self._note_summary(kind, st, time.monotonic()))
+
+    def flush_notes(self):
+        """Write the summary of every kind of note left out so far (a driver connection closed, the hub stops)."""
+        now = time.monotonic()
+        with self.log_lock:
+            lines = []
+            for kind, st in list(self._note_kinds.items()):
+                lines += self._note_summary(kind, st, now)
+                st["t0"], st["written"] = now, 0
+            self._write_lines(lines)
+
+    def _write_lines(self, lines):
+        """Caller holds log_lock."""
+        if not self.log or not lines:
+            return
+        for line in lines:
+            data = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {line}\n"
+            try:
+                self.log.write(data)
+            except (OSError, ValueError):
                 return
-            for line in lines:
-                data = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {line}\n"
-                try:
-                    self.log.write(data)
-                except (OSError, ValueError):
-                    return
-                self.log_bytes += len(data.encode())
-            if self.log_bytes > LOG_MAX:
-                self.rotate_log()
+            self.log_bytes += len(data.encode())
+        if self.log_bytes > LOG_MAX:
+            self.rotate_log()
 
     def event(self, client, family, type_, message, severity=None, action=None, data=None, debounce=None):
         """The optional event stream (docs/events.md), on a background thread: never delays a call."""
@@ -902,34 +961,103 @@ class Hub:
 
     def _lease_keeper_run(self):
         """While leases exist: keep their claim fresh (and retry a failed write); past LEASE_MAX_S, end the driver
-        runtime the calls run in. The lease itself ends only when those calls are gone (_pend_finished)."""
-        ended = None
+        connection each lease's remaining calls were sent on (their own generation, which may no longer be the
+        current one), its whole process tree, before anything is let go. The lease itself ends only when those
+        calls are gone (_pend_finished, after _upstream_closed has ended the tree)."""
+        ending = set()                               # generations being ended (each once)
         while True:
             time.sleep(LEASE_TICK_S)
             with self.lease_lock:
                 if not self.leases:
                     self._lease_keeper = None
                     return
-                leases = list(self.leases.values())
+                leases = list(self.leases.items())
             now = time.monotonic()
             every = min(LEASE_REFRESH_S, max(1.0, owners.ACTIVE_S / 3))    # well inside the activity window
-            if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for l in leases):
+            if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for _c, l in leases):
                 with self.owner_lock:
                     try:
                         with owners.lock():
                             self._refresh_leases()
                     except (OSError, TimeoutError):
                         self._refresh_leases()
-            oldest = min(l["t0"] for l in leases)
-            proc = self.up
-            if now - oldest > LEASE_MAX_S and proc is not None and proc is not ended:
-                ended = proc
-                self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending the driver "
-                          "runtime before letting the computer go")
-                try:
-                    proc.kill()                      # the reader sees the end: those calls fail, the lease ends
-                except OSError:
-                    pass
+            for cid, lease in leases:
+                if now - lease["t0"] <= LEASE_MAX_S:
+                    continue
+                with self.lease_lock:                # what is still running, looked at now (not at the snapshot)
+                    gens = {self.pending[k].get("gen") for k in lease["keys"] if k in self.pending}
+                    gone = not gens and self.leases.get(cid) is lease
+                if gone:                             # its calls ended meanwhile: nothing to stop
+                    lease["keys"].clear()
+                    self._end_lease(cid)
+                    continue
+                for gen in gens - ending:
+                    proc = self.gen_procs.get(gen)
+                    if proc is None:
+                        continue
+                    ending.add(gen)
+                    self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending driver "
+                              f"connection {gen} (its whole process tree) before letting the computer go")
+                    threading.Thread(target=self._end_transport, args=(proc, True), daemon=True,
+                                     name=f"hub-end-{gen}").start()
+            ending &= set(self.gen_procs)
+
+    def _end_transport(self, proc, term):
+        """End a driver connection's process tree, bounded, once: with term, SIGTERM to its process group first (the
+        action log's relay fails its pending records and signs its log; SSH ends), then TRANSPORT_GRACE_S to exit;
+        then SIGKILL to whatever of the group is left (a child that ignored SIGTERM, an SSH the relay didn't end);
+        only then is the group's leader reaped. The group is the connection's own (start_new_session in
+        _spawn_bridge), and its id is the leader's pid, which can't be reused while the leader is unreaped, so every
+        signal here reaches this connection's group and no other. Nothing else in the hub reaps a connection's
+        process. The keeper, the reader and shutdown may call this at once: one runs it, the others wait for it and
+        find it done. A leader that was reaped elsewhere gets no signal at all (its number may be someone else's)."""
+        lock = getattr(proc, "mcomp_lock", None)
+        if lock is None:
+            lock = proc.mcomp_lock = threading.Lock()
+        with lock:
+            if getattr(proc, "mcomp_ended", False):
+                return
+            try:
+                if proc.returncode is None:
+                    if term:
+                        self._signal_group(proc, signal.SIGTERM)
+                    _wait_exit_unreaped(proc, TRANSPORT_GRACE_S)
+                    self._signal_group(proc, signal.SIGKILL)
+                    try:
+                        proc.wait(timeout=5)         # reaped last: after this its number is free again
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
+            finally:
+                proc.mcomp_ended = True
+
+    @staticmethod
+    def _signal_group(proc, sig):
+        """sig to a connection's process group (or its process), only while its leader is unreaped."""
+        if proc.returncode is not None:
+            return
+        pgid = getattr(proc, "mcomp_pgid", None)
+        try:
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            else:
+                os.kill(proc.pid, sig)
+        except OSError:                              # gone already (EPERM: only the zombie leader is left)
+            pass
+
+    @staticmethod
+    def _kill_leader(proc):
+        """SIGKILL to a connection's own process (its reader then ends the rest of the group), unless it's being
+        ended right now or was reaped: checked and sent under the lock _end_transport reaps under."""
+        lock = getattr(proc, "mcomp_lock", None)
+        if lock is None or not lock.acquire(blocking=False):
+            return                                   # being ended already
+        try:
+            if proc.returncode is None and not getattr(proc, "mcomp_ended", False):
+                os.kill(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        finally:
+            lock.release()
 
     def _refresh_leases(self):
         with self.lease_lock:
@@ -997,8 +1125,10 @@ class Hub:
         env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
+        # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                env=env, close_fds=True)
+                                env=env, close_fds=True, start_new_session=True)
+        proc.mcomp_pgid = proc.pid
         # SSH carries the VM's stderr: drained with a fixed memory tail and a capped log file, so a VM that writes
         # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail).
         self.stderr_tail = wirelimits.StderrTail(proc.stderr, self._stderr_path())
@@ -1009,8 +1139,10 @@ class Hub:
         return tail.text(wait=2.0).strip() if tail is not None else ""
 
     def connected(self):
+        """Without reaping the process (only _end_transport does): its reader marks the end of its output."""
         up = self.up
-        return up is not None and self.ready and up.poll() is None
+        return (up is not None and self.ready and not getattr(up, "mcomp_eof", False)
+                and not getattr(up, "mcomp_ended", False) and up.returncode is None)
 
     def send_up(self, *msgs):
         """Write messages to the driver as one unit (a client note goes right before its call)."""
@@ -1036,10 +1168,7 @@ class Hub:
         except TimeoutError:
             # The VM stopped reading: a stuck driver must not hold every client's call forever.
             self.note(f"the driver didn't take a message within {WRITE_TIMEOUT_S} s; closing its connection")
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            self._kill_leader(proc)                  # its reader sees the end and ends the rest (_upstream_closed)
             return False
         except (BrokenPipeError, OSError, ValueError):
             return False
@@ -1061,21 +1190,20 @@ class Hub:
             if self.connected():
                 return None
             old = self.up
-            if old is not None and old.poll() is None:
-                try:
-                    old.kill()
-                except OSError:
-                    pass
+            if old is not None:
+                self._kill_leader(old)               # its reader ends the rest of it
             try:
                 proc = self.spawn()
             except OSError as e:
                 return f"Could not start the connection to the virtual computer ({e})."
+            proc.mcomp_lock, proc.mcomp_eof, proc.mcomp_ended = threading.Lock(), False, False
             try:
                 os.set_blocking(proc.stdin.fileno(), False)    # send_up writes with a deadline
             except (OSError, ValueError, AttributeError):
                 pass
             self.up_gen += 1
             gen = self.up_gen
+            self.gen_procs[gen] = proc               # until its reader is done (_upstream_closed)
             self.up, self.ready = proc, False
             self._reset_runtime()
             threading.Thread(target=self._reader, args=(proc, gen), daemon=True, name=f"hub-upstream-{gen}").start()
@@ -1086,10 +1214,7 @@ class Hub:
                     proc.stdin.close()
                 except OSError:
                     pass
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                self._end_transport(proc, False)     # (its reader may be doing the same: it's done once)
                 if self.up is proc:
                     self.up = None
                 err = self._stderr_text()
@@ -1224,10 +1349,16 @@ class Hub:
                     break
                 if not line.strip():
                     continue
+                bad = None                             # why a message is unusable (its kind of note)
                 try:
                     msg = wirelimits.loads(line)       # too deep, too many values or not JSON: never a dead reader
-                except ValueError:
+                except wirelimits.LimitError:
                     msg = None
+                    bad = "over the value or depth limit, with no call of ours as its top-level id"
+                    if self._answer_refused(line, gen):
+                        continue                       # too complex for the hub, and answered: not a broken driver
+                except ValueError:
+                    msg, bad = None, "not JSON"
                 usable = False
                 if isinstance(msg, dict) and msg.get("method") == "notifications/metacomputer/closing":
                     p = msg.get("params")
@@ -1236,9 +1367,14 @@ class Hub:
                 if isinstance(msg, dict):
                     try:
                         usable = self.on_upstream(msg) is not False
+                        bad = None if usable else "the wrong shape"
                     except Exception as e:
-                        self.note(f"error handling a message from the driver: {e!r}"[:300], kind="driver message error")
-                if not usable and self._bad_upstream_message(gen):
+                        bad = f"an error handling it: {type(e).__name__}"
+                        self.note(f"error handling a message from the driver: {e!r}"[:300],
+                                  kind=f"driver message error ({type(e).__name__})")
+                elif msg is not None:
+                    bad = "not a JSON object"
+                if not usable and self._bad_upstream_message(gen, bad or "unusable"):
                     why = "protocol"
                     self.note(f"the driver sent more than {BAD_UPSTREAM_MAX} unusable messages in "
                               f"{int(BAD_UPSTREAM_WINDOW_S)} s; closing the connection")
@@ -1247,32 +1383,73 @@ class Hub:
             if not isinstance(e, (OSError, ValueError)):
                 self.note(f"the driver connection's reader stopped: {e!r}"[:300])
         finally:
+            proc.mcomp_eof = True                    # (connected() looks here, never at the process itself)
             self._upstream_closed(proc, gen, why)
 
-    def _bad_upstream_message(self, gen):
-        """One more unusable message from the driver (not JSON, the wrong shape, one the hub couldn't handle). True
-        once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S: a driver that keeps doing it
-        is hung up on rather than logged without end."""
+    def _answer_refused(self, line, gen):
+        """A message over the hub's content limits (wirelimits.LimitError) answers a request of this connection when
+        its top-level "id" (wirelimits.top_level_id: one linear pass, nested ids never count) is one of ours: that
+        request gets LIMIT_MSG now, instead of waiting until its client gives up. True when it was answered; else
+        (no such id, or an ambiguous one) the caller counts the message as unusable and no call is touched."""
+        key = wirelimits.top_level_id(line)
+        if not isinstance(key, str) or not HUB_ID_RE.fullmatch(key):
+            return False
+        slot = self.internal.get(key)
+        if slot is not None and slot[3] == gen:
+            self.internal.pop(key, None)
+            if slot[0] is not None:
+                slot[0].set()                        # ask_up: no answer (None)
+            elif slot[2] is not None:
+                try:
+                    slot[2](None)
+                except Exception:
+                    pass
+        else:
+            with self.lease_lock:
+                pend = self.pending.get(key)
+                if pend is None or pend.get("gen") != gen:
+                    return False
+                self.pending.pop(key, None)
+            self.layout_pending.pop(key, None)
+            self._pend_finished(key, pend)
+            if not pend.get("orphan"):
+                if pend.get("method") == "tools/call":
+                    pend["client"].send({"jsonrpc": "2.0", "id": pend["id"], "result": {
+                        "content": [{"type": "text", "text": LIMIT_MSG}], "isError": True,
+                        "structuredContent": {"code": "answer_too_complex", "effect": "unknown"}}})
+                else:
+                    pend["client"].send({"jsonrpc": "2.0", "id": pend["id"],
+                                         "error": {"code": -32603, "message": LIMIT_MSG}})
+        self.note("an answer from the driver was over the hub's limits (values or depth); its call got an error",
+                  kind="driver answer over limits")
+        return True
+
+    def _bad_upstream_message(self, gen, why="unusable"):
+        """One more unusable message from this driver connection (not JSON, the wrong shape, one the hub couldn't
+        handle: why). True once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S on the same
+        connection: a driver that keeps doing it is hung up on rather than logged without end."""
         now = time.monotonic()
-        q = self._bad_upstream
+        # Counted per driver connection, each in its own window: a new one starts clean, and messages alternating
+        # between an old connection still finishing and the current one can't reset each other's count.
+        q = self._bad_upstream.setdefault(gen, collections.deque())
         q.append(now)
         while q and now - q[0] > BAD_UPSTREAM_WINDOW_S:
             q.popleft()
-        self.note("the driver sent a message the hub couldn't use; skipped", kind="driver unusable message")
+        self.note(f"the driver (connection {gen}) sent a message the hub couldn't use ({why}); skipped",
+                  kind=f"driver message {why.split(':')[0]}")
         if len(q) > BAD_UPSTREAM_MAX:
             q.clear()
             return True
         return False
 
     def _upstream_closed(self, proc, gen, why=None):
-        if why in ("oversize", "protocol"):
-            try:
-                proc.kill()
-            except OSError:
-                pass
         # No connect_lock here: connect() holds it while it waits for the handshake this closing may answer.
         if self.up is proc:
             self.up, self.ready = None, False
+        # The connection's whole process tree ends before its calls fail and their leases let go, so nothing it ran
+        # can still act once the computer is free. After a hostile message: SIGTERM first (the relay signs its log);
+        # after an ordinary end the relay is finishing anyway and gets TRANSPORT_GRACE_S to exit. Then SIGKILL.
+        self._end_transport(proc, why in ("oversize", "protocol"))
         text = OVERSIZE_MSG if why == "oversize" else PROTOCOL_MSG if why == "protocol" else DROPPED_MSG
         for key, pend in list(self.pending.items()):
             if pend.get("gen") == gen:
@@ -1295,13 +1472,10 @@ class Hub:
         if gen == self.up_gen:
             self._reset_runtime()
         self.last_activity = time.time()
+        self.gen_procs.pop(gen, None)
+        self._bad_upstream.pop(gen, None)
+        self.flush_notes()                           # what was left out about this connection, counted, before it ends
         self.note(f"driver connection closed (generation {gen}{', ' + why if why else ''})")
-        try:
-            proc.wait(timeout=3)                     # the relay signs its log's end first
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        except OSError:
-            pass
 
     def on_upstream(self, msg):
         """Handle one message from the driver. False when its shape is wrong (counted by the reader)."""
@@ -1612,6 +1786,19 @@ class Hub:
             busy.append({"kind": "session", "claim": "pending", "active": True, "bridge_pid": c.holder,
                          "claude_pid": c.claude, "cwd": c.cwd, "last_tool": pend.get("tool"),
                          "idle_s": int(time.time() - pend.get("t0", time.time()))})
+        # A lease whose claim couldn't be written isn't in any file, and the client's own claim may be gone with its
+        # process: the hub's own record of it counts. (A written lease is its file, which `release` may drop.)
+        with self.lease_lock:
+            unwritten = [l for l in self.leases.values() if not l["written"] and l["keys"]]
+        # An earlier write still on file stands in for it only when that file itself counts here (active, and for
+        # the same client): a stale one, left by refreshes that failed, doesn't.
+        on_file = {o.get("client_pid") for o in busy if o.get("claim") == "lease" and o.get("bridge_pid") == self.pid}
+        for l in unwritten:
+            if l["client_pid"] in mine or (client.claude and l["claude"] == client.claude) or l["client_pid"] in on_file:
+                continue
+            busy.append({"kind": "session", "claim": "lease", "active": True, "bridge_pid": self.pid,
+                         "client_pid": l["client_pid"], "claude_pid": l["claude"], "cwd": l["cwd"],
+                         "last_tool": l["tool"], "idle_s": int(time.monotonic() - l["t0"])})
         return busy
 
     def check_and_claim(self, client, tool):
@@ -1719,7 +1906,7 @@ class Hub:
         the pid or window the call also names ("conflict"). Naming something else never makes a target safe."""
         if not isinstance(args, dict):
             return False, None
-        own = any(args.get(k) not in (None, "") for k in ("app", "window", "pid", "window_id", "element_token"))
+        own = names_target(args)
         layer = args if own or not isinstance(outer, dict) else outer
         for k in ("app", "window"):
             v = layer.get(k)
@@ -1739,6 +1926,8 @@ class Hub:
             return True, None                    # Chrome by what the call names: the stricter handling applies
         if wid is not None and wpid is None and isinstance(wid, int) and not isinstance(wid, bool):
             return None, "window"
+        if len(hints) > 1:
+            return None, "conflict"              # the pid and the window_id belong to different apps
         tok_pid = None
         tok = layer.get("element_token")
         if tok is not None and tok != "":
@@ -1756,8 +1945,8 @@ class Hub:
         pids = hints | ({tok_pid} if tok_pid is not None else set())
         if any(CHROME_RE.search(self.app_name(p)) for p in pids):
             return True, None
-        if tok_pid is not None and hints and tok_pid not in hints:
-            return None, "conflict"
+        if tok_pid is not None and any(h != tok_pid for h in hints):
+            return None, "conflict"              # every hint must agree with the token's app, not just one
         return False, None
 
     def chrome_target(self, args, outer=None):
@@ -1816,13 +2005,24 @@ class Hub:
                 notes.append("sent in the foreground (background input to Chrome is ignored)")
             keyboard = name in KEY_TOOLS
         elif name == "run_steps":
-            top_chrome = self.is_chrome(args)
-            steps = steps_of(args)
+            # The driver runs a step that names no window in the window the last step that named one acted in, and
+            # before any, in the batch's default. The hub follows the steps the same way; where both could apply,
+            # the stricter verdict counts (Chrome over unknown over not Chrome).
+            default = self.chrome_verdict(args) if names_target(args) else (False, None)
+            top_chrome = default[0] is True
+            inherited = default
             chrome_steps = []
-            for t, a in steps:
-                target, why = (True, None) if top_chrome else self.chrome_verdict(a, args) \
-                    if (t in INPUT_TOOLS or t == "set_value") else (self.is_chrome(a), None)
-                if target is None:
+            for t, a in steps_of(args):
+                own = names_target(a)
+                if top_chrome:
+                    target, why = True, None
+                elif own:
+                    target, why = self.chrome_verdict(a)
+                else:
+                    target, why = stricter(inherited, default)
+                if own:
+                    inherited = (target, why)
+                if target is None and (t in INPUT_TOOLS or t == "set_value"):
                     return UNKNOWN_TARGET[why][0], None
                 if target:
                     chrome_steps.append((t, a))
@@ -1934,6 +2134,8 @@ class Hub:
                 if live is None:
                     self.note("coordinate guard: list_windows failed; passing the call on unchecked")
                     return None
+            if not getattr(rec["windows"], "complete", True) or not getattr(live, "complete", True):
+                return incomplete_refusal(wid, i, t)  # a window left out could be the target or what covers it
             if frame == "desktop":
                 change = desktop_change(rec, live, pts)
             else:
@@ -2090,15 +2292,16 @@ class Hub:
     def shutdown(self):
         """End the core: close the driver connection (the VM's driver runtime ends with it)."""
         proc, self.up, self.ready = self.up, None, False
-        if proc and proc.poll() is None:
+        if proc:
             try:
-                proc.stdin.close()
-                proc.wait(timeout=3)
+                proc.stdin.close()                   # the relay signs its log and SSH ends...
             except Exception:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                pass
+            self._end_transport(proc, False)         # ...within TRANSPORT_GRACE_S, else the group is killed
+        for old in list(self.gen_procs.values()):    # earlier connections still finishing (a bounded session's end)
+            if old is not proc:
+                self._end_transport(old, True)
+        self.flush_notes()
         with self.lease_lock:
             had_lease, self.leases = bool(self.leases), {}
         if had_lease and not self.local:
@@ -2113,6 +2316,55 @@ class Hub:
                 events.flush_async(2.0)
             except Exception:
                 pass
+
+
+def _wait_exit_unreaped(proc, timeout):
+    """Wait up to timeout for proc to exit without reaping it, so its pid (its group's id) stays its own. True when
+    it has exited. waitid(WNOWAIT) where Python has it; else kqueue (an older macOS Python), which also answers at
+    once for a process that already exited."""
+    end = time.monotonic() + timeout
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        while True:
+            try:
+                if os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                    return True
+            except ChildProcessError:
+                return True
+            except OSError:
+                break
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.02)
+    try:
+        kq = select.kqueue()
+        try:
+            ev = select.kevent(proc.pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                               fflags=select.KQ_NOTE_EXIT)
+            return bool(kq.control([ev], 1, max(0.0, end - time.monotonic())))
+        finally:
+            kq.close()
+    except ProcessLookupError:
+        return True
+    except (OSError, AttributeError):
+        time.sleep(max(0.0, end - time.monotonic()))
+        return False
+
+
+TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
+
+
+def names_target(a):
+    """Does a call or a run_steps step name its own target (else a step runs in the window it inherits)?"""
+    return isinstance(a, dict) and any(a.get(k) not in (None, "") for k in TARGET_KEYS)
+
+
+def stricter(v1, v2):
+    """Of two Chrome verdicts ((True|False|None, reason)), the one that asks for more care: Chrome, then unknown."""
+    for want in (True, None):
+        for v in (v1, v2):
+            if v[0] is want:
+                return v
+    return v1
 
 
 # --- pixel geometry ------------------------------------------------------------------------
@@ -2154,13 +2406,19 @@ def shot_size(w, h):
     return (w if _num(w) else None, h if _num(h) else None)
 
 
+class WindowList(list):
+    """A compacted window list; complete is False when it had more windows than a layout keeps, and then the
+    coordinate guard refuses the pixels it would check against it (it can't tell what it left out)."""
+    complete = True
+
+
 def compact_windows(ws):
     """The part of a window list the coordinate guard compares (id, stacking, frame, visibility, a short app name),
-    for at most MAX_LAYOUT_WINDOWS windows with a valid frame. Anything else a result carried isn't kept. None when
-    there's no list."""
+    for at most MAX_LAYOUT_WINDOWS windows with a valid frame (more: complete is False). Anything else a result
+    carried isn't kept. None when there's no list."""
     if not isinstance(ws, list):
         return None
-    out = []
+    out = WindowList()
     for w in ws:
         if not isinstance(w, dict):
             continue
@@ -2170,12 +2428,13 @@ def compact_windows(ws):
         g = geometry(w.get("bounds") if isinstance(w.get("bounds"), dict) else w)
         if g is None:
             continue
+        if len(out) >= MAX_LAYOUT_WINDOWS:
+            out.complete = False                 # one more than a layout keeps: comparisons against it would miss it
+            break
         z = w.get("z_index")
         out.append({"window_id": wid, "z_index": z if _num(z) else None, "bounds": g,
                     "is_on_screen": w.get("is_on_screen") is not False, "minimized": bool(w.get("minimized")),
                     "app_name": clean(w.get("app_name"), 40)})
-        if len(out) >= MAX_LAYOUT_WINDOWS:
-            break
     return out
 
 
@@ -2225,9 +2484,10 @@ def geometry_step(tool, a, default_wid=None, batch=None):
     few words), or None. Pixels in a later step of the same batch were aimed from a screenshot taken before it, so
     the hub refuses them and asks for a fresh screenshot. Equivalent spellings count the same (a click with count 2
     is a double click). Not counted, because ordinary batches put pixel clicks after them (click a field, type,
-    Return, click the next field): a single plain click inside a window except on a dialog's button named by role
-    and name, typing (newlines too), set_value, scroll, and keys such as Return, Tab or Ctrl+A, even though a
-    click or Return can open or close a dialog."""
+    Return, click the next field): a single plain click inside a window except on a dialog's or the window's own
+    button named by role and name, typing (newlines too), set_value, scroll, and keys such as Return, Tab or
+    Ctrl+A, even though a click or Return can open or close a dialog. Counting single clicks would refuse 10 of
+    the 373 recorded benchmark batches, Return 3 and typed newlines 2 (SECURITY.md says what's left)."""
     if not isinstance(a, dict):
         return None
     if tool == "double_click":
@@ -2250,6 +2510,10 @@ def geometry_step(tool, a, default_wid=None, batch=None):
     if tool in ("click", "double_click") and str(a.get("role") or "").lower() in ("button", "push button") \
             and DIALOG_BUTTON_RE.match(str(a.get("name") or "").strip()):
         return f"a click on \"{clean(a.get('name'), 30)}\" can open or close a dialog"
+    if tool in ("click", "double_click") and str(a.get("role") or "").lower() in ("button", "push button",
+                                                                                   "toggle button") \
+            and WINDOW_BUTTON_RE.match(str(a.get("name") or "").strip()):
+        return f"a click on \"{clean(a.get('name'), 30)}\" can maximize, minimize or restore a window"
     if tool in ("press_key", "hotkey"):
         keys = key_names(a)
         combo = "+".join(keys)[:40]
@@ -2403,6 +2667,21 @@ def coord_refusal(change, wid, step, tool, args, sess):
             f"was sent. {how}")
     sc = {"code": COORD_CODE, "effect": "refused", "hint": "the windows changed since your screenshot; take a fresh one",
           "change": {k: v for k, v in change.items() if k != "detail"}, "next_call": nxt}
+    if step is not None:
+        sc["failed_step"] = step
+    return text, sc
+
+
+def incomplete_refusal(wid, step, tool):
+    """(text, structured) for pixel input the guard can't check: more windows were open than a layout keeps."""
+    where = f"window {wid}" if wid is not None else "the desktop"
+    in_step = f" (step {step + 1}, {tool})" if step is not None else ""
+    text = (f"Refused by the metacomputer bridge (coordinate guard){in_step}: more than {MAX_LAYOUT_WINDOWS} windows "
+            f"are open, so it can't check that pixels aimed at {where} still land where you aimed, and no input was "
+            "sent. Target by role and name or element token instead (those aren't affected), or close windows you "
+            "don't need and take a fresh screenshot.")
+    sc = {"code": "too_many_windows", "effect": "refused", "max_windows": MAX_LAYOUT_WINDOWS,
+          "hint": "use role/name or element-token targets, or close windows"}
     if step is not None:
         sc["failed_step"] = step
     return text, sc

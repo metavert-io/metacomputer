@@ -15,6 +15,7 @@ recorded and never passed on to the driver:
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -35,6 +36,10 @@ MAX_MSG = 64 << 20          # one message either way (the VM is untrusted: a lin
 CLIENT = "notifications/metacomputer/client"
 OURS = "notifications/metacomputer/"
 DROPPED = "the connection to the VM closed before this call finished"
+TOO_COMPLEX = "the VM's answer was over the hub's value or depth limit; the hub answered the call with an error"
+# The ids the hub gives its requests (mcp_hub.HUB_ID_RE): an answer too complex to parse is recorded for the request
+# its top-level "id" names (wirelimits.top_level_id), the one the hub answers; nested ids never count.
+HUB_ID_RE = re.compile(r"c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12}")
 
 
 def session_info():
@@ -115,6 +120,14 @@ def main(cmd):
                     break
                 try:
                     msg = wirelimits.loads(line)     # not JSON or nested too deeply: passed on unlogged (the hub skips it)
+                except wirelimits.LimitError:
+                    msg = None                       # too complex: the hub answers the call its top-level id names
+                    key = wirelimits.top_level_id(line)              # with an error, and the log says so
+                    if isinstance(key, str) and HUB_ID_RE.fullmatch(key):
+                        with plock:
+                            tool = pending.pop(json.dumps(key), None)
+                        if tool:
+                            log.result(key, tool, {"error": {"message": TOO_COMPLEX}})
                 except ValueError:
                     msg = None
                 if isinstance(msg, dict) and "method" not in msg and "id" in msg:
