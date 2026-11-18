@@ -895,11 +895,13 @@ do_recordings() {
   local sync=0 n=20
   for a in "$@"; do case "$a" in --sync) sync=1 ;; [0-9]*) n="$a" ;; esac; done
   if [ $sync = 1 ]; then
-    vm_running "$VM_NAME" || die "VM is not running; nothing to sync"
+    # A failed sync returns non-zero instead of exiting: reset, stop and checkpoint call this first and must
+    # go on (a VM whose home was wiped has no ~/metacomputer-runs to copy).
+    vm_running "$VM_NAME" || { warn "VM is not running; nothing to sync"; return 1; }
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
     # Plain files and folders only: links and special files from the VM are left out (lib/guest_import.py).
     gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | guest_import "$dest" \
-      || die "could not sync ~/metacomputer-runs from the guest"
+      || { warn "could not sync ~/metacomputer-runs from the guest"; return 1; }
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
   "$PY" - "$LAB_ROOT/recordings" "$n" "${RECORD_DIR:-}" <<'EOF'
