@@ -306,15 +306,17 @@ if [ -z "$LUME_CHOICE" ]; then
 fi
 if [ "$LUME_CHOICE" = mcomp-vm ]; then
   LUME_BIN="$HOME/.local/bin/mcomp-vm"
-  if [ -x "$LUME_BIN" ] && grep -qs "upstream=lume-v$LUME_VERSION" "$HOME/.local/share/mcomp-vm/BUILD_INFO" \
+  # Current when the installed build is the pinned release (BUILD_INFO's version= line, written since
+  # 0.7.2-mcomp.2); an older build, or one without that line, is rebuilt from the pin.
+  if [ -x "$LUME_BIN" ] && grep -qsx "version=${MCOMP_VM_TAG#v}" "$HOME/.local/share/mcomp-vm/BUILD_INFO" \
      && "$LUME_BIN" run --help 2>&1 | grep -q -- "--no-host-sharing"; then
-    ok "already installed: $LUME_BIN"
+    ok "already installed: $LUME_BIN (mcomp-vm ${MCOMP_VM_TAG#v})"
   else
     if ! xcode-select -p >/dev/null 2>&1 || ! command -v swift >/dev/null 2>&1; then
       die "mcomp-vm is built with Swift: install Apple's Command Line Tools (xcode-select --install), then run this again, or use ./install.sh --lume=standard"
     fi
     src="$ROOT/.cache/mcomp-vm"; rm -rf "$src"; mkdir -p "$ROOT/.cache"
-    git clone -q --depth 1 --branch "$MCOMP_VM_TAG" "$MCOMP_VM_REPO" "$src"
+    git clone -q -c advice.detachedHead=false --depth 1 --branch "$MCOMP_VM_TAG" "$MCOMP_VM_REPO" "$src"
     [ "$(git -C "$src" rev-parse HEAD)" = "$MCOMP_VM_COMMIT" ] || die "mcomp-vm $MCOMP_VM_TAG isn't the pinned commit $MCOMP_VM_COMMIT"
     "$src/install.sh"
     # A tag from before the rename (pinned in local.env) installs the runner as lume-secure.

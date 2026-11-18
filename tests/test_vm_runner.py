@@ -126,8 +126,8 @@ def lib_cases(td):
 
 # --- install.sh -------------------------------------------------------------------
 NEW_REPO = "https://github.com/metavert-io/metacomputer-vm.git"
-NEW_TAG = "v0.7.2-mcomp.1"
-NEW_COMMIT = "73b0c9a51c68be68b7b6141e3e3fa514a9ec9b16"
+NEW_TAG = "v0.7.2-mcomp.2"
+NEW_COMMIT = "26dc0df2b75edaca26cb2306995a0b6437a87349"
 
 
 def install_cases(td):
@@ -159,14 +159,16 @@ def install_cases(td):
     write(os.path.join(fakebin, "claude"), "#!/bin/sh\nexit 1\n", 0o755)
     n = [0]
 
-    def install(args, local_env=None, have=(), head=NEW_COMMIT, runner="mcomp-vm", build_info=False):
+    def install(args, local_env=None, have=(), head=NEW_COMMIT, runner="mcomp-vm", build_info=False,
+                build_version="0.7.2-mcomp.2"):
         n[0] += 1
         home = os.path.join(td, f"ihome{n[0]}")
         os.makedirs(home)
         for r in have:
             fake_runner(home, r)
         if build_info:
-            write(os.path.join(home, ".local", "share", "mcomp-vm", "BUILD_INFO"), "upstream=lume-v0.7.2 f30fbc0\n")
+            write(os.path.join(home, ".local", "share", "mcomp-vm", "BUILD_INFO"),
+                  (f"version={build_version}\n" if build_version else "") + "upstream=lume-v0.7.2 f30fbc0\n")
         if local_env is None:
             if os.path.exists(conf):
                 os.remove(conf)
@@ -239,6 +241,13 @@ def install_cases(td):
     check("mcomp-vm already installed: says so and clones nothing",
           r.returncode == 0 and f"already installed: {home}/.local/bin/mcomp-vm" in r.stdout and clone == "",
           (clone, (r.stdout + r.stderr)[-300:]))
+    home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n", have=["mcomp-vm"], build_info=True,
+                                   build_version=None)
+    check("an older mcomp-vm build (no version= line) is rebuilt from the pinned release",
+          r.returncode == 0 and NEW_TAG in clone and "already installed" not in r.stdout, (clone, (r.stdout + r.stderr)[-300:]))
+    home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n", have=["mcomp-vm"], build_info=True,
+                                   build_version="0.7.2-mcomp.1")
+    check("...and so is a build of an earlier release", r.returncode == 0 and NEW_TAG in clone, (clone, (r.stdout + r.stderr)[-300:]))
 
     # --uninstall names the runner in use.
     def uninstall(local_env, have):
