@@ -187,6 +187,12 @@ These apps aren't in the standard VM. They were verified in a VM built with `EXT
   - `metacomputer shot --task NAME` saves a whole-desktop PNG.
   - `metacomputer get PATH --task NAME` copies any file out.
 
+## When only the user can go on
+
+- **What counts:** a dialog you won't accept yourself (a permission prompt, terms, payment, a destructive confirmation, a security or download warning), a sign-in, or a code.
+- **Don't click through it.** Run `metacomputer notify "what you need, and where" --why dialog --action "what to do"` (`--why login`, `2fa` or `captcha` for those), say it in your reply, and wait. [EVENTS.md](EVENTS.md) has the details.
+- **Afterwards, read the window again** before acting: the screen changed while you waited.
+
 ## Don't
 
 - Call `check_for_update`, `install_extension` or `install_ffmpeg`, use `browser_prepare` with `strategy: existing_profile`, or use `set_config` beyond cursor appearance.

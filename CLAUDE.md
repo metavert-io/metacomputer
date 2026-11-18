@@ -51,12 +51,22 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   as an acting call for the one-controller rule. The VM is untrusted: keep the
   Mac side's wire limits, deadline, strict reply schema and terminal escaping
   (docs/shell.md, "A VM that misbehaves").
+- Optional event stream (docs/events.md): `metacomputer notify` when blocked
+  on the user; `metacomputer events sink …` only when the user asks (it
+  decides what leaves the Mac). Off by default and best effort: an emitter
+  must never fail or block its command (`emit_event` in `scripts/lib.sh`,
+  `events.emit` / `emit_async` in Python). New event fields go through
+  `lib/events.py`'s cleaning; never put typed text, tokens or URL queries in
+  an event. Other programs hand in events through the spool (architecture.md,
+  "Event spool"). Tests: `python3 tests/test_events.py` (no VM) and
+  `tests/test_options.py E` (VM).
 
 ## Useful commands
 
 ```bash
 metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view | where
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
+metacomputer notify "TEXT" --why login --action "…" | events status|tail|sink list   # optional event stream
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
 metacomputer security [apply] | actions list|show|verify   # optional hardening, signed action log
 metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop user (docs/shell.md)

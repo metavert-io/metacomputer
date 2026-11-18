@@ -70,6 +70,66 @@ steady within a recording but different between recordings. `desktop-record`
 delays the sound by 90 ms, so expect it within about 50 ms of the picture: fine
 for watching, but nudge it in the editor if a sound has to land on an exact frame.
 
+## Event stream: `tests/test_events.py`, `tests/test_options.py E`
+
+`python3 tests/test_events.py` needs no VM (169 checks, about a minute). It keeps
+everything in a temporary folder and runs a local receiver for each kind: an
+HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
+CA, made with `openssl` (the syslog checks are skipped without it). It checks:
+- sinks are added, listed, shown and removed; the config is private; header values and ntfy topics are never printed; plain http off the Mac, syslog without TLS and credentials in URLs are refused;
+- four sinks receive the same events in order, in each format: CloudEvents with a valid HMAC signature, OTLP/HTTP JSON, RFC 5424 over TLS with octet counting, ntfy;
+- family and minimum-severity filters, and the opt-in `actions` family;
+- cleaning: control characters and escape sequences, URL queries and credentials, secret-looking keys, size caps, a sink's header value and the live-view password;
+- the spool, including invalid and oversized files;
+- a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
+- eight processes emitting at once; debounce; `notify`;
+- the watcher's pieces (blocked connections batched a minute at a time, health changes), `events watcher start|stop`, and the bridge's hooks (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
+- the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
+- the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds;
+- the review's fixes, one or more checks each:
+  - malformed addresses in `open-untrusted`;
+  - query redaction whatever the query holds, also without a scheme;
+  - the driver's and the VM's text kept out of messages;
+  - the rate limit and its summary; slower repeats of blocked connections; quiet health flapping; repeated `notify` and `emit`;
+  - sink changes refused without a terminal, asked at one, and announced to the existing sinks (the removed one included);
+  - more secret-looking keys; signing keys and topics redacted; lone surrogates and invisible characters;
+  - odd gateway records; a failing watcher step; ports out of range; one watcher per VM;
+  - temporary spool names; events left at a bridge's exit; a lost sequence counter; debounce only after recording;
+  - what `--replace` says; `origin`; an ntfy `?auth=`; a refused event inside an OTLP batch; the byte cap; `sink test` behind a slow backlog.
+- the second review's fixes:
+  - reserved types refused from `events emit` and the spool; strict sliding windows; the phone cap per sink (10 in 10 minutes, 30 an hour, tests included); the relay's `actions` outside the family limit;
+  - a hand edit to `events.json` announced once to the previous sinks, and its removal too;
+  - a sink-change announcement kept for a sink that's down, delivered later, and given up (and logged) for one that never answers;
+  - replacing a sink waits for a sender holding its lock; a sender with the retired generation sends nothing;
+  - fixed messages for failed recordings, blocked destinations that aren't addresses and `open-untrusted`;
+  - every link in a word, bare IPv4, `[IPv6]` and `localhost`, credentials anywhere, encoded links;
+  - camelCase, hyphenated and invisible-character key names; no stored tag of the live-view password;
+  - a spool file too deep to parse, and folders that don't use up the 500;
+  - events started but not finished at a bridge's exit; a restored counter;
+  - provenance on the phone; a syslog reset at close counted as a failure.
+- the third review's fixes:
+  - the phone cap taken right before each attempt: retries use slots, a backlog after an outage arrives as the window allows, what waits isn't dropped; sink-change announcements under the cap, several as one message, waiting without using up attempts;
+  - a broken `events.json`: the local log still gets events, status says why, it's announced; the same sinks put back quietly; journal recovery (a prepared announcement sent when its change was written, dropped when it wasn't, including a change cut off before the write); a hand edit journaled before it's accepted;
+  - an add or replace confirmed after someone else changed the same sink is refused;
+  - spool files: a FIFO swapped in doesn't block, a link isn't followed, a `.quarantine` link isn't used;
+  - a trailing newline in a type or sink name refused; no internal `_emit`; `notify` shown as "[from Claude]" on a phone;
+  - the watcher wanted while an announcement waits, even with no sinks;
+  - an encoded secret key name (`pa%73sword`) and an encoded `token=` after a query;
+  - `events-state/redact.json` from an earlier build deleted, and noted.
+
+Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py E` runs against a
+running VM, with its own temporary events folder and a local webhook receiver,
+so your own sinks get nothing. It changes nothing in the VM (a test page in
+`/tmp` is removed afterwards). It checks:
+- `metacomputer _health` (the watcher's probe) answers without MCP;
+- `record start` / `record stop` sends `task.recording_stopped` with the recording's details (the test recording is deleted afterwards);
+- `notify` sends `needs_you.login` with the action;
+- a blocked connection from the VM (`curl` to `10.255.255.254:9`) reaches the receiver as `security.blocked_connections` within one watcher cycle (if a watcher already runs for that VM, the test drives one cycle with `events watch --once` instead);
+- `web open-untrusted` on `tests/fixtures/site/signin.html` sends `security.untrusted_link` with the password field and origins only;
+- nothing the receiver got holds a URL query or the live-view password.
+
 ## Optional hardening: `tests/test_actionlog.py`, `tests/test_options.py`
 
 `python3 tests/test_actionlog.py` needs no VM (16 checks). It writes logs to a

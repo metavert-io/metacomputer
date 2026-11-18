@@ -1,6 +1,6 @@
 ---
 name: metacomputer
-description: Claude's own disposable computer (metacomputer) is an isolated Ubuntu 24.04 desktop VM on this Mac that Claude sees and controls through the metacomputer MCP tools (Cua Driver), with accessibility trees, screenshots, clicks, typing and MP4 recordings. Use when the user asks Claude to get or use a computer of its own or a virtual, disposable, sandbox or Linux computer or desktop; to do something in a real browser or GUI app ("use Firefox to…", "in Chrome…", "visually test…", "click through…", "compare this page in both browsers", "what does this link do"); to record itself performing a task; or to open untrusted links or files in isolation, including "what does this link do / is it safe to open?" about a URL someone sent (metacomputer web open-untrusted shows redirects, the final page, password prompts and downloads without touching the Mac). Not for the user's own Mac, screen, apps or accounts ("my screen", "my Notes", "my Chrome"), and not for work that code, the shell, files or HTTP/APIs do directly.
+description: Claude's own disposable computer (metacomputer) is an isolated Ubuntu 24.04 desktop VM on this Mac that Claude sees and controls through the metacomputer MCP tools (Cua Driver), with accessibility trees, screenshots, clicks, typing and MP4 recordings. Use when the user asks Claude to get or use a computer of its own or a virtual, disposable, sandbox or Linux computer or desktop; to do something in a real browser or GUI app ("use Firefox to…", "in Chrome…", "visually test…", "click through…", "compare this page in both browsers", "what does this link do"); to record itself performing a task; or to open untrusted links or files in isolation, including "what does this link do / is it safe to open?" about a URL someone sent (metacomputer web open-untrusted shows redirects, the final page, password prompts and downloads without touching the Mac). Also when the user wants to hear from it during virtual-computer work ("ping me when you're stuck", "notify me when it's done") or wants metacomputer's events sent to Slack, ntfy, Datadog, a SIEM or an OpenTelemetry Collector (metacomputer notify, metacomputer events). Not for the user's own Mac, screen, apps or accounts ("my screen", "my Notes", "my Chrome"), and not for work that code, the shell, files or HTTP/APIs do directly.
 ---
 
 # Virtual computer
@@ -108,6 +108,17 @@ Do everything else directly with normal tools: code, builds, tests, git, files, 
     - When the bridge says the bounded session has ended, ask the user to reconnect (`/mcp`).
   - **Action log** (`ACTION_LOG=on`): every call is recorded, with typed text redacted by default. `metacomputer actions show latest` shows what was sent.
 
+## Getting the user's attention (events)
+
+- **Blocked on the user?** That covers a sign-in, a CAPTCHA, a 2FA code, a dialog you won't accept, an approval, or the computer in use by someone who isn't answering.
+  1. Run `metacomputer notify "what you need, and where" --why login|captcha|2fa|dialog|approval|other --action "what they should do"`.
+  2. Say the same in your reply.
+  3. Wait, or carry on with what doesn't depend on it.
+- **Keep both texts to one line each and specific.** Never include a secret, a code or a full URL.
+- **Don't duplicate what's sent automatically:** finished tasks and recordings, security signals, the computer's lifecycle and health, and the bridge's own refusals.
+- **Sinks decide what leaves the Mac.** Changing them works only from the user's own terminal. When they ask, give them the `metacomputer events sink add …` command to run there.
+- **Details,** the `--why` table and examples: [EVENTS.md](EVENTS.md).
+
 ## Also available
 
 - **Checkpoints.** `metacomputer checkpoint NAME` takes one while the VM is stopped. `metacomputer checkpoints` lists them. `metacomputer restore NAME` replaces the current state, so it needs the user's OK.
@@ -126,5 +137,6 @@ Do everything else directly with normal tools: code, builds, tests, git, files, 
 - [DESKTOP.md](DESKTOP.md): rules for this desktop, verified on Cua Driver 0.52.1.
 - [BROWSER.md](BROWSER.md): choosing Firefox or Chrome and human, page or hybrid mode; profiles; `metacomputer web` checks.
 - [SHELL.md](SHELL.md): `metacomputer sh`, which work goes to the shell and which to the apps, and what the VM has for format-aware work.
+- [EVENTS.md](EVENTS.md): `metacomputer notify` when you're blocked on the user, what's sent automatically, and event sinks.
 - `.claude/skills/cua-driver/` in the project folder (`metacomputer where`): Cua Driver's own skill (WORKFLOW.md, LINUX.md, RECORDING.md).
 - The project's `README.md` (usage) and `architecture.md` (design, network isolation).

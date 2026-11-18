@@ -31,6 +31,11 @@
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
 #   ssh [ops|admin] [CMD...]       shell into the guest
+#   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
+#                                  tell the user Claude is blocked on them (through the event sinks)
+#   events [status | sink add|list|show|test|remove | tail [N] | emit FAMILY TYPE --message TEXT
+#          | drain | watcher start|stop|status]
+#                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
 #   mcp                            direct stdio MCP bridge (tests, mcp_client.py)
 #   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use)
 #   build [--replace]              build the VM + baseline from scratch
@@ -49,6 +54,15 @@ LIB="$(dirname "$SELF")/../scripts/lib.sh"
 . "$LIB"
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
+
+# --- EVENTS HOOK (secrets) ---------------------------------------------------------
+# `metacomputer secrets` comes from another branch. When it exits 3 ("vault locked"),
+# needs_you.vault_locked goes to the event stream, however its dispatch line is
+# written (an EXIT trap, so the merge needs no edit here). Subcommands that exec the
+# vault directly (list, status, unlock, ...) never come back to run it; the paths
+# Claude uses to fill (fill, session save|load) do. The vault's own events ("approval
+# waiting", ...) come through the spool (architecture.md, "Event spool").
+if [ "$cmd" = secrets ]; then trap 'rc=$?; trap - EXIT; events_hook_secrets_exit "$rc"; exit "$rc"' EXIT; fi
 
 confirm() { # PROMPT
   [ "${ASSUME_YES:-0}" = 1 ] && return 0
@@ -97,7 +111,80 @@ do_start() {
   wait_session 240 || die "XFCE session not ready (metacomputer ssh admin; sudo metacomputer-admin logs)"
   ok "XFCE session ready"
   mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (metacomputer status)"
+  emit_event lifecycle started info "The virtual computer $VM_NAME started" ""
+  events_watcher_start
   say "ready. Live view: metacomputer view"
+}
+
+# --- the event watcher (docs/events.md): only while a sink is configured --------
+# A detached process like the gateway (never a LaunchAgent): every 30 s it drains
+# the spool, retries backlogs and reads new lines of netgw-blocked.jsonl; every
+# 5 min a cheap health probe (metacomputer _health). start starts it, stop stops it.
+events_watcher_pid() {
+  local p; p="$(cat "$RUN_DIR/events-watcher.pid" 2>/dev/null)"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ps -o command= -p "$p" 2>/dev/null | grep -q 'events.py watch' && echo "$p"
+  return 0
+}
+events_watcher_start() {
+  "$PY" "$LAB_ROOT/lib/events.py" needs-watcher 2>/dev/null || return 0   # sinks, or announcements to deliver
+  [ -n "$(events_watcher_pid)" ] && return 0
+  ( umask 077; : >> "$LOG_DIR/events-watcher.log" ); chmod 600 "$LOG_DIR/events-watcher.log" 2>/dev/null
+  ( export_options; daemonize "$LOG_DIR/events-watcher.log" "$PY" "$LAB_ROOT/lib/events.py" watch )
+  local i=0; while [ -z "$(events_watcher_pid)" ] && [ $i -lt 20 ]; do sleep 0.25; i=$((i + 1)); done
+  if [ -n "$(events_watcher_pid)" ]; then ok "event watcher running (metacomputer events status)"
+  else warn "the event watcher did not start (see $LOG_DIR/events-watcher.log)"; fi
+}
+events_watcher_stop() {
+  local p i=0 target; p="$(events_watcher_pid)"
+  if [ -n "$p" ]; then
+    # The watcher leads its own process group (daemonize), so signal the group: a health probe it
+    # started (metacomputer _health and its ssh) stops with it.
+    target="$p"; [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" = "$p" ] && target="-$p"
+    kill -TERM -- "$target" 2>/dev/null
+    while kill -0 "$p" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+    kill -0 "$p" 2>/dev/null && kill -9 -- "$target" 2>/dev/null
+  fi
+  rm -f "$RUN_DIR/events-watcher.pid"
+}
+do_events_watcher() { # start|stop|status
+  case "${1:-status}" in
+    start)  "$PY" "$LAB_ROOT/lib/events.py" needs-watcher || die "no event sinks configured, and no announcement to deliver"
+            events_watcher_start ;;
+    stop)   events_watcher_stop; ok "event watcher stopped" ;;
+    status) local p; p="$(events_watcher_pid)"
+            if [ -n "$p" ]; then echo "event watcher running (pid $p; log $LOG_DIR/events-watcher.log)"; else echo "event watcher not running"; fi ;;
+    *) die "usage: metacomputer events watcher start|stop|status" ;;
+  esac
+}
+
+do_health() { # internal (the event watcher): VM, gateway, SSH, guest-status, desktop recording; no MCP, no GUI work
+  local vm_state gw=false ssh_ok=false gs="{}" rec_status="" rec_mode="" rec_name="" rec_pid=""
+  vm_state="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
+  netgw_alive && gw=true
+  if [ -s "$RUN_DIR/manual-recording" ]; then
+    rec_mode="$(sed -n 's/^mode=//p' "$RUN_DIR/manual-recording")"; rec_name="$(sed -n 's/^name=//p' "$RUN_DIR/manual-recording")"
+    rec_pid="$(sed -n 's/^pid=//p' "$RUN_DIR/manual-recording")"
+  fi
+  if [ "$vm_state" = running ] && $gw && gssh ops true 2>/dev/null; then
+    ssh_ok=true
+    gs="$(gssh ops /opt/metacomputer/bin/guest-status 2>/dev/null || echo '{}')"
+    [ -n "$rec_name" ] && rec_status="$(gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null)"
+  fi
+  local pid_alive=""; [ -n "$rec_pid" ] && { kill -0 "$rec_pid" 2>/dev/null && pid_alive=1 || pid_alive=0; }
+  "$PY" - "$vm_state" "$gw" "$ssh_ok" "$gs" "$rec_name" "$rec_mode" "$rec_status" "$pid_alive" <<'EOF'
+import json, sys
+vm, gw, ssh, gs, name, mode, rstat, pid_alive = sys.argv[1:]
+try:
+    gs = json.loads(gs or "{}")
+except ValueError:
+    gs = {}
+rec = {"expected": bool(name), "name": name or None, "mode": mode or None, "running": None}
+if name and ssh == "true":
+    rec["running"] = rstat.startswith("recording") and (mode != "host" or pid_alive != "0")
+keep = ("ready", "driver_doctor_rc", "disk_free_gb", "xorg_running", "xfce_session_running", "atspi_bus")
+print(json.dumps({"vm": vm, "gateway": gw == "true", "ssh": ssh == "true",
+                  "guest": {k: gs.get(k) for k in keep} if gs else {}, "recording": rec}))
+EOF
 }
 
 mcp_probe() { "$PY" "$LAB_ROOT/lib/mcp_client.py" --probe; }
@@ -108,6 +195,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   if vm_running "$VM_NAME"; then
     owners_check
+    events_watcher_stop   # first, so its health probe doesn't report the shutdown as a problem
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
     if [ -s "$RUN_DIR/manual-recording" ]; then
       say "finishing the desktop recording first"
@@ -115,8 +203,10 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
     fi
     gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
+    emit_event lifecycle stopped info "The virtual computer $VM_NAME stopped" "" "forced=$([ -n "$force" ] && echo yes || echo no)"
   else
     netgw_stop
+    events_watcher_stop
   fi
   ok "stopped"
 }
@@ -217,10 +307,15 @@ do_status() {
     fi
   fi
   export_options
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" <<'EOF'
+  local ev; ev="$("$PY" "$LAB_ROOT/lib/events.py" status --json 2>/dev/null || echo '{}')"
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" <<'EOF'
 import json, os, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout = sys.argv[1:]
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib = sys.argv[1:]
 gs = json.loads(gs or "{}"); mcp = json.loads(mcp or "{}")
+try:
+    ev = json.loads(ev or "{}")
+except ValueError:
+    ev = {}
 sharing = None
 if hs:
     parts = (hs.split("---") + ["", "", ""])[:3]
@@ -232,7 +327,8 @@ out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.s
        "host_sharing": sharing, "lume": lume, "guest_layout": layout,
        "options": {"action_log": os.environ.get("MCOMP_ACTION_LOG", "off"), "ssh_auth": os.environ.get("MCOMP_SSH_AUTH", "key"),
                    "driver_mode": os.environ.get("MCOMP_DRIVER_MODE", "standard"),
-                   "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None}}
+                   "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None},
+       "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -266,14 +362,19 @@ if o["action_log"] == "on" or o["ssh_auth"] == "cert" or o["driver_mode"] == "bo
     parts = (["action log on"] if o["action_log"] == "on" else []) + (["SSH certificates"] if o["ssh_auth"] == "cert" else []) \
         + ([f"driver bounded ({o['driver_profile'] or 'manifest'})"] if o["driver_mode"] == "bounded" else [])
     print(f"hardening     {' · '.join(parts)}   (metacomputer security)")
+if ev.get("sinks"):
+    sys.path.insert(0, lib)
+    import events
+    print(f"events        {events.status_line(ev)}   (metacomputer events)")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
 }
 
-restore_from() { # SOURCE_VM LABEL: replace the working VM with a copy of SOURCE_VM, then start it
-  local src="$1" label="$2"
+restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
+  local src="$1" label="$2" evtype="${3:-restored}"
   if vm_exists "$VM_NAME" && vm_running "$VM_NAME"; then
+    events_watcher_stop   # start brings it back; meanwhile the replacement isn't a health problem
     say "saving guest recordings to the host first"
     do_recordings --sync >/dev/null || warn "could not sync guest recordings"
     vm_stop "$VM_NAME"
@@ -282,6 +383,7 @@ restore_from() { # SOURCE_VM LABEL: replace the working VM with a copy of SOURCE
   say "cloning $src -> $VM_NAME"
   "$LUME" clone "$src" "$VM_NAME" >/dev/null || die "lume clone failed"
   ok "restored from $label"
+  emit_event lifecycle "$evtype" info "The virtual computer $VM_NAME was replaced by $label" "" "from=$src"
   do_start
 }
 
@@ -290,7 +392,7 @@ do_reset() {
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"
-  restore_from "$BASELINE_NAME" baseline
+  restore_from "$BASELINE_NAME" baseline reset
 }
 
 CKPT_PREFIX="$VM_NAME-ckpt-"
@@ -303,6 +405,7 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
     ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     confirm "Delete checkpoint '$2'?"
     "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
+    emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
     ok "checkpoint '$2' deleted"; return 0
   fi
   local name="${1:-}" replace=0; [ "${2:-}" = "--replace" ] && replace=1
@@ -314,6 +417,7 @@ do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
+  emit_event lifecycle checkpoint info "Checkpoint '$name' of $VM_NAME saved" "" "name=$name" "change=saved"
   ok "checkpoint '$name' saved (restore with: metacomputer restore $name)"
 }
 
@@ -329,7 +433,7 @@ do_restore() { # NAME [--yes] [--override]
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded (host recordings and results are kept)"
-  restore_from "$CKPT_PREFIX$name" "checkpoint '$name'"
+  restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
 }
 
 do_baseline() {
@@ -337,7 +441,7 @@ do_baseline() {
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   local was_running=0; vm_running "$VM_NAME" && was_running=1
-  [ $was_running = 1 ] && { do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' || true; vm_stop "$VM_NAME"; }
+  [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' || true; vm_stop "$VM_NAME"; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
@@ -345,6 +449,7 @@ do_baseline() {
     ok "previous baseline kept as $keep"
   fi
   "$LUME" clone "$VM_NAME" "$BASELINE_NAME" >/dev/null || die "clone failed"
+  emit_event lifecycle baseline info "The baseline $BASELINE_NAME was replaced by the current state of $VM_NAME" ""
   ok "baseline updated"
   [ $was_running = 1 ] && do_start
 }
@@ -407,6 +512,12 @@ do_record() {
       fi ;;
     stop)
       local name mode dir pid started fps quality ended path i=0 out
+      rec_fail() { # WHY MESSAGE [DETAIL]: tell the event stream (a fixed reason; anything from the VM only
+                   # as a cleaned detail in its data), then stop with the message
+        emit_event task recording_failed error "Recording '$name' failed: $1" "metacomputer record status" \
+          "name=$name" "mode=$mode" ${3:+"detail=$3"}
+        rm -f "$state"; die "$2"
+      }
       if [ ! -s "$state" ]; then
         # A recording started some other way (or before this version): stop it and copy it.
         path="$(gssh ops /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
@@ -424,22 +535,23 @@ do_record() {
       if [ "$mode" = host ]; then
         while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-        [ -s "$dir/$name.mkv" ] || { rm -f "$state"; die "the stream saved nothing (see $dir/$name.stream.log)"; }
+        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing" "the stream saved nothing (see $dir/$name.stream.log)"
         # Same video, in an MP4 that players and editors open at once (no re-encoding).
         if ffmpeg -hide_banner -loglevel error -nostdin -y -i "$dir/$name.mkv" -c copy -movflags +faststart "$out" \
            && [ -n "$("$PY" "$LAB_ROOT/lib/recording.py" probe "$out" 2>/dev/null)" ]; then
           rm -f "$dir/$name.mkv"
           [ -s "$dir/$name.stream.log" ] || rm -f "$dir/$name.stream.log"
         else
-          rm -f "$out"; rm -f "$state"
-          die "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
+          rm -f "$out"
+          rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
         fi
       else
-        case "$path" in */"$name.mp4") ;; *) rm -f "$state"; die "the VM's recorder said: $path" ;; esac
-        gssh ops "cat '$path'" > "$out" || { rm -f "$state"; die "copy failed (the file stays in the VM: $path)"; }
+        case "$path" in */"$name.mp4") ;; *) rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $path" "$path" ;; esac
+        gssh ops "cat '$path'" > "$out" || rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (the file stays in the VM: $path)" "$path"
       fi
       rm -f "$state"
       record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode"
+      ( export_options; "$PY" "$LAB_ROOT/lib/events.py" _recording "$out" ) >/dev/null 2>&1 || true
       ok "saved $out ($(du -h "$out" | cut -f1)); its description: ${out%.mp4}.json" ;;
     status)
       if [ -s "$state" ]; then
@@ -685,14 +797,14 @@ EOF
       echo "FILES_DIR=$guest/files            # save outputs here in the VM"
       echo "HOST_DIR=$host" ;;
     finish)
-      local name="${1:-}" host guest
+      local name="${1:-}" host guest copied=yes
       [[ "$name" =~ ^mcomp-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: metacomputer task finish mcomp-YYYYMMDD-HHMMSS-slug"
       host="$LAB_ROOT/results/$name"; guest="$GUEST_RUN_DIR/$name"; mkdir -p "$host/guest"
       if vm_running "$VM_NAME"; then
         gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | tar -C "$host/guest" -xf - 2>/dev/null \
-          || warn "nothing to copy from $guest"
+          || { warn "nothing to copy from $guest"; copied=no; }
       else
-        warn "the virtual computer is off; listing what is already on the Mac"
+        warn "the virtual computer is off; listing what is already on the Mac"; copied=off
       fi
       # Action-log files written while the task ran (ACTION_LOG=on).
       if [ -d "$LOG_DIR/actions" ]; then
@@ -705,9 +817,10 @@ EOF
       while IFS= read -r v; do
         [ -n "$v" ] && do_contact_sheet "$v" >/dev/null 2>&1 || true
       done < <(find "$host" -name '*.mp4' -size +0 2>/dev/null)
-      "$PY" - "$host" <<'EOF'
+      export_options
+      "$PY" - "$host" "$LAB_ROOT/lib" "$copied" <<'EOF'
 import json, os, subprocess, sys, time
-host = sys.argv[1]
+host, lib, copied = sys.argv[1:4]
 items = {"videos": [], "contact_sheets": [], "screenshots": [], "files": []}
 for d, _, fs in os.walk(host):
     for f in sorted(fs):
@@ -734,6 +847,28 @@ for k, label in (("contact_sheets", "contact sheet"), ("screenshots", "screensho
     for p in items[k]:
         print(f"{label:<12} {p}")
 print(f"index        {os.path.join(host, 'artifacts.json')}")
+try:   # the optional event stream (docs/events.md); never fails the command
+    from datetime import datetime
+    sys.path.insert(0, lib)
+    import events
+    task = json.load(open(os.path.join(host, "task.json")))
+    secs = round(time.time() - datetime.strptime(task["started"], "%Y-%m-%dT%H:%M:%S%z").timestamp())
+    name = os.path.basename(host)
+    empty = not (items["videos"] or items["files"] or items["screenshots"])
+    failed = empty and copied != "yes"
+    what = (f"{len(items['videos'])} video(s), {len(items['files'])} file(s), {len(items['screenshots'])} screenshot(s)"
+            if not empty else "no artifacts")
+    events.emit("task", "finished",
+                f"Task {name} finished after {secs // 60} min {secs % 60} s: {what}"
+                + (" (nothing could be copied from the VM)" if failed else ""),
+                "error" if failed else "info", f"See {host}" if not failed else "metacomputer status",
+                {"task": name, "duration_s": secs, "host_dir": host, "copied_from_vm": copied,
+                 "videos": [{"path": v["path"], "seconds": v["seconds"]} for v in items["videos"][:10]],
+                 "contact_sheets": items["contact_sheets"][:10], "files": len(items["files"]),
+                 "screenshots": len(items["screenshots"])},
+                project=task.get("requested_from"))
+except Exception:
+    pass
 EOF
       ;;
     *) die "usage: metacomputer task start SLUG | finish NAME" ;;
@@ -811,6 +946,15 @@ case "$cmd" in
   test)       parse_flags "$@"; owners_check
               exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
   who)        do_who "$@" ;;
+  notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
+  events)     export_options
+              if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
+              "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?
+              # A sink added or removed while the computer runs: make sure the watcher runs now (removing the
+              # last sink leaves its own announcement to deliver), rather than at the next start.
+              if [ $rc = 0 ] && [ "${1:-}" = sink ] && { [ "${2:-}" = add ] || [ "${2:-}" = remove ]; } && vm_running "$VM_NAME"; then events_watcher_start; fi
+              exit $rc ;;
+  _health)    do_health ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
   call)       [ $# -ge 1 ] || die "usage: metacomputer call TOOL ['JSON']"

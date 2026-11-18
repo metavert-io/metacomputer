@@ -35,6 +35,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
+try:
+    import events  # noqa: E402  (the optional event stream, docs/events.md)
+except Exception:  # never let it stop the bridge
+    events = None
 
 LAB = owners.LAB
 MCOMP_CLI = os.path.join(LAB, "bin", "metacomputer")
@@ -59,6 +63,11 @@ DROPPED_MSG = (
     "Check `~/.local/bin/metacomputer status`; after a restart, element tokens from earlier reads are stale."
 )
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
+BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
+REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
+# Which kind of manifest limit a refusal hit, from words in the driver's text (the text itself never leaves).
+REFUSAL_KINDS = (("app", ("app", "launch", "executable", "bundle")), ("path", ("path", "folder", "file", "director")),
+                 ("site", ("origin", "url", "site", "domain")), ("tool", ("tool",)))
 BOUNDED_END = (
     "metacomputer bridge: Cua Driver's bounded session has ended (DRIVER_MODE=bounded; DRIVER_EXPIRES / "
     "DRIVER_IDLE in the virtual computer's config). Tell the user; they can start a new one by reconnecting the "
@@ -142,9 +151,40 @@ class Bridge:
         self.tool_of = {}           # forwarded tools/call id (json) -> tool name
         self.annotate = {}          # forwarded tools/call id (json) -> note to add to its result
         self.mpx_dirty = None       # None = unknown since start; True = a virtual-device route was used
+        self.refusals = {}          # (tool, reason) -> times the driver refused it (bounded mode)
 
     def note(self, text):
         self.log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{self.pid}] {text}\n")
+
+    def event(self, family, type_, message, severity=None, action=None, data=None, debounce=None):
+        """The optional event stream (docs/events.md), on a background thread: never delays a call."""
+        if events is None:
+            return
+        try:
+            events.emit_async(family, type_, message, severity, action, data, project=os.getcwd(), debounce=debounce,
+                              origin="bridge")
+        except Exception as e:
+            self.note(f"event failed: {e!r}")
+
+    def bounded_refused(self, tool, res):
+        """Cua Driver refused a call in bounded mode. Once the same tool is refused again within 5 minutes, the
+        user may need to allow it. The driver's text comes from inside the VM, so none of it goes into the
+        event: the message names only the tool, and data says only which kind of limit it hit. One event per
+        tool per 5 minutes."""
+        tool = re.sub(r"[^A-Za-z0-9_.-]", "", str(tool))[:40] or "a tool"
+        texts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
+        reason = " ".join(t for t in texts if isinstance(t, str)).lower()
+        kind = next((k for k, words in REFUSAL_KINDS if any(w in reason for w in words)), "other")
+        now = time.time()
+        hist = [t for t in self.refusals.get(tool, []) if now - t < REPEAT_S] + [now]
+        self.refusals[tool] = hist
+        if len(hist) >= 2:
+            self.event("needs_you", "refused",
+                       f"Cua Driver's bounded mode keeps refusing {tool} (outside the capability manifest)",
+                       action="Allow it (another DRIVER_PROFILE, or your own DRIVER_MANIFEST), or tell Claude another "
+                              "way to do the task",
+                       data={"tool": tool, "limit": kind, "count": len(hist)},
+                       debounce=f"bridge{self.pid}:{tool}")
 
     # --- transport ---------------------------------------------------------
     def send(self, msg):
@@ -301,6 +341,9 @@ class Bridge:
             return
         if res.get("isError") and BOUNDED_END_RE.search(json.dumps(res.get("content") or [])[:4000]):
             res.setdefault("content", []).append({"type": "text", "text": BOUNDED_END})
+        elif (res.get("isError") and driver_profiles.bounded()
+              and BOUNDED_REFUSED_RE.search(json.dumps(res.get("content") or [])[:4000])):
+            self.bounded_refused(tool or "a tool", res)
         if tool in ("list_windows", "launch_app", "get_window_state", "list_apps"):
             self.learn_apps(res.get("structuredContent") or {})
         if tool and MPX_RE.search(json.dumps(res)[:200000]):
@@ -423,8 +466,13 @@ class Bridge:
         return val
 
     def claim(self, tool):
+        first = not self.has_claim
         owners.write_claim(self.pid, self.claude, os.getcwd(), tool, self.started)
         self.has_claim = True
+        if first:
+            self.event("lifecycle", "controller_connected",
+                       f"A Claude Code session in {owners.short(os.getcwd())} is controlling the virtual computer",
+                       data={"tool": tool, "bridge_pid": self.pid, "claude_pid": self.claude})
 
     # --- handlers ------------------------------------------------------------
     def reply(self, msg, result):
@@ -468,6 +516,15 @@ class Bridge:
             busy = self.busy_others()
             if busy:
                 lines = "\n".join("  - " + owners.describe(o) for o in busy)
+                self.event("needs_you", "in_use",
+                           f"Claude Code in {owners.short(os.getcwd())} wants the virtual computer, but another "
+                           f"controller is using it: {owners.describe(busy[0])}",
+                           action="Let the other session finish, or run `metacomputer release` if it's done; "
+                                  "then tell Claude to carry on",
+                           data={"tool": name, "others": [{"kind": o.get("kind"), "project": o.get("cwd"),
+                                                            "idle_s": o.get("idle_s"), "last_tool": o.get("last_tool")}
+                                                           for o in busy[:5]]},
+                           debounce=f"bridge{self.pid}")
                 self.refuse(msg, (
                     "The virtual computer is in use by another controller:\n" + lines +
                     "\nOnly one session should control it at a time. Ask the user before taking over; if they "
@@ -492,6 +549,10 @@ class Bridge:
                 note = "metacomputer bridge: " + launch_note + ("; " + note if note else "")
             if err:
                 self.refuse(msg, err)
+                tool = re.sub(r"[^A-Za-z0-9_.-]", "", str(name))[:40] or "a tool"
+                self.event("security", "chrome_input_refused",
+                           f"The bridge refused {tool} aimed at Chrome (background input there would block "
+                           "Chrome's keyboard)", data={"tool": tool}, debounce=f"bridge{self.pid}:{tool}")
                 return
             if note:
                 self.annotate[json.dumps(msg["id"])] = note
@@ -547,6 +608,12 @@ class Bridge:
 
     def shutdown(self, *_):
         owners.drop_claim(self.pid)
+        if self.has_claim:
+            self.event("lifecycle", "controller_released",
+                       f"The Claude Code session in {owners.short(os.getcwd())} let go of the virtual computer",
+                       data={"bridge_pid": self.pid, "claude_pid": self.claude})
+        if events is not None:
+            events.flush_async(2.0)
         proc = self.up
         if proc and proc.poll() is None:
             try:

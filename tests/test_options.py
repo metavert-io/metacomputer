@@ -488,11 +488,148 @@ def main(argv):
     which = [a.upper() for a in argv] or ["A", "B", "C", "F"]
     try:
         for k in which:
-            {"A": test_a, "B": test_b, "C": test_c, "F": test_f}[k]()
+            {"A": test_a, "B": test_b, "C": test_c, "E": test_e, "F": test_f}[k]()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} checks passed")
     return 0 if results and all(results) else 1
+
+
+# --- E ---------------------------------------------------------------------------
+class Receiver:
+    """A local webhook receiver for test E (the events go nowhere else)."""
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.events, rx = [], self
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                try:
+                    rx.events.append(json.loads(body)["data"])
+                except (ValueError, KeyError):
+                    pass
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def wait(self, family, type_, timeout=10, since=0):
+        end = time.time() + timeout
+        while time.time() < end:
+            hit = [e for e in self.events[since:] if e.get("family") == family and e.get("type") == type_]
+            if hit:
+                return hit[0]
+            time.sleep(0.25)
+        return None
+
+
+def test_e():
+    """E: the event stream (docs/events.md), run by name (python3 tests/test_options.py E); not in the default
+    set. With a local webhook receiver in a temporary events folder: `record stop` sends task.recording_stopped,
+    `notify` sends needs_you, a blocked connection from the VM reaches security within one watcher cycle, and
+    `web open-untrusted` on a sign-in page sends security.untrusted_link with origins only. Changes nothing in
+    the VM."""
+    print("E  event stream (a local receiver in a temporary events folder; the VM's settings don't change)")
+    env = {"MCOMP_EVENTS_DIR": os.path.join(TMP, "events"), "MCOMP_EVENTS_SPOOL": os.path.join(TMP, "events-spool")}
+    saved = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    rx = Receiver()
+    s = settings(BASE)
+    started_watcher = False
+    rec_files = []
+    try:
+        import pty
+        m, s_ = pty.openpty()              # adding a sink needs a terminal
+        try:
+            r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "events.py"), "sink", "add", "etest", "--kind",
+                                "webhook", "--url", f"http://127.0.0.1:{rx.port}/e", "--yes"], capture_output=True,
+                               text=True, stdin=s_)
+        finally:
+            os.close(s_)
+            os.close(m)
+        check("a webhook sink in a temporary events folder", r.returncode == 0, r.stdout + r.stderr)
+        h = json.loads(mcomp(BASE, "_health").stdout or "{}")
+        check("_health (what the watcher probes): running, SSH, desktop ready, no MCP",
+              h.get("vm") == "running" and h.get("ssh") and (h.get("guest") or {}).get("ready"), h)
+
+        # record stop -> task.recording_stopped
+        name = "events-test-" + time.strftime("%H%M%S")
+        r = mcomp(BASE, "record", "start", name)
+        time.sleep(4)
+        r2 = mcomp(BASE, "record", "stop")
+        ev = rx.wait("task", "recording_stopped")
+        d = (ev or {}).get("data") or {}
+        if d.get("path"):
+            rec_files = [d["path"], d["path"][:-4] + ".json"]
+        check("record stop -> task.recording_stopped with name, duration, path, description, key moments, audio",
+              r.returncode == 0 and r2.returncode == 0 and d.get("name") == name and (d.get("duration_s") or 0) > 2
+              and str(d.get("path", "")).endswith(".mp4") and str(d.get("description_file", "")).endswith(".json")
+              and isinstance(d.get("key_moments"), int) and isinstance(d.get("audio"), bool), (r.stderr, r2.stderr, ev))
+
+        # notify -> needs_you
+        r = mcomp(BASE, "notify", "Test E: a sign-in would be needed here", "--why", "login",
+                  "--action", "Nothing to do: this is test E")
+        ev = rx.wait("needs_you", "login")
+        check("notify -> needs_you.login with the action and the VM's name", r.returncode == 0 and ev
+              and ev.get("action") == "Nothing to do: this is test E" and ev.get("vm"), (r.stdout, r.stderr, ev))
+
+        # a blocked connection from the VM -> security event within one watcher cycle
+        if mcomp(BASE, "events", "watcher", "status").stdout.startswith("event watcher running"):
+            print("  (a watcher already runs for this VM: driving one cycle with 'events watch --once' instead)")
+            mcomp(BASE, "events", "watch", "--once")          # sets where reading starts
+            since = len(rx.events)
+            mcomp(BASE, "ssh", "ops", "curl -s -m 3 -o /dev/null http://10.255.255.254:9/; true")
+            time.sleep(1)
+            mcomp(BASE, "events", "watch", "--once")
+            ev = rx.wait("security", "blocked_connections", timeout=5, since=since)
+        else:
+            r = mcomp(BASE, "events", "watcher", "start")
+            started_watcher = True
+            time.sleep(3)                                      # its first cycle notes where the log ends
+            since = len(rx.events)
+            mcomp(BASE, "ssh", "ops", "curl -s -m 3 -o /dev/null http://10.255.255.254:9/; true")
+            ev = rx.wait("security", "blocked_connections", timeout=45, since=since)
+        dests = ((ev or {}).get("data") or {}).get("destinations") or []
+        check("a blocked connection from the VM -> security.blocked_connections within one cycle (30 s)",
+              any(x.get("host") == "10.255.255.254" and x.get("port") == 9 for x in dests), ev)
+
+        # open-untrusted on a local page with a password field -> security event
+        mcomp(BASE, "put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", "/tmp/mcomp-events-site")
+        mcomp(BASE, "ssh", "ops", "cd /tmp/mcomp-events-site/site && (nohup python3 -m http.server 8793 --bind 127.0.0.1 "
+                                  ">/dev/null 2>&1 &)")
+        time.sleep(1)
+        r = mcomp(BASE, "web", "open-untrusted", "http://127.0.0.1:8793/signin.html?ref=abc", "--watch", "4", timeout=240)
+        ev = rx.wait("security", "untrusted_link", timeout=10)
+        d = (ev or {}).get("data") or {}
+        check("open-untrusted on a page with a password field -> security.untrusted_link, origins only",
+              r.returncode == 0 and d.get("password_fields", 0) >= 1 and d.get("start_origin") == "http://127.0.0.1:8793"
+              and "ref=abc" not in json.dumps(ev), (r.stdout[-300:], r.stderr[-300:], ev))
+        vp = os.path.join(s["ssh_dir"], "vnc-pass")
+        vnc = open(vp).read().strip() if os.path.exists(vp) else ""
+        blob = json.dumps(rx.events)
+        check("nothing secret in what the receiver got: no URL queries, no live-view password",
+              "ref=abc" not in blob and not (vnc and vnc in blob))
+    finally:
+        if started_watcher:
+            mcomp(BASE, "events", "watcher", "stop")
+        mcomp(BASE, "ssh", "ops", "pkill -f '[h]ttp.server 8793'; rm -rf /tmp/mcomp-events-site; true")
+        for f in rec_files:
+            if os.path.exists(f):
+                os.remove(f)
+        rx.srv.shutdown()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

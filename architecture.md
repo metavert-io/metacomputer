@@ -227,7 +227,8 @@ Every connection the guest opens is checked on the host:
   benchmark/reserved ranges, outbound SMTP
 - everything else (the public internet): allowed
 
-Blocked attempts are logged to `logs/netgw-blocked.jsonl`. Inbound: there is
+Blocked attempts are logged to `logs/netgw-blocked.jsonl` (with an event
+sink configured, the event watcher reports new ones; see "Event stream"). Inbound: there is
 no route to the guest at all except the two forwards, which listen on
 127.0.0.1 only. The guest's ufw additionally admits only 22 and 5900 from the
 gateway address. There is no vmnet bridge, so the guest never appears on
@@ -266,6 +267,149 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
 
 The VMs are not started at login and no LaunchAgent or daemon was added.
+With an event sink configured (or a sink-change announcement still waiting),
+`start` also starts the event watcher (a detached process, like cua-netgw) and
+`stop` stops it; see below.
+
+## Event stream (optional)
+
+`lib/events.py` ([docs/events.md](docs/events.md)) sends events to sinks the
+user adds with `metacomputer events sink add`: a CloudEvents webhook signed
+with HMAC-SHA256, OTLP/HTTP JSON logs, RFC 5424 syslog over TLS (RFC 5425
+framing) or ntfy. With no sink, nothing is sent and events only reach the
+local log, `$LOG_DIR/events.jsonl`. Its scope: hostile text from the guest
+and the web, floods and mistakes in metacomputer's own code, and telling the
+user about sink changes. It doesn't defend against a program running as the
+user, which can read `events.json` and post to the sinks directly (SECURITY.md).
+
+```text
+emitters                                  lib/events.py                          sinks
+bin/metacomputer (start, stop, reset,  ┐   clean → number (seq, under a lock)   ┌ webhook (CloudEvents)
+  record stop, task finish; build-vm)  │   → local log                          │ otlp (Collector)
+lib/mcp_lazy.py (in use, Chrome guard, ├─▶ → each matching sink's backlog ──────┤ syslog+tls
+  bounded refusals, controllers)       │   → send now, 3 s per sink;            └ ntfy
+lib/mcp_relay.py (action-log records)  │     else retry with backoff, in order
+actionlog verify, web open-untrusted   │
+metacomputer notify (Claude)           ┘
+spool files (the secrets vault, …)  ──▶ taken on every emission and by the watcher
+events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
+```
+
+- **Where it runs.** In the process that emits: commands emit before they
+  return (at most about 3 s, sinks in parallel); the two bridges emit on a
+  background thread so a tool call never waits. A sink in its backoff isn't
+  tried at all.
+- **State.** `~/.config/metacomputer/events.json` (sinks, 0600) and
+  `events-state/` beside it: the sequence counter and a global lock; per sink
+  and generation an append-only backlog file, a count of what was queued and
+  its delivery status; one lock per sink name; debounce marks; the family and
+  phone windows; pending sink-change announcements; the last configuration
+  `events sink` wrote; and the watcher's place in the gateway log. Events are
+  appended to backlogs under the global lock (which also re-reads the
+  configuration), in sequence order; one process at a time sends a sink's
+  backlog, under that sink's lock, after checking its generation is still the
+  current one. `MCOMP_EVENTS_DIR` moves all of it.
+- **Origin and limits.** Each event records the code path that made it
+  (`cli` for the commands' own Python code, `bridge`, `watcher`, `spool`,
+  `claude` for `notify`, `script` for `events emit`, which the shell hooks in
+  `bin/metacomputer` and `scripts/lib.sh` use too); `events emit` and the spool
+  can't use the types only metacomputer's own code makes. Origins tell code
+  paths apart; they don't authenticate producers. A strict sliding window per
+  family lets at most 10 events in any 10 minutes reach the sinks; the rest are
+  logged locally and summed up in one `suppressed` event (only code paths can
+  exempt an event: sink tests, the relay's `actions`). Each phone (ntfy) sink
+  also has its own cap, 10 in any 10 minutes and 30 in any hour, taken right
+  before each network attempt (retries and sink-change announcements included);
+  a message without a slot waits in order, it isn't dropped.
+- **Sink changes.** `events sink add` and `remove` need a terminal on stdin.
+  The change is one transaction under the sink's lock and then the global lock:
+  it re-reads the configuration, refuses if the sink's generation isn't the one
+  the user confirmed, captures the sinks that existed before it, writes the
+  announcement (`security.sink_added`/`sink_removed`) to a journal in
+  `events-state/admin/` as *prepared* with the hash of the configuration it's
+  about to write, writes the configuration, and marks the record *committed*.
+  On the next run, a prepared record whose hash matches the file is committed
+  and one that doesn't is dropped. Replacing or removing a sink makes a new
+  generation (the retired one's files go). Announcements are retried from the
+  journal until delivered (or given up after 20 attempts), outside the backlogs;
+  several waiting for one phone go as one `sink_changes` message. A change to
+  `events.json` made any other way is noticed against the hash of the last
+  configuration `events sink` wrote, journaled before it's accepted, and
+  announced the same way (`security.sink_config_changed`) to that
+  configuration's sinks. An unreadable `events.json` is used as no sinks
+  (events still reach the local log), reported by `events status` and the
+  error log, and announced once. Best effort: a program running as the user
+  can also edit `events-state/`.
+- **The watcher.** `events.py watch`, started by `start` when a sink exists
+  or an announcement is still pending (`events.py needs-watcher`; it exits when
+  neither holds), pid in `$RUN_DIR/events-watcher.pid`. Every 30 s: the
+  configuration check, the spool, pending announcements, due
+  backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
+  (destination, port, protocol, reason; batched to one event a minute, slowing
+  to once an hour for the same destinations). Every 5 min: `metacomputer
+  _health` (Lume state, gateway, SSH, `guest-status`, the desktop recording),
+  with one event per change and a 30-minute quiet period for a condition that
+  comes back. Each step runs on its own, so one failing doesn't stop the others.
+  Its pidfile stays locked while it runs (one watcher per VM). It never opens
+  an MCP connection.
+- **Cleaning.** Every string loses control and invisible characters, escape
+  sequences, and links' credentials, path parameters, queries and fragments (to
+  the next space, also without a scheme); sink header values, signing keys,
+  secret URL parts and the VNC password are redacted; secret-looking keys are
+  dropped from `data`; sizes are capped. Text from inside the VM goes only into
+  `data`, never into a message.
+
+### Event spool
+
+The contract for programs that produce events without calling metacomputer,
+such as the secrets vault ("approval waiting", "vault locked"):
+
+- **Folder:** `~/Library/Application Support/metacomputer/events/spool/`, or
+  `$MCOMP_EVENTS_SPOOL`. The producer creates it if missing, 0700. Files
+  in it must be regular files owned by the same user; anything else is
+  skipped.
+- **One file per event,** named `<time>-<random>.json`, where `<time>` is UTC
+  `YYYYMMDDTHHMMSS.ffffffZ` (fixed width, so names sort in time order) and
+  `<random>` is at least 8 letters or digits.
+- **Written atomically:** write the content to a name that starts with `.` or
+  doesn't end in `.json` (for example `.<name>.tmp`) in the same folder, then
+  rename it to the final name. Such temporary names are never read.
+- **Content:** one UTF-8 JSON object of at most 64 KB:
+
+  | Field | Required | |
+  | --- | --- | --- |
+  | `family` | yes | `needs_you`, `task`, `security`, `lifecycle` or `actions` |
+  | `type` | yes | lowercase letters, digits and `_`, at most 40 (`^[a-z0-9][a-z0-9_]{0,39}$`) |
+  | `message` | yes | one line for a person |
+  | `severity` | no | `info`, `warn` or `error`; default by family (`needs_you` and `security` warn, the others info) |
+  | `vm` | no | the VM's name; default: the VM of the process that takes the file |
+  | `action` | no | what the person should do |
+  | `data` | no | a small object |
+  | `project` | no | a folder path |
+
+  Other fields are ignored (an `origin` in the file too: these events always
+  say `spool`). The event's time is the file's modification time.
+- **Reserved types:** a file can't use the types only metacomputer's own code
+  makes (`suppressed`, the `actions` family, the bridge's, the watcher's, sink
+  changes and tests; docs/events.md lists them).
+- **Taking them:** on every emission and every watcher cycle, under the
+  global lock, oldest name first (up to 500 per pass, counted after skipping
+  temporary names, folders, links and files that aren't yours). The folder is
+  pinned as a descriptor and everything is relative to it; each file is opened
+  with `O_NOFOLLOW|O_NONBLOCK`, checked again with `fstat` and read only up to
+  the size limit plus one byte; quarantine moves are relative to the same
+  descriptor. Spool events
+  count toward their family's rate limit. A valid file is
+  cleaned like any event (so a producer can't leak a URL query or a
+  secret-looking key through it), numbered, logged, queued for each matching
+  sink, then deleted; delivery then follows the sinks' backlogs. An invalid
+  (any parse failure, too deep included), oversized or reserved file, or one
+  that can't be recorded, is moved to `spool/.quarantine/` (the newest 50 kept)
+  and counted (`events status --json`, `spool_rejected`) without stopping the
+  others.
+- **Guarantees:** at least once to each sink, in order with everything else.
+  Files wait in the spool while nothing runs (no command, no watcher). With no
+  sink configured, taken events reach only the local log.
 
 ## Known limitations
 

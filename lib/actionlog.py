@@ -120,8 +120,9 @@ def summarize_result(res, keep_text):
 class ActionLog:
     """One session's log file. Thread-safe; every method is a no-op after a failure to sign."""
 
-    def __init__(self, session, cfg=None):
+    def __init__(self, session, cfg=None, listener=None):
         cfg = cfg or settings()
+        self.listener = listener    # called with (record, path) after each write: the optional event stream
         self.keep_text = cfg["keep_text"]
         self.key = cfg["key"]
         ensure_key(self.key)
@@ -149,6 +150,11 @@ class ActionLog:
         rec["hash"] = record_hash(rec)
         self.f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.head, self.seq = rec["hash"], self.seq + 1
+        if self.listener:
+            try:
+                self.listener(rec, self.path)
+            except Exception:
+                pass
         return rec
 
     def _sign(self, final=False):
@@ -382,11 +388,12 @@ def main(argv):
         if not paths:
             print("no action logs to verify")
             return 0
-        bad = 0
+        bad, failed = 0, []
         for p in paths:
             v = verify_file(p, base, pub)
             if not v["ok"]:
                 bad += 1
+                failed.append(v["file"])
                 print(f"TAMPERED  {v['file']}")
                 for pr in v["problems"][:10]:
                     print(f"          {pr}")
@@ -398,6 +405,16 @@ def main(argv):
                     notes.append("no final signature (session still open, crashed, or cut short)")
                 print(f"{'OK' if not notes else 'OK*':9} {v['file']}  {v['calls']} calls, signed through record "
                       f"{v['signed_through']}" + (f"; {'; '.join(notes)}" if notes else ""))
+        if bad:
+            try:   # the optional event stream (docs/events.md); never changes the result
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import events
+                events.emit("security", "actions_verify_failed",
+                            f"metacomputer actions verify: {bad} of {len(paths)} action log(s) failed verification",
+                            "error", "Keep copies of the files and run metacomputer actions verify --all to see what changed",
+                            {"failed": bad, "checked": len(paths), "files": failed[:10]}, project=events.caller_project())
+            except Exception:
+                pass
         return 1 if bad else 0
     print(__doc__)
     return 2

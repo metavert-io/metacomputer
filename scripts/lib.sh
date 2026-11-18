@@ -179,6 +179,29 @@ export_options() {
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}"
 }
 
+# --- the optional event stream (docs/events.md; off until a sink is added) ------
+# Best effort: it never fails the command, and waits at most about 3 s per sink.
+emit_event() { # FAMILY TYPE SEVERITY MESSAGE ACTION [KEY=VALUE ...] (ACTION may be "")
+  local fam="$1" typ="$2" sev="$3" msg="$4" act="$5" kv f=()
+  shift 5
+  for kv in "$@"; do f+=(--field "$kv"); done
+  ( export_options
+    "$PY" "$LAB_ROOT/lib/events.py" emit "$fam" "$typ" --severity "$sev" --message "$msg" \
+      ${act:+--action "$act"} ${f[@]+"${f[@]}"} --quiet ) >/dev/null 2>&1 || true
+}
+# EVENTS HOOK (secrets): `metacomputer secrets` exits 3 when the vault isn't unlocked (or
+# doesn't exist yet). bin/metacomputer calls this from an EXIT trap for that command (see
+# there). Quiet when you ran it yourself at a terminal, and at most once in 5 minutes.
+events_hook_secrets_exit() { # RC
+  [ "${1:-0}" = 3 ] || return 0
+  [ -t 0 ] && return 0
+  ( export_options
+    "$PY" "$LAB_ROOT/lib/events.py" emit needs_you vault_locked --severity warn --debounce 300 --quiet \
+      --message "The secrets vault isn't unlocked (or doesn't exist yet), so Claude can't fill a login" \
+      --action "In your own terminal: metacomputer secrets unlock (or secrets init, if there's no vault yet)" \
+      --field exit=3 ) >/dev/null 2>&1 || true
+}
+
 # --- SSH_AUTH=cert: a fresh key and a short-lived certificate per connection ---
 CA_KEY="${SSH_CA_KEY:-$SSH_DIR/ca}"
 ca_pub() { case "$CA_KEY" in *.pub) echo "$CA_KEY" ;; *) echo "$CA_KEY.pub" ;; esac; }

@@ -309,6 +309,14 @@ def main(argv):
                 print("cannot release (stop that process instead): " + describe(o))
         if not n:
             print("No other session's claim to release.")
+        else:
+            try:   # the optional event stream (docs/events.md); never fails the command
+                import events
+                events.emit("lifecycle", "controller_released",
+                            f"{n} other session claim(s) on the virtual computer released (metacomputer release)",
+                            data={"released": n}, project=events.caller_project())
+            except Exception:
+                pass
         return 0
     print(__doc__)
     return 2

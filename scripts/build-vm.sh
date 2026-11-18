@@ -10,6 +10,12 @@
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
+# The optional event stream (docs/events.md): build_done or build_failed, however the build ends.
+# Refusing to overwrite an existing VM sends nothing; an interrupted build (Ctrl-C) is info.
+BUILD_QUIET_EXIT=0
+trap 'rc=$?; if [ $rc = 0 ]; then emit_event lifecycle build_done info "The virtual computer $VM_NAME was built" "metacomputer start";
+      elif [ $rc = 130 ] || [ $rc = 143 ]; then emit_event lifecycle build_failed info "Building the virtual computer $VM_NAME was interrupted" "metacomputer build --replace to start again" "exit=$rc";
+      elif [ "$BUILD_QUIET_EXIT" = 0 ]; then emit_event lifecycle build_failed error "Building the virtual computer $VM_NAME failed (exit $rc)" "see ${BUILD_LOG:-the newest logs/build-*.log}" "exit=$rc"; fi' EXIT
 REPLACE=0; [ "${1:-}" = "--replace" ] && REPLACE=1
 TS="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="$LOG_DIR/build-$TS.log"
@@ -33,7 +39,7 @@ case "${VIRTUAL_AUDIO:-off}" in on|off) ;; *) die "VIRTUAL_AUDIO must be on or o
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   if vm_exists "$vm"; then
-    [ $REPLACE -eq 1 ] || die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"
+    [ $REPLACE -eq 1 ] || { BUILD_QUIET_EXIT=1; die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"; }
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
     "$LUME" delete "$vm" --force
