@@ -956,7 +956,19 @@ def test_get_confirm_local_state():
             ("an unknown .cache entry", lambda d: write(os.path.join(d, ".cache", "mystuff", "notes.txt"), "mine\n"), ".cache/mystuff"),
             ("cached sources (.cache/cua-src)", lambda d: write(os.path.join(d, ".cache", "cua-src", "x"), "x\n"), ".cache/cua-src"),
             ("Python bytecode (__pycache__)", lambda d: write(os.path.join(d, "lib", "__pycache__", "m.pyc"), "x"), "lib/__pycache__"),
-        ]
+            # rclone's download: the unpacked program is checked only against the digest kept beside it.
+            ("the unpacked rclone program and its recorded digest", lambda d: [
+                write(os.path.join(d, ".cache", "rclone-v1.75.2", "SHA256SUMS"), "x\n"),
+                write(os.path.join(d, ".cache", "rclone-v1.75.2", "rclone"), "#!/bin/sh\n", 0o755),
+                write(os.path.join(d, ".cache", "rclone-v1.75.2", "rclone.sha256"), "x\n")], ".cache/rclone-v1.75.2/rclone"),
+            ("a program in a subfolder of rclone's download", lambda d: write(os.path.join(d, ".cache", "rclone-v1.75.2", "x", "SHA256SUMS"),
+                                                                             "#!/bin/sh\n", 0o755), ".cache/rclone-v1.75.2/x/SHA256SUMS"),
+        ] + [(f"an rclone pin or source ({k}) in local.env", lambda d, k=k, v=v: write(os.path.join(d, "config", "local.env"),
+                                                                                      f'VOLUMES="work"\n{k}={v}\n'),
+              "choose a command, a source or a pin")
+             for k, v in (("RCLONE_VERSION", "1.75.1"), ("RCLONE_BASE_URL", "https://example.invalid/r"),
+                          ("RCLONE_ZIP", "other.zip"), ("RCLONE_SHA256", "00ff"), ("RCLONE_KEYS_URL", "https://example.invalid/k"),
+                          ("RCLONE_SIGNING_KEY_FPR", "0000000000000000000000000000000000000000"))]
         for i, (why, prep, words) in enumerate(cases):
             d = clean_clone(f"c{i}")
             prep(d)
@@ -988,6 +1000,19 @@ def test_get_confirm_local_state():
         p, _ = b.get("--confirm", "--yes", "--dir", d)
         check("--confirm accepts logs, verified downloads and settings that only set values (it then needs the network, which tests refuse)",
               "isn't a plain checkout" not in p.stderr and "couldn't list" in p.stderr, p.stderr[-400:])
+        # Storage: rclone's verified download (checked again before every use) and the value-only storage settings.
+        d = clean_clone("storage")
+        write(os.path.join(d, "config", "local.env"),
+              'BROWSERS="firefox"\nSTORAGE_DIR="$HOME/metacomputer-volumes"\nVOLUMES="work:/volume,team:/mnt/team:rw"\n'
+              'REFDISKS="docs:/mnt/docs"\nS3_SYNC_INTERVAL=60\nS3_BACKUP_MAX_GB=5\n')
+        for f in ("SHA256SUMS", "KEYS.asc", "pinned-key.asc", "signing-key.gpg", "rclone-v1.75.2-osx-arm64.zip",
+                  "rclone-v1.75.2-osx-arm64.zip.part"):
+            write(os.path.join(d, ".cache", "rclone-v1.75.2", f), "x\n")
+        before = tree(d)
+        p, _ = b.get("--confirm", "--yes", "--dir", d)
+        check("--confirm accepts rclone's verified download (sums, keys, the pinned zip) and the storage settings "
+              "(STORAGE_DIR, VOLUMES, REFDISKS, S3_SYNC_INTERVAL, S3_BACKUP_MAX_GB), keeping every file",
+              "isn't a plain checkout" not in p.stderr and "couldn't list" in p.stderr and tree(d) == before, p.stderr[-400:])
         # From the plugin, install.sh builds the host tools and mcomp-vm from new clones (offline: --repo is local).
         d = os.path.join(b.t, "fresh")
         git("clone", "-q", repo, d)

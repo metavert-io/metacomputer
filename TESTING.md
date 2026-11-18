@@ -110,7 +110,7 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
 
 ## The installers: `tests/test_install.py`
 
-`python3 tests/test_install.py` (206 checks) needs no VM, no network and no
+`python3 tests/test_install.py` (215 checks) needs no VM, no network and no
 Homebrew. Every command that looks at the Mac or reaches out (`uname`, `sw_vers`,
 `sysctl`, `df`, `dscl`, `curl`, `xcode-select`, `brew`, `ssh`, `security`, the VM
 runner) is a stub on `PATH` that logs its calls, in a temporary home, with its own
@@ -135,7 +135,10 @@ real `security`, on a throwaway keychain that exists only inside a temporary hom
   git settings beyond a plain clone's, hooks, unknown files, build outputs, other
   `.cache` entries, a Lume storage location inside it (tested with VMs stored in its
   `.cache`, with and without `--no-build`) and settings that choose a command, a source
-  or a pin are refused, every file kept; install.sh then gets `--fresh-sources`. Homebrew: never without a terminal; on a terminal (a pty) its
+  or a pin are refused, every file kept; install.sh then gets `--fresh-sources`. Storage:
+  rclone's verified download (signed sums, keys, the pinned zip) and the value-only storage
+  settings are accepted; the unpacked rclone program (in its folder or below it) and every
+  `RCLONE_*` pin or source are refused. Homebrew: never without a terminal; on a terminal (a pty) its
   installer is downloaded whole first and a cut-off download never runs.
 - The health check never acts on a VM the run kept: install.sh reports a VM it built
   (`vm_built=1` in the file get.sh names in `MCOMP_INSTALL_REPORT`; never through a

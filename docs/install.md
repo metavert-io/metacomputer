@@ -174,14 +174,20 @@ Two limits:
   never deletes anything in an existing checkout. A checkout in that folder is
   used only if it's a clean checkout of github.com/metavert-io/metacomputer on
   its default branch that holds nothing but its tracked files, logs, run state,
-  verified downloads (`.cache/ubuntu-*`, `cua-driver-*`, `mozilla`, `google`)
-  and a `config/local.env` whose settings only set values. Refused: git
-  settings beyond a plain clone's, git hooks, files git doesn't know, build
-  outputs (`vendor/`, `.cache/cua-src`, `.cache/mcomp-vm`, `__pycache__`), any
-  other `.cache` entry, a Lume storage location inside the checkout, and
-  settings that choose a command, a source or a pin (`*_GET`, `*_SET`,
-  repositories, tags, commits, URLs, checksums, `LUME` pointing anywhere but
-  the runners install.sh installs). Then you run that checkout's
+  verified downloads (`.cache/ubuntu-*`, `cua-driver-*`, `mozilla`, `google`,
+  and in `.cache/rclone-v*` rclone's signed sums, its keys and the pinned zip)
+  and a `config/local.env` whose settings only set values (storage's
+  `STORAGE_DIR`, `VOLUMES`, `REFDISKS`, `S3_SYNC_INTERVAL` and
+  `S3_BACKUP_MAX_GB` among them). Refused: git settings beyond a plain
+  clone's, git hooks, files git doesn't know, build outputs (`vendor/`,
+  `.cache/cua-src`, `.cache/mcomp-vm`, `__pycache__`, and the rclone program
+  unpacked from its zip, which is checked only against a digest kept beside
+  it: delete `.cache/rclone-v*/rclone`, and storage unpacks it again from the
+  checked zip when it needs it), any other `.cache` entry, a Lume storage
+  location inside the checkout,
+  and settings that choose a command, a source or a pin (`*_GET`, `*_SET`,
+  repositories, tags, commits, URLs, checksums, `RCLONE_*`, `LUME` pointing
+  anywhere but the runners install.sh installs). Then you run that checkout's
   `./install.sh` yourself if you trust it, or set up a fresh copy with
   `--dir` and a new folder. From the plugin, install.sh builds the host tools
   and mcomp-vm from new temporary clones (`--fresh-sources`), leaving the
@@ -286,6 +292,7 @@ above).
 | Go's build cache and modules | `~/go` and `~/Library/Caches/go-build` (Go's own defaults) |
 | Homebrew packages | Homebrew's prefix (`/opt/homebrew`) |
 | The install and build locks | `metacomputer-locks` in your per-user temporary folder (`getconf DARWIN_USER_TEMP_DIR`) |
+| Volumes and reference disks, if you make any ([storage.md](storage.md)) | `STORAGE_DIR` (default `~/.local/share/metacomputer`), their records in `~/.local/share/metacomputer/storage`; rclone for S3 volumes in the checkout's `.cache/rclone-v*`. The installer neither needs nor touches them |
 
 ## Updating
 
@@ -322,8 +329,10 @@ rm -rf ~/.local/share/mcomp-vm ~/.local/bin/mcomp-vm   # last: the deletes above
 rm -rf ~/metacomputer                      # the checkout, with its recordings and results
 ```
 
-Your secrets vault (`~/Library/Application Support/metacomputer`) and event
-sinks (`~/.config/metacomputer`) stay until you delete them. Go's module cache
+Your secrets vault (`~/Library/Application Support/metacomputer`), event
+sinks (`~/.config/metacomputer`) and any volumes and reference disks
+(`metacomputer volume list`, `refdisk list`; delete them with `volume delete`
+and `refdisk delete` before removing the checkout) stay until you delete them. Go's module cache
 is read-only on purpose; `go clean -modcache` removes it. Homebrew packages stay
 installed (`brew uninstall ffmpeg go gnupg` if nothing else uses them).
 
