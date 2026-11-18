@@ -867,9 +867,8 @@ Then:
 - "Draw a simple logo in Inkscape and export it as a PNG."
 - "Trim the silence from the start of this recording in Audacity."
 
-[DESKTOP.md](skills/metacomputer/DESKTOP.md) has rules for Inkscape,
-Audacity, Kdenlive, LibreOffice Calc and pygame windows, verified in a VM
-built this way. Some of their dialogs, canvases and timelines need real
+[EXTRA-APPS.md](skills/metacomputer/EXTRA-APPS.md) has rules for Inkscape,
+Audacity, Kdenlive and pygame windows, verified in a VM built this way. Some of their dialogs, canvases and timelines need real
 pointer clicks instead of accessibility actions.
 
 ### Give the VM sound

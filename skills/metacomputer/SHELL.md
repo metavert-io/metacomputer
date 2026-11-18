@@ -40,7 +40,7 @@ python3 summarize.py data.csv > report.txt
 EOF
 ```
 
-- **For anything longer than a line,** write the script to a file with the Write tool (in your scratchpad) and pass `--file`. It avoids quoting and permission prompts.
+- **For anything longer than a line,** write the script to a file with the Write tool (in your scratchpad) and pass `--file`. It avoids quoting and permission prompts. The file runs as bash: for Python, put the code in a heredoc inside it (`python3 - <<'EOF'` … `EOF`).
 - **Nothing is expanded on the Mac:** `~` and `$HOME` are the desktop user's home in the VM. The default folder is that home; `--cwd DIR` picks another.
 - **The script's own stdin is empty.** Data goes in a file (`metacomputer put`, or a heredoc inside the script).
 - **Output comes back when the script ends.** Each stream keeps its first and last 32 KB (`--max-output BYTES`, up to 1 MB); the full size and SHA-256 are reported. For big outputs, write a file in the VM and `metacomputer get` it.
