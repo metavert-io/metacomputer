@@ -253,6 +253,7 @@ def run(td):
           and open(victim, "rb").read() == before, (r.returncode, r.stderr[-500:]))
 
     # 7. recordings --sync: the same importer; the listing escapes the VM's words
+    # (list every recording: the checkout may already hold newer ones than the one synced here)
     rec_payload = io.BytesIO()
     with tarfile.open(fileobj=rec_payload, mode="w") as tf:
         add_dir(tf, ".")
@@ -264,7 +265,7 @@ def run(td):
     synced = os.path.join(LAB, "recordings", "guest-runs", "run1")
     existed = os.path.exists(synced)
     try:
-        r = subprocess.run([CLI, "recordings", "--sync", "5"], env=env, capture_output=True, text=True, timeout=120)
+        r = subprocess.run([CLI, "recordings", "--sync", "100000"], env=env, capture_output=True, text=True, timeout=120)
         check("recordings --sync: the clip arrives, the link doesn't", r.returncode == 0
               and os.path.isfile(os.path.join(synced, "clip.mp4")) and not os.path.lexists(os.path.join(synced, "clip-contact.png")),
               (r.returncode, r.stderr[-400:]))
