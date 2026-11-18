@@ -4,7 +4,8 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 
 ## Who runs what
 
-- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value.
+- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `import-passwords`, `import-session`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value (the imports also show macOS's question about Chrome's key).
+  - To bring saved logins in, suggest: `metacomputer secrets import-passwords --browser chrome` (or `--csv FILE` for a Chrome, Passwords app, 1Password or Bitwarden export; `--dry-run` first shows what would come in). To bring a signed-in session for one site from their Chrome: `metacomputer secrets import-session --browser chrome --site SITE --name NAME --to-profile PROFILE` (cookies only; localStorage doesn't come along). Then load it like any sealed session (below).
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
 - **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
@@ -57,6 +58,8 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 3. End the browser session (`end_session`): a profile Chrome is using can't be saved.
 4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
 5. Later, with no Chrome on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`. A session loads only under the profile name it was saved from.
+
+A session the user imported from their own Chrome (`list` shows it as cookies for its sites) loads into its profile's own cookie store: open that profile once first (`browser_prepare` with `{mode: "isolated_named", name: P}`, then `end_session`), then `session load NAME`, then `browser_prepare` with the same profile. If the reason says the profile has no cookie store yet, do that first step. One whose cookies reach an identity provider asks at every load.
 
 ## Using an API key from the VM (tokens)
 

@@ -256,6 +256,17 @@ elif "mcomp-session-load" in remote:
         log()
         sys.stderr.write("SECRET-FROM-GUEST-7731\n")
         sys.exit(7)
+elif "mcomp-cookie-load" in remote:
+    # Imported cookies (tests/test_vault_import.py): what the VM's loader would get.
+    rec["kind"] = "cookies:load"
+    raw = sys.stdin.buffer.read()
+    open(os.path.join(d, "loaded-cookies.json"), "wb").write(raw)
+    if flag("load-leak-next"):
+        # A hostile VM that got the cookies writes one to stderr and fails as the loader's "no profile yet".
+        log()
+        sys.stderr.write("SECRET-FROM-GUEST-7731\n")
+        sys.exit(6)
+    print(json.dumps({{"ok": True, "cookies": len(json.loads(raw)["cookies"])}}))
 else:
     rec["kind"] = "other"
 log()

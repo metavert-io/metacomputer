@@ -12,9 +12,11 @@
 #                                       instead of /usr/bin/ssh), MCOMP_VAULT_TEST_LISTENERS,
 #                                       MCOMP_VAULT_TEST_PROMPT_TIMEOUT, MCOMP_VAULT_TEST_LOCAL_AUTH
 #                                       (a stand-in for the person at the Touch ID dialog, which a
-#                                       test build never shows) and MCOMP_VAULT_TEST_BIOMETRY (a
-#                                       stand-in for "this Mac has Touch ID"), and runs only with
-#                                       MCOMP_VAULT_DIR outside ~/Library; tests/test_secrets.py
+#                                       test build never shows), MCOMP_VAULT_TEST_BIOMETRY (a
+#                                       stand-in for "this Mac has Touch ID"), MCOMP_VAULT_TEST_CHROME_DIR
+#                                       and MCOMP_VAULT_TEST_CHROME_KEY (synthetic Chrome profiles; it
+#                                       never reads the real ones or asks the Keychain), and runs only
+#                                       with MCOMP_VAULT_DIR outside ~/Library; tests/test_secrets.py
 #                                       uses it. Release builds don't contain that code.
 #
 # The VM side of a fill isn't in this binary: it's /opt/metacomputer/bin/secret-fill,
@@ -32,7 +34,7 @@ while [ $# -gt 0 ]; do
     --force) force=1 ;;
     --out) mode=out; out="${2:?--out needs a path}"; shift ;;
     --test) mode=test; out="${2:?--test needs a path}"; shift ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build-vault: unknown option $1" >&2; exit 2 ;;
   esac
   shift

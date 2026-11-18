@@ -718,6 +718,20 @@ Values are typed with the echo off, never on a command line. Write the recovery 
 down and keep it away from this Mac. `set` on a name that already exists refuses unless
 you add `--replace` (see [Rotate keys and keep an audit trail](#rotate-keys-and-keep-an-audit-trail)).
 
+Or bring the logins you already have, in your own terminal:
+
+```bash
+metacomputer secrets import-passwords --browser chrome --dry-run   # what would come in: sites, masked usernames
+metacomputer secrets import-passwords --browser chrome             # macOS asks about Chrome's key: Allow (once)
+metacomputer secrets import-passwords --csv ~/Downloads/passwords.csv   # Chrome, Passwords app, 1Password or Bitwarden export
+metacomputer secrets import-session --browser chrome --site github.com --name gh --to-profile work   # one site's cookies
+```
+
+Imported logins ask before every use until you relax them (`policy NAME --approval session`).
+A Passwords app or 1Password export's one-time-code column comes in as a 2FA secret too.
+`import-session` brings a site's cookies, not its localStorage, sealed for a page-mode Chrome
+profile in the VM; `session load NAME` puts them there. Delete a CSV export once it's in.
+
 Then Claude:
 1. opens the site in page-mode Chrome;
 2. clicks into the field;

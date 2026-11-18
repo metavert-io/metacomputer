@@ -794,7 +794,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -975,6 +975,27 @@ person at it, and without it there is none. It covers:
   doesn't approve;
 - **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit
   --verify` and `verify-audit.py` on the log with the new records.
+
+`python3 tests/test_vault_import.py` (45 checks, about a minute) covers the imports with
+synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
+their values encrypted as Chrome on macOS does with a test key. The test build reads them
+through `MCOMP_VAULT_TEST_CHROME_DIR` and takes the key from `MCOMP_VAULT_TEST_CHROME_KEY`;
+it never reads the real Chrome folder or asks the Keychain (both refusals are checked), and a
+release build contains neither switch. It covers:
+- **Chrome's passwords:** a dry run (no passphrase, no values, nothing saved), the import
+  (what's skipped and why), the decrypted value reaching a fill, a re-import that changes
+  nothing, a changed password updated as a rotation, `--site`, `--profile`, the wrong key;
+- **CSV exports** from Chrome (a password with a comma, quotes and a line break), the
+  Passwords app (OTPAuth becoming a TOTP secret that fills the current code, an unsupported
+  one skipped), 1Password and Bitwarden (several URIs, its TOTP, notes skipped);
+- **`import-session`:** `--site` required, a dry run, only the named site's cookies sealed,
+  `--replace`, an identity provider needing `--allow-identity-provider` and asking at every
+  load whatever its policy, the load sending each value encrypted with the VM's Chrome key
+  (with and without the domain hash) to the cookie loader;
+- **the VM-side cookie loader**, run here against a profile store made here: cookies merged
+  and replaced, a profile never opened (exit 6), a keyring-encrypted store and a symbolic
+  link refused;
+- the audit records, and no value or unmasked username in any output or the audit log.
 
 `python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.

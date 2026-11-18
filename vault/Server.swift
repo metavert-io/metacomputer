@@ -1038,6 +1038,10 @@ final class UnlockServer {
             var d: [String: Any] = ["name": n, "vm": m.vm, "profile": m.profile, "saved_at": m.saved_at, "bytes": m.bytes,
                                     "loads": m.loads, "approval": m.approval ?? "each"]
             if let l = m.last_loaded { d["last_loaded"] = l }
+            if let k = m.kind { d["kind"] = k }
+            if let s = m.sites { d["sites"] = s }
+            if let s = m.source { d["source"] = s }
+            if m.identity_provider == true { d["identity_provider"] = true }
             return d
         }
         var out: [String: Any] = ["ok": true, "status": "ok", "secrets": secrets, "vms": vms, "sessions": sessions]
@@ -1619,10 +1623,12 @@ final class UnlockServer {
         guard let meta = p.sessions[name] else {
             return finish("session_load", fields, failed("no saved session named \(name) (metacomputer secrets list)"), who, approval: "-")
         }
+        let cookies = meta.kind == "cookies"
         let profile = req["profile"] as? String ?? meta.profile
         fields["profile"] = profile
-        // Don't forge or rewrite the driver's own records.
-        guard profile == meta.profile else {
+        if cookies { fields["kind"] = "cookies" }
+        // Don't forge or rewrite the driver's own records. (Imported cookies go into a profile's own store, whatever its name.)
+        guard profile == meta.profile || cookies else {
             return finish("session_load", fields, denied("\(name) was saved from profile \(meta.profile). The driver records a profile's name inside it (.cua-driver-owned-profile.json), so the session works only under that name: leave out --profile, or use --profile \(meta.profile)"), who, approval: "-")
         }
         guard let t = target(p, vm) else {
@@ -1637,9 +1643,14 @@ final class UnlockServer {
         // its policy, and no grant or rule covers it.
         let idp = meta.alwaysAsks
         if confirmEach || meta.approval != "session" || meta.vm != vm || idp {
-            let question = meta.vm != vm
-                ? "  Load the sealed session \(name), saved from VM \(meta.vm), into a different VM, \(vm) (profile \(profile); replaces it)?"
-                : "  Load the sealed session \(name) into profile \(profile) on VM \(vm) (replaces that profile)?"
+            let what = cookies ? "the cookies imported for \((meta.sites ?? []).joined(separator: ", "))" : "the sealed session"
+            let question = cookies
+                ? (meta.vm != vm
+                   ? "  Load \(name), \(what) (made for VM \(meta.vm)), into profile \(profile) on a different VM, \(vm)?"
+                   : "  Load \(name), \(what), into profile \(profile) on VM \(vm)?")
+                : (meta.vm != vm
+                   ? "  Load the sealed session \(name), saved from VM \(meta.vm), into a different VM, \(vm) (profile \(profile); replaces it)?"
+                   : "  Load the sealed session \(name) into profile \(profile) on VM \(vm) (replaces that profile)?")
             // A load into another VM always asks this time, whatever was granted before (and no rule covers it).
             let kind = meta.vm != vm ? "session_load_elsewhere:\(vm)" : "session_load"
             let o = approve(kind, name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil, use: "session_load",
@@ -1655,12 +1666,21 @@ final class UnlockServer {
             return finish("session_load", fields, failed("the sealed session file is missing or was changed"), who, approval: approval)
         }
         defer { wipe(&archive) }
+        if cookies {
+            // Imported cookies: each value encrypted with the VM's Chrome key, merged into the profile's own store.
+            guard var input = cookiesForVM(archive) else {
+                return finish("session_load", fields, failed("the sealed cookies can't be read"), who, approval: approval)
+            }
+            wipe(&archive)
+            archive = input
+            wipe(&input)
+        }
         guard Date() < expires, receivedSignal == 0 else {
             return finish("session_load", fields, lockedResult("the vault locked before the session was sent"), who, approval: approval)
         }
         let r: ProcResult
-        do { r = try runner.opsSSH(t, remote: sessionLoadScript(user: t.binding.guest_user, profile: profile), input: archive,
-                                   timeout: TimeInterval(min(600, remaining()))) }
+        let script = cookies ? cookieLoadScript(user: t.binding.guest_user, profile: profile) : sessionLoadScript(user: t.binding.guest_user, profile: profile)
+        do { r = try runner.opsSSH(t, remote: script, input: archive, timeout: TimeInterval(min(600, remaining()))) }
         catch { return finish("session_load", fields, failed("cannot reach the VM"), who, approval: approval) }
         if let why = sealedSessionRefusal(r) { return finish("session_load", fields, failed(why), who, approval: approval) }
         if r.interrupted || r.timedOut || r.status != 0 {
