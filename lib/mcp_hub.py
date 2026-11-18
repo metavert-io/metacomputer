@@ -198,9 +198,9 @@ WINDOW_UNKNOWN = (
     "the call is aimed at (input to Chrome has to go in the foreground, and set_value to Chrome is refused). Run "
     "list_windows and use a current window_id with its pid.")
 TARGET_CONFLICT = (
-    "Refused by the metacomputer bridge: this element_token belongs to another app than the pid or window_id the "
-    "call also names, so it can't tell where the input would go. Read the window again (get_window_state) and use "
-    "that read's tokens with its own pid and window_id.")
+    "Refused by the metacomputer bridge: the pid, window_id and element_token this call names belong to different "
+    "apps, so it can't tell where the input would go. Read the window again (get_window_state) and use that read's "
+    "tokens with its own pid and window_id.")
 UNKNOWN_TARGET = {"token": (TOKEN_UNKNOWN, TOKEN_CODE), "window": (WINDOW_UNKNOWN, "window_unknown"),
                   "conflict": (TARGET_CONFLICT, "target_conflict")}
 
@@ -1830,7 +1830,7 @@ class Hub:
         the pid or window the call also names ("conflict"). Naming something else never makes a target safe."""
         if not isinstance(args, dict):
             return False, None
-        own = any(args.get(k) not in (None, "") for k in ("app", "window", "pid", "window_id", "element_token"))
+        own = names_target(args)
         layer = args if own or not isinstance(outer, dict) else outer
         for k in ("app", "window"):
             v = layer.get(k)
@@ -1850,6 +1850,8 @@ class Hub:
             return True, None                    # Chrome by what the call names: the stricter handling applies
         if wid is not None and wpid is None and isinstance(wid, int) and not isinstance(wid, bool):
             return None, "window"
+        if len(hints) > 1:
+            return None, "conflict"              # the pid and the window_id belong to different apps
         tok_pid = None
         tok = layer.get("element_token")
         if tok is not None and tok != "":
@@ -1867,8 +1869,8 @@ class Hub:
         pids = hints | ({tok_pid} if tok_pid is not None else set())
         if any(CHROME_RE.search(self.app_name(p)) for p in pids):
             return True, None
-        if tok_pid is not None and hints and tok_pid not in hints:
-            return None, "conflict"
+        if tok_pid is not None and any(h != tok_pid for h in hints):
+            return None, "conflict"              # every hint must agree with the token's app, not just one
         return False, None
 
     def chrome_target(self, args, outer=None):
@@ -1927,13 +1929,24 @@ class Hub:
                 notes.append("sent in the foreground (background input to Chrome is ignored)")
             keyboard = name in KEY_TOOLS
         elif name == "run_steps":
-            top_chrome = self.is_chrome(args)
-            steps = steps_of(args)
+            # The driver runs a step that names no window in the window the last step that named one acted in, and
+            # before any, in the batch's default. The hub follows the steps the same way; where both could apply,
+            # the stricter verdict counts (Chrome over unknown over not Chrome).
+            default = self.chrome_verdict(args) if names_target(args) else (False, None)
+            top_chrome = default[0] is True
+            inherited = default
             chrome_steps = []
-            for t, a in steps:
-                target, why = (True, None) if top_chrome else self.chrome_verdict(a, args) \
-                    if (t in INPUT_TOOLS or t == "set_value") else (self.is_chrome(a), None)
-                if target is None:
+            for t, a in steps_of(args):
+                own = names_target(a)
+                if top_chrome:
+                    target, why = True, None
+                elif own:
+                    target, why = self.chrome_verdict(a)
+                else:
+                    target, why = stricter(inherited, default)
+                if own:
+                    inherited = (target, why)
+                if target is None and (t in INPUT_TOOLS or t == "set_value"):
                     return UNKNOWN_TARGET[why][0], None
                 if target:
                     chrome_steps.append((t, a))
@@ -2224,6 +2237,23 @@ class Hub:
                 events.flush_async(2.0)
             except Exception:
                 pass
+
+
+TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
+
+
+def names_target(a):
+    """Does a call or a run_steps step name its own target (else a step runs in the window it inherits)?"""
+    return isinstance(a, dict) and any(a.get(k) not in (None, "") for k in TARGET_KEYS)
+
+
+def stricter(v1, v2):
+    """Of two Chrome verdicts ((True|False|None, reason)), the one that asks for more care: Chrome, then unknown."""
+    for want in (True, None):
+        for v in (v1, v2):
+            if v[0] is want:
+                return v
+    return v1
 
 
 # --- pixel geometry ------------------------------------------------------------------------

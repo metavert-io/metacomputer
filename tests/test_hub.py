@@ -1983,6 +1983,39 @@ def lease3_checks():
         clear_claims()
 
 
+def chrome_batch_checks():
+    print("#5: a batch step that names no window inherits the last one named; every target hint must agree")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running()
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="cb")
+    h.call("list_windows", {})
+    n0 = len(tool_calls("run_steps"))
+    res = h.call("run_steps", {"steps": [{"click": {"app": "Google-chrome", "role": "button", "name": "Go"}},
+                                         {"set_value": {"role": "textfield", "name": "q", "value": "x"}}]})
+    check("set_value in a step that inherits Chrome from an earlier step is refused (nothing runs)",
+          res.is_error and "set_value" in res.text and len(tool_calls("run_steps")) == n0, res.text[:160])
+    res = h.call("run_steps", {"steps": [{"click": {"app": "Google-chrome", "role": "button", "name": "Go"}},
+                                         {"type_text": {"text": "hi"}}]})
+    sent = tool_calls("run_steps", n0)
+    steps = sent[-1]["msg"]["params"]["arguments"]["steps"] if sent else []
+    check("…and typing in that inherited Chrome window goes in the foreground",
+          not res.is_error and steps and steps[1]["type_text"].get("delivery_mode") == "foreground", steps)
+    snap = h.call("get_window_state", {"pid": 50, "window_id": W}).structured.get("snapshot_id")
+    n1 = len(calls())
+    a = h.call("click", {"element_token": f"{snap}:2", "pid": 10, "window_id": W})
+    b = h.call("click", {"pid": 10, "window_id": W, "x": 5, "y": 5})
+    sent = [c["msg"]["params"]["name"] for c in tool_calls(None, n1)]
+    check("a token, pid and window_id must all agree: one that matches only one of the others is refused, and so "
+          "is a pid with another app's window (target_conflict)",
+          a.is_error and a.structured.get("code") == "target_conflict" and b.is_error
+          and b.structured.get("code") == "target_conflict" and "click" not in sent, (a.text[:100], b.text[:100], sent))
+    h.close()
+    r.stop()
+    clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -2019,6 +2052,7 @@ def main():
         status_claim_checks()
         answer_limit_checks()
         lease3_checks()
+        chrome_batch_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
