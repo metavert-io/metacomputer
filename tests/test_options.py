@@ -589,7 +589,10 @@ def test_d_proxy():
     mac = srv.server_address[1]
     p, err = tunnel(s, proxy, f"127.0.0.1:{pp}:127.0.0.1:{mac}")
     up = p.poll() is None and "remote forward success" in open(err).read()
-    check(f"the proxy key opens the reverse forward to the VM's 127.0.0.1:{pp}", up, open(err).read()[-400:])
+    errtext = open(err).read()
+    hint = (" (is a vault unlock with a live API token for this VM running? Its own tunnel holds that port: lock it first)"
+            if "remote port forwarding failed" in errtext else "")
+    check(f"the proxy key opens the reverse forward to the VM's 127.0.0.1:{pp}", up, errtext[-400:] + hint)
     if up:
         r = raw_ssh(s, ops, cmd=f"python3 -c \"import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{pp}/', timeout=10).read().decode())\"")
         check("...and a request inside the VM reaches the Mac's end of it", "mcproxy-forward-ok" in r.stdout, r.stdout + r.stderr)

@@ -396,7 +396,8 @@ pseudo-terminal for the rest of the vault:
   - checks a page that redefines `type`, `activeElement` and `self.origin` in its own
     world.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` checks the fill and proxy
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` (with the vault locked, or no live API
+token for that VM: the vault's own tunnel holds the proxy port while one is) checks the fill and proxy
 accounts on a VM built with this version, changing nothing. It covers:
 - the fill account's forced command, whatever is asked for;
 - no terminal and no forwarding for it;
