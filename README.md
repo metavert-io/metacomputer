@@ -300,7 +300,7 @@ prefix too (for example `"permissions": {"allow": ["mcp__plugin_metacomputer_met
 - **mcomp-vm** (or standard Lume), at a pinned and verified version. Telemetry off, no background service.
 - **This Mac's settings** in `config/local.env`, never committed.
 - **The command** `~/.local/bin/metacomputer` and its alias `mcomp`.
-- **The plugin** `metacomputer@metacomputer`, at user scope, from the marketplace `metacomputer` (this checkout): the skills `metacomputer` and `cua-driver` and the MCP server `metacomputer` (`…/bin/metacomputer mcp-lazy`). An earlier install's skill link and user-scope MCP server are removed when they point at this checkout, so the tools aren't listed twice.
+- **The plugin** `metacomputer@metacomputer`, at user scope, from the marketplace `metacomputer` (this checkout): the skills `metacomputer` and `cua-driver` and the MCP server `metacomputer` (`…/bin/metacomputer mcp-lazy`). An earlier install's skill link and user-scope MCP server are removed when they point at this checkout, so the tools aren't listed twice. A marketplace named `metacomputer` that's already registered is used only when it's this checkout or github.com/metavert-io/metacomputer; from anywhere else its plugin isn't installed (it would run that source's code on your Mac), the installer says how to remove it, and sets up the skill link and server instead.
 - **Without the plugin** (`--no-plugin`, or a Claude Code without `claude plugin`): the skill, linked at `~/.claude/skills/metacomputer`, and the MCP server `metacomputer` at user scope (`claude mcp add -s user metacomputer …/bin/metacomputer mcp-lazy`).
 - **The secrets vault program**, `~/.local/share/metacomputer/bin/mcomp-vault`, built from `vault/` by `scripts/build-vault.sh` (skipped, with a note, before macOS 15 or without `swiftc`).
 
@@ -1026,7 +1026,7 @@ alias). `metacomputer help` prints the same list with every option.
 | `ssh [ops\|admin] [CMD...]` | A raw SSH shell in the VM (`ops` is the desktop user); prefer `sh` |
 | `logs [N]` | The last lines of the Lume, gateway and VM logs |
 | `where` | Project, config, skill, docs and results folders; VM names |
-| `mcp-lazy` / `mcp` | The MCP bridge Claude Code uses, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection, used by the GUI tests and `web`) |
+| `mcp-lazy` / `mcp` | The MCP bridge Claude Code uses, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise) |
 | `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time |
 
 `stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart` and `sh`
@@ -1204,7 +1204,7 @@ plain process that `start` and `stop` manage.
 - Output comes back when the script ends, capped per stream; write big outputs to a file and `get` it.
 - `--read-only` is a promise, not a sandbox: it skips the one-controller check and leaves out the desktop's environment, but doesn't stop a script from changing things.
 - The sizes and hashes in a result are the VM's own report; a compromised VM could report anything that fits the schema.
-- One controller at a time is checked and claimed in one step under the owners lock, for tool calls (in the hub) and shell runs alike. It keeps sessions from clashing; it isn't a barrier against a program running as you, which can use the direct connection (`MCOMP_DIRECT_BRIDGE=1`) the tests use.
+- One controller at a time is checked and claimed in one step under the owners lock, for tool calls (in the hub, for every client including `web` and the GUI tests) and shell runs alike. It keeps sessions from clashing; it isn't a barrier against a program running as you, which can use the raw driver connection (`MCOMP_DIRECT_BRIDGE=1`) the transport tests use.
 - `VM_SHELL=off` turns off this command, not SSH: `metacomputer ssh ops` still works for the Mac's own plumbing. Deny it in Claude Code's permissions if you want a barrier.
 
 **Bounded mode** (`DRIVER_MODE=bounded`, [SECURITY.md](SECURITY.md)):

@@ -285,8 +285,9 @@ How it's enforced:
 ## The hub and its guards (`MCP_HUB`, `COORD_GUARD`)
 
 One process per VM on your Mac, the hub (`lib/mcp_hub.py`), holds the single
-connection to Cua Driver and serves Claude Code's bridge, `metacomputer call`
-and scripts (`lib/mcomp_sdk.py`). It's on by default (`MCP_HUB=on`); design in
+connection to Cua Driver and serves Claude Code's bridge, `metacomputer call`,
+`metacomputer web`, the GUI test harness, the status probe and scripts
+(`lib/mcomp_sdk.py`). It's on by default (`MCP_HUB=on`); design in
 [architecture.md](architecture.md#the-hub).
 
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
@@ -296,8 +297,15 @@ task through `call` after the bridge refused it. Now every client goes through
 the hub, and the hub applies, to each one:
 - one controller at a time, checked and claimed as one step under the owners lock
   (shared with `metacomputer sh`, so a tool call and a shell run can't both slip
-  through);
-- the Chrome guard;
+  through). `web` and the GUI tests claim that way before they start; a client
+  that disconnects while one of its acting calls still runs in the driver (a
+  script that timed out, a session that closed mid-call) leaves the hub holding
+  the computer for that call, in a claim of its own (a "lease"), until the call
+  ends or the driver connection closes, at most the activity window;
+- the Chrome guard, which also knows which app an element token came from (the
+  hub remembers which window each read's tokens belong to), so a token alone
+  can't slip background input or `set_value` past it; a token from a read the hub
+  never saw is refused when it's all the call names;
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
@@ -309,26 +317,41 @@ so an MCP client registered with the older command gets the hub too. With
 connection.
 
 **The socket.** `RUN_DIR/hub/sock`, in a folder only you can open (0700), the
-socket itself 0600 (or the same in a private folder in `/tmp` when that path is
-too long for a Unix socket). The hub asks the kernel who's at the other end of
-each connection (`LOCAL_PEERCRED`) and closes it, before reading anything, unless
-it's your own user id. The first message must name the client and its settings;
-a client with other settings (another `ACTION_LOG`, `DRIVER_MODE`, …) is refused
-while others use the hub, so one session can't quietly change another's
-protections.
+socket itself 0600 (when that path is too long for a Unix socket, the same in a
+folder in your own temporary folder, `/var/folders/.../T`, never the shared
+`/tmp`). The hub asks the kernel who's at the other end of each connection
+(`LOCAL_PEERCRED`) and closes it, before reading anything, unless it's your own
+user id. A client checks the same way before it sends anything: the socket's
+folder must be yours and private, and the process serving it must run as you,
+so another account can't stand in for the hub and receive your tool calls. The
+first message must name the client and its settings; a client with other
+settings (another `ACTION_LOG`, `DRIVER_MODE`, …) is refused while others use
+the hub, so one session can't quietly change another's protections.
 
 **What the VM can send.** The VM is untrusted, so each message from it is read
 with a fixed limit (64 MB) before any parsing; a line that doesn't end within it
 closes the connection, and the calls in flight fail with a plain message; so
 does a VM that stops reading what the hub sends for 30 s. The largest real
-results measured were under 1 MB. A client's message is limited to
-8 MB, and at most 128 MB or 256 messages may wait for a client; one that stops
-reading is disconnected without holding up the others. The relay
-(`ACTION_LOG=on`) and the direct client (`lib/mcp_client.py`, used by the tests
-and `web`) read with the same limit. `metacomputer call` escapes control
-characters, C1 controls and bidirectional overrides when it prints to a terminal
-(`lib/termsafe.py`, shared with `metacomputer sh`); `--raw` and `--json` print
-the result exactly.
+results measured were under 1 MB. JSON nested more than 100 levels deep is
+dropped like any other bad line (Python's parser would otherwise fail in a way
+that leaves a reader dead and the connection silently open). A client's message
+is limited to 8 MB, and at most 128 MB or 256 messages may wait for a client;
+one that stops reading is disconnected without holding up the others. What the
+driver can make the hub keep or do is capped whatever the messages' size: a
+`tools/list_changed` notice starts at most one refresh at a time (repeats fold
+into it, and clients hear of it once per refresh); a refresh stops after 50
+pages, 2,000 tools, 16 MB, 60 s or a repeated cursor and keeps the earlier
+list; what the hub learns from results (apps, windows, element-token snapshots,
+screenshot layouts) is kept to a few thousand entries. The driver connection's
+stderr (SSH carries the VM's) is drained with a 64 KB memory tail and at most
+1 MB per connection in its log file. The relay (`ACTION_LOG=on`) reads with the
+same limits. `metacomputer call` escapes control characters, C1 controls and
+bidirectional overrides when it prints to a terminal (`lib/termsafe.py`, shared
+with `metacomputer sh`); `--raw` and `--json` print the result exactly. Other
+commands that show the VM's words on a terminal (`inspect`, `record status`,
+`logs`, `who`, `input-reset`, and the stderr of every SSH command they run)
+escape them the same way; `inspect --json` is written again by the Mac as
+ASCII-only JSON. `metacomputer ssh` stays raw: it's the plumbing.
 
 **The coordinate guard (`COORD_GUARD=on`, the default).** A pixel click is aimed
 from a screenshot. Cua Driver 0.52.1 maps window pixels through the window's
@@ -340,16 +363,29 @@ and refuses a pixel action when the target window's size, the windows above it
 at that point, or (for desktop pixels) the windows at that point have changed,
 before any input reaches the VM. The refusal says "the windows changed since
 your screenshot; take a fresh one" (code `windows_changed_since_screenshot`).
-`COORD_GUARD=off` leaves only the driver's own checks.
+Inside one `run_steps` batch the hub can't look between steps, so a pixel step
+that comes after a step able to move, resize, open, close or raise a window is
+refused before the batch runs (code `pixels_after_window_change`): after a
+double click, a drag, a press on the desktop frame (a title bar or a window
+edge), or keys with Super, Alt or Meta, a function key (F11 is full screen) or
+Ctrl+N/W/Q/O/S/P. Run the steps up to that one, take a fresh screenshot, and
+send the pixel steps in a new batch. `COORD_GUARD=off` leaves only the driver's
+own checks.
 
 **Where it ends:**
-- The socket and the uid check keep out other users of this Mac. They don't keep
+- The socket and the uid checks keep out other users of this Mac. They don't keep
   out programs running as you, which can connect to the hub, or run
-  `metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1` (the direct connection the GUI
-  tests and `web` use), or use the `mcp` key directly. A direct connection shows
-  in `metacomputer who` and makes the hub refuse other sessions' actions while it
-  lasts, but its own calls aren't guarded. The skill tells Claude never to route
-  around a refusal; that's an instruction, not a barrier.
+  `metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1` (the raw driver connection; in
+  this repository only the hub itself and the transport tests open it, and
+  `lib/mcp_client.py` refuses it unless a test asks with `transport_test=True`),
+  or use the `mcp` key directly. A direct connection shows in `metacomputer who`
+  and makes the hub refuse other sessions' actions while it lasts, but its own
+  calls aren't guarded. The skill tells Claude never to route around a refusal;
+  that's an instruction, not a barrier.
+- A lease (above) holds the computer for a call the driver hasn't answered; it
+  ends when the answer comes, when the driver connection closes, or after the
+  activity window (10 min) even if the call is still running. `metacomputer
+  release` drops it, as any other claim.
 - Clients share one driver runtime. Only one acts at a time, but another
   session's screenshot of the same window can replace the controller's
   screenshot frame (the driver then refuses its pixels until it reads again) and
@@ -360,6 +396,10 @@ your screenshot; take a fresh one" (code `windows_changed_since_screenshot`).
   `run_script`'s `[x, y]` targets and `parallel_mouse_drag`'s paths aren't checked. When the hub saw no screenshot
   for that driver session and window, or `list_windows` fails, the action is
   passed on to the driver's own checks (fail open, and logged in `hub.log`).
+  In a batch, a single click inside a window, Return, Escape or Tab before a
+  pixel step isn't refused, although such a step can open or close a dialog:
+  refusing them would refuse ordinary batches (click a field, type, press
+  Return, click the next field).
 - `metacomputer call`'s claim belongs to its Claude Code process. Outside Claude
   Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
   kept for the activity window after the last call even when that shell exits,
@@ -1189,7 +1229,8 @@ something waits for you:
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
-| `audit-sink list`, `audit-sink show NAME`, `audit-sink test NAME` | anywhere | Sinks, their backlog and last error (URLs masked); deliver now |
+| `audit-sink list`, `audit-sink show NAME` | anywhere (while locked: each sink's delivery state only, not its settings) | Sinks, their backlog and last error (URLs masked) |
+| `audit-sink test NAME` | anywhere while unlocked; while locked, your terminal (it asks for the passphrase) | Deliver now |
 | `status`, `audit [--tail N]`, `audit --head`, `audit --verify`, `selftest` | anywhere (`--verify` while unlocked) | State; the audit log; its head as SEQ:HASH; every record's creation MAC and the chain checked by the vault; the program's own checks |
 
 `metacomputer secrets ...` fills in the current VM (`--vm`). `bind` takes its port,
