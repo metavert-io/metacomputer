@@ -141,15 +141,17 @@ SCRIPT_CHROME = (
     "browser_* page tools; run_script is fine for other apps.")
 
 # --- coordinate guard ----------------------------------------------------------------
-# Pixel input is aimed from a screenshot. Cua Driver 0.52.1 maps window-local x,y
+# Pixel input is aimed from a screenshot. Cua Driver (0.52.1, 0.53.0) maps window-local x,y
 # through the window's live position and refuses a point outside the window, or a
 # background press under another app's window; it doesn't notice that the window
 # was resized (the content reflowed) or that a window now covers the point for a
 # foreground press or an AT-SPI hit, and desktop pixels aren't checked at all. So
 # the hub records the window layout (list_windows) at each screenshot-bearing read
-# and compares it with the live layout before passing on pixel input.
+# and compares it with the live layout before passing on pixel input. The keyboard
+# tools count when they carry x,y: type_text, press_key and hotkey then pixel-click
+# that point to focus it before the keys go.
 PIXEL_TOOLS = {"click", "double_click", "right_click", "drag", "scroll", "move_cursor", "type_text",
-               "mouse_button_down", "mouse_drag", "mouse_button_up"}
+               "press_key", "hotkey", "mouse_button_down", "mouse_drag", "mouse_button_up"}
 COORD_CODE = "windows_changed_since_screenshot"
 
 

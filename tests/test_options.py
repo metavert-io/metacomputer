@@ -683,8 +683,9 @@ def test_g():
     a throwaway Chrome profile), closes what it opened, and changes no VM settings."""
     print("G  the hub: one connection per VM, every guard for every client; the coordinate guard")
     import mcomp_sdk
-    cfg = variant("hub", "MCP_HUB=on", "COORD_GUARD=on")
-    off = variant("nohub", "MCP_HUB=off", "COORD_GUARD=on")
+    # ACTION_LOG=on here, not left to the test VM's own config: one check reads the hub's action log.
+    cfg = variant("hub", "MCP_HUB=on", "COORD_GUARD=on", "ACTION_LOG=on")
+    off = variant("nohub", "MCP_HUB=off", "COORD_GUARD=on", "ACTION_LOG=on")
     s = settings(cfg)
     rd = run_dir(cfg)
     mcomp(cfg, "hub", "stop")
@@ -808,6 +809,11 @@ def test_g():
         sc = res.get("structuredContent") or {}
         check("coordinate guard: refused after the window was resized (Cua Driver alone would click)",
               rc == 1 and sc.get("code") == "windows_changed_since_screenshot" and "800x600" in text_of_result(res),
+              text_of_result(res)[:240])
+        rc, res, _ = call_json(cfg, "--session", "cg", "press_key", json.dumps({"pid": pid, "window_id": wid, "x": 300,
+                                                                                "y": 300, "key": "End"}))
+        check("coordinate guard: press_key with x,y (it clicks there to focus first) is refused after the resize too",
+              rc == 1 and (res.get("structuredContent") or {}).get("code") == "windows_changed_since_screenshot",
               text_of_result(res)[:240])
         shot()
         rc, res, _ = click(300, 300)
