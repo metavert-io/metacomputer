@@ -28,7 +28,6 @@ CLI (used by bin/metacomputer):
   owners.py release           forget other sessions' claims (after the user agrees)
 """
 import contextlib
-import fcntl
 import json
 import os
 import re
@@ -36,6 +35,9 @@ import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import flockwait  # noqa: E402
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # bin/metacomputer passes this VM's RUN_DIR (config/defaults.env), so two VMs keep separate owners.
@@ -141,15 +143,10 @@ def lock(timeout=10.0):
     os.makedirs(OWNERS_DIR, exist_ok=True)
     fd = os.open(os.path.join(OWNERS_DIR, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("another process holds the owners lock")
-                time.sleep(0.05)
+        try:
+            flockwait.exclusive(fd, timeout, 0.05)
+        except BlockingIOError:
+            raise TimeoutError("another process holds the owners lock")
         yield
     finally:
         os.close(fd)   # releases the lock
