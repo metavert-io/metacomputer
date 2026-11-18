@@ -203,23 +203,12 @@ final class GuestRunner {
     /// ssh to the pinned endpoint as user with key, running `remote`, with `input` on its stdin.
     func ssh(_ t: GuestTarget, user: String, key: String, remote: String, input: [UInt8], timeout: TimeInterval,
              maxStdout: Int = 1 << 20) throws -> ProcResult {
-        let dir = userTempDir() + "/mcomp-vault-\(getpid())-\(UInt32.random(in: 0...UInt32.max))"
-        guard mkdir(dir, 0o700) == 0 else { throw VaultError("cannot make a temporary folder", code: Exit.error) }
-        let kh = dir + "/known_hosts"
-        defer {
-            unlink(kh)
-            rmdir(dir)
-        }
         let b = t.binding
-        try writeFileAtomic(kh, Array("[127.0.0.1]:\(b.ssh_port) \(b.host_key_line)\n".utf8))
-        let args = ["-F", "/dev/null", "-T",
-                    "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(key)",
-                    "-o", "UserKnownHostsFile=\(kh)", "-o", "StrictHostKeyChecking=yes",
-                    "-o", "GlobalKnownHostsFile=/dev/null", "-o", "UpdateHostKeys=no", "-o", "CheckHostIP=no",
-                    "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
-                    "-o", "ClearAllForwardings=yes", "-o", "PasswordAuthentication=no",
-                    "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
-                    "-p", "\(b.ssh_port)", "\(user)@127.0.0.1", remote]
+        guard let pin = pinnedHostKeyOptions(port: b.ssh_port, hostKeyLine: b.host_key_line) else {
+            throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
+        }
+        let args = sshBaseOptions(key: key, port: b.ssh_port) + pin + ["-T", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR",
+                                                                       "\(user)@127.0.0.1", remote]
         return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout)
     }
 
@@ -255,13 +244,18 @@ final class GuestRunner {
                     "reason": "the VM refused the fill account (\(user)). VMs built before secrets support have none: rebuild the VM to use secrets (or bind again if its keys changed)"]
         }
         let last = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
-        guard var out = parseJSONObject(Array(last.utf8)), out["ok"] is Bool else {
+        guard let raw = parseJSONObject(Array(last.utf8)), raw["ok"] is Bool else {
             let why = stderr.isEmpty ? "exit \(r.status)" : oneLine(stderr, max: 200)
             return ["ok": false, "status": "error", "reason": "the VM side failed (\(why))"]
         }
-        // Never pass the value on, whatever came back: any string holding it, at any length.
-        if let v = valueString, !v.isEmpty, out.values.contains(where: { ($0 as? String)?.contains(v) == true }) {
+        // Never pass the value on, whatever came back: anything holding it, at any depth or length.
+        if let v = valueString, !v.isEmpty, containsString(raw, v) {
             return ["ok": false, "status": "error", "reason": "result withheld (it contained the value)"]
+        }
+        // Keep only the fields a fill answers with, each of its type; anything else is dropped,
+        // and a field of the wrong type makes the whole answer an error.
+        guard var out = fillResultSchema(raw) else {
+            return ["ok": false, "status": "error", "reason": "the VM side answered in an unexpected form"]
         }
         let ok = out["ok"] as? Bool ?? false
         out["status"] = ok ? "ok" : ((out["denied"] as? Bool ?? false) ? "denied" : "error")
@@ -269,4 +263,55 @@ final class GuestRunner {
         if let reason = out["reason"] as? String { out["reason"] = oneLine(reason) }
         return out
     }
+}
+
+
+/// The answer secret-fill may give: these fields, each a scalar of its type (nil: wrong form).
+func fillResultSchema(_ raw: [String: Any]) -> [String: Any]? {
+    let bools: Set<String> = ["ok", "denied"]
+    let strings: Set<String> = ["mode", "field", "origin", "route", "reason", "profile"]
+    let ints: Set<String> = ["chars"]
+    var out: [String: Any] = [:]
+    for (k, v) in raw {
+        if bools.contains(k) {
+            guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+            out[k] = n.boolValue
+        } else if strings.contains(k) {
+            guard let s = v as? String else { return nil }
+            out[k] = clean(s, max: 300)
+        } else if ints.contains(k) {
+            guard let n = v as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue == Double(n.intValue),
+                  n.intValue >= 0, n.intValue <= 1_000_000 else { return nil }
+            out[k] = n.intValue
+        }
+    }
+    return out
+}
+
+/// Whether any string anywhere in a JSON value (keys included) contains `needle`.
+func containsString(_ v: Any, _ needle: String) -> Bool {
+    if let s = v as? String { return s.contains(needle) }
+    if let a = v as? [Any] { return a.contains { containsString($0, needle) } }
+    if let d = v as? [String: Any] { return d.contains { $0.key.contains(needle) || containsString($0.value, needle) } }
+    return false
+}
+
+/// ssh options every vault connection uses: no config file (not ~/.ssh/config, not the system's),
+/// no agent, only the given key, no password prompts.
+func sshBaseOptions(key: String, port: Int) -> [String] {
+    ["-F", "none", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(key)", "-o", "IdentityAgent=none",
+     "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+     "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=5",
+     "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "PermitLocalCommand=no", "-p", "\(port)"]
+}
+
+/// The pinned host key, given to ssh without any file a process of this user could change in
+/// between: no known_hosts files at all, and KnownHostsCommand running /bin/echo (on the
+/// sealed system volume) with the pinned line as its arguments. nil when the line isn't a key.
+func pinnedHostKeyOptions(port: Int, hostKeyLine: String) -> [String]? {
+    let parts = hostKeyLine.split(separator: " ").map(String.init)
+    guard parts.count == 2, matches(parts[0], "^[a-z0-9-]{3,40}$"), matches(parts[1], "^[A-Za-z0-9+/=]{20,2000}$") else { return nil }
+    return ["-o", "UserKnownHostsFile=/dev/null", "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "KnownHostsCommand=/bin/echo [127.0.0.1]:\(port) \(parts[0]) \(parts[1])",
+            "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "CheckHostIP=no", "-o", "HashKnownHosts=no"]
 }

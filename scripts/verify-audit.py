@@ -24,8 +24,11 @@ signed: a raw event line is refused. Accepted inputs, detected line by line:
 Repeated deliveries of the same event (same seq, same hash) are fine (delivery is at least
 once); otherwise each new seq must follow the one before, in the order received. An
 `audit_tamper` notice (the vault found a record it wouldn't sign) fails the check. Events marked
-unverified were written without the vault key (refusals while the vault was locked); they're
-counted, and --require-verified fails on them.
+unverified were written without the vault key (refusals while the vault was locked, or records
+from before the vault had an audit key); they're counted, and --require-verified fails on them.
+The status counts only when it's authenticated: a webhook's comes in its signed body, an OTLP
+record's and a syslog message's signature covers "verified=true|false" and the line together.
+An absent status (an older capture) counts as unverified.
 
 --expect-start SEQ and --expect-head SEQ:HASH (from `metacomputer secrets audit --head`, noted at a
 moment you trust, or from another sink) pin the ends; without them a check can't tell whether
@@ -133,7 +136,8 @@ class Checker:
             self.bad(where, f"seq {seq}: prev isn't seq {seq - 1}'s hash (the chain is broken here)")
         if not self.order and seq == 1 and ev.get("prev") not in (ZERO, *self.legacy):
             self.bad(where, "seq 1: prev is neither the zero hash nor an earlier line's hash")
-        if verified is False:
+        if self.capture and verified is not True:
+            # Only an authenticated true counts: false, absent (an older capture) or malformed is unverified.
             self.unverified.append(seq)
         self.seen[seq] = (ev["hash"], where)
         self.order.append((seq, ev, where))
@@ -166,7 +170,8 @@ class Checker:
                 return
             if doc.get("id") != (data.get("id") or data.get("hash")):
                 self.bad(where, "CloudEvent id isn't the event's id")
-            self.event(where, canonical(data), doc.get("mcompverified"))
+            v = doc.get("mcompverified")
+            self.event(where, canonical(data), v if isinstance(v, bool) else None)
             return
         if isinstance(doc, dict) and "resourceLogs" in doc:
             n = 0
@@ -177,9 +182,13 @@ class Checker:
                         w = f"{where} record {n}"
                         raw = ((lr.get("body") or {}).get("stringValue")) or ""
                         attrs = {a.get("key"): (a.get("value") or {}) for a in lr.get("attributes") or []}
-                        if not self.signature(w, raw.encode(), (attrs.get("metacomputer.signature") or {}).get("stringValue")):
+                        vb = (attrs.get("metacomputer.verified") or {}).get("boolValue")
+                        vb = vb if isinstance(vb, bool) else None
+                        # The record's own signature covers its verification status and its line.
+                        signed = (f"verified={'true' if vb else 'false'}\n" + raw) if vb is not None else raw
+                        if not self.signature(w, signed.encode(), (attrs.get("metacomputer.signature") or {}).get("stringValue")):
                             continue
-                        self.event(w, raw, (attrs.get("metacomputer.verified") or {}).get("boolValue"))
+                        self.event(w, raw, vb)
             if n == 0:
                 self.bad(where, "OTLP request without log records")
             return
@@ -204,7 +213,11 @@ class Checker:
         if not params:
             self.bad(where, f"no [{SD_ID}] element")
             return
-        if not self.signature(where, msg.encode(), params.get("sig")):
+        v = params.get("verified")
+        v = v if v in ("true", "false") else None
+        # sig covers the verification status and MSG: flipping verified= breaks it.
+        signed = (f"verified={v}\n" + msg) if v is not None else msg
+        if not self.signature(where, signed.encode(), params.get("sig")):
             return
         try:
             ev = json.loads(msg)
@@ -213,7 +226,6 @@ class Checker:
                 self.bad(where, "structured data doesn't match the event")
         except (ValueError, AttributeError):
             pass
-        v = params.get("verified")
         self.event(where, msg, None if v is None else v == "true")
 
     def finish(self, start, head):

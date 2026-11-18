@@ -164,8 +164,10 @@ argv = sys.argv[1:]
 remote = argv[-1] if argv else ""
 dest = next((a for a in argv if a.endswith("@127.0.0.1")), "")
 rec = {{"argv": argv, "env": dict(os.environ), "user": dest.split("@")[0]}}
-kh = next((a.split("=", 1)[1] for a in argv if a.startswith("UserKnownHostsFile=")), None)
-rec["known_hosts"] = open(kh).read() if kh and os.path.exists(kh) else None
+# The pinned host key arrives as KnownHostsCommand=/bin/echo LINE (no file): what ssh would read.
+khc = next((a.split("=", 1)[1] for a in argv if a.startswith("KnownHostsCommand=")), None)
+rec["known_hosts"] = (" ".join(khc.split()[1:]) + "\n") if khc and khc.split()[0] == "/bin/echo" else None
+rec["files"] = [a.split("=", 1)[1] for a in argv if a.startswith(("UserKnownHostsFile=", "GlobalKnownHostsFile="))]
 d = os.path.dirname(LOG)
 def flag(n):
     p = os.path.join(d, n)
@@ -194,6 +196,14 @@ if rec["user"] == "mcfill":
         out = {{"ok": True, "mode": req["mode"], "field": req["field"], "origin": "https://evil.example", "chars": 3}}
     elif flag("echo-value-next"):
         out = {{"ok": False, "denied": False, "reason": "saw " + str(req.get("value"))}}
+    elif flag("nested-value-next"):
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": {{"value": req.get("value")}},
+               "route": "element"}}
+    elif flag("badtype-next"):
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": "16", "route": "element"}}
+    elif flag("extra-next"):
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req.get("value") or ""),
+               "route": "element", "extra": {{"note": "dropped"}}, "debug": [1, 2]}}
     elif req.get("mode") == "check":
         out = {{"ok": True, "mode": "check", "field": req["field"], "origin": req["origins"][0]}}
     else:
@@ -578,10 +588,12 @@ def run(td, procs):
     check("the value is on no command line and in no environment variable", PW_VALUE not in " ".join(c["argv"])
           and not any(PW_VALUE in v for v in c["env"].values()))
     check("ssh gets no agent and no caller environment", "SSH_AUTH_SOCK" not in c["env"] and "MCOMP_VAULT_DIR" not in c["env"])
-    want = ["-F", "/dev/null", "BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null",
+    want = ["-F", "none", "BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=/dev/null",
+            "UserKnownHostsFile=/dev/null", "IdentityAgent=none", "ProxyCommand=none", "ProxyJump=none",
             "ControlPath=none", "ForwardAgent=no", "-p", str(port), "mcfill@127.0.0.1"]
     check("ssh runs with the pinned port and user, and strict host checking", all(w in c["argv"] for w in want), c["argv"])
-    check("ssh trusts only the pinned host key", c["known_hosts"] == f"[127.0.0.1]:{port} {hostkey}\n", c["known_hosts"])
+    check("ssh trusts only the pinned host key, given as KnownHostsCommand=/bin/echo (no known_hosts file to swap)",
+          c["known_hosts"] == f"[127.0.0.1]:{port} {hostkey}\n" and c["files"] == ["/dev/null", "/dev/null"], (c["known_hosts"], c["files"]))
 
     r = client("fill", "web-login", "--vm", "testvm", "--field", "username")
     check("fill the username", r.returncode == 0 and json.loads(calls()[-1]["stdin"])["value"] == USERNAME and USERNAME not in r.stdout)

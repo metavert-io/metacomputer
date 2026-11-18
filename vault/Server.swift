@@ -169,13 +169,14 @@ final class UnlockServer {
     var auditKey: [UInt8] = []
     let knownLock = NSLock()
     var known: [Int: String] = [:]
+    var maxWritten = 0              // the highest seq this process wrote: a lower or equal one again means the log was cut back
     let sinkLock = NSLock()
     var cursors: [String: Int] = [:]
     var sinkNext: [String: Date] = [:]
     var sinkShown: [String: String] = [:]
     var sinkFailures: [String: Int] = [:]
-    var waitingBegins: Set<Int> = []
-    var ackedBegins: [String: Set<Int>] = [:]
+    var waitingBegins: Set<String> = []          // "id|hash" of begins waiting for their acknowledgements
+    var ackedBegins: [String: Set<String>] = [:]   // per sink, the begins it accepted
     var tamperSeen: Set<String> = []
     var auditSize: off_t = -1
 
@@ -251,17 +252,31 @@ final class UnlockServer {
     // MARK: the audit log and its sinks
 
     /// Write an audit record with the vault's audit MAC, and remember its hash: delivery
-    /// refuses a record at that seq with any other hash. nil when it couldn't be written.
+    /// refuses a record at that seq with any other hash. nil when it couldn't be written, or when
+    /// the log was cut back so that this record reuses a seq this process already wrote (or
+    /// doesn't follow the record it wrote just before): then it isn't remembered, and the
+    /// terminal says so.
     @discardableResult
     func record(_ rec: [String: Any]) -> [String: Any]? {
+        // One writer at a time in this process, so seqs are remembered in the order written.
+        knownLock.lock()
         guard let stored = audit(paths, rec, macKey: auditKey) else {
+            knownLock.unlock()
             say("\(clockTime())  WARNING: the audit log couldn't be written (look at audit.jsonl and the unified log)")
             return nil
         }
-        if let s = (stored["seq"] as? NSNumber)?.intValue, let h = stored["hash"] as? String {
-            knownLock.lock()
+        guard let s = (stored["seq"] as? NSNumber)?.intValue, let h = stored["hash"] as? String else { knownLock.unlock(); return nil }
+        let reused = s <= maxWritten || known[s] != nil
+        let unlinked = known[s - 1].map { ($0) != (stored["prev"] as? String) } ?? false
+        if !reused && !unlinked {
             known[s] = h
-            knownLock.unlock()
+            maxWritten = s
+        }
+        knownLock.unlock()
+        if reused || unlinked {
+            let why = reused ? "the log was cut back: seq \(s) was already used by this unlock" : "seq \(s) doesn't follow the record this unlock wrote before it"
+            say("\(clockTime())  AUDIT LOG CHANGED: \(why); uses that need a required audit sink are refused")
+            return nil
         }
         return stored
     }
@@ -285,12 +300,18 @@ final class UnlockServer {
         return st.delivered
     }
 
-    /// Deliver to one sink (sinkLock held); notes tamper notices, acknowledged begins and problems.
-    func deliver(_ name: String, _ sink: AuditSink) -> String? {
+    /// Deliver to one sink (sinkLock held); notes tamper notices and acknowledged begins (by
+    /// their id and hash, never just a seq). Returns the problem, if any, and whether it stopped
+    /// at its deadline with more to send.
+    func deliver(_ name: String, _ sink: AuditSink, _ p: Payload, deadline: Date) -> (String?, Bool) {
         let k = name + "|" + sinkStamp(sink)
-        let d = deliverSink(paths, name, sink, auditKey: auditKey, from: cursor(name, sink), known: knownSnapshot())
+        let d = deliverSink(paths, name, sink, auditKey: auditKey, from: cursor(name, sink), known: knownSnapshot(),
+                            legacyThrough: p.legacyThrough, deadline: deadline)
         cursors[k] = d.delivered
-        for s in d.genuine where waitingBegins.contains(s) { ackedBegins[k, default: []].insert(s) }
+        for g in d.genuine {
+            let id = "\(g.id)|\(g.hash)"
+            if waitingBegins.contains(id) { ackedBegins[k, default: []].insert(id) }
+        }
         for t in d.tampered {
             let reason = (t.e["reason"] as? String) ?? "a record failed its checks"
             if tamperSeen.insert("\(t.seq)|\(reason)").inserted {
@@ -298,19 +319,19 @@ final class UnlockServer {
                 record(["op": "audit_tamper", "result": "error", "target_seq": t.seq, "reason": reason])
             }
         }
-        return d.problem
+        return (d.problem, d.incomplete)
     }
 
     /// Try to deliver what's pending. force: ignore the backoff. Returns the sinks still
     /// behind, with why, and whether any of those is required.
     @discardableResult
-    func flushSinks(force: Bool, onlyRequired: Bool = false) -> [(String, String, Bool)] {
-        sinkLock.lock()
+    func flushSinks(force: Bool, onlyRequired: Bool = false, within seconds: Double = 20) -> [(String, String, Bool)] {
+        guard sinkLock.lock(before: Date().addingTimeInterval(seconds)) else { return [] }
         defer { sinkLock.unlock() }
-        return flushLocked(force: force, onlyRequired: onlyRequired)
+        return flushLocked(force: force, onlyRequired: onlyRequired, deadline: Date().addingTimeInterval(seconds))
     }
 
-    func flushLocked(force: Bool, onlyRequired: Bool) -> [(String, String, Bool)] {
+    func flushLocked(force: Bool, onlyRequired: Bool, deadline: Date) -> [(String, String, Bool)] {
         guard let p = try? load(), let sinks = p.audit_sinks, !sinks.isEmpty else { return [] }
         var behind: [(String, String, Bool)] = []
         let last = lastAuditEvent(paths.audit).0
@@ -322,7 +343,12 @@ final class UnlockServer {
                 behind.append((name, sinkShown[name] ?? "retrying", sink.required))
                 continue
             }
-            if let problem = deliver(name, sink) {
+            if receivedSignal != 0 || Date() >= deadline {
+                behind.append((name, "not tried this round", sink.required))
+                continue
+            }
+            let (problem, incomplete) = deliver(name, sink, p, deadline: deadline)
+            if let problem {
                 sinkFailures[name, default: 0] += 1
                 sinkNext[name] = Date().addingTimeInterval(min(60, pow(2, Double(min(sinkFailures[name]!, 6)))))
                 if sinkShown[name] != problem {
@@ -333,8 +359,9 @@ final class UnlockServer {
             } else {
                 if sinkShown[name] != nil { say("\(clockTime())  audit sink \(name): delivering again") }
                 sinkShown[name] = nil
-                sinkNext[name] = nil
                 sinkFailures[name] = 0
+                sinkNext[name] = incomplete ? Date() : nil   // more to send: the next tick goes on
+                if incomplete { behind.append((name, "more to send", sink.required)) }
             }
         }
         return behind
@@ -343,28 +370,40 @@ final class UnlockServer {
     /// nil when every required sink has acknowledged the record of this use before it happens;
     /// else the refusal. With a required sink, each use is first recorded as op "begin" (what,
     /// which secret, VM, requester); this process must see every required sink accept that very
-    /// record (its seq, with the hash it wrote) before the use goes ahead. A saved delivery
-    /// place or an empty backlog proves nothing. Without a required sink, nothing extra is written.
+    /// record (its id and hash, as it wrote it) before the use goes ahead. A saved delivery
+    /// place, an empty backlog or an earlier acknowledgement of the same seq proves nothing, and
+    /// acknowledgements are dropped for every sink when this returns. Syslog can't be required:
+    /// TLS delivery has no acknowledgement from the receiver. Without a required sink, nothing
+    /// extra is written.
     func requiredSinkProblem(_ op: String, _ fields: [String: Any], requester: [String: Any]) -> String? {
         guard let p = try? load() else { return "the vault can't be read" }
         let required = (p.audit_sinks ?? [:]).filter { $0.value.required }
         if required.isEmpty { return nil }
-        sinkLock.lock()
+        if let bad = required.keys.sorted().first(where: { ["syslog", "ntfy"].contains(required[$0]!.kind) }) {
+            return "the required audit sink \(bad) is \(required[bad]!.kind), which can't acknowledge what it receives; make it optional (remove it and add it again without --required) or require a webhook or OTLP sink"
+        }
+        guard sinkLock.lock(before: Date().addingTimeInterval(30)) else {
+            return "the audit sinks are busy delivering; uses that need a required audit sink are refused until they catch up"
+        }
         defer { sinkLock.unlock() }
         var rec = fields
         rec["op"] = "begin"
         rec["use"] = op
         rec["result"] = "pending"
         rec["requester"] = requester
-        guard let stored = record(rec), let seq = (stored["seq"] as? NSNumber)?.intValue else {
-            return "the audit log can't be written, and a required audit sink must get a record of every use first; uses are refused until it can"
+        guard let stored = record(rec), let id = stored["id"] as? String, let hash = stored["hash"] as? String else {
+            return "the audit log can't be written (or was changed), and a required audit sink must get a record of every use first; uses are refused until it can"
         }
-        waitingBegins.insert(seq)
-        defer { waitingBegins.remove(seq) }
-        let behind = flushLocked(force: true, onlyRequired: true)
+        let key = "\(id)|\(hash)"
+        waitingBegins.insert(key)
+        defer {
+            waitingBegins.remove(key)
+            for k in Array(ackedBegins.keys) { ackedBegins[k]?.remove(key) }
+        }
+        let behind = flushLocked(force: true, onlyRequired: true, deadline: Date().addingTimeInterval(20))
         for name in required.keys.sorted() {
             let k = name + "|" + sinkStamp(required[name]!)
-            if ackedBegins[k]?.remove(seq) != nil { continue }
+            if ackedBegins[k]?.contains(key) == true { continue }
             let why = behind.first(where: { $0.0 == name })?.1 ?? "it didn't acknowledge the record of this use"
             return "the required audit sink \(name) can't be reached (\(why)); uses are refused until it can"
         }
@@ -375,15 +414,16 @@ final class UnlockServer {
         requiredSinkProblem(op, fields, requester: who.record)
     }
 
-    /// Only when the audit log grew, or a sink is behind and its retry time has come.
+    /// Only when the audit log grew, or a sink is behind and its retry time has come; at most a
+    /// few seconds, so Ctrl-C and the clock are honoured.
     func sinkTick() {
         var st = stat()
         let size = stat(paths.audit, &st) == 0 ? st.st_size : 0
-        sinkLock.lock()
+        guard sinkLock.lock(before: Date().addingTimeInterval(1)) else { return }
         defer { sinkLock.unlock() }
         if size != auditSize || sinkNext.values.contains(where: { $0 <= Date() }) {
             auditSize = size
-            _ = flushLocked(force: false, onlyRequired: false)
+            _ = flushLocked(force: false, onlyRequired: false, deadline: Date().addingTimeInterval(5))
         }
     }
 
@@ -837,44 +877,72 @@ final class UnlockServer {
             return ["ok": false, "status": "error", "reason": "no such audit sink"]
         }
         record(["op": "audit_sink_test", "result": "ok", "name": name, "requester": who.record])
-        sinkLock.lock()
+        guard sinkLock.lock(before: Date().addingTimeInterval(30)) else {
+            return ["ok": false, "status": "error", "reason": "the audit sinks are busy delivering; try again"]
+        }
         defer { sinkLock.unlock() }
-        if let why = deliver(name, s) {
+        let (why, incomplete) = deliver(name, s, p, deadline: Date().addingTimeInterval(30))
+        if let why {
             sinkShown[name] = why
             return ["ok": false, "status": "error", "reason": why]
         }
         sinkShown[name] = nil
-        sinkNext[name] = nil
+        sinkNext[name] = incomplete ? Date() : nil
         sinkFailures[name] = 0
+        if incomplete { return ["ok": false, "status": "error", "reason": "more to send than fits one go; it goes on in the background"] }
         return ["ok": true, "status": "ok", "delivered": cursor(name, s)]
     }
 
-    /// Every record's creation MAC and the chain, checked by the one process holding the audit key.
+    /// Every record's creation MAC and the chain, checked by the one process holding the audit
+    /// key, and reconciled with what this unlock remembers writing. Lines that aren't records,
+    /// an empty log, and a record this unlock wrote that's missing or changed are all problems.
+    /// Records up to the vault's migration boundary predate the audit key: counted as legacy.
     func opAuditVerify() -> [String: Any] {
-        guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return ["ok": false, "status": "error", "reason": "cannot read audit.jsonl"] }
-        var verified = 0, unverified = 0, total = 0, prev: String?, lastSeq = 0
+        guard let p = try? load() else { return ["ok": false, "status": "error", "reason": "cannot read the vault"] }
+        guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else {
+            return ["ok": false, "status": "error", "reason": "cannot read audit.jsonl"]
+        }
+        var verified = 0, unverified = 0, legacy = 0, total = 0, lastSeq = 0, line = 0
+        var prev: String?
         var bad: [String] = []
+        var seen: [Int: String] = [:]
         let known = knownSnapshot()
-        for l in bytes.split(separator: 0x0A, omittingEmptySubsequences: true) {
-            guard let e = parseJSONObject(Array(l)), let seq = (e["seq"] as? NSNumber)?.intValue else { continue }
+        for l in bytes.split(separator: 0x0A, omittingEmptySubsequences: false) {
+            line += 1
+            if l.isEmpty { continue }
+            guard let e = parseJSONObject(Array(l)) else { bad.append("line \(line) isn't a record"); continue }
+            guard let seq = (e["seq"] as? NSNumber)?.intValue, let h = e["hash"] as? String else {
+                // A line from before the chain existed is legacy only before the first chained record.
+                if total == 0 && lastSeq == 0 && p.legacyThrough >= 0 { legacy += 1 } else { bad.append("line \(line) has no seq or hash") }
+                continue
+            }
             total += 1
-            let h = e["hash"] as? String
-            if seq != lastSeq + 1 && lastSeq != 0 { bad.append("seq \(seq) follows \(lastSeq)") }
+            if lastSeq != 0 && seq != lastSeq + 1 { bad.append("seq \(seq) follows \(lastSeq)") }
             if h != eventHash(e) { bad.append("seq \(seq): its hash doesn't match") }
-            if let p = prev, (e["prev"] as? String) != p { bad.append("seq \(seq): doesn't link to the record before") }
+            if let pr = prev, (e["prev"] as? String) != pr { bad.append("seq \(seq): doesn't link to the record before") }
             if let k = known[seq], k != h { bad.append("seq \(seq): not the record this unlock wrote") }
-            if let m = e["mac"] as? String {
-                if m == auditRecordMAC(auditKey, e) { verified += 1 } else { bad.append("seq \(seq): fails its creation MAC") }
+            if e.keys.contains("mac") {
+                if let m = e["mac"] as? String, m == auditRecordMAC(auditKey, e) { verified += 1 } else {
+                    bad.append("seq \(seq): fails its creation MAC")
+                }
+            } else if seq <= p.legacyThrough {
+                legacy += 1
             } else if clientMayWrite(e) {
                 unverified += 1
             } else {
                 bad.append("seq \(seq) (\(clean(e["op"] as? String ?? "?", max: 40))): no creation MAC")
             }
+            seen[seq] = h
             prev = h
             lastSeq = seq
         }
+        if total == 0 { bad.append("the log holds no records") }
+        for (seq, h) in known.sorted(by: { $0.key < $1.key }) where seen[seq] != h {
+            bad.append("seq \(seq), written by this unlock, is " + (seen[seq] == nil ? "missing" : "changed"))
+        }
         return ["ok": bad.isEmpty, "status": bad.isEmpty ? "ok" : "error", "records": total, "verified": verified,
-                "unverified": unverified, "problems": Array(bad.prefix(50)), "head": lastSeq, "head_hash": prev ?? ""]
+                "unverified": unverified, "legacy": legacy, "problems": Array(bad.prefix(50)), "problem_count": bad.count,
+                "head": lastSeq, "head_hash": prev ?? ""]
     }
 
     // MARK: sealed browser sessions (the desktop account)

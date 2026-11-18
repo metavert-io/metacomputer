@@ -302,7 +302,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (176 checks, about 2 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (198 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
@@ -312,7 +312,9 @@ pseudo-terminal for the rest of the vault:
   test-build pause) is kept;
 - **rotation:** `set` over a secret needs `--replace`; `list` shows ages;
   `rotate-session-key` re-encrypts sealed sessions, which still load; cut short twice
-  in a row (a test-build switch), both sessions still load and a third run finishes;
+  in a row (a test-build switch), both sessions still load and a third run finishes,
+  writing the vault with every key, then each session file, then the vault without the
+  old keys, each made durable before the next (a test-build trace);
   an unreadable sealed session stops it with nothing changed;
 - **audit:** the hash chain, creation MACs (`audit --verify`; a locked refusal has none
   and is marked unverified), the unified log; `scripts/verify-audit.py` in both modes
@@ -320,8 +322,21 @@ pseudo-terminal for the rest of the vault:
   signed capture fail; repeated deliveries pass; `--expect-start` and `--expect-head`;
   `--require-verified`);
 - **forgeries:** a record rewritten (and rehashed) after the vault wrote it, a forged
-  record without a MAC and one with a wrong MAC each reach the sink as an
-  `audit_tamper` notice, never signed as genuine; a forged `sinks/NAME.state` is ignored;
+  record without a MAC, one with a wrong MAC and one with a malformed (non-string) MAC
+  each reach the sink as an `audit_tamper` notice, never signed as genuine; a forged
+  `sinks/NAME.state` is ignored; flipping syslog's `verified=` breaks its signature, and
+  a capture without the status fails `--require-verified`; with two required sinks, an
+  acknowledgement of a begin can't authorize a later use after the log is cut back to
+  reuse its seq;
+- **upgrades:** a vault made as an earlier version did (a test-build switch) gets its
+  audit key on its next change, and `audit --verify` counts its older record as legacy;
+  `audit --verify` fails (never "checks out") on an unreadable or empty log, a line that
+  isn't a record, or a record this unlock wrote that's gone;
+- **the VM's answer:** a fill answer hiding the value in a nested field is withheld, a
+  field of the wrong type is an error, and unknown fields are dropped;
+- **ssh:** the vault's own ssh options, replayed with the real `/usr/bin/ssh` against an
+  sshd of the test's own on 127.0.0.1: it connects with the pinned key and refuses
+  another (no known_hosts file takes part);
 - **audit sinks, all four at once** against local receivers: webhook (CloudEvents,
   signature, user header), OTLP (`/v1/logs`, attributes, a header typed with `{ask}`),
   syslog over TLS with a throwaway CA passed with `--ca` (and refused without it), and
@@ -330,8 +345,10 @@ pseudo-terminal for the rest of the vault:
   fail with another's; an optional sink that's down stops nothing and catches up in
   order; a required one refuses uses until it's back, even with its saved state forged
   to look caught up, and stops the very next proxied request when it goes down; an
-  audit log that can't be written refuses uses while a sink is required; a `--ca`
-  syslog sink still checks the host name; removing one leaves the others;
+  audit log that can't be written refuses uses while a sink is required; syslog can't
+  be `--required`, and a required OTLP sink whose answer rejects records (partial
+  success) refuses the use; a `--ca` syslog sink still checks the host name; removing
+  one leaves the others;
 - **requesters** through a stand-in process named `claude`: the prompt and audit name
   its project and pid; `NAME session`, `NAME unlock` and plain `NAME` last as long as
   they should; `--project` limits;
@@ -341,7 +358,8 @@ pseudo-terminal for the rest of the vault:
   `revoke`, a VM without the proxy account, the tunnel's ssh arguments, the action log
   holding only the token's id, and the proxy and tunnels gone after the vault locks
   (a `rekey` while unlocked); tokens ended by `set --replace` (no new value, no wider
-  path) and `delete`; the request parser refusing overflowing chunk sizes, huge or
+  path) and `delete`; a request whose token is revoked while it waits on a slow
+  required sink isn't forwarded; the request parser refusing overflowing chunk sizes, huge or
   doubled Content-Length, CL with TE, other transfer codings, bare CR/LF, NULs, folded
   headers, absolute URIs, CONNECT and HTTP/2.0, with the unlock process still serving;
 - **the events spool:** `approval_waiting` while a question waits, `vault_locked` from

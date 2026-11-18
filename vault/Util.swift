@@ -171,17 +171,49 @@ func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
 }
 
 /// Write a file atomically (temporary file in the same folder, fsync, rename), mode 0600.
+/// Write a file so that, after a crash or power loss, it holds either the old contents or
+/// the new, and once this returns the new contents and the rename are on disk: the data goes
+/// to a temp file flushed with F_FULLFSYNC (plain fsync on macOS may leave it in the drive's
+/// cache), is renamed over the file, and the folder is flushed the same way.
 func writeFileAtomic(_ path: String, _ bytes: [UInt8]) throws {
     let tmp = path + ".tmp-\(getpid())"
     unlink(tmp)
     let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
     guard fd >= 0 else { throw VaultError("cannot write \(tmp): \(String(cString: strerror(errno)))") }
-    let ok = writeAll(fd, bytes) && fsync(fd) == 0
+    let ok = writeAll(fd, bytes) && fullSync(fd)
     close(fd)
     guard ok, rename(tmp, path) == 0 else {
         unlink(tmp)
         throw VaultError("cannot write \(path)")
     }
+    guard syncFolder(of: path) else { throw VaultError("cannot flush the folder of \(path)") }
+    testTrace("durable " + path)
+}
+
+/// Test builds only: append a line to $MCOMP_VAULT_TEST_TRACE (the order of durable writes).
+func testTrace(_ line: String) {
+    #if MCOMP_VAULT_TESTING
+    guard let p = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_TRACE"], !p.isEmpty else { return }
+    let fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { return }
+    _ = writeAll(fd, Array((line + "\n").utf8))
+    close(fd)
+    #endif
+}
+
+/// Flush a file descriptor to stable storage (F_FULLFSYNC, falling back to fsync).
+func fullSync(_ fd: Int32) -> Bool {
+    if fcntl(fd, F_FULLFSYNC) == 0 { return true }
+    return fsync(fd) == 0
+}
+
+/// Flush a path's folder, so a rename into it is durable.
+func syncFolder(of path: String) -> Bool {
+    let dir = (path as NSString).deletingLastPathComponent
+    let fd = open(dir.isEmpty ? "." : dir, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    return fullSync(fd)
 }
 
 /// Run body while holding an flock on path (made 0600 if missing).
@@ -450,7 +482,7 @@ func audit(_ paths: Paths, _ record: [String: Any], macKey: [UInt8]? = nil) -> [
         defer { close(fd) }
         var st = stat()
         let before = fstat(fd, &st) == 0 ? st.st_size : -1
-        guard writeAll(fd, Array((line + "\n").utf8)), fsync(fd) == 0 else {
+        guard writeAll(fd, Array((line + "\n").utf8)), fullSync(fd) else {
             why = "can't write audit.jsonl: \(String(cString: strerror(errno)))"
             if before >= 0 { _ = ftruncate(fd, before) }   // no half line for the chain to trip over
             return

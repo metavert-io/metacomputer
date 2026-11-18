@@ -640,13 +640,26 @@ func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
             eprint("mcomp-vault: \(lockedHint(paths)) (checking the records' creation MACs needs the unlocked vault)")
             return Exit.locked
         }
-        if a.has("json") { oprint(jsonPretty(res)); return res["ok"] as? Bool == true ? Exit.ok : Exit.error }
+        let ok = res["ok"] as? Bool == true
+        if a.has("json") { oprint(jsonPretty(res)); return ok ? Exit.ok : Exit.error }
+        guard res["records"] != nil else {
+            // The check itself couldn't run (the log or the vault couldn't be read): never "checks out".
+            eprint(clean("mcomp-vault: audit --verify failed: \(res["reason"] as? String ?? "no answer")", max: 400))
+            return Exit.error
+        }
         let probs = res["problems"] as? [String] ?? []
         oprint(clean("\(res["records"] ?? 0) records: \(res["verified"] ?? 0) with a valid creation MAC, \(res["unverified"] ?? 0) "
-                     + "written without the vault key (refusals while locked); head \(res["head"] ?? 0):\(res["head_hash"] ?? "")", max: 400))
+                     + "written without the vault key (refusals while locked), \(res["legacy"] ?? 0) from before the vault had an audit key; "
+                     + "head \(res["head"] ?? 0):\(res["head_hash"] ?? "")", max: 500))
         for p in probs { oprint(clean("  BAD " + p, max: 300)) }
-        oprint(probs.isEmpty ? "The local log checks out." : "The local log was changed.")
-        return probs.isEmpty ? Exit.ok : Exit.error
+        if let n = res["problem_count"] as? Int, n > probs.count { oprint("  ... and \(n - probs.count) more") }
+        if ok && probs.isEmpty {
+            oprint("The local log checks out.")
+            return Exit.ok
+        }
+        if let r = res["reason"] as? String, probs.isEmpty { oprint(clean("  BAD " + r, max: 300)) }
+        oprint("The local log doesn't check out.")
+        return Exit.error
     }
     let lines = String(decoding: try readFileBytes(paths.audit, max: 256 << 20), as: UTF8.self).split(separator: "\n").suffix(max(1, n))
     for l in lines {

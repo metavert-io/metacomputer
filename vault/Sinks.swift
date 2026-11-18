@@ -136,6 +136,11 @@ func plainSessionConfig(timeout: Double) -> URLSessionConfiguration {
 
 /// POST; returns nil on a 2xx answer, else why not.
 func httpPost(_ url: URL, headers: [(String, String)], body: Data, timeout: Double = 8) -> String? {
+    httpPostAnswer(url, headers: headers, body: body, timeout: timeout).0
+}
+
+/// POST; (nil, the answer's body) on a 2xx answer, else (why not, nil).
+func httpPostAnswer(_ url: URL, headers: [(String, String)], body: Data, timeout: Double = 8) -> (String?, Data?) {
     let session = URLSession(configuration: plainSessionConfig(timeout: timeout), delegate: NoRedirects(), delegateQueue: nil)
     defer { session.finishTasksAndInvalidate() }
     var req = URLRequest(url: url)
@@ -150,10 +155,28 @@ func httpPost(_ url: URL, headers: [(String, String)], body: Data, timeout: Doub
         box.error = e
         sem.signal()
     }.resume()
-    if sem.wait(timeout: .now() + timeout + 2) == .timedOut { session.invalidateAndCancel(); return "no answer in \(Int(timeout)) s" }
-    if let e = box.error { return oneLine(e.localizedDescription, max: 160) }
-    guard let h = box.response as? HTTPURLResponse else { return "no HTTP answer" }
-    return (200..<300).contains(h.statusCode) ? nil : "HTTP \(h.statusCode)"
+    if sem.wait(timeout: .now() + timeout + 2) == .timedOut { session.invalidateAndCancel(); return ("no answer in \(Int(timeout)) s", nil) }
+    if let e = box.error { return (oneLine(e.localizedDescription, max: 160), nil) }
+    guard let h = box.response as? HTTPURLResponse else { return ("no HTTP answer", nil) }
+    return (200..<300).contains(h.statusCode) ? (nil, box.data ?? Data()) : ("HTTP \(h.statusCode)", nil)
+}
+
+/// An OTLP export answer that accepted only part of the batch (partialSuccess with rejected
+/// records) is a failure: those records weren't stored. nil when every record was accepted.
+func otlpRejection(_ body: Data?) -> String? {
+    guard let b = body, !b.isEmpty, let o = try? JSONSerialization.jsonObject(with: b) as? [String: Any],
+          let ps = (o["partialSuccess"] ?? o["partial_success"]) as? [String: Any] else { return nil }
+    let r = ps["rejectedLogRecords"] ?? ps["rejected_log_records"]
+    let n = (r as? NSNumber)?.int64Value ?? (r as? String).flatMap { Int64($0) } ?? 0
+    guard n > 0 else { return nil }
+    let msg = clean((ps["errorMessage"] ?? ps["error_message"]) as? String ?? "", max: 160)
+    return "the collector rejected \(n) record(s)" + (msg.isEmpty ? "" : ": \(msg)")
+}
+
+/// The signature a single record carries (OTLP's metacomputer.signature, syslog's sig=): over
+/// its verification status and its line, so neither can change without the other.
+func recordSignature(_ key: [UInt8], _ raw: String, verified: Bool) -> String {
+    "sha256=" + hmacSHA256Hex(key: key, data: Array(("verified=\(verified)\n" + raw).utf8))
 }
 
 // MARK: - syslog over TLS
@@ -291,7 +314,7 @@ func otlpBody(_ events: [OutEvent], key: [UInt8]) -> String {
             if let p = r["project"] as? String { attrs.append(s("metacomputer.project", p)) }
             if let p = (r["claude_pid"] as? NSNumber)?.intValue { attrs.append(i("metacomputer.requester.pid", p)) }
         }
-        attrs.append(s("metacomputer.signature", "sha256=" + hmacSHA256Hex(key: key, data: Array(raw.utf8))))
+        attrs.append(s("metacomputer.signature", recordSignature(key, raw, verified: ev.verified)))
         let sev = severityOf(e)
         return ["timeUnixNano": epochNanos((e["ts"] as? String) ?? ""), "observedTimeUnixNano": observed, "severityNumber": sev.otlp,
                 "severityText": sev.text, "body": ["stringValue": raw], "attributes": attrs]
@@ -314,7 +337,7 @@ func syslogMessage(_ ev: OutEvent, key: [UInt8]) -> String {
     let raw = ev.raw, e = ev.e
     let pri = 1 * 8 + severityOf(e).syslog
     let op = String(((e["op"] as? String) ?? "event").unicodeScalars.filter { $0.value > 32 && $0.value < 127 }.prefix(32).map(Character.init))
-    let sig = "sha256=" + hmacSHA256Hex(key: key, data: Array(raw.utf8))
+    let sig = recordSignature(key, raw, verified: ev.verified)
     var sd = "[\(syslogSDID) seq=\"\((e["seq"] as? NSNumber)?.intValue ?? 0)\" family=\"vault\""
     if let vm = e["vm"] as? String { sd += " vm=\"\(sdEscape(vm))\"" }
     sd += " id=\"\(sdEscape((e["id"] as? String) ?? ""))\" hash=\"\(sdEscape((e["hash"] as? String) ?? ""))\""
@@ -383,7 +406,7 @@ func tamperEvent(_ seq: Int, _ reason: String, seen: String?) -> OutEvent {
 
 /// The events after `after`, in order, each checked: its hash, its place in the chain, the
 /// hash the unlock process saw when it wrote it (`known`), and its creation MAC.
-func pendingEvents(_ paths: Paths, after: Int, limit: Int, auditKey: [UInt8], known: [Int: String]) -> [OutEvent] {
+func pendingEvents(_ paths: Paths, after: Int, limit: Int, auditKey: [UInt8], known: [Int: String], legacyThrough: Int = 0) -> [OutEvent] {
     guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return [] }
     var prevHash: String?
     var last = after
@@ -407,13 +430,17 @@ func pendingEvents(_ paths: Paths, after: Int, limit: Int, auditKey: [UInt8], kn
         let h = e["hash"] as? String
         let raw = String(decoding: l, as: UTF8.self)
         var problem: String?
+        var verified = false
         if h != eventHash(e) {
             problem = "record \(seq) doesn't match its own hash (changed after it was written); not sent"
         } else if let k = known[seq], k != h {
             problem = "record \(seq) isn't the one the unlock process wrote; not sent"
-        } else if let m = e["mac"] as? String {
-            if m != auditRecordMAC(auditKey, e) { problem = "record \(seq) fails its creation MAC; not sent" }
-        } else if !clientMayWrite(e) {
+        } else if e.keys.contains("mac") {
+            // Present: it must be a string that checks out. Only an absent MAC means "unverified".
+            if let m = e["mac"] as? String, m == auditRecordMAC(auditKey, e) { verified = true } else {
+                problem = "record \(seq) fails its creation MAC; not sent"
+            }
+        } else if seq > legacyThrough && !clientMayWrite(e) {
             problem = "record \(seq) (\(clean(e["op"] as? String ?? "?", max: 40))) has no creation MAC, which only a locked client's refusals may lack; not sent"
         }
         if problem == nil, linkOK, let p = prevHash, (e["prev"] as? String) != p {
@@ -422,7 +449,7 @@ func pendingEvents(_ paths: Paths, after: Int, limit: Int, auditKey: [UInt8], kn
         if let why = problem {
             out.append(tamperEvent(seq, why, seen: h))
         } else {
-            out.append(OutEvent(seq: seq, raw: raw, e: e, verified: e["mac"] != nil, tamper: false))
+            out.append(OutEvent(seq: seq, raw: raw, e: e, verified: verified, tamper: false))
         }
         prevHash = h
         linkOK = true
@@ -435,14 +462,16 @@ func pendingEvents(_ paths: Paths, after: Int, limit: Int, auditKey: [UInt8], kn
 struct Delivery {
     var problem: String?
     var delivered: Int          // the place reached: every event up to here was sent and acknowledged
-    var genuine: [Int] = []     // seqs sent as the records themselves (not tamper notices)
+    var genuine: [(seq: Int, id: String, hash: String)] = []   // records sent as themselves (not tamper notices)
     var tampered: [OutEvent] = []
     var stateTrusted = true     // false: the saved place failed its MAC (delivery started again from the first event)
+    var incomplete = false      // stopped at the deadline with more to send
 }
 
 /// Send what's pending for one sink, starting after `from` (the unlock process's own place in
 /// memory) or, without it, after the sink's saved place (MAC-checked).
-func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [UInt8], from: Int?, known: [Int: String]) -> Delivery {
+func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [UInt8], from: Int?, known: [Int: String],
+                 legacyThrough: Int = 0, deadline: Date = .distantFuture) -> Delivery {
     try? ensurePrivateDir(sinkDir(paths))
     let res: Delivery? = try? withFileLock(sinkDir(paths) + "/\(name).lock") { () -> Delivery in
         let loaded = loadSinkState(paths, name, sink, key: auditKey)
@@ -455,7 +484,9 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
         var d = Delivery(problem: nil, delivered: state.delivered)
         d.stateTrusted = from != nil || trusted
         while d.problem == nil {
-            let events = pendingEvents(paths, after: d.delivered, limit: sink.kind == "otlp" ? 50 : 100, auditKey: auditKey, known: known)
+            if Date() >= deadline { d.incomplete = true; break }   // the rest goes on the next round
+            let events = pendingEvents(paths, after: d.delivered, limit: sink.kind == "otlp" ? 50 : 100, auditKey: auditKey, known: known,
+                                       legacyThrough: legacyThrough)
             if events.isEmpty { break }
             var sentThrough = d.delivered
             var sent: [OutEvent] = []
@@ -464,8 +495,12 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
                 var url = sink.url.hasSuffix("/") ? String(sink.url.dropLast()) : sink.url
                 if !url.hasSuffix("/v1/logs") { url += "/v1/logs" }
                 let body = otlpBody(events, key: key)
-                d.problem = URL(string: url).map { httpPost($0, headers: sinkHeaders(sink, body, contentType: "application/json"), body: Data(body.utf8)) }
-                    ?? "bad URL"
+                if let u = URL(string: url) {
+                    let (why, answer) = httpPostAnswer(u, headers: sinkHeaders(sink, body, contentType: "application/json"), body: Data(body.utf8))
+                    d.problem = why ?? otlpRejection(answer)
+                } else {
+                    d.problem = "bad URL"
+                }
                 if d.problem == nil { sent = events }
             case "syslog":
                 guard let u = URLComponents(string: sink.url), let host = u.host else { d.problem = "bad URL"; break }
@@ -495,7 +530,9 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
             }
             for ev in sent {
                 sentThrough = max(sentThrough, ev.seq)
-                if ev.tamper { d.tampered.append(ev) } else { d.genuine.append(ev.seq) }
+                if ev.tamper { d.tampered.append(ev) } else {
+                    d.genuine.append((ev.seq, (ev.e["id"] as? String) ?? "", (ev.e["hash"] as? String) ?? ""))
+                }
             }
             if sentThrough > d.delivered { d.delivered = sentThrough; state.failures = 0 }
             if sent.isEmpty && d.problem == nil { break }

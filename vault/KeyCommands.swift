@@ -26,11 +26,18 @@ func cmdInit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     var pass = try readPassphrase(confirm: true)
     defer { wipe(&pass) }
     let (key, recovery) = try newVaultKey(passphrase: pass, enclave: enclave)
+    var fresh = Payload.fresh(boundary: lastAuditEvent(paths.audit).0)
+    let oldVault = testOldVault()
+    if oldVault {
+        fresh.audit_key = nil
+        fresh.audit_key_since = nil
+    }
     try withFileLock(paths.lock) {
         guard !vaultExists(paths) else { throw VaultError("a vault already exists at \(paths.vault)") }
-        try savePayload(paths, key, Payload.fresh())
+        try savePayload(paths, key, fresh)
     }
-    audit(paths, ["op": "init", "result": "ok", "enclave": enclave, "recovery_key": recovery != nil], macKey: vaultAuditKey(paths, key))
+    audit(paths, ["op": "init", "result": "ok", "enclave": enclave, "recovery_key": recovery != nil],
+          macKey: oldVault ? nil : vaultAuditKey(paths, key))
     oprint("Created the vault at \(paths.vault)" + (enclave ? ", bound to this Mac's Secure Enclave." : " (passphrase only, no Secure Enclave)."))
     if let r = recovery { showRecoveryKey(r) }
     oprint("Next: metacomputer secrets set NAME --kind password --origin https://site.example --username you")
@@ -45,8 +52,9 @@ func rewrite(_ paths: Paths, from old: VaultKey, passphrase: [UInt8], enclave: B
     testPause("rekey")
     try withFileLock(paths.lock) {
         var current = try loadPayload(paths, old)
-        current.ensureAuditKey()
+        let made = current.ensureAuditKey(boundary: lastAuditEvent(paths.audit).0)
         try savePayload(paths, key, current)
+        if made, let k = current.auditKeyBytes { adoptSinkStates(paths, current, key: k) }
     }
     return (key, recovery)
 }
@@ -108,7 +116,7 @@ func cmdRotateSessionKey(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     var resumed = false
     try withFileLock(paths.lock) {
         var p = try loadPayload(paths, key)
-        p.ensureAuditKey()
+        if p.ensureAuditKey(boundary: lastAuditEvent(paths.audit).0), let k = p.auditKeyBytes { adoptSinkStates(paths, p, key: k) }
         resumed = !(p.session_keys_old ?? []).isEmpty || p.session_key_prev != nil
         let ring = p.sessionKeyring
         guard !ring.isEmpty else { throw VaultError("the vault's session key is damaged") }
@@ -172,5 +180,14 @@ func testStopAfter(_ point: String, _ step: Int) {
     #if MCOMP_VAULT_TESTING
     let v = "MCOMP_VAULT_TEST_STOP_" + point.uppercased() + "_AFTER"
     if let s = ProcessInfo.processInfo.environment[v], Int(s) == step { _exit(9) }
+    #endif
+}
+
+/// Test builds only: make the vault as an earlier version did (no audit key), to test the upgrade.
+func testOldVault() -> Bool {
+    #if MCOMP_VAULT_TESTING
+    return ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_OLD_VAULT"] == "1"
+    #else
+    return false
     #endif
 }

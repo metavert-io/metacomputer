@@ -86,15 +86,22 @@ struct Payload: Codable {
     var created: String
     var session_keys_old: [String]? = nil   // every earlier session key a sealed file may still use (rotation cut short)
     var audit_key: String? = nil            // base64, 32 bytes: the MAC on each audit record and on sink states
+    // The last audit seq written before the audit key existed (a vault from an earlier version,
+    // or a log older than this vault): records up to it are legacy, unverified, not forgeries.
+    var audit_key_since: Int? = nil
 
-    static func fresh() -> Payload {
+    /// A new vault. `boundary`: the audit log's last seq now (records before the vault are legacy).
+    static func fresh(boundary: Int) -> Payload {
         var k = randomBytes(32)
         var a = randomBytes(32)
         defer { wipe(&k); wipe(&a) }
         return Payload(secrets: [:], vms: [:], session_key: Data(k).base64EncodedString(), session_key_prev: nil,
                        session_key_rotated: nil, sessions: [:], audit_sinks: nil, created: isoTime(),
-                       session_keys_old: nil, audit_key: Data(a).base64EncodedString())
+                       session_keys_old: nil, audit_key: Data(a).base64EncodedString(), audit_key_since: boundary)
     }
+
+    /// Records up to this seq were written before the audit key: no MAC is expected on them.
+    var legacyThrough: Int { audit_key_since ?? 0 }
 
     /// Every session key a sealed file may use: the current one first.
     var sessionKeyring: [[UInt8]] {
@@ -105,13 +112,16 @@ struct Payload: Codable {
         return out
     }
 
-    /// The audit MAC key, made if this vault predates it.
-    mutating func ensureAuditKey() {
-        if audit_key.flatMap({ Data(base64Encoded: $0) })?.count != 32 {
-            var a = randomBytes(32)
-            defer { wipe(&a) }
-            audit_key = Data(a).base64EncodedString()
-        }
+    /// The audit MAC key, made if this vault predates it, with the migration boundary: the
+    /// log's last seq now. Returns true when it was made.
+    @discardableResult
+    mutating func ensureAuditKey(boundary: Int) -> Bool {
+        guard audit_key.flatMap({ Data(base64Encoded: $0) })?.count != 32 else { return false }
+        var a = randomBytes(32)
+        defer { wipe(&a) }
+        audit_key = Data(a).base64EncodedString()
+        audit_key_since = boundary
+        return true
     }
 
     var auditKeyBytes: [UInt8]? { audit_key.flatMap { Data(base64Encoded: $0) }.map(Array.init).flatMap { $0.count == 32 ? $0 : nil } }
@@ -389,9 +399,19 @@ func savePayload(_ paths: Paths, _ key: VaultKey, _ payload: Payload) throws {
 func updateVault(_ paths: Paths, _ key: VaultKey, _ change: (inout Payload) throws -> Void) throws {
     try withFileLock(paths.lock) {
         var p = try loadPayload(paths, key)
-        p.ensureAuditKey()
+        let made = p.ensureAuditKey(boundary: lastAuditEvent(paths.audit).0)
         try change(&p)
         try savePayload(paths, key, p)
+        if made, let k = p.auditKeyBytes { adoptSinkStates(paths, p, key: k) }
+    }
+}
+
+/// When an audit key is first made, the sink places saved by the earlier version (which had no
+/// MAC) are taken as they are, once, and signed: from then on a changed one is noticed.
+func adoptSinkStates(_ paths: Paths, _ p: Payload, key: [UInt8]) {
+    for (name, sink) in p.audit_sinks ?? [:] {
+        let (st, _) = loadSinkState(paths, name, sink)
+        saveSinkState(paths, name, st, key: key)
     }
 }
 

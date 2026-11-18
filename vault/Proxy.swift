@@ -117,6 +117,11 @@ final class ProxyHub: @unchecked Sendable {
         return (t, raw)
     }
 
+    /// Is this token still live: present, unexpired, and the proxy not shutting down?
+    func stillLive(_ t: APIToken) -> Bool {
+        withLock { !closed && tokens[t.hash].map { $0.expires > Date() } == true }
+    }
+
     /// Drop tokens whose secret is gone or changed (set --replace, delete); returns them.
     @discardableResult
     func prune(_ p: Payload) -> [APIToken] {
@@ -199,17 +204,15 @@ final class ProxyHub: @unchecked Sendable {
     func startTunnel(_ t: GuestTarget, user: String, keyPath: String, guestPort: Int, macPort: Int) throws -> Tunnel {
         let dir = userTempDir() + "/mcomp-tunnel-\(getpid())-\(UInt32.random(in: 0...UInt32.max))"
         guard mkdir(dir, 0o700) == 0 else { throw VaultError("cannot make a temporary folder", code: Exit.error) }
-        let kh = dir + "/known_hosts", errPath = dir + "/ssh.err"
-        try writeFileAtomic(kh, Array("[127.0.0.1]:\(t.binding.ssh_port) \(t.binding.host_key_line)\n".utf8))
-        let args = ["-F", "/dev/null", "-N", "-T",
-                    "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(keyPath)",
-                    "-o", "UserKnownHostsFile=\(kh)", "-o", "StrictHostKeyChecking=yes", "-o", "GlobalKnownHostsFile=/dev/null",
-                    "-o", "UpdateHostKeys=no", "-o", "CheckHostIP=no", "-o", "ControlMaster=no", "-o", "ControlPath=none",
-                    "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PasswordAuthentication=no",
-                    "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=5", "-o", "ExitOnForwardFailure=yes",
-                    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=DEBUG1",
-                    "-R", "127.0.0.1:\(guestPort):127.0.0.1:\(macPort)",
-                    "-p", "\(t.binding.ssh_port)", "\(user)@127.0.0.1"]
+        let errPath = dir + "/ssh.err"
+        // The pinned host key goes to ssh as KnownHostsCommand arguments, never through a file.
+        guard let pin = pinnedHostKeyOptions(port: t.binding.ssh_port, hostKeyLine: t.binding.host_key_line) else {
+            rmdir(dir)
+            throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
+        }
+        let args = sshBaseOptions(key: keyPath, port: t.binding.ssh_port) + pin
+            + ["-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+               "-o", "LogLevel=DEBUG1", "-R", "127.0.0.1:\(guestPort):127.0.0.1:\(macPort)", "\(user)@127.0.0.1"]
         let errFD = open(errPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
         let nullFD = open("/dev/null", O_RDWR | O_CLOEXEC)
         guard errFD >= 0, nullFD >= 0 else { throw VaultError("cannot start the tunnel", code: Exit.error) }
@@ -370,6 +373,21 @@ final class ProxyHub: @unchecked Sendable {
             log(503, 0, token, host, "required audit sink: \(why)")
             return
         }
+        // Waiting on delivery takes time: just before forwarding, the token must still be live
+        // (not revoked, not expired, the vault not locking) and the secret still the one it was
+        // made for. The value used is the one read now.
+        guard stillLive(token) else {
+            let shutting = withLock { closed }
+            respond(c, shutting ? 503 : 401, shutting ? "the vault is locking" : "the token ended while this request waited (expired or revoked)")
+            log(shutting ? 503 : 401, 0, token, host, "token ended while waiting")
+            return
+        }
+        guard let p2 = try? loadPayload(paths, key), let s2 = p2.secrets[name], token.fits(s2) else {
+            _ = revoke(token.id)
+            respond(c, 401, "\(name) changed while this request waited; get a new token")
+            log(401, 0, token, host, "the secret changed while waiting")
+            return
+        }
         guard let url = URL(string: "\(upstreamScheme)://\(host)\(rest)\(query)") else { respond(c, 400, "bad path"); return }
         var u = URLRequest(url: url)
         u.httpMethod = req.method
@@ -378,10 +396,10 @@ final class ProxyHub: @unchecked Sendable {
                                     "x-metacomputer-token", hName.lowercased()]
         let named = Set((req.header("Connection") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
         for (k, v) in req.headers where !dropped.contains(k.lowercased()) && !named.contains(k.lowercased()) { u.addValue(v, forHTTPHeaderField: k) }
-        u.setValue(hPrefix + s.value + hSuffix, forHTTPHeaderField: hName)
+        u.setValue(hPrefix + s2.value + hSuffix, forHTTPHeaderField: hName)
         if !req.body.isEmpty { u.httpBody = Data(req.body) }
         let stream = StreamBack(fd: c, upstreamHost: host, scheme: upstreamScheme,
-                                proxyBase: "http://127.0.0.1:\(l.guestPort)/\(name)", secret: Array(s.value.utf8))
+                                proxyBase: "http://127.0.0.1:\(l.guestPort)/\(name)", secret: Array(s2.value.utf8))
         let session = URLSession(configuration: plainSessionConfig(timeout: 120), delegate: stream, delegateQueue: nil)
         session.dataTask(with: u).resume()
         _ = stream.done.wait(timeout: .now() + 600)

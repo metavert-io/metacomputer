@@ -53,7 +53,8 @@ UPSTREAM_VALUE = "dummy-api-key-7Hq2Zp9W"
 SITE = ts.SITE
 UPSTREAM_VALUE2 = "dummy-api-key-2nd-Qm4x"
 RACE_VALUE = "dummy race value 5"
-VALUES = [PASS, PASS2, PASS3, PW_VALUE, UPSTREAM_VALUE, UPSTREAM_VALUE2, RACE_VALUE]
+TEXT_O = "dummy old vault text 6"
+VALUES = [PASS, PASS2, PASS3, PW_VALUE, UPSTREAM_VALUE, UPSTREAM_VALUE2, RACE_VALUE, TEXT_O]
 RECOVERY_RE = re.compile(r"\b([A-Z2-7]{4}(?:-[A-Z2-7]{4}){7})\b")
 KEY_RE = re.compile(r"signing key[^\n]*\n\s+([A-Za-z0-9+/]{43}=)")
 SPOOL_NAME = re.compile(r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{16}\.json")
@@ -96,10 +97,13 @@ authorityKeyIdentifier = keyid
 # --- receivers ---------------------------------------------------------------------------------
 
 class Receiver(http.server.BaseHTTPRequestHandler):
-    """Webhook, OTLP and ntfy endpoints: records each POST; paths in server.down answer 503."""
+    """Webhook, OTLP and ntfy endpoints: records each POST; paths in server.down answer 503, paths in
+    server.slow wait 4 s first, paths in server.partial answer 200 with an OTLP partial success."""
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+        if any(self.path.startswith(p) for p in self.server.slow):
+            time.sleep(4)
         if any(self.path.startswith(p) for p in self.server.down):
             self.send_response(503)
             self.send_header("Content-Length", "0")
@@ -107,9 +111,14 @@ class Receiver(http.server.BaseHTTPRequestHandler):
             return
         self.server.got.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
                                 "signature": self.headers.get("X-Metacomputer-Signature"), "body": body})
+        answer = b""
+        if any(self.path.startswith(p) for p in self.server.partial):
+            answer = json.dumps({"partialSuccess": {"rejectedLogRecords": "1", "errorMessage": "dummy rejection"}}).encode()
         self.send_response(200)
-        self.send_header("Content-Length", "0")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(answer)))
         self.end_headers()
+        self.wfile.write(answer)
 
     def log_message(self, *a):
         pass
@@ -160,7 +169,7 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 
 def http_server(handler):
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    srv.got, srv.down = [], set()
+    srv.got, srv.down, srv.slow, srv.partial = [], set(), set(), set()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -232,6 +241,38 @@ def make_certs(d):
         if r.returncode != 0:
             return None, r.stderr
     return (j("ca.pem"), j("srv.pem"), j("srv.key")), ""
+
+
+def pwd_name():
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def local_sshd(td):
+    """An sshd of this user's own on 127.0.0.1 (no root needed): (port, host key line, client key, process) or None."""
+    d = os.path.join(td, "sshd")
+    os.makedirs(d, exist_ok=True)
+    for k in ("hk", "ck"):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "dummy", "-f", os.path.join(d, k)], check=True)
+    shutil.copy(os.path.join(d, "ck.pub"), os.path.join(d, "ak"))
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    open(os.path.join(d, "cfg"), "w").write(
+        f"Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hk\nPidFile {d}/pid\nAuthorizedKeysFile {d}/ak\nStrictModes no\n"
+        "UsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n")
+    if not os.path.exists("/usr/sbin/sshd"):
+        return None
+    pr = subprocess.Popen(["/usr/sbin/sshd", "-D", "-f", os.path.join(d, "cfg"), "-E", os.path.join(d, "log")])
+    for _ in range(50):
+        with socket.socket() as c:
+            if c.connect_ex(("127.0.0.1", port)) == 0:
+                hk = " ".join(open(os.path.join(d, "hk.pub")).read().split()[:2])
+                return port, hk, os.path.join(d, "ck"), pr
+        time.sleep(0.1)
+    pr.kill()
+    return None
 
 
 def wait_for(fn, timeout=20, step=0.1):
@@ -456,6 +497,25 @@ def run(td, procs):
                                                                            for f in glob.glob(vdir + "/*") if os.path.isfile(f)))
     else:
         check("init without a Secure Enclave: passphrase only", rc == 0 and "passphrase only" in out, out)
+    olddir = os.path.join(td, "vold")
+    oenv = {"MCOMP_VAULT_DIR": olddir}
+    tty([BIN, "init", "--no-enclave"], [("New vault passphrase", PASS + "\n"), ("same passphrase again", PASS + "\n")],
+        extra=dict(oenv, MCOMP_VAULT_TEST_OLD_VAULT="1"))
+    rc, out = tty([BIN, "set", "old1", "--kind", "text", "--origin", SITE], [("Vault passphrase", PASS + "\n"), ("Value for old1", TEXT_O + "\n")],
+                  extra=oenv)
+    orecs = [json.loads(l) for l in open(os.path.join(olddir, "audit.jsonl"))]
+    check("a vault from before the audit key (test switch) gets one on its next change; its earlier record has no MAC, the new one has",
+          rc == 0 and "mac" not in orecs[0] and "mac" in orecs[-1], [sorted(r) for r in orecs])
+    po = ts.Pty([BIN, "unlock", *allow], dict(env, **oenv))
+    procs.append(po)
+    po.expect("Vault passphrase: ")
+    po.send(PASS + "\n")
+    po.expect("unlocked until")
+    r = client("audit", "--verify", extra=oenv)
+    check("audit --verify on the upgraded vault: its older record is legacy (from before the audit key), not a forgery",
+          r.returncode == 0 and "1 from before the vault had an audit key" in r.stdout and "checks out" in r.stdout, r.stdout + r.stderr)
+    po.send("\x03")
+    po.wait(15)
     st = client("status")
     check("status says how the vault is keyed", "keys:" in st.stdout and (("Secure Enclave" in st.stdout) == enclave), st.stdout)
 
@@ -641,6 +701,19 @@ def run(td, procs):
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("a fill while four sinks are set", r.returncode == 0, r.stdout + r.stderr)
     check("records the vault writes carry a creation MAC", "mac" in audit_recs()[-1], audit_recs()[-1])
+    open(os.path.join(stubdir, "nested-value-next"), "w").close()
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("a VM answer hiding the value in a nested field is withheld (output and audit never see it)", r.returncode == 4
+          and "withheld" in js(r.stdout).get("reason", "") and not any(v in r.stdout + r.stderr for v in VALUES)
+          and not any(v in open(alog).read() for v in VALUES), r.stdout)
+    open(os.path.join(stubdir, "badtype-next"), "w").close()
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("a VM answer with a field of the wrong type is an error", r.returncode == 4 and "unexpected form" in js(r.stdout).get("reason", ""),
+          r.stdout)
+    open(os.path.join(stubdir, "extra-next"), "w").close()
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("fields a fill doesn't answer with are dropped", r.returncode == 0 and "extra" not in r.stdout and "debug" not in r.stdout
+          and "dropped" not in json.dumps(audit_recs()[-1]), r.stdout)
 
     def last_seq():
         recs = audit_recs()
@@ -722,6 +795,26 @@ def run(td, procs):
     r = client("audit", "--verify")
     check("audit --verify (unlocked): every record's creation MAC checks out; locked refusals counted as unverified",
           r.returncode == 0 and "checks out" in r.stdout and "written without the vault key" in r.stdout, r.stdout + r.stderr)
+    os.chmod(alog, 0)
+    r = client("audit", "--verify")
+    os.chmod(alog, 0o600)
+    check("audit --verify when audit.jsonl can't be read: fails (exit 4) with the reason, never 'checks out'", r.returncode == 4
+          and "cannot read audit.jsonl" in r.stdout + r.stderr and "checks out" not in r.stdout, r.stdout + r.stderr)
+    saved_log = open(alog).read()
+    with open(alog, "a") as f:
+        f.write("not a record\n")
+    r = client("audit", "--verify")
+    open(alog, "w").write(saved_log)
+    check("audit --verify: a line that isn't a record is a problem", r.returncode == 4 and "isn't a record" in r.stdout, r.stdout)
+    open(alog, "w").write("".join(l + "\n" for l in saved_log.splitlines()[:-1]))
+    r = client("audit", "--verify")
+    open(alog, "w").write(saved_log)
+    check("audit --verify: a record this unlock wrote that's gone from the end of the log is a problem", r.returncode == 4
+          and "written by this unlock, is missing" in r.stdout, r.stdout)
+    open(alog, "w").write("")
+    r = client("audit", "--verify")
+    open(alog, "w").write(saved_log)
+    check("audit --verify: an empty log is a problem", r.returncode == 4 and "no records" in r.stdout, r.stdout)
     check("no sink received a value", not any(v in g["body"] for g in rx.got for v in VALUES)
           and not any(v in m for m in (sl.got if sl else []) for v in VALUES))
 
@@ -742,6 +835,27 @@ def run(td, procs):
               r.stdout + r.stderr)
     r = subprocess.run([sys.executable, "-I", verify, "--key", keys["otel"] or "00", cap["hook"]], capture_output=True, text=True)
     check("verify-audit.py: another sink's key fails", r.returncode == 1 and "signature" in r.stdout, r.stdout)
+    sys_lines = open(cap["sys"]).read().splitlines()
+    flipped = os.path.join(td, "sys-flipped.txt")
+    open(flipped, "w").write("\n".join(l.replace('verified="false"', 'verified="true"') for l in sys_lines) + "\n")
+    r = subprocess.run([sys.executable, "-I", verify, "--key", keys["sys"] or "00", flipped], capture_output=True, text=True)
+    check("syslog: flipping verified=\"false\" to \"true\" breaks the signature (it covers the status and MSG)",
+          any('verified="false"' in l for l in sys_lines) and r.returncode == 1 and "signature" in r.stdout, r.stdout[:300])
+    open(flipped, "w").write("\n".join(re.sub(r' verified="(true|false)"', "", l) for l in sys_lines) + "\n")
+    r = subprocess.run([sys.executable, "-I", verify, "--key", keys["sys"] or "00", "--require-verified", flipped], capture_output=True, text=True)
+    check("...and removing the marker doesn't pass --require-verified (absent counts as unverified)", r.returncode == 1, r.stdout[:300])
+    stripped_hook = os.path.join(td, "hook-nomarker.jsonl")
+    with open(stripped_hook, "w") as f:
+        for l in open(cap["hook"]).read().splitlines():
+            w = json.loads(l)
+            body = json.loads(w["body"])
+            body.pop("mcompverified", None)
+            b = json.dumps(body, sort_keys=True, separators=(",", ":"))
+            f.write(json.dumps({"signature": "sha256=" + hmac.new(base64.b64decode(keys["hook"]), b.encode(), hashlib.sha256).hexdigest(),
+                                "body": b}) + "\n")
+    r = subprocess.run([sys.executable, "-I", verify, "--key", keys["hook"], "--require-verified", stripped_hook], capture_output=True, text=True)
+    check("a webhook capture without the status (an older one) fails --require-verified", r.returncode == 1
+          and "not producer-verified" in r.stdout, r.stdout[:300])
     r = subprocess.run([sys.executable, "-I", verify, cap["hook"]], capture_output=True, text=True)
     check("verify-audit.py: a signed capture without --key fails", r.returncode == 1, r.stdout)
     lines = open(alog).read().splitlines()
@@ -843,6 +957,18 @@ def run(td, procs):
     check("...the unlock terminal warns about it", "the audit log couldn't be written" in u.text())
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("...and uses work again once it can be written", r.returncode == 0, r.stdout)
+    r = client("audit-sink", "add", "sysreq", "--kind", "syslog", "--url", f"syslog+tls://127.0.0.1:{sl.port if sl else 9}", "--required")
+    check("a syslog sink can't be --required (TLS delivery has no acknowledgement from the receiver)", r.returncode == 64
+          and "acknowledges" in r.stderr, r.stderr)
+    rx.partial.add("/otlpreq")
+    rc, out = tty([BIN, "audit-sink", "add", "otlpreq", "--kind", "otlp", "--url", f"http://127.0.0.1:{hp}/otlpreq", "--required"],
+                  [("Vault passphrase", current + "\n")])
+    n = len(calls())
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("a required OTLP sink answering 200 with rejected records (partial success) doesn't count as acceptance: the use is refused",
+          rc == 0 and r.returncode == 2 and "rejected 1 record" in js(r.stdout).get("reason", "") and len(calls()) == n, r.stdout)
+    rx.partial.discard("/otlpreq")
+    tty([BIN, "audit-sink", "remove", "otlpreq"], [("Vault passphrase", current + "\n")])
     rx.down.discard("/hook")
     r = client("audit-sink", "test", "hook")
     check("audit-sink test: the optional sink catches up", r.returncode == 0 and "Sent: hook has every event" in r.stdout, r.stdout + r.stderr)
@@ -890,6 +1016,29 @@ def run(td, procs):
           and any(x.get("op") == "audit_tamper" and x.get("target_seq") == forged["seq"] for x in audit_recs()))
     r = client("audit", "--verify")
     check("audit --verify finds the changed record (exit 4)", r.returncode == 4 and f"seq {forged['seq']}" in r.stdout, r.stdout)
+    rc, out = tty([BIN, "audit-sink", "add", "req2", "--kind", "webhook", "--url", f"http://127.0.0.1:{hp}/second", "--required"],
+                  [("Vault passphrase", current + "\n")])
+    rx.down.add("/req")
+    n = len(calls())
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    first = [x for x in audit_recs() if x.get("op") == "begin"][-1]
+    acked_by_req2 = any(json.loads(g["body"])["data"].get("id") == first["id"] for g in rx.got if g["path"] == "/second")
+    keep = [l for l in open(alog).read().splitlines() if json.loads(l)["seq"] < first["seq"]]
+    open(alog, "w").write("".join(l + "\n" for l in keep))           # cut the log back before that begin
+    rx.down.discard("/req")
+    rx.down.add("/second")
+    r2 = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("a stale acknowledgement can't authorize another use: with req down, req2 acked begin seq N; the log is cut back; "
+          "with req2 down, a new use at the same seq N is refused", r.returncode == 2 and acked_by_req2 and r2.returncode == 2
+          and len(calls()) == n, (r.stdout[:120], r2.stdout[:200]))
+    check("...and the terminal says the log was cut back", "the log was cut back" in u.text(), u.text()[-300:])
+    rx.down.discard("/second")
+    for _ in range(3):
+        r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+        if r.returncode == 0:
+            break
+    check("...once both sinks are back, uses go through again (after the refusals the cut-back log causes)", r.returncode == 0, r.stdout)
+    tty([BIN, "audit-sink", "remove", "req2"], [("Vault passphrase", current + "\n")])
     tcap = os.path.join(td, "cap-tamper.jsonl")
     with open(tcap, "w") as f:
         for g in rx.got:
@@ -1032,6 +1181,20 @@ def run(td, procs):
     check("...and passes again once it's back, each request's own begin record having reached the sink first", st == 200
           and req_begins and req_begins[-1].get("token_id") == tok.get("token_id") and req_begins[-1].get("path") == "/v1/echo",
           (st, req_begins[-1:]))
+
+    rx.slow.add("/req")
+    holder = {}
+    n_up = len(up.got)
+    th = threading.Thread(target=lambda: holder.update(r=vm_request("GET", "/api1/v1/echo", bearer)))
+    th.start()
+    time.sleep(1.5)
+    rr = client("revoke", tok.get("token_id", "00000000"))
+    th.join(60)
+    rx.slow.discard("/req")
+    check("a request whose token is revoked while it waits on the required sink isn't forwarded (401)", rr.returncode == 0
+          and holder.get("r", (0,))[0] == 401 and "ended while this request waited" in holder["r"][2] and len(up.got) == n_up, holder.get("r"))
+    tok = js(client("token", "api1", "--vm", "opsvm", "--ttl", "10m").stdout)
+    bearer = {"Authorization": "Bearer " + tok.get("token", "")}
 
     # M2: the request parser, against malformed and hostile requests
     def raw_request(data):
@@ -1189,7 +1352,11 @@ def run(td, procs):
         lrc, lout = detached_wait(h)
         ok_loads.append(lrc == 0 and open(os.path.join(stubdir, "loaded.tgz"), "rb").read() == open(os.path.join(stubdir, "archive.tgz"), "rb").read())
     check("...both sessions still load: every older key is kept until a rotation finishes", all(ok_loads), ok_loads)
-    rc, out = tty([BIN, "rotate-session-key"], [("Vault passphrase", current + "\n")])
+    trace = os.path.join(td, "durable.trace")
+    rc, out = tty([BIN, "rotate-session-key"], [("Vault passphrase", current + "\n")], extra={"MCOMP_VAULT_TEST_TRACE": trace})
+    steps = [l.split("/")[-1] for l in open(trace).read().splitlines()] if os.path.exists(trace) else []
+    check("rotation's durable writes, in order: the vault with every key, then each session file, then the vault without the old keys",
+          steps == ["vault.json", "s1.sealed", "s2.sealed", "vault.json"], steps)
     d1, d2 = both()
     check("running it again finishes: both files under the new key, and it says the earlier rotation was cut short", rc == 0
           and "2 sealed session(s) re-encrypted" in out and "cut short" in out and d2 != a2, out)
@@ -1240,14 +1407,43 @@ def run(td, procs):
     # Locked: forged records appended with a correct chain, without the vault key
     f1 = append_forged({"op": "fill", "result": "ok", "name": "web-login", "vm": "opsvm", "field": "password", "chars": 9})
     f2 = append_forged({"op": "token", "result": "ok", "name": "api1", "vm": "opsvm", "mac": "0" * 64})
+    f3 = append_forged({"op": "fill", "result": "locked", "name": "web-login", "vm": "opsvm", "field": "password", "mac": {}})
     n_hook = len([g for g in rx.got if g["path"] == "/hook"])
     rc, out = tty([BIN, "audit-sink", "test", "hook"], [("Vault passphrase", PASS + "\n")])
     new_hook = [json.loads(g["body"])["data"] for g in rx.got if g["path"] == "/hook"][n_hook:]
     d1 = [d for d in new_hook if d.get("seq") == f1["seq"]]
     d2 = [d for d in new_hook if d.get("seq") == f2["seq"]]
+    d3 = [json.loads(g["body"]) for g in rx.got if g["path"] == "/hook"][n_hook:]
+    d3 = [c for c in d3 if c["data"].get("seq") == f3["seq"]]
+    check("a locked-client record with a malformed (non-string) MAC isn't signed as verified: a notice instead",
+          d3 and all(c["data"].get("op") == "audit_tamper" for c in d3) and not any(c["data"].get("op") == "fill" for c in d3), d3)
     check("records appended without the vault key (a fill with no MAC, a token with a wrong one) aren't signed for a sink: notices instead",
           d1 and d2 and all(d.get("op") == "audit_tamper" for d in d1 + d2) and "no creation MAC" in d1[0].get("reason", "")
           and "fails its creation MAC" in d2[0].get("reason", "") and "AUDIT LOG CHANGED" in out, (d1, d2))
+    fills = [c for c in calls() if c.get("user") == "mcfill"]
+    pin = next((a for a in fills[-1]["argv"] if a.startswith("KnownHostsCommand=")), "") if fills else ""
+    sshd = local_sshd(td)
+    if sshd and pin:
+        sport, shk, ckey, sproc = sshd
+        procs.append(sproc)
+
+        def real_ssh(hostkey_line):
+            argv = [a for a in fills[-1]["argv"]]
+            argv = [("KnownHostsCommand=/bin/echo [127.0.0.1]:%d %s" % (sport, hostkey_line)) if a.startswith("KnownHostsCommand=") else a
+                    for a in argv]
+            argv = [f"IdentityFile={ckey}" if a.startswith("IdentityFile=") else a for a in argv]
+            i = argv.index("-p")
+            argv[i + 1] = str(sport)
+            argv[-2] = f"{os.environ.get('USER') or pwd_name()}@127.0.0.1"
+            argv[-1] = "echo pinned-ok"
+            return subprocess.run(["/usr/bin/ssh", *argv], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        r = real_ssh(shk)
+        other = " ".join(open(ckey + ".pub").read().split()[:2])
+        r2 = real_ssh(other)
+        check("the real /usr/bin/ssh, with the vault's own options, connects when the pin is the server's key and refuses another",
+              "pinned-ok" in r.stdout and r2.returncode != 0 and "verification failed" in r2.stderr, (r.stdout + r.stderr)[-200:])
+    else:
+        print("(no local sshd: skipped the real-ssh pin check)")
     term = u.text()
     check("the unlock terminal never showed a value or a token", not any(v in term for v in VALUES)
           and tok.get("token", "x") not in term)

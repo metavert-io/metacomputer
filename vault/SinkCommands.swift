@@ -24,6 +24,11 @@ func cmdAuditSink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
     guard let kind = a.last("kind"), sinkKinds.contains(kind) else { throw usageError("--kind webhook, otlp, syslog or ntfy") }
+    if a.has("required") && (kind == "syslog" || kind == "ntfy") {
+        throw usageError("--required needs a sink that acknowledges each record: \(kind) can't (syslog over TLS confirms only that "
+                         + "bytes left this Mac; ntfy keeps no record). Use a webhook or OTLP sink for --required, "
+                         + "or a collector that accepts OTLP and forwards to syslog")
+    }
     // `--url ask` and a header value of `{ask}` are typed with the echo off, so a secret in them
     // (a webhook path, an ntfy topic, a collector's token) stays off the command line.
     guard var url = a.last("url") else { throw usageError("--url: where to send the events (or `ask`)") }
@@ -165,7 +170,7 @@ func sinkTest(_ paths: Paths, _ name: String) throws -> Int32 {
     guard p0.audit_sinks?[name] != nil, let ak = vaultAuditKey(paths, key), let p = try? loadPayload(paths, key),
           let s = p.audit_sinks?[name] else { throw VaultError("no audit sink named \(name)") }
     audit(paths, ["op": "audit_sink_test", "result": "ok", "name": name], macKey: ak)
-    let d = deliverSink(paths, name, s, auditKey: ak, from: nil, known: [:])
+    let d = deliverSink(paths, name, s, auditKey: ak, from: nil, known: [:], legacyThrough: p.legacyThrough)
     if !d.stateTrusted {
         oprint("\(name): its saved delivery state didn't check out (changed outside the vault?); sent again from its first event.")
     }

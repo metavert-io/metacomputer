@@ -454,7 +454,11 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    - The listener is checked again before the value goes.
 5. It runs `/usr/bin/ssh` with the pinned port and host key, ignoring your SSH config
    and agent, as the VM's **fill account** (`mcfill`) with its own key. It writes the
-   request, value included, to ssh's standard input.
+   request, value included, to ssh's standard input. No file takes part in the host-key
+   check, so nothing of yours can swap the pin while ssh starts: ssh gets `-F none`,
+   empty known_hosts files and `KnownHostsCommand=/bin/echo [127.0.0.1]:PORT KEY` (the
+   system's own `echo`, with the pinned key as its arguments); no proxy, jump host or
+   local command.
 6. In the VM, sshd runs one program for that account, `secret-fill`, whatever is
    asked for. It:
    - finds Chrome's DevTools among the desktop user's listeners on 127.0.0.1. With
@@ -473,7 +477,11 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    It gives up after 40 seconds.
 7. Claude gets back only the outcome, for example
    `{"ok":true,"field":"password","origin":"https://x.com","chars":16}`, or a refusal
-   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error.
+   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error. The VM's
+   answer is held to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
+   `reason`, `profile` as strings or booleans, `chars` a number): anything else is
+   dropped, a field of the wrong type makes it an error, and an answer holding the value
+   anywhere, at any depth, is withheld.
 
 **The fill account** is always present on VMs built with this version. Nothing else
 can use it, so it's safe to leave on:
@@ -575,6 +583,9 @@ it expires.
      httpbin.org/anything would otherwise hand the key to the VM);
    - with a required audit sink, first records the request (`begin`, use `api`) and
      waits for every required sink to acknowledge that record; otherwise 503;
+   - checks again, just before forwarding, that the token is still live (not revoked,
+     not expired, the vault not locking) and the secret unchanged, and uses the value
+     read then: a request that waited on delivery can't outlive its token;
    - audits it: method, host, path without the query, status, bytes, token id and how
      many copies were withheld. Never bodies or headers.
 5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
@@ -637,7 +648,10 @@ other host or path prefix, or outlive the unlock. The proxy's Mac end listens on
   stops it, with nothing changed); the new key is saved with every older key kept;
   each file is rewritten and checked; only then are the older keys dropped. Cut short
   at any point (even twice in a row), every file still opens, and running it again
-  finishes.
+  finishes. Each of those steps is on disk before the next starts: every vault and
+  session file is written to a temp file flushed with `F_FULLFSYNC`, renamed, and its
+  folder flushed, so a power loss can't leave files under a key the vault no longer
+  holds.
 - An audit sink's signing key: remove the sink and add it again.
 
 ### The audit log, and sending it off this Mac
@@ -675,12 +689,23 @@ you've just given the passphrase.
   current head, to note at a moment you trust).
 - The **creation MAC** says a process holding the vault key wrote the record. Only the
   vault can check it: `metacomputer secrets audit --verify` (while unlocked) checks every
-  record's MAC and chain and names what fails. Refusals written while the vault is
-  locked come from a client without the key; they carry no MAC and are counted as
-  unverified. A record of a kind only the vault writes (a fill that went ahead, a token,
-  a `begin`, an unlock) without a valid MAC is a forgery.
-- The unlock process also remembers the hash of every record it writes, so a record it
-  wrote and that was rewritten since is caught even before the MAC is checked.
+  record's MAC and chain, reconciles them with the records this unlock remembers
+  writing (one missing or changed is named), and treats a line that isn't a record, or
+  an empty log, as a failure; it says "checks out" only when the check ran and found
+  nothing. Refusals written while the vault is locked come from a client without the
+  key; they carry no MAC and are counted as unverified. A record of a kind only the vault
+  writes (a fill that went ahead, a token, a `begin`, an unlock) without a valid MAC is a
+  forgery, and so is any record whose `mac` is present but isn't a matching string.
+- **Upgrading.** A vault made by an earlier version gets its audit key on its first
+  change after the upgrade, and records the log's last seq then: records up to it are
+  **legacy** (no MAC expected; counted, and sent to sinks, as unverified), never
+  reported as forgeries. Sink places saved before then are taken as they are, once, and
+  signed.
+- The unlock process also remembers the hash of every record it writes, and the highest
+  seq it wrote, so a record it wrote and that was rewritten since is caught even before
+  the MAC is checked, and a log cut back so that a new record reuses a seq (or doesn't
+  follow the record it wrote before) is noticed: the terminal says `AUDIT LOG CHANGED`
+  and uses that need a required sink are refused until the log moves on.
 - A **sink's signature** (its own HMAC key, held by you and the receiver) says the
   record reached the receiver exactly as the vault sent it. The vault signs only records
   that pass the checks above: one that fails reaches every sink as an `audit_tamper`
@@ -688,7 +713,11 @@ you've just given the passphrase.
   CHANGED`, and the local log records it. Each sink also says whether the vault verified
   the record's creation MAC (`mcompverified` in a CloudEvent, `metacomputer.verified` in
   OTLP, `verified=` in syslog, `[unverified]` in ntfy): `false` means a locked client
-  wrote it, and anything running as you could have.
+  (or, before an upgrade, the earlier version) wrote it, and anything running as you
+  could have. The status is signed with the record: inside a webhook's signed body, and
+  for an OTLP record or a syslog message, the per-record signature is over
+  `verified=true|false`, a newline and the event's line, so flipping it breaks the
+  signature. A capture without the status counts as unverified.
 - So a capture checked with `verify-audit.py --key` proves the events are intact, in
   order, signed for that sink and (where marked) written by the vault; records the agent
   wrote or changed before delivery never arrive signed as genuine. It doesn't prove what
@@ -710,8 +739,8 @@ both:
 | `ntfy` | ntfy's JSON publishing to the server's root: `topic` (the URL's last part), `title` `<vm> - vault: <op>`, `message` one line such as `#42 fill name=x-login field=password vm=metacomputer -> ok https://x.com [Claude in ~/Projects/foo]`, `priority` 4 for refusals and errors, 3 otherwise, `tags`. No signature | `https://ntfy.sh/<topic>` |
 
 ```
-metacomputer secrets audit-sink add siem --kind syslog --url syslog+tls://siem.example:6514 [--ca ca.pem] --required
-metacomputer secrets audit-sink add otel --kind otlp --url http://127.0.0.1:4318
+metacomputer secrets audit-sink add siem --kind syslog --url syslog+tls://siem.example:6514 [--ca ca.pem]
+metacomputer secrets audit-sink add otel --kind otlp --url http://127.0.0.1:4318 --required   # uses wait for it to accept their record
 metacomputer secrets audit-sink add phone --kind ntfy --url ask      # the topic is typed, not echoed
 metacomputer secrets audit-sink add hec --kind webhook --url https://splunk.example:8088/services/collector/raw \
     --header 'Authorization: {ask}'                                  # "Splunk <token>", typed
@@ -736,9 +765,16 @@ metacomputer secrets audit-sink add hec --kind webhook --url https://splunk.exam
   first event (receivers drop what they have by `id`) and the terminal says so.
 - **`--required` fails closed.** With a required sink, each use is first recorded as
   `begin` (what, which secret, the VM, the requester), and the unlock process must see
-  every required sink accept that very record (its seq, as it wrote it) before the use
-  goes ahead; the outcome follows as its own event. A saved delivery place or an empty
-  backlog proves nothing. While one can't be reached, fills, tokens and session saves
+  every required sink accept that very record (its id and hash, as it wrote it) before
+  the use goes ahead; the outcome follows as its own event. A saved delivery place, an
+  empty backlog or an earlier acknowledgement of the same seq proves nothing, and the
+  acknowledgements of a use are dropped for every sink once it's decided. Only sinks
+  that acknowledge each record can be required: a webhook (a 2xx answer) or OTLP (a 2xx
+  answer whose partial success rejects nothing). Syslog over TLS confirms only that
+  bytes left this Mac, and ntfy keeps no record, so `--required` is refused for both.
+  Delivery works in bounded rounds (a few seconds at a time between requests, 20
+  seconds for a use's own record), so a slow or flooded sink can't hold the unlock
+  terminal or Ctrl-C. While one can't be reached, fills, tokens and session saves
   and loads are refused (exit 2) and each proxied request gets 503. If the audit log
   itself can't be written (a full disk, changed permissions), uses are refused too
   while a sink is required, and the terminal warns either way. Optional sinks never
@@ -894,7 +930,8 @@ fails a request.
   in between is refused or reported. Asking for a field the secret doesn't have is
   refused before anything reaches the VM.
 - **A pinned VM.** The vault connects only:
-  - to the VM you bound, with its pinned host key, accounts and keys;
+  - to the VM you bound, with its pinned host key (given to ssh in its arguments, never
+    through a file), accounts and keys;
   - when the pinned gateway program (path and contents) is the one listening on that port.
 - **Text from the VM or a client can't drive your terminal.** Before anything is
   printed in the unlock terminal, written to the audit log or sent back, these are
