@@ -226,7 +226,7 @@ passes when every item is met; its partial score is the weighted share met.
 `guest/checklib.py` has the readers:
 - files and numbers: `read`, `num`;
 - the server log: `requests_log`, `field`;
-- ODF: `odt_blocks`, `bold_runs`, `ods_rows`, `cell`, `cval`, `ods_charts`;
+- ODF: `odt_blocks`, `bold_runs` (what shows in bold, span overrides included; tested by `tests/test_bench_checks.py`), `ods_rows`, `cell`, `cval`, `ods_charts`;
 - other files: `docx_text`, `csv_rows`;
 - the desktop: `gsetting`, `windows`, `copy_from_window`.
 
