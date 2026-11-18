@@ -79,6 +79,16 @@ Work from structure first; screenshots are for what structure can't tell you.
   - Use `app.click({role, name})`, `app.query({role})` (returns `label` and `value`), `app.waitFor({...})` and `app.verify(...)`.
   - Only the return value and a call log come back. Two Calculator sums in a loop took one call: 13 driver calls in 6.8 s.
 
+## Pixels
+
+Use pixels only for what isn't in the tree (canvas, charts, timelines, some cells). A click at x,y is aimed from a screenshot, and these rules keep it landing where you aimed:
+
+- **Pixels need a screenshot of that window, in this session.** `get_window_state {pid, window_id, include_accessibility_tree: false}` takes one without a tree walk. A later read without a screenshot (including a `run_steps` `observe` and role/name steps in a batch) cancels it: end the read before a pixel batch with `observe: {include_screenshot: true}`. The driver refuses otherwise ("No screenshot frame …", `screenshot_context_missing`).
+- **x,y are pixels of that screenshot** (window-local; the driver scales them back if the image was downsized). Desktop pixels come from `get_desktop_state` and need `scope: "desktop"`.
+- **The coordinate guard.** Before passing on a pixel action, the bridge compares the windows now with the windows at your last screenshot of that window. If the window was resized, or another window now covers the point (a dialog, a menu window, another app raised over it), or, for desktop pixels, the windows at that point changed, it refuses with code `windows_changed_since_screenshot` ("the windows changed since your screenshot; take a fresh one") and sends nothing. Take a fresh screenshot and aim from it; its `next_call` names the read. A window that only moved is fine: window pixels follow it.
+- **It can't see** a page that scrolled or re-rendered inside the same window, or a popup menu (those aren't windows the driver lists). After anything that could have changed the content, look again before aiming.
+- **`metacomputer call`:** use the same `--session NAME` for the screenshot and the click, or the click has no screenshot to go by.
+
 ## Verifying
 
 End each task, and each checkpoint that matters, with a structural check rather than a look at a screenshot, and report what you checked.

@@ -81,7 +81,7 @@ background `type_text` into the Calculator was enough.
 
 **Fix.** `xinput remove-master` on the pair restores Chrome's keyboard at
 once, with no restart. The project ships `input-reset` (guest) /
-`metacomputer input-reset`. The lazy bridge:
+`metacomputer input-reset`. The lazy bridge (since the hub, `lib/mcp_hub.py`, for every client):
 - sends input aimed at Chrome in the foreground;
 - refuses `set_value` and `run_script` aimed at Chrome;
 - runs the reset before Chrome's next keyboard input whenever a

@@ -121,7 +121,8 @@ version and the model.
 | `--model` | `BENCH_MODEL` | `claude-opus-5-5` | The model |
 | `--skill DIR` | `BENCH_SKILL` | this checkout's `skills/metacomputer` | The skill the session gets (copied in as a project skill; its hash is recorded) |
 | `--shell allow\|forbid` | `BENCH_SHELL` | `allow` | `forbid` denies `metacomputer ssh` and `metacomputer sh` through the session's permissions and asks in the prompt to work through the desktop. This is the placeholder for comparing with and without the coming `metacomputer sh` |
-| `--coord-guard on\|off` | `BENCH_COORD_GUARD` | `off` | Passed to the bridge as `MCOMP_COORD_GUARD`. The bridge doesn't read it yet; `run.json` records whether it does (`coord_guard_in_bridge`) |
+| `--coord-guard on\|off` | `BENCH_COORD_GUARD` | `off` | Passed to the bridge as `MCOMP_COORD_GUARD`, which overrides the VM config's `COORD_GUARD`: the hub's coordinate guard (pixel input refused when the windows changed since its screenshot). `run.json` records whether this checkout has it (`coord_guard_in_bridge`) |
+| `--hub on\|off` | `BENCH_HUB` | the VM config's `MCP_HUB` | Passed as `MCOMP_MCP_HUB`: `on`, sessions reach the VM through the shared hub; `off`, each bridge has its own connection (the same guards) |
 | `--screen WxH` | `BENCH_SCREEN` | the VM's own (1920x1080) | Set with `xrandr` after each reset, e.g. `1280x800` or `1600x900`; the result records what the VM reports |
 | `--effort` | `BENCH_EFFORT` | the model's default | Claude Code's effort level |
 | `--budget USD` | `BENCH_BUDGET` | `3` | Per-task cap (`--max-budget-usd`); a task file can set `budget_usd` |

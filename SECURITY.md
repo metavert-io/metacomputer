@@ -16,7 +16,9 @@ This page covers three **optional** protections. All are off by default, so
 out of the box metacomputer behaves the way Cua Driver does on its own.
 Each one is independent; turn on any of them in `config/local.env`. It also
 covers the shell channel, `metacomputer sh`: what it can reach, how bounded
-mode turns it off, and its optional logging.
+mode turns it off, and its optional logging; and the hub, which applies the
+guards (one controller at a time, the Chrome guard, bounded mode, the coordinate
+guard) to every way in, through a socket only you can use.
 
 | Setting | What it adds | Costs |
 | --- | --- | --- |
@@ -50,13 +52,16 @@ Each section says where its protection ends.
 ## Signed action log (`ACTION_LOG=on`)
 
 Every connection to Cua Driver goes through `metacomputer mcp`. That
-includes Claude Code's bridge, `metacomputer call`, `web` and the tests.
+includes the hub, which carries Claude Code's bridge, `metacomputer call` and
+scripts, and also `web` and the tests. The hub's connection is one log file,
+and each call in it names the client that made it (kind, pid, Claude Code
+process, project folder, driver session).
 With the log on, a relay there writes one file per connection to
 `logs/actions/DAY/TIME-PID.jsonl` (private to you, 0600). The file holds:
 - who connected, from which project, and the VM's settings;
 - every tool call exactly as it was sent;
 - each result's error flag, hash, image count and timing;
-- every call the bridge refused.
+- every call the hub refused, and for whom.
 
 How it resists tampering:
 - **Hash chain.** Each record includes the hash of the one before it. Editing,
@@ -203,7 +208,9 @@ By default the Mac reaches the VM with two static keys, `ops` (a shell) and
   `SSH_CERT_TTL` (5 minutes; only the sign-in must fall inside it). The
   certificate is valid only from the Mac's side of the VM network.
 - Its key ID (`mcomp:ROLE:USER:PROJECT:pidN`) appears in the VM's auth log for
-  every sign-in.
+  every sign-in. The driver's connection is the hub's, made when the hub
+  connects, so its key ID names the hub (PROJECT is the checkout's folder); the
+  action log names the client behind each call.
 - The VM decides what each role may do, whatever a certificate says.
   `/etc/ssh/metacomputer-principals/cua` forces the driver command for
   `mcp` and allows only a plain shell for `ops`.
@@ -274,6 +281,87 @@ How it's enforced:
 - In our tests with driver 0.52.1, `kill_app` refused to close apps the
   driver had launched, even with `terminate: driver_launched`. Close them from
   their own window, or use `metacomputer desktop-restart`.
+
+## The hub and its guards (`MCP_HUB`, `COORD_GUARD`)
+
+One process per VM on your Mac, the hub (`lib/mcp_hub.py`), holds the single
+connection to Cua Driver and serves Claude Code's bridge, `metacomputer call`
+and scripts (`lib/mcomp_sdk.py`). It's on by default (`MCP_HUB=on`); design in
+[architecture.md](architecture.md#the-hub).
+
+**Every way in has the same guards.** Before the hub, Claude Code's bridge held
+the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
+`metacomputer call` skipped all of them: a session's logs showed it doing a whole
+task through `call` after the bridge refused it. Now every client goes through
+the hub, and the hub applies, to each one:
+- one controller at a time, checked and claimed as one step under the owners lock
+  (shared with `metacomputer sh`, so a tool call and a shell run can't both slip
+  through);
+- the Chrome guard;
+- bounded mode's launch rewrite, its refusal events and the end of a bounded
+  session (every client attached to it has to reconnect);
+- the coordinate guard (below);
+- the action log's notes (which client made each call) and the event stream.
+
+`metacomputer mcp` without `MCOMP_DIRECT_BRIDGE=1` is the same guarded bridge,
+so an MCP client registered with the older command gets the hub too. With
+`MCP_HUB=off` each client runs the same guards in its own process, on its own
+connection.
+
+**The socket.** `RUN_DIR/hub/sock`, in a folder only you can open (0700), the
+socket itself 0600 (or the same in a private folder in `/tmp` when that path is
+too long for a Unix socket). The hub asks the kernel who's at the other end of
+each connection (`LOCAL_PEERCRED`) and closes it, before reading anything, unless
+it's your own user id. The first message must name the client and its settings;
+a client with other settings (another `ACTION_LOG`, `DRIVER_MODE`, …) is refused
+while others use the hub, so one session can't quietly change another's
+protections.
+
+**What the VM can send.** The VM is untrusted, so each message from it is read
+with a fixed limit (64 MB) before any parsing; a line that doesn't end within it
+closes the connection, and the calls in flight fail with a plain message; so
+does a VM that stops reading what the hub sends for 30 s. The largest real
+results measured were under 1 MB. A client's message is limited to
+8 MB, and at most 128 MB or 256 messages may wait for a client; one that stops
+reading is disconnected without holding up the others. The relay
+(`ACTION_LOG=on`) and the direct client (`lib/mcp_client.py`, used by the tests
+and `web`) read with the same limit. `metacomputer call` escapes control
+characters, C1 controls and bidirectional overrides when it prints to a terminal
+(`lib/termsafe.py`, shared with `metacomputer sh`); `--raw` and `--json` print
+the result exactly.
+
+**The coordinate guard (`COORD_GUARD=on`, the default).** A pixel click is aimed
+from a screenshot. Cua Driver 0.52.1 maps window pixels through the window's
+current position and refuses a point outside the window or a background press
+under another app's window, but in our tests it clicked when the window had been
+resized since the screenshot, and a foreground click landed on a window that had
+since moved over the point. The hub records the window layout at each screenshot
+and refuses a pixel action when the target window's size, the windows above it
+at that point, or (for desktop pixels) the windows at that point have changed,
+before any input reaches the VM. The refusal says "the windows changed since
+your screenshot; take a fresh one" (code `windows_changed_since_screenshot`).
+`COORD_GUARD=off` leaves only the driver's own checks.
+
+**Where it ends:**
+- The socket and the uid check keep out other users of this Mac. They don't keep
+  out programs running as you, which can connect to the hub, or run
+  `metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1` (the direct connection the GUI
+  tests and `web` use), or use the `mcp` key directly. A direct connection shows
+  in `metacomputer who` and makes the hub refuse other sessions' actions while it
+  lasts, but its own calls aren't guarded. The skill tells Claude never to route
+  around a refusal; that's an instruction, not a barrier.
+- Clients share one driver runtime. Only one acts at a time, but another
+  session's screenshot of the same window can replace the controller's
+  screenshot frame (the driver then refuses its pixels until it reads again) and
+  a read can make its element tokens stale. Both fail closed.
+- The coordinate guard compares window geometry, not pixels: a page that
+  scrolled or re-rendered inside an unchanged window isn't caught, popup menus
+  aren't in `list_windows`, and steps that name their window only by title, or
+  `run_script`'s `[x, y]` targets, aren't checked. When the hub saw no screenshot
+  for that driver session and window, or `list_windows` fails, the action is
+  passed on to the driver's own checks (fail open, and logged in `hub.log`).
+- `metacomputer call`'s claim belongs to its Claude Code process or, outside
+  Claude Code, to the shell that ran it, as for `metacomputer sh`.
 
 ## The shell channel (`metacomputer sh`)
 
@@ -349,9 +437,9 @@ Settings:
 - The sizes and hashes in a result are the VM's own report. They let you
   check a file against what the VM said, but a compromised VM can report
   anything that fits the schema, so they don't prove what ran or printed.
-- Claude Code's bridge doesn't take the owners lock yet, so a shell run and
-  an acting tool call from two sessions starting in the same moment can both
-  pass the check.
+- (Fixed with the hub: tool calls now check and claim under the same owners lock as
+  `metacomputer sh`, so a shell run and an acting tool call from two sessions
+  starting in the same moment can't both pass the check.)
 - `--read-only` isn't enforced; it only skips the one-controller check and
   leaves out the desktop's environment.
 

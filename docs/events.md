@@ -404,7 +404,7 @@ every sink whose filters it passes.
 
 - **At the moment it happens.** The command or bridge that emits the event
   tries each matching sink right away, in parallel, with a 3-second timeout.
-  The bridges (`mcp-lazy`, the action-log relay) do this on a background
+  The hub (and `mcp-lazy` with `MCP_HUB=off`) and the action-log relay do this on a background
   thread, so a tool call never waits.
 - **Then a backlog.** An event that couldn't be delivered stays in that
   sink's backlog on disk (0600), and the next events queue behind it, so each

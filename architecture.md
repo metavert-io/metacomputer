@@ -8,10 +8,16 @@ macOS; every graphical action happens inside the guest.
 ```text
 Your Mac (Apple silicon, macOS 14+) - trusted controller
 │
-├── Claude Code ──stdio──▶ bin/metacomputer mcp-lazy ─▶ bin/metacomputer mcp ──ssh──┐
-│     (metacomputer skill; one controller at a time: .run/owners/)     │
-├── tests/run_tests.py (MCP client, direct bridge `metacomputer mcp`)            │
-├── bin/metacomputer (start/stop/status/reset/test/record/recordings/view)        │
+├── Claude Code ──stdio──▶ bin/metacomputer mcp-lazy ─┐                      │
+├── metacomputer call [--session NAME] ───────────────┤ Unix socket          │
+├── scripts (lib/mcomp_sdk.py) ───────────────────────┤ RUN_DIR/hub/sock     │
+│                                                     ▼ (0600, uid-checked)  │
+│   the hub, lib/mcp_hub.py: one per VM; every guard, every client           │
+│     one controller (.run/owners/) · Chrome guard · bounded mode ·         │
+│     coordinate guard · action-log notes · events                          │
+│     └── bin/metacomputer mcp (MCOMP_DIRECT_BRIDGE=1) ──ssh─────────────────┐
+├── tests/run_tests.py, web (MCP client, direct bridge `metacomputer mcp`)    │
+├── bin/metacomputer (start/stop/status/reset/test/record/recordings/view)    │
 │                                                                            │
 ├── cua-netgw (user-mode gateway, host-enforced egress policy)               │
 │     127.0.0.1:2277 ─▶ guest :22      127.0.0.1:5977 ─▶ guest :5900 (VNC)   │
@@ -91,32 +97,173 @@ Claude Code sessions use `metacomputer` → `bin/metacomputer mcp-lazy`
 (`lib/mcp_lazy.py`), registered at user scope so it exists in every
 project. It answers `initialize` and `tools/list` from a saved copy of the
 driver's handshake (`config/driver-mcp-cache.json`, refreshed under `.run/` on
-each live connection), so the tools are listed even while the VM is off. On the
-first `tools/call` it starts the direct bridge, `bin/metacomputer mcp`, and relays
+each live connection), so the tools are listed even while the VM is off, and
+it starts instantly. On the first call that needs the driver it connects to this
+VM's hub (below), starting it if it isn't running, and passes messages through it
 from then on. While the VM is off, a call returns "start it, then retry". A
-dropped connection is reopened on the next call. Its claims in `.run/owners/`
-(`lib/owners.py`) let only one session act at a time: acting calls are
-refused while another session acted within 10 minutes, reads are always
-allowed, and `metacomputer stop/reset/restore/test` refuse too unless given
-`--override`.
+dropped connection (the VM or the hub stopped) fails the calls in flight with a
+plain message and is reopened on the next call. If Claude Code goes away
+without closing the bridge's stdin, the bridge notices within 5 s and exits.
 
-The bridge also guards Google Chrome (docs/chrome-investigation.md). When
-the driver delivers background input through its own X input devices (a
-"CUA v1..." master pointer/keyboard pair, created by XInput2 multi-pointer),
-Chrome ignores that input, and while such a pair exists Chrome ignores all
-keyboard input, for any app's background input, until the pair is removed.
-So the bridge:
-- learns which guest pids are Chrome from results it relays, asking
-  `list_windows` when needed;
-- rewrites input tools and `run_steps` aimed at Chrome to
-  `delivery_mode: "foreground"`;
-- refuses `set_value` and `run_script` aimed at Chrome;
-- notices virtual-device routes in results (`path=mpx_*`), and before the
-  next Chrome keyboard input runs `metacomputer input-reset` (the guest's
-  `input-reset`, `xinput remove-master`), noting it in that result.
+### The hub
 
-A driver session whose pair was removed can't use the background keyboard
-route again until it reconnects; its next such call returns an error.
+`lib/mcp_hub.py` is one process per VM on the Mac. It holds the single MCP
+connection to Cua Driver in the VM (`bin/metacomputer mcp` with
+`MCOMP_DIRECT_BRIDGE=1`, below) and serves every client on this Mac: Claude
+Code's bridge, `metacomputer call` and scripts (`lib/mcomp_sdk.py`). The idea
+comes from Microsoft's Hybrid Computer Use study: one daemon per desktop that
+the MCP server, the CLI and an SDK share, so references and state carry over.
+
+- **Where it listens.** A Unix socket, `RUN_DIR/hub/sock`: the folder is 0700 and
+  the socket 0600. When that path is too long for a Unix socket (about 104 bytes
+  on macOS), the socket goes in a private folder in `/tmp` named after RUN_DIR
+  (`/tmp/mcomp-hub-UID-HASH/`), checked the same way. Each connection's peer is
+  identified by the kernel (`LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS,
+  `SO_PEERCRED` on Linux, `getpeereid` as a fallback), and anything that isn't
+  this user is closed before a byte is read. The first message must be a
+  `metacomputer/hello` naming the client's kind (Claude Code, `call`, a script),
+  folder, optional driver session and settings.
+- **One per VM.** `RUN_DIR/hub/hub.pid` is held under `flock` while the hub runs;
+  a second hub for the same VM exits (code 3). A client that finds no socket
+  starts one (`mcp_hub.py serve`, detached, logging to `LOG_DIR/hub.log`) and
+  waits for its socket. A client whose settings differ (another `ACTION_LOG`,
+  `DRIVER_MODE`, `COORD_GUARD`, …) is refused while others use the hub; when
+  it's alone the hub restarts with that client's settings.
+- **When it ends.** After `HUB_IDLE` (10 minutes) with no client and no
+  driver recording (it asks the driver before exiting while one was started
+  through it), on `metacomputer stop`, or on `metacomputer hub stop`.
+- **Multiplexing.** Each client's JSON-RPC ids are rewritten on the way to the
+  driver (`c<client>.<n>`) and restored on the way back, so each answer reaches
+  only its client. `initialize`, `tools/list`, `ping` and `logging/setLevel` are
+  answered by the hub from the driver's handshake. The driver's
+  `tools/list_changed` goes to every client; progress notifications go to the
+  client whose token they carry; other notifications aren't any one client's
+  and are dropped. Requests the driver makes of its client (`ping`) are answered
+  by the hub. A client's cancellation is passed on with the rewritten id.
+- **Driver sessions.** Every client shares one driver runtime, so element
+  tokens, driver sessions, recordings and a Chrome that `browser_prepare`
+  started outlive any one call. Screenshot frames are per driver session (Cua
+  Driver 0.52.1 refuses pixels against "a screenshot that belongs to another
+  session"), so the hub gives each Claude Code session a driver session of its
+  own (`mcp-<pid>-<n>`, added to calls that take a `session` and don't name
+  one) and ends it when that session disconnects, as its own connection used to.
+  `metacomputer call --session NAME` and `Hub(session=NAME)` name one that
+  lasts until `end_session` or the hub's exit; without one, calls use the
+  hub's default driver session, which also lasts while the hub runs.
+- **Limits.** A client's message is at most 8 MB and a message from the VM at
+  most 64 MB (read with a bounded `readline`, before any JSON parsing; the
+  largest real results measured were under 1 MB at 1920x1080, and an
+  incompressible 4096x2160 screenshot is about 35 MB in base64). A client
+  gets at most 256 messages or 128 MB waiting for it; one that stops reading is
+  disconnected, and each client has its own reader and writer threads, so a slow
+  or hung client never holds up the others. A message over a limit closes that
+  connection with a plain error: a client's own, or, for the VM, the driver
+  connection, failing every call in flight. A driver that doesn't take a message
+  within 30 s is dropped the same way, so a stuck VM can't hold every client's
+  call forever.
+- **Reconnecting.** When the driver connection drops (the VM stopped or
+  restarted), every pending request fails with a plain message, everything the
+  hub learned about that runtime is forgotten, and the next call reconnects.
+
+With `MCP_HUB=off` the same core runs inside each client instead, over a
+socketpair: Claude Code's bridge and `metacomputer call` each have their own
+connection, as before the hub, with the same guards.
+
+### Guards (in the hub, for every client)
+
+- **One controller at a time** (`lib/owners.py`). Acting calls are refused
+  while another session acted within 10 minutes; reads are always allowed.
+  The check and the claim are one step under this VM's owners lock, shared with
+  `metacomputer sh`. Claims are written per client in `.run/owners/`: a Claude
+  Code session's under its bridge's pid (dropped when it disconnects), a
+  one-shot `metacomputer call`'s under its Claude Code process, or else the shell
+  that ran it, like `metacomputer sh`. `metacomputer stop/reset/restore/test`
+  refuse too unless given `--override`. The hub's own SSH connection isn't
+  counted as a controller; any other direct connection is.
+- **Chrome** (docs/chrome-investigation.md). When the driver delivers
+  background input through its own X input devices (a "CUA v1..." master
+  pointer/keyboard pair, created by XInput2 multi-pointer), Chrome ignores that
+  input, and while such a pair exists Chrome ignores all keyboard input, for any
+  app's background input, until the pair is removed. So the hub:
+  - learns which guest pids are Chrome from results it relays, asking
+    `list_windows` when needed;
+  - rewrites input tools and `run_steps` aimed at Chrome to
+    `delivery_mode: "foreground"`;
+  - refuses `set_value` and `run_script` aimed at Chrome;
+  - notices virtual-device routes in results (`path=mpx_*`), and before the
+    next Chrome keyboard input runs `metacomputer input-reset` (the guest's
+    `input-reset`, `xinput remove-master`), noting it in that result.
+
+  A driver session whose pair was removed can't use the background keyboard
+  route again until it reconnects; its next such call returns an error.
+- **Bounded mode** (SECURITY.md): `launch_app` by name is rewritten to the
+  absolute path the manifest allows; a refusal that repeats tells the user
+  (events); when the bounded session ends, every client attached to it is told
+  to ask the user to reconnect, and stays ended until it does, while a client
+  that connects later gets a new driver connection (each connection used to
+  have its own session).
+- **The coordinate guard** (`COORD_GUARD=on`, below).
+- **The action log** (`ACTION_LOG=on`): one log file per driver connection, so
+  the hub's connection is one file; before each `tools/call` the hub sends the
+  relay a note naming the client (kind, pid, Claude Code pid, folder, driver
+  session), which the relay records in the call's record and never passes on.
+  Calls the hub refuses are recorded with their client too.
+- **Events** (docs/events.md): `in_use`, `chrome_input_refused`, `refused`
+  (bounded) and the controller events, with the client's own folder.
+
+### The coordinate guard
+
+Pixel input is aimed from a screenshot. Measured on Cua Driver 0.52.1: it maps
+window-local x,y through the window's live position, so moving the window is
+harmless; it refuses a point outside the window, a pixel action without a
+screenshot of that window in that driver session, and a background press under
+another app's window (`target_occluded`). It does **not** notice that the
+window was resized since the screenshot (the content reflowed, and the click
+lands on whatever is there now), that a window now covers the point for a
+foreground click (it clicks the covering window) or that an app's own dialog
+opened over it (it retargets to the dialog), and it can't check desktop pixels
+at all.
+
+So with `COORD_GUARD=on` (the default) the hub records the window layout
+(`list_windows`) at every screenshot-bearing read: `get_window_state` with its
+screenshot (the layout is asked for just before the read, without waiting),
+`get_desktop_state` (its own window list), and a `run_steps` result that carries
+one. Before it passes on a pixel-addressed action (`click`, `double_click`,
+`right_click`, `drag`, `scroll`, `type_text`, `mouse_button_down`/`drag`/`up`
+and `move_cursor` with a target, with x/y, and `run_steps` steps that use x/y),
+it compares that layout with the live one and refuses, before any input, when:
+- the target window's size changed;
+- the set of windows above the target that cover the point changed (one
+  appeared, moved over it or went away), the point mapped through the
+  screenshot's scale; after a `zoom`, the zoomed region;
+- for desktop pixels, the windows stacked at that point (and their frames) changed.
+
+The refusal's code is `windows_changed_since_screenshot`, with the hint "the
+windows changed since your screenshot; take a fresh one" and the read to make
+next. Non-pixel actions pay nothing; a pixel action pays one `list_windows`,
+which a batch shares (it's reused until the next action is passed on, at most
+1 s). Layouts are kept per driver session and window and forgotten when the
+driver connection drops. When the hub saw no screenshot for that session and
+window, or `list_windows` fails, the action is passed on and the driver's own
+checks decide. Not covered: popup menus (`list_windows` doesn't list them),
+windows named only by title in a batch step, and `run_script`'s `[x, y]`
+targets. The active window isn't reported by `list_windows`, and on its own it
+doesn't change where a point lands; a window raised over the point is caught
+by the stacking check.
+
+The direct bridge, `bin/metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1`, is
+`ssh -T` with the `mcp` key to `cua@127.0.0.1:2277`. It's the hub's own
+connection, and the GUI tests and `web` use it for theirs (they check for other
+controllers and claim the computer themselves). Without that variable, and with
+`MCP_HUB=on`, `metacomputer mcp` runs the same bridge as `mcp-lazy`, so an MCP
+client registered with the older command gets the hub and its guards. In the
+guest the key is `restrict,command="/opt/metacomputer/bin/driver-mcp"`: no
+shell, no PTY, no forwarding. The wrapper loads the XFCE session's environment
+(published at login to `$XDG_RUNTIME_DIR/metacomputer/session.env`: `DISPLAY`,
+`XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`) and execs `cua-driver mcp`. MCP's
+stdio stream is carried end to end by SSH; each MCP connection owns one driver
+runtime. Nothing on the Mac drives the Mac's own desktop: Cua Driver is not
+installed on macOS at all.
 
 Browsers: Firefox (Mozilla's APT repo) is the default. Google Chrome comes
 from Google's APT repo (`BROWSERS`, key fingerprint pinned in
@@ -129,16 +276,6 @@ Chrome on driver-owned profiles under
 `~/.local/state/cua-driver/browser-profiles/` in the guest. Attaching to the
 normal profile (`existing_profile`) needs the driver's `--grant
 existing-profile`, which this lab doesn't pass.
-
-The direct bridge, `bin/metacomputer mcp`, is `ssh -T` with the
-`mcp` key to `cua@127.0.0.1:2277`. In the guest that key is
-`restrict,command="/opt/metacomputer/bin/driver-mcp"`: no shell, no PTY, no
-forwarding. The wrapper loads the XFCE session's environment (published at
-login to `$XDG_RUNTIME_DIR/metacomputer/session.env`: `DISPLAY`, `XAUTHORITY`,
-`DBUS_SESSION_BUS_ADDRESS`) and execs `cua-driver mcp`. MCP's stdio stream is
-carried end to end by SSH; each MCP connection owns one driver runtime.
-Nothing on the Mac drives the Mac's own desktop: Cua Driver is not
-installed on macOS at all.
 
 ## Shell channel
 
@@ -322,8 +459,8 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | Command | Implementation |
 | --- | --- |
 | `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
-| `stop` | `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
-| `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe |
+| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
+| `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe, the hub (pid, clients, idle time) |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
 
@@ -347,7 +484,7 @@ user, which can read `events.json` and post to the sinks directly (SECURITY.md).
 emitters                                  lib/events.py                          sinks
 bin/metacomputer (start, stop, reset,  ┐   clean → number (seq, under a lock)   ┌ webhook (CloudEvents)
   record stop, task finish; build-vm)  │   → local log                          │ otlp (Collector)
-lib/mcp_lazy.py (in use, Chrome guard, ├─▶ → each matching sink's backlog ──────┤ syslog+tls
+lib/mcp_hub.py (in use, Chrome guard,  ├─▶ → each matching sink's backlog ──────┤ syslog+tls
   bounded refusals, controllers)       │   → send now, 3 s per sink;            └ ntfy
 lib/mcp_relay.py (action-log records)  │     else retry with backoff, in order
 actionlog verify, web open-untrusted   │
@@ -357,7 +494,7 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
 ```
 
 - **Where it runs.** In the process that emits: commands emit before they
-  return (at most about 3 s, sinks in parallel); the two bridges emit on a
+  return (at most about 3 s, sinks in parallel); the hub and the relay emit on a
   background thread so a tool call never waits. A sink in its backoff isn't
   tried at all.
 - **State.** `~/.config/metacomputer/events.json` (sinks, 0600) and
