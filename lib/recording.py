@@ -180,8 +180,11 @@ def cmd_moments(a):
     if not ms:
         print("no key moments (the action log was off or nothing was called while recording)")
         return
+    # A description file can come from the VM (recordings --sync): its words are escaped.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from termsafe import escape_for_terminal as esc
     for m in ms:
-        print(f"{fmt_t(m['t']):>8}  {m['tool']}{' (refused)' if m.get('refused') else ''}  {m.get('what', '')}".rstrip())
+        print(esc(f"{fmt_t(m['t']):>8}  {m['tool']}{' (refused)' if m.get('refused') else ''}  {m.get('what', '')}".rstrip()))
 
 
 def main():
