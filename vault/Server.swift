@@ -161,6 +161,11 @@ struct ApprovalOutcome {
     var thisUseOnly: Bool { ["each:yes", "each:local-auth", "each:passphrase"].contains(how) }
 }
 
+/// Why a request stopped when the program that asked went away (or withdrew it) while it was being served.
+let requesterLeftReason = "stopped: the program that asked went away or withdrew the request, so nothing further was done (a step in progress was ended)"
+/// The requests whose requester may withdraw them while they run (Commands.swift, request(): cancellable).
+let withdrawableOps: Set<String> = ["fill", "login", "session_save", "session_load", "token"]
+
 /// A connection read while the unlock process waited for an answer, served once it's free.
 struct DeferredRequest {
     let fd: Int32
@@ -186,6 +191,10 @@ final class UnlockServer {
     var pendingRequests: [String: PendingRequest] = [:]
     var usedRequestIDs: Set<String> = []
     var deferred: [DeferredRequest] = []
+    // The connection of the fill, sign-in, session or token request being served, and whether its requester has gone
+    // away or withdrawn it (requesterGone). Its answer is this process's acknowledgement that the work stopped.
+    var requesterFD: Int32 = -1
+    var requesterWithdrew = false
     var promptOpen = false              // a question waits on the terminal, its cursor at the end of the prompt
     lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
     // The audit log and its sinks. The audit key (from the vault) MACs every record this
@@ -412,6 +421,12 @@ final class UnlockServer {
             if receivedSignal != 0 { return result }
             if stopReason != nil { result = .denied("the vault was locked"); return result }
             if let d = p.decision { result = d; return d }
+            if requesterGone() {
+                // The program that asked went away (or withdrew it): nobody is left to act for, so no approval is taken.
+                say("  (request \(p.id) withdrawn: the program that asked went away)")
+                result = .denied("withdrawn: the program that asked went away before it was decided")
+                return result
+            }
             if Date() >= deadline {
                 if promptOpen { eprint("\n  (no answer in \(timeout) s: not allowed)"); promptOpen = false } else {
                     say("  (no answer in \(timeout) s: not allowed)")
@@ -996,6 +1011,34 @@ final class UnlockServer {
         // A program outside Claude Code may pass on a request for a Claude Code process (the hub does).
         let onBehalf = (req["on_behalf_pid"] as? NSNumber).map { pid_t(truncatingIfNeeded: $0.intValue) }
         let who = Requester.of(pid, onBehalf: onBehalf)
+        // A fill, sign-in, session or token request stops when its requester goes away or withdraws it (closes its side
+        // of the connection): checked before each step, while it waits for an approval and during each ssh, whose process
+        // group is then killed. Its answer, written below once it has stopped, is the acknowledgement the requester waits for.
+        let withdrawable = withdrawableOps.contains(op)
+        if withdrawable {
+            requesterFD = c
+            requesterWithdrew = false
+            requesterProbe = { [unowned self] in self.requesterGone() }
+        }
+        defer {
+            if withdrawable {
+                requesterProbe = nil
+                requesterFD = -1
+                requesterWithdrew = false
+            }
+        }
+        if withdrawable && requesterGone() {
+            // It waited (behind a question, or in the queue) and its requester left meanwhile: it never starts.
+            var rec = echo(req, ["name", "vm", "field", "profile"])
+            rec["op"] = op
+            rec["result"] = "cancelled"
+            rec["reason"] = "withdrawn before it started: the program that asked went away"
+            rec["requester"] = who.record
+            record(rec)
+            say("\(clockTime())  \(op.replacingOccurrences(of: "_", with: " ")) withdrawn before it started (the program that asked went away), asked by \(who.describe)")
+            reply(c, ["ok": false, "status": "cancelled", "reason": "withdrawn before it started: the program that asked went away"])
+            return
+        }
         var res: [String: Any]
         switch op {
         case "status": res = opStatus()
@@ -1016,6 +1059,11 @@ final class UnlockServer {
         case "rule_add": res = opRuleAdd(req, who)
         case "rule_list": res = opRuleList()
         case "rule_remove": res = opRuleRemove(req, who)
+        case "settle":
+            // Answered only here, in order: every request that reached this process before it has finished (requests
+            // that arrive during a question wait behind it). A requester that couldn't confirm its own request stopped
+            // asks this; once it's answered, nothing that request started still runs.
+            res = ["ok": true, "status": "ok", "settled": true]
         case "lock":
             // It only restricts: anyone may. The loop ends after this reply.
             stopReason = "locked with `lock` (from \(who.describe))"
@@ -1030,6 +1078,24 @@ final class UnlockServer {
     func reply(_ c: Int32, _ obj: [String: Any]) {
         let safe = (cleanAll(obj) as? [String: Any]) ?? ["ok": false, "status": "error"]
         _ = writeAll(c, Array((jsonLine(safe) + "\n").utf8))
+    }
+
+    /// Whether the requester of the request being served has gone away or withdrawn it: its connection hung up, or
+    /// reads as ended (it closed its side for writing), or sent anything more (a request is one line). Sticky for the
+    /// request. Only ever true for a fill, sign-in, session or token request (dispatch registers those).
+    func requesterGone() -> Bool {
+        if requesterWithdrew { return true }
+        guard requesterFD >= 0 else { return false }
+        var pfd = pollfd(fd: requesterFD, events: Int16(POLLIN), revents: 0)
+        guard poll(&pfd, 1, 0) > 0 else { return false }
+        if pfd.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+            requesterWithdrew = true
+        } else if pfd.revents & Int16(POLLIN) != 0 {
+            var b: UInt8 = 0
+            let n = recv(requesterFD, &b, 1, MSG_PEEK | MSG_DONTWAIT)
+            if n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { requesterWithdrew = true }
+        }
+        return requesterWithdrew
     }
 
     /// The vault, re-read for every request. If its key settings changed (rekey, recover),
@@ -1110,9 +1176,18 @@ final class UnlockServer {
         // How the VM typed it: "element" (into the checked element) or "keyboard" (the fallback).
         if let r = res["route"] as? String, ["element", "keyboard"].contains(r) { out["route"] = r }
         if let id = requestID { out["request_id"] = id }
+        // The requester went away or withdrew it: whatever stopped it, it stopped for that reason (a use that completed
+        // first is recorded as it was, and marked).
+        let left = requesterFD >= 0 && requesterGone()
+        if left && out["status"] as? String != "ok" {
+            out["ok"] = false
+            out["status"] = "cancelled"
+            out["reason"] = requesterLeftReason
+        }
         out = (cleanAll(out) as? [String: Any]) ?? fields
         let status = out["status"] as? String ?? "error"
         var rec = fields
+        if left { rec["requester_left"] = true }
         rec["op"] = op
         rec["result"] = status
         rec["approval"] = approval
@@ -1468,6 +1543,7 @@ final class UnlockServer {
             approval = o.how
             if !o.yes { return finish("token", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
         }
+        if requesterGone() { return finish("token", fields, failed(requesterLeftReason), who, approval: approval) }
         let listener: ProxyListener
         do { listener = try hub.ensure(t) } catch let e as VaultError { return finish("token", fields, failed(e.message), who, approval: approval) } catch {
             return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
@@ -1477,6 +1553,12 @@ final class UnlockServer {
         let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
         var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
         res = finish("token", fields, res, who, approval: approval)
+        if requesterGone() {
+            // Nobody is left to hand it to: it ends now rather than live, unused, until it expires.
+            let gone = hub.revoke(tok.id)
+            record(["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "reason": "the requester went away before it got the token"])
+            return ["ok": false, "status": "cancelled", "reason": requesterLeftReason]
+        }
         do {
             try updateVault(paths, key) { p in
                 p.secrets[name]?.uses += 1

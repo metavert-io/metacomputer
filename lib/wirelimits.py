@@ -206,7 +206,8 @@ def loads(data, max_depth=None, max_nodes=None):
 class StderrTail:
     """Drain a child's stderr on a thread of its own. The last `keep` bytes stay in memory (text()); at most
     `file_max` bytes go to the file at `path` (0600; appended to when append is true), then one line says the
-    rest was left out. The child never blocks on a full pipe, and nothing grows without limit."""
+    rest was left out. The child never blocks on a full pipe, and nothing grows without limit. withhold(): from then on
+    nothing read is kept, in memory or the file (one line says so, and at the end how many bytes were left out)."""
 
     def __init__(self, stream, path=None, keep=None, file_max=None, append=False):
         self.stream = stream
@@ -216,6 +217,8 @@ class StderrTail:
         self.append = append
         self.buf = bytearray()
         self.total = 0
+        self.withheld = None        # why nothing read is kept any more (withhold), else None
+        self.held = 0               # bytes read since then, none of them kept
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True, name="stderr-tail")
@@ -230,9 +233,15 @@ class StderrTail:
         except OSError:
             return None
 
+    def withhold(self, why):
+        """Keep nothing read from now on (sticky): a guest that may hold a secret writes here."""
+        with self.lock:
+            if self.withheld is None:
+                self.withheld = str(why)[:200]
+
     def _run(self):
         f = self._open()
-        written, cut = 0, False
+        written, cut, marked = 0, False, False
         try:
             fd = self.stream.fileno()
             while True:
@@ -241,9 +250,23 @@ class StderrTail:
                     break
                 with self.lock:
                     self.total += len(chunk)
-                    self.buf += chunk
-                    if len(self.buf) > self.keep:
-                        del self.buf[:len(self.buf) - self.keep]
+                    withheld = self.withheld
+                    if withheld is None:
+                        self.buf += chunk
+                        if len(self.buf) > self.keep:
+                            del self.buf[:len(self.buf) - self.keep]
+                    else:
+                        self.held += len(chunk)
+                if withheld is not None:
+                    if f is not None and not marked:
+                        try:
+                            f.write(f"\n[metacomputer: from here on this stream is withheld ({withheld}); none of it is "
+                                    "kept]\n".encode())
+                            f.flush()
+                        except (OSError, ValueError):
+                            pass
+                        marked = True
+                    continue
                 if f is not None and not cut:
                     room = self.file_max - written
                     try:
@@ -263,8 +286,10 @@ class StderrTail:
         finally:
             if f is not None:
                 try:
+                    if self.held:
+                        f.write(f"[metacomputer: {self.held} bytes withheld]\n".encode())
                     f.close()
-                except OSError:
+                except (OSError, ValueError):
                     pass
             try:
                 self.stream.close()

@@ -12,6 +12,13 @@ struct ProcResult {
     var timedOut = false
     var interrupted = false
     var tooLarge = false
+    var cancelled = false       // the program whose request this step serves went away (requesterProbe): ended
+}
+
+/// Whether the request this process is serving was withdrawn (only the unlock process's own thread asks).
+func requesterLeft() -> Bool {
+    guard Thread.isMainThread, let probe = requesterProbe else { return false }
+    return probe()
 }
 
 /// Run a program with the given stdin bytes, collecting stdout and stderr. The child
@@ -20,6 +27,8 @@ struct ProcResult {
 func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [UInt8],
                 timeout: TimeInterval, maxStdout: Int = 1 << 20) -> ProcResult {
     var res = ProcResult()
+    // A request whose requester went away starts no further step.
+    if requesterLeft() { res.cancelled = true; return res }
     var inPipe: [Int32] = [0, 0], outPipe: [Int32] = [0, 0], errPipe: [Int32] = [0, 0]
     guard pipe(&inPipe) == 0, pipe(&outPipe) == 0, pipe(&errPipe) == 0 else { return res }
 
@@ -67,6 +76,7 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     var buf = [UInt8](repeating: 0, count: 1 << 16)
     while outOpen || errOpen {
         if receivedSignal != 0 { res.interrupted = true; break }
+        if requesterLeft() { res.cancelled = true; break }
         if Date() > deadline { res.timedOut = true; break }
         var fds: [pollfd] = []
         if inFD >= 0 { fds.append(pollfd(fd: inFD, events: Int16(POLLOUT), revents: 0)) }
@@ -99,7 +109,10 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     if inFD >= 0 { close(inFD) }
     close(outPipe[0]); close(errPipe[0])
     wipe(&buf)
-    if res.timedOut || res.interrupted || res.tooLarge { kill(pid, SIGKILL) }
+    if res.timedOut || res.interrupted || res.tooLarge || res.cancelled {
+        kill(-pid, SIGKILL)         // its own process group (ssh and anything it started), then the child itself
+        kill(pid, SIGKILL)
+    }
     var status: Int32 = 0
     while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
     if (status & 0x7F) == 0 { res.status = (status >> 8) & 0xFF } else { res.status = 128 + (status & 0x7F) }
@@ -237,6 +250,7 @@ final class GuestRunner {
         let r = try ssh(t, user: user, key: key, remote: secretFillCommand, input: inputBytes, timeout: timeout)
         var stderr = String(decoding: r.stderr, as: UTF8.self)
         if let v = valueString, !v.isEmpty { stderr = stderr.replacingOccurrences(of: v, with: "[redacted]") }
+        if r.cancelled { return ["ok": false, "status": "cancelled", "reason": requesterLeftReason] }
         if r.interrupted { return ["ok": false, "status": "error", "reason": "interrupted (the vault is locking)"] }
         if r.timedOut { return ["ok": false, "status": "error", "reason": "the VM didn't answer in time"] }
         if r.status == 255 && stderr.contains("Permission denied") {

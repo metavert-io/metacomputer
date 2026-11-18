@@ -64,6 +64,8 @@ TOOLS = [{"name": n, "description": n, "inputSchema": {"type": "object", "proper
          for n in ("browser_prepare", "list_windows", "get_browser_state", "browser_navigate", "browser_click", "browser_type", "end_session")]
 def send(m):
     sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+with open(os.path.join(STATE, "pids"), "a") as f:
+    f.write("%d\n" % os.getpid())
 def ok(mid, sc, err=False):
     r = {"content": [{"type": "text", "text": json.dumps(sc)}], "structuredContent": sc}
     if err:
@@ -82,6 +84,21 @@ for line in sys.stdin:
     name, a = m["params"]["name"], m["params"].get("arguments") or {}
     log({"tool": name, "args": a})
     s = st()
+    if s.get("stderr_leak") and s.get("leak") and s.get("snaps", 0) >= 1:
+        # A hostile VM, once it has the value, also spells it on the connection's stderr.
+        sys.stderr.write("guest stderr " + s["leak"] + "\n"); sys.stderr.flush()
+        log({"stderr": True})
+    if name == "browser_click" and s.get("slow_click"):
+        # A click the driver takes its time over (once): only if nobody ends it does it happen, later.
+        import time
+        n = s["slow_click"]; s["slow_click"] = 0; save(s)
+        time.sleep(n)
+        open(os.path.join(STATE, "clicked"), "w").write(str(time.time()))
+        ok(mid, {"status": "ok"}); continue
+    if name == "browser_click" and s.get("crash_on_click"):
+        os._exit(3)                       # the driver dies mid-call
+    if name == "end_session" and s.get("leak"):
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "session gone " + s["leak"]}}); continue
     if name == "browser_prepare":
         ok(mid, {"status": "ok", "prepared": True, "prepared_pid": 4242})
     elif name == "list_windows":
@@ -570,6 +587,206 @@ def run(td, procs):
               "the client's answer", not r2.is_error and r2.structured.get("status") == "filled" and leak not in json.dumps(r2.raw)
               and not found and secret_calls and any(x.get("type") == "call" and x.get("tool") == "browser_click" for x in secret_calls)
               and not any(x.get("rpc_error", "").startswith("page gone") for x in recs), (r2.raw, found, secret_calls[-3:]))
+
+    # --- round 6: every way a job ends, each proven stopped before the computer is let go; no guest bytes logged -----
+    leak = "LEAK" + PW.encode().hex()
+    relay_py = os.path.join(LAB, "lib", "mcp_relay.py")
+    vaudit = os.path.join(vdir, "audit.jsonl")
+
+    def hub_env(tag, state0, relay=True, **extra):
+        st_ = os.path.join(td, "drv-" + tag)
+        os.makedirs(st_)
+        json.dump(state0, open(os.path.join(st_, "state.json"), "w"))
+        e_ = dict(env, MCOMP_RUN_DIR=os.path.join(td, "run-" + tag), MCOMP_LOG_DIR=os.path.join(td, "logs-" + tag),
+                  MCOMP_EVENTS_DIR=os.path.join(td, "events-" + tag), MCOMP_EVENTS_SPOOL=os.path.join(td, "spool-" + tag),
+                  MCOMP_HUB_DRIVER_CMD=json.dumps(([sys.executable, relay_py] if relay else []) + [sys.executable, fake, st_]),
+                  **extra)
+        if relay:
+            e_.update(MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions-" + tag),
+                      MCOMP_ACTION_LOG_KEY=os.path.join(td, "alkey-" + tag, "action-log"))
+        return e_, st_
+
+    def leaked_into(tag):
+        found = []
+        for d in ("actions-", "logs-", "events-", "spool-", "run-"):
+            for dp, _dn, fn in os.walk(os.path.join(td, d + tag)):
+                for f in fn:
+                    try:
+                        if leak in open(os.path.join(dp, f), errors="replace").read():
+                            found.append(os.path.relpath(os.path.join(dp, f), td))
+                    except OSError:
+                        pass
+        return found
+
+    def action_recs(tag):
+        logs = [os.path.join(dp, f) for dp, _dn, fn in os.walk(os.path.join(td, "actions-" + tag)) for f in fn if f.endswith(".jsonl")]
+        return [json.loads(l) for lp in logs for l in open(lp) if l.strip()]
+
+    def stderr_file(tag):
+        return [os.path.join(dp, f) for dp, _dn, fn in os.walk(os.path.join(td, "run-" + tag)) for f in fn if f.endswith(".stderr")]
+
+    def owners_free(tag):
+        od = os.path.join(td, "run-" + tag, "owners")
+        return not [f for f in (os.listdir(od) if os.path.isdir(od) else []) if f.endswith(".json")]
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def vault_recs():
+        return [json.loads(l) for l in open(vaudit)] if os.path.exists(vaudit) else []
+
+    def pending_ids():
+        r_ = subprocess.run([BIN, "requests", "--json"], env=venv, capture_output=True, text=True, timeout=30)
+        try:
+            return [x.get("id") for x in json.loads(r_.stdout).get("requests") or []]
+        except ValueError:
+            return []
+
+    def outcome(h_, r_, url):
+        """A sign-in that hadn't finished by the first answer: its outcome, collected."""
+        if r_.structured.get("status") == "pending" and r_.structured.get("request_id"):
+            return h_.call("request_site_login", {"url": url, "request_id": r_.structured["request_id"], "wait_secs": 60}, timeout=200)
+        return r_
+
+    def hub_runner(e_, tag, tool, args):
+        """A client in a process of its own that makes one call and leaves (its job, if any, carries on)."""
+        json.dump(e_, open(os.path.join(td, f"runner-env-{tag}.json"), "w"))
+        out_p = os.path.join(td, f"runner-{tag}.out")
+        subprocess.run(["/bin/sh", "-c", f"({sys.executable} {runner} {td}/runner-env-{tag}.json {out_p} {tool} "
+                        f"{shlex.quote(json.dumps(args))} >/dev/null 2>&1 &)"], stdin=subprocess.DEVNULL)
+        wait_until = time.time() + 90
+        while time.time() < wait_until and not (os.path.exists(out_p) and os.path.getsize(out_p)):
+            time.sleep(0.1)
+        return open(out_p).read() if os.path.exists(out_p) else ""
+
+    # A (cleanup, transport): a Claude Code client leaves while its sign-in waits; the hub ends its driver session
+    # (end_session) while the job runs, and the VM answers that call with the value spelled out, and writes it to stderr.
+    e3, st3 = hub_env("a1", {"url": SITE + "/login.html", "leak": leak, "stderr_leak": True})
+    h3 = mcomp_sdk.Hub(env=e3, timeout=200, kind="claude-code")
+    h3.connect()
+    r3 = h3.call("request_site_login", {"url": SITE + "/login.html"}, timeout=200)
+    rid3 = r3.structured.get("request_id") or "00000000"
+    h3.close()
+    time.sleep(1.5)
+    subprocess.run([BIN, "approve", rid3], env=venv, capture_output=True, text=True, timeout=60)
+    for _ in range(150):
+        if owners_free("a1"):
+            break
+        time.sleep(0.2)
+    time.sleep(1.0)
+    mcp_hub.stop_hub(e3)
+    time.sleep(0.5)
+    recs3 = action_recs("a1")
+    ends = [x for x in recs3 if x.get("tool") == "end_session"]
+    dcalls = [json.loads(l) for l in open(os.path.join(st3, "calls.jsonl"))] if os.path.exists(os.path.join(st3, "calls.jsonl")) else []
+    errs = open(stderr_file("a1")[0], errors="replace").read() if stderr_file("a1") else ""
+    found3 = leaked_into("a1")
+    check("R6-A: a client that leaves during its sign-in: the hub's own end of its driver session, answered by a VM that "
+          "spells the value, is recorded as secret-adjacent (no message), and the VM's stderr from the sign-in on is "
+          "withheld (a fixed note), so the value reaches no action log, hub.log, upstream.stderr or event",
+          r3.structured.get("status") == "pending" and ends and all(x.get("secret_adjacent") for x in ends)
+          and any(d.get("stderr") for d in dcalls) and "withheld" in errs and not found3,
+          (r3.raw, ends[-2:], found3, errs[-300:]))
+
+    # ...and one that leaves after its sign-in finished: its session's end is still secret-adjacent (that client had one)
+    e4, st4 = hub_env("a2", {"url": SITE4 + "/login.html", "leak": leak, "stderr_leak": True})
+    h4 = mcomp_sdk.Hub(env=e4, timeout=200, kind="claude-code")
+    h4.connect()
+    r4 = outcome(h4, h4.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200), SITE4 + "/login.html")
+    time.sleep(1.5)                                  # the job has ended (its window closed) before the client leaves
+    h4.close()
+    time.sleep(1.5)
+    mcp_hub.stop_hub(e4)
+    time.sleep(0.5)
+    ends4 = [x for x in action_recs("a2") if x.get("tool") == "end_session"]
+    found4 = leaked_into("a2")
+    check("R6-A: a client that leaves after its sign-in finished: the end of its driver session (the VM answering with the "
+          "value) is recorded as secret-adjacent too, and nothing of the VM's reaches a log",
+          r4.structured.get("status") == "filled" and ends4 and all(x.get("secret_adjacent") for x in ends4) and not found4,
+          (r4.raw, ends4[-2:], found4))
+
+    # B (driver timeout): the post-fill click doesn't answer in its time (3 s here; it would act at 8 s). The job keeps the
+    # computer until the driver connection's whole process tree is ended; only then can another controller act, and the
+    # delayed click never happens.
+    e5, st5 = hub_env("b1", {"url": SITE4 + "/login.html", "slow_click": 8}, relay=False, MCOMP_SITE_LOGIN_CALL_S="3")
+    os.makedirs(os.path.join(td, "run-b1", "owners"), exist_ok=True)
+    t_start = time.time()
+    out5 = hub_runner(e5, "b1", "request_site_login", {"url": SITE4 + "/login.html"})
+    pid5 = None
+    freed_alive = None
+    for _ in range(400):
+        if pid5 is None and os.path.exists(os.path.join(st5, "pids")):
+            pid5 = int(open(os.path.join(st5, "pids")).read().split()[0])
+        if pid5 is not None and owners_free("b1"):
+            freed_alive = alive(pid5)                # the moment the computer is free: is the first driver still there?
+            break
+        time.sleep(0.05)
+    other = hub_runner(e5, "b1c", "browser_click", {"target_id": "bt-1", "tab_id": "tab-1", "ref": "p9:6", "session": "other"})
+    time.sleep(max(0.0, t_start + 12 - time.time()))
+    mcp_hub.stop_hub(e5)
+    hlog = "".join(open(os.path.join(dp, f), errors="replace").read() for dp, _dn, fn in os.walk(os.path.join(td, "logs-b1")) for f in fn)
+    check("R6-B: a driver call of a sign-in that doesn't answer in time: its connection's process tree is ended before the "
+          "job lets the computer go (the driver is gone when it's free), another controller then acts, and the delayed "
+          "post-fill click never runs", pid5 is not None and freed_alive is False and "in use by another controller" not in other
+          and not os.path.exists(os.path.join(st5, "clicked")) and "ending driver connection" in hlog,
+          (pid5, freed_alive, other[-160:], os.path.exists(os.path.join(st5, "clicked")), "ending driver connection" in hlog, out5[-120:]))
+
+    # B (lease past its life): a client leaves while its sign-in waits for the user; past the lease's life the hub withdraws
+    # the vault call, and lets the computer go only after the vault confirmed (the question is gone; approving fails).
+    e6, st6 = hub_env("b2", {"url": SITE + "/login.html"}, relay=False, MCOMP_ACTIVE_S="6")
+    n6 = len(calls())
+    out6 = hub_runner(e6, "b2", "request_site_login", {"url": SITE + "/login.html"})
+    rid6 = (re.findall(r'request_id\\?": \\?"([0-9a-f]{8})', out6) or ["00000000"])[0]
+    held_at = time.time()
+    freed_at = None
+    for _ in range(600):
+        if owners_free("b2"):
+            freed_at = time.time()
+            break
+        time.sleep(0.05)
+    cancelled = [x for x in vault_recs() if x.get("request_id") == rid6 and x.get("result") == "cancelled"]
+    still = rid6 in pending_ids()
+    ap = subprocess.run([BIN, "approve", rid6], env=venv, capture_output=True, text=True, timeout=30)
+    time.sleep(1.0)
+    filled6 = [c for c in calls()[n6:] if c.get("kind") == "fill:fill"]
+    mcp_hub.stop_hub(e6)
+    check("R6-B: a lease past its life (6 s here) withdraws the sign-in's vault call: the vault withdraws the question and "
+          "confirms (recorded as cancelled) before the computer is let go; approving afterwards finds nothing, and nothing is typed",
+          freed_at is not None and freed_at - held_at >= 4 and cancelled and not still and ap.returncode != 0 and not filled6,
+          (out6[-200:], freed_at and freed_at - held_at, cancelled[-1:], still, ap.stdout + ap.stderr, filled6))
+
+    # B (hub stop): the hub stopping withdraws a sign-in waiting for the user, and exits only after the vault confirmed.
+    e7, st7 = hub_env("b3", {"url": SITE + "/login.html", "leak": leak, "stderr_leak": True}, relay=False)
+    h7 = mcomp_sdk.Hub(env=e7, timeout=200, session="sl7")
+    h7.connect()
+    r7 = h7.call("request_site_login", {"url": SITE + "/login.html"}, timeout=200)
+    rid7 = r7.structured.get("request_id") or "00000000"
+    mcp_hub.stop_hub(e7)
+    cancelled7 = [x for x in vault_recs() if x.get("request_id") == rid7 and x.get("result") == "cancelled"]
+    still7 = rid7 in pending_ids()
+    try:
+        h7.close()
+    except Exception:
+        pass
+    check("R6-B: stopping the hub while a sign-in waits for the user: the vault call is withdrawn and confirmed (recorded as "
+          "cancelled) before the hub has exited; nothing is left to approve", r7.structured.get("status") == "pending"
+          and cancelled7 and not still7 and not leaked_into("b3"), (r7.raw, cancelled7[-1:], still7))
+
+    # B (driver crash): the driver dies at the post-fill click: the connection's process tree ends with it, the job ends.
+    e8, st8 = hub_env("b4", {"url": SITE4 + "/login.html", "crash_on_click": True}, relay=False)
+    h8 = mcomp_sdk.Hub(env=e8, timeout=200, session="sl8")
+    h8.connect()
+    r8 = outcome(h8, h8.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200), SITE4 + "/login.html")
+    pid8 = int(open(os.path.join(st8, "pids")).read().split()[0]) if os.path.exists(os.path.join(st8, "pids")) else None
+    h8.close()
+    mcp_hub.stop_hub(e8)
+    check("R6-B: the driver dying mid-job (at the post-fill click): the job ends at once (filled, not submitted), with the "
+          "driver's process gone", r8.structured.get("status") == "filled" and r8.structured.get("submitted") is False
+          and pid8 is not None and not alive(pid8), (r8.raw, pid8))
     u.send("\x03")
     u.wait(15)
     leaked = [v for v in VALUES if any(v in o for o in ts.outputs)]

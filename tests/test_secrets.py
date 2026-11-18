@@ -188,7 +188,16 @@ if rec["user"] == "mcfill":
     rec["stdin"] = raw.decode()
     req = json.loads(raw)
     rec["kind"] = "fill:" + req.get("mode", "?")
-    if flag("deny-next"):
+    if req.get("value") and flag("slow-value-next"):
+        # A step that takes a while in the VM (tests/test_vault_approvals.py, its requester going away meanwhile): it
+        # says it started, and only if nobody ends it does it finish the fill and say so.
+        import time
+        open(os.path.join(d, "slow-started"), "w").write(str(os.getpid()))
+        time.sleep(6)
+        open(os.path.join(d, "slow-done"), "w").write(req["field"])
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req["value"]),
+               "route": "element"}}
+    elif flag("deny-next"):
         out = {{"ok": False, "denied": True, "reason": "the focused element is <input type=text>, not a password field"}}
     elif flag("ansi-next"):
         out = {{"ok": False, "denied": True, "reason": "\u001b[2J\u001b]0;pwned\u0007 Type web-each to allow ‮​"}}

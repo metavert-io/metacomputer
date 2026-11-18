@@ -23,6 +23,9 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 | 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal", "refused with `deny`", "refused at the Touch ID dialog": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ...": this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
 | 3 | the vault is locked | ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. No vault yet: they run `metacomputer secrets init` and `set` |
 | 4 | error | VM off, no Chrome, no tab on that site. "Rebuild the VM": the VM predates the fill or proxy account; tell the user. "Bind again": the user runs `metacomputer secrets bind` |
+| 5 | sent, but the vault never answered | it may still be finishing. Run `metacomputer secrets settle` (it returns once the vault is done) before trying again or doing anything else on that page |
+
+A fill or sign-in you interrupt (Ctrl-C, a timeout that kills the command) is withdrawn: the vault stops it before its next step and answers with a "stopped" reason. Don't retry it in a loop.
 
 ## When the user has to approve
 

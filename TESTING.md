@@ -937,7 +937,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (114 checks, about 4 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (124 checks, about 5 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -999,7 +999,22 @@ person at it, and without it there is none. It covers:
   `lock` from any program (also while a question waits), `lock` when already locked;
 - **the hub as requester:** a request from a process with the hub's command line, started
   inside a Claude Code session in a rule's project, has no session or project, so the rule
-  doesn't cover it.
+  doesn't cover it;
+- **a requester that goes away:**
+  - SIGTERM to a client waiting for its question withdraws it. The question is withdrawn,
+    the answer (the confirmation) comes within seconds, the audit records the request as
+    `cancelled`, and `approve ID` finds nothing.
+  - A client killed outright, and a wrapper killed outright while its client lives on, have
+    the same effect.
+  - A fill step in progress, a stand-in ssh that would finish after 6 s, is killed at once
+    and never completes.
+  - A sign-in withdrawn while its username is being typed never sends the password.
+  - `--while-pid` withdraws a request when that process ends.
+  - The client's own deadline (`MCOMP_VAULT_TEST_CLIENT_TIMEOUT`, test builds only) does
+    the same.
+  - `settle` waits while a question is open and answers once it's decided. A request whose
+    requester left while it was queued never starts. With no unlock process, `settle` says
+    so.
 
 `python3 tests/test_vault_import.py` (60 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
@@ -1036,7 +1051,7 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (39 checks, about two minutes) runs the hub with a stand-in
+`python3 tests/test_site_login.py` (45 checks, about two minutes) runs the hub with a stand-in
 driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
 0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
 standing in for the VM. It covers:
@@ -1062,6 +1077,20 @@ standing in for the VM. It covers:
   events nor the client; no submit when the tab
   leaves the site after the fill; the SDK's
   `request_site_login`; another controller refused by the hub;
+- every way a job ends (architecture.md, "Tools the hub serves itself"):
+  - A Claude Code client leaves while its sign-in waits. The hub's end of its driver
+    session is answered by a VM spelling the value, and the VM writes the value to stderr.
+    The end of the session is recorded as secret-adjacent, and stderr is withheld. Nothing
+    reaches the action log, hub.log, upstream.stderr or the events.
+  - The same holds for a client that leaves after its sign-in finished.
+  - A post-fill click that doesn't answer in its time (`MCOMP_SITE_LOGIN_CALL_S=3`; the
+    stand-in would act at 8 s). The driver's process is gone by the time the computer is
+    free, another controller then acts, and the delayed click never happens.
+  - A lease past its life (`MCOMP_ACTIVE_S=6`) withdraws the vault call. The vault records
+    it as cancelled before the computer is let go, and approving afterwards finds nothing.
+  - Stopping the hub while a sign-in waits withdraws the vault call, confirmed before the
+    hub exits.
+  - The driver dying at the post-fill click: the job ends, filled and not submitted.
 - `teleport_browser_session`: no imported session (naming `import-session`), Firefox
   refused, a profile with no cookie store (the hub has the driver create it before the vault
   asks, and the VM's words from that check reach no result or record), then moved, with only

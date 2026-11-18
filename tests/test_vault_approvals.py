@@ -1113,6 +1113,156 @@ def run(td, procs):
           len(canon(big)) > 1 << 18 and nxt.get("seq") == 2 and nxt.get("prev") == big["hash"] and vr.returncode == 0,
           (nxt.get("seq"), nxt.get("prev"), vr.stdout[-200:]))
 
+    # --- 11. a request whose requester goes away stops, and the vault says so (the requester's confirmation) -----
+    # The unlock process watches the requester's connection while it serves a fill, sign-in, session or token
+    # request: when the requester closes its side (withdraws it: a signal, its parent gone, --while-pid, its own
+    # deadline) or dies, the question is withdrawn, no further step starts and a step in progress (its ssh) is killed;
+    # then it answers, and that answer is what a requester (the hub) waits for before it lets the computer go.
+    u = start_unlock(["--for", "10m", *allow], dict(T, MCOMP_VAULT_TEST_PROMPT_TIMEOUT="30"))
+
+    def cancel_recs(rid=None):
+        return [x for x in audit_recs() if x.get("result") == "cancelled" and (rid is None or x.get("request_id") == rid)]
+
+    def no_pending():
+        return not js(pending().stdout).get("requests")
+
+    def nreq(timeout=20):
+        """next_request, without stopping the run when no question comes (an earlier build keeps an old one open)."""
+        try:
+            return next_request(u, timeout)
+        except AssertionError:
+            return None
+
+    proc = background(*fill)
+    rid = nreq()
+    t0 = time.time()
+    proc.send_signal(signal.SIGTERM)
+    try:
+        rc, out, err = finish(proc, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc, out, err = 999, "", "no exit"
+    took = time.time() - t0
+    check("R6-B: SIGTERM to a fill waiting for its question withdraws it: the unlock process withdraws the question and "
+          "answers (the confirmation, within seconds), recorded as cancelled with its request id; nothing is left to approve",
+          rc == 4 and "went away or withdrew" in js(out).get("reason", "") and took < 8 and cancel_recs(rid)
+          and wait_for(no_pending, 5) and soft(u, f"request {rid} withdrawn"), (rc, out[-300:], err[-300:], took, cancel_recs()[-1:]))
+    r = client("approve", rid or "00000000")
+    check("...approving it afterwards finds nothing to approve", r.returncode != 0 and "no request" in (r.stdout + r.stderr), r.stdout + r.stderr)
+
+    proc = background(*fill)
+    rid = nreq()
+    proc.kill()                                          # SIGKILL: no chance to withdraw it; the connection just ends
+    proc.wait(10)
+    check("R6-B: a client killed outright (SIGKILL) while its question waits: the unlock process sees the connection end "
+          "and withdraws the question (recorded as cancelled), rather than waiting for an answer that has nobody to act for",
+          bool(wait_for(lambda: cancel_recs(rid), 6)) and wait_for(no_pending, 5), (rid, cancel_recs()[-1:]))
+
+    flag("slow-value-next")
+    for f_ in ("slow-started", "slow-done"):
+        flag(f_, on=False)
+    n = len(calls())
+    proc = background("fill", "web-sess", "--vm", "avm", "--field", "password")
+    started = wait_for(lambda: os.path.exists(os.path.join(stubdir, "slow-started")), 15)
+    t0 = time.time()
+    proc.send_signal(signal.SIGTERM)
+    try:
+        rc, out, err = finish(proc, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc, out, err = 999, "", "no exit"
+    took = time.time() - t0
+    time.sleep(7)                                        # past the step's own 6 s: had it lived, it would have finished
+    check("R6-B: a fill step in progress (its ssh to the VM) when the requester withdraws: its process group is killed at once, "
+          "so the step never completes, and the answer says it was stopped", bool(started) and rc == 4 and took < 5
+          and "went away or withdrew" in js(out).get("reason", "") and not os.path.exists(os.path.join(stubdir, "slow-done"))
+          and cancel_recs(), (started, rc, out[-300:], took, os.path.exists(os.path.join(stubdir, "slow-done"))))
+    flag("slow-value-next", on=False)
+
+    flag("slow-value-next")
+    for f_ in ("slow-started", "slow-done"):
+        flag(f_, on=False)
+    n = len(calls())
+    proc = background("login", "web-sess", "--vm", "avm", "--password-selector", "#pw", "--username-selector", "#user")
+    started = wait_for(lambda: os.path.exists(os.path.join(stubdir, "slow-started")), 15)
+    proc.send_signal(signal.SIGTERM)
+    try:
+        rc, out, err = finish(proc, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc, out, err = 999, "", "no exit"
+    time.sleep(7)
+    later = [c for c in calls()[n:] if c.get("kind") == "fill:fill"]
+    check("R6-B: a sign-in withdrawn while its username is being typed: that step is ended and the password is never sent "
+          "(no further step after a withdrawal)", bool(started) and rc == 4 and not later
+          and not os.path.exists(os.path.join(stubdir, "slow-done")), (started, rc, out[-300:], later))
+    flag("slow-value-next", on=False)
+
+    sh_out = os.path.join(td, "wrapped.out")
+    wrapper = subprocess.Popen(["/bin/sh", "-c", f"{shlex.join([BIN, *fill])} >{shlex.quote(sh_out)} 2>&1; echo done"],
+                               env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(wrapper)
+    rid = nreq()
+    wrapper.kill()                                       # the wrapper (the program that ran the client) is killed outright
+    wrapper.wait(10)
+    check("R6-B: killing the wrapper that ran the client (SIGKILL; the client itself lives on) withdraws the request too: "
+          "the client sees its parent gone, and the unlock process withdraws the question", bool(wait_for(lambda: cancel_recs(rid), 8))
+          and wait_for(no_pending, 5), (rid, open(sh_out).read()[-300:] if os.path.exists(sh_out) else ""))
+
+    sleeper = subprocess.Popen(["/bin/sleep", "60"])
+    procs.append(sleeper)
+    proc = background(*fill, "--while-pid", str(sleeper.pid))
+    rid = nreq(5)
+    sleeper.kill()
+    sleeper.wait()
+    try:
+        rc, out, err = finish(proc, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc, out, err = 999, "", "no exit"
+    check("R6-B: --while-pid PID (the hub passes its own): the request is withdrawn when that process ends, and confirmed",
+          rid is not None and rc == 4 and cancel_recs(rid) and wait_for(no_pending, 5), (rid, rc, out[-200:], err[-300:]))
+
+    proc = background(*fill, extra={"MCOMP_VAULT_TEST_CLIENT_TIMEOUT": "2"})
+    rid = nreq()
+    try:
+        rc, out, err = finish(proc, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc, out, err = 999, "", "no exit"
+    check("R6-B: the client's own deadline (300 s; 2 s in this test build) withdraws the request instead of leaving it to run "
+          "on: the unlock process stops it and confirms before the client exits", rc == 4 and cancel_recs(rid)
+          and "went away or withdrew" in js(out).get("reason", "") and wait_for(no_pending, 5), (rc, out[-200:], err[-300:]))
+
+    # settle: answered only once everything the unlock process got before it has finished
+    first = background(*fill)
+    rid_a = nreq()
+    second = background("fill", "web-sess", "--vm", "avm", "--field", "password")   # queued behind the question
+    time.sleep(1.0)
+    second.kill()                                        # its requester gone while it waits in the queue
+    second.wait(10)
+    n = len(calls())
+    st = subprocess.Popen([BIN, "settle", "--timeout", "60"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, stdin=subprocess.DEVNULL)
+    time.sleep(1.5)
+    waited = st.poll() is None
+    client("deny", rid_a or "00000000")
+    try:
+        s_out, s_err = st.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        st.kill()
+        s_out, s_err = "", "no answer"
+    finish(first)
+    withdrawn = [x for x in audit_recs() if "before it started" in x.get("reason", "")]
+    check("R6-B: settle waits while a question is open, and answers once everything before it has finished; a request whose "
+          "requester went away while it waited in the queue never starts (recorded as withdrawn before it started)",
+          waited and st.returncode == 0 and js(s_out).get("settled") is True and js(s_out).get("unlock") == "running"
+          and withdrawn and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], (waited, s_out, s_err[-200:], withdrawn[-1:]))
+    lock(u)
+    r = client("settle", "--timeout", "5")
+    check("settle with no unlock process: settled (nothing can be running), exit 0", r.returncode == 0 and js(r.stdout).get("unlock") == "none",
+          r.stdout + r.stderr)
+
     # --- every output ----------------------------------------------------------------------------------------
     text = open(alog).read()
     check("the audit log holds no values and no unmasked username", not any(v in text for v in VALUES + [USERNAME]))

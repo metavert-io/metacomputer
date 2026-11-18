@@ -234,8 +234,14 @@ class ActionLog:
             rec["result"] = summarize_result(msg.get("result"), self.keep_text)
         self._add(rec)
 
-    def refused(self, tool, args, reason, client=None):
-        rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
+    def refused(self, tool, args, reason, client=None, secret=False):
+        """secret: refused while a sign-in or session load ran (secret-adjacent): the arguments' names and size only."""
+        if secret:
+            rec = {"type": "refused", "tool": tool, "secret_adjacent": True, "reason": reason[:300],
+                   "args": {"redacted": "secret-adjacent", "keys": sorted(str(k) for k in args)[:20] if isinstance(args, dict) else [],
+                            "chars": len(canonical(args))}}
+        else:
+            rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
         if client:
             rec["client"] = client
         self._add(rec)

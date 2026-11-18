@@ -1463,7 +1463,12 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
+      # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
+      # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
+      trap ':' INT TERM HUP
       out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
+      trap - INT TERM HUP
       printf '%s\n' "$out"
       # The action log gets metadata only: never the token itself.
       printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
