@@ -397,21 +397,37 @@ func resolvePresence(flag: Bool?, setting: String?, biometry b: Biometry, detail
 }
 
 /// What the audit log says about presence: whether Touch ID was ever seen enrolled, and the last `presence on|off|auto`
-/// setting. A vault file put back to an older copy (any program running as you can do that) loses both from inside the
-/// vault; the log, appended to separately, still has them. Only ever used to make presence mode stricter: a record
-/// added to the log by anyone can only turn it on, never off.
-func auditPresenceHistory(_ paths: Paths) -> (seen: Bool, lastMode: String?) {
+/// setting that is authenticated: its creation MAC checks out under the vault's audit key (only a command that opened
+/// the vault with the passphrase can make one) and it sits where the chain says (its seq follows the line before it and
+/// its prev is that line's hash, so a genuine old record copied to the end doesn't count). A vault file put back to an
+/// older copy (any program running as you can do that) loses both from inside the vault; the log, appended to
+/// separately, still has them. The caller only ever makes presence mode stricter with this: a Touch ID record, real
+/// or not, can only keep it on, and a setting counts only when it's authenticated.
+func auditPresenceHistory(_ paths: Paths, macKey: [UInt8]?) -> (seen: Bool, lastMode: String?) {
     guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return (false, nil) }
     var seen = false
     var last: String?
+    var prevSeq: Int?
+    var prevHash: String?
     let marker = Array("\"op\":\"presence\"".utf8)
-    for line in bytes.split(separator: 0x0A) where line.count < 65536 {
-        guard line.count >= marker.count, Array(line).firstRange(of: marker) != nil,
-              let o = parseJSONObject(Array(line)), o["op"] as? String == "presence", let mode = o["mode"] as? String else { continue }
-        if mode == "biometry_seen" { seen = true } else if ["on", "off", "auto"].contains(mode) { last = mode }
+    for raw in bytes.split(separator: 0x0A) {
+        let line = Array(raw)
+        // Every line's place in the chain; only presence records are parsed in full.
+        guard line.count < 65536, let o = parseJSONObject(line) else { prevSeq = nil; prevHash = nil; continue }
+        let seq = (o["seq"] as? NSNumber)?.intValue
+        let hash = o["hash"] as? String
+        defer { prevSeq = seq; prevHash = hash }
+        guard line.firstRange(of: marker) != nil, o["op"] as? String == "presence", let mode = o["mode"] as? String else { continue }
+        if mode == "biometry_seen" { seen = true; continue }
+        guard ["on", "off", "auto"].contains(mode), let k = macKey, let mac = o["mac"] as? String, mac == auditRecordMAC(k, o),
+              let s = seq, let ps = prevSeq, s == ps + 1, let p = o["prev"] as? String, p == prevHash, hash == eventHash(o) else { continue }
+        last = mode
     }
     return (seen, last)
 }
+
+/// How strict a presence setting is: on, then the default (auto), then off.
+func presenceRank(_ setting: String?) -> Int { setting == "on" ? 2 : (setting == "off" ? 0 : 1) }
 
 /// `presence on|off|auto`: the vault's own setting for presence mode (the passphrase, like `policy`).
 func cmdPresence(_ paths: Paths, _ argv: [String]) throws -> Int32 {

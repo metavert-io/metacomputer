@@ -205,6 +205,15 @@ if rec["user"] == "mcfill":
         out = {{"ok": False, "denied": False, "mode": "fill", "field": req["field"],
                "origin": "https://" + req["value"].encode().hex() + ".evil.example", "chars": 7731,
                "reason": "the page changed during the fill"}}
+    elif req.get("value") and flag("all-fields-leak-next"):
+        # A hostile VM spells the value it got in every field an answer can have (two bytes of it as the count).
+        h = req["value"].encode().hex()
+        out = {{"ok": False, "denied": True, "mode": h, "field": h, "origin": "https://" + h + ".evil.example", "route": h,
+               "reason": "the field holds " + h, "profile": h, "chars": int.from_bytes(req["value"].encode()[:2], "big")}}
+    elif req.get("value") and flag("all-fields-leak-ok-next"):
+        h = req["value"].encode().hex()
+        out = {{"ok": True, "mode": h, "field": h, "origin": "https://" + h + ".evil.example", "route": h, "profile": h,
+               "chars": int.from_bytes(req["value"].encode()[:2], "big")}}
     elif req.get("value") and flag("origin-leak-ok-next"):
         # ...or for one it says worked.
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": "https://" + req["value"].encode().hex() + ".evil.example",

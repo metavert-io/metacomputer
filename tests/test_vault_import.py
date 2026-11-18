@@ -473,6 +473,26 @@ def run(td, procs):
           and "ty.example-otp: tied to the login ty.example by its id now" in o3 and "ty.example-otp-2" not in s3
           and any(x.get("op") == "rotate" and x.get("name") == "ty.example-otp" and x.get("kind") == "totp" for x in recs)
           and any(x.get("op") == "totp_links" for x in recs), (o2[-200:], o3[-400:], sorted(n for n in s3 if n.startswith("ty."))))
+    # P2: two logins saved by an earlier build (no ids) with their codes tied by name: migrated once, one id each, and the
+    # import right after replaces each code instead of making new ones.
+    tl = csv_file("tl.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                  f"tl,https://tl1.example/,alice-tl,{PW_TW}1,,otpauth://totp/x:alice?secret={SEED}&issuer=x\n"
+                  f"tl,https://tl2.example/,bob-tl,{PW_TW}2,,otpauth://totp/x:bob?secret={SEED}&issuer=x\n")
+    tl2 = csv_file("tl2.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                   f"tl,https://tl1.example/,alice-tl,{PW_TW}1,,otpauth://totp/x:alice?secret={SEED2}&issuer=x\n"
+                   f"tl,https://tl2.example/,bob-tl,{PW_TW}2,,otpauth://totp/x:bob?secret={SEED3}&issuer=x\n")
+    rc1, o1 = tty([BIN, "import-passwords", "--csv", tl], [("Vault passphrase", PASS + "\n")])
+    rc2, o2 = tty([BIN, "test-legacy-totp-link", "tl1.example-otp", "tl1.example", "--no-id"], [("Vault passphrase", PASS + "\n")])
+    rc3, o3 = tty([BIN, "test-legacy-totp-link", "tl2.example-otp", "tl2.example", "--no-id"], [("Vault passphrase", PASS + "\n")])
+    rc4, o4 = tty([BIN, "import-passwords", "--csv", tl2], [("Vault passphrase", PASS + "\n")])
+    s4 = secrets()
+    recs = [json.loads(l) for l in open(alog)]
+    check("P2: two legacy logins (no ids) with codes tied by name: one id each, persisted once, and the import that opened the vault "
+          "replaces both codes (no new ones)", rc1 == rc2 == rc3 == rc4 == 0
+          and "tl1.example-otp: tied to the login tl1.example by its id now" in o4 and "tl2.example-otp: tied to the login tl2.example by its id now" in o4
+          and not any(n in s4 for n in ("tl1.example-otp-2", "tl2.example-otp-2"))
+          and all(any(x.get("op") == "rotate" and x.get("name") == n and x.get("kind") == "totp" for x in recs)
+                  for n in ("tl1.example-otp", "tl2.example-otp")), (o4[-500:], sorted(n for n in s4 if n.startswith("tl"))))
     bad = csv_file("bad.csv", "a,b\n1,2\n")
     rc, out = tty([BIN, "import-passwords", "--csv", bad], [("Vault passphrase", PASS + "\n")])
     check("a CSV without url and password columns is refused", rc != 0 and "no url and password columns" in out, out)

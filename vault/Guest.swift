@@ -275,6 +275,9 @@ final class GuestRunner {
             out["mode"] = request["mode"] as? String
             out["field"] = request["field"] as? String
             out["profile"] = nil
+            // Every field is now either the request's, this process's, or one of a fixed few words: no text of the VM's.
+            if let r = out["route"] as? String, r != "element" && r != "keyboard" { out["route"] = nil }
+            out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
         }
         return out
     }
@@ -308,11 +311,17 @@ func fillResultSchema(_ raw: [String: Any]) -> [String: Any]? {
     let bools: Set<String> = ["ok", "denied"]
     let strings: Set<String> = ["mode", "field", "origin", "route", "reason", "profile"]
     let ints: Set<String> = ["chars"]
+    // The fields that name one of a few things take only those: anything else is dropped, here, before it's kept anywhere.
+    let enums: [String: Set<String>] = ["route": ["element", "keyboard"], "mode": ["fill", "check"],
+                                        "field": ["password", "username", "otp", "text"]]
     var out: [String: Any] = [:]
     for (k, v) in raw {
         if bools.contains(k) {
             guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
             out[k] = n.boolValue
+        } else if let allowed = enums[k] {
+            guard let s = v as? String else { return nil }
+            if allowed.contains(s) { out[k] = s }
         } else if strings.contains(k) {
             guard let s = v as? String else { return nil }
             out[k] = clean(s, max: 300)
