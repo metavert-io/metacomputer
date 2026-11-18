@@ -1,5 +1,5 @@
 {
- "driver_version": "0.52.1",
+ "driver_version": "0.53.0",
  "initialize": {
   "2025-06-18": {
    "capabilities": {
@@ -13,7 +13,7 @@
    "protocolVersion": "2025-06-18",
    "serverInfo": {
     "name": "cua-driver",
-    "version": "0.52.1"
+    "version": "0.53.0"
    }
   }
  },
@@ -22,7 +22,7 @@
    {
     "mimeType": "text/markdown",
     "name": "BROWSER.md",
-    "size": 31032,
+    "size": 32544,
     "uri": "skill://cua-driver/BROWSER.md"
    },
    {
@@ -34,7 +34,7 @@
    {
     "mimeType": "text/markdown",
     "name": "LINUX.md",
-    "size": 34404,
+    "size": 34945,
     "uri": "skill://cua-driver/LINUX.md"
    },
    {
@@ -83,12 +83,12 @@
    {
     "mimeType": "text/markdown",
     "name": "WINDOWS.md",
-    "size": 48413,
+    "size": 48121,
     "uri": "skill://cua-driver/WINDOWS.md"
    }
   ]
  },
- "saved": "2026-11-15T21:18:09-0500",
+ "saved": "2026-11-18T02:25:13-0500",
  "tools": {
   "tools": [
    {
@@ -1532,7 +1532,7 @@
      "accessibility.menu.native",
      "input.delivery_mode"
     ],
-    "description": "Resolve an exact application-menu path one live native level at a time and invoke its final item through accessibility APIs. Missing, ambiguous, disabled, or structurally mismatched segments fail closed; this tool never falls back to pixels. Menu paths and refusals: `get_guide({topic:\"menus\"})`.",
+    "description": "Resolve an exact application-menu path one live native level at a time and normally invoke its final item through accessibility APIs. Missing, ambiguous, structurally mismatched, and other disabled segments fail closed; this tool never falls back to pixels. On macOS, a disabled Save (\u2318S) in a background document window with a known document path is saved through the app\u2019s scripting interface using Apple Events instead, without activating the app. This requires per-app Automation consent and may show macOS\u2019s first-use consent prompt; denied permission refuses the save. Menu paths and refusals: `get_guide({topic:\"menus\"})`.",
     "inputSchema": {
      "additionalProperties": false,
      "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API. Path labels are matched after\ntrimming surrounding whitespace and otherwise remain case-sensitive. On\nmacOS, three periods in a label also match the ellipsis character that\nnative menu titles use (`Save As...` finds `Save As\u2026`).",
@@ -8261,7 +8261,7 @@
     "capabilities": [
      "browser.input.type"
     ],
-    "description": "Type text into an exactly-bound tab via the Input domain. mode=\"insert_text\" (default) uses Input.insertText; mode=\"keystrokes\" dispatches per-character key events. Both insert at the caret, so typing into a field that already holds text appends to it; pass replace=true to set the field instead, or to clear it by typing an empty string. Pass a ref to an editable element from the latest snapshot. A ref is required; heuristic bindings are refused.",
+    "description": "Type text into an exactly-bound tab via the Input domain. mode=\"insert_text\" (default) uses Input.insertText; mode=\"keystrokes\" dispatches per-character key events. Both insert at the caret, so typing into a field that already holds text appends to it; pass replace=true to set the field instead, or to clear it by typing an empty string. On a single-line input, a trailing newline is pressed as a real Enter (key, code, keyCode 13) after the text and the result reports enter_pressed; a textarea or contenteditable keeps it as content. Pass a ref to an editable element from the latest snapshot. A ref is required; heuristic bindings are refused.",
     "inputSchema": {
      "additionalProperties": true,
      "properties": {
@@ -8294,7 +8294,7 @@
        "type": "string"
       },
       "text": {
-       "description": "Text to type.",
+       "description": "Text to type. End it with \\n to press Enter after the text on a single-line input.",
        "type": "string"
       }
      },
