@@ -216,6 +216,9 @@ WM_MODIFIERS = ("super", "meta", "win", "hyper", "alt", "cmd", "command", "optio
 CTRL_NAMES = {"ctrl", "control", "ctrl_l", "ctrl_r", "control_l", "control_r"}
 CTRL_WINDOW_KEYS = {"n", "w", "q", "o", "s", "p"}     # new, close, quit; the open, save and print dialogs
 FKEY_RE = re.compile(r"^f(?:[1-9]|[12][0-9]|3[0-5])$")
+# Buttons that open or close a dialog, when a step names its target by role and name.
+DIALOG_BUTTON_RE = re.compile(r"^(?:ok|cancel|close|save|save as\W*|open|apply|yes|no|insert|print|delete|replace all|"
+                              r"don.?t save|discard|keep current format|use .{1,40} format!?|done|finish|next)\b", re.I)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -2160,21 +2163,35 @@ def key_names(a):
 
 
 def geometry_step(tool, a, default_wid=None, batch=None):
-    """Why a run_steps step can move, resize, open, close or raise a window (a few words), or None. Pixels in a
-    later step of the same batch were aimed from a screenshot taken before it, so the hub refuses them. Not
-    counted (they rarely move windows, and refusing them would refuse ordinary batches): a single click inside a
-    window, typing, set_value, scroll, and keys such as Return, Escape, Tab or Ctrl+A, even though a click,
-    Return or Escape can open or close a dialog."""
+    """Why a run_steps step can move, resize, open, close or raise a window, or open or close a dialog over it (a
+    few words), or None. Pixels in a later step of the same batch were aimed from a screenshot taken before it, so
+    the hub refuses them and asks for a fresh screenshot. Equivalent spellings count the same (a click with count 2
+    is a double click). Not counted, because ordinary batches put pixel clicks after them (click a field, type,
+    Return, click the next field): a single plain click inside a window except on a dialog's button named by role
+    and name, typing (newlines too), set_value, scroll, and keys such as Return, Tab or Ctrl+A, even though a
+    click or Return can open or close a dialog."""
     if not isinstance(a, dict):
         return None
     if tool == "double_click":
         return "a double click can maximize a window"
+    count = a.get("count")
+    if tool == "click" and _num(count) and count >= 2:
+        return "a double click (click with count 2) can maximize a window"
     if tool in DRAG_TOOLS:
         return "a drag can move or resize a window"
+    mods = next((a[k] for k in ("modifier", "modifiers") if isinstance(a.get(k), list)), [])
+    held = [str(m).strip().lower() for m in mods]
+    if tool in ("click", "right_click", "double_click") and any(m.startswith(WM_MODIFIERS) for m in held):
+        return f"a click with {'+'.join(held)[:30]} held can move or resize a window"
+    if tool in ("click", "right_click") and str(a.get("button") or "").lower() == "middle":
+        return "a middle click on a title bar can raise or lower a window"
     if tool in PRESS_TOOLS:
         tg = pixel_target(tool, a, default_wid, batch)
         if tg and tg[0] == "desktop":
             return "a press on the desktop can hit a window's title bar, buttons or edge"
+    if tool in ("click", "double_click") and str(a.get("role") or "").lower() in ("button", "push button") \
+            and DIALOG_BUTTON_RE.match(str(a.get("name") or "").strip()):
+        return f"a click on \"{clean(a.get('name'), 30)}\" can open or close a dialog"
     if tool in ("press_key", "hotkey"):
         keys = key_names(a)
         combo = "+".join(keys)[:40]
@@ -2184,6 +2201,8 @@ def geometry_step(tool, a, default_wid=None, batch=None):
             return f"{combo} can make a window full screen or open one"
         if any(k in CTRL_NAMES for k in keys) and any(k in CTRL_WINDOW_KEYS for k in keys):
             return f"{combo} can open or close a window"
+        if any(k in ("escape", "esc") for k in keys):
+            return f"{combo} can close a dialog or menu"
     return None
 
 

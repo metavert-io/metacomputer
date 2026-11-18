@@ -1712,6 +1712,35 @@ def token2_checks():
     r.stop()
 
 
+def batch2_checks():
+    print("N7: equivalent double clicks and dialog-changing steps in a batch")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running()
+    h = client(r, "call", session="batch2")
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    n0 = len(tool_calls("run_steps"))
+
+    def batch(*steps):
+        return h.call("run_steps", {"pid": 50, "window_id": W, "steps": list(steps)})
+    cases = {
+        "click count 2": batch({"click": {"x": 5, "y": 5, "count": 2}}, {"click": {"x": 10, "y": 10}}),
+        "click with alt held": batch({"click": {"x": 5, "y": 5, "modifier": ["alt"]}}, {"click": {"x": 10, "y": 10}}),
+        "Escape": batch({"press_key": {"key": "Escape"}}, {"click": {"x": 10, "y": 10}}),
+        "OK button": batch({"click": {"role": "button", "name": "OK"}}, {"click": {"x": 10, "y": 10}}),
+    }
+    bad = {k: v.text[:100] for k, v in cases.items()
+           if not (v.is_error and v.structured.get("code") == "pixels_after_window_change")}
+    check("a click with count 2, a click with Alt held, Escape and a dialog's OK button count as window changes",
+          not bad and len(tool_calls("run_steps")) == n0, bad)
+    fine = batch({"click": {"x": 5, "y": 5, "modifier": ["shift"]}}, {"click": {"role": "button", "name": "Bold"}},
+                 {"click": {"x": 10, "y": 10}})
+    check("…but a shift-click or another button (Bold) don't", not fine.is_error, fine.text[:120])
+    h.close()
+    r.stop()
+    clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -1743,6 +1772,7 @@ def main():
         lease2_checks()
         lease_write_checks()
         token2_checks()
+        batch2_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
