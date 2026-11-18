@@ -426,6 +426,59 @@ def hostile_metadata_checks(td):
     rep = gi.import_tar(io.BytesIO(gzip.compress(one_member())), d)
     check("a compressed stream isn't decompressed (`tar -cf` never compresses): refused, nothing made",
           isinstance(rep.failure, tarfile.ReadError) and os.listdir(d) == [], (rep.failure, os.listdir(d)))
+    # pax GNU sparse 1.0: its map is read from the stream into a list before the entry is yielded
+    sp = io.BytesIO()
+    data = b"5000000\n" + b"1\n2\n" * 300_000
+    with tarfile.open(fileobj=sp, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        ti = tarfile.TarInfo("sparse-map.bin")
+        ti.size = len(data)
+        ti.pax_headers = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.name": "sparse-map.bin",
+                          "GNU.sparse.realsize": "1000000"}
+        tf.addfile(ti, io.BytesIO(data))
+    s = Counting(sp.getvalue())
+    d = dest()
+    rep = gi.import_tar(s, d)
+    check("a pax GNU sparse (1.0) entry is refused before its map is read from the stream",
+          isinstance(rep.failure, gi.ImportLimit) and "sparse" in str(rep.failure) and s.n < 100_000
+          and os.listdir(d) == [], (rep.failure, s.n))
+    sp01 = io.BytesIO()
+    with tarfile.open(fileobj=sp01, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        ti = tarfile.TarInfo("sparse01.bin")
+        ti.size = 3
+        ti.pax_headers = {"GNU.sparse.size": "100", "GNU.sparse.map": "0,1," * 5000}
+        tf.addfile(ti, io.BytesIO(b"abc"))
+    rep = gi.import_tar(io.BytesIO(sp01.getvalue()), dest())
+    check("…and the pax 0.1 form (a map in the header) too", isinstance(rep.failure, gi.ImportLimit)
+          and "sparse" in str(rep.failure), rep.failure)
+    # no TarInfo kept per member: watch tarfile's own member list while 60 pax entries go by
+    many = io.BytesIO()
+    with tarfile.open(fileobj=many, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for i in range(60):
+            ti = tarfile.TarInfo(f"m{i}.txt")
+            ti.size = 1
+            ti.pax_headers = {"comment": "c" * 2000}
+            tf.addfile(ti, io.BytesIO(b"x"))
+    real_next, seen = tarfile.TarFile.next, []
+
+    def watching_next(self):
+        seen.append(len(self.members))
+        return real_next(self)
+    tarfile.TarFile.next = watching_next
+    try:
+        rep = gi.import_tar(io.BytesIO(many.getvalue()), dest())
+    finally:
+        tarfile.TarFile.next = real_next
+    check("members aren't cached as the stream goes by (the list stays empty: no metadata piles up)",
+          rep.failure is None and rep.files == 60 and seen and max(seen) <= 1, (rep.failure, max(seen) if seen else None))
+    saved = gi.MAX_EXT_TOTAL
+    gi.MAX_EXT_TOTAL = 20_000
+    try:
+        rep = gi.import_tar(io.BytesIO(many.getvalue()), dest())
+    finally:
+        gi.MAX_EXT_TOTAL = saved
+    check("every extension header counts against one metadata budget for the stream",
+          isinstance(rep.failure, gi.ImportLimit) and "metadata budget" in str(rep.failure) and rep.files < 60,
+          (rep.failure, rep.files))
 
 
 PRODUCER = r'''

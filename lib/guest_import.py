@@ -53,6 +53,7 @@ MAX_OBJECTS = 200_000            # files and folders made on the Mac, including 
 MAX_DROPPED_KEPT = 1000          # left-out names kept for the report (the count is exact)
 MAX_EXT_HEADER = 64 << 10        # one GNU long name / pax header (a name is used only up to MAX_NAME)
 MAX_EXT_CHAIN = 8                # extension headers in a row before an entry
+MAX_EXT_TOTAL = 64 << 20         # every extension header in a stream together (the metadata budget)
 OBJECT_COST = 4096               # what a file or folder costs the disk before any data, for the free-space check
 FREE_CHECK_EVERY = 64 << 20      # bytes written (objects at OBJECT_COST) between free-space checks
 STREAM_SLACK = 64 << 20          # with max_bytes: what headers and padding may add to the stream
@@ -69,8 +70,10 @@ EXT_TYPES = (tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK, tarfile.XHDTYPE
 
 class _TarInfo(tarfile.TarInfo):
     """tarfile reads a long-name or pax header's whole payload into memory, and follows a chain of them by
-    recursion, before it yields the entry they belong to; GNU sparse headers can extend without end. So their
-    sizes are checked here first, and a stream that goes past them stops (ImportLimit)."""
+    recursion, before it yields the entry they belong to; GNU sparse headers (old style, or pax's GNU.sparse.*
+    records, whose map is read from the stream into a list) can grow without end. So sizes are checked here
+    first, sparse maps are refused before their parsers run, and every extension header counts against one
+    budget for the stream (ImportLimit)."""
 
     def _proc_member(self, tf):
         if self.type == tarfile.GNUTYPE_SPARSE:
@@ -83,12 +86,32 @@ class _TarInfo(tarfile.TarInfo):
         chain = getattr(tf, "_mcomp_chain", 0) + 1
         if chain > MAX_EXT_CHAIN:
             raise ImportLimit(f"more than {MAX_EXT_CHAIN} tar extension headers in a row")
+        tf._mcomp_ext = getattr(tf, "_mcomp_ext", 0) + self.size
+        if tf._mcomp_ext > MAX_EXT_TOTAL:
+            raise ImportLimit(f"more than {MAX_EXT_TOTAL >> 20} MB of tar extension headers (the metadata budget)")
         if self.type == tarfile.XGLTYPE:    # a global pax header stays for the rest of the stream: capped in all
             tf._mcomp_global = getattr(tf, "_mcomp_global", 0) + self.size
             if tf._mcomp_global > MAX_EXT_HEADER:
                 raise ImportLimit(f"more than {MAX_EXT_HEADER:,} bytes of global pax headers")
         tf._mcomp_chain = chain
         return super()._proc_member(tf)
+
+    # pax's GNU sparse formats (0.0, 0.1, 1.0): tarfile calls these after reading the next header; 1.0 then
+    # reads a map of any length from the stream. Refused before any of them runs.
+    def _proc_gnusparse_00(self, *_a, **_k):
+        raise ImportLimit("a pax GNU sparse entry (`tar -cf` makes none)")
+
+    _proc_gnusparse_01 = _proc_gnusparse_00
+    _proc_gnusparse_10 = _proc_gnusparse_00
+
+
+def _open_stream(stream):
+    """The tar stream, read as plain tar, with no TarInfo kept per member (`stream=True` where tarfile has it;
+    unpack() also empties the member list as it goes)."""
+    try:
+        return tarfile.open(fileobj=stream, mode="r|", tarinfo=_TarInfo, stream=True)
+    except TypeError:                     # an older tarfile without the stream argument
+        return tarfile.open(fileobj=stream, mode="r|", tarinfo=_TarInfo)
 
 
 class _Capped:
@@ -206,8 +229,9 @@ def unpack(stream, stage_fd, report, max_bytes=None, min_free=0):
             raise ImportLimit(f"more than {MAX_OBJECTS:,} files and folders")
         spend(OBJECT_COST)
 
-    with tarfile.open(fileobj=stream, mode="r|", tarinfo=_TarInfo) as tf:
+    with _open_stream(stream) as tf:
         for m in tf:
+            del tf.members[:]            # nothing per member stays in memory (a stream reads each once)
             members += 1
             if members > MAX_MEMBERS:
                 raise ImportLimit(f"more than {MAX_MEMBERS:,} entries")
