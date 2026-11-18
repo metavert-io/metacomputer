@@ -31,6 +31,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -206,24 +207,41 @@ def check_task(t):
 
 
 # --- the headless session ---------------------------------------------------------------------
+def trusted_claude(path=None):
+    """The `claude` program as an absolute path, looked up on PATH as it was before the
+    shim folder goes in front (absolute entries only), and owned by you or root and not
+    writable by other accounts. The session runs this file, never a `claude` found
+    through the shim folder."""
+    entries = [d for d in (path if path is not None else os.environ.get("PATH", "")).split(os.pathsep) if os.path.isabs(d)]
+    p = shutil.which("claude", path=os.pathsep.join(entries))
+    if not p:
+        sys.exit("claude isn't on PATH")
+    real = os.path.realpath(p)
+    st = os.stat(real)
+    if st.st_uid not in (0, os.getuid()) or st.st_mode & 0o022:
+        sys.exit(f"refusing {real}: owned by another account or writable by others")
+    return real
+
+
 def prepare_workdir(run_id, sw):
-    """A folder outside any repository (so no CLAUDE.md is picked up) with the skill
-    under test as a project skill, and `metacomputer` on PATH for this checkout."""
-    work = os.path.join("/tmp", "mcomp-bench", run_id, "work")
+    """A fresh private folder (mkdtemp: 0700, yours, an unpredictable name in your own
+    temporary folder) outside any repository (so no CLAUDE.md is picked up), with the
+    skill under test as a project skill and `metacomputer` on PATH for this checkout.
+    A predictable shared path like /tmp/mcomp-bench/<run> could be made in advance by
+    another account, with its own `claude` in the shim folder."""
+    work = tempfile.mkdtemp(prefix=f"mcomp-bench-{run_id}-")
+    st = os.lstat(work)
+    if not os.path.isdir(work) or os.path.islink(work) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        sys.exit(f"refusing the work folder {work}: not a private folder of yours")
     skill_dst = os.path.join(work, ".claude", "skills", "metacomputer")
-    shutil.rmtree(os.path.join(work, ".claude"), ignore_errors=True)
     shutil.copytree(sw["skill"], skill_dst)
     # The skill names the installed launcher; point the copy at the checkout under test.
     for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
         s = open(p).read()
         open(p, "w").write(s.replace("~/.local/bin/metacomputer", CLI))
     shim = os.path.join(work, "bin")
-    os.makedirs(shim, exist_ok=True)
+    os.mkdir(shim, 0o700)
     for n in ("metacomputer", "mcomp"):
-        try:
-            os.remove(os.path.join(shim, n))
-        except FileNotFoundError:
-            pass
         os.symlink(CLI, os.path.join(shim, n))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
@@ -252,9 +270,10 @@ def session_args(t, sw, cfg):
     return args, budget
 
 
-def run_session(t, sw, work, cfg, shim, tdir):
+def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     args, budget = session_args(t, sw, cfg)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    claude = claude or trusted_claude(env.get("PATH", ""))   # resolved before the shim goes first
     env["PATH"] = shim + os.pathsep + env.get("PATH", "")
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
     timeout = int(t.get("timeout_s", 600))
@@ -262,7 +281,7 @@ def run_session(t, sw, work, cfg, shim, tdir):
     t0 = time.time()
     tr = gzip.open(os.path.join(tdir, "transcript.jsonl.gz"), "wt")
     err = open(os.path.join(tdir, "session.stderr"), "w")
-    proc = subprocess.Popen(["claude", *args], cwd=work, env=env, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen([claude, *args], cwd=work, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=err, text=True, start_new_session=True)
 
     def reader():
@@ -348,7 +367,7 @@ def cmd_run(a):
     run_id = a.run_id or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     rdir = os.path.join(RESULTS, run_id)
     os.makedirs(rdir, exist_ok=True)
-    claude_v = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
+    claude_v = subprocess.run([trusted_claude(), "--version"], capture_output=True, text=True).stdout.strip()
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
             "switches": dict(sw, skill_hash=skill_hash(sw["skill"]),
@@ -404,6 +423,7 @@ def cmd_run(a):
         meta["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
         meta["spent_usd"] = round(spent, 4)
         json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
+        shutil.rmtree(work, ignore_errors=True)
         if not a.keep_running:
             log(f"stopping {vc['vm']}")
             mc("stop", timeout=300)
