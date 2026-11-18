@@ -139,6 +139,14 @@ class TestRun:
         self.t0 = time.time()
         self.c.connect()
         claim = self.c.claim(f"test {self.test_id}")
+        if not claim.get("claimed") and os.environ.get("MCOMP_OVERRIDE") == "1" and claim.get("others"):
+            # `metacomputer test --override` (the user agreed): other sessions' claims go, as with `release`.
+            import owners
+            for o in owners.others():
+                if o["kind"] == "session":
+                    owners.drop_claim(o["bridge_pid"])
+                    self.note("released: " + owners.describe(o))
+            claim = self.c.claim(f"test {self.test_id}")
         if not claim.get("claimed"):
             raise Step("the virtual computer is in use by another controller (metacomputer who): "
                        + "; ".join(claim.get("others") or [claim.get("message") or "?"]))

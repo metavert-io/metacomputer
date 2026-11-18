@@ -1113,7 +1113,7 @@ case "$cmd" in
   reset)      do_reset "$@" ;;
   baseline)   do_baseline "$@" ;;
   test)       parse_flags "$@"; owners_check
-              export_options; exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
+              export_options; MCOMP_OVERRIDE="$OVERRIDE" exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
   who)        do_who "$@" ;;
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
   events)     export_options
