@@ -898,7 +898,12 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    answer is held to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
    `reason`, `profile` as strings or booleans, `chars` a number): anything else is
    dropped, a field of the wrong type makes it an error, and an answer holding the value
-   anywhere, at any depth, is withheld.
+   anywhere, at any depth, is withheld. Once the VM has the value, nothing it chose goes
+   on, whether the fill worked or not: its words are replaced by the vault's own, `origin`
+   is kept only as one of the sites the request named (the vault's own copy; otherwise
+   none, since a VM could spell the value in a host name), `chars` is the vault's own count
+   of the value (and only when it worked), and `mode` and `field` are the request's. That
+   holds for the result, the audit log, the unlock terminal and the events alike.
 
 **The fill account** is always present on VMs built with this version. Nothing else
 can use it, so it's safe to leave on:
@@ -1029,6 +1034,18 @@ Unattended rules are made the same way, with the rule and its expiry in the dial
   to turn presence mode on (your login password then confirms in the dialog). (macOS
   answers "no finger enrolled" on a Mac with no sensor that could take a Touch ID
   keyboard.)
+- **A vault file put back to an older copy.** Any program running as you can replace the
+  vault file with a copy from before Touch ID was seen enrolled (or from when it said
+  `presence off`); the file's encryption can't tell an older copy from the current one.
+  The unlock checks the audit log too, which is appended to separately: if the log says
+  Touch ID was seen enrolled, or its last `presence` setting is stricter than the file's,
+  the stricter one holds, the unlock says the file may be an older copy, and that goes in
+  the log (`rollback_suspected`). A record added to the log can only make presence mode
+  stricter. What this doesn't stop: putting back both the vault file and the audit log
+  (cutting the log off before those records) to matching older copies. An audit sink, which
+  received the records as they happened, still shows them. Keeping this state somewhere a
+  program of yours can't rewrite (the Secure Enclave or a Keychain item with its own access
+  list) would close that; it isn't done here.
 - **Either way can be switched:** `unlock --require-presence` or
   `--no-require-presence` for one unlock, and `metacomputer secrets presence on|off|auto`
   (with the passphrase) for the vault's own default, kept inside the vault.
@@ -1098,6 +1115,12 @@ metacomputer secrets rule list | rule remove ID
   save, a load into another VM, or a whole browser profile (only imported sessions,
   whose sites are known, can have one). It decides whether to ask, never where the value
   goes: the fill is bound to the site checked.
+- What's confirmed is what's stored. The rule is built, with its absolute expiry, before
+  you're asked; macOS's dialog shows its secret, site or session, its project and that
+  expiry, and the rule is stored exactly as shown. A rule whose text is too long for the
+  dialog to show whole (over 400 characters, a very long project path) is refused there:
+  `rule add --passphrase` shows it in full in your terminal, with the expiry fixed when
+  it's shown, and refuses to store anything that differs.
 - The audit log records each use it covers as `approval: rule:ID`, and the rule's
   making (`rule_add`, with how it was confirmed) and removal.
 - `metacomputer secrets policy NAME --approval session|each` (passphrase) changes
@@ -1174,8 +1197,12 @@ the audit record): a random id each secret gets once and keeps through `set --re
 never reused, unlike a name. Importing again replaces only that one, never another
 account's code on the same site, not even one whose login had the same name before.
 Deleting a login leaves its code tied to no login (`delete` says so); replacing a code with
-`set --replace` keeps its login, and replacing a secret with one of another kind unties
-any code from it; every code made or
+`set --replace` keeps its login. A replacement for another account (another kind, another
+username, or other sites) is a new secret with a new id: any code tied to the old one is
+untied, and `set` says so (`totp_unlinked` in its record). A code an earlier build tied to
+its login by name is tied by that login's id the first time the vault is opened with the
+passphrase (or untied, when no login of that name is left), and the command says which;
+every code made or
 replaced has its own audit record (`set` or `rotate`, `kind: totp`), even when the password
 is unchanged. Bitwarden's non-login items are skipped; a login's URIs become its sites, at
 most its first 20 (the import says when it cut one). An export file holds every password in
@@ -1243,10 +1270,13 @@ documents (docs/moving-from-spaces.md maps the rest). They add no new way to a v
   a masked username, the tab and `same_site`: whether the page is still on the login's
   origin. Nothing of the page's address comes back, not its path or query and not its
   host: a page, or the VM, could spell the password or a token in any of them.
-- **The Chrome is bound, the tab isn't.** The hub tells the vault which Chrome it read:
-  the one it opened, by its browser process id (`--browser-pid`), or the named profile
-  given with a tab; a tab given without either is refused, and the vault refuses a request
-  through the hub that names neither. In that Chrome, the fill goes only to a tab that's
+- **The Chrome is bound, the tab isn't.** The hub tells the vault which Chrome it read,
+  by its browser process id (`--browser-pid`): the one it opened, or the one a tab passed
+  in belongs to. A tab passed in needs that pid, and the hub checks through the driver
+  that the tab is one of that Chrome's (it binds each of that process's windows and looks
+  for the target and tab); a tab elsewhere, or one passed with only a profile, is refused
+  before anything is typed. The vault refuses a request through the hub that names no
+  Chrome. In that Chrome, the fill goes only to a tab that's
   alone on the site: two or more are refused outright, never chosen between by focus or
   visibility (the pages' own answers). The tab itself can't be bound: the driver's tab ids
   aren't the ones Chrome's DevTools uses. The process id and the profile are Chrome's own

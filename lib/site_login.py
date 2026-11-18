@@ -19,8 +19,9 @@ wait_secs). Here the use goes ahead as soon as the user approves, whether or not
 The vault sees these requests as the hub's own (no Claude Code session, no project): the hub serves every
 session from one process, so the client's pid it passes on (`--on-behalf-pid`) is shown and recorded as an
 unverified claim and never satisfies a project limit, a rule or a grant. What the hub checked is bound into
-the vault's call instead: the login's exact origin (`--origin`), the Chrome it read (`--browser-pid` for the one
-it opened, `--profile` for a named one; the vault refuses a hub request without either), the sites of a session
+the vault's call instead: the login's exact origin (`--origin`), the Chrome it read (`--browser-pid`: the one it
+opened, or the one a tab passed in belongs to, checked through the driver; the vault refuses a hub request naming
+no Chrome), the sites of a session
 load (`--site`). After a login nothing the page chose comes back: not its URL, not even its host (a page, or the VM,
 can spell a value in a host name), only whether it's still on the login's own origin (`same_site`).
 """
@@ -50,8 +51,9 @@ TOOLS = [
             "status \"pending\" with a request_id while the user decides; call again with the same url and request_id "
             "to get \"filled\" (site, origin, a masked username_hint, submitted, same_site (whether the page is still on "
             "the login's origin; no address of the page is returned) and the tab) or \"denied\". "
-            "Pass the tab you opened (session, target_id, tab_id from get_browser_state, and the Chrome it's in: pid, or "
-            "profile for a named one) to sign in there; without one it opens page-mode Chrome on url itself and returns its "
+            "Pass the tab you opened (session, target_id, tab_id from get_browser_state, and pid, the Chrome process you "
+            "bound it with; the tool checks the tab is in that Chrome) to sign in there; without one it opens page-mode "
+            "Chrome on url itself and returns its "
             "tab. The fill refuses when another tab in that Chrome is on the same site. A multi-step sign-in needs one call per page "
             "(a page with only a username field gets only the username). Never returns a password."),
         "inputSchema": {
@@ -67,7 +69,7 @@ TOOLS = [
                 "request_id": {"type": "string", "description": "The request id a previous call returned (on the retry)."},
                 "wait_secs": {"type": "integer", "description": "Seconds the retry waits for the user's decision (default 20, at most 120)."},
                 "profile": {"type": "string", "description": "metacomputer only: a named driver profile to open (isolated_named) when no tab is given (default a throwaway one), or the named profile of the tab given."},
-                "pid": {"type": "integer", "description": "metacomputer only: the Chrome process of the tab given (the pid you bound with get_browser_state); a tab needs this or profile."},
+                "pid": {"type": "integer", "description": "metacomputer only: the Chrome process of the tab given (the pid you bound with get_browser_state); a tab needs it, and must be in that Chrome."},
                 "submit": {"type": "boolean", "description": "metacomputer only: submit the form after filling (default true)."},
                 "relay_plaintext_ack": {"type": "boolean", "description": "Accepted for compatibility; nothing here travels over a relay."},
             },
@@ -325,6 +327,18 @@ def open_page(hub, client, sess, url, profile=None):
     return tgt, pid
 
 
+def tab_in_chrome(hub, client, sess, tgt, pid):
+    """Is this target and tab one of the windows of Chrome process pid, as the driver binds them?"""
+    ws = (driver(hub, client, "list_windows", {"pid": pid}) or {}).get("windows") or []
+    for w in ws[:20]:
+        if not isinstance(w, dict) or w.get("pid") not in (None, pid):
+            continue
+        b = driver(hub, client, "get_browser_state", {"pid": pid, "window_id": w.get("window_id"), "session": sess}) or {}
+        if b.get("target_id") == tgt["target_id"] and any(isinstance(t, dict) and t.get("tab_id") == tgt["tab_id"] for t in b.get("tabs") or []):
+            return True
+    return False
+
+
 def snapshot(hub, client, tgt, want_origin=None, wait=15):
     """dom_refs_v1 of the tab, once the page has some fields (or the wait is over)."""
     end, snap = time.time() + wait, {}
@@ -375,13 +389,16 @@ def site_login(hub, client, args):
     sess = session_label(client, args)
     profile = args.get("profile") if isinstance(args.get("profile"), str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.get("profile")) else None
     bpid = args.get("pid") if isinstance(args.get("pid"), int) and not isinstance(args.get("pid"), bool) and args.get("pid") > 1 else None
-    # The vault is told which Chrome the hub read (its pid, or its named profile), and the fill refuses when another tab
-    # there is on the site: a value can't go to a same-site tab in another Chrome or profile.
+    # The vault is told which Chrome the hub read (its pid), and the fill refuses when another tab there is on the site:
+    # a value can't go to a same-site tab in another Chrome. A tab passed in must be in the Chrome passed with it, as the
+    # driver binds them, or nothing is typed.
     if args.get("target_id") and args.get("tab_id"):
-        if not profile and not bpid:
-            raise ToolError("invalid_argument", "a tab needs the Chrome it's in: pass pid (the process you bound with get_browser_state) "
-                                                "or profile (its named driver profile), or leave out the tab and let this tool open one")
+        if not bpid:
+            raise ToolError("invalid_argument", "a tab needs the Chrome it's in: pass pid (the process you bound with get_browser_state), "
+                                                "or leave out the tab and let this tool open one")
         tgt = {"target_id": str(args["target_id"])[:200], "tab_id": str(args["tab_id"])[:200], "session": sess}
+        if not tab_in_chrome(hub, client, sess, tgt, bpid):
+            raise ToolError("login_refused", f"that tab isn't in Chrome process {bpid} (as the driver binds its windows); nothing was typed")
     else:
         tgt, bpid = open_page(hub, client, sess, url, profile)
     snap = snapshot(hub, client, tgt, origin)

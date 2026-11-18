@@ -265,6 +265,17 @@ final class GuestRunner {
             // With the value sent, the VM's words are replaced by this process's own (secret-fill's known reasons).
             out["reason"] = valueString != nil ? fillReasonAfterValue(reason) : oneLine(reason)
         }
+        if let v = valueString {
+            // Once the VM has the value, nothing it chose goes on, failed or not: the site only as one of the sites this
+            // request named (this process's own copy, else none: a VM could spell the value in a host name), the count
+            // of characters as this process counts the value, and the rest from the request itself.
+            let allowed = request["origins"] as? [String] ?? []
+            out["origin"] = (out["origin"] as? String).flatMap { o in allowed.first { $0 == o } }
+            out["chars"] = ok ? v.utf16.count : nil
+            out["mode"] = request["mode"] as? String
+            out["field"] = request["field"] as? String
+            out["profile"] = nil
+        }
         return out
     }
 }
@@ -284,7 +295,7 @@ func fillReasonAfterValue(_ guest: String) -> String {
         ("no field is focused", "no field is focused in the page; click into the field first"),
         ("the focused field is read-only", "the focused field is read-only or disabled"),
         ("the focused element is", "the focused element isn't the kind of field this fills"),
-        ("tabs are open on the allowed sites", "several tabs are open on the allowed sites; close the others or bring the right one to the front"),
+        ("tabs are open on the allowed sites", "several tabs are open on the allowed sites; close the others (a fill goes only to a tab that's alone on its site)"),
     ]
     let g = guest.lowercased()
     for (prefix, text) in known where g.hasPrefix(prefix.lowercased()) || g.contains(prefix.lowercased()) { return text }

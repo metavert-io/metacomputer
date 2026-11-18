@@ -798,7 +798,7 @@ connection to the VM and checks:
 
 Both need no VM, and every value in them is a dummy.
 
-`python3 tests/test_secrets.py` (130 checks, about 50 s) builds two copies of
+`python3 tests/test_secrets.py` (131 checks, about 50 s) builds two copies of
 `mcomp-vault`:
 - a release build, which must not contain the test switches;
 - a test build that runs a stub instead of `ssh` (`scripts/build-vault.sh --test`).
@@ -830,7 +830,8 @@ person would. It checks that:
   - the question shows the Chrome profile and the selector (one line, at most 80 characters);
   - the secret's name allows, and only the approved site goes with the value;
   - once the value has gone to the VM, a failure reason or error output that carries it
-    (a stand-in leaks it) is replaced by the vault's own words;
+    (a stand-in leaks it) is replaced by the vault's own words, and a site or count the VM
+    spells it in (for a failed fill or a "successful" one) reaches no result or log;
   - a check naming another site is refused;
   - the listener is checked again after approval;
   - no answer times out, and a question can't outlast the unlock;
@@ -936,7 +937,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (105 checks, about 4 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (109 checks, about 4 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -976,7 +977,10 @@ person at it, and without it there is none. It covers:
   naming the scope) gives that grant; `NAME unlock` typed while the dialog for one use is
   open withdraws that dialog (`MCOMP_VAULT_TEST_LOCAL_AUTH=allow-first-after:N` would have
   allowed it) and opens one naming the wider scope, so no unlock-wide grant comes from the
-  first; `rule add --passphrase` showing the rule and its expiry before the passphrase;
+  first; `rule add --passphrase` showing the rule and its expiry before the passphrase,
+  and storing exactly that expiry however long the passphrase takes; a rule too long for
+  the dialog to show whole refused there; a vault file put back to a copy from before
+  Touch ID was seen enrolled, caught through the audit log (presence mode stays on);
 - **the hub's fills name their Chrome:** one through the hub without `--profile` or
   `--browser-pid` is refused before anyone is asked;
 - **audit continuity:** after a last record of several megabytes, the next one still
@@ -991,7 +995,7 @@ person at it, and without it there is none. It covers:
   inside a Claude Code session in a rule's project, has no session or project, so the rule
   doesn't cover it.
 
-`python3 tests/test_vault_import.py` (57 checks, about a minute) covers the imports with
+`python3 tests/test_vault_import.py` (59 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
 their values encrypted as Chrome on macOS does with a test key. The test build reads them
 through `MCOMP_VAULT_TEST_CHROME_DIR` and takes the key from `MCOMP_VAULT_TEST_CHROME_KEY`;
@@ -1008,7 +1012,9 @@ release build contains neither switch. It covers:
   account never replacing another account's code on the same site, with its own audit record;
   a login deleted and another imported under its name, which gets a code of its own while the
   old code is left untouched (and `delete` says it's tied to no login now); `set --replace`
-  on a code keeping the login it belongs to;
+  on a code keeping the login it belongs to; `set --replace` with another username
+  untying the code (another account's import then makes its own); a code tied by name, as
+  an earlier build did (a test-build command makes one), tied by id when the vault opens;
 - **`import-session`:** `--site` required, a dry run, only the named site's cookies sealed,
   `--replace` (which keeps an identity provider's mark), an identity provider needing
   `--allow-identity-provider` and asking at every load whatever its policy, the load sending
@@ -1022,7 +1028,7 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (34 checks, about a minute) runs the hub with a stand-in
+`python3 tests/test_site_login.py` (36 checks, about a minute) runs the hub with a stand-in
 driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
 0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
 standing in for the VM. It covers:
@@ -1038,7 +1044,9 @@ standing in for the VM. It covers:
   VM reports the other; no page address returned after the sign-in, only `same_site` (true
   when the page put a token in its URL, false and nothing more when it went to a host
   spelling a value); every request to the VM naming the Chrome the hub opened by its
-  browser process id; a tab given without `pid` or `profile` refused; no submit when the tab
+  browser process id; a tab given without `pid`, or with another Chrome's `pid`, refused
+  before anything is typed; a VM spelling the username it got in the site it reports for a
+  failed fill, which reaches neither the answer nor the audit log; no submit when the tab
   leaves the site after the fill; the SDK's
   `request_site_login`; another controller refused by the hub;
 - `teleport_browser_session`: no imported session (naming `import-session`), Firefox

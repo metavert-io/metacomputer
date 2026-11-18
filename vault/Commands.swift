@@ -121,6 +121,9 @@ func runMain(_ argv: [String]) -> Int32 {
         case "status": return try cmdStatus(paths, rest)
         case "audit": return try cmdAudit(paths, rest)
         case "selftest": return rest == ["--local-auth"] ? localAuthSelftest() : selftest()
+        #if MCOMP_VAULT_TESTING
+        case "test-legacy-totp-link": return try testLegacyTOTPLink(paths, rest)
+        #endif
         case "version": return cmdVersion(rest)
         case "help", "-h", "--help": oprint(usageText); return Exit.ok
         default: throw usageError("unknown command '\(cmd)' (mcomp-vault help)")
@@ -141,7 +144,55 @@ func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
     _ = try readHeader(paths)
     var pass = try readPassphrase(confirm: false)
     defer { wipe(&pass) }
-    return try openWithPassphrase(paths, pass)
+    let (key, opened) = try openWithPassphrase(paths, pass)
+    var payload = opened
+    // 2FA codes an earlier build tied to their login by name are tied by the login's id from now on, once, here.
+    var probe = payload
+    if !migrateLegacyTOTPLinks(&probe).isEmpty {
+        var notes: [String] = []
+        try updateVault(paths, key) { p in notes = migrateLegacyTOTPLinks(&p) }
+        payload = probe
+        for n in notes { oprint(clean("2FA code \(n)", max: 300)) }
+        audit(paths, ["op": "totp_links", "result": "ok", "changes": notes], macKey: vaultAuditKey(paths, key))
+    }
+    return (key, payload)
+}
+
+#if MCOMP_VAULT_TESTING
+/// Test builds only: tie a 2FA code to a login by name, as an earlier build did (tests/test_vault_import.py).
+func testLegacyTOTPLink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    guard argv.count == 2, validName(argv[0]), validName(argv[1]) else { throw usageError("usage: test-legacy-totp-link TOTP LOGIN") }
+    try requireTTY("test-legacy-totp-link")
+    installPromptSignalHandlers()
+    _ = try readHeader(paths)
+    var pass = try readPassphrase(confirm: false)
+    defer { wipe(&pass) }
+    let (key, _) = try openWithPassphrase(paths, pass)
+    try updateVault(paths, key) { p in p.secrets[argv[0]]?.totp_for = argv[1] }
+    oprint("tied \(argv[0]) to \(argv[1]) by name")
+    return Exit.ok
+}
+#endif
+
+/// Earlier builds tied a 2FA code to its login by the login's name, which a later login can take. Move each such tie to
+/// the login's id (giving the login one if it has none), or clear it when no login of that name is left. Returns what
+/// was done, one line each (empty: nothing to do).
+func migrateLegacyTOTPLinks(_ p: inout Payload) -> [String] {
+    let ids = Set(p.secrets.values.compactMap(\.id))
+    var notes: [String] = []
+    for (k, v) in p.secrets.sorted(by: { $0.key < $1.key }) where v.kind == "totp" {
+        guard let link = v.totp_for, !ids.contains(link), p.secrets[link]?.id != link else { continue }
+        if let login = p.secrets[link], login.kind == "password" {
+            let lid = login.id ?? newSecretID()
+            p.secrets[link]?.id = lid
+            p.secrets[k]?.totp_for = lid
+            notes.append("\(k): tied to the login \(link) by its id now")
+        } else {
+            p.secrets[k]?.totp_for = nil
+            notes.append("\(k): no login named \(link) is left, so it's tied to no login now (a later import gives that site's login a code of its own)")
+        }
+    }
+    return notes
 }
 
 /// The age of an ISO time, like "12 days".
@@ -251,9 +302,10 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     let stored = String(decoding: value, as: UTF8.self)
     let now = isoTime()
-    // A replacement of the same kind is the same secret: it keeps its id, and a 2FA code keeps the login it belongs to.
-    // Another kind is a new secret: a new id, and any 2FA code that belonged to the old one belongs to no login now.
-    let sameKind = old?.kind == kind
+    // A replacement for the same account (same kind, same username, same sites) is the same secret: it keeps its id, and
+    // a 2FA code keeps the login it belongs to. Anything else is another account: a new id, and any 2FA code that
+    // belonged to the old one belongs to no login now (said, and recorded), so it can never pass to the new account.
+    let sameKind = old.map { o in o.kind == kind && (o.username ?? "") == (username ?? "") && Set(o.origins) == Set(origins) } ?? false
     var unlinked: [String] = []
     try updateVault(paths, key) { p in
         if let o = old, !sameKind, let oldID = o.id {
@@ -274,7 +326,7 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if !projects.isEmpty { rec["projects"] = projects }
     if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
     audit(paths, rec, macKey: vaultAuditKey(paths, key))
-    if !unlinked.isEmpty { oprint("No longer tied to a login (\(name) is a different kind now): \(unlinked.joined(separator: ", ")).") }
+    if !unlinked.isEmpty { oprint("No longer tied to a login (\(name) now holds another account): \(unlinked.joined(separator: ", ")). A later import gives the new account a code of its own.") }
     let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
     oprint((old == nil ? "Saved" : "Rotated") + " \(name) (\(kind)) for \(where_)"
            + (projects.isEmpty ? "" : ", only for Claude Code sessions in \(projects.map(tildePath).joined(separator: ", "))")
@@ -430,14 +482,31 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let (key, opened) = try unlockKey(paths)
     var payload = opened
     // Touch ID enrolled, seen once, keeps presence mode on by default from then on (fail closed): kept in the vault.
-    if bio == .touchID && payload.biometry_seen == nil {
+    // The audit log keeps it too: a vault file put back to an older copy that lacks it (or that says `presence off`
+    // where the log's last setting doesn't) is caught here, and the stricter of the two holds.
+    let history = auditPresenceHistory(paths)
+    var rollback: String?
+    if history.seen && payload.biometry_seen == nil {
+        rollback = "this vault file has no record of Touch ID being enrolled, but its audit log has: the file may have been put back to an older copy"
+    }
+    var setting = payload.require_presence
+    if setting == "off", let lastMode = history.lastMode, lastMode != "off" {
+        setting = lastMode == "on" ? "on" : nil
+        rollback = (rollback.map { $0 + "; and " } ?? "") + "this vault file says `presence off`, but the audit log's last setting is `presence \(lastMode)`: the file may have been put back to an older copy"
+    }
+    if (bio == .touchID || history.seen) && payload.biometry_seen == nil {
         let now = isoTime()
         try updateVault(paths, key) { p in p.biometry_seen = now }
         payload.biometry_seen = now
-        audit(paths, ["op": "presence", "result": "ok", "mode": "biometry_seen"], macKey: vaultAuditKey(paths, key))
+        audit(paths, ["op": "presence", "result": "ok", "mode": "biometry_seen"] as [String: Any], macKey: vaultAuditKey(paths, key))
     }
-    let presence = resolvePresence(flag: flag, setting: payload.require_presence, biometry: bio, detail: bioDetail,
-                                   seen: payload.biometry_seen != nil)
+    if let r = rollback {
+        audit(paths, ["op": "presence", "result": "ok", "mode": "rollback_suspected", "reason": r], macKey: vaultAuditKey(paths, key))
+    }
+    var presence = resolvePresence(flag: flag, setting: setting, biometry: bio, detail: bioDetail, seen: payload.biometry_seen != nil)
+    if let r = rollback {
+        presence.2 = r + "; presence mode keeps the stricter setting" + (presence.2.map { ". " + $0 } ?? "")
+    }
     let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each",
                               multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"), touchID: a.has("touch-id"),
                               presence: presence)

@@ -63,8 +63,8 @@ does. It adds `profile` (a named driver profile to open) and `submit` (default t
    origin (`same_site`). The vault fills only a tab on that one origin, in the Chrome the
    tool read, and only when no other tab there is on the site; the form isn't submitted if
    the tab has left it.
-   A tab you pass needs its Chrome: `pid` (the process you bound with `get_browser_state`)
-   or `profile` (a named driver profile).
+   A tab you pass needs its Chrome's `pid` (the process you bound with `get_browser_state`),
+   and the tool checks that the tab is in that Chrome before anything is typed.
 
 **`teleport_browser_session`** takes `sites` (required), `browser`, `name`, `reason`,
 `request_id` and `duration_minutes`. It adds `session` and `wait_secs`.

@@ -84,7 +84,12 @@ for line in sys.stdin:
     if name == "browser_prepare":
         ok(mid, {"status": "ok", "prepared": True, "prepared_pid": 4242})
     elif name == "list_windows":
-        ok(mid, {"windows": [{"pid": 4242, "window_id": 7, "app_name": "Google-chrome", "title": "Chrome"}]})
+        # One Chrome, process 4242 (window 7, tab bt-1/tab-1); another, process 5555 (window 9, tab bt-2/tab-2).
+        wins = {4242: [{"pid": 4242, "window_id": 7, "app_name": "Google-chrome", "title": "Chrome"}],
+                5555: [{"pid": 5555, "window_id": 9, "app_name": "Google-chrome", "title": "Chrome"}]}
+        ok(mid, {"windows": wins.get(a.get("pid"), [])})
+    elif name == "get_browser_state" and "snapshot_format" not in a and a.get("pid") == 5555:
+        ok(mid, {"target_id": "bt-2", "tabs": [{"tab_id": "tab-2", "url": "about:blank"}], "binding_quality": "exact"})
     elif name == "get_browser_state" and "snapshot_format" in a:
         # move_on_snap: from that page snapshot on, the tab is on move_url (a page that navigated away after the fill)
         s["snaps"] = s.get("snaps", 0) + 1; save(s)
@@ -337,9 +342,18 @@ def run(td, procs):
     json.dump({"url": SITE + "/login.html", "force_url": "https://evil.example/login"}, open(os.path.join(state, "state.json"), "w"))
     n = len(calls())
     r0 = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1"})
-    check("N4: a tab given without the Chrome it's in (pid, or a named profile) is refused, nothing typed",
+    check("N4: a tab given without the Chrome it's in (pid) is refused, nothing typed",
           r0.is_error and r0.structured.get("error") == "invalid_argument" and "pid" in r0.structured.get("message", "")
           and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], r0.raw)
+    json.dump({"url": SITE + "/login.html"}, open(os.path.join(state, "state.json"), "w"))
+    r1 = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1", "pid": 5555})
+    r2 = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1", "profile": "work"})
+    check("a tab in Chrome 4242 passed with Chrome 5555's pid (or with only a profile): refused before anything is typed, so "
+          "Chrome 5555 can't get the value while the hub reads and submits the other",
+          r1.is_error and r1.structured.get("error") == "login_refused" and "isn't in Chrome process 5555" in r1.structured.get("message", "")
+          and r2.is_error and "pid" in r2.structured.get("message", "")
+          and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], (r1.raw, r2.raw))
+    json.dump({"url": SITE + "/login.html", "force_url": "https://evil.example/login"}, open(os.path.join(state, "state.json"), "w"))
     r = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1", "pid": 4242})
     check("a tab that is on another site: login_refused before anything is typed", r.is_error and r.structured.get("error") == "login_refused"
           and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], r.raw)
@@ -353,6 +367,13 @@ def run(td, procs):
     check("a login saved for two sites, asked for on one: the vault gets that origin and fills only there, even when the VM "
           "reports the login's other site", not r.is_error and r.structured.get("status") == "filled" and sent
           and all(x.get("origins") == [SITE4] for x in sent), (r.raw, [x.get("origins") for x in sent]))
+    open(os.path.join(stubdir, "origin-leak-next"), "w").close()
+    r = call("request_site_login", {"url": SITE4 + "/login.html"})
+    spelled_user = USER.encode().hex()
+    audit_text = open(os.path.join(vdir, "audit.jsonl")).read()
+    check("P1: a VM that spells the value it got in the site it reports for a failed fill: it reaches neither the tool's "
+          "answer nor the vault's audit log", spelled_user not in json.dumps(r.raw) and spelled_user not in audit_text
+          and "evil.example" not in json.dumps(r.raw), r.raw)
     json.dump({"after_click_url": SITE4 + "/home?session=" + URL_TOKEN + "#pw=" + URL_TOKEN}, open(os.path.join(state, "state.json"), "w"))
     r = call("request_site_login", {"url": SITE4 + "/login.html"})
     check("after the sign-in nothing of the page's address comes back: same_site true, no page_url, no path or query",
