@@ -67,6 +67,7 @@
 #   secrets init | set NAME ... [--replace] | delete NAME | bind [VM] | session policy|delete NAME
 #           | policy NAME --approval session|each | unlock [--for 30m] [--confirm each] [--touch-id]
 #           | rekey | recover | rotate-session-key | approve ID [--passphrase] | rule add ... --for 8h
+#           | import-passwords --browser chrome|--csv FILE | import-session --browser chrome --site HOST --name N --to-profile P
 #           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
 #           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove
@@ -1449,6 +1450,10 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
       exec "$VAULT_BIN" bind "$vm" --port "$SSH_PORT" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
         --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" --gateway "$NETGW_BIN" ${proxy[@]+"${proxy[@]}"} "$@" ;;
+    import-session)
+      # The session is for this VM (its approval policy, and where `session load` puts it).
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      exec "$VAULT_BIN" import-session "$@" ;;
     fill|login|session|token)
       local kind="secrets_$sub"
       if [ "$sub" = session ]; then

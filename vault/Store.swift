@@ -62,6 +62,9 @@ struct SessionMeta: Codable {
     var loads: Int
     var approval: String?           // "session": loads into the same VM don't ask. nil or "each": they do
     var identity_provider: Bool? = nil   // holds an identity provider's sign-in: every load asks, whatever the policy
+    var kind: String? = nil         // nil: a Chrome profile saved from a VM (a tar.gz); "cookies": a site's cookies imported from this Mac's Chrome
+    var source: String? = nil       // cookies: where they came from ("chrome:Default")
+    var sites: [String]? = nil      // cookies: the sites named at import
 }
 
 extension SessionMeta {

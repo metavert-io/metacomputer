@@ -29,6 +29,14 @@ In your own terminal (these ask for the vault passphrase):
   audit-sink show NAME --key | remove NAME
   policy NAME --approval session|each    whether a secret's uses ask first (without typing its value again)
   presence on|off|auto                   presence mode by default (auto: on where this Mac has Touch ID)
+  import-passwords --browser chrome [--profile NAME] [--site HOST ...] [--dry-run]
+  import-passwords --csv FILE [--site HOST ...] [--dry-run]
+                                         bring saved logins in: Chrome's (macOS asks for its Safe Storage key),
+                                         or a Chrome, Passwords app, 1Password or Bitwarden export; they ask at each use
+  import-session --browser chrome --site HOST [--site ...] --name NAME --vm VM --to-profile P
+      [--profile NAME] [--allow-identity-provider] [--replace] [--dry-run]
+                                         seal a site's cookies from your Chrome as a session for the VM's
+                                         page-mode Chrome (cookies only, not localStorage); every load asks
   unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]
                                          serve requests from this terminal until Ctrl-C or the time is up;
                                          --touch-id also shows macOS's Touch ID / login password dialog per question;
@@ -99,6 +107,8 @@ func runMain(_ argv: [String]) -> Int32 {
         case "rule": return try cmdRule(paths, rest)
         case "policy": return try cmdPolicy(paths, rest)
         case "presence": return try cmdPresence(paths, rest)
+        case "import-passwords": return try cmdImportPasswords(paths, rest)
+        case "import-session": return try cmdImportSession(paths, rest)
         case "session": return try cmdSession(paths, rest)
         case "token": return try cmdToken(paths, rest)
         case "tokens": return try cmdTokens(paths, rest)
@@ -669,6 +679,12 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let sessions = res["sessions"] as? [[String: Any]] ?? []
     if !sessions.isEmpty { oprint("Sealed browser sessions:" + ((res["session_key_rotated"] as? String).flatMap { age($0) }.map { " (key rotated \($0))" } ?? "")) }
     for s in sessions {
+        if s["kind"] as? String == "cookies" {
+            oprint(clean("  \(s["name"] ?? "")  cookies for \((s["sites"] as? [String] ?? []).joined(separator: ", ")) from \(s["source"] ?? "Chrome"), "
+                         + "for profile \(s["profile"] ?? "") on VM \(s["vm"] ?? ""), imported \(s["saved_at"] ?? ""), loaded \(s["loads"] ?? 0)x, "
+                         + "approval \(s["approval"] ?? "each")" + ((s["identity_provider"] as? Bool == true) ? " (identity provider: always asks)" : ""), max: 400))
+            continue
+        }
         oprint(clean("  \(s["name"] ?? "")  profile \(s["profile"] ?? "") from VM \(s["vm"] ?? ""), saved \(s["saved_at"] ?? ""), \(s["bytes"] ?? 0) bytes, "
                      + "loaded \(s["loads"] ?? 0)x, approval \(s["approval"] ?? "each")", max: 400))
     }

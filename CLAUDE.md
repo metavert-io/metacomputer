@@ -47,8 +47,10 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   the proxy URL inside the VM) for API keys; never put a real key in the VM
   (`skills/metacomputer/SECRETS.md`). If it says locked, ask the user to run
   `metacomputer secrets unlock` in their own terminal. Only the user runs `init`,
-  `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add` and
-  `audit-sink add|remove` (`approve` and `rule add` show a Touch ID dialog: never trigger it).
+  `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add`,
+  `import-passwords`, `import-session` and `audit-sink add|remove` (`approve` and `rule add`
+  show a Touch ID dialog: never trigger it). Tests never read the real Chrome profile or its
+  "Chrome Safe Storage" Keychain item: they use synthetic profiles and the test build's stand-ins.
 - The hub (`lib/mcp_hub.py`, `MCP_HUB=on`; architecture.md "The hub") is one
   process per VM holding the one driver connection; Claude Code's bridge,
   `metacomputer call`, `web`, the GUI test harness and scripts (`lib/mcomp_sdk.py`)
@@ -163,7 +165,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
-  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
+  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_vm_runner`, `test_plugin`, `test_learn`, `test_storage`, `test_install` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings) and

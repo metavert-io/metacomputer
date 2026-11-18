@@ -785,7 +785,8 @@ and every use waits for you. It is not a wall against a deliberately hostile age
 "What doesn't hold" below has the details and how to narrow them.
 
 It ships in this repository. It needs no password manager, no other secrets tool and
-not the macOS Keychain. It has two parts:
+not the macOS Keychain (only `import-passwords --browser chrome` and `import-session`
+read one Keychain item, Chrome's own, after macOS asks you). It has two parts:
 - **On the Mac:** the vault program, `vault/`, built by `scripts/build-vault.sh`
   (which `install.sh` runs). It needs macOS 15 and Apple's Command Line Tools
   (`swiftc`).
@@ -1109,6 +1110,65 @@ the site, which must be one of the secret's, and the username field must be on t
 site), then both are typed through the same path as `fill`, to that site only. The
 answer lists the fields filled, the site and a masked username.
 
+### Bringing logins in: Chrome, CSV exports, a site's cookies
+
+All of these run in your own terminal and ask for the vault passphrase, like `set`; the
+values go from their source into the encrypted vault and nowhere else. The output names
+sites, counts, proposed secret names and masked usernames (`a***@example.com`) only, and
+`--dry-run` shows that much without opening the vault (or, for Chrome, the passwords).
+Everything imported starts at `each`: every use asks until you relax it (`policy`, or a
+rule).
+
+**Saved passwords from Chrome**, `import-passwords --browser chrome [--profile NAME]
+[--site HOST ...]`:
+- It reads a copy of the profile's `Login Data` (with its `-wal` and `-journal`), made in a
+  private folder and removed afterwards; Chrome's own file is never opened.
+- The passwords are encrypted with Chrome's "Chrome Safe Storage" key, which Chrome keeps in
+  your login keychain. The vault asks the Keychain for it, and macOS asks you whether
+  `mcomp-vault` may use it: choose **Allow** (not Always Allow) to let it read the key this
+  once. Over SSH, with no window to ask in, macOS refuses and the import says so.
+- One secret per site and username, named after the host (`github.com`, `github.com-2`).
+  Importing again changes nothing that's the same, updates a changed password in place
+  (recorded as a rotation) and never duplicates. Skipped, and counted: sites that aren't
+  https (http only for `localhost` or `127.0.0.1` with a port), apps' logins, "never save"
+  entries, empty passwords, and passwords in a form other than Chrome's macOS one (`v10`).
+
+**CSV exports**, `import-passwords --csv FILE`: Chrome's (`name,url,username,password,note`),
+the macOS Passwords app's (`Title,URL,Username,Password,Notes,OTPAuth`), 1Password's
+(`Title,Url,Username,Password,OTPAuth,...`) and Bitwarden's (`...,type,name,...,login_uri,
+login_username,login_password,login_totp`), recognized by their headers. A one-time-code
+column (`OTPAuth`, `login_totp`) becomes a TOTP secret beside the login (`NAME-otp`) when
+it's a SHA1, 6-digit, 30-second code; others are skipped and said. Bitwarden's non-login
+items are skipped; all of a login's URIs become its sites. An export file holds every
+password in plain text: delete it once it's imported.
+
+**A site's session from your Chrome**, `import-session --browser chrome --site HOST [--site
+...] --name NAME --to-profile P`:
+- It reads a copy of the profile's cookie store and keeps the named sites' cookies: those of
+  the site itself, its subdomains, and domain cookies above it. There is no "every site".
+- The values are decrypted with the Safe Storage key (macOS asks, as above) and sealed in
+  the vault like a saved session, for profile `P` on the current VM. The session's approval
+  starts at `each`.
+- **localStorage and IndexedDB are not imported.** Chrome keeps them in LevelDB stores that
+  can't be merged into another profile reliably; a site that keeps its sign-in there needs a
+  fresh sign-in in the VM. Only cookies come along.
+- Cookies that reach an identity provider's sign-in pages (`.google.com` reaches
+  `accounts.google.com`) need `--allow-identity-provider`, and such a session asks at every
+  load, whatever its policy and whatever rules exist.
+- `session load NAME` puts them into the VM through the same guarded path as any sealed
+  session (the pinned VM and gateway, the desktop account, the approval). In the VM a loader
+  run as the desktop user merges them into profile `P`'s own cookie store: the profile must
+  exist (opened once by the driver in page-mode Chrome, then closed), no Chrome may be using
+  it, a store encrypted with a keyring is refused, and cookies with the same host, name and
+  path are replaced. Each value goes there encrypted with the VM's Chrome key (Chromium's
+  fixed key for a Linux machine without a keyring, as the VM is built), so the VM's Chrome
+  reads it as its own; the key on this Mac is never copied anywhere.
+
+Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME_DIR` (a
+folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
+stand-in for the Safe Storage password) are required there, and release builds don't
+contain them (`tests/test_vault_import.py`).
+
 ### API keys: short-lived tokens through a proxy
 
 The key stays on the Mac. The VM gets a token that works only through the vault's
@@ -1242,7 +1302,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
 | `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
 | `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
@@ -1665,7 +1725,12 @@ something waits for you:
   a URL, inside a compressed file it serves as data) would hand it over. What the API
   itself does with your requests is up to the API.
 - **A sealed login is a login.** Anyone who loads it is signed in, so treat it like
-  the password.
+  the password. That includes cookies imported from your own Chrome: once loaded, the VM's
+  desktop account (and so Claude's shell) can read them, as with any sealed session.
+- **Importing from Chrome trusts this Mac's Chrome key to the vault for a moment.** While it
+  runs, `mcomp-vault` holds Chrome's Safe Storage key, which opens every password and cookie
+  Chrome keeps. If you choose Always Allow at macOS's question, `mcomp-vault` can read it
+  later without asking: choose Allow.
 - **Memory.** While unlocked, the unlock process holds the decrypted vault. When it
   locks, it overwrites the copies it controls and exits. Swift and Foundation make
   copies it can't reach.
@@ -1675,6 +1740,7 @@ something waits for you:
 | Command | Where | What it does |
 | --- | --- | --- |
 | `init [--no-enclave]`, `set ... [--replace]`, `delete`, `policy NAME`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `import-passwords --browser chrome [--profile N] \| --csv FILE [--site H ...] [--dry-run]`, `import-session --browser chrome --site H ... --name N --to-profile P [--allow-identity-provider]` | your terminal | Bring saved logins in, or a site's cookies from your Chrome (macOS asks about Chrome's key; asks for the passphrase) |
 | `rekey [--enclave\|--no-enclave]`, `recover [--no-enclave]`, `rotate-session-key` | your terminal | New keys; open with the recovery key ("Keys, the Secure Enclave and rotation") |
 | `audit-sink add\|remove NAME`, `audit-sink show NAME --key` | your terminal | Off-Mac copies of the audit log, and a sink's signing key |
 | `unlock [--for 30m] [--confirm each] [--allow-multiplexer] [--touch-id]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
