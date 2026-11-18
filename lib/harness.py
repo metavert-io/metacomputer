@@ -30,6 +30,7 @@ import traceback
 
 import guest_import
 import mcomp_sdk
+import termsafe
 from mcp_client import LAB_ROOT
 
 SSH = [os.path.join(LAB_ROOT, "bin", "metacomputer"), "ssh", "ops"]
@@ -178,17 +179,11 @@ class TestRun:
         # Plain files and folders only: links and special files from the VM are left out and
         # nothing is written through a link (guest_import.py).
         dest = os.path.join(self.res_dir, "guest")
-        os.makedirs(dest, exist_ok=True)
-        max_bytes, min_free = guest_import.limits_from_config()
-        try:
-            rep, rc, err = guest_import.import_from_command(SSH + [f"cd {self.guest_dir} && tar -cf - ."], dest,
-                                                             max_bytes, min_free, timeout=600)
-            if rep.dropped:
-                self.errors.append(f"left out {len(rep.dropped)} link(s) or special file(s) from the VM")
-            if rep.failure is not None and (rep.files or rep.dirs or rc == 0):
-                self.errors.append(f"copy from the VM incomplete: {rep.failure}")
-        except OSError as e:
-            self.errors.append(f"copy from the VM failed: {e}")
+        complete, problems = collect_guest(SSH + [f"cd {self.guest_dir} && tar -cf - ."], dest)
+        self.errors.extend(problems)
+        self.evidence["collection_complete"] = complete
+        if not complete:
+            self.note("evidence from the VM is incomplete: " + "; ".join(problems)[:300])
         vids = []
         for d, _, fs in os.walk(dest):
             vids += [os.path.join(d, f) for f in fs if f.endswith(".mp4") and not os.path.islink(os.path.join(d, f))]
@@ -231,6 +226,30 @@ class TestRun:
                            "run_id": self.run_id, "result_json": os.path.relpath(os.path.join(self.res_dir, "result.json"), LAB_ROOT)},
                           f, indent=2)
         return result
+
+
+def collect_guest(cmd, dest, limits=None, timeout=600):
+    """Copy a guest folder to dest through cmd (an SSH tar command) with the importer's limits. Returns (complete,
+    problems): complete is False whenever the command failed or the copy stopped, and every problem is named with a
+    short, escaped diagnostic, so a run never looks fully evidenced when it isn't."""
+    os.makedirs(dest, exist_ok=True)
+    max_bytes, min_free = limits if limits is not None else guest_import.limits_from_config()
+    problems = []
+    try:
+        rep, rc, err = guest_import.import_from_command(cmd, dest, max_bytes, min_free, timeout=timeout)
+    except OSError as e:
+        return False, [f"copy from the VM failed: {termsafe.escape_for_terminal(str(e))[:200]}"]
+    tail = termsafe.escape_for_terminal(" ".join(err.split())[-200:]) if err else ""
+    if rc not in (0, None):
+        problems.append(f"copy from the VM: its command exited {rc}" + (f" ({tail})" if tail else ""))
+    elif rc is None:
+        problems.append("copy from the VM: its command didn't exit")
+    if rep.failure is not None:
+        problems.append(f"copy from the VM incomplete: {termsafe.escape_for_terminal(str(rep.failure))[:200]}")
+    if rep.dropped_count:
+        problems.append(f"left out {rep.dropped_count} link(s) or special file(s) from the VM")
+    complete = rc == 0 and rep.failure is None
+    return complete, problems
 
 
 READ_ONLY = {"list_apps", "list_windows", "get_window_state", "get_desktop_state", "get_accessibility_tree",

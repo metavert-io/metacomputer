@@ -536,6 +536,22 @@ def command_checks(td):
     src = open(os.path.join(LAB, "lib", "harness.py")).read()
     check("the harness copies through import_from_command with those limits (no capture_output of the stream)",
           "import_from_command" in src and "limits_from_config" in src and "capture_output=True, timeout=600" not in src)
+    # the harness's collection says when evidence is missing, whatever the reason
+    import harness
+    lim = (10_000_000, 0)
+    ok, probs = harness.collect_guest([sys.executable, "-c", "import sys; sys.stderr.write('no such dir\\x1b[2J'); "
+                                       "sys.exit(3)"], os.path.join(td, "col1"), lim)
+    check("collection: a command that fails before sending anything is reported (exit code, escaped stderr), "
+          "evidence incomplete", not ok and any("exited 3" in p and "\\x1b[2J" in p for p in probs)
+          and not any("\x1b" in p for p in probs), probs)
+    partial = (f"import sys, subprocess; out = subprocess.run([sys.executable, {prod!r}, 'quiet'], capture_output=True)"
+               ".stdout; sys.stdout.buffer.write(out[:400_000]); sys.stdout.flush(); sys.exit(1)")
+    ok, probs = harness.collect_guest([sys.executable, "-c", partial], os.path.join(td, "col2"), lim)
+    check("collection: a stream cut short is reported too, and what arrived whole is kept",
+          not ok and any("exited 1" in p for p in probs) and any("incomplete" in p for p in probs)
+          and os.listdir(os.path.join(td, "col2")) == ["a.bin"], (probs, os.listdir(os.path.join(td, "col2"))))
+    ok, probs = harness.collect_guest([sys.executable, prod, "quiet"], os.path.join(td, "col3"), lim)
+    check("collection: a whole copy is complete, with nothing to report", ok and probs == [], probs)
 
 
 if __name__ == "__main__":
