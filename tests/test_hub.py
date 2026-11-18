@@ -2187,6 +2187,50 @@ def answer_id_checks():
           ids == ("c1.2", None, None, None, "c1.3"), ids)
 
 
+def transport_cleanup_checks():
+    print("#36: ending a connection signals only its own process group, once, wherever it's called from")
+    hub = mcp_hub.Hub(env=env(MCOMP_RUN_DIR=os.path.join(TD, "run-tc")))
+    mark = os.path.join(TD, "tc-mark")
+    os.makedirs(mark, exist_ok=True)
+    relay = os.path.join(TD, "tree_relay.py")
+    open(relay, "w").write(TREE_RELAY)
+    hub.env["MCOMP_HUB_DRIVER_CMD"] = json.dumps([PY, relay, mark, PY, FAKE, STATE])
+    saved = mcp_hub.TRANSPORT_GRACE_S
+    mcp_hub.TRANSPORT_GRACE_S = 1.0
+    real = os.killpg
+    sent = []
+    try:
+        proc = hub._spawn_bridge()
+        proc.mcomp_lock = threading.Lock()
+        wait_until(lambda: os.path.exists(os.path.join(mark, "child.pid")), 5)
+        child = int(open(os.path.join(mark, "child.pid")).read())
+
+        def spy(pgid, sig):
+            sent.append((sig, proc.returncode))
+            return real(pgid, sig)
+        os.killpg = spy
+        ths = [threading.Thread(target=hub._end_transport, args=(proc, True)) for _ in range(3)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join(30)
+        wait_until(lambda: not owners.alive(child), 3)   # (launchd reaps the killed child)
+        sigs = [s for s, _ in sent]
+        check("three cleanups at once (keeper, reader, shutdown): one SIGTERM, one SIGKILL, never a signal once the "
+              "leader is reaped, and the whole group gone", sigs.count(signal.SIGTERM) == 1
+              and sigs.count(signal.SIGKILL) == 1 and all(rc is None for _, rc in sent)
+              and proc.returncode is not None and not owners.alive(child), (sent, proc.returncode, owners.alive(child)))
+        other = subprocess.Popen(["sleep", "0"], start_new_session=True)
+        other.mcomp_pgid = other.pid
+        other.wait()                                 # reaped elsewhere: its number may be anyone's now
+        del sent[:]
+        hub._end_transport(other, True)
+        check("…and a connection whose leader was already reaped gets no signal at all", sent == [], sent)
+    finally:
+        os.killpg = real
+        mcp_hub.TRANSPORT_GRACE_S = saved
+
+
 def main():
     setup_driver()
     try:
@@ -2229,6 +2273,7 @@ def main():
         notes_checks()
         linear_scan_checks()
         answer_id_checks()
+        transport_cleanup_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)

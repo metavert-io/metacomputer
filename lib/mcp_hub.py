@@ -1004,39 +1004,61 @@ class Hub:
             ending &= set(self.gen_procs)
 
     def _end_transport(self, proc, term):
-        """End a driver connection's process tree, bounded: with term, SIGTERM to its process group first (the action
-        log's relay fails its pending records and signs its log; SSH ends), then TRANSPORT_GRACE_S to exit; then
-        SIGKILL to whatever of the group is left (a child that ignored SIGTERM, an SSH the relay didn't end), and the
-        process reaped. The group is the connection's own (start_new_session in _spawn_bridge)."""
-        pgid = getattr(proc, "mcomp_pgid", None)
-
-        def signal_all(sig):
+        """End a driver connection's process tree, bounded, once: with term, SIGTERM to its process group first (the
+        action log's relay fails its pending records and signs its log; SSH ends), then TRANSPORT_GRACE_S to exit;
+        then SIGKILL to whatever of the group is left (a child that ignored SIGTERM, an SSH the relay didn't end);
+        only then is the group's leader reaped. The group is the connection's own (start_new_session in
+        _spawn_bridge), and its id is the leader's pid, which can't be reused while the leader is unreaped, so every
+        signal here reaches this connection's group and no other. Nothing else in the hub reaps a connection's
+        process. The keeper, the reader and shutdown may call this at once: one runs it, the others wait for it and
+        find it done. A leader that was reaped elsewhere gets no signal at all (its number may be someone else's)."""
+        lock = getattr(proc, "mcomp_lock", None)
+        if lock is None:
+            lock = proc.mcomp_lock = threading.Lock()
+        with lock:
+            if getattr(proc, "mcomp_ended", False):
+                return
             try:
-                if pgid is not None:
-                    os.killpg(pgid, sig)
-                else:
-                    os.kill(proc.pid, sig)
-            except (OSError, ProcessLookupError):
-                pass
-        if term:
-            signal_all(signal.SIGTERM)
+                if proc.returncode is None:
+                    if term:
+                        self._signal_group(proc, signal.SIGTERM)
+                    _wait_exit_unreaped(proc, TRANSPORT_GRACE_S)
+                    self._signal_group(proc, signal.SIGKILL)
+                    try:
+                        proc.wait(timeout=5)         # reaped last: after this its number is free again
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
+            finally:
+                proc.mcomp_ended = True
+
+    @staticmethod
+    def _signal_group(proc, sig):
+        """sig to a connection's process group (or its process), only while its leader is unreaped."""
+        if proc.returncode is not None:
+            return
+        pgid = getattr(proc, "mcomp_pgid", None)
         try:
-            proc.wait(timeout=TRANSPORT_GRACE_S)
-        except (subprocess.TimeoutExpired, OSError):
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            else:
+                os.kill(proc.pid, sig)
+        except OSError:                              # gone already (EPERM: only the zombie leader is left)
             pass
-        signal_all(signal.SIGKILL)
+
+    @staticmethod
+    def _kill_leader(proc):
+        """SIGKILL to a connection's own process (its reader then ends the rest of the group), unless it's being
+        ended right now or was reaped: checked and sent under the lock _end_transport reaps under."""
+        lock = getattr(proc, "mcomp_lock", None)
+        if lock is None or not lock.acquire(blocking=False):
+            return                                   # being ended already
         try:
-            proc.wait(timeout=5)
-        except (subprocess.TimeoutExpired, OSError):
+            if proc.returncode is None and not getattr(proc, "mcomp_ended", False):
+                os.kill(proc.pid, signal.SIGKILL)
+        except OSError:
             pass
-        if pgid is not None:                         # nothing of the group outlives this (bounded)
-            end = time.monotonic() + 2
-            while time.monotonic() < end:
-                try:
-                    os.killpg(pgid, 0)
-                except (OSError, ProcessLookupError):
-                    break
-                time.sleep(0.02)
+        finally:
+            lock.release()
 
     def _refresh_leases(self):
         with self.lease_lock:
@@ -1118,8 +1140,10 @@ class Hub:
         return tail.text(wait=2.0).strip() if tail is not None else ""
 
     def connected(self):
+        """Without reaping the process (only _end_transport does): its reader marks the end of its output."""
         up = self.up
-        return up is not None and self.ready and up.poll() is None
+        return (up is not None and self.ready and not getattr(up, "mcomp_eof", False)
+                and not getattr(up, "mcomp_ended", False) and up.returncode is None)
 
     def send_up(self, *msgs):
         """Write messages to the driver as one unit (a client note goes right before its call)."""
@@ -1145,10 +1169,7 @@ class Hub:
         except TimeoutError:
             # The VM stopped reading: a stuck driver must not hold every client's call forever.
             self.note(f"the driver didn't take a message within {WRITE_TIMEOUT_S} s; closing its connection")
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            self._kill_leader(proc)                  # its reader sees the end and ends the rest (_upstream_closed)
             return False
         except (BrokenPipeError, OSError, ValueError):
             return False
@@ -1170,15 +1191,13 @@ class Hub:
             if self.connected():
                 return None
             old = self.up
-            if old is not None and old.poll() is None:
-                try:
-                    old.kill()
-                except OSError:
-                    pass
+            if old is not None:
+                self._kill_leader(old)               # its reader ends the rest of it
             try:
                 proc = self.spawn()
             except OSError as e:
                 return f"Could not start the connection to the virtual computer ({e})."
+            proc.mcomp_lock, proc.mcomp_eof, proc.mcomp_ended = threading.Lock(), False, False
             try:
                 os.set_blocking(proc.stdin.fileno(), False)    # send_up writes with a deadline
             except (OSError, ValueError, AttributeError):
@@ -1196,10 +1215,7 @@ class Hub:
                     proc.stdin.close()
                 except OSError:
                     pass
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                self._end_transport(proc, False)     # (its reader may be doing the same: it's done once)
                 if self.up is proc:
                     self.up = None
                 err = self._stderr_text()
@@ -1368,6 +1384,7 @@ class Hub:
             if not isinstance(e, (OSError, ValueError)):
                 self.note(f"the driver connection's reader stopped: {e!r}"[:300])
         finally:
+            proc.mcomp_eof = True                    # (connected() looks here, never at the process itself)
             self._upstream_closed(proc, gen, why)
 
     def _answer_refused(self, line, gen):
@@ -2299,6 +2316,38 @@ class Hub:
                 events.flush_async(2.0)
             except Exception:
                 pass
+
+
+def _wait_exit_unreaped(proc, timeout):
+    """Wait up to timeout for proc to exit without reaping it, so its pid (its group's id) stays its own. True when
+    it has exited. waitid(WNOWAIT) where Python has it; else kqueue (an older macOS Python), which also answers at
+    once for a process that already exited."""
+    end = time.monotonic() + timeout
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        while True:
+            try:
+                if os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                    return True
+            except ChildProcessError:
+                return True
+            except OSError:
+                break
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.02)
+    try:
+        kq = select.kqueue()
+        try:
+            ev = select.kevent(proc.pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                               fflags=select.KQ_NOTE_EXIT)
+            return bool(kq.control([ev], 1, max(0.0, end - time.monotonic())))
+        finally:
+            kq.close()
+    except ProcessLookupError:
+        return True
+    except (OSError, AttributeError):
+        time.sleep(max(0.0, end - time.monotonic()))
+        return False
 
 
 TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
