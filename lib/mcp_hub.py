@@ -673,8 +673,7 @@ class Hub:
         self._lease_keeper = None   # the thread that refreshes leases and ends a runtime past LEASE_MAX_S
         self.gen_procs = {}         # driver connection generation -> its process, until that connection's reader is done
                                     # (a lease's calls run in their own generation, which may no longer be self.up)
-        self._bad_upstream = collections.deque()   # times of unusable messages from the driver (BAD_UPSTREAM_*)
-        self._bad_gen = None        # ...on this driver connection only: a new one starts with none
+        self._bad_upstream = {}     # driver connection generation -> times of its unusable messages (BAD_UPSTREAM_*)
         self.log_lock = threading.Lock()
         self._note_kinds = {}       # kind -> its window: start, written, left out, examples, timer (NOTE_REPEAT_MAX)
         self.log = None
@@ -1430,10 +1429,9 @@ class Hub:
         handle: why). True once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S on the same
         connection: a driver that keeps doing it is hung up on rather than logged without end."""
         now = time.monotonic()
-        q = self._bad_upstream
-        if self._bad_gen != gen:                     # counted per driver connection: a new one starts clean
-            q.clear()
-            self._bad_gen = gen
+        # Counted per driver connection, each in its own window: a new one starts clean, and messages alternating
+        # between an old connection still finishing and the current one can't reset each other's count.
+        q = self._bad_upstream.setdefault(gen, collections.deque())
         q.append(now)
         while q and now - q[0] > BAD_UPSTREAM_WINDOW_S:
             q.popleft()
@@ -1475,6 +1473,7 @@ class Hub:
             self._reset_runtime()
         self.last_activity = time.time()
         self.gen_procs.pop(gen, None)
+        self._bad_upstream.pop(gen, None)
         self.flush_notes()                           # what was left out about this connection, counted, before it ends
         self.note(f"driver connection closed (generation {gen}{', ' + why if why else ''})")
 
@@ -1791,10 +1790,11 @@ class Hub:
         # process: the hub's own record of it counts. (A written lease is its file, which `release` may drop.)
         with self.lease_lock:
             unwritten = [l for l in self.leases.values() if not l["written"] and l["keys"]]
-        if any(o.get("claim") == "lease" and o.get("bridge_pid") == self.pid for o in others):
-            unwritten = []                           # an earlier write is still on file (a refresh failed)
+        # An earlier write still on file stands in for it only when that file itself counts here (active, and for
+        # the same client): a stale one, left by refreshes that failed, doesn't.
+        on_file = {o.get("client_pid") for o in busy if o.get("claim") == "lease" and o.get("bridge_pid") == self.pid}
         for l in unwritten:
-            if l["client_pid"] in mine or (client.claude and l["claude"] == client.claude):
+            if l["client_pid"] in mine or (client.claude and l["claude"] == client.claude) or l["client_pid"] in on_file:
                 continue
             busy.append({"kind": "session", "claim": "lease", "active": True, "bridge_pid": self.pid,
                          "client_pid": l["client_pid"], "claude_pid": l["claude"], "cwd": l["cwd"],

@@ -2231,6 +2231,46 @@ def transport_cleanup_checks():
         mcp_hub.TRANSPORT_GRACE_S = saved
 
 
+def partial_checks():
+    print("#36: a stale lease file doesn't stand in for an unwritten lease; bad messages count per connection")
+    clear_claims()
+    real = owners.write_claim
+    r = Running()
+    try:
+        sub = subprocess.Popen([PY, "-c", (
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import mcomp_sdk\n"
+            "h = mcomp_sdk.Hub(env=json.loads(sys.argv[2]), kind='sdk', timeout=1).connect()\n"
+            "h.call('slow', {'s': 30}); h.close()\n"), os.path.join(LAB, "lib"), json.dumps(r.env)])
+        sub.wait(30)
+        wait_until(lambda: lease_files(), 5)
+        owners.write_claim = lambda pid, *a, **k: (_ for _ in ()).throw(OSError("disk full")) \
+            if k.get("kind") == "lease" else real(pid, *a, **k)
+        with owners.lock():
+            r.hub._refresh_leases()                  # the refresh fails: the hub's lease is unwritten now
+        path = owners.claim_path(r.hub.pid)
+        rec = json.load(open(path))
+        rec["last_call"] = time.time() - 2 * owners.ACTIVE_S     # and the earlier file has gone stale
+        json.dump(rec, open(path, "w"))
+        stranger = mcp_hub.Client(r.hub, None, 99999)
+        stranger.mine, stranger.claude, stranger.holder = set(), None, 99999
+        busy = r.hub.busy_others(stranger)
+        check("an unwritten lease still counts when the only file left is a stale one from an earlier write",
+              any(o.get("claim") == "lease" and o.get("active") for o in busy), busy)
+    finally:
+        owners.write_claim = real
+        r.stop()
+        clear_claims()
+    saved = mcp_hub.BAD_UPSTREAM_MAX
+    mcp_hub.BAD_UPSTREAM_MAX = 40
+    try:
+        hub = mcp_hub.Hub(env=env(MCOMP_RUN_DIR=os.path.join(TD, "run-bad")))
+        hung = [hub._bad_upstream_message(1 if i % 2 else 2, "not JSON") for i in range(100)]
+        check("bad messages alternating between an old connection and the current one still reach the hang-up "
+              "(each connection counted on its own)", any(hung), hung.count(True))
+    finally:
+        mcp_hub.BAD_UPSTREAM_MAX = saved
+
+
 def main():
     setup_driver()
     try:
@@ -2274,6 +2314,7 @@ def main():
         linear_scan_checks()
         answer_id_checks()
         transport_cleanup_checks()
+        partial_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
