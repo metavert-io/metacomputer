@@ -44,6 +44,11 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   `lib/mcp_relay.py`, `lib/driver_profiles.py`) and the guest
   (`metacomputer-admin ssh-auth|driver-policy`, `driver-mcp`).
   `metacomputer security` shows what is on.
+- Shell channel (`metacomputer sh`, `lib/vm_shell.py` + `lib/vm_shell_guest.py`):
+  route work by where the state lives (`skills/metacomputer/SHELL.md`); never
+  fake a GUI result. `VM_SHELL` (auto = off while bounded) and `SHELL_LOG`
+  (auto = logged when `ACTION_LOG=on`) must keep those defaults; a run counts
+  as an acting call for the one-controller rule.
 
 ## Useful commands
 
@@ -52,7 +57,8 @@ metacomputer start | stop | status | reset | test [A-F] | record start|stop|mome
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
 metacomputer security [apply] | actions list|show|verify   # optional hardening, signed action log
-metacomputer ssh ops 'cmd'      # shell as the desktop user (artifact checks, not GUI work)
+metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop user (docs/shell.md)
+metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
 metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --describe TOOL
 ```
 
@@ -67,8 +73,8 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
   `status` says to rebuild them.
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
-  `python3 tests/test_actionlog.py` and `python3 tests/test_recording.py` (no VM), `tests/test_options.py` (test VM only;
-  it switches the VM's SSH and driver settings). See TESTING.md.
+  `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py` and `python3 tests/test_vm_shell.py` (no VM),
+  `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),
 docs/chrome-investigation.md, and `.claude/skills/cua-driver/` (the

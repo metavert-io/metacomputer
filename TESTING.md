@@ -78,7 +78,7 @@ with its hash recomputed, a deleted record, a cut-off end, and a log signed
 with another key. It also runs the relay against a fake driver and checks that
 messages pass through unchanged.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py [A] [B] [C]` runs against
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py [A] [B] [C] [F]` runs against
 a running **test** VM. It switches the VM's SSH and driver settings through the
 maintenance account, then puts them back to the defaults.
 - **A** (6 checks): a real session is logged in order, typed text is redacted,
@@ -97,6 +97,8 @@ maintenance account, then puts them back to the defaults.
   - An expired manifest and one changed inside the VM are refused.
   - Standard mode works again afterwards.
 
+- **F** (26 checks), the shell channel (`metacomputer sh`, below).
+
 The GUI suite also runs under the `desktop` profile: put
 `DRIVER_MODE=bounded` in the test VM's config and run
 `metacomputer test A B C D`.
@@ -104,6 +106,37 @@ The GUI suite also runs under the `desktop` profile: put
   in driver 0.52.1.
 - F uses page tools and hybrid typing, which need standard mode (or the
   `browser` profile for the page tools alone).
+
+## The shell channel: `tests/test_vm_shell.py`, `tests/test_options.py F`
+
+`python3 tests/test_vm_shell.py` needs no VM (55 checks). `bash -c` stands in
+for SSH, so the Mac's half (`lib/vm_shell.py`) and the VM's half
+(`lib/vm_shell_guest.py`) both run locally. It checks:
+- argument parsing and usage errors, guest paths for `--cwd`;
+- `VM_SHELL` (`auto` off while bounded, `on`, `off`, unknown values refused)
+  and `SHELL_LOG` against `ACTION_LOG`;
+- the output cap: whole under the cap, first and last halves over it, sizes
+  and SHA-256 of the whole stream, cuts on UTF-8 character boundaries;
+- exit codes (the script's, 124, 125, 255, 130, 2), stdin, `--file` and
+  arguments, `--json`;
+- the desktop session's environment from a session file, and none with
+  `--read-only`;
+- a background program doesn't hold the result, a timeout ends the script's
+  process group, an interrupted command stops the script;
+- another session's claim refuses a run, `--read-only` and `--override` still
+  run, and a run claims the computer;
+- the action log: no file with `ACTION_LOG=off` or `SHELL_LOG=off`; with
+  logging, a `vm_shell` call and result with hashes and sizes, nothing of the
+  script or output unless `ACTION_LOG_TEXT=keep`, refusals and timeouts
+  recorded, and `actions verify --all` passing.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py F` (26 checks) does the
+same against a running test VM. It also checks that the script runs as the
+desktop user without sudo, that nothing of the Mac's is mounted and the
+gateway refuses it, that the desktop's display, session bus and accessibility
+settings work, and that a GUI app started with `setsid -f` outlives the run
+with an accessibility tree the driver can read. It changes no VM settings: the
+`VM_SHELL`, bounded-driver and logging cases are config variants on the Mac.
 
 ## Browser checks: `metacomputer web …`
 

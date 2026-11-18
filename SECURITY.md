@@ -14,7 +14,9 @@ it:
 
 This page covers three **optional** protections. All are off by default, so
 out of the box metacomputer behaves the way Cua Driver does on its own.
-Each one is independent; turn on any of them in `config/local.env`.
+Each one is independent; turn on any of them in `config/local.env`. It also
+covers the shell channel, `metacomputer sh`: what it can reach, how bounded
+mode turns it off, and its optional logging.
 
 | Setting | What it adds | Costs |
 | --- | --- | --- |
@@ -80,7 +82,8 @@ its results folder; copies verify like the originals.
   exists as a file.
 - Deleting a whole file isn't detected. Copy the files somewhere you control
   if you need that.
-- The log covers the driver, not the `metacomputer ssh` shells.
+- The log covers the driver and `metacomputer sh` (unless `SHELL_LOG=off`;
+  see below), not `metacomputer ssh`.
 - It records what was asked and what came back, not what the screen showed.
   Use `metacomputer record` for that.
 
@@ -160,7 +163,8 @@ How it's enforced:
 **Where it ends:**
 - It limits the driver, which is how Claude acts on the VM. It doesn't limit
   the `ops` shell the Mac uses for status and file copies, or programs already
-  running inside the VM.
+  running inside the VM. That's why bounded mode turns `metacomputer sh` off
+  unless `VM_SHELL=on` (below).
 - Cua runs page tools and desktop tools in separate runtimes, so one bounded
   session can't use both. `MODE=hybrid` browsing needs standard mode.
 - Driver 0.52.1's manifests have no entry for the clipboard, so
@@ -168,6 +172,61 @@ How it's enforced:
 - In our tests with driver 0.52.1, `kill_app` refused to close apps the
   driver had launched, even with `terminate: driver_launched`. Close them from
   their own window, or use `metacomputer desktop-restart`.
+
+## The shell channel (`metacomputer sh`)
+
+`metacomputer sh` runs a bash script in the VM as the desktop user and brings
+back its output and exit code ([docs/shell.md](docs/shell.md)). It's on by
+default, because code and command-line tools are often the more accurate
+and cheaper way to work with files in the VM.
+
+What it can do:
+- whatever the desktop user `cua` can do in the VM: read and write that
+  user's files, run and stop that user's programs, start apps on the desktop
+  (it gets the desktop session's environment), and reach the public internet
+  like the VM's browsers do.
+
+What it can't do:
+- **Reach your Mac.** It uses the same SSH path, account and key (or
+  certificate) as `metacomputer ssh ops`. The VM's side of that key refuses
+  agent, port and X11 forwarding, so nothing in the VM can reach back through
+  the connection. The gateway refuses every connection from the VM to the
+  Mac, your network and the tailnet, and the VM has no shared folders. The
+  script travels on SSH's stdin and is never run by a shell on the Mac.
+- **Get root.** `cua` has no sudo.
+- **Get around the one-controller rule by accident.** A run counts as acting:
+  it's refused while another session is using the computer, unless the user
+  agrees to `--override`. `--read-only` skips that for checks, as a promise
+  rather than a sandbox.
+
+Settings:
+- `VM_SHELL=auto` (the default) is on, except while `DRIVER_MODE=bounded`:
+  the shell isn't held to the driver's manifest, so it would get around the
+  bounded profile's limits. `VM_SHELL=on` allows it anyway; `VM_SHELL=off`
+  refuses every run (exit 125).
+- `SHELL_LOG=auto` (the default) records every run in the signed action log
+  when `ACTION_LOG=on`, as a `vm_shell` call and result: the script's
+  SHA-256 and size, the folder, the exit code and duration, and each output
+  stream's size and SHA-256. The script, its arguments and the output text
+  are kept only with `ACTION_LOG_TEXT=keep`, like typed text. `SHELL_LOG=off`
+  keeps shell runs out of the log; with `ACTION_LOG=off` nothing is logged
+  either way. Refused runs are logged too, and a run whose required log
+  can't be opened is refused.
+
+`metacomputer security` shows both settings and what they come to.
+
+**Where it ends:**
+- `VM_SHELL=off` turns off this command, not SSH. `metacomputer ssh ops`
+  still works for the Mac's own plumbing (status, `put`, `get`, `inspect`),
+  and anyone with your Mac account can use it. The skill tells Claude not to
+  use it to get around a refused `sh`, but that's an instruction, not a
+  barrier; Claude Code's permission rules can deny `metacomputer ssh` if you
+  want one.
+- The log records what was sent and hashes of what came back; it doesn't
+  record what the script did inside the VM. Programs it started detached keep
+  running after the run is logged.
+- `--read-only` isn't enforced; it only skips the one-controller check and
+  leaves out the desktop's environment.
 
 ## Reporting a vulnerability
 

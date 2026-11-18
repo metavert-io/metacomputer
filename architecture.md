@@ -140,6 +140,31 @@ carried end to end by SSH; each MCP connection owns one driver runtime.
 Nothing on the Mac drives the Mac's own desktop: Cua Driver is not
 installed on macOS at all.
 
+## Shell channel
+
+`metacomputer sh` (`lib/vm_shell.py` on the Mac, `lib/vm_shell_guest.py` in
+the VM; [docs/shell.md](docs/shell.md)) runs a bash script as `cua` over the
+`ops` connection, the same path, key or certificate as `metacomputer ssh ops`.
+The remote command is a fixed bootstrap: the VM's half of the program, a JSON
+header and the script arrive on SSH's stdin, so nothing is quoted or run by a
+shell on the Mac. In the VM:
+- the script gets the desktop session's environment (`session.env`, plus the
+  accessibility variables from `/etc/X11/Xsession.d/90metacomputer-env`), so
+  apps it starts with `setsid -f` open on the desktop and the driver reads them;
+- it runs in its own process group with stdout and stderr in files in a
+  private `/tmp/mcsh.*` folder, so programs it leaves running don't hold the
+  connection;
+- one JSON line comes back: status, exit code, duration, and each stream's
+  size, SHA-256 and first and last `max_output / 2` bytes;
+- a timeout, or stdin closing early (the Mac's side interrupted), ends the
+  process group: SIGTERM, then SIGKILL after 3 s.
+
+On the Mac, `VM_SHELL` (`auto` is off while `DRIVER_MODE=bounded`) and the
+one-controller rule are checked first, a run claims the computer in
+`.run/owners/` like an acting tool call (held by the caller's Claude Code
+process), and with `ACTION_LOG=on` and `SHELL_LOG=auto` each run is its own
+signed action-log file with a `vm_shell` call and result.
+
 ## Observation and accessibility
 
 AT-SPI2 runs on the session bus; `toolkit-accessibility` is on (dconf system
@@ -154,7 +179,7 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 | Credential | Where | Grants |
 | --- | --- | --- |
 | `$SSH_DIR/mcp` (default `~/.ssh/metacomputer`) | host, 0600 | `cua@guest`, forced command = Cua Driver MCP only |
-| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) |
+| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) and the shell channel, `metacomputer sh` |
 | `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/metacomputer-admin` (fixed verbs) |
 | `$SSH_DIR/hostkey` | host, 0600 | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection) |
 | VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/metacomputer/vnc-pass` 0600 | live view / takeover |
