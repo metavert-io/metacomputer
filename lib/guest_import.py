@@ -16,7 +16,12 @@ folders under DEST. The VM is untrusted, so:
   link already there instead of writing through it, and no folder in DEST is
   entered through a link; a folder on the Mac is never replaced by a file;
 - what was left out is reported on stderr (escaped), so later writers (the
-  contact sheet, a re-sync) never meet a link the VM made.
+  contact sheet, a re-sync) never meet a link the VM made;
+- the copy stops, keeping the files that arrived whole, when the stream passes
+  MCOMP_IMPORT_MAX_BYTES (bin/metacomputer passes VM_DISK_BYTES: a VM can't hold
+  more real files than its disk), when the Mac's free space at DEST would fall
+  below MCOMP_IMPORT_MIN_FREE_GB (IMPORT_MIN_FREE_GB, default 10), or after
+  MAX_MEMBERS entries, so a VM can't fill the Mac's disk or memory.
 
 Exit 0 when the stream was read (even with items left out), 1 when nothing could
 be read (no stream, not a tar stream) or the copy failed.
@@ -35,6 +40,30 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXE
 WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 MAX_DEPTH = 64
 MAX_NAME = 1024
+MAX_MEMBERS = 200_000            # tar entries, including ones left out
+MAX_DROPPED_KEPT = 1000          # left-out names kept for the report (the count is exact)
+FREE_CHECK_EVERY = 64 << 20      # bytes written between free-space checks
+GIB = 1 << 30
+
+
+class ImportLimit(Exception):
+    """The copy passed one of the limits; what arrived whole is kept."""
+
+
+def limits_from_env(env=None):
+    """(max_bytes or None, min_free_bytes) from MCOMP_IMPORT_MAX_BYTES and MCOMP_IMPORT_MIN_FREE_GB."""
+    env = os.environ if env is None else env
+    def num(name, default):
+        v = (env.get(name) or "").strip()
+        if not v:
+            return default
+        try:
+            n = float(v)
+        except ValueError:
+            return default
+        return n if n >= 0 else default
+    mx = num("MCOMP_IMPORT_MAX_BYTES", 0)
+    return (int(mx) if mx > 0 else None), int(num("MCOMP_IMPORT_MIN_FREE_GB", 10) * GIB)
 KINDS = {tarfile.SYMTYPE: "symbolic link", tarfile.LNKTYPE: "hard link", tarfile.FIFOTYPE: "FIFO",
          tarfile.CHRTYPE: "character device", tarfile.BLKTYPE: "block device"}
 
@@ -43,11 +72,15 @@ class Report:
     def __init__(self):
         self.files = 0
         self.dirs = 0
-        self.dropped = []      # (name, why)
+        self.dropped = []      # (name, why), the first MAX_DROPPED_KEPT
+        self.dropped_count = 0
+        self.bytes = 0         # file bytes written
         self.failure = None    # the error that cut the stream short, if any
 
     def drop(self, name, why):
-        self.dropped.append((name, why))
+        self.dropped_count += 1
+        if len(self.dropped) < MAX_DROPPED_KEPT:
+            self.dropped.append((name, why))
 
 
 def parts_of(name):
@@ -80,10 +113,22 @@ def open_dir(parent_fd, parts, create):
         raise
 
 
-def unpack(stream, stage_fd, report):
-    """Unpack the tar stream into the staging folder: regular files and folders only."""
+def free_bytes(fd):
+    st = os.fstatvfs(fd)
+    return st.f_bavail * st.f_frsize
+
+
+def unpack(stream, stage_fd, report, max_bytes=None, min_free=0):
+    """Unpack the tar stream into the staging folder: regular files and folders only.
+    Raises ImportLimit when the stream passes max_bytes or MAX_MEMBERS, or when the
+    free space would fall below min_free."""
+    members = 0
+    since_check = FREE_CHECK_EVERY       # check before the first byte
     with tarfile.open(fileobj=stream, mode="r|*") as tf:
         for m in tf:
+            members += 1
+            if members > MAX_MEMBERS:
+                raise ImportLimit(f"more than {MAX_MEMBERS:,} entries")
             parts = parts_of(m.name)
             if parts is None:
                 report.drop(m.name, "a name that isn't a plain relative path")
@@ -124,7 +169,16 @@ def unpack(stream, stage_fd, report):
                             b = src.read(1 << 20)
                             if not b:
                                 break
+                            if max_bytes is not None and report.bytes + len(b) > max_bytes:
+                                raise ImportLimit(f"more than {max_bytes / GIB:.1f} GiB, the most a VM's disk holds")
+                            since_check += len(b)
+                            if since_check >= FREE_CHECK_EVERY:
+                                since_check = 0
+                                if free_bytes(stage_fd) - FREE_CHECK_EVERY < min_free:
+                                    raise ImportLimit(f"the Mac would have less than {min_free / GIB:.0f} GiB free "
+                                                      "(IMPORT_MIN_FREE_GB)")
                             out.write(b)
+                            report.bytes += len(b)
                     try:
                         os.utime(ffd, (m.mtime, m.mtime))
                     except (OSError, OverflowError, ValueError, TypeError):
@@ -192,9 +246,10 @@ def merge(src_fd, dst_fd, rel, report, skip=None):
             os.rename(name, name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
 
 
-def import_tar(stream, dest):
+def import_tar(stream, dest, max_bytes=None, min_free=0):
     """Unpack a tar stream from the VM into dest (made if missing). Returns a Report;
-    raises tarfile.TarError or OSError when the stream can't be read or written."""
+    raises tarfile.TarError or OSError when the stream can't be read or written.
+    A limit (ImportLimit) ends the copy like a broken stream: report.failure."""
     os.makedirs(dest, exist_ok=True)
     report = Report()
     dest_fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
@@ -205,8 +260,8 @@ def import_tar(stream, dest):
         try:
             failure = None
             try:
-                unpack(stream, stage_fd, report)
-            except (tarfile.TarError, OSError, EOFError) as e:
+                unpack(stream, stage_fd, report, max_bytes, min_free)
+            except (tarfile.TarError, OSError, EOFError, ImportLimit) as e:
                 failure = e         # what arrived whole before the stream broke is still kept
             sweep(stage_fd, "", report)
             merge(stage_fd, dest_fd, "", report, skip=name)
@@ -226,27 +281,31 @@ def main(argv):
     if len(args) != 1:
         print("usage: ... | guest_import.py DEST [--quiet]", file=sys.stderr)
         return 2
+    max_bytes, min_free = limits_from_env()
     try:
-        report = import_tar(sys.stdin.buffer, args[0])
+        report = import_tar(sys.stdin.buffer, args[0], max_bytes, min_free)
     except OSError as e:
         print(f"metacomputer: copying from the VM failed: {escape_for_terminal(str(e))}", file=sys.stderr)
         return 1
     rc = 0
     if report.failure is not None:
         rc = 1
-        if isinstance(report.failure, tarfile.ReadError) and not (report.files or report.dirs):
+        if isinstance(report.failure, ImportLimit):
+            print(f"metacomputer: stopped copying from the VM: {report.failure}; "
+                  f"{report.files} file(s) arrived whole and were kept", file=sys.stderr)
+        elif isinstance(report.failure, tarfile.ReadError) and not (report.files or report.dirs):
             if not quiet:
                 print("metacomputer: nothing came from the VM (no files, or not a tar stream)", file=sys.stderr)
         else:
             print(f"metacomputer: the copy from the VM stopped part-way ({escape_for_terminal(str(report.failure))}); "
                   f"{report.files} file(s) arrived whole and were kept", file=sys.stderr)
-    if report.dropped:
-        print(f"metacomputer: left out {len(report.dropped)} item(s) from the VM that aren't plain files or folders:",
+    if report.dropped_count:
+        print(f"metacomputer: left out {report.dropped_count} item(s) from the VM that aren't plain files or folders:",
               file=sys.stderr)
         for n, why in report.dropped[:20]:
             print(f"  {escape_for_terminal(n)} ({why})", file=sys.stderr)
-        if len(report.dropped) > 20:
-            print(f"  ... and {len(report.dropped) - 20} more", file=sys.stderr)
+        if report.dropped_count > 20:
+            print(f"  ... and {report.dropped_count - 20} more", file=sys.stderr)
     return rc
 
 

@@ -104,6 +104,12 @@ guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
 }
 
 abs_host_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac; }
+# A tar stream from the VM on stdin -> plain files and folders under DEST (lib/guest_import.py).
+# Stops past the VM's disk size or when the Mac would have less than IMPORT_MIN_FREE_GB free.
+guest_import() { # DEST [--quiet]
+  MCOMP_IMPORT_MAX_BYTES="${VM_DISK_BYTES:-}" MCOMP_IMPORT_MIN_FREE_GB="${IMPORT_MIN_FREE_GB:-10}" \
+    "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"
+}
 
 need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
 
@@ -630,7 +636,7 @@ do_recordings() {
     vm_running "$VM_NAME" || die "VM is not running; nothing to sync"
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
     # Plain files and folders only: links and special files from the VM are left out (lib/guest_import.py).
-    gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | "$PY" "$LAB_ROOT/lib/guest_import.py" "$dest" \
+    gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | guest_import "$dest" \
       || die "could not sync ~/metacomputer-runs from the guest"
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
@@ -801,7 +807,7 @@ do_get() { # GUEST_PATH [HOST_DIR] [--task NAME]
   # Plain files and folders only: links and special files from the VM are left out, and
   # nothing is written through a link (lib/guest_import.py).
   gssh ops "tar -C $(printf %q "$(dirname "$src")") -cf - $(printf %q "$(basename "$src")")" \
-    | "$PY" "$LAB_ROOT/lib/guest_import.py" "$dest" || die "could not copy $src from the guest"
+    | guest_import "$dest" || die "could not copy $src from the guest"
   echo "$dest/$(basename "$src")"
 }
 
@@ -871,7 +877,7 @@ EOF
       if vm_running "$VM_NAME"; then
         # Plain files and folders only: links and special files from the VM are left out, so the
         # contact sheets below can't be written through a link it planted (lib/guest_import.py).
-        gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | "$PY" "$LAB_ROOT/lib/guest_import.py" "$host/guest" --quiet \
+        gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | guest_import "$host/guest" --quiet \
           || { warn "nothing (or not everything) could be copied from $guest"; copied=no; }
       else
         warn "the virtual computer is off; listing what is already on the Mac"; copied=off

@@ -273,6 +273,49 @@ def run(td):
     finally:
         if not existed:
             shutil.rmtree(synced, ignore_errors=True)
+    # 8. limits: a VM can't fill the Mac's disk or memory
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        add_file(tf, "a.bin", b"a" * 300_000)
+        add_file(tf, "b.bin", b"b" * 300_000)
+        add_file(tf, "c.bin", b"c" * 300_000)
+    big = b.getvalue()
+    d8 = os.path.join(td, "dest8")
+    rep = guest_import.import_tar(io.BytesIO(big), d8, max_bytes=700_000)
+    check("past the size limit: the copy stops, whole files kept, the cut one removed",
+          isinstance(rep.failure, guest_import.ImportLimit) and sorted(os.listdir(d8)) == ["a.bin", "b.bin"]
+          and rep.bytes == 600_000, (rep.failure, os.listdir(d8)))
+    d8b = os.path.join(td, "dest8b")
+    rep = guest_import.import_tar(io.BytesIO(big), d8b, min_free=1 << 62)
+    check("too little free space on the Mac: nothing is written", isinstance(rep.failure, guest_import.ImportLimit)
+          and os.listdir(d8b) == [] and "free" in str(rep.failure), (rep.failure, os.listdir(d8b)))
+    many = io.BytesIO()
+    with tarfile.open(fileobj=many, mode="w") as tf:
+        for i in range(30):
+            add_special(tf, f"l{i}", tarfile.SYMTYPE, "/etc/passwd")
+    saved = guest_import.MAX_MEMBERS, guest_import.MAX_DROPPED_KEPT
+    guest_import.MAX_MEMBERS, guest_import.MAX_DROPPED_KEPT = 20, 5
+    try:
+        rep = guest_import.import_tar(io.BytesIO(many.getvalue()), os.path.join(td, "dest8c"))
+    finally:
+        guest_import.MAX_MEMBERS, guest_import.MAX_DROPPED_KEPT = saved
+    check("past the entry limit: the copy stops; left-out names kept for the report are capped, the count exact",
+          isinstance(rep.failure, guest_import.ImportLimit) and rep.dropped_count == 20 and len(rep.dropped) == 5,
+          (rep.failure, rep.dropped_count, len(rep.dropped)))
+    check("limits from the environment: VM_DISK_BYTES and IMPORT_MIN_FREE_GB; empty or bad values fall back",
+          guest_import.limits_from_env({"MCOMP_IMPORT_MAX_BYTES": "1000", "MCOMP_IMPORT_MIN_FREE_GB": "2"}) == (1000, 2 << 30)
+          and guest_import.limits_from_env({}) == (None, 10 << 30)
+          and guest_import.limits_from_env({"MCOMP_IMPORT_MAX_BYTES": "x", "MCOMP_IMPORT_MIN_FREE_GB": "-1"}) == (None, 10 << 30))
+    with open(env["MCOMP_TEST_TAR"], "wb") as f:
+        f.write(big)
+    with open(env["MCOMP_CONFIG"], "a") as f:
+        f.write("VM_DISK_BYTES=700000\n")
+    gdest2 = os.path.join(td, "got2")
+    r = subprocess.run([CLI, "get", "~/x", gdest2], env=env, capture_output=True, text=True, timeout=60)
+    check("get passes VM_DISK_BYTES as the limit: it stops and says why", r.returncode != 0
+          and "stopped copying from the VM" in r.stderr and sorted(os.listdir(gdest2)) == ["a.bin", "b.bin"],
+          (r.returncode, r.stderr[-400:], os.listdir(gdest2) if os.path.isdir(gdest2) else None))
+
     check("the Mac file is still untouched at the end", open(victim, "rb").read() == before)
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
