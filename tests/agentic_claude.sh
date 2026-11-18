@@ -22,7 +22,7 @@ CFG="$OUT/mcp-config.json"
 printf '{"mcpServers":{"metacomputer":{"type":"stdio","command":"%s","args":["mcp-lazy"]}}}\n' "$LAB/bin/metacomputer" > "$CFG"
 env -u CLAUDECODE claude -p "$PROMPT" \
   --mcp-config "$CFG" --strict-mcp-config \
-  --allowedTools "mcp__metacomputer" \
+  --allowedTools "mcp__metacomputer" "mcp__plugin_metacomputer_metacomputer" \
   --output-format json > "$OUT/transcript.json" 2> "$OUT/stderr.log" || true
 "$PY" -c 'import json,sys
 d=json.load(open(sys.argv[1]))

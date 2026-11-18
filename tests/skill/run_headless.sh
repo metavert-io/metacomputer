@@ -23,7 +23,7 @@ vm_before="$(vm_state)"
 start=$(date +%s)
 cd "$WORKDIR" || exit 1
 env -u CLAUDECODE claude -p "$PROMPT" ${MCP_ARGS[@]+"${MCP_ARGS[@]}"} \
-  --allowedTools "Skill" "Read" "Glob" "Grep" "WebFetch" "ToolSearch" "mcp__metacomputer" \
+  --allowedTools "Skill" "Read" "Glob" "Grep" "WebFetch" "ToolSearch" "mcp__metacomputer" "mcp__plugin_metacomputer_metacomputer" \
     "Bash($LAB/bin/metacomputer:*)" "Bash(~/.local/bin/metacomputer:*)" "Bash(metacomputer:*)" \
     "Bash(python3 $LAB/lib/mcp_client.py:*)" \
   --max-turns 80 --output-format stream-json --verbose > "$OUT/$NAME.jsonl" 2> "$OUT/$NAME.stderr"

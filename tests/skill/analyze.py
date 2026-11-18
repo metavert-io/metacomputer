@@ -36,17 +36,19 @@ for line in open(path):
     elif ev.get("type") == "result":
         final = ev
 
+# The metacomputer tools: mcp__metacomputer__* (user-scope or --mcp-config server) or the plugin's.
+MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
+def _tool(c): return next((c["name"][len(p):] for p in MCP_PREFIXES if c["name"].startswith(p)), "")
 skills = [c["input"].get("skill") for c in calls if c["name"] == "Skill"]
 bash = [c["input"].get("command", "") for c in calls if c["name"] == "Bash"]
-mcp = [c["name"].replace("mcp__metacomputer__", "") for c in calls if c["name"].startswith("mcp__metacomputer__")]
+vm_calls = [c for c in calls if _tool(c)]
+mcp = [_tool(c) for c in vm_calls]
 denied = [{"tool": c["name"], "input": json.dumps(c["input"])[:160], "why": results[c["id"]]["text"][:160]}
           for c in calls if c["id"] in results and results[c["id"]]["error"]
           and ("permission" in results[c["id"]]["text"].lower() or "denied" in results[c["id"]]["text"].lower()
                or "not allowed" in results[c["id"]]["text"].lower())]
-mcp_errors = [{"tool": c["name"].replace("mcp__metacomputer__", ""), "text": results[c["id"]]["text"][:160]}
-              for c in calls if c["name"].startswith("mcp__metacomputer__") and c["id"] in results and results[c["id"]]["error"]]
-vm_calls = [c for c in calls if c["name"].startswith("mcp__metacomputer__")]
-def _tool(c): return c["name"].replace("mcp__metacomputer__", "")
+mcp_errors = [{"tool": _tool(c), "text": results[c["id"]]["text"][:160]}
+              for c in vm_calls if c["id"] in results and results[c["id"]]["error"]]
 reads = [c for c in vm_calls if _tool(c) == "get_window_state"]
 named_steps = sum(1 for c in vm_calls if _tool(c) == "run_steps"
                   for st in c["input"].get("steps", []) if isinstance(st, dict) and "tool" not in st)

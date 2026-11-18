@@ -58,6 +58,23 @@
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
+# The Claude Code plugin's copy of this file (in Claude Code's plugin folder, when the plugin was
+# installed from GitHub) has no settings, VM keys or tools: it runs the checkout ./install.sh set up,
+# $MCOMP_HOME or else ~/.local/bin/metacomputer. Keep this first, before anything reads config.
+mc_plugins="${CLAUDE_CODE_PLUGIN_CACHE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins}"
+mc_in_plugins() { case "$1" in "$(readlink -f "$mc_plugins" 2>/dev/null || echo "$mc_plugins")"/*|"$HOME/.claude/plugins/"*) return 0 ;; esac; return 1; }
+mc_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+if mc_in_plugins "$mc_self"; then
+  for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/metacomputer"; do
+    mc_to="$(readlink -f "$mc_to" 2>/dev/null)" || continue
+    [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" && exec "$mc_to" "$@"
+  done
+  printf '%s\n' "metacomputer: this is the Claude Code plugin's copy, and this Mac has no metacomputer set up yet." \
+    "Set it up once (macOS on Apple silicon; it builds the VM):" \
+    "  git clone https://github.com/metavert-io/metacomputer && cd metacomputer && ./install.sh" \
+    "or point MCOMP_HOME at an existing checkout." >&2
+  exit 1
+fi
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
 # shellcheck source=../scripts/lib.sh

@@ -66,6 +66,37 @@ a fake `git`.
   that's the one installed, or standard Lume) and how to remove it, and mentions a
   lume-secure left beside mcomp-vm.
 
+## The Claude Code plugin: `tests/test_plugin.py`
+
+`python3 tests/test_plugin.py` (57 checks) needs no VM. `install.sh` runs against a
+stub `claude` that records its arguments and keeps its state in a temporary home,
+so this Mac's own Claude Code setup is never touched. `--real-claude` repeats the
+install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
+`CLAUDE_CONFIG_DIR`; it needs no network.
+- The marketplace lists the plugin at `./plugin`, whose links (`skills/metacomputer`,
+  `.claude/skills/cua-driver`, `bin/metacomputer`) are relative and resolve to the
+  repository's files; the driver pack's `../` links resolve from both copies.
+  `plugin.json` has no `version` and runs `${CLAUDE_PLUGIN_ROOT}/bin/metacomputer
+  mcp-lazy`; there is no root `.mcp.json`.
+- `claude plugin validate` on the repository and on `plugin/` (skipped without
+  `claude`): no errors, and no warnings other than the missing version and the links
+  in `plugin/skills` (so `--strict` fails on exactly those two, by design).
+- A copy of `bin/metacomputer` in Claude Code's plugin folder (`~/.claude/plugins`,
+  `$CLAUDE_CONFIG_DIR/plugins`, `$CLAUDE_CODE_PLUGIN_CACHE_DIR`) execs
+  `$MCOMP_HOME/bin/metacomputer` or else `~/.local/bin/metacomputer` with the same
+  arguments, never a copy inside the plugin folder; with neither it exits 1 and
+  says how to set up. The checkout and `plugin/bin/metacomputer` run as always.
+- `install.sh --only-claude`: a fresh install adds the checkout as the marketplace
+  and installs the plugin at user scope; a second run changes nothing; an earlier
+  install's skill link and user-scope server are removed when they're this
+  checkout's (or a moved checkout's, dangling), and left alone when another
+  existing checkout's. `--no-plugin` swaps back. A GitHub marketplace is kept,
+  another checkout's marketplace is replaced, a plugin that's turned off is left
+  so, and without `claude plugin` (or when the plugin can't be added) it falls back
+  to the skill link and server. `--uninstall` removes whichever is there.
+- The skill and the driver pack name both prefixes; bench's metrics and allowed
+  tools and the skill-test analyzer count both.
+
 ## Recordings: `tests/test_recording.py`
 
 `python3 tests/test_recording.py` needs no VM. It makes a short video and an
