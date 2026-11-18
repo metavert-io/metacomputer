@@ -452,7 +452,7 @@ space_check() {
     ok "$free GB free on the disk with $names ($sum GB needed)"
   done
 }
-# git that also works while a repository is private: when plain git can't reach it, retry with the
+# git that also works for a private fork or mirror: when plain git can't reach it, retry with the
 # GitHub CLI's credentials (gh auth login), if gh is installed and logged in.
 git_net() {
   local gh
