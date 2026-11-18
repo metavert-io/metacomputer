@@ -72,7 +72,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (169 checks, about a minute). It keeps
+`python3 tests/test_events.py` needs no VM (176 checks, about a minute and a half). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -116,6 +116,10 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
   - the watcher wanted while an announcement waits, even with no sinks;
   - an encoded secret key name (`pa%73sword`) and an encoded `token=` after a query;
   - `events-state/redact.json` from an earlier build deleted, and noted.
+- the 2026-11-18 review's fixes:
+  - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`;
+  - a server that sends one byte a second: `deliver`, `sink remove`, `flush_admin` and an ordinary emit all end on time;
+  - 50 action-log records with `events.json` unchanged parse it zero times.
 
 Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
 
@@ -231,6 +235,37 @@ settings work, and that a GUI app started with `setsid -f` outlives the run
 with an accessibility tree the driver can read. It changes no VM settings: the
 `VM_SHELL`, bounded-driver and logging cases are config variants on the Mac.
 
+## What the VM hands back, and other boundaries (no VM)
+
+Each of these needs no VM and takes seconds.
+
+- `python3 tests/test_guest_import.py` (24 checks; needs ffmpeg): files copied from the
+  VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
+  stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
+  a device, a folder link with a file behind it, absolute and `..` names and names with
+  escape sequences or newlines. Only plain files and folders arrive, what was left out
+  is reported escaped, and the Mac file stays untouched through the importer, `task
+  finish` (which builds contact sheets), `get` and `recordings --sync`. A link already on
+  the Mac where a file arrives is replaced, not written through; a stream cut off
+  part-way keeps only whole files; `contact-sheet` refuses an output that's a link.
+- `python3 tests/test_termsafe.py` (13 checks): text from the VM and from pages reaches
+  the terminal escaped in `inspect`, `browser`'s profile list, `web` (its report, its
+  messages and errors) and `record moments`; `--json` stays exact.
+- `python3 tests/test_key_pinning.py` (12 checks; needs gpg): `scripts/pin-gpg-key.sh`
+  keeps only the pinned key from a download with an extra key appended (or first),
+  refuses one without it, drops a subkey grafted on without a binding signature, and
+  keeps the cached Mozilla and Google keys with all their subkeys.
+- `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
+  exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
+  key and `known_hosts` byte for byte unchanged and deletes nothing.
+- `python3 tests/test_owners.py` (9 checks): a `metacomputer sh` claim made outside
+  Claude Code outlives its short-lived shell for the activity window, counts as the same
+  controller from the same terminal session and as another one from a different
+  session, then expires; Claude Code and bridge claims still go with their process.
+- `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
+  fresh private one, and a `claude` planted in the old shared path, the shim folder or a
+  relative PATH entry is never run.
+
 ## SSH options: `tests/test_ssh_options.py`
 
 `python3 tests/test_ssh_options.py` needs no VM and connects nowhere (44
@@ -304,7 +339,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (198 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (213 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
@@ -364,6 +399,19 @@ pseudo-terminal for the rest of the vault:
   required sink isn't forwarded; the request parser refusing overflowing chunk sizes, huge or
   doubled Content-Length, CL with TE, other transfer codings, bare CR/LF, NULs, folded
   headers, absolute URIs, CONNECT and HTTP/2.0, with the unlock process still serving;
+  the 2026-11-18 review's fixes, with the test build's smaller limits (6 connections
+  per VM, a 1.5 s wait for a slot, 3 s for the head and for the answer):
+  - the path prefix by whole segments (`/v10`, `/v1-admin`, `/v1%2Fadmin` refused,
+    `/v1` allowed);
+  - a same-host redirect keeping `%2F`, `%20`, a trailing slash and the query's escapes;
+  - a wrong token answered at once while its body is still to come;
+  - six clients dripping their heads a byte every 0.5 s cut off at the head deadline
+    (408), a seventh connection given 503 after the wait, and the slots free again;
+  - an answer past the answer timeout cut off, its late data reaching no other
+    connection, and the proxy still serving;
+- **sealed sessions and `SSH_AUTH=cert`:** a VM that refuses the static ops key gives
+  a message that names the cause, and `metacomputer secrets session save` under
+  `SSH_AUTH=cert` refuses at once, before any question or ssh;
 - **events:** an `approval_waiting` spool file while a question waits (its name, a
   folder made if missing); on exit 3 through `bin/metacomputer`, one `vault_locked`
   event from the event stream's hook (in a test events folder) and no spool file of
