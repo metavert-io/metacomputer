@@ -95,6 +95,16 @@ DROPPED_MSG = (
     "Check `~/.local/bin/metacomputer status`; after a restart, element tokens from earlier reads are stale."
 )
 IDENTITY, OFF_MSG, DROPPED_MSG = (m.replace("~/.local/bin/metacomputer", CLI) for m in (IDENTITY, OFF_MSG, DROPPED_MSG))
+# The skill's core habits, repeated for sessions that don't open its files (skills/metacomputer/SKILL.md).
+HABITS = (
+    "How to work on it (the metacomputer skill has the rest):\n"
+    "- Input reported as sent (ok, effect unverifiable, did not settle, any invoke_menu) isn't proof: check the "
+    "outcome (a query read, the title, the saved file) before you report it. Never resend to make sure.\n"
+    "- Two failures, or two routes with no effect: stop, look once and check the premise (window, focus, mode, "
+    "an open dialog, a frozen app), then change mechanism. Never a third identical call.\n"
+    "- Pixel input needs a screenshot as that window's last read; any read without one cancels it.\n"
+    "- A refusal from the hub is the user's control: follow the route it names, or report it."
+)
 OVERSIZE_MSG = ("The virtual computer sent a message larger than the hub accepts ({} MB), so the hub closed its "
                 "connection to it. Call again; element tokens from earlier reads are stale.").format(MAX_UPSTREAM_MSG >> 20)
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
@@ -260,7 +270,7 @@ def initialize_result(cache, want=None, live_init=None):
         res = {"protocolVersion": want or "2025-06-18", "capabilities": {"tools": {}},
                "serverInfo": {"name": "cua-driver", "version": pinned_version() or "unknown"}}
     res = json.loads(json.dumps(res))
-    res["instructions"] = IDENTITY + "\n\n" + (res.get("instructions") or "")
+    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + (res.get("instructions") or "")
     res.setdefault("capabilities", {}).setdefault("tools", {})["listChanged"] = True
     return res
 

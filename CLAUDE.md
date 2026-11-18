@@ -24,14 +24,16 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   `metacomputer record start NAME` / `record stop` (settings `RECORD_*`; the
   description file beside the MP4 lists key moments when `ACTION_LOG=on`).
 - Work from structure: `list_windows` / `metacomputer inspect` to find things,
-  `get_window_state` with `include_screenshot: false` (and `since` after
-  acting) to read, `run_steps` with role/name targets and `expect` checks
-  (or `run_script` for loops) to act, and `verify_state` (GTK) or `expect`
-  (Firefox pages) to verify. Screenshots only when the tree can't answer.
-  Fall back to pixels / `delivery_mode: "foreground"` only when the
-  accessible route is refused or ineffective. On Linux the focused element
-  is not reported in trees; prove focus with a fresh read. Details:
-  `skills/metacomputer/DESKTOP.md`.
+  `get_window_state` with `include_screenshot: false` and a `query` to read,
+  `run_steps` with role/name targets and `expect` checks (or `run_script` for
+  loops) to act. A result that says input was sent isn't proof: check the
+  outcome (a query read, `expect`, the saved file through `metacomputer sh`).
+  Screenshots only when the tree can't answer; a pixel action needs a
+  screenshot as that window's last read. Fall back to pixels /
+  `delivery_mode: "foreground"` only when the accessible route is refused or
+  ineffective. On Linux the focused element is not reported in trees; prove
+  focus with a fresh read. Details: `skills/metacomputer/SKILL.md` ("How to
+  drive it") and `DESKTOP.md` (with its error table).
 - Browsers: Firefox is the default; Chrome is installed. Modes and steps
   (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Never
   send background input or `set_value` to Chrome (the hub enforces it);
