@@ -35,6 +35,7 @@ from urllib.parse import urljoin, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import owners  # noqa: E402
 from mcp_client import MCPClient  # noqa: E402
+from termsafe import escape_for_terminal  # noqa: E402
 
 LAB = owners.LAB
 MCOMP_CLI = os.path.join(LAB, "bin", "metacomputer")
@@ -54,7 +55,8 @@ class Fail(Exception):
 
 
 def say(msg):
-    print(msg, file=sys.stderr, flush=True)
+    # Messages can carry the page's or the VM's words (errors, titles): escaped, never raw.
+    print(escape_for_terminal(msg), file=sys.stderr, flush=True)
 
 
 def lab(*args, check=True):
@@ -601,10 +603,12 @@ def main(argv):
         say(f"metacomputer web {a.cmd}: {e}")
         return 1
     if a.json:
-        print(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))   # exact; json.dumps escapes control characters itself
     else:
-        print(open(os.path.join(report["folder"], "report.md")).read().rstrip())
-        print(f"\nfolder: {report['folder']}")
+        # The report quotes the page (titles, headings, links, text): escaped for the terminal.
+        # report.md on disk keeps the page's own text.
+        print(escape_for_terminal(open(os.path.join(report["folder"], "report.md"), newline="").read().rstrip()))
+        print(f"\nfolder: {escape_for_terminal(report['folder'])}")
     return 0
 
 

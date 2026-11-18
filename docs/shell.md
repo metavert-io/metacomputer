@@ -177,7 +177,12 @@ like a click:
   the run, so the claim is held by the caller's Claude Code process, or
   outside Claude Code by the shell that ran it; it's refreshed every minute
   of a long run, from the holder found at the start (a file write, without
-  reading the process table, so it can't hold up the deadline).
+  reading the process table, so it can't hold up the deadline). That shell
+  is often short-lived (`bash -c`, a script, another agent's tool runner), so
+  a claim made outside Claude Code lasts the 10-minute activity window from
+  its last run even after its shell exits, and runs from the same terminal
+  session (its session id) count as the same controller; a run from another
+  session is refused until the window has passed (or `--override`).
 - the check and the claim are one step under this VM's owners lock
   (`.run/owners/.lock`, `flock`), so two runs started together can't both
   pass. If the claim can't be written, the run is refused (125); if a

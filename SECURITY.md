@@ -64,8 +64,12 @@ How it resists tampering:
 - **Signatures.** About every 20 records, every minute with new activity, and
   when the connection closes, the head of the chain is signed with an SSH key
   (`ssh-keygen -Y sign`).
+  Each signature covers the record right before it, so a signature copied to
+  another place in the file doesn't verify.
 - **Final signature.** A file whose last signature isn't marked final was cut
-  short, or its session crashed.
+  short, or its session crashed. The final signature is the file's last
+  record: anything after it was added once the log was closed, and fails
+  verification.
 
 Typed text, values and scripts are recorded as their length only.
 `ACTION_LOG_TEXT=keep` records them in full; only do that when you can keep
@@ -562,22 +566,29 @@ it expires.
    the token where the key would go (`Authorization: Bearer mct_...`, or the secret's
    own header, or `X-Metacomputer-Token`).
 4. For each request the proxy:
-   - takes only a strict HTTP/1.1 request: a path (no absolute URI, no `CONNECT` or
-     `TRACE`), CRLF line ends, no folded or control-character headers, `Content-Length`
-     or chunked but never both, at most 64 KB of head and 32 MB of body; anything else
+   - holds at most 16 connections from one VM at once (each VM has its own count, so a VM
+     holding all of its own never slows another; one more waits up to 15 s, then gets 503);
+   - takes only a strict HTTP/1.1 (or 1.0) request head: a path (no absolute URI, no
+     `CONNECT` or `TRACE`), CRLF line ends, no folded or control-character headers,
+     `Content-Length` or chunked but never both, at most 64 KB, and all of it within 10
+     seconds of the connection however slowly it trickles in (408 after); anything else
      gets a 4xx or 5xx before a token is even looked at;
-   - checks the token: this secret, this VM, not expired, not revoked, and still the
-     secret it was made for (401 otherwise). A token is bound to the secret's
-     generation and to its host, header and path prefix as approved: `set --replace` or
-     `delete` ends it, so a token can never pick up a new value, host or wider scope;
-   - checks the path: under `--api-path-prefix` if set, no `.` or `..` segments, no
+   - checks the token right after the head, before reading any body: this secret, this
+     VM, not expired, not revoked, and still the secret it was made for (401
+     otherwise). A token is bound to the secret's generation and to its host, header and
+     path prefix as approved: `set --replace` or `delete` ends it, so a token can never
+     pick up a new value, host or wider scope;
+   - checks the path: under `--api-path-prefix` if set, by whole segments (`/v1` allows
+     `/v1` and `/v1/...`, never `/v10` or `/v1-admin`), no `.` or `..` segments, no
      encoded slashes (403 otherwise);
+   - only then reads the body: at most 32 MB, within 300 seconds;
    - sends it to `https://<api-host><path>` with the real header in place of the token,
      checking the server's certificate against the system's trust;
    - drops hop-by-hop headers (and any named in `Connection`), the token header and
      `Proxy-Authorization`, and passes the rest, body included;
    - never follows a redirect: one to another host comes back as 502, one on the same
-     host comes back with its `Location` pointing through the proxy;
+     host comes back with its `Location` pointing through the proxy, its path and query
+     exactly as the API encoded them (escapes and a trailing slash kept);
    - streams the answer back, replacing every exact copy of the key in its headers
      and body with `[key withheld by metacomputer secrets]` (an echo endpoint such as
      httpbin.org/anything would otherwise hand the key to the VM);
@@ -1045,8 +1056,13 @@ something waits for you:
   `/proc/PID/cmdline`, then `Browser.getBrowserCommandLine`; a failure says what each
   route answered. Without a profile, it matches tabs by site only, and refuses when
   that's ambiguous.
-- **`SSH_AUTH=cert`.** Fills use their own account and work. Sealed sessions sign in
-  with the static `ops` key, which a VM on certificates refuses.
+- **`SSH_AUTH=cert`.** Fills and API tokens use their own accounts and work. Sealed sessions sign in
+  with the static `ops` key, which a VM on certificates refuses, so for now they need
+  `SSH_AUTH=key`: `metacomputer secrets session save|load` refuses at once under `cert`
+  (before anyone is asked to approve), and the vault names the cause if the VM refuses
+  the key anyway (a VM still on certificates after the setting changed back).
+  Getting a short-lived certificate for the vault, as `bin/metacomputer` does, is the
+  way to lift this later.
 - **The local audit log isn't secret, and only partly tamper-evident.** It names your
   secrets, sites and projects (never values), and anyone with your account can read
   it. The chain shows a changed or missing line, but your account can rewrite the

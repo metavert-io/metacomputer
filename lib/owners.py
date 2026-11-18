@@ -11,6 +11,8 @@ Two kinds of controller can drive the VM's desktop:
 The shell channel (`metacomputer sh`) acts too: each run (except --read-only)
 keeps .run/owners/<pid>.json up to date, where pid is its Claude Code process,
 or outside Claude Code the shell that ran it, since the command itself exits.
+Such a claim (kind "shell") lasts the activity window from its last run even after
+that shell exits, and runs from the same terminal session (sid) are the same controller.
 
 "Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
 or a shell it runs under, so a session never blocks itself.
@@ -138,10 +140,14 @@ def lock(timeout=10.0):
         os.close(fd)   # releases the lock
 
 
-def write_claim(bridge_pid, claude_pid, cwd, tool, started):
+def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None):
     os.makedirs(OWNERS_DIR, exist_ok=True)
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
+    if kind:
+        rec["kind"] = kind      # "shell": metacomputer sh outside Claude Code (kept by its time, see claims())
+    if sid is not None:
+        rec["sid"] = sid        # the terminal session it ran in: later runs from it are the same controller
     # A temporary file of its own: two writers for one claim (two runs under one session) don't collide.
     fd, tmp = tempfile.mkstemp(dir=OWNERS_DIR, prefix=".claim-", suffix=".tmp")
     try:
@@ -156,11 +162,22 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started):
         raise
 
 
+def my_sid():
+    try:
+        return os.getsid(0)
+    except OSError:
+        return None
+
+
 def claim_for_shell(tool, who=None):
     """`metacomputer sh` acted. Its process ends with the run, so the claim lives
-    as long as the caller's Claude Code session, or else the shell that ran it.
-    Returns who holds it, (holder pid, claude pid); passing that back (a refresh
-    during a run) skips looking at the process table."""
+    as long as the caller's Claude Code session. Outside Claude Code it's held in
+    the name of the shell that ran it, but that shell is often short-lived (bash -c,
+    a script, another agent's tool runner): such a claim lasts the activity window
+    (ACTIVE_S, ten minutes) from its last run whether or not that shell is still
+    alive, and later runs from the same terminal session (its sid) count as the
+    same controller. Returns who holds it, (holder pid, claude pid); passing that
+    back (a refresh during a run) skips looking at the process table."""
     if who is None:
         table = ps_table()
         claude = claude_of(os.getpid(), table)
@@ -171,7 +188,10 @@ def claim_for_shell(tool, who=None):
         started = json.load(open(claim_path(holder))).get("started", started)
     except (OSError, ValueError):
         pass
-    write_claim(holder, claude, os.getcwd(), tool, started)
+    if claude:
+        write_claim(holder, claude, os.getcwd(), tool, started)
+    else:
+        write_claim(holder, None, os.getcwd(), tool, started, kind="shell", sid=my_sid())
     return who
 
 
@@ -183,7 +203,9 @@ def drop_claim(bridge_pid):
 
 
 def claims():
-    """Live claims; files of dead bridges are removed."""
+    """Live claims; files of dead bridges are removed. A shell claim made outside Claude
+    Code (kind "shell") is kept for the activity window after its last run even when the
+    shell that ran it has exited, and removed after that."""
     out = []
     if not os.path.isdir(OWNERS_DIR):
         return out
@@ -195,14 +217,23 @@ def claims():
             rec = json.load(open(p))
         except (OSError, ValueError):
             continue
-        if not alive(rec.get("bridge_pid")):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        if not isinstance(rec, dict):
             continue
-        rec["idle_s"] = int(time.time() - rec.get("last_call", 0))
-        rec["active"] = rec["idle_s"] < ACTIVE_S
+        try:
+            idle = int(time.time() - float(rec.get("last_call", 0)))
+        except (TypeError, ValueError):
+            idle = ACTIVE_S
+        if not alive(rec.get("bridge_pid")):
+            if rec.get("kind") == "shell" and not rec.get("claude_pid") and idle < ACTIVE_S:
+                rec["holder_gone"] = True     # its shell exited; the claim holds by its time
+            else:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                continue
+        rec["idle_s"] = idle
+        rec["active"] = idle < ACTIVE_S
         out.append(rec)
     return out
 
@@ -243,12 +274,17 @@ def others(self_pid=None, table=None):
     self_pid = self_pid or os.getpid()
     mine = set(ancestors(self_pid, table))
     my_claude = claude_of(self_pid, table)
+    sid = my_sid()
     found = []
     for c in claims():
         # mine: also a claim held by a shell above the caller (metacomputer sh outside Claude Code)
         if c.get("bridge_pid") == self_pid or c.get("bridge_pid") in mine or (my_claude and c.get("claude_pid") == my_claude):
             continue
-        found.append({"kind": "session", **c})
+        # mine: a shell claim from this same terminal session, outside Claude Code (its shell may be gone)
+        if (not my_claude and c.get("kind") == "shell" and not c.get("claude_pid")
+                and c.get("sid") is not None and c.get("sid") == sid):
+            continue
+        found.append({**c, "kind": "session", "claim": c.get("kind") or "bridge"})
     for d in direct_connections(table):
         chain = set(d["chain"])
         if self_pid in chain or (my_claude and my_claude in chain) or (chain & mine - {1}):
@@ -261,6 +297,8 @@ def describe(o):
     if o["kind"] == "session":
         state = "ACTIVE" if o["active"] else "idle"
         who = (f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid")
+               else f"metacomputer sh outside Claude Code (shell pid {o.get('bridge_pid')}"
+                    f"{', exited' if o.get('holder_gone') else ''}, terminal session {o.get('sid')})" if o.get("claim") == "shell"
                else f"MCP client outside Claude Code (bridge pid {o.get('bridge_pid')})")
         return (f"{who} in {short(o.get('cwd'))}: last action "
                 f"{o['idle_s'] // 60} min {o['idle_s'] % 60} s ago ({o.get('last_tool')}) [{state}]")

@@ -23,25 +23,34 @@ exec > >(tee -a "$BUILD_LOG") 2>&1
 say "build $TS (log: logs/build-$TS.log)"
 
 # --- 0. prerequisites -------------------------------------------------------
+# Every check that can refuse the build comes first: until the build is certain to go
+# ahead, nothing of the existing VM's may change (its host key and known_hosts entry
+# keep SSH to it working).
 command -v "$LUME" >/dev/null || die "lume not found ($LUME)"
+for p in $EXTRA_PACKAGES; do   # names go into the guest's provisioning script
+  [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_PACKAGES: '$p' is not an Ubuntu package name"
+done
+case "${VIRTUAL_AUDIO:-off}" in on|off) ;; *) die "VIRTUAL_AUDIO must be on or off" ;; esac
+for vm in "$VM_NAME" "$BASELINE_NAME"; do
+  if vm_exists "$vm" && [ $REPLACE -ne 1 ]; then
+    BUILD_QUIET_EXIT=1; die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"
+  fi
+done
+command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
+"$(dirname "$0")/build-tools.sh"
+"$(dirname "$0")/fetch-artifacts.sh"
+
+# The build goes ahead: keys, then the host key's known_hosts entry.
 for k in admin ops mcp fill proxy hostkey; do   # fill, proxy: the secrets accounts (mcfill, mcproxy)
   # A finished build deletes the host key's private half (below), so a rebuild makes a new
   # host key: drop the old .pub with it (bind the secrets vault again afterwards).
   [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; rm -f "$SSH_DIR/$k.pub"; ssh-keygen -q -t ed25519 -N '' -C "mcomp-$k" -f "$SSH_DIR/$k"; }
 done
 echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
-"$(dirname "$0")/build-tools.sh"
-"$(dirname "$0")/fetch-artifacts.sh"
-
-for p in $EXTRA_PACKAGES; do   # names go into the guest's provisioning script
-  [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_PACKAGES: '$p' is not an Ubuntu package name"
-done
-case "${VIRTUAL_AUDIO:-off}" in on|off) ;; *) die "VIRTUAL_AUDIO must be on or off" ;; esac
 
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   if vm_exists "$vm"; then
-    [ $REPLACE -eq 1 ] || { BUILD_QUIET_EXIT=1; die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"; }
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
     "$LUME" delete "$vm" --force
@@ -62,10 +71,10 @@ MAC="$(vm_mac "$VM_NAME")"
 SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"; mkdir -p "$SEED/payload"
 cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
-cp "$CACHE_DIR/mozilla/repo-signing-key.gpg" "$SEED/payload/mozilla-repo-signing-key.gpg"
+cp "$CACHE_DIR/mozilla/pinned-key.asc" "$SEED/payload/mozilla-repo-signing-key.gpg"   # only the pinned key (fetch-artifacts.sh)
 cp "$SSH_DIR/fill.pub" "$SEED/payload/fill.pub"   # the fill account's key (provision.sh installs it under /etc)
 cp "$SSH_DIR/proxy.pub" "$SEED/payload/proxy.pub" # the proxy account's key (likewise)
-case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub" "$SEED/payload/google-linux-signing-key.pub" ;; esac
+case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/pinned-key.asc" "$SEED/payload/google-linux-signing-key.pub" ;; esac
 {
   echo "GUEST_USER=$GUEST_USER"; echo "ADMIN_USER=$ADMIN_USER"
   echo "CUA_DRIVER_VERSION=$CUA_DRIVER_VERSION"; echo "CUA_DRIVER_TARBALL=$CUA_DRIVER_TARBALL"

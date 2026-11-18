@@ -224,6 +224,12 @@ elif rec["user"] == "mcproxy":
     import time
     while True:
         time.sleep(60)
+elif flag("ops-refused-next"):
+    # A VM on SSH certificates (SSH_AUTH=cert) refuses the static ops key.
+    rec["kind"] = "ops:refused"
+    log()
+    sys.stderr.write("cua@127.0.0.1: Permission denied (publickey).\n")
+    sys.exit(255)
 elif "-czf -" in remote:
     rec["kind"] = "session:save"
     sys.stdout.buffer.write(open(os.path.join(d, "archive.tgz"), "rb").read())

@@ -17,6 +17,7 @@ results/<run>/. Nothing needed afterwards stays only in the VM.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -25,6 +26,7 @@ import subprocess
 import time
 import traceback
 
+import guest_import
 from mcp_client import LAB_ROOT, MCPClient
 
 SSH = [os.path.join(LAB_ROOT, "bin", "metacomputer"), "ssh", "ops"]
@@ -153,12 +155,21 @@ class TestRun:
         # Pull the guest run dir (video + trajectory) to the host.
         dest = os.path.join(self.res_dir, "guest")
         os.makedirs(dest, exist_ok=True)
+        # Plain files and folders only: links and special files from the VM are left out and
+        # nothing is written through a link (guest_import.py).
         p = subprocess.run(SSH + [f"cd {self.guest_dir} && tar -cf - ."], capture_output=True, timeout=600)
         if p.returncode == 0 and p.stdout:
-            subprocess.run(["tar", "-C", dest, "-xf", "-"], input=p.stdout, check=False)
+            try:
+                rep = guest_import.import_tar(io.BytesIO(p.stdout), dest)
+                if rep.dropped:
+                    self.errors.append(f"left out {len(rep.dropped)} link(s) or special file(s) from the VM")
+                if rep.failure is not None:
+                    self.errors.append(f"copy from the VM incomplete: {rep.failure}")
+            except OSError as e:
+                self.errors.append(f"copy from the VM failed: {e}")
         vids = []
         for d, _, fs in os.walk(dest):
-            vids += [os.path.join(d, f) for f in fs if f.endswith(".mp4")]
+            vids += [os.path.join(d, f) for f in fs if f.endswith(".mp4") and not os.path.islink(os.path.join(d, f))]
         if vids:
             vids.sort(key=os.path.getsize, reverse=True)
             self.video_host = os.path.join(self.rec_dir, f"{self.test_id}.mp4")

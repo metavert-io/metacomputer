@@ -1147,6 +1147,135 @@ def main():
         check("R3 a destination that never answers is given up after its attempts, and that's logged",
               not any(p_["sink"] == "dead2" for p_ in events.admin_pending()) and "gave up on dead2" in alog, alog[-300:])
 
+        # F17: an OTLP collector's partial success: the rejected records are dropped (counted, with the
+        # collector's message as last_error), not counted as delivered, and not retried
+        refill()
+        part = {"got": [], "reject": 1}
+
+        class PartialH(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                recs_ = [r_ for rl in body.get("resourceLogs", []) for sl in rl.get("scopeLogs", []) for r_ in sl.get("logRecords", [])]
+                part["got"].append(len(recs_))
+                ans = json.dumps({"partialSuccess": {"rejectedLogRecords": str(part["reject"]),
+                                                     "errorMessage": "attribute too long \x1b[31m(red)"}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(ans)))
+                self.end_headers()
+                self.wfile.write(ans)
+
+            def log_message(self, *_):
+                pass
+        psrv = ThreadingHTTPServer(("127.0.0.1", 0), PartialH)
+        psrv.daemon_threads = True
+        threading.Thread(target=psrv.serve_forever, daemon=True).start()
+        sink_add("partial", "--kind", "otlp", "--url", f"http://127.0.0.1:{psrv.server_address[1]}", "--families", "task")
+        n0 = len(part["got"])
+        events.emit("task", "finished", "a record the collector refuses")
+        ps = stat_of("partial")
+        check("F17 OTLP partial success: the rejected record counts as dropped, not delivered, with the collector's message",
+              part["got"][n0:] == [1] and ps["delivered"] == 0 and ps["dropped"] == 1
+              and "rejected 1 of 1" in (ps["last_error"] or "") and "attribute too long" in ps["last_error"]
+              and "\x1b" not in ps["last_error"], (part["got"][n0:], ps))
+        part["reject"] = 0
+        events.emit("task", "finished", "one it accepts")
+        ps2 = stat_of("partial")
+        check("F17 ...and it isn't retried: the next request holds only the next event", part["got"][n0:] == [1, 1]
+              and ps2["delivered"] == 1 and ps2["dropped"] == 1 and ps2["sent_seq"] > ps["sent_seq"], (part["got"][n0:], ps2))
+        st_line = cli("status").stdout
+        st_list = cli("sink", "list").stdout
+        check("F17 events status and sink list show the rejection", "rejected 1 of 1" in st_line and "partial (1:" in st_line
+              and "refused by the receiver" in st_list, (st_line[-600:], st_list[-600:]))
+        sink_remove("partial")
+        psrv.shutdown()
+        psrv.server_close()
+
+        # F18: delivery has a wall-clock deadline that a sink sending one byte a second can't stretch
+        refill()
+        trickle_stop = threading.Event()
+
+        def trickle_conn(c_):
+            try:
+                c_.settimeout(5)
+                buf_ = b""
+                while b"\r\n\r\n" not in buf_:
+                    d_ = c_.recv(65536)
+                    if not d_:
+                        return
+                    buf_ += d_
+                for ch in b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Slow: " + b"z" * 60:
+                    if trickle_stop.is_set():
+                        break
+                    c_.sendall(bytes([ch]))
+                    time.sleep(1.0)
+            except OSError:
+                pass
+            finally:
+                c_.close()
+        tsock = socket.socket()
+        tsock.bind(("127.0.0.1", 0))
+        tsock.listen(16)
+
+        def trickle_loop():
+            while not trickle_stop.is_set():
+                try:
+                    c_, _ = tsock.accept()
+                except OSError:
+                    return
+                threading.Thread(target=trickle_conn, args=(c_,), daemon=True).start()
+        threading.Thread(target=trickle_loop, daemon=True).start()
+        turl = f"http://127.0.0.1:{tsock.getsockname()[1]}/"
+        t0 = time.time()
+        ok_, err_, _, _ = events.deliver({"kind": "webhook", "url": turl, "hmac_key": base64.b64encode(b"k" * 32).decode()},
+                                         [events.build_event("task", "finished", "to a trickling sink")], 1.5)
+        dt = time.time() - t0
+        check("F18 deliver() to a sink that trickles a byte a second ends at its deadline (1.5 s), timed out",
+              not ok_ and err_ == "timed out" and dt < 2.6, (ok_, err_, round(dt, 1)))
+        sink_add("trickle", "--kind", "webhook", "--url", turl, "--families", "task")
+        r = sink_remove("trickle")      # its announcement goes to the trickling sink too, and waits there
+        pend = [p_ for p_ in events.admin_pending() if p_["sink"] == "trickle"]
+        check("F18 sink remove with a trickling destination: done within its budget, the announcement kept for later",
+              r.returncode == 0 and pend, (r.returncode, pend, r.stderr[-300:]))
+        t0 = time.time()
+        events.flush_admin(budget=2.0, force=True)
+        dt1 = time.time() - t0
+        t0 = time.time()
+        events.emit("lifecycle", "started", "an ordinary command while an announcement waits on a trickling sink")
+        dt2 = time.time() - t0
+        check("F18 flush_admin and an ordinary emit (start, stop) return on time while that sink trickles",
+              dt1 < 3.6 and dt2 < events.EMIT_BUDGET + 2.0, (round(dt1, 1), round(dt2, 1)))
+        trickle_stop.set()
+        tsock.close()
+        for _ in range(events.ADMIN_MAX_ATTEMPTS):
+            events.flush_admin(force=True)
+
+        # F7: the relay's per-record check reads events.json only when it changes
+        calls_ = [0]
+        real_load = events.load_config
+
+        def counting():
+            if threading.current_thread() is threading.main_thread():   # the call path, not the sending thread
+                calls_[0] += 1
+            return real_load()
+        events.load_config = counting
+        try:
+            events.config_for_reading()
+            calls_[0] = 0
+            for i_ in range(50):
+                events.emit_async("actions", "call", f"record {i_}", data={"seq": i_})
+            unchanged = calls_[0]
+            sink_add("acts", "--kind", "webhook", "--url", web.url("/acts"), "--families", "actions")
+            calls_[0] = 0
+            events.emit_async("actions", "call", "after a change")
+            changed = calls_[0]
+        finally:
+            events.load_config = real_load
+            events.flush_async()
+        check("F7 50 action-log records with events.json unchanged: parsed 0 times; once after it changes",
+              unchanged == 0 and changed == 1, (unchanged, changed))
+        sink_remove("acts")
+
         # R4: sink generations; replacing waits for a sender
         refill()
         orx, nrx = HTTPRx(), HTTPRx()

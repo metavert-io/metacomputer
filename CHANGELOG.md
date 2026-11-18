@@ -26,9 +26,20 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ### Security
 - Every SSH connection the Mac makes to the VM now runs with no config file (`-F /dev/null`) and with agent, X11, port and tunnel forwarding and connection sharing turned off, so nothing in your SSH config can forward anything to the VM.
+- Files copied from the VM (`task finish`, `get`, `recordings --sync`, the test harness) arrive as plain files and folders only: links, hard links, FIFOs and devices are left out and reported, and nothing is written through a link, so a VM can no longer plant a link named like a contact sheet and have `task finish` overwrite a Mac file through it.
+- Text from the VM or a web page is shown escaped by `inspect`, `browser`, `web` and `record moments`, as `metacomputer sh` already did (`--json` stays exact).
+- The API proxy matches `--api-path-prefix` by whole path segments (`/v1` no longer allows `/v10` or `/v1-admin`); a request's head must arrive within 10 seconds and its token is checked before any body is read; each VM has its own 16 connection slots.
+- `actions verify` requires each checkpoint to sign the record right before it and the final one to end the file, so forged records followed by a replayed final checkpoint no longer verify.
+- The VM's Mozilla and Google package keyrings hold only the pinned key, even if the downloaded key file carries others.
+- The benchmark runs in a fresh private folder and runs `claude` by an absolute path found before its shim folder goes on PATH.
 
 ### Fixed
 - Two VMs side by side: a session on one VM no longer makes the other refuse every tool call ("in use by another controller").
+- A refused `build` (the VM exists, or a bad setting) no longer replaces the host key and `known_hosts`, which broke SSH to the existing VM.
+- `metacomputer sh` outside Claude Code: its claim on the computer lasts the activity window even when the shell that ran it exits.
+- The API proxy: a same-host redirect keeps the API's path encoding and trailing slash; after an answer times out, nothing more is written to that connection.
+- Sealed browser sessions refuse at once, with a clear message, under `SSH_AUTH=cert` (they need `SSH_AUTH=key` for now).
+- The event stream: an OTLP collector's partial success counts the rejected events as dropped; every delivery attempt has a wall-clock deadline, so a sink that trickles bytes can't hold `start`, `stop` or `sink add`; the relay reads `events.json` only when it changes.
 
 ## [0.1.0] - 2026-11-17
 

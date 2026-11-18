@@ -44,6 +44,7 @@ step "install the guest file tree"
 cp -r --preserve=mode,timestamps "$PAYLOAD/rootfs/." /
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
 install -d -m 0755 /etc/apt/keyrings
+# Only the pinned key (scripts/pin-gpg-key.sh on the Mac); mozilla.sources names it in Signed-By.
 install -m 0644 "$PAYLOAD/mozilla-repo-signing-key.gpg" /etc/apt/keyrings/packages.mozilla.org.asc
 
 step "apt: update + full upgrade"
@@ -88,7 +89,8 @@ dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core libreoffice-
 case " ${MCOMP_BROWSERS:-firefox} " in *" chrome "*)
   step "Google Chrome (optional; Firefox stays the default browser)"
   # Google's official arm64 .deb from its APT repo; the host verified the
-  # signing key's fingerprint against the pinned one (config/lab.env).
+  # pinned signing key (config/defaults.env) and kept only that key from Google's
+  # download (scripts/pin-gpg-key.sh); Signed-By limits the repo to it.
   install -m 0644 "$PAYLOAD/google-linux-signing-key.pub" /etc/apt/keyrings/google-chrome.asc
   # Keep the repo definition ours: otherwise the package's cron job adds and
   # re-enables its own sources entry with its own key handling.

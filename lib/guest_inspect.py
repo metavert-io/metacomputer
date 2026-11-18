@@ -374,16 +374,32 @@ def render(d):
     return "\n".join(L)
 
 
+def host_escape():
+    """The Mac's terminal escaping (lib/termsafe.py). Only the host-side modes use it: in the
+    VM this file runs alone, from standard input."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from termsafe import escape_for_terminal
+    return escape_for_terminal
+
+
 def main(argv):
-    if argv[:1] == ["--render"]:
-        print(render(json.load(sys.stdin)))
-        return 0
-    if argv[:1] == ["--render-profiles"]:
-        ps = json.load(sys.stdin)["browser"]["named_profiles"]
-        if not ps:
-            print("no driver-owned Chrome profiles in the VM")
-        for p in ps:
-            print(f"{p['name']:<40} {p['bytes'] // 2**20:>6} MiB  {'in use' if p['in_use'] else ''}")
+    if argv[:1] in (["--render"], ["--render-profiles"]):
+        # Titles, names and commands come from the VM: escape sequences in them are shown,
+        # never sent to the terminal. --json (the raw JSON) stays exact.
+        esc = host_escape()
+        try:
+            d = json.load(sys.stdin)
+            if argv[0] == "--render":
+                text = render(d)
+            else:
+                ps = d["browser"]["named_profiles"]
+                text = "\n".join([f"{p['name']:<40} {p['bytes'] // 2**20:>6} MiB  {'in use' if p['in_use'] else ''}"
+                                  for p in ps] or ["no driver-owned Chrome profiles in the VM"])
+        except (ValueError, KeyError, TypeError, AttributeError, IndexError):
+            print("metacomputer: the VM's snapshot isn't in the expected shape (metacomputer inspect --json shows it)",
+                  file=sys.stderr)
+            return 1
+        print(esc(text))
         return 0
     minutes, top, sections = 60, 15, []
     it = iter(argv)

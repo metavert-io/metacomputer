@@ -5,7 +5,8 @@
 #     key (fingerprint pinned in config/defaults.env), then the image's SHA-256
 #   - Cua Driver linux-arm64 release tarball: SHA-256 pinned in config/defaults.env
 #     and cross-checked against the release's SHA256SUMS
-#   - Mozilla APT signing key: fingerprint pinned in config/defaults.env
+#   - Mozilla (and Google) APT signing keys: fingerprints pinned in config/defaults.env;
+#     only the pinned key is kept from each download (scripts/pin-gpg-key.sh)
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
@@ -56,15 +57,19 @@ ok "$CUA_DRIVER_TARBALL sha256 verified"
 say "Mozilla APT signing key"
 M="$CACHE_DIR/mozilla"; mkdir -p "$M"
 curl -fsSL -o "$M/repo-signing-key.gpg" "$MOZILLA_KEY_URL"
-fpr="$(gpg --batch --with-colons --show-keys "$M/repo-signing-key.gpg" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
-[ "$fpr" = "$MOZILLA_KEY_FPR" ] || die "Mozilla key fingerprint $fpr != pinned $MOZILLA_KEY_FPR"
-ok "Mozilla key fingerprint $fpr"
+# Only the pinned key (and the subkeys it has bound) goes to the guest: APT trusts every
+# key in a Signed-By keyring, so an extra key in the download must not come along.
+rm -f "$M/pinned-key.asc"
+"$LAB_ROOT/scripts/pin-gpg-key.sh" "$M/repo-signing-key.gpg" "$MOZILLA_KEY_FPR" "$M/pinned-key.asc" \
+  || die "Mozilla's key file has no key with the pinned fingerprint $MOZILLA_KEY_FPR"
+ok "Mozilla key $MOZILLA_KEY_FPR (only that key kept)"
 
 case " $BROWSERS " in *" chrome "*)
   say "Google Linux packages signing key (BROWSERS includes chrome)"
   G="$CACHE_DIR/google"; mkdir -p "$G"
   curl -fsSL -o "$G/linux_signing_key.pub" "$GOOGLE_KEY_URL"
-  fpr="$(gpg --batch --with-colons --show-keys "$G/linux_signing_key.pub" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
-  [ "$fpr" = "$GOOGLE_KEY_FPR" ] || die "Google key fingerprint $fpr != pinned $GOOGLE_KEY_FPR"
-  ok "Google key fingerprint $fpr"
+  rm -f "$G/pinned-key.asc"
+  "$LAB_ROOT/scripts/pin-gpg-key.sh" "$G/linux_signing_key.pub" "$GOOGLE_KEY_FPR" "$G/pinned-key.asc" \
+    || die "Google's key file has no key with the pinned fingerprint $GOOGLE_KEY_FPR"
+  ok "Google key $GOOGLE_KEY_FPR (only that key kept)"
 esac

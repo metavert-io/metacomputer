@@ -16,9 +16,11 @@ its result summary and timing, and the calls Claude Code's bridge refused.
   removing a record breaks the chain from that point on.
 - Every 20 records, every 60 seconds with new records, and when the session
   ends, a checkpoint record signs the head of the chain with an SSH key
-  (`ssh-keygen -Y sign`, namespace metacomputer-action-log). Records after
-  the last checkpoint are reported as unsigned; a file without a final
-  checkpoint ended abnormally or was cut short.
+  (`ssh-keygen -Y sign`, namespace metacomputer-action-log). A checkpoint
+  always signs the record right before it, and the final one is the file's
+  last record; a checkpoint anywhere else (copied or replayed) fails
+  verification. Records after the last checkpoint are reported as unsigned;
+  a file without a final checkpoint ended abnormally or was cut short.
 - Typed text, values and scripts are replaced by their length unless
   ACTION_LOG_TEXT=keep. Results are kept only as a hash and sizes.
 
@@ -300,10 +302,19 @@ def verify_file(path, base, pub):
             cs = r.get("covers_seq")
             covered = recs[cs] if isinstance(cs, int) and 0 <= cs < i else None
             msg = checkpoint_message(name, cs, r.get("head"), bool(r.get("final")))
-            if covered is None or covered.get("hash") != r.get("head"):
+            # A checkpoint signs the record right before it, as the writer always has: a copy of
+            # an older checkpoint (say the final one, appended after forged records) names a record
+            # further back and fails here, though its signature would still verify.
+            if cs != i - 1 or r.get("head") != r.get("prev"):
+                problems.append(f"record {i}: checkpoint doesn't sign the record right before it "
+                                f"(covers {cs}; a copied or moved checkpoint)")
+            elif covered is None or covered.get("hash") != r.get("head"):
                 problems.append(f"record {i}: checkpoint doesn't match record {cs}")
             elif not verify_sig(pub, msg, r.get("sig", "")):
                 problems.append(f"record {i}: signature doesn't verify with {os.path.basename(pub)}")
+            elif r.get("final") and i != len(recs) - 1:
+                # The final checkpoint ends the file: the writer closes it right after.
+                problems.append(f"record {i}: records after the final checkpoint (added after the log was closed)")
             else:
                 signed_through = cs
                 final = final or bool(r.get("final"))

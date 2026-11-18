@@ -137,7 +137,9 @@ and the driver follow without a restart, so there's no need to rebuild the VM
 
 Every session gets the same harness, so only the switches differ:
 - `claude -p` runs with `env -u CLAUDECODE`, in a folder outside any
-  repository (`/tmp/mcomp-bench/<run-id>/work`), with `--setting-sources
+  repository (a fresh private folder from `mkdtemp` in your own temporary folder,
+  removed afterwards; `claude` is the absolute path found on PATH before the
+  shim folder for `metacomputer` goes in front), with `--setting-sources
   project`. Your user settings, plugins, hooks, global CLAUDE.md and user
   skills are left out, and the only skill is the one under test.
 - The `metacomputer` MCP server (`mcp-lazy`) points at the test VM.

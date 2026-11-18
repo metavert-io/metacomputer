@@ -445,6 +445,19 @@ every sink whose filters it passes.
   and counted). An event a receiver refuses outright (HTTP 400, 413, 415 or
   422) three times is dropped so the rest can move. OTLP sends up to 50 events
   per request, syslog up to 100 per connection, webhook and ntfy one.
+- **OTLP partial success.** A collector that answers 2xx with
+  `partialSuccess.rejectedLogRecords` above 0 stored only part of the batch:
+  the rejected events are counted as dropped (not delivered), its
+  `errorMessage` becomes the sink's `last_error`, and they aren't retried
+  (OTLP says a client mustn't). `sink list` shows the count, and `events
+  status` names the sink for a day. A sink-change announcement refused this
+  way is given up and logged.
+- **A wall-clock deadline per attempt.** Socket timeouts apply to each read,
+  so a receiver that sends a byte a second could otherwise hold a connection
+  open for as long as it liked. Each attempt runs with a deadline (3 s, or what
+  is left of the sender's budget) and its connection is cut off when it
+  passes, so the commands that deliver on their way (`start`, `stop`, `sink
+  add|remove`, a pending announcement) end on time.
 
 ## The watcher
 

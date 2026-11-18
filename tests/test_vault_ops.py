@@ -143,6 +143,30 @@ class Upstream(http.server.BaseHTTPRequestHandler):
             self.send_header("Location", "/v1/echo?x=1")
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif self.path.startswith("/v1/redirect-encoded"):
+            self.send_response(302)
+            self.send_header("Location", "/v1/a%2Fb/c%20d/?q=%26x")   # an encoded slash and a trailing slash
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.path.startswith("/v1/late"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")   # no sniffing wait: data is passed on at once
+            self.end_headers()           # HTTP/1.0: the body ends when the connection does
+            try:
+                self.wfile.write(b"first " + b"." * 2048)
+                self.wfile.flush()
+                time.sleep(5)            # past the proxy's answer timeout in this test build (3 s)
+                self.wfile.write(b"LATE-DATA")
+                self.wfile.flush()
+            except OSError:
+                pass
+        elif self.path.startswith("/v1/slow"):
+            time.sleep(2)            # within the answer timeout (3 s), but open while /v1/late would still write
+            data = b'{"slow": true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif self.path.startswith("/v1/split"):
             self.send_response(200)
             self.end_headers()           # HTTP/1.0: the body ends when the connection does
@@ -689,7 +713,10 @@ def run(td, procs):
     check("audit-sink list while locked: no settings shown", r.returncode == 0 and "unlock to see" in r.stdout
           and "127.0.0.1" not in r.stdout, r.stdout)
 
+    # The proxy's limits made small, so the tests needn't wait long: 6 connections per VM (one more waits 1.5 s,
+    # then gets 503), the head within 3 s, the answer within 3 s.
     T = {"MCOMP_VAULT_TEST_LISTENERS": my_name, "MCOMP_VAULT_TEST_PROMPT_TIMEOUT": "8", "MCOMP_VAULT_TEST_API_HTTP": "1",
+         "MCOMP_VAULT_TEST_PROXY_SLOTS": "6", "MCOMP_VAULT_TEST_SLOT_WAIT": "1.5", "MCOMP_VAULT_TEST_HEAD_DEADLINE": "3", "MCOMP_VAULT_TEST_ANSWER_TIMEOUT": "3",
          "MCOMP_EVENTS_SPOOL": spool}
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     locked_rec = audit_recs()[-1]
@@ -1263,6 +1290,106 @@ def run(td, procs):
     st, hd, _ = vm_request("GET", "/api1/v1/redirect-same", bearer)
     check("a redirect on the same host comes back through the proxy", st == 302
           and hd.get("location") == "http://127.0.0.1:18765/api1/v1/echo?x=1", (st, hd))
+    # F6: the Location is rewritten from the encoded path: escapes and the trailing slash stay
+    st, hd, _ = vm_request("GET", "/api1/v1/redirect-encoded", bearer)
+    check("a same-host redirect keeps the API's encoding (%2F, %20, a trailing slash, the query's %26)", st == 302
+          and hd.get("location") == "http://127.0.0.1:18765/api1/v1/a%2Fb/c%20d/?q=%26x", (st, hd))
+    # F3: the path prefix by whole segments (api1 was set with --api-path-prefix /v1/, kept as /v1)
+    for path in ("/api1/v10/echo", "/api1/v1-admin", "/api1/v1-admin/users", "/api1/v1%2Fadmin", "/api1/v1%2fadmin"):
+        n_up = len(up.got)
+        st, _, _ = vm_request("GET", path, bearer)
+        check(f"path {path}: outside the prefix /v1 by segments, refused (403), nothing forwarded", st == 403 and len(up.got) == n_up, st)
+    st, _, _ = vm_request("GET", "/api1/v1", bearer)
+    check("path /api1/v1 (the prefix itself): allowed", st == 200 and up.got[-1]["path"] == "/v1", (st, up.got[-1:]))
+
+    # A7: the token is checked right after the head, before any body is read
+    sk = socket.create_connection(("127.0.0.1", mport), timeout=15)
+    t0 = time.time()
+    sk.sendall(b"POST /api1/v1/echo HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer mct_dummy-wrong-token\r\n"
+               b"Content-Length: 100000\r\n\r\n")
+    resp = b""
+    try:
+        while True:
+            d = sk.recv(4096)
+            if not d:
+                break
+            resp += d
+    except OSError:
+        pass
+    sk.close()
+    check("a wrong token with a body still to come: 401 at once, the body never waited for",
+          resp.startswith(b"HTTP/1.1 401") and time.time() - t0 < 2, (resp[:60], round(time.time() - t0, 1)))
+
+    # A7: a client that drips its head is cut off at the head deadline (3 s in this test build), however often a
+    # byte arrives; and one VM's connections are limited (6 here): one more waits 1.5 s for a slot, then gets 503.
+    def drip(out):
+        s2 = socket.create_connection(("127.0.0.1", mport), timeout=30)
+        s2.settimeout(0.5)
+        t1, got = time.time(), b""
+        for ch in b"GET /api1/v1/echo HTTP/1.1\r\nHost: x\r\nX-Pad: " + b"a" * 200:
+            try:
+                s2.send(bytes([ch]))
+            except OSError:
+                break
+            try:
+                d = s2.recv(4096)
+                got += d
+                if not d or got:
+                    break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+        out.append((round(time.time() - t1, 1), got[:40]))
+        s2.close()
+    dripped = []
+    drippers = [threading.Thread(target=drip, args=(dripped,)) for _ in range(6)]
+    for th in drippers:
+        th.start()
+    time.sleep(1.0)
+    t0 = time.time()
+    st = raw_request(b"GET /api1/v1/echo HTTP/1.1\r\nHost: x\r\n" + b"Authorization: Bearer " + tok.get("token", "").encode()
+                     + b"\r\n\r\n")
+    check("with all 6 of this VM's slots held by dripping clients, one more connection waits about 1.5 s, then gets 503", st == 503
+          and 1.2 <= time.time() - t0 < 3, (st, round(time.time() - t0, 1)))
+    for th in drippers:
+        th.join(30)
+    check("each dripping client is cut off at the head deadline (408 at about 3 s), not kept for a byte every 0.5 s",
+          len(dripped) == 6 and all(2.5 <= t <= 6 and g.startswith(b"HTTP/1.1 408") for t, g in dripped), dripped)
+    st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
+    check("...and the slots are free again: the next request passes", st == 200, st)
+
+    # F4: an answer past the proxy's answer timeout (3 s here): cut off, and nothing of it written afterwards
+    holder = {}
+
+    def late():
+        s3 = socket.create_connection(("127.0.0.1", mport), timeout=20)
+        t1 = time.time()
+        s3.sendall(b"GET /api1/v1/late HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + tok.get("token", "").encode() + b"\r\n\r\n")
+        got = b""
+        try:
+            while True:
+                d = s3.recv(4096)
+                if not d:
+                    break
+                got += d
+        except OSError:
+            pass
+        holder["late"] = (round(time.time() - t1, 1), got)
+        s3.close()
+    th = threading.Thread(target=late)
+    th.start()
+    time.sleep(3.6)
+    # A request on a new connection (likely the same descriptor number on the Mac) while the late answer's
+    # remaining data would arrive: it must get only its own answer.
+    st, _, data = vm_request("GET", "/api1/v1/slow", bearer)
+    th.join(30)
+    lt, lgot = holder.get("late", (0, b""))
+    check("an answer past the timeout is cut off near it, and its late data reaches no connection",
+          b"first " in lgot and b"LATE-DATA" not in lgot and lt < 9 and st == 200 and "LATE-DATA" not in data
+          and '"slow": true' in data, (lt, lgot[-80:], st, data[:80]))
+    st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
+    check("...and the proxy still serves", st == 200, st)
     apis = [x for x in audit_recs() if x.get("op") == "api"]
     check("each proxied request is audited: method, host, path without the query, status, bytes, token id, key withheld",
           any(x.get("method") == "GET" and x.get("host") == upstream and x.get("path") == "/v1/echo" and x.get("status") == 200
@@ -1330,6 +1457,24 @@ def run(td, procs):
     rc, out = detached_wait(h)
     loaded = open(os.path.join(stubdir, "loaded.tgz"), "rb").read() if os.path.exists(os.path.join(stubdir, "loaded.tgz")) else b""
     check("...and it still loads, unchanged", rc == 0 and loaded == open(os.path.join(stubdir, "archive.tgz"), "rb").read(), out)
+    # F12: sealed sessions sign in with the static ops key; a VM on SSH certificates refuses it
+    open(os.path.join(stubdir, "ops-refused-next"), "w").close()
+    h = detached_start("session", "load", "s1", "--vm", "opsvm")
+    u.expect("Load the sealed session s1")
+    u.send("s1\n")
+    rc, out = detached_wait(h)
+    check("a VM that refuses the static ops key (SSH_AUTH=cert): the load fails and names the cause", rc != 0
+          and "sealed sessions need SSH_AUTH=key" in out, out)
+    cert_conf = os.path.join(td, "cert.env")
+    with open(cert_conf, "w") as f:
+        f.write(f'. "{wrapper["MCOMP_CONFIG"]}"\nSSH_AUTH=cert\n')
+    n_calls = len(calls())
+    t0 = time.time()
+    r = subprocess.run([mc, "secrets", "session", "save", "s9", "--profile", "prof1"], capture_output=True, text=True,
+                       env=dict(env, **dict(wrapper, MCOMP_CONFIG=cert_conf)), timeout=60, stdin=subprocess.DEVNULL)
+    check("with SSH_AUTH=cert, metacomputer secrets session save refuses at once, before any question or ssh", r.returncode == 1
+          and "sealed sessions need SSH_AUTH=key" in r.stderr and len(calls()) == n_calls and time.time() - t0 < 10,
+          (r.returncode, r.stderr[-300:]))
     check("list shows when the session key was rotated", "key rotated" in client("list").stdout)
     h = detached_start("session", "save", "s2", "--vm", "opsvm", "--profile", "prof1")
     u.expect("as the sealed session s2?")
