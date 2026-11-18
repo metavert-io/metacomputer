@@ -139,7 +139,7 @@ version and the model.
 | --- | --- | --- | --- |
 | `--model` | `BENCH_MODEL` | `claude-opus-5-5` | The model |
 | `--skill DIR` | `BENCH_SKILL` | this checkout's `skills/metacomputer` | The skill the session gets (copied in as a project skill; its hash is recorded) |
-| `--shell allow\|forbid` | `BENCH_SHELL` | `allow` | `forbid` denies `metacomputer ssh` and `metacomputer sh` through the session's permissions and asks in the prompt to work through the desktop. This is the placeholder for comparing with and without the coming `metacomputer sh` |
+| `--shell allow\|forbid` | `BENCH_SHELL` | `allow` | `forbid` denies `metacomputer ssh` and `metacomputer sh` through the session's permissions and asks in the prompt to work through the desktop, to compare runs with and without the shell channel (`metacomputer sh`) |
 | `--coord-guard on\|off` | `BENCH_COORD_GUARD` | `off` | Passed to the bridge as `MCOMP_COORD_GUARD`, which overrides the VM config's `COORD_GUARD`: the hub's coordinate guard (pixel input refused when the windows changed since its screenshot). `run.json` records whether this checkout has it (`coord_guard_in_bridge`) |
 | `--hub on\|off` | `BENCH_HUB` | the VM config's `MCP_HUB` | Passed as `MCOMP_MCP_HUB`: `on`, sessions reach the VM through the shared hub; `off`, each bridge has its own connection (the same guards) |
 | `--screen WxH` | `BENCH_SCREEN` | the VM's own (1920x1080) | Set with `xrandr` after each reset, e.g. `1280x800` or `1600x900`; the result records what the VM reports |
@@ -271,20 +271,33 @@ three times and compare the totals.
 
 Each task is capped at $3 by default, and the run at $60.
 
+**Recorded runs.** Every run cited here, in the README, the CHANGELOG and
+docs/learn.md has a summary in [runs/](runs/): for each task, whether it passed,
+its invalid-argument calls and its turns, with the run's date, model, Cua Driver
+version, metacomputer commit and switches. They're made from each run's
+`run.json` and `results.jsonl` (the latest attempt of each task) and leave out
+paths, costs and transcripts. The costs, times and other counts below come from
+the same runs' own records, which stay on the Mac that ran them. A commit that
+isn't on main names the merge that brought its work there, and a run made with
+uncommitted changes says so.
+
 The first baseline (2026-11-17, Opus 5.5, Cua Driver 0.52.1, the default skill)
 passed all 20 tasks:
 - it cost $11.95 in all, from $0.20 to $1.31 per task, $0.60 on average;
 - a session took 20 s to 2.3 min, 0.9 min on average;
-- with about 25 s per task for the reset and setup, a full run takes about 35
-  minutes.
+- with about 25 s per task for the reset and setup, a full run takes about 25
+  to 35 minutes (the runs below took 24 to 36).
 
-Its numbers are in `results/bench/baseline-2026-11-17/summary.md`. Because every
+Per task: [runs/baseline-2026-11-17.json](runs/baseline-2026-11-17.json). Because every
 task passed, later changes will show up mostly in cost, turns, time and the
 tool-call mix. Make tasks harder (or add some) when you need pass rates to
 separate two variants.
 
-The hub and the coordinate guard (2026-11-18, mcsecrets with native Calc,
-`ACTION_LOG=off`, the same skill, budget $2 a task) changed nothing measurable:
+The hub and the coordinate guard (2026-11-18, Cua Driver 0.52.1, a test VM with
+native Calc, `ACTION_LOG=off`, the same skill, budget $2 a task; metacomputer
+b8c4328 and 432008d, merged as c7378d8) changed nothing measurable
+([runs/hub-baseline-2026-11-18.json](runs/hub-baseline-2026-11-18.json),
+[runs/hub-on-2026-11-18.json](runs/hub-on-2026-11-18.json)):
 
 | Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Refused |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -296,8 +309,23 @@ coordinate guard refused nothing: in these tasks no window changed between a
 screenshot and the pixels aimed from it. Per-task differences are within one
 run's noise.
 
-Cua Driver 0.53.0 (2026-11-18, test VM mcdrv built from the update's branch,
-the same switches as `hub-on`, the skill from main at the time) also passed all 20:
+The tightened skill (2026-11-18, Cua Driver 0.52.1, the same switches as `hub-on`)
+was measured in two runs. The first full run, `skill-v2-2026-11-18` (commit
+7d78038), passed 19 of 20 with 1 invalid-argument call (`hub-on` had 14);
+thunar-copy failed. After a change to the skill's notes (GTK dialogs, Thunar,
+`sh --file`), the three tasks that change touched (thunar-copy, thunar-organize,
+data-transform) ran again as `skill-v2b-2026-11-18` (commit 773e1b3) and passed
+with none. Both commits' work was merged as b9b9685. With those three results in
+place of the first run's, the 20 tasks passed with 0 invalid-argument calls and
+18.0 turns on average (20.2 for `hub-on`), $10.38 against $11.83. That combines
+two runs, which is weaker evidence than one full run of the final skill
+([runs/skill-v2-2026-11-18.json](runs/skill-v2-2026-11-18.json),
+[runs/skill-v2b-2026-11-18.json](runs/skill-v2b-2026-11-18.json)).
+
+Cua Driver 0.53.0 (2026-11-18, a test VM built with it at commit 1a1578d plus
+uncommitted changes, merged as 88b6c5f; the same switches as `hub-on`, the skill
+from main at the time) also passed all 20
+([runs/driver-053-2026-11-18.json](runs/driver-053-2026-11-18.json)):
 
 | Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Refused | Invalid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -311,7 +339,10 @@ since `hub-on` (screenshot-only reads before pixel clicks), so this comparison
 is not of the driver alone.
 
 Lessons from `metacomputer learn` (2026-11-18, a test VM with 0.53.0, budget $1.50
-a task, `learn bench` with two approved built-in lessons, `no-frame` and `check-text`):
+a task, `learn bench` with two approved built-in lessons, `no-frame` and `check-text`;
+commit 3a55a77 plus the uncommitted `learn` work, merged as d58f9c2;
+[runs/learn-2026-11-18-without.json](runs/learn-2026-11-18-without.json),
+[runs/learn-2026-11-18-with.json](runs/learn-2026-11-18-with.json)):
 
 | Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Invalid | Other errors |
 | --- | --- | --- | --- | --- | --- | --- | --- |

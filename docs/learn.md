@@ -231,8 +231,8 @@ change the checkout's code that does the checking. What remains:
 The hashes cover each lesson's id and cleaned text (what is sent), not its
 provenance (title, source, dates, evidence).
 
-A follow-up, once the secrets vault's presence-based approvals (Touch ID through
-LocalAuthentication) are merged: have `learn approve` ask the vault to sign each
+A possible follow-up, now that the secrets vault has presence-based approvals (Touch ID
+through LocalAuthentication): have `learn approve` ask the vault to sign each
 record with a key that needs your presence, and have the hub send only signed
 lessons. That would make a silent approval need your fingerprint rather than
 your account; the code that checks it would still live in a checkout your
@@ -300,8 +300,11 @@ pixel actions without a screenshot frame were 35% of the failed calls:
 It cost $19.48. Neither targeted pattern occurred in these tasks without the
 lessons (no pixel action without a frame; three failed checks in each run), so
 this run shows no measurable effect either way: the differences are within one
-run's noise. The benchmark's tasks already pass with today's skill, which holds
-the same rules; lessons are for what your own sessions keep running into.
+run's noise. Per-task results:
+[bench/runs/learn-2026-11-18-without.json](../bench/runs/learn-2026-11-18-without.json)
+and [learn-2026-11-18-with.json](../bench/runs/learn-2026-11-18-with.json). The
+benchmark's tasks already pass with today's skill, which holds the same rules;
+lessons are for what your own sessions keep running into.
 
 ## Security
 

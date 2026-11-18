@@ -11,6 +11,8 @@ Mac's own Claude Code setup is never touched.
 - .claude-plugin/marketplace.json lists the plugin at ./plugin; plugin/ mirrors the repo with
   relative links (skills/metacomputer, .claude/skills/cua-driver, bin/metacomputer) that stay in
   the repo, so the driver pack's links to ../../../skills/metacomputer/DESKTOP.md resolve in both.
+  It carries the license notices a copy of it needs (LICENSE, THIRD_PARTY_NOTICES.md, links to the
+  repo's), and the driver pack its own LICENSE, Cua's MIT notice, the same text as in the notices.
 - `claude plugin validate` (when claude is installed): no errors; the only warnings are the
   missing version (on purpose: users track commits until the first tagged release) and the
   symlinks in plugin/skills.
@@ -85,7 +87,9 @@ def test_layout():
     links = {"plugin/skills/metacomputer": "skills/metacomputer",
              "plugin/.claude/skills/cua-driver": ".claude/skills/cua-driver",
              "plugin/bin/metacomputer": "bin/metacomputer",
-             "plugin/get.sh": "get.sh"}
+             "plugin/get.sh": "get.sh",
+             "plugin/LICENSE": "LICENSE",
+             "plugin/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"}
     for link, target in links.items():
         p = os.path.join(LAB, link)
         ok = os.path.islink(p) and not os.path.isabs(os.readlink(p)) \
@@ -107,6 +111,20 @@ def test_layout():
             if not os.path.isfile(os.path.normpath(os.path.join(LAB, base, rel.split("#")[0]))):
                 bad.append(f"{base}: {rel}")
     check("the driver pack's ../ links resolve (lexically) from both copies", not bad, bad)
+    # License notices travel with the plugin copy and with the driver pack (Cua's MIT notice).
+    notices = open(os.path.join(LAB, "THIRD_PARTY_NOTICES.md")).read()
+    cua = notices.split("```text\n", 1)[-1].split("```", 1)[0] if "```text\n" in notices else ""
+    pack_license = os.path.join(LAB, ".claude", "skills", "cua-driver", "LICENSE")
+    check("THIRD_PARTY_NOTICES.md holds Cua's MIT notice",
+          cua.startswith("MIT License") and "Copyright (c) 2025 Cua AI, Inc." in cua and "THE SOFTWARE IS PROVIDED" in cua)
+    check("the driver pack carries LICENSE, the same Cua notice",
+          os.path.isfile(pack_license) and open(pack_license).read() == cua)
+    check("plugin/LICENSE is metacomputer's MIT license",
+          open(os.path.join(LAB, "plugin", "LICENSE")).read().startswith("MIT License"))
+    dropped = [f"{n}: {d}" for n in sorted(os.listdir(os.path.join(LAB, ".claude", "skills", "cua-driver")))
+               for d in ("MACOS.md", "WINDOWS.md", "EMBEDDING.md", "cua.ai/driver/install")
+               if d in open(os.path.join(LAB, ".claude", "skills", "cua-driver", n)).read()]
+    check("the driver pack names no guide it doesn't include, and no host installer", not dropped, dropped)
 
 
 def test_validate():

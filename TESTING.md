@@ -68,14 +68,17 @@ a fake `git`.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (79 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (85 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. `--real-claude` repeats the
 install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
 `CLAUDE_CONFIG_DIR`; it needs no network.
 - The marketplace lists the plugin at `./plugin`, whose links (`skills/metacomputer`,
-  `.claude/skills/cua-driver`, `bin/metacomputer`) are relative and resolve to the
-  repository's files; the driver pack's `../` links resolve from both copies.
+  `.claude/skills/cua-driver`, `bin/metacomputer`, `get.sh`, `LICENSE`,
+  `THIRD_PARTY_NOTICES.md`) are relative and resolve to the repository's files; the
+  driver pack's `../` links resolve from both copies. The driver pack carries its own
+  `LICENSE`, the same Cua MIT notice as `THIRD_PARTY_NOTICES.md`, and names no guide
+  it doesn't include and no host installer.
   `plugin.json` has no `version` and runs `${CLAUDE_PLUGIN_ROOT}/bin/metacomputer
   mcp-lazy`; there is no root `.mcp.json`.
 - `claude plugin validate` on the repository and on `plugin/` (skipped without

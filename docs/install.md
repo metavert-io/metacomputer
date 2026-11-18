@@ -24,13 +24,6 @@ Paste this into Terminal:
 curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash
 ```
 
-While the repository is private, `raw.githubusercontent.com` needs a login, so
-use the GitHub CLI instead (`gh auth login` first):
-
-```bash
-gh api -H "Accept: application/vnd.github.raw" repos/metavert-io/metacomputer/contents/get.sh | bash
-```
-
 You can read the script before you run it: download it, read it, then run
 `bash get.sh`. The top of the file says what it does. It never asks for or
 stores your password, and it never runs `sudo` itself.
@@ -355,7 +348,7 @@ installed (`brew uninstall ffmpeg go gnupg` if nothing else uses them).
 | `another build or change of the VM … is running` | A build, `reset`, `restore`, `baseline` or `checkpoint` of the same VM is running (the message names it). Wait for it to finish, then run the command again. |
 | `couldn't list … releases` or `not the commit … named` | get.sh couldn't ask the repository which release to install, or the checkout didn't match the commit the repository named (a push or a moved tag in between). Nothing is installed from it; run get.sh again. |
 | `can't reach github.com` or `Ubuntu's image server` | Check the network, and any proxy, VPN or firewall that blocks github.com or cloud-images.ubuntu.com. |
-| `couldn't download metacomputer` while the repository is private | Log in to GitHub first: `gh auth login`. get.sh then uses the GitHub CLI's credentials. |
+| `couldn't download metacomputer` | Check the network, as above. Cloning a private fork or mirror (`--repo`) needs a login: `gh auth login`, and get.sh then uses the GitHub CLI's credentials. |
 | Homebrew's installer fails | It needs an administrator account and the internet. Install it from [brew.sh](https://brew.sh), then run get.sh again. |
 | `Homebrew couldn't install …` | Run `brew update`, then `brew doctor`, and fix what it names. Then run it again. Installing the tools another way also works; they only need to be on `PATH`. |
 | The Command Line Tools dialog never appeared, or you're on SSH | See below. |

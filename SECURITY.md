@@ -776,10 +776,14 @@ short-lived token for a proxy that adds the key on the way out.
 
 **The limit, up front.** This keeps values out of Claude's view in normal operation,
 and nothing is used until you unlock the vault in your own terminal.
-- Whether each use then asks depends on the secret. Imported secrets ask at every use
-  (`each`). A secret you add with `set` doesn't, once the vault is unlocked (`session`).
+- Whether each use then asks depends on the secret. Imported secrets and sealed browser
+  logins ask at every use (`each`). A secret you add with `set` doesn't, once the vault is
+  unlocked (`session`): its uses go ahead and are shown in that terminal.
 - For per-use approval on such a secret, add `--approval each`, change it later with
   `policy NAME --approval each`, or unlock with `--confirm each`.
+- A typed approval is only as safe as the terminal you type it in: a program that can
+  type into it can answer for you ("Keystroke injection into the unlock terminal"
+  below). In presence mode (Touch ID, your login password or the passphrase) it can't.
 
 It is not a wall against a deliberately hostile agent.
 - By default Claude also has a shell in the VM as the desktop user, and Chrome runs as
@@ -827,8 +831,9 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
 - Each secret names the exact sites it may go to (`--origin`, repeatable): scheme,
   host and port, with no path. `http://127.0.0.1:PORT` and `http://localhost:PORT`
   are accepted for testing.
-- `--approval each` makes every use of that secret ask you first.
-  `unlock --confirm each` does that for every use of every secret. To allow a use,
+- `--approval each` makes every use of that secret ask you first; the default,
+  `--approval session`, doesn't ask once the vault is unlocked.
+  `unlock --confirm each` makes every use of every secret ask. To allow a use,
   you type the secret's name (not just "y").
 - **`bind` pins the VM.** It shows:
   - the VM's SSH port and its host key's fingerprint;
@@ -1663,7 +1668,7 @@ something waits for you:
 | A KMS key never leaves KMS; you call `Sign` or `Decrypt` and get only the result | A fill or a token uses the value (typed into the page, or added to the API request by the proxy); Claude gets only the outcome |
 | Envelope encryption: a data key encrypted under the KMS key | `vault.json`'s data key, wrapped under the passphrase plus the Secure Enclave key, and again under the recovery key |
 | Key policies, grant constraints and encryption context limit how a key is used | Each secret's sites (`--origin`), field kinds, API host and path prefix, `--project`; the pinned VM (host key, gateway program and contents, accounts) |
-| MFA-protected API calls (`aws:MultiFactorAuthPresent`) | Typing the secret's name in the unlock terminal (`--approval each`, `--confirm each`), with a scope: this use, this session, until lock |
+| MFA-protected API calls (`aws:MultiFactorAuthPresent`) | Typing the secret's name in the unlock terminal (`--approval each`, `--confirm each`; not the default), with a scope: this use, this session, until lock. Not a second factor: a program that can type into that terminal can answer too |
 | Vault's seal and unseal | `unlock --for` (at most 12 h); everything stops at lock, including tokens |
 | Leases and TTLs, short-lived credentials from STS or the instance metadata service | API tokens: `--ttl`, at most 8 h and never past the unlock; `revoke`; usable only through the proxy |
 | Secrets Manager rotation | `set --replace` (recorded; `list` shows ages), `rekey`, `rotate-session-key`. You rotate; nothing rotates on a schedule |
@@ -1706,14 +1711,17 @@ something waits for you:
     that contains the value (at any length, even a 6-digit code) is withheld.
 - **Nothing is used until you unlock.** The vault is locked until you unlock it in your
   own terminal with its passphrase. Imported secrets then ask at every use; secrets you
-  add with `set` ask only with `--approval each` (or `policy NAME --approval each`, or
-  `unlock --confirm each`).
+  add with `set` default to `--approval session` and ask only with `--approval each` (or
+  `policy NAME --approval each`, or `unlock --confirm each`). Sealed browser logins ask on
+  every load, and every save asks.
   - It locks again on Ctrl-C, when its time is up, or when that terminal closes.
   - Your terminal shows every request and its outcome, never the values.
   - With `each`, you confirm each use by typing its name, or with Touch ID, your login
     password or the passphrase through `approve ID`. In presence mode nothing a program
     sends can confirm it for you. With typed approvals, a program that can type into the
-    unlock terminal could (see "Keystroke injection into the unlock terminal" below).
+    unlock terminal could: a multiplexer (refused unless you add `--allow-multiplexer`;
+    `--touch-id` answers with Touch ID instead), an editor's built-in terminal, a
+    scripted terminal (see "Keystroke injection into the unlock terminal" below).
     Identity providers' sign-in pages always ask.
   - Adding, changing or deleting a secret, binding a VM and relaxing a session's
     approval each need the passphrase again, even while the vault is unlocked.

@@ -1,11 +1,13 @@
 # Third-party notices
 
-## Included in this repository
+## Included in this repository and its Claude Code plugin
 
-**Cua Driver skill pack** (`.claude/skills/cua-driver/`), from the
-[trycua/cua](https://github.com/trycua/cua) release `cua-driver-rs-v0.53.0`.
-It is trimmed to the Linux guide; `SKILL.md` is edited for this project
-(`scripts/vendor-driver-skill.py` records exactly how).
+**Cua Driver skill pack** (`.claude/skills/cua-driver/`, also in the plugin as
+`metacomputer:cua-driver`), from the [trycua/cua](https://github.com/trycua/cua)
+release `cua-driver-rs-v0.53.0`. It is trimmed to the Linux guide; `SKILL.md`,
+`README.md` and `RUNTIME.md` are edited for this project, where the driver runs
+only inside the VM (`scripts/vendor-driver-skill.py` records exactly how). Its
+`LICENSE` file holds the notice below, taken from the same release.
 
 ```text
 MIT License
