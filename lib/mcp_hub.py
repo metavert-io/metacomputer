@@ -41,6 +41,7 @@ import fcntl
 import hashlib
 import itertools
 import json
+import math
 import os
 import re
 import select
@@ -88,6 +89,8 @@ MAX_SNAPSHOTS = 2048                # snapshot ids remembered (an element token 
 MAX_APPS = 4096                     # pid -> app name
 MAX_WINDOW_PIDS = 4096              # window id -> pid
 MAX_LAYOUTS = 512                   # screenshot layouts kept for the coordinate guard
+MAX_LAYOUT_WINDOWS = 256            # windows kept per layout (only their checked geometry)
+MAX_LAYOUT_WINDOWS_TOTAL = 32768    # windows kept in all layouts together
 SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 TOKEN_RE = re.compile(r"^(s[0-9a-f]{8}):[0-9]+$")    # an element token: <snapshot_id>:<row>
 KINDS = ("claude-code", "call", "sdk", "status", "test", "web")
@@ -1033,7 +1036,7 @@ class Hub:
                     self.note(f"the driver sent a message over {MAX_UPSTREAM_MSG >> 20} MB; closing the connection")
                     break
                 try:
-                    msg = wirelimits.loads(line)       # too deep or not JSON: skipped, never a dead reader
+                    msg = wirelimits.loads(line)       # too deep, too many values or not JSON: never a dead reader
                 except ValueError:
                     continue
                 if isinstance(msg, dict) and msg.get("method") == "notifications/metacomputer/closing":
@@ -1588,26 +1591,38 @@ class Hub:
         self.layout_pending[key] = rec
 
         def got(m):
-            ws = (((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-            rec["windows"] = ws if isinstance(ws, list) else None
+            rec["windows"] = compact_windows((((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows"))
             rec["ready"].set()
+            self._trim_layouts()
         self.ask_up_async("tools/call", {"name": "list_windows", "arguments": {}}, got)
 
     def capture_after(self, rec):
         """A screenshot that came back inside a batch: its layout, asked for right away."""
         def got(m):
-            ws = (((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-            rec["windows"] = ws if isinstance(ws, list) else None
+            rec["windows"] = compact_windows((((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows"))
             rec["ready"].set()
+            self._trim_layouts()
         self.ask_up_async("tools/call", {"name": "list_windows", "arguments": {}}, got)
+
+    def _trim_layouts(self):
+        """Layouts keep only checked geometry (compact_windows), at most MAX_LAYOUT_WINDOWS_TOTAL windows in all:
+        the oldest go first."""
+        while True:
+            total = sum(len(r.get("windows") or []) for r in list(self.layouts.values()))
+            if total <= MAX_LAYOUT_WINDOWS_TOTAL or not self.layouts:
+                return
+            try:
+                self.layouts.popitem(last=False)
+            except KeyError:
+                return
 
     def live_windows(self):
         t, seq, ws = self._live
         if ws is not None and seq == self.act_seq and time.time() - t < LIVE_WINDOWS_TTL_S:
             return ws
         r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {}}, timeout=10)
-        ws = (((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-        if not isinstance(ws, list):
+        ws = compact_windows((((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows"))
+        if ws is None:
             return None
         self._live = (time.time(), self.act_seq, ws)
         return ws
@@ -1739,21 +1754,25 @@ class Hub:
             if (res.get("isError") or not (has_image or sc.get("screenshot_file_path")) or not isinstance(wid, int)
                     or sc.get("screenshot_frame_valid") is False):
                 return
-            rec.update(bounds=sc.get("window_bounds"), shot=(sc.get("screenshot_width"), sc.get("screenshot_height")))
+            rec.update(bounds=geometry(sc.get("window_bounds")),
+                       shot=shot_size(sc.get("screenshot_width"), sc.get("screenshot_height")))
             self._remember(self.layouts, (sess, "w", wid), rec, MAX_LAYOUTS)
             self.zooms.pop((sess, wid), None)
+            self._trim_layouts()
         elif tool == "get_desktop_state" and not res.get("isError") and isinstance(sc.get("windows"), list):
-            r = {"ready": threading.Event(), "windows": sc["windows"], "t": time.time(),
-                 "bounds": {"x": 0, "y": 0, "width": sc.get("screen_width"), "height": sc.get("screen_height")},
-                 "shot": (sc.get("screenshot_width"), sc.get("screenshot_height"))}
+            r = {"ready": threading.Event(), "windows": compact_windows(sc["windows"]), "t": time.time(),
+                 "bounds": geometry({"x": 0, "y": 0, "width": sc.get("screen_width"), "height": sc.get("screen_height")}),
+                 "shot": shot_size(sc.get("screenshot_width"), sc.get("screenshot_height"))}
             r["ready"].set()
             self._remember(self.layouts, (sess, "desktop"), r, MAX_LAYOUTS)
+            self._trim_layouts()
         elif tool == "run_steps":
             state = ((sc.get("observation") or {}).get("state") or {}) if isinstance(sc.get("observation"), dict) else {}
             wid = state.get("window_id")
-            if has_image and isinstance(wid, int) and state.get("screenshot_frame_valid") and state.get("window_bounds"):
-                r = {"ready": threading.Event(), "windows": None, "t": time.time(), "bounds": state["window_bounds"],
-                     "shot": (state.get("screenshot_width"), state.get("screenshot_height"))}
+            bounds = geometry(state.get("window_bounds"))
+            if has_image and isinstance(wid, int) and state.get("screenshot_frame_valid") and bounds:
+                r = {"ready": threading.Event(), "windows": None, "t": time.time(), "bounds": bounds,
+                     "shot": shot_size(state.get("screenshot_width"), state.get("screenshot_height"))}
                 self._remember(self.layouts, (sess, "w", wid), r, MAX_LAYOUTS)
                 self.zooms.pop((sess, wid), None)
                 self.capture_after(r)
@@ -1849,6 +1868,48 @@ def steps_of(args):
 
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def geometry(b):
+    """A window frame from the driver as {x, y, width, height} of finite, sane numbers, or None."""
+    if not isinstance(b, dict):
+        return None
+    try:
+        vals = [float(b[k]) for k in ("x", "y", "width", "height")]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(v) and abs(v) < 1e7 for v in vals) or vals[2] < 0 or vals[3] < 0:
+        return None
+    return dict(zip(("x", "y", "width", "height"), vals))
+
+
+def shot_size(w, h):
+    return (w if _num(w) else None, h if _num(h) else None)
+
+
+def compact_windows(ws):
+    """The part of a window list the coordinate guard compares (id, stacking, frame, visibility, a short app name),
+    for at most MAX_LAYOUT_WINDOWS windows with a valid frame. Anything else a result carried isn't kept. None when
+    there's no list."""
+    if not isinstance(ws, list):
+        return None
+    out = []
+    for w in ws:
+        if not isinstance(w, dict):
+            continue
+        wid = w.get("window_id")
+        if not isinstance(wid, int) or isinstance(wid, bool):
+            continue
+        g = geometry(w.get("bounds") if isinstance(w.get("bounds"), dict) else w)
+        if g is None:
+            continue
+        z = w.get("z_index")
+        out.append({"window_id": wid, "z_index": z if _num(z) else None, "bounds": g,
+                    "is_on_screen": w.get("is_on_screen") is not False, "minimized": bool(w.get("minimized")),
+                    "app_name": clean(w.get("app_name"), 40)})
+        if len(out) >= MAX_LAYOUT_WINDOWS:
+            break
+    return out
 
 
 def pixel_target(tool, a, default_wid=None, batch=None):

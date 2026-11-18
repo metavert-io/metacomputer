@@ -8,7 +8,9 @@ each message with a size limit; this module adds what a size limit doesn't cover
   a reader thread would die and leave its connection open and silent. Here it is a
   ValueError like any other bad message, and anything nested deeper than
   MAX_JSON_DEPTH is refused too, so later code (json.dumps, walks over a result)
-  never meets a structure that deep.
+  never meets a structure that deep. A message that could hold more than
+  MAX_JSON_NODES values is refused before it's parsed, so a small frame can't
+  turn into millions of Python objects.
 - StderrTail: a child's stderr (SSH carries the VM's) drained without growing: the
   last few kilobytes stay in memory for error messages, and a log file gets at most
   a fixed number of bytes.
@@ -18,6 +20,7 @@ import os
 import threading
 
 MAX_JSON_DEPTH = 100          # MCP messages nest a handful of levels; Python's parser gives up near 1000
+MAX_JSON_NODES = 1_000_000    # values in one message (a 5,000-element tree is tens of thousands; base64 has none)
 STDERR_KEEP = 64 << 10        # what an error message can quote from a child's stderr
 STDERR_FILE_MAX = 1 << 20     # what a child's stderr may add to its log file
 
@@ -28,29 +31,44 @@ def _brackets(data):
     return data.count("[") + data.count("{")
 
 
+def _nodes(data):
+    """An upper bound on the values a JSON text holds: every container opens with [ or {, and every value
+    after the first in a container follows a comma (counted in strings too, so it can only overcount)."""
+    if isinstance(data, (bytes, bytearray)):
+        return data.count(b"[") + data.count(b"{") + data.count(b",")
+    return data.count("[") + data.count("{") + data.count(",")
+
+
+def _children(o):
+    return iter(o.values()) if isinstance(o, dict) else iter(o)
+
+
 def depth_exceeds(obj, limit):
-    """True when obj (parsed JSON) nests containers more than limit levels deep. No recursion."""
-    stack = [(obj, 1)]
+    """True when obj (parsed JSON) nests containers more than limit levels deep. No recursion, and the stack holds
+    one iterator per level (never every sibling), so its size is the depth."""
+    if not isinstance(obj, (dict, list)):
+        return False
+    stack = [_children(obj)]
     while stack:
-        o, d = stack.pop()
-        if d > limit:
+        if len(stack) > limit:
             return True
-        if isinstance(o, dict):
-            items = o.values()
-        elif isinstance(o, list):
-            items = o
-        else:
-            continue
-        for v in items:
+        for v in stack[-1]:
             if isinstance(v, (dict, list)):
-                stack.append((v, d + 1))
+                stack.append(_children(v))
+                break
+        else:
+            stack.pop()
     return False
 
 
-def loads(data, max_depth=None):
-    """json.loads for a message off the wire. Raises ValueError (never RecursionError) when it isn't JSON or
-    nests deeper than max_depth (MAX_JSON_DEPTH)."""
+def loads(data, max_depth=None, max_nodes=None):
+    """json.loads for a message off the wire. Raises ValueError (never RecursionError) when it isn't JSON, holds more
+    than max_nodes values (MAX_JSON_NODES, checked before anything is parsed) or nests deeper than max_depth
+    (MAX_JSON_DEPTH)."""
     limit = MAX_JSON_DEPTH if max_depth is None else max_depth
+    nodes = MAX_JSON_NODES if max_nodes is None else max_nodes
+    if _nodes(data) > nodes:
+        raise ValueError(f"JSON with more than {nodes:,} values")
     try:
         obj = json.loads(data)
     except RecursionError:

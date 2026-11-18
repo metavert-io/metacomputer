@@ -1491,6 +1491,51 @@ def who_checks():
     clear_claims()
 
 
+# --- second verification round ---------------------------------------------------------------
+def memory_checks():
+    print("N2: what a small frame or many screenshots can make the hub hold")
+    import tracemalloc
+    wide = [[] for _ in range(300_000)]
+    tracemalloc.start()
+    deep = wirelimits.depth_exceeds(wide, 100)
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    check("the depth check's stack is as deep as the JSON, not as wide (300,000 siblings: under 1 MB)",
+          not deep and peak < 1_000_000, peak)
+    many = b"[" + b"[]," * 2_000_000 + b"[]]"
+    tracemalloc.start()
+    try:
+        wirelimits.loads(many)
+        refused = False
+    except ValueError as e:
+        refused = "values" in str(e)
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    check("a frame with millions of values is refused before it's parsed (no millions of objects)",
+          refused and peak < 10_000_000, peak)
+    hub = mcp_hub.Hub(env=env(MCOMP_RUN_DIR=os.path.join(TD, "run-mem")))
+    junk = "j" * 1000
+    for i in range(300):
+        ws = [{"window_id": 1000 * i + k, "pid": 5, "app_name": "A" * 500, "z_index": k, "junk": junk,
+               "bounds": {"x": 0, "y": 0, "width": 100, "height": 100, "extra": junk}} for k in range(400)]
+        res = {"content": [{"type": "image"}]}
+        sc = {"windows": ws, "screen_width": 1920, "screen_height": 1080, "screenshot_width": 1920,
+              "screenshot_height": 1080}
+        hub.note_layout("get_desktop_state", res, sc, f"s{i}", {}, None)
+    per = [len(r["windows"] or []) for r in hub.layouts.values()]
+    keys = {k for r in hub.layouts.values() for w in (r["windows"] or []) for k in w}
+    names = {len(w["app_name"]) for r in hub.layouts.values() for w in (r["windows"] or [])}
+    check("screenshot layouts keep only checked geometry, at most 256 windows each and 32,768 in all",
+          max(per) <= mcp_hub.MAX_LAYOUT_WINDOWS and sum(per) <= mcp_hub.MAX_LAYOUT_WINDOWS_TOTAL
+          and keys <= {"window_id", "z_index", "bounds", "is_on_screen", "minimized", "app_name"} and max(names) <= 40,
+          (max(per), sum(per), keys))
+    hub.note_layout("get_desktop_state", {"content": []}, {"windows": [{"window_id": 1, "bounds": {"x": "a"}}],
+                    "screen_width": float("inf"), "screen_height": 1}, "bad", {}, None)
+    rec = hub.layouts.get(("bad", "desktop"))
+    check("…and a frame that isn't finite numbers isn't kept at all", rec and rec["bounds"] is None and rec["windows"] == [],
+          rec)
+
+
 def main():
     setup_driver()
     try:
@@ -1517,6 +1562,7 @@ def main():
         token_checks()
         batch_checks()
         who_checks()
+        memory_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
