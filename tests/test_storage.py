@@ -2481,7 +2481,9 @@ def test_status_untrusted_guest():
     host = {"configured": True, "guest_features": True, "items": [
         {"kind": "folder", "name": "f", "mount": "/mnt/f", "rw": False, "path": "/x"}]}
     bad = []
-    for guest in ("junk", [1, 2], {"items": "x"}, {"items": [1, "a", None]}, {"supported": True, "items": [[]]}, 7):
+    for guest in ("junk", [1, 2], {"items": "x"}, {"items": [1, "a", None]}, {"supported": True, "items": [[]]}, 7,
+                  {"supported": True, "items": [{"kind": [], "name": "x"}]},
+                  {"supported": True, "items": [{"kind": "folder", "name": {"a": 1}, "mounted": True}]}):
         try:
             storage.describe_status(host, guest, True)
         except Exception as e:  # noqa: BLE001

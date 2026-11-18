@@ -4345,7 +4345,8 @@ def describe_status(host, guest, running):
     elif not isinstance(guest.get("items"), list):
         guest = dict(guest, items=[])
     else:
-        guest = dict(guest, items=[g for g in guest["items"] if isinstance(g, dict)])
+        guest = dict(guest, items=[g for g in guest["items"] if isinstance(g, dict)
+                                   and isinstance(g.get("kind"), str) and isinstance(g.get("name"), str)])
     supported = guest.get("supported") if guest is not None else host.get("guest_features")
     if not host.get("configured") and not host.get("items"):
         return lines
