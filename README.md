@@ -280,13 +280,18 @@ shell, `claude plugin install metacomputer --marketplace metavert-io/metacompute
 The plugin alone has no VM: until the next step is done, its MCP server stops
 with a message saying to set it up.
 
-**The VM and the command, on your Mac:**
+**The VM and the command, on your Mac**, in one command (it checks the Mac,
+offers Homebrew and Apple's Command Line Tools if they're missing, clones into
+`~/metacomputer` and runs `./install.sh --yes`; about 5 minutes with the
+prerequisites in place). [docs/install.md](docs/install.md) has the details,
+measured times, the plugin-first path, updating, uninstalling and
+troubleshooting:
 
 ```bash
-git clone https://github.com/metavert-io/metacomputer.git
-cd metacomputer
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash
 ```
+
+Or by hand: `git clone https://github.com/metavert-io/metacomputer.git && cd metacomputer && ./install.sh`.
 
 `./install.sh` installs the plugin too, from the checkout, so you can skip the
 `/plugin` commands. If you added the plugin from GitHub first, it keeps that one.
@@ -299,17 +304,17 @@ The two sources update differently:
   runs your checkout's, through `~/.local/bin/metacomputer` (or the checkout that
   `MCOMP_HOME` names).
 
-The installer asks at most four questions:
-1. whether to install missing tools with Homebrew;
-2. which Lume runs the VM: mcomp-vm (recommended; built from source in about a minute) or Cua's standard release, which always shares your clipboard, audio and Rosetta with the VM;
-3. whether to put Google Chrome in the VM next to Firefox;
-4. whether to build the VM now.
+`./install.sh` shows what it will do and asks once (Enter means yes; `--yes`
+skips it). Its defaults: mcomp-vm runs the VM (`--lume=standard` for Cua's
+release, which always shares your clipboard, audio and Rosetta with the VM),
+Google Chrome goes in next to Firefox (`--no-chrome`), and the VM is built now
+(`--no-build`).
 
 | Option | Effect |
 | --- | --- |
 | `--yes` | Take the defaults: mcomp-vm, Chrome included, build now |
 | `--no-chrome` | Firefox only in the VM |
-| `--lume=mcomp-vm` / `--lume=standard` | Choose mcomp-vm or Cua's standard Lume without being asked (`--lume=secure`, from before the rename, still means mcomp-vm) |
+| `--lume=mcomp-vm` / `--lume=standard` | mcomp-vm (the default) or Cua's standard Lume (`--lume=secure`, from before the rename, still means mcomp-vm) |
 | `--no-build` | Set everything up but don't build the VM yet |
 | `--no-claude` | Don't touch Claude Code (no command links, plugin, skill or MCP server) |
 | `--no-plugin` | Claude Code without the plugin: the skill link and a user-scope MCP server, as before the plugin (tools: `mcp__metacomputer__*`). It removes this checkout's plugin |

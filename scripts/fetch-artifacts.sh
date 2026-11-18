@@ -76,11 +76,19 @@ gpgv --keyring "$KEYRING" --status-fd 1 "$U/SHA256SUMS.gpg" "$U/SHA256SUMS" 2>/d
 ok "SHA256SUMS signed by $UBUNTU_SIGNING_KEY_FPR"
 listed="$(awk -v f="*$UBUNTU_IMAGE" '$2==f{print $1}' "$U/SHA256SUMS")"
 [ "$listed" = "$UBUNTU_IMAGE_SHA256" ] || die "pinned image digest differs from the signed SHA256SUMS ($listed)"
-if [ ! -f "$U/$UBUNTU_IMAGE" ] || ! echo "$UBUNTU_IMAGE_SHA256  $U/$UBUNTU_IMAGE" | shasum -a 256 -c - >/dev/null 2>&1; then
-  curl -fL --progress-bar -o "$U/$UBUNTU_IMAGE.part" "$UBUNTU_BASE_URL/$UBUNTU_IMAGE"
-  mv "$U/$UBUNTU_IMAGE.part" "$U/$UBUNTU_IMAGE"
+image_ok() { echo "$UBUNTU_IMAGE_SHA256  $1" | shasum -a 256 -c - >/dev/null 2>&1; }
+if [ ! -f "$U/$UBUNTU_IMAGE" ] || ! image_ok "$U/$UBUNTU_IMAGE"; then
+  # An interrupted download resumes from its .part file (-C -); one that can't resume starts again.
+  part="$U/$UBUNTU_IMAGE.part"
+  if [ ! -f "$part" ] || ! image_ok "$part"; then
+    say "downloading the image (about 600 MB$([ -s "$part" ] && echo "; resuming the earlier download"))"
+    curl -fL --retry 3 -C - --progress-bar -o "$part" "$UBUNTU_BASE_URL/$UBUNTU_IMAGE" \
+      || { rm -f "$part"; curl -fL --retry 3 --progress-bar -o "$part" "$UBUNTU_BASE_URL/$UBUNTU_IMAGE"; } \
+      || die "the download of Ubuntu's image stopped (network?): run the build again to resume it"
+  fi
+  mv "$part" "$U/$UBUNTU_IMAGE"
 fi
-echo "$UBUNTU_IMAGE_SHA256  $U/$UBUNTU_IMAGE" | shasum -a 256 -c - >/dev/null || die "image digest mismatch"
+image_ok "$U/$UBUNTU_IMAGE" || { rm -f "$U/$UBUNTU_IMAGE"; die "image digest mismatch (the file is removed; the next build downloads it again)"; }
 ok "$UBUNTU_IMAGE sha256 verified"
 
 say "Cua Driver $CUA_DRIVER_VERSION (linux-arm64)"
@@ -90,7 +98,7 @@ curl -fsSL -o "$D/SHA256SUMS" "$REL/SHA256SUMS"
 listed="$(awk -v f="$CUA_DRIVER_TARBALL" '$2==f{print $1}' "$D/SHA256SUMS" | head -1)"
 [ "$listed" = "$CUA_DRIVER_SHA256" ] || die "pinned driver digest differs from the release SHA256SUMS ($listed)"
 if [ ! -f "$D/$CUA_DRIVER_TARBALL" ] || ! echo "$CUA_DRIVER_SHA256  $D/$CUA_DRIVER_TARBALL" | shasum -a 256 -c - >/dev/null 2>&1; then
-  curl -fL --progress-bar -o "$D/$CUA_DRIVER_TARBALL" "$REL/$CUA_DRIVER_TARBALL"
+  curl -fL --retry 3 --progress-bar -o "$D/$CUA_DRIVER_TARBALL" "$REL/$CUA_DRIVER_TARBALL"
 fi
 echo "$CUA_DRIVER_SHA256  $D/$CUA_DRIVER_TARBALL" | shasum -a 256 -c - >/dev/null || die "driver digest mismatch"
 ok "$CUA_DRIVER_TARBALL sha256 verified"

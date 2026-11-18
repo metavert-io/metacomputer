@@ -53,6 +53,10 @@
 #   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use; through the hub)
 #   mcp                            the same as mcp-lazy; with MCOMP_DIRECT_BRIDGE=1 the hub's own SSH
 #                                  connection to the driver (the hub; the transport tests)
+#   setup [--no-chrome] [--no-build] [--yes]
+#                                  finish or repair the setup (./install.sh; finished steps are skipped).
+#                                  From the Claude Code plugin with no checkout yet: download it and set
+#                                  everything up (get.sh; says what it will do and asks first)
 #   build [--replace]              build the VM + baseline from scratch
 #   baseline [--yes]               re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
@@ -84,9 +88,32 @@ if mc_in_plugins "$mc_self"; then
     mc_to="$(readlink -f "$mc_to" 2>/dev/null)" || continue
     [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" && exec "$mc_to" "$@"
   done
+  # No checkout yet. Only `setup` runs anything: /bin/bash with the get.sh that came in this plugin copy
+  # (its root, beside bin/), which explains what it will do and asks first (--confirm). Only the options
+  # below pass through; no setting or variable can point it at another script or repository.
+  if [ "${1:-}" = setup ]; then
+    shift; mc_args=(--confirm)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }; mc_args+=(--dir "$2"); shift ;;
+        --no-chrome|--no-build|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
+        *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --yes, --dry-run)" >&2; exit 2 ;;
+      esac
+      shift
+    done
+    mc_root="$(dirname "$(dirname "$mc_self")")"
+    mc_get="$(readlink -f "$mc_root/get.sh" 2>/dev/null)"
+    if [ -n "$mc_get" ] && [ "$mc_get" = "$mc_root/get.sh" ] && [ -f "$mc_get" ] && mc_in_plugins "$mc_get"; then
+      exec /bin/bash "$mc_get" "${mc_args[@]}"
+    fi
+    printf '%s\n' "metacomputer setup: this plugin copy has no get.sh of its own (update the plugin: claude plugin update metacomputer@metacomputer)." \
+      "Or set it up in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" >&2
+    exit 1
+  fi
   printf '%s\n' "metacomputer: this is the Claude Code plugin's copy, and this Mac has no metacomputer set up yet." \
-    "Set it up once (macOS on Apple silicon; it builds the VM):" \
-    "  git clone https://github.com/metavert-io/metacomputer && cd metacomputer && ./install.sh" \
+    "Set it up from here (it says what it will do and asks first; macOS on Apple silicon; it builds the VM):" \
+    "  $mc_self setup" \
+    "or in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" \
     "or point MCOMP_HOME at an existing checkout." >&2
   exit 1
 fi
@@ -610,6 +637,7 @@ expect_guard() {
 
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
   local src="$1" label="$2" evtype="${3:-restored}"
+  vm_lock_or_die "restoring $VM_NAME"   # held already by its callers; never a delete without it
   expect_guard
   if vm_exists "$VM_NAME" && vm_running "$VM_NAME"; then
     events_watcher_stop   # start brings it back; meanwhile the replacement isn't a health problem
@@ -632,6 +660,7 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
 
 do_reset() {
   parse_flags "$@"
+  vm_lock_or_die "metacomputer reset"
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
@@ -645,6 +674,7 @@ ckpt_name() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "checkpoint nam
 do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
+  vm_lock_or_die "metacomputer checkpoint"
   if [ "${1:-}" = "--delete" ]; then
     ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     local vols; vols="$(storage_py checkpoint list "$2" 2>/dev/null)"
@@ -689,6 +719,7 @@ pre = sys.argv[1]; print("\n".join(sorted(v["name"][len(pre):] for v in json.loa
 do_restore() { # NAME [--yes] [--override]
   parse_flags "$@"
   local name="${REST[0]:-}"; ckpt_name "$name"
+  vm_lock_or_die "metacomputer restore $name"
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
@@ -698,6 +729,7 @@ do_restore() { # NAME [--yes] [--override]
 
 do_baseline() {
   parse_flags "$@"
+  vm_lock_or_die "metacomputer baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   local was_running=0; vm_running "$VM_NAME" && was_running=1
@@ -1157,10 +1189,93 @@ EOF
   esac
 }
 
+# The live-view (VNC) password. It never goes into an environment or onto a command line: it reaches the
+# VM on ssh's stdin, the Keychain through a `security -i` command fed on stdin, and its file through Python's
+# stdin. VNC_PASSWORD_STORE=keychain: the login Keychain, service metacomputer-vnc, account VM_NAME, a new
+# password each build, written and then checked by a one-time tag in its comment; the user reads it in
+# their own terminal. A usable password an earlier setup kept in $SSH_DIR/vnc-pass stays in use.
+VNC_KEYCHAIN_SERVICE=metacomputer-vnc
+vnc_file() { printf '%s' "$SSH_DIR/vnc-pass"; }
+# read: print the file's password if it's usable (status 1 if not); write: the password on stdin goes in.
+# The folder must be a real folder of yours (made 0700) under folders that are root's or yours and that only
+# their owner can write to, unless they're sticky (/tmp); the file is read and created with no-follow
+# opens through a descriptor of that folder: written to a new 0600 file (exclusive), then renamed into place.
+vnc_file_io() {
+  "$PY" -c '
+import os, secrets, stat, sys
+mode, d = sys.argv[1], sys.argv[2]
+uid, name = os.getuid(), "vnc-pass"
+def stop(msg, code=2):
+    print(msg, file=sys.stderr); sys.exit(code)
+if mode == "write":
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except OSError as e:
+        stop(f"could not create {d}: {e.strerror}")
+try:
+    st = os.lstat(d)
+except FileNotFoundError:
+    sys.exit(1)
+if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+    stop(f"{d} is a link or not a folder; refusing to keep the live-view password there")
+if st.st_uid != uid:
+    stop(f"{d} belongs to someone else; refusing to keep the live-view password there")
+a = os.path.dirname(os.path.realpath(d))
+while True:
+    s = os.stat(a)
+    if s.st_uid not in (0, uid) or ((s.st_mode & 0o022) and not s.st_mode & stat.S_ISVTX):
+        stop(f"{a} (above {d}) can be changed by someone else; refusing to keep the live-view password there")
+    if a == "/":
+        break
+    a = os.path.dirname(a)
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+s = os.fstat(dfd)
+if s.st_uid != uid:
+    stop(f"{d} changed while it was checked")
+if s.st_mode & 0o077:
+    os.fchmod(dfd, 0o700)
+if mode == "read":
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+    except OSError:
+        sys.exit(1)
+    s = os.fstat(fd)
+    data = os.read(fd, 257) if stat.S_ISREG(s.st_mode) and s.st_uid == uid and s.st_size <= 256 else b""
+    pw = data.decode("utf-8", "replace").rstrip("\n")
+    if not pw or "\n" in pw or len(pw) > 64 or not all(33 <= ord(c) < 127 for c in pw):
+        sys.exit(1)
+    print(pw); sys.exit(0)
+pw = sys.stdin.readline().rstrip("\n")
+if not pw:
+    stop("no password to write")
+try:
+    if not stat.S_ISREG(os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode):
+        stop(f"{d}/{name} is a link or not a plain file; refusing to write the live-view password through it (remove it, then run this again)")
+except FileNotFoundError:
+    pass
+tmp = ".vnc-pass." + secrets.token_hex(8)
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+try:
+    os.fchmod(fd, 0o600)
+    if os.write(fd, pw.encode()) != len(pw.encode()):
+        raise OSError("short write")
+    os.fsync(fd)
+except OSError as e:
+    os.close(fd); os.unlink(tmp, dir_fd=dfd); stop(f"could not write the live-view password: {e}")
+os.close(fd)
+os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+' "$1" "$SSH_DIR"
+}
+vnc_file_ok() { vnc_file_io read >/dev/null 2>&1; }
+vnc_file_write() { # PASSWORD
+  printf '%s\n' "$1" | vnc_file_io write || die "couldn't keep the live-view password in $(vnc_file) (above)"
+}
 vnc_password_hint() {
   case "$VNC_PASSWORD_STORE" in
     command) echo "$VNC_PASSWORD_GET   (in your own terminal)" ;;
-    *)       echo "cat $SSH_DIR/vnc-pass   (in your own terminal)" ;;
+    keychain) if vnc_file_ok; then echo "cat $(vnc_file)   (in your own terminal)"
+              else echo "security find-generic-password -s $VNC_KEYCHAIN_SERVICE -a $VM_NAME -w   (in your own terminal)"; fi ;;
+    *)       echo "cat $(vnc_file)   (in your own terminal)" ;;
   esac
 }
 
@@ -1179,13 +1294,59 @@ EOF
     echo "To publish it to your tailnet instead:"
     echo "  tailscale serve --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT   (undo: tailscale serve --tcp $VNC_PORT off)"
   fi
-  [ "${1:-}" = "--open" ] && open "vnc://127.0.0.1:$VNC_PORT"
+  if [ "${1:-}" = "--open" ]; then open "vnc://127.0.0.1:$VNC_PORT"; fi
 }
 
 new_vnc_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8; }
 
+# DEADLINE CMD... (with this shell's stdin): CMD, stopped when $SECONDS reaches DEADLINE: TERM a second
+# before it, then KILL at it (the process and its children). 124 = stopped. The deadline is checked again
+# on every pass, so the whole of it never runs past DEADLINE.
+proc_tree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do printf '%s ' "$c"; proc_tree "$c"; done; }
+run_until() {
+  local deadline="$1" pid procs; shift
+  [ "$SECONDS" -lt "$deadline" ] || return 124
+  "$@" 0<&0 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge $(( deadline - 1 )) ]; then
+      # The whole tree, listed before anything is signalled (a child whose parent dies is re-parented).
+      procs="$pid $(proc_tree "$pid")"
+      kill -TERM $procs 2>/dev/null
+      while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+      kill -KILL $procs $(proc_tree "$pid") 2>/dev/null; wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$pid"
+}
+# PASSWORD -> the login Keychain as metacomputer-vnc / VM_NAME; 0 = that item now holds this password. All of
+# it ends within MCOMP_KEYCHAIN_WAIT seconds. `add-generic-password -w` with no value reads the terminal
+# (getpass) and with one puts it on a command line, so the command goes to `security -i` on stdin. It
+# updates the item in place (-U: no moment without one) and tags it with a one-time comment; since
+# `security -i`'s exit status says nothing, the item is then looked up and must carry that tag, so another
+# write that won the race (or an old item) is never taken for this one. The build's VM lock keeps two
+# writes for one VM apart in the first place.
+vnc_keychain_put() {
+  local pw="$1" kc tag deadline
+  deadline=$(( SECONDS + ${MCOMP_KEYCHAIN_WAIT:-20} ))
+  [[ "$VM_NAME" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$pw" =~ ^[A-Za-z0-9]+$ ]] || return 1
+  tag="mcomp-$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 20)"
+  kc="$(run_until "$deadline" security login-keychain </dev/null 2>/dev/null | sed -n '1s/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p')"
+  case "$kc" in /*) ;; *) return 1 ;; esac
+  case "$kc" in *'"'*|*'\'*) return 1 ;; esac
+  [ -f "$kc" ] || return 1
+  printf 'add-generic-password -U -s %s -a %s -l "metacomputer live view" -j %s -w %s "%s"\n' \
+    "$VNC_KEYCHAIN_SERVICE" "$VM_NAME" "$tag" "$pw" "$kc" | run_until "$deadline" security -i >/dev/null 2>&1
+  run_until "$deadline" security find-generic-password -s "$VNC_KEYCHAIN_SERVICE" -a "$VM_NAME" "$kc" </dev/null 2>/dev/null \
+    | grep -F "\"icmt\"<blob>=\"$tag\"" >/dev/null
+}
+
 do_vnc_install() { # make sure a live-view password exists in the configured store, then push it to the guest
   local pw=""
+  # The same lock as the build's (held already when the build runs this): one password change per VM at a time.
+  vm_lock_or_die "the live-view password of $VM_NAME"
   case "$VNC_PASSWORD_STORE" in
     command)
       [ -n "$VNC_PASSWORD_GET" ] && [ -n "$VNC_PASSWORD_SET" ] || die "VNC_PASSWORD_STORE=command needs VNC_PASSWORD_GET and VNC_PASSWORD_SET (config/local.env)"
@@ -1194,19 +1355,32 @@ do_vnc_install() { # make sure a live-view password exists in the configured sto
         new_vnc_password | sh -c "$VNC_PASSWORD_SET" >/dev/null || die "VNC_PASSWORD_SET failed"
         pw="$(sh -c "$VNC_PASSWORD_GET" 2>/dev/null || true)"
       fi ;;
+    keychain)
+      if pw="$(vnc_file_io read 2>/dev/null)"; then
+        vnc_file_write "$pw"   # an earlier setup's password: kept, rewritten 0600
+      else
+        pw="$(new_vnc_password)"
+        if ! vnc_keychain_put "$pw"; then
+          warn "the login Keychain didn't take the live-view password (none, locked, or waiting on a dialog); it's kept in $(vnc_file) (0600) instead"
+          vnc_file_write "$pw"
+        fi
+      fi ;;
     *)
-      local f="$SSH_DIR/vnc-pass"
-      [ -s "$f" ] || { mkdir -p -m 700 "$SSH_DIR"; (umask 077; new_vnc_password > "$f"); }
-      pw="$(cat "$f")" ;;
+      pw="$(vnc_file_io read 2>/dev/null)" || pw="$(new_vnc_password)"
+      vnc_file_write "$pw" ;;
   esac
   [ -n "$pw" ] || die "no live-view password available (VNC_PASSWORD_STORE=$VNC_PASSWORD_STORE)"
-  VNC_PASSWORD="$pw" "$SELF" _vnc-push
+  vnc_push "$pw"
 }
-do_vnc_push() {
-  [ -n "${VNC_PASSWORD:-}" ] || die "_vnc-push needs VNC_PASSWORD"
-  printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/metacomputer; cat > ~/.config/metacomputer/vnc-pass; pkill -x x11vnc; /opt/metacomputer/bin/session-run /opt/metacomputer/bin/session-init' \
+vnc_push() { # PASSWORD -> the VM, on ssh's stdin, within MCOMP_VNC_PUSH_WAIT seconds (a VM that holds it open can't stall a build)
+  printf '%s\n' "$1" | run_until $(( SECONDS + ${MCOMP_VNC_PUSH_WAIT:-120} )) gssh ops 'umask 077; mkdir -p ~/.config/metacomputer; cat > ~/.config/metacomputer/vnc-pass; pkill -x x11vnc; /opt/metacomputer/bin/session-run /opt/metacomputer/bin/session-init' \
     || die "could not install the VNC password"
   ok "live view enabled on 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))"
+}
+do_vnc_push() { # _vnc-push: the password as one line on stdin
+  local pw=""; IFS= read -r pw || true
+  [ -n "$pw" ] || die "_vnc-push reads the password as one line on stdin"
+  vnc_push "$pw"
 }
 
 do_where() { # paths a person or an agent may need
@@ -1348,6 +1522,11 @@ case "$cmd" in
   secrets)    do_secrets "$@"; exit $? ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
+  setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
+              case " $* " in *" --yes "*|*" -y "*) ;; *)
+                [ -t 0 ] || { printf '%s\n' "metacomputer setup runs $LAB_ROOT/install.sh, which asks before it changes anything." \
+                  "There's no terminal here to ask on: to go ahead, run: metacomputer setup --yes" >&2; exit 3; } ;; esac
+              exec "$LAB_ROOT/install.sh" "$@" ;;
   logs)       n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"
               { tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
                 gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null; } | term_safe ;;

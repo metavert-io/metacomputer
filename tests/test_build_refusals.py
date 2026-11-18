@@ -68,6 +68,7 @@ def run(td):
             f.write(f'VM_NAME=fake-build-vm\nBASELINE_NAME=fake-build-vm-baseline\nLUME="{bindir}/lume"\n'
                     f'SSH_DIR="{ssh}"\nSSH_PORT=2399\nRUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\n{extra_cfg}\n')
         env = dict(os.environ, MCOMP_CONFIG=cfg, MCOMP_EVENTS_DIR=os.path.join(td, "events"),
+                   MCOMP_LOCK_DIR=os.path.join(td, "locks"),   # the build's VM lock: never the real per-user folder
                    PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
         if os.path.exists(calls):
             os.remove(calls)

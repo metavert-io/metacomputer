@@ -140,7 +140,20 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   marketplace (`install.sh`) loads it in place; a GitHub install copies it, links
   resolved, and that copy's `bin/metacomputer` hands over to the installed checkout
   (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`): keep that block first in
-  `bin/metacomputer`, before anything reads config. Anything that names the tools
+  `bin/metacomputer`, before anything reads config. With no checkout, its only
+  other action is `setup`: `/bin/bash` with the `get.sh` at that copy's root
+  (`plugin/get.sh` links to `get.sh`), with `--confirm` and an allowlist of options;
+  never let a variable or option pick another script or repository (with `--confirm`,
+  get.sh uses an existing checkout only when it's a clean one of the project's repository).
+- Installers never delete a VM on their own: a VM without its baseline is replaced only
+  with `install.sh --replace-vm` (never implied by `--yes`); lookups that fail (the VM
+  listing, `vm_dir`, release tags, where Lume keeps VMs) stop instead of guessing. One
+  install per user and one change per VM run at a time: every command that deletes,
+  replaces, restores or snapshots a VM, its baseline or checkpoints calls
+  `vm_lock_or_die` (`scripts/lib.sh`), the lock build-vm.sh holds; install.sh and get.sh
+  take `install_lock`. Locks are flocks on descriptors 7/8 that children inherit (so
+  they last as long as the work); `daemonize` closes them, so daemons never keep one.
+  `get.sh --confirm` never deletes anything in a checkout: it refuses instead. Anything that names the tools
   (skill, bench, tests, scripts) must accept both prefixes. No `version` in
   `plugin.json` until the first tagged release (users track commits). Checks:
   `claude plugin validate .` and `python3 tests/test_plugin.py` (its only accepted
@@ -151,7 +164,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
-  `test_bench_workdir`, `test_vm_runner`, `test_plugin`, `test_learn`, `test_storage` (no VM),
+  `test_bench_workdir`, `test_vm_runner`, `test_plugin`, `test_learn`, `test_storage`, `test_install` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings) and
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,

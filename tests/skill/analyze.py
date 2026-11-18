@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 """Summarize a headless session transcript (stream-json) for the skill tests:
 skill use, metacomputer commands, metacomputer tool calls, denied attempts, result.
 

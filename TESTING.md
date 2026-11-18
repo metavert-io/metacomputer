@@ -68,7 +68,7 @@ a fake `git`.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (64 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (79 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. `--real-claude` repeats the
 install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
@@ -86,6 +86,14 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   `$MCOMP_HOME/bin/metacomputer` or else `~/.local/bin/metacomputer` with the same
   arguments, never a copy inside the plugin folder; with neither it exits 1 and
   says how to set up. The checkout and `plugin/bin/metacomputer` run as always.
+- `metacomputer setup` in that copy, with no checkout: runs only `/bin/bash` with the
+  `get.sh` at the copy's root (`plugin/get.sh`, a link in the repository, a file in
+  a GitHub install), always with `--confirm`, passing through only `--dir`,
+  `--no-chrome`, `--no-build`, `--yes`, `--dry-run` and `--help` (`--repo`, `--ref`
+  and anything else exit 2 with nothing run). `MCOMP_HOME` and `PATH` can't point it
+  elsewhere; a `get.sh` that's a link, or one in `bin/`, is refused. With a checkout,
+  `setup` hands over like any command. The real get.sh, with no terminal, explains
+  and exits 3.
 - `install.sh --only-claude`: a fresh install adds the checkout as the marketplace
   and installs the plugin at user scope; a second run changes nothing; an earlier
   install's skill link and user-scope server are removed when they're this
@@ -99,6 +107,74 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   to the skill link and server. `--uninstall` removes whichever is there.
 - The skill and the driver pack name both prefixes; bench's metrics and allowed
   tools and the skill-test analyzer count both.
+
+## The installers: `tests/test_install.py`
+
+`python3 tests/test_install.py` (194 checks) needs no VM, no network and no
+Homebrew. Every command that looks at the Mac or reaches out (`uname`, `sw_vers`,
+`sysctl`, `df`, `dscl`, `curl`, `xcode-select`, `brew`, `ssh`, `security`, the VM
+runner) is a stub on `PATH` that logs its calls, in a temporary home, with its own
+lock folder (`MCOMP_LOCK_DIR`) and account home (so the real `~/.config/lume` is never
+read). git is the real one behind a wrapper that refuses network URLs (with
+`GIT_ALLOW_PROTOCOL=file`), so every repository is a local folder. One check uses the
+real `security`, on a throwaway keychain that exists only inside a temporary home
+(skipped where `security` doesn't keep to that home).
+- `get.sh`: `--help`; option errors exit 2; cut off anywhere before its last line it
+  runs nothing. It refuses an Intel Mac, a terminal under Rosetta, another OS, macOS 13
+  and no network, changing nothing. Free space is checked on every disk a fresh install
+  writes to (Lume's VMs, the checkout, the home folder, the temporary folders), summed
+  per disk; where Lume keeps VMs comes from an installed runner, else
+  `~/.config/lume/config.yaml`, else `~/.lume`, and a failed lookup refuses. The dry run
+  runs nothing. Release selection: the newest `vX.Y.Z`, annotated or not, else the
+  default branch; a failed lookup stops. A full run against a local repository clones,
+  checks out, verifies the commit and only then runs `install.sh --yes`; a moved tag
+  stops it. Existing checkouts with local changes or on a branch of their own are left
+  alone and said to run unchecked. With `--confirm` nothing in an existing checkout is
+  ever deleted: only a clean checkout of the project's repository holding nothing but
+  tracked files, logs, run state, verified downloads and value-only settings is used;
+  git settings beyond a plain clone's, hooks, unknown files, build outputs, other
+  `.cache` entries, a Lume storage location inside it (tested with VMs stored in its
+  `.cache`, with and without `--no-build`) and settings that choose a command, a source
+  or a pin are refused, every file kept; install.sh then gets `--fresh-sources`. Homebrew: never without a terminal; on a terminal (a pty) its
+  installer is downloaded whole first and a cut-off download never runs.
+- Locks: killing the install that holds the lock while its child works doesn't free
+  it, and it's free once everything has exited; a daemon started under a lock doesn't
+  keep it; a child inherits its parent's lock. `reset`, `restore`, `checkpoint` (save
+  and delete), `baseline`, `build --replace` and `_vnc-install` each refuse while the
+  VM's lock is held, touching nothing, and a restore racing a build refuses.
+- Host tools: `scripts/build-tools.sh` rebuilds a tool whose binary is missing, isn't
+  the one built, or whose pinned source changed; `--check` builds nothing;
+  `--rebuild --fresh-source` never uses the checkout's `.cache/cua-src`; git runs with
+  hooks off. install.sh builds out-of-date tools when the VM is already built, and
+  checks the checkout's disk when it builds the runner or tools, `--no-build` too.
+- Concurrency, with real concurrent runs against stand-ins: two `install.sh` runs (two
+  checkouts and homes, one lock folder), and two `get.sh` runs: the second waits, then
+  refuses without changing anything, and runs once the first is done. Two
+  `scripts/build-vm.sh` runs of one VM: the second (even with `--replace`) refuses
+  before it lists, deletes or creates anything. A failed VM listing stops the build; a
+  VM that appears after the first look isn't deleted without `--replace`.
+- `install.sh`: refuses before writing anything when tools are missing without
+  Homebrew, without the Command Line Tools (mcomp-vm), with too little space on any
+  disk it writes to, when it can't tell where Lume keeps VMs, with no network, and when
+  the VM listing fails. A stage that fails partway prints its own advice. The VM: a
+  built one is left alone, a missing one is built; one without its snapshot (an
+  interrupted build or not) or a snapshot without its VM stops the run, and is
+  replaced only with `--replace-vm`; with `--no-build`, any of these is reported and
+  the run succeeds.
+- `scripts/lib.sh` `vm_dir` and `vm_dir_is`: the folder comes from the storage location
+  of a `lume get` that succeeded and described this VM, matched literally in `lume
+  config get` exactly once, absolute and existing; a VM's folder needs a real
+  `disk.img` and `config.json` of yours and the MAC address Lume reports.
+- The live-view password, against a `security` stand-in that models `-w`'s getpass,
+  `-i`'s silent exit status, `-U` and the item's comment: the item is updated in place
+  and checked by a one-time tag, so another install's write in between is never taken
+  for this one; no output, argv or environment holds the password; a hang at any step
+  ends within the wait (TERM, then KILL); a VM that holds the push open is stopped
+  within `MCOMP_VNC_PUSH_WAIT`. The fallback file: written through a private folder
+  (made 0700) under folders no one else can change, never through a link. With the
+  real `security`: written, then updated in place, each verified by its tag.
+- `metacomputer setup` in a checkout with no terminal asks for `--yes`. The
+  installers, defaults and docs/install.md name no one's machine.
 
 ## Recordings: `tests/test_recording.py`
 

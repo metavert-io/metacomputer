@@ -138,6 +138,7 @@ def install_cases(td):
     for f in ("defaults.env", "local.env.example"):
         shutil.copy(os.path.join(LAB, "config", f), os.path.join(root, "config"))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
+    write(os.path.join(root, "scripts", "build-tools.sh"), "#!/bin/sh\nexit 0\n", 0o755)   # host tools: up to date
     conf = os.path.join(root, "config", "local.env")
     # Fakes: git (clone writes an installer that makes $FAKE_RUNNER; rev-parse prints
     # $FAKE_HEAD), the Swift tools, the tools install.sh checks for, and claude.
@@ -177,7 +178,8 @@ def install_cases(td):
         if os.path.exists(calls):
             os.remove(calls)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("MCOMP_", "LUME"))}
-        env.update(HOME=home, PATH=fakebin + ":/usr/bin:/bin:/usr/sbin:/sbin", FAKE_HEAD=head, FAKE_RUNNER=runner)
+        env.update(HOME=home, PATH=fakebin + ":/usr/bin:/bin:/usr/sbin:/sbin", FAKE_HEAD=head, FAKE_RUNNER=runner,
+                   MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # install.sh's lock: never the real per-user folder
         r = subprocess.run([os.path.join(root, "install.sh")] + args, env=env, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=60)
         clone = open(calls).read().splitlines()[0] if os.path.exists(calls) else ""

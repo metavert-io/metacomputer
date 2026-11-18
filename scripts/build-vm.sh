@@ -31,8 +31,18 @@ for p in $EXTRA_PACKAGES; do   # names go into the guest's provisioning script
   [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_PACKAGES: '$p' is not an Ubuntu package name"
 done
 case "${VIRTUAL_AUDIO:-off}" in on|off) ;; *) die "VIRTUAL_AUDIO must be on or off" ;; esac
+# One build of a VM at a time, across checkouts and homes: this lock is held from before the first look at
+# the VM until the build ends, so another build can't create or delete it in between.
+lock_rc=0; lock_hold "$(vm_lock_name "$VM_NAME")" "${MCOMP_LOCK_WAIT:-10}" "a build of $VM_NAME" || lock_rc=$?
+case "$lock_rc" in
+  0) ;;
+  1) BUILD_QUIET_EXIT=1; die "another build or change of the VM $VM_NAME is running ($LOCK_OWNER); nothing was changed. Wait for it to finish, then run this again" ;;
+  *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
+esac
+# A listing that fails is never "absent": nothing is created or deleted on a guess.
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
-  if vm_exists "$vm" && [ $REPLACE -ne 1 ]; then
+  st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME, so it can't tell whether $vm exists; nothing was changed"
+  if [ "$st" = present ] && [ $REPLACE -ne 1 ]; then
     BUILD_QUIET_EXIT=1; die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"
   fi
 done
@@ -40,7 +50,12 @@ command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
 "$(dirname "$0")/build-tools.sh"
 "$(dirname "$0")/fetch-artifacts.sh"
 
-# The build goes ahead: keys, then the host key's known_hosts entry.
+# The build goes ahead. Until it finishes, this marker says that $VM_NAME is a build in progress (install.sh
+# reads it: only then is a VM without its baseline an interrupted build, and even then it's replaced only on
+# an explicit --replace-vm). It goes when the baseline exists.
+BUILD_MARKER="$RUN_DIR/build-unfinished-$VM_NAME"
+printf 'started=%s\nvm=%s\n' "$TS" "$VM_NAME" > "$BUILD_MARKER"
+# Keys, then the host key's known_hosts entry.
 for k in admin ops mcp fill proxy hostkey; do   # fill, proxy: the secrets accounts (mcfill, mcproxy)
   # A finished build deletes the host key's private half (below), so a rebuild makes a new
   # host key: drop the old .pub with it (bind the secrets vault again afterwards).
@@ -53,7 +68,10 @@ rm -f "$SSH_DIR/guest-features"
 
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
-  if vm_exists "$vm"; then
+  st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME before replacing them; nothing was deleted"
+  if [ "$st" = present ]; then
+    # Deleted only on --replace, checked again here: a VM that appeared since the first look isn't ours to delete.
+    [ $REPLACE -eq 1 ] || die "$vm appeared while this build was getting ready (made by something else); nothing was deleted"
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
     "$LUME" delete "$vm" --force
@@ -65,8 +83,11 @@ done
 say "creating $VM_NAME ($VM_CPU vCPU, $VM_MEMORY, $VM_DISPLAY)"
 "$LUME" create "$VM_NAME" --os linux --cpu "$VM_CPU" --memory "$VM_MEMORY" \
   --disk-size "$((VM_DISK_BYTES / 1024 / 1024 / 1024))GB" --display "$VM_DISPLAY" --network nat
-VMDIR="$HOME/.lume/$VM_NAME"   # Lume's default ("home") storage location
-[ -f "$VMDIR/disk.img" ] || die "unexpected Lume layout: no $VMDIR/disk.img"
+# The new VM's folder, from Lume's own settings (~/.lume unless you configured another storage location).
+# Its empty disk is replaced only when the folder is certainly this VM's: found without guessing, and with
+# the MAC address Lume reports for $VM_NAME.
+VMDIR="$(vm_dir "$VM_NAME")" || die "couldn't tell which folder holds $VM_NAME (above); nothing was replaced"
+vm_dir_is "$VMDIR" "$VM_NAME" || die "$VMDIR isn't the folder of the VM just created ($VM_NAME: no disk.img, or another MAC address); nothing was replaced"
 size="$(stat -f %z "$VMDIR/disk.img")"
 rm -f "$VMDIR/disk.img"
 "$QCOW2RAW_BIN" "$CACHE_DIR/ubuntu-$UBUNTU_RELEASE/$UBUNTU_IMAGE" "$VMDIR/disk.img" "$size"
@@ -154,7 +175,7 @@ chmod 600 "$RUN_DIR/seed.iso"
 ok "seed: $(du -h "$RUN_DIR/seed.iso" | cut -f1) (user-data, keys, payload)"
 
 # --- 3. first boot: cloud-init provisions ----------------------------------
-say "first boot (provisioning runs inside the guest; ~10-25 min)"
+say "first boot (provisioning runs inside the guest: about 2 minutes on a fast connection, 10 or more on a slow one)"
 vm_start "$VM_NAME" "$RUN_DIR/seed.iso"
 wait_ssh admin 600 || die "admin SSH never came up (see logs/lume-$VM_NAME.log)"
 ok "admin SSH up"
@@ -212,6 +233,7 @@ vm_stop "$VM_NAME"
 "$LUME" clone "$VM_NAME" "$BASELINE_NAME"
 rm -f "$RUN_DIR/seed.iso"
 ok "baseline $BASELINE_NAME created"
+rm -f "$BUILD_MARKER"
 # The VM's private host key now lives only in its disk and the baseline (reset restores
 # it from there). On the Mac only the public half is needed (known_hosts, the secrets
 # vault's pin); anything able to read the private half could pose as the VM.
