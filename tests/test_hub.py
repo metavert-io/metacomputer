@@ -1741,6 +1741,25 @@ def batch2_checks():
     clear_claims()
 
 
+def status_claim_checks():
+    print("N9: status connections never hold the computer")
+    clear_claims()
+    r = Running()
+    st = mcomp_sdk.Hub(env=r.env, kind="status", timeout=20).connect()
+    res = st.claim("status")
+    check("a status connection's claim is refused, and nothing is written", not res.get("claimed")
+          and "only read" in (res.get("message") or "") and not os.path.exists(owners.claim_path(os.getpid())), res)
+    sc = next(c for c in r.hub.clients.values() if c.kind == "status")
+    r.hub.claim(sc, "forced")                        # however one came to hold a claim...
+    held = os.path.exists(owners.claim_path(sc.holder))
+    st.close()
+    time.sleep(0.4)
+    check("…and one that holds a claim lets go of it when it disconnects", held
+          and not os.path.exists(owners.claim_path(sc.holder)))
+    r.stop()
+    clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -1773,6 +1792,7 @@ def main():
         lease_write_checks()
         token2_checks()
         batch2_checks()
+        status_claim_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)

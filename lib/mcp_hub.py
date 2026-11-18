@@ -756,7 +756,7 @@ class Hub:
         with self.clock:
             if self.clients.pop(client.cid, None) is None:
                 return
-        if not client.hello or client.kind == "status":
+        if not client.hello or (client.kind == "status" and not client.has_claim):
             return
         self.last_activity = time.time()
         running = []
@@ -1375,6 +1375,10 @@ class Hub:
             # wants to know before it starts (`metacomputer web`, the GUI tests). The same one step under the lock.
             p = msg.get("params") if isinstance(msg.get("params"), dict) else {}
             tool = re.sub(r"[^A-Za-z0-9 _.-]", "", str(p.get("tool") or client.kind))[:40]
+            if client.kind == "status":          # a status connection only reads: it never holds the computer
+                self.reply(client, msg, {"claimed": False, "others": [],
+                                         "message": "a status connection to the metacomputer hub can only read"})
+                return
             busy = self.check_and_claim(client, tool) if not client.expired else None
             if busy is None:
                 self.reply(client, msg, {"claimed": False, "others": [],
