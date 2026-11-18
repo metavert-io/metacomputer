@@ -291,6 +291,18 @@ screenshots come from the skill: main's skill had gained a section on pixels
 since `hub-on` (screenshot-only reads before pixel clicks), so this comparison
 is not of the driver alone.
 
+Lessons from `metacomputer learn` (2026-11-18, a test VM with 0.53.0, budget $1.50
+a task, `learn bench` with two approved built-in lessons, `no-frame` and `check-text`):
+
+| Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Invalid | Other errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `learn-2026-11-18-without` (`--lessons off`) | 19/20 | $9.67 | 17.1 | 0.86 | 30 | 0 | 12 |
+| `learn-2026-11-18-with` (`--lessons on`) | 19/20 | $9.81 | 16.6 | 0.86 | 29 | 0 | 9 |
+
+The same task (writer-format) failed at the same check in both. The two
+lessons' patterns didn't come up without them either, so the differences are
+noise; see docs/learn.md.
+
 A session's claims go with that session: Claude Code is recognized however it's
 installed, including the native installer's `~/.local/share/claude/versions/X.Y.Z`
 (before 2026-11-18 that one wasn't, so a run started from inside Claude Code could

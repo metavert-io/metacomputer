@@ -196,6 +196,27 @@ The benchmark's switch is also available directly: `bench/bench.py run
 default store. `run.json` records how many lessons the sessions got and a hash of
 the exact text.
 
+**The first comparison** (2026-11-18; a test VM with Cua Driver 0.53.0, Opus 5.5,
+the skill from main, $1.50 a task). The two lessons approved for it were the
+built-in `no-frame` and `check-text`, proposed from 33 recorded sessions where
+pixel actions without a screenshot frame were 35% of the failed calls:
+
+| | without | with |
+| --- | --- | --- |
+| passed | 19/20 | 19/20 (the same task failed both times, at the same check) |
+| invalid-argument calls | 0 | 0 |
+| other tool errors | 12 | 9 |
+| mean turns | 17.1 | 16.6 |
+| mean minutes | 0.86 | 0.86 |
+| screenshots | 30 | 29 |
+| cost | $9.67 | $9.81 |
+
+It cost $19.48. Neither targeted pattern occurred in these tasks without the
+lessons (no pixel action without a frame; three failed checks in each run), so
+this run shows no measurable effect either way: the differences are within one
+run's noise. The benchmark's tasks already pass with today's skill, which holds
+the same rules; lessons are for what your own sessions keep running into.
+
 ## Security
 
 The threat is a prompt-injected session trying to plant a lesson, so that
