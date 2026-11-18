@@ -58,11 +58,14 @@ does. It adds `profile` (a named driver profile to open) and `submit` (default t
    you decide.
 5. Call again with that `request_id` (and `wait_secs`, default 20, at most 120). The
    answer is `status: "filled"` with `site`, `origin`, `username_hint` (`a***@example.com`),
-   `submitted`, `page_url` and the tab, or `status: "denied"`.
+   `submitted`, `page_url` (the page's origin only, never its path or query) and the tab, or
+   `status: "denied"`. The vault fills only a tab on that one origin, and the form isn't
+   submitted if the tab has left it.
 
 **`teleport_browser_session`** takes `sites` (required), `browser`, `name`, `reason`,
 `request_id` and `duration_minutes`. It adds `session` and `wait_secs`.
-- It finds a session you imported that covers those sites. The first call answers
+- It finds a session you imported that covers those sites, and loads only the cookies
+  those sites get, even when the session holds more. The first call answers
   `consent_required` with a `request_id`; once you approve, the retry answers `moved: true`
   and names the driver profile to open with `browser_prepare`.
 - If the profile has no cookie store yet, the hub has the driver create one first.
@@ -101,8 +104,10 @@ does. It adds `profile` (a named driver profile to open) and `submit` (default t
   can't be opened on another Mac with the passphrase alone; the recovery key opens it.
 - **Who asked is a Claude Code session and its project folder**, taken from the process
   tree, not a signed app identity. Unattended rules are keyed on that project folder
-  (`--project DIR`) instead of an agent's name. The `agent` parameter is shown to you,
-  marked as unverified.
+  (`--project DIR`) instead of an agent's name. Through these two tools, though, the
+  requester is the hub itself, with no session or project, since it serves every session
+  from one process: project limits and rules don't cover them, so they ask. The calling
+  session and the `agent` parameter are shown to you, marked as unverified.
 - **The use happens when you approve.** A `request_site_login` or
   `teleport_browser_session` that waits for you goes ahead as soon as you allow it. The
   retry with `request_id` collects the outcome rather than triggering the use. A request

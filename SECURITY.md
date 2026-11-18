@@ -1211,18 +1211,32 @@ documents (docs/moving-from-spaces.md maps the rest). They add no new way to a v
   sites and username, from `list`). It opens page-mode Chrome on the page or uses the tab
   given, and refuses if the tab is on any other site. It reads the page's fields from a
   `dom_refs_v1` snapshot, then runs `metacomputer secrets login` (or `fill --field
-  username` on a username-only page) with those fields' selectors. The vault then checks
-  both fields in the VM, asks you as for any fill, and types the values through its fill
-  account to that site only. The hub clicks the submit button. The answer carries status,
-  the site, a masked username and the tab, never a value.
+  username` on a username-only page) with those fields' selectors and that origin
+  (`--origin`). The vault then checks both fields in the VM against that one origin, not
+  the login's other sites, asks you as for any fill, and types the values through its fill
+  account to that site only. Before clicking the submit button the hub reads the tab
+  again, and doesn't submit if it has left the site. The answer carries status, the site,
+  a masked username, the tab and `page_url`, which is the page's origin only: a page can
+  write the password, or a token, into its own address, so no path, query or fragment
+  comes back.
+- **Not everything is bound.** The vault can't be told which tab the hub checked: the
+  driver's tab ids aren't the ones Chrome's DevTools uses, so the fill finds its tab by
+  site (and Chrome profile when one is named) and refuses when that's ambiguous, as
+  `metacomputer secrets fill` does. Two tabs on the same site in one profile can't be told
+  apart.
 - **`teleport_browser_session`** finds a session you imported with `import-session` that
-  covers the sites, and runs `metacomputer secrets session load` for it. If the profile has
-  no cookie store yet, the vault says so before asking you, and the hub has the driver open
-  and close the profile once.
-- **The requester is the calling session.** The hub passes on the client's process id
-  (`--on-behalf-pid`), so the unlock terminal shows the Claude Code session and project
-  that called the tool, "through metacomputer hub", and `--project` limits and rules apply
-  to it.
+  covers the sites, and runs `metacomputer secrets session load NAME --site ...` for it:
+  only the cookies a browser sends to those sites go to the VM, filtered on the Mac,
+  whatever else the session holds, and the question and the audit record name that scope.
+  If the profile has no cookie store yet, the vault says so before asking you (in its own
+  words, never the VM's), and the hub has the driver open and close the profile once.
+- **The requester is the hub, not the calling session.** The hub serves every session from
+  one process, so the vault sees these requests as the hub's own: no Claude Code session
+  and no project. A login limited with `--project`, an unattended rule and a `NAME session`
+  grant never cover them; they ask, or are refused. The hub passes on the client's process
+  id (`--on-behalf-pid`), which the unlock terminal and the audit log show as an unverified
+  claim (`for Claude Code in ~/Projects/foo (pid 4242) as it says (unverified)`), and
+  nothing more.
 - **Two steps, as Keyvault has them.** The first call starts the use and answers
   `pending` (or `consent_required`) with the vault's own request id while you decide; the
   use goes ahead the moment you approve, and a later call with that `request_id` collects
@@ -1376,7 +1390,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `totp_for` | the login an imported 2FA code belongs to |
 | `sites`, `cookies` | the sites a cookie session's load was narrowed to (`--site`), and how many cookies went |
 | `identity_provider` | `true` on a request for an identity provider's site |
-| `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted |
+| `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted; `hub_pid` (and no `claude_pid` or `project`) for a request through the metacomputer hub |
 | `reason` | why it was refused or failed |
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |

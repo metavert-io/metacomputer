@@ -936,7 +936,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (93 checks, about 3 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (98 checks, about 3 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -976,7 +976,10 @@ person at it, and without it there is none. It covers:
 - **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit
   --verify` and `verify-audit.py` on the log with the new records;
 - **the verbs other vaults use:** `--passphrase-stdin` refused, `unlock --passphrase`,
-  `lock` from any program (also while a question waits), `lock` when already locked.
+  `lock` from any program (also while a question waits), `lock` when already locked;
+- **the hub as requester:** a request from a process with the hub's command line, started
+  inside a Claude Code session in a rule's project, has no session or project, so the rule
+  doesn't cover it.
 
 `python3 tests/test_vault_import.py` (55 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
@@ -1006,7 +1009,7 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (24 checks, about a minute) runs the hub with a stand-in
+`python3 tests/test_site_login.py` (31 checks, about a minute) runs the hub with a stand-in
 driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
 0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
 standing in for the VM. It covers:
@@ -1015,12 +1018,17 @@ standing in for the VM. It covers:
   several logins (a masked list); the main path (pending with the vault's own request id,
   the question naming the agent as unverified, `approve ID`, then filled with a masked
   username and the tab, the fields filled through the vault's path with the snapshot's
-  selectors, the submit click, the audit record with the hub as `via`); declined; an
-  unknown request id; a tab on another site refused before typing; the SDK's
+  selectors, the submit click, the audit record naming the hub as the requester with the
+  calling session only as an unverified claim); a login limited to the session's project
+  refused through the hub; declined; an unknown request id; a tab on another site refused
+  before typing; a login saved for two sites filled only on the one asked for, even when the
+  VM reports the other; only the page's origin returned as `page_url` when the page puts a
+  token in its URL; no submit when the tab leaves the site after the fill; the SDK's
   `request_site_login`; another controller refused by the hub;
 - `teleport_browser_session`: no imported session (naming `import-session`), Firefox
   refused, a profile with no cookie store (the hub has the driver create it before the vault
-  asks), then moved.
+  asks, and the VM's words from that check reach no result or record), then moved, with only
+  the requested site's cookies sent though the session holds two sites'.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (13 checks, a test VM) does both
 tools end to end. It serves the fixture pages and a cookie-echo page in the VM, then:
