@@ -321,7 +321,7 @@ Each of these needs no VM and takes seconds.
   tail, and the limits taken from the settings; a command that exits nonzero or a
   copy cut short is reported (exit code, escaped stderr) and the evidence marked
   incomplete, keeping what arrived whole.
-- `python3 tests/test_termsafe.py` (23 checks): text from the VM and from pages reaches
+- `python3 tests/test_termsafe.py` (24 checks): text from the VM and from pages reaches
   the terminal escaped in `inspect`, `browser`'s profile list, `web` (its report, its
   messages and errors) and `record moments`; `web --json` stays exact. With a fake
   `ssh` writing escape sequences on stdout and stderr: `record start`, `record status`,
@@ -330,7 +330,8 @@ Each of these needs no VM and takes seconds.
   escaped, SSH's stderr included, and `input-reset` in a pipe stays exact; `record
   start` passes the recorder's words on as they come (not held until it ends) and
   still fails when the recorder does; `status` shows a load average or memory figure
-  that isn't numbers as `?`, never its keys raw; the `termsafe.py` filter escapes
+  that isn't numbers as `?`, never its keys raw, and a 401-digit one as `?` rather
+  than crashing; the `termsafe.py` filter escapes
   line by line and caps what it passes.
 - `python3 tests/test_key_pinning.py` (12 checks; needs gpg): `scripts/pin-gpg-key.sh`
   keeps only the pinned key from a download with an extra key appended (or first),
@@ -400,7 +401,7 @@ results, window titles, app names, typed text, errors and the model's own text.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (176 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (187 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -487,10 +488,16 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   budget; the depth check's memory follows the depth, not the width, and a frame
   with millions of values is refused before parsing, while a 3.6 MB text full of
   commas, brackets and colons passes whole; an answer with more values than the hub
-  takes gets its call an error at once and isn't counted against the driver;
+  takes gets its call an error at once and isn't counted against the driver, but
+  only the call its top-level id names: another pending call's id nested inside it
+  completes nothing (in the hub or the action-log relay), and with no top-level id
+  no call is touched and the line counts as unusable; counting values in a string
+  of a million commas ending in 60,000 backslashes, or of 400,000 escaped quotes,
+  takes well under a second (one linear pass);
   screenshot layouts keep only checked geometry within their window caps; 200
   messages of the wrong shape write a handful of log lines and make the hub hang up
-  on the driver (the next call reconnects), and bad messages count per connection;
+  on the driver (the next call reconnects), and bad messages count per connection,
+  also when they alternate between an old connection and the current one;
   hub.log rotates while the hub runs, and notes left out are summarized with their
   count when their minute ends or the connection closes;
 - `web` and the GUI tests: `web` is a hub client whose claim is refused while
@@ -508,7 +515,10 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   after a bounded session's end a lease's expiry ends its own (earlier) connection,
   never the current one; a lease that couldn't be written holds the computer after
   its client exited; with a relay in front of a driver that ignores SIGTERM, expiry
-  lets the relay finish, kills the rest, and lets go only after;
+  lets the relay finish, kills the rest, and lets go only after; three cleanups of
+  one connection at once send one SIGTERM and one SIGKILL, never a signal after the
+  leader is reaped, and a leader reaped elsewhere gets none; an unwritten lease
+  counts even when the only lease file left is a stale one;
 - element tokens: `set_value` by a Chrome token alone refused (alone and as a
   step), input by a Chrome token sent in the foreground, another app's token passed
   as it was, a token from a read the hub never saw refused (`element_token_unknown`),

@@ -349,9 +349,11 @@ results measured were under 1 MB. JSON nested more than 100 levels deep isn't
 parsed into anything (Python's parser would otherwise fail in a way that leaves
 a reader dead and the connection silently open), and neither is a line with more
 than a million values, counted before it's parsed and outside strings (so a long
-text full of commas is fine; the depth check's memory follows the depth, not the
-width). When such a line answers one of the hub's calls, that call gets an error
-at once (`answer_too_complex`). A driver that keeps sending messages the hub
+text full of commas is fine; strings are skipped in one linear pass, and the
+depth check's memory follows the depth, not the width). When such a line's
+top-level `id` is one of the hub's calls, that call gets an error at once
+(`answer_too_complex`); ids anywhere else in it (a page's element ids, say)
+never count, and a line without one completes no call. A driver that keeps sending messages the hub
 can't use (not JSON, or ids, methods and params of the wrong type) is hung up on
 after 50 in a minute on one connection, like an oversized line; `hub.log` is
 rotated at 5 MB while the hub runs (one old copy), and the same kind of note is
@@ -419,9 +421,18 @@ own checks.
   window (10 min, `MCOMP_ACTIVE_S`) the hub ends that connection's process group
   (SIGTERM, so the action log's relay can sign its end; 3 s later SIGKILL), so
   nothing on the Mac's side of the call goes on after the computer is let go.
+  The group's leader is reaped only after that SIGKILL, so its number (the
+  group's id) can't belong to anyone else while the hub signals it, and a group
+  whose leader was already reaped gets no signal.
   What the driver in the VM does after its connection closes is the driver's;
   Cua Driver's MCP server ends with its connection. `metacomputer release` drops
   a written lease, as any other claim.
+- More than 256 windows open (minimized and off-screen ones count) means every
+  pixel action is refused (`too_many_windows`): the hub can't keep a full layout,
+  and a window it left out could be the target or what covers it. An app in the
+  VM that keeps that many windows open can deny pixel input this way, on
+  purpose: it fails closed. Role/name and element-token targets and keyboard
+  input keep working, and closing windows brings pixels back.
 - Clients share one driver runtime. Only one acts at a time, but another
   session's screenshot of the same window can replace the controller's
   screenshot frame (the driver then refuses its pixels until it reads again) and

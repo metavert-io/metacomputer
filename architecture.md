@@ -183,14 +183,18 @@ server, the CLI and an SDK share, so references and state carry over.
   within 30 s is dropped the same way, so a stuck VM can't hold every client's
   call forever. JSON nested more than 100 levels deep, or with more than a
   million values (counted before parsing, outside strings: the top value,
-  containers, commas and colons), isn't parsed (`lib/wirelimits.py`'s
+  containers, commas and colons; strings are skipped in one linear pass with
+  `find()`, no regular expression), isn't parsed (`lib/wirelimits.py`'s
   `LimitError`; its depth check keeps one iterator per level; the readers'
-  cleanup runs whatever stops them). When such a line names one of the hub's
-  requests (`"id":"c<client>.<n>"`, found without parsing), that request is
-  answered at once with an error (`answer_too_complex`); otherwise it's a bad
-  line, skipped. So is a message of the wrong shape (an id, method or params of
-  the wrong type); past 50 bad lines in a minute on one driver connection the
-  hub closes it like an oversized one. What
+  cleanup runs whatever stops them). When such a line's top-level `id` names
+  one of the hub's requests (`c<client>.<n>`; `wirelimits.top_level_id`, one
+  linear pass following nesting outside strings, so nested ids and ids inside
+  strings never count, and two ids or anything but one complete object give
+  none), that request is answered at once with an error (`answer_too_complex`);
+  otherwise it's a bad line, skipped, and no request is touched. So is a
+  message of the wrong shape (an id, method or params of the wrong type); past
+  50 bad lines in a minute on one driver connection (each counted on its own)
+  the hub closes it like an oversized one. What
   the driver can make the hub keep is capped regardless of message size: a tool
   list refresh stops after 50 pages, 2,000 tools, 16 MB, 60 s or a repeated
   cursor (the earlier list stays); pid, window and snapshot maps and screenshot
@@ -207,7 +211,12 @@ server, the CLI and an SDK share, so references and state carry over.
   3 s for the relay to sign its log, then SIGKILL) before it fails that
   connection's calls, and keeps each connection's process by generation until its
   reader is done, so a connection it no longer uses for new calls (after a
-  bounded session ended) can still be ended.
+  bounded session ended) can still be ended. Ending runs once per connection
+  under a lock (the lease keeper, the reader and shutdown may all ask), waits
+  for the leader without reaping it (`waitid(WNOWAIT)`, or kqueue), and reaps it
+  only after the group's SIGKILL, so the group id can't be reused while it's
+  signalled; nothing else reaps it (liveness comes from the reader seeing the end
+  of the output), and a leader reaped elsewhere means no signal at all.
 
 With `MCP_HUB=off` the same core runs inside each client instead, over a
 socketpair: Claude Code's bridge and `metacomputer call` each have their own
