@@ -180,9 +180,19 @@ SCRIPT_CHROME = (
 TOKEN_UNKNOWN = (
     "Refused by the metacomputer bridge: this element_token isn't from a window read the bridge has seen on this "
     "connection, so it can't tell which app it belongs to (input to Chrome has to go in the foreground, and set_value "
-    "to Chrome is refused). Read the window again (get_window_state) and use a token from that read, or name the "
-    "window with pid and window_id too.")
+    "to Chrome is refused), and a pid or window_id next to it doesn't say. Read the window again (get_window_state) "
+    "and use a token from that read.")
 TOKEN_CODE = "element_token_unknown"
+WINDOW_UNKNOWN = (
+    "Refused by the metacomputer bridge: the driver doesn't list this window_id, so the bridge can't tell which app "
+    "the call is aimed at (input to Chrome has to go in the foreground, and set_value to Chrome is refused). Run "
+    "list_windows and use a current window_id with its pid.")
+TARGET_CONFLICT = (
+    "Refused by the metacomputer bridge: this element_token belongs to another app than the pid or window_id the "
+    "call also names, so it can't tell where the input would go. Read the window again (get_window_state) and use "
+    "that read's tokens with its own pid and window_id.")
+UNKNOWN_TARGET = {"token": (TOKEN_UNKNOWN, TOKEN_CODE), "window": (WINDOW_UNKNOWN, "window_unknown"),
+                  "conflict": (TARGET_CONFLICT, "target_conflict")}
 
 # --- coordinate guard ----------------------------------------------------------------
 # Pixel input is aimed from a screenshot. Cua Driver (0.52.1, 0.53.0) maps window-local x,y
@@ -1481,9 +1491,10 @@ class Hub:
             err, note = self.chrome_guard(name, args)
             if launch_note:
                 note = "metacomputer bridge: " + launch_note + ("; " + note if note else "")
-            if err == TOKEN_UNKNOWN:
-                self.refuse(client, msg, err, {"code": TOKEN_CODE, "effect": "refused",
-                                               "hint": "read the window again and use a token from that read"})
+            unknown = next((code for text, code in UNKNOWN_TARGET.values() if err == text), None)
+            if unknown:
+                self.refuse(client, msg, err, {"code": unknown, "effect": "refused",
+                                               "hint": "read the window again and use its pid, window_id and tokens"})
                 return
             if err:
                 self.refuse(client, msg, err)
@@ -1629,46 +1640,68 @@ class Hub:
             self._remember(self.app_of, pid, name, MAX_APPS)
         return self.app_of.get(pid, "")
 
-    def chrome_target(self, args, outer=None):
-        """Is a call (or a run_steps step; outer = its batch, whose target is the steps' default) aimed at Chrome?
-        True or False; None when it's addressed only by an element token from a read the hub hasn't seen, so
-        the app can't be told (the token carries its pid to the driver, not to the hub)."""
+    def window_owner(self, wid):
+        """The pid of window wid: from what the hub has seen, else from one list_windows; None when the driver
+        doesn't list it."""
+        pid = self.window_pid.get(wid)
+        if pid is None and self.connected():
+            r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {}}, timeout=10)
+            self.learn_apps((((r or {}).get("result") or {}).get("structuredContent") or {}))
+            pid = self.window_pid.get(wid)
+        return pid
+
+    def chrome_verdict(self, args, outer=None):
+        """Is a call (or a run_steps step; outer = its batch, whose target applies when the step names none) aimed at
+        Chrome? (True, None) or (False, None) when that's known; (None, reason) when it can't be told, which the
+        guard refuses: an element token whose read the hub never saw ("token"; the token carries its pid to the
+        driver, not to the hub), a window id the driver doesn't list ("window"), or a token whose app disagrees with
+        the pid or window the call also names ("conflict"). Naming something else never makes a target safe."""
         if not isinstance(args, dict):
-            return False
-        unknown = False
-        named = False
-        for a in (args, outer if isinstance(outer, dict) else {}):
-            for k in ("app", "window"):
-                if isinstance(a.get(k), str) and a[k]:
-                    named = True
-                    if CHROME_RE.search(a[k]):
-                        return True
-            pid = a.get("pid")
-            wid = a.get("window_id")
-            if isinstance(wid, int) and not isinstance(wid, bool):
-                named = True
-                if not isinstance(pid, int) or isinstance(pid, bool):
-                    pid = self.window_pid.get(wid)
-            if isinstance(pid, int) and not isinstance(pid, bool):
-                named = True
-                if CHROME_RE.search(self.app_name(pid)):
-                    return True
-            tok = a.get("element_token")
+            return False, None
+        own = any(args.get(k) not in (None, "") for k in ("app", "window", "pid", "window_id", "element_token"))
+        layer = args if own or not isinstance(outer, dict) else outer
+        for k in ("app", "window"):
+            v = layer.get(k)
+            if isinstance(v, str) and v and CHROME_RE.search(v):
+                return True, None
+        hints = set()
+        pid = layer.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool):
+            hints.add(pid)
+        wid = layer.get("window_id")
+        wpid = None
+        if isinstance(wid, int) and not isinstance(wid, bool):
+            wpid = self.window_owner(wid)
+            if wpid is not None:
+                hints.add(wpid)
+        if any(CHROME_RE.search(self.app_name(p)) for p in hints):
+            return True, None                    # Chrome by what the call names: the stricter handling applies
+        if wid is not None and wpid is None and isinstance(wid, int) and not isinstance(wid, bool):
+            return None, "window"
+        tok_pid = None
+        tok = layer.get("element_token")
+        if tok is not None and tok != "":
             m = TOKEN_RE.match(tok) if isinstance(tok, str) else None
-            if m:
-                snap = self.snapshots.get(m.group(1))
-                if snap is None:
-                    unknown = True
-                    continue
-                tpid, twid, tapp = snap
-                if tpid is None and twid is not None:
-                    tpid = self.window_pid.get(twid)
-                if CHROME_RE.search(tapp or "") or CHROME_RE.search(self.app_name(tpid)):
-                    return True
-                named = True
-            elif isinstance(tok, str) and tok:
-                unknown = unknown or not named     # a token of another shape: the driver decides
-        return None if unknown and not named else False
+            snap = self.snapshots.get(m.group(1)) if m else None
+            if snap is None:
+                return None, "token"
+            tok_pid, twid, tapp = snap
+            if tapp and CHROME_RE.search(tapp):
+                return True, None
+            if tok_pid is None and twid is not None:
+                tok_pid = self.window_owner(twid)
+            if tok_pid is None:
+                return None, "token"
+        pids = hints | ({tok_pid} if tok_pid is not None else set())
+        if any(CHROME_RE.search(self.app_name(p)) for p in pids):
+            return True, None
+        if tok_pid is not None and hints and tok_pid not in hints:
+            return None, "conflict"
+        return False, None
+
+    def chrome_target(self, args, outer=None):
+        """True, False, or None (can't be told: see chrome_verdict)."""
+        return self.chrome_verdict(args, outer)[0]
 
     def is_chrome(self, args):
         return bool(self.chrome_target(args))
@@ -1709,12 +1742,12 @@ class Hub:
                 return SCRIPT_CHROME, None
             return None, None
         if name == "set_value":
-            target = self.chrome_target(args)
-            return (TOKEN_UNKNOWN if target is None else SET_VALUE_CHROME if target else None), None
+            target, why = self.chrome_verdict(args)
+            return (UNKNOWN_TARGET[why][0] if target is None else SET_VALUE_CHROME if target else None), None
         if name in INPUT_TOOLS:
-            target = self.chrome_target(args)
+            target, why = self.chrome_verdict(args)
             if target is None:
-                return TOKEN_UNKNOWN, None
+                return UNKNOWN_TARGET[why][0], None
             if not target:
                 return None, None
             if args.get("delivery_mode") != "foreground":
@@ -1726,10 +1759,10 @@ class Hub:
             steps = steps_of(args)
             chrome_steps = []
             for t, a in steps:
-                target = True if top_chrome else self.chrome_target(a, args) if (t in INPUT_TOOLS or t == "set_value") \
-                    else self.is_chrome(a)
+                target, why = (True, None) if top_chrome else self.chrome_verdict(a, args) \
+                    if (t in INPUT_TOOLS or t == "set_value") else (self.is_chrome(a), None)
                 if target is None:
-                    return TOKEN_UNKNOWN, None
+                    return UNKNOWN_TARGET[why][0], None
                 if target:
                     chrome_steps.append((t, a))
             if not chrome_steps:

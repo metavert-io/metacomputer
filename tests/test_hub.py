@@ -1682,6 +1682,36 @@ def lease_write_checks():
         clear_claims()
 
 
+def token2_checks():
+    print("N6: a token the hub can't bind, or hints that disagree, are never 'not Chrome'")
+    r = Running()
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="tok2")
+    ch = h.call("get_window_state", {"pid": 77, "window_id": CHROME}).structured.get("snapshot_id")
+    mp = h.call("get_window_state", {"pid": 50, "window_id": W}).structured.get("snapshot_id")
+    r.hub.snapshots.clear()                          # as after eviction: the Chrome token is unknown now
+    n0 = len(calls())
+    a = h.call("set_value", {"element_token": f"{ch}:1", "window_id": W, "value": "x"})
+    b = h.call("click", {"element_token": f"{ch}:2", "app": "Mousepad"})
+    sent = [c["msg"]["params"]["name"] for c in tool_calls(None, n0)]
+    check("an unknown token with a non-Chrome window_id or app name is refused, not taken for 'not Chrome'",
+          a.is_error and a.structured.get("code") == "element_token_unknown" and b.is_error
+          and "set_value" not in sent and "click" not in sent, (a.text[:100], b.text[:100], sent))
+    mp2 = h.call("get_window_state", {"pid": 50, "window_id": W}).structured.get("snapshot_id")
+    c = h.call("click", {"element_token": f"{mp2}:2", "pid": 10})
+    check("a token from one app with another app's pid is refused (target_conflict)",
+          c.is_error and c.structured.get("code") == "target_conflict", c.text[:120])
+    d = h.call("click", {"window_id": 999999, "x": 5, "y": 5})
+    check("a window_id the driver doesn't list is refused (window_unknown)",
+          d.is_error and d.structured.get("code") == "window_unknown", d.text[:120])
+    e = h.call("click", {"element_token": f"{mp2}:2", "pid": 50, "window_id": W})
+    check("…while a token, pid and window_id that agree pass as before", not e.is_error, e.text[:120])
+    del mp
+    h.close()
+    clear_claims()
+    r.stop()
+
+
 def main():
     setup_driver()
     try:
@@ -1712,6 +1742,7 @@ def main():
         log_checks()
         lease2_checks()
         lease_write_checks()
+        token2_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
