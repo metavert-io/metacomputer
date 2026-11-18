@@ -243,13 +243,213 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py`
+
+Both need no VM, and every value in them is a dummy.
+
+`python3 tests/test_secrets.py` (127 checks, about 50 s) builds two copies of
+`mcomp-vault`:
+- a release build, which must not contain the test switches;
+- a test build that runs a stub instead of `ssh` (`scripts/build-vault.sh --test`).
+  It refuses to run without its own `MCOMP_VAULT_DIR` outside `~/Library`, and
+  `metacomputer secrets` refuses it.
+
+The test types the passphrase, values and approvals into a pseudo-terminal, as a
+person would. It checks that:
+- `init`, `set`, `bind` and `unlock` refuse without a terminal, and refuse short or
+  mismatched passphrases, bad sites and names, and the wrong passphrase;
+- `bind` shows what it pins, pins nothing without `yes`, refuses paths with control or
+  invisible characters, and (through `bin/metacomputer`) warns while the VM's private
+  host key is still on the Mac;
+- the vault file is 0600 and holds no names or values in the clear, and a header with
+  absurd KDF rounds is refused;
+- while locked, `list` and `fill` exit 3 and nothing reaches the VM;
+- a port served by anything but the pinned gateway program is refused. A stand-in
+  `cua-netgw`, compiled by the test, passes, and is refused once its file's contents
+  change; both refusals say to bind again;
+- a fill goes to the fill account (`mcfill`) with the fill key, and its value
+  reaches the VM side only on ssh's standard input, never on the command line or in
+  the environment;
+- ssh runs with the pinned port, host key and account, and no config or agent;
+- a VM without the fill account says to rebuild;
+- the TOTP code is the current one;
+- wrong field and kind combinations are refused before anything is sent;
+- `each` approval:
+  - `y` and wrong words refuse, and send only a check without the value;
+  - the question shows the Chrome profile and the selector (one line, at most 80 characters);
+  - the secret's name allows, and only the approved site goes with the value;
+  - a check naming another site is refused;
+  - the listener is checked again after approval;
+  - no answer times out, and a question can't outlast the unlock;
+- inside tmux (and with `$WEZTERM_PANE` or `$KITTY_LISTEN_ON`), `--confirm each` won't
+  start and confirmations are refused unless `--allow-multiplexer`;
+- control and bidi characters from the VM or a hostile request reach no output,
+  terminal or log, and a VM answer holding the value (even a 6-digit code) is withheld;
+- sealed sessions:
+  - save and replace always ask, and load asks unless the passphrase-gated policy
+    says otherwise;
+  - loading into another VM asks, naming both, and loading under another profile name
+    is refused;
+  - a changed file is refused;
+  - the loader refuses `..`, absolute paths, entries outside the profile, links leading
+    outside, special files and a symlinked profile folder;
+- Ctrl-C, the time running out and the terminal closing each lock the vault;
+- through `bin/metacomputer` with `ACTION_LOG=on`, the fill is in the signed log
+  and verifies;
+- no value appears in any command's output, the unlock terminal or the audit log.
+
+`MCOMP_VAULT_TEST_BIN=PATH` uses an existing test build, and
+`MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
+tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
+
+`python3 tests/test_vault_ops.py` (198 checks, about 3 minutes) reuses that stub and
+pseudo-terminal for the rest of the vault:
+- **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
+  recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
+  working); on a Mac whose Enclave can't use the key (a test-build switch), only the
+  recovery key opens the vault, and `recover`, then `rekey --enclave`, move it back; a
+  changed header breaks every wrap; a `set` made while `rekey` builds its keys (a
+  test-build pause) is kept;
+- **rotation:** `set` over a secret needs `--replace`; `list` shows ages;
+  `rotate-session-key` re-encrypts sealed sessions, which still load; cut short twice
+  in a row (a test-build switch), both sessions still load and a third run finishes,
+  writing the vault with every key, then each session file, then the vault without the
+  old keys, each made durable before the next (a test-build trace);
+  an unreadable sealed session stops it with nothing changed;
+- **audit:** the hash chain, creation MACs (`audit --verify`; a locked refusal has none
+  and is marked unverified), the unified log; `scripts/verify-audit.py` in both modes
+  (a changed, removed, repeated or reordered local line fails; raw events in place of a
+  signed capture fail; repeated deliveries pass; `--expect-start` and `--expect-head`;
+  `--require-verified`);
+- **forgeries:** a record rewritten (and rehashed) after the vault wrote it, a forged
+  record without a MAC, one with a wrong MAC and one with a malformed (non-string) MAC
+  each reach the sink as an `audit_tamper` notice, never signed as genuine; a forged
+  `sinks/NAME.state` is ignored; flipping syslog's `verified=` breaks its signature, and
+  a capture without the status fails `--require-verified`; with two required sinks, an
+  acknowledgement of a begin can't authorize a later use after the log is cut back to
+  reuse its seq;
+- **upgrades:** a vault made as an earlier version did (a test-build switch) gets its
+  audit key on its next change, and `audit --verify` counts its older record as legacy;
+  `audit --verify` fails (never "checks out") on an unreadable or empty log, a line that
+  isn't a record, or a record this unlock wrote that's gone;
+- **the VM's answer:** a fill answer hiding the value in a nested field is withheld, a
+  field of the wrong type is an error, and unknown fields are dropped;
+- **ssh:** the vault's own ssh options, replayed with the real `/usr/bin/ssh` against an
+  sshd of the test's own on 127.0.0.1: it connects with the pinned key and refuses
+  another (no known_hosts file takes part);
+- **audit sinks, all four at once** against local receivers: webhook (CloudEvents,
+  signature, user header), OTLP (`/v1/logs`, attributes, a header typed with `{ask}`),
+  syslog over TLS with a throwaway CA passed with `--ca` (and refused without it), and
+  ntfy (JSON publishing, its URL typed with `ask`). Each gets every event since it was
+  added, in order, identical to the local log; captures verify with their own key and
+  fail with another's; an optional sink that's down stops nothing and catches up in
+  order; a required one refuses uses until it's back, even with its saved state forged
+  to look caught up, and stops the very next proxied request when it goes down; an
+  audit log that can't be written refuses uses while a sink is required; syslog can't
+  be `--required`, and a required OTLP sink whose answer rejects records (partial
+  success) refuses the use; a `--ca` syslog sink still checks the host name; removing
+  one leaves the others;
+- **requesters** through a stand-in process named `claude`: the prompt and audit name
+  its project and pid; `NAME session`, `NAME unlock` and plain `NAME` last as long as
+  they should; `--project` limits;
+- **API tokens** against a local plain-HTTP upstream (a test-build switch): the real
+  header swapped in (Bearer and `x-api-key`), the key withheld from echoed answers
+  (also split across reads), path limits, redirects, hop-by-hop headers, expiry,
+  `revoke`, a VM without the proxy account, the tunnel's ssh arguments, the action log
+  holding only the token's id, and the proxy and tunnels gone after the vault locks
+  (a `rekey` while unlocked); tokens ended by `set --replace` (no new value, no wider
+  path) and `delete`; a request whose token is revoked while it waits on a slow
+  required sink isn't forwarded; the request parser refusing overflowing chunk sizes, huge or
+  doubled Content-Length, CL with TE, other transfer codings, bare CR/LF, NULs, folded
+  headers, absolute URIs, CONNECT and HTTP/2.0, with the unlock process still serving;
+- **events:** an `approval_waiting` spool file while a question waits (its name, a
+  folder made if missing); on exit 3 through `bin/metacomputer`, one `vault_locked`
+  event from the event stream's hook (in a test events folder) and no spool file of
+  the wrapper's own.
+
+`python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
+`provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
+- **Its helpers:**
+  - sites and field types;
+  - `/proc/net/tcp` and `tcp6` parsing, against fixtures with decoys;
+  - DevTools `/json/version` answers and Chrome command lines;
+  - WebSocket frames, including RFC 6455's examples;
+  - redaction.
+- **The whole program against a fake Chrome DevTools server**, found through a
+  `/proc/net/tcp` fixture beside a plain web server, a silent listener and another
+  user's port. The fake models:
+  - frames with loader ids, isolated worlds, `DOM.describeNode` and `SystemInfo`;
+  - a tab list, or a page's own world, that disagrees with the frame tree;
+  - cross-origin, srcdoc, sandboxed and out-of-process frames;
+  - several tabs;
+  - profiles found from the browser's command line (`SystemInfo.getInfo`), from its
+    pid and `/proc`, or from `Browser.getBrowserCommandLine`, and a failure that
+    says what each route answered;
+  - a reload between the check and the typing (nothing typed) and a navigation during
+    it (reported);
+  - the keyboard route when a page won't take `execCommand`;
+  - focus moving or lost, length limits and invalid selectors;
+  - no known desktop user (nothing filled), and a hung browser (the deadline).
+- **The whole program against a real headless Chromium**, when one is found
+  (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:
+  - fills a dummy login page, through the element itself, with fields in a same-origin
+    frame, a srcdoc frame, a cross-origin frame and a shadow root;
+  - finds the profile from the browser's own command line, with no `/proc`;
+  - checks a page that redefines `type`, `activeElement` and `self.origin` in its own
+    world.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py D` (with the vault locked, or no live API
+token for that VM: the vault's own tunnel holds the proxy port while one is) checks the fill and proxy
+accounts on a VM built with this version, changing nothing. It covers:
+- the fill account's forced command, whatever is asked for;
+- no terminal and no forwarding for it;
+- the proxy key opening its one reverse forward (a request in the VM reaches the Mac),
+  bound to the VM's loopback only; any other port refused; no command (nologin), no
+  terminal, no local forwarding;
+- that the fill, proxy, ops and desktop keys don't cross;
+- that the accounts, their programs and key lists are root-owned and their homes empty.
+
+What these can't cover is the VM's own Chrome, launched by the driver; see the
+manual steps below.
+
+### In the VM (manual)
+
+1. Build and install the vault (`scripts/build-vault.sh`), and build a VM with this
+   version.
+2. In your own terminal, outside tmux:
+   - `metacomputer secrets init`;
+   - `metacomputer secrets set demo --kind password --origin http://localhost:8000 --username demo`;
+   - `metacomputer secrets bind`: check the fingerprint in the live view, then type `yes`.
+3. Serve `tests/fixtures/site/` in the VM (below) and open
+   `http://localhost:8000/login.html`, a dummy sign-in page, in page-mode Chrome
+   with a named profile.
+4. `metacomputer secrets unlock --confirm each` in your terminal. From Claude, or
+   another terminal: focus the field, then run
+   `metacomputer secrets fill demo --field password --profile P`.
+5. Check:
+   - the question names the page's site and the profile, and typing `demo` allows it;
+   - with `--profile`, a failure lists what each route answered;
+   - the field fills and the result shows `chars`;
+   - submitting the page shows only the lengths of what was typed.
+
+   Then `session save` / `session load` that profile.
+6. API tokens (needs a VM built with this version, bound again):
+   - `metacomputer secrets set httpbin --kind api --api-host httpbin.org --header 'Authorization: Bearer {value}'`
+     (type any dummy key of 8+ characters);
+   - `metacomputer secrets token httpbin` and, in the VM, `curl -s -H "Authorization:
+     Bearer <token>" http://127.0.0.1:18765/httpbin/anything`: httpbin echoes the
+     headers it received, and the `Authorization` header there reads `Bearer [key
+     withheld by metacomputer secrets]`, the proxy having blanked the real key it sent;
+   - `metacomputer secrets revoke --all`, and the same request gets 401.
+
 ## Browser checks: `metacomputer web …`
 
 `compare`, `responsive`, `a11y` and `open-untrusted` serve as their own
 smoke tests. The pages in `tests/fixtures/site/` cover the edge cases:
 - a form with every control;
 - a page with planted accessibility problems;
-- a redirecting fake sign-in page.
+- a redirecting fake sign-in page;
+- a dummy sign-in page for `metacomputer secrets fill` (`login.html`).
 
 To serve them in the VM:
 `metacomputer put tests/fixtures/site --to '~/metacomputer-runs'`, then

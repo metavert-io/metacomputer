@@ -92,11 +92,18 @@ Things to know:
 - **Throwaway by default.**
 - **Named profiles,** when the user asks for one (for example "use a profile called shopping"):
   1. Launch with `{mode: "isolated_named", name: "shopping"}`.
-  2. Ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
+  2. Sign in: fill it from the vault ([SECRETS.md](SECRETS.md)), or ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
   3. Later sessions with the same name reuse the cookies.
-- **Never type the user's credentials.**
+- **Never type the user's credentials yourself.** Use `metacomputer secrets` ([SECRETS.md](SECRETS.md)).
 - **Housekeeping:** `metacomputer browser profiles` lists named profiles, and `metacomputer browser profiles --delete NAME` deletes one (ask first). A VM reset removes them all.
 - **Never attach to Chrome's normal profile.** `strategy: existing_profile` isn't enabled in this lab.
+
+## Signing in: `metacomputer secrets`
+
+Logins, 2FA codes, saved sessions and API keys come from the user's vault, without the values passing through the conversation: read [SECRETS.md](SECRETS.md) before signing in, keeping someone signed in, or using an API key in the VM. In short:
+- fills work only in page-mode Chrome: focus the field, then `metacomputer secrets fill NAME --field username|password|otp`;
+- never type, ask for or read back a password, code, key or the vault passphrase;
+- exit 3 (locked): ask the user to run `metacomputer secrets unlock` in their own terminal.
 
 ## Checks that need no model: `metacomputer web`
 

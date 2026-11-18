@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks for the optional hardening (SECURITY.md) against a running VM.
 
-    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [F]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [D] [F]
 
 Use a test VM: this switches the VM's SSH and driver settings (through the
 maintenance account) and puts them back to the defaults at the end. Variants
@@ -16,6 +16,14 @@ C  DRIVER_MODE=bounded: readonly refuses input; desktop launches listed apps
    (by name, mapped to their path) and refuses the terminal and page tools;
    browser opens only listed origins; an expired or tampered manifest and a
    standard request (the VM's floor) are refused; back to standard at the end.
+D  The secrets accounts (changes nothing). Fill (mcfill): the fill key runs only
+   secret-fill whatever is asked, with no terminal and no forwarding; the fill key
+   doesn't work for the desktop user nor the ops key for mcfill; the account, its
+   program and its key list are root-owned and its home is empty. Proxy (mcproxy):
+   the proxy key may only open one reverse forward, to the VM's
+   127.0.0.1:SECRETS_PROXY_PORT, and it carries requests through to the Mac; any
+   other port, local forwards, commands and a terminal are refused; keys don't cross
+   between accounts; its files are root-owned.
 F  metacomputer sh: runs in the VM as the desktop user with the desktop's
    environment; exit codes, stdin/--file/--cwd/arguments, a detached GUI app
    the driver can read, background programs, --timeout, an interrupted run,
@@ -25,6 +33,7 @@ F  metacomputer sh: runs in the VM as the desktop user with the desktop's
    and verifies.
 """
 import hashlib
+import http.server
 import json
 import os
 import shutil
@@ -32,6 +41,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,11 +72,11 @@ def mcomp(cfg, *args, stdin=None, timeout=180):
 
 
 def settings(cfg):
-    """SSH_DIR, SSH_PORT, GUEST_USER, NET_GATEWAY_IP, LOG_DIR, as scripts/lib.sh resolves them."""
+    """SSH_DIR, SSH_PORT, GUEST_USER, NET_GATEWAY_IP, LOG_DIR, SECRETS_PROXY_PORT, as scripts/lib.sh resolves them."""
     out = subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; printf "%s\\n" "$SSH_DIR" "$SSH_PORT" "$GUEST_USER" '
-                          '"$NET_GATEWAY_IP" "$LOG_DIR" "$KNOWN_HOSTS"'],
+                          '"$NET_GATEWAY_IP" "$LOG_DIR" "$KNOWN_HOSTS" "${SECRETS_PROXY_PORT:-18765}"'],
                          capture_output=True, text=True, env=dict(os.environ, MCOMP_CONFIG=cfg)).stdout.split("\n")
-    return dict(zip(["ssh_dir", "port", "user", "gw", "logs", "known"], out))
+    return dict(zip(["ssh_dir", "port", "user", "gw", "logs", "known", "proxy_port"], out))
 
 
 def client(cfg):
@@ -484,11 +494,156 @@ def test_f():
         sh(BASE, "--override", "-c", f"pkill -x mousepad; pkill -f 'sleep 6[1-4].5'; rm -f {marker} /tmp/mcomp-optf-mousepad.log; true")
 
 
+# --- D ---------------------------------------------------------------------------
+def as_user(s, key, user, stdin=b"", cmd="id", extra=()):
+    args = ["ssh", "-T", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", f"IdentityFile={key}",
+            "-o", f"UserKnownHostsFile={s['known']}", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR", "-p", s["port"], *extra, f"{user}@127.0.0.1", cmd]
+    return subprocess.run(args, input=stdin, capture_output=True, timeout=60)
+
+
+def last_json(r):
+    try:
+        return json.loads(r.stdout.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+
+
+def test_d():
+    print("D  secrets fill account (mcfill)")
+    s = settings(BASE)
+    fill, ops = os.path.join(s["ssh_dir"], "fill"), os.path.join(s["ssh_dir"], "ops")
+    if not os.path.exists(fill):
+        check("the fill key exists (a VM built with secrets support)", False, fill)
+        return
+    r = as_user(s, fill, "mcfill", stdin=b"not json\n", cmd="id; cat /etc/shadow")
+    check("the fill key runs only secret-fill, whatever command is asked for",
+          r.returncode == 0 and last_json(r).get("reason") == "bad request" and b"uid=" not in r.stdout, r.stdout + r.stderr)
+    req = json.dumps({"mode": "check", "field": "password", "origins": ["https://example.com"]}).encode() + b"\n"
+    res = last_json(as_user(s, fill, "mcfill", stdin=req))
+    check("a check answers in JSON (no Chrome, or no tab on the site)", res.get("ok") is False
+          and any(t in res.get("reason", "") for t in ("no Chrome", "no open tab")), res)
+    r = as_user(s, fill, "mcfill", stdin=b"x\n", extra=("-tt",))
+    check("no terminal for the fill account", b"PTY allocation request failed" in r.stderr, r.stderr)
+    r = as_user(s, fill, "mcfill", extra=("-W", "127.0.0.1:22"))
+    check("no forwarding for the fill account", r.returncode != 0, r.stderr)
+    check("the ops key doesn't sign in as mcfill", as_user(s, ops, "mcfill").returncode == 255)
+    check("the fill key doesn't sign in as the desktop user", as_user(s, fill, s["user"]).returncode == 255)
+    r = raw_ssh(s, ops, cmd="getent passwd mcfill | cut -d: -f6,7; "
+                "stat -c '%U %a %n' /opt/metacomputer/bin/secret-fill /etc/ssh/metacomputer-fill/authorized_keys "
+                "/var/lib/metacomputer/fill-home /etc/metacomputer/fill.conf; ls -A /var/lib/metacomputer/fill-home | wc -l; "
+                "test -w /opt/metacomputer/bin/secret-fill && echo WRITABLE; true")
+    out = r.stdout
+    check("mcfill: root-owned empty home, dash, no password shell", "/var/lib/metacomputer/fill-home:/bin/sh" in out, out)
+    check("secret-fill, the key list and fill.conf are root-owned and not writable by the desktop user",
+          "root 755 /opt/metacomputer/bin/secret-fill" in out and "root 644 /etc/ssh/metacomputer-fill/authorized_keys" in out
+          and "root 755 /var/lib/metacomputer/fill-home" in out and "root 644 /etc/metacomputer/fill.conf" in out
+          and "WRITABLE" not in out and out.strip().splitlines()[-1].strip() == "0", out)
+    test_d_proxy()
+
+
+# --- D, the proxy account -----------------------------------------------------------
+class _Marker(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"mcproxy-forward-ok"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def listen_addrs(ss_out):
+    """The local address column of `ss -Hltn` lines (the peer column of a listener is always 0.0.0.0:* or [::]:*)."""
+    return [l.split()[3] for l in ss_out.splitlines() if len(l.split()) >= 5]
+
+
+def tunnel(s, key, spec, user="mcproxy"):
+    """ssh -N -R SPEC as USER; returns (process, its stderr file) once the forward is up or ssh has ended."""
+    err = os.path.join(TMP, f"tunnel-{spec.replace(':', '_')}.err")
+    p = subprocess.Popen(["ssh", "-F", "/dev/null", "-N", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                          "-o", f"IdentityFile={key}", "-o", f"UserKnownHostsFile={s['known']}", "-o", "StrictHostKeyChecking=yes",
+                          "-o", "ConnectTimeout=5", "-o", "ExitOnForwardFailure=yes", "-o", "LogLevel=DEBUG1",
+                          "-R", spec, "-p", s["port"], f"{user}@127.0.0.1"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=open(err, "w"))
+    for _ in range(100):
+        text = open(err).read()
+        if "remote forward success" in text or p.poll() is not None:
+            break
+        time.sleep(0.1)
+    return p, err
+
+
+def test_d_proxy():
+    print("D  secrets proxy account (mcproxy)")
+    s = settings(BASE)
+    proxy, ops, fill = (os.path.join(s["ssh_dir"], k) for k in ("proxy", "ops", "fill"))
+    if not os.path.exists(proxy):
+        check("the proxy key exists (a VM built with API token support)", False, proxy)
+        return
+    pp = s["proxy_port"]
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Marker)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    mac = srv.server_address[1]
+    p, err = tunnel(s, proxy, f"127.0.0.1:{pp}:127.0.0.1:{mac}")
+    up = p.poll() is None and "remote forward success" in open(err).read()
+    errtext = open(err).read()
+    hint = (" (is a vault unlock with a live API token for this VM running? Its own tunnel holds that port: lock it first)"
+            if "remote port forwarding failed" in errtext else "")
+    check(f"the proxy key opens the reverse forward to the VM's 127.0.0.1:{pp}", up, errtext[-400:] + hint)
+    if up:
+        r = raw_ssh(s, ops, cmd=f"python3 -c \"import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{pp}/', timeout=10).read().decode())\"")
+        check("...and a request inside the VM reaches the Mac's end of it", "mcproxy-forward-ok" in r.stdout, r.stdout + r.stderr)
+        r = raw_ssh(s, ops, cmd=f"ss -Hltn 'sport = :{pp}'")
+        local = listen_addrs(r.stdout)
+        check("...listening on the VM's loopback only", local and all(a == f"127.0.0.1:{pp}" for a in local), r.stdout)
+    p.terminate()
+    p.wait(10)
+    other = str(int(pp) + 1)
+    p, err = tunnel(s, proxy, f"127.0.0.1:{other}:127.0.0.1:{mac}")
+    time.sleep(1)
+    check(f"any other port is refused (127.0.0.1:{other})", p.poll() is not None and "remote port forwarding failed" in open(err).read(),
+          open(err).read()[-300:])
+    if p.poll() is None:
+        p.terminate()
+    p, err = tunnel(s, proxy, f"0.0.0.0:{pp}:127.0.0.1:{mac}")
+    time.sleep(1)
+    r = raw_ssh(s, ops, cmd=f"ss -Hltn 'sport = :{pp}'")
+    check("an address other than loopback is refused or bound to loopback only", p.poll() is not None
+          or all(a.startswith("127.0.0.1:") for a in listen_addrs(r.stdout)), r.stdout + open(err).read()[-200:])
+    if p.poll() is None:
+        p.terminate()
+        p.wait(10)
+    srv.shutdown()
+    r = as_user(s, proxy, "mcproxy", cmd="id; cat /etc/passwd")
+    check("a command as mcproxy runs nologin, not the command", r.returncode != 0 and b"uid=" not in r.stdout
+          and b"root:" not in r.stdout, r.stdout + r.stderr)
+    r = as_user(s, proxy, "mcproxy", stdin=b"x\n", extra=("-tt",))
+    check("no terminal for the proxy account", b"PTY allocation request failed" in r.stderr or r.returncode != 0, r.stderr)
+    r = as_user(s, proxy, "mcproxy", extra=("-W", "127.0.0.1:22"))
+    check("no local forwarding for the proxy account", r.returncode != 0, r.stderr)
+    check("the ops key doesn't sign in as mcproxy", as_user(s, ops, "mcproxy").returncode == 255)
+    if os.path.exists(fill):
+        check("the fill key doesn't sign in as mcproxy", as_user(s, fill, "mcproxy").returncode == 255)
+        check("the proxy key doesn't sign in as mcfill", as_user(s, proxy, "mcfill").returncode == 255)
+    check("the proxy key doesn't sign in as the desktop user", as_user(s, proxy, s["user"]).returncode == 255)
+    r = raw_ssh(s, ops, cmd="getent passwd mcproxy | cut -d: -f6,7; "
+                "stat -c '%U %a %n' /etc/ssh/metacomputer-proxy/authorized_keys /var/lib/metacomputer/proxy-home; "
+                "cut -d' ' -f1 /etc/ssh/metacomputer-proxy/authorized_keys; ls -A /var/lib/metacomputer/proxy-home | wc -l")
+    out = r.stdout
+    check("mcproxy: root-owned empty home; its key list is root-owned and limits the key to that one forward",
+          "/var/lib/metacomputer/proxy-home:" in out and "root 644 /etc/ssh/metacomputer-proxy/authorized_keys" in out
+          and "root 755 /var/lib/metacomputer/proxy-home" in out
+          and f'restrict,port-forwarding,permitlisten="127.0.0.1:{pp}"' in out and out.strip().splitlines()[-1].strip() == "0", out)
+
+
 def main(argv):
-    which = [a.upper() for a in argv] or ["A", "B", "C", "F"]
+    which = [a.upper() for a in argv] or ["A", "B", "C", "D", "F"]
     try:
         for k in which:
-            {"A": test_a, "B": test_b, "C": test_c, "E": test_e, "F": test_f}[k]()
+            {"A": test_a, "B": test_b, "C": test_c, "D": test_d, "E": test_e, "F": test_f}[k]()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} checks passed")

@@ -181,6 +181,46 @@ sed "s/@LO_VERSION@/$LO_VER/g" "$PAYLOAD/templates/registrymodifications.xcu" > 
 chown -R "$GUSER:$GUSER" "/home/$GUSER/.config/libreoffice"
 chmod 0755 /opt/metacomputer/bin/* /usr/local/sbin/metacomputer-admin
 chown root:root /usr/local/sbin/metacomputer-admin
+chown -R root:root /opt/metacomputer
+
+step "secrets fill account (mcfill; SECURITY.md, Secrets and logins)"
+# A locked system account whose only use is sshd's forced command,
+# /opt/metacomputer/bin/secret-fill (15-metacomputer-fill.conf). Its home is root-owned
+# and empty, its shell is dash (no rc files for a non-interactive command), and its key
+# list lives under /etc, root-owned: nothing the desktop user can write takes part.
+FILL_HOME=/var/lib/metacomputer/fill-home
+getent passwd mcfill >/dev/null || useradd --system --user-group --no-create-home \
+  --home-dir "$FILL_HOME" --shell /bin/sh --comment "metacomputer secrets fill" mcfill
+passwd -l mcfill >/dev/null
+install -d -o root -g root -m 0755 "$FILL_HOME"
+install -d -o root -g root -m 0755 /etc/ssh/metacomputer-fill
+[ -s "$PAYLOAD/fill.pub" ] || { echo "the payload has no fill.pub (scripts/build-vm.sh makes it)"; false; }
+printf 'restrict %s\n' "$(head -n 1 "$PAYLOAD/fill.pub")" > /etc/ssh/metacomputer-fill/authorized_keys
+chmod 0644 /etc/ssh/metacomputer-fill/authorized_keys
+install -d -m 0755 /etc/metacomputer
+printf 'desktop_user=%s\n' "$GUSER" > /etc/metacomputer/fill.conf
+chmod 0644 /etc/metacomputer/fill.conf
+
+step "secrets proxy account (mcproxy; SECURITY.md, Secrets and logins)"
+# Locked like mcfill. Its key may only open one reverse forward, 127.0.0.1:$PROXY_PORT
+# inside the VM, to the vault's API proxy on the Mac (16-metacomputer-proxy.conf); a
+# session gets nologin.
+PROXY_PORT="${SECRETS_PROXY_PORT:-18765}"
+case "$PROXY_PORT" in ''|*[!0-9]*) echo "SECRETS_PROXY_PORT must be a number"; false ;; esac
+PROXY_HOME=/var/lib/metacomputer/proxy-home
+getent passwd mcproxy >/dev/null || useradd --system --user-group --no-create-home \
+  --home-dir "$PROXY_HOME" --shell /bin/sh --comment "metacomputer secrets proxy" mcproxy
+passwd -l mcproxy >/dev/null
+install -d -o root -g root -m 0755 "$PROXY_HOME"
+install -d -o root -g root -m 0755 /etc/ssh/metacomputer-proxy
+[ -s "$PAYLOAD/proxy.pub" ] || { echo "the payload has no proxy.pub (scripts/build-vm.sh makes it)"; false; }
+printf 'restrict,port-forwarding,permitlisten="127.0.0.1:%s" %s\n' "$PROXY_PORT" "$(head -n 1 "$PAYLOAD/proxy.pub")" \
+  > /etc/ssh/metacomputer-proxy/authorized_keys
+chmod 0644 /etc/ssh/metacomputer-proxy/authorized_keys
+sed -i "s/^\([[:space:]]*PermitListen 127\.0\.0\.1:\)[0-9][0-9]*[[:space:]]*$/\1$PROXY_PORT/" /etc/ssh/sshd_config.d/16-metacomputer-proxy.conf
+grep -q "PermitListen 127\.0\.0\.1:$PROXY_PORT\$" /etc/ssh/sshd_config.d/16-metacomputer-proxy.conf \
+  || { echo "16-metacomputer-proxy.conf: couldn't set the proxy port"; false; }
+printf 'proxy_port=%s\n' "$PROXY_PORT" >> /etc/metacomputer/fill.conf
 
 step "identity wallpaper (desktop screenshots and recordings say this is the virtual computer)"
 # Applied at each login by session-init, with the Applications-menu title.

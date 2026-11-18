@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+"""Offline checks for the VM side of `metacomputer secrets fill`
+(provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill).
+
+No VM needed. Three parts:
+  1. its pure helpers: origins, field checks, /proc/net/tcp parsing (fixtures),
+     WebSocket frames, redaction;
+  2. the whole program against a fake Chrome DevTools server (HTTP + WebSocket) that
+     models frames, isolated worlds, DOM.describeNode and SystemInfo, found through a
+     /proc/net/tcp fixture beside decoy listeners;
+  3. the whole program against a real headless Chromium, when one is found
+     (MCOMP_TEST_CHROME=/path/to/chrome, Google Chrome, or Playwright's copy),
+     including a page that tampers with its own globals; skipped otherwise.
+
+Run: python3 tests/test_secret_fill.py
+Values here are dummies.
+"""
+import glob
+import http.server
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(LAB, "provisioning", "guest", "rootfs", "opt", "metacomputer", "bin", "secret-fill")
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("secret_fill", SCRIPT)
+_spec = importlib.util.spec_from_loader("secret_fill", _loader)
+sf = importlib.util.module_from_spec(_spec)
+_loader.exec_module(sf)
+
+VALUE = "Dummy-Pass-4815"
+UID = 1000
+results = []
+
+
+def check(name, cond, detail=""):
+    results.append(bool(cond))
+    print(f"{'PASS' if cond else 'FAIL'}  {name}" + (f"  ({str(detail)[:300]})" if detail and not cond else ""))
+
+
+def tcp_line(i, ip_hex, port, st="0A", uid=UID):
+    return (f"  {i:3d}: {ip_hex}:{port:04X} 00000000:0000 {st} 00000000:00000000 00:00000000 00000000 "
+            f"{uid:5d}        0 {10000 + i} 1 0000000000000000 100 0 0 10 0")
+
+
+TCP_HEAD = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
+TCP6_HEAD = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
+
+
+# --- 1. pure helpers ------------------------------------------------------------------
+def unit():
+    po = sf.parse_origin
+    check("origin: path and query dropped", po("https://Example.com/login?x=1") == "https://example.com")
+    check("origin: default port dropped", po("https://example.com:443/") == "https://example.com")
+    check("origin: other port kept", po("https://example.com:8443/a") == "https://example.com:8443")
+    check("origin: http with port", po("http://127.0.0.1:8000/x") == "http://127.0.0.1:8000")
+    check("origin: not http(s)", po("about:blank") is None and po("://") is None and po("null") is None)
+    check("allowed: subdomain is another site", not sf.origin_allowed("https://evil.example.com/", ["https://example.com"]))
+    check("allowed: look-alike suffix refused", not sf.origin_allowed("https://example.com.evil.test/", ["https://example.com"]))
+
+    ff = sf.field_fits
+    check("field: password into type=password", ff("password", {"tag": "input", "type": "password"})[0])
+    check("field: password refused in type=text", not ff("password", {"tag": "input", "type": "text"})[0])
+    check("field: username into email", ff("username", {"tag": "input", "type": "email"})[0])
+    check("field: otp into tel/number/text", all(ff("otp", {"tag": "input", "type": t})[0] for t in ("tel", "number", "text")))
+    check("field: text into textarea", ff("text", {"tag": "textarea", "type": ""})[0])
+    check("field: read-only refused", not ff("password", {"tag": "input", "type": "password", "readonly": True})[0])
+    check("field: nothing focused", not ff("password", {"tag": "body"})[0])
+
+    check("loopback: 127.0.0.1 as /proc prints it", sf.loopback_hex("0100007F"))
+    check("loopback: 127.1.2.3", sf.loopback_hex("0302017F"))
+    check("loopback: 0.0.0.0 and 10.0.0.1 aren't", not sf.loopback_hex("00000000") and not sf.loopback_hex("0100000A"))
+    check("loopback: ::1", sf.loopback_hex("00000000000000000000000001000000"))
+    check("loopback: ::ffff:127.0.0.1", sf.loopback_hex("0000000000000000FFFF00000100007F"))
+    check("loopback: :: isn't", not sf.loopback_hex("00000000000000000000000000000000"))
+    tcp = "\n".join([TCP_HEAD, tcp_line(0, "0100007F", 9222), tcp_line(1, "00000000", 5900),
+                     tcp_line(2, "0100007F", 8000, uid=0), tcp_line(3, "0100007F", 9333, st="01"),
+                     tcp_line(4, "0100007F", 9222), tcp_line(5, "0302017F", 41000)])
+    tcp6 = "\n".join([TCP6_HEAD, tcp_line(0, "00000000000000000000000001000000", 9444),
+                      tcp_line(1, "00000000000000000000000000000000", 22)])
+    check("listeners: loopback, LISTEN, this user, once each", sf.tcp_listeners([tcp, tcp6], UID) == [9222, 41000, 9444],
+          sf.tcp_listeners([tcp, tcp6], UID))
+    check("listeners: any user when none is configured", 8000 in sf.tcp_listeners([tcp], None))
+    check("listeners: malformed lines skipped", sf.tcp_listeners(["header\nnot a line\n  0: zz:zz", ""], UID) == [])
+    ok_v = {"Browser": "Chrome/150.0.1.2", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"}
+    check("devtools: Chrome's /json/version", sf.is_devtools_version(ok_v, 9222))
+    check("devtools: headless Chrome too", sf.is_devtools_version(dict(ok_v, Browser="HeadlessChrome/150"), 9222))
+    check("devtools: another browser refused", not sf.is_devtools_version(dict(ok_v, Browser="Firefox/140"), 9222))
+    check("devtools: an endpoint for another port refused", not sf.is_devtools_version(ok_v, 9223))
+    check("devtools: not JSON object", not sf.is_devtools_version(["x"], 9222))
+    check("cmdline: --user-data-dir (NUL-separated)",
+          sf.user_data_dir(b"/opt/google/chrome/chrome\0--user-data-dir=/home/u/p/x\0--remote-debugging-port=0\0") == "/home/u/p/x")
+    check("cmdline: rewritten with spaces", sf.user_data_dir(b"chrome --type=x --user-data-dir=/a/b") == "/a/b")
+    check("cmdline: none", sf.user_data_dir(b"chrome\0--flag\0") is None)
+    check("redaction: any length", sf.withheld({"reason": "got 12 here"}, "12") and not sf.withheld({"chars": 2}, "12"))
+    check("utf16 length", sf.utf16_len("aä\U0001F600") == 4)
+    check("websocket accept key (RFC 6455 1.3)", sf.ws_accept("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    for n in (0, 125, 126, 65535, 65536):
+        payload = bytes(i % 251 for i in range(n))
+        f = sf.ws_encode_frame(0x1, payload, mask=b"\x01\x02\x03\x04")
+        d = sf.ws_decode_frame(f)
+        check(f"websocket frame round trip, {n} bytes (masked)", d is not None and d[2] == payload and d[3] == len(f) and f[1] & 0x80)
+    check("websocket masking (RFC 6455 5.7)", sf.ws_encode_frame(0x1, b"Hello", mask=b"\x37\xfa\x21\x3d") == bytes.fromhex("818537fa213d7f9f4d5158"))
+
+
+# --- 2. against a fake DevTools server ------------------------------------------------
+def server_frame(op, payload, fin=True):
+    b0 = (0x80 if fin else 0) | op
+    n = len(payload)
+    if n < 126:
+        return struct.pack("!BB", b0, n) + payload
+    if n < 65536:
+        return struct.pack("!BBH", b0, 126, n) + payload
+    return struct.pack("!BBQ", b0, 127, n) + payload
+
+
+class FakeChrome:
+    """Chrome's DevTools as secret-fill sees it: /json/version, /json/list, a browser socket
+    (SystemInfo) and page sockets that answer for a model of frames and focus."""
+
+    def __init__(self, pages, pid=4242, browser="Chrome/150.0", routes=None):
+        self.pages, self.pid, self.browser = pages, pid, browser
+        # What the browser endpoint answers about its command line (absent: that call fails).
+        self.browser_routes = routes if routes is not None else {
+            "getInfo": "/opt/google/chrome/chrome --remote-debugging-port=0 --password-store=basic "
+                       "--user-data-dir=/home/u/.local/state/cua-driver/browser-profiles/p1 about:blank"}
+        self.inserted, self.unmasked, self.pongs, self.routes = [], 0, 0, []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.conn, args=(c,), daemon=True).start()
+
+    def http(self, c, obj):
+        body = json.dumps(obj).encode()
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+    def conn(self, c):
+        try:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = c.recv(4096)
+                if not chunk:
+                    return
+                head += chunk
+            head, rest = head.split(b"\r\n\r\n", 1)
+            lines = head.decode().split("\r\n")
+            path = lines[0].split()[1]
+            hdrs = {k.strip().lower(): v.strip() for k, _, v in (l.partition(":") for l in lines[1:])}
+            if path == "/json/version":
+                return self.http(c, {"Browser": self.browser, "Protocol-Version": "1.3",
+                                     "webSocketDebuggerUrl": f"ws://127.0.0.1:{self.port}/devtools/browser/b1"})
+            if path.startswith("/json"):
+                return self.http(c, [{"id": p["id"], "type": p.get("type", "page"), "url": p["url"],
+                                      "webSocketDebuggerUrl": f"ws://127.0.0.1:{self.port}/devtools/page/{p['id']}"}
+                                     for p in self.pages])
+            c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                       "Sec-WebSocket-Accept: " + sf.ws_accept(hdrs["sec-websocket-key"]) + "\r\n\r\n").encode())
+            page = None if path.endswith("/browser/b1") else next(p for p in self.pages if path.endswith("/" + p["id"]))
+            self.ws(c, page, rest)
+        finally:
+            c.close()
+
+    def ws(self, c, page, buf):
+        n = 0
+        while True:
+            f = sf.ws_decode_frame(buf)
+            if not f:
+                chunk = c.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+                continue
+            if not (buf[1] & 0x80):
+                self.unmasked += 1
+            buf = buf[f[3]:]
+            _, op, payload, _ = f
+            if op == 0x8:
+                return
+            if op == 0xA:
+                self.pongs += 1
+                continue
+            if op != 0x1:
+                continue
+            msg = json.loads(payload)
+            try:
+                reply = {"id": msg["id"], "result": self.answer(page, msg["method"], msg.get("params") or {})}
+            except LookupError as e:
+                reply = {"id": msg["id"], "error": {"code": -32000, "message": str(e)}}
+            n += 1
+            # An event and a ping before each answer; every other answer in two fragments.
+            c.sendall(server_frame(0x1, json.dumps({"method": "Runtime.consoleAPICalled", "params": {}}).encode()))
+            c.sendall(server_frame(0x9, b"hi"))
+            data = json.dumps(reply).encode()
+            c.sendall(server_frame(0x1, data[:7], fin=False) + server_frame(0x0, data[7:]) if n % 2 else server_frame(0x1, data))
+
+    def tree(self, page, fid):
+        f = page["frames"][fid]
+        node = {"frame": {"id": fid, "securityOrigin": f["origin"], "url": f["url"], "loaderId": f.get("loader", "L-" + fid)}}
+        kids = [k for k, v in page["frames"].items() if v.get("parent") == fid]
+        if kids:
+            node["childFrames"] = [self.tree(page, k) for k in kids]
+        return node
+
+    def answer(self, page, method, params):
+        if page is None:
+            b = self.browser_routes
+            if method == "SystemInfo.getInfo":
+                if "getInfo" not in b:
+                    raise LookupError("GPU info not available")
+                return {"gpu": {}, "modelName": "", "modelVersion": "", "commandLine": b["getInfo"]}
+            if method == "SystemInfo.getProcessInfo":
+                return {"processInfo": [{"type": "renderer", "id": self.pid + 1}, {"type": "browser", "id": self.pid}]}
+            if method == "Browser.getBrowserCommandLine":
+                if "automation" not in b:
+                    raise LookupError("Command line not returned because --enable-automation not set.")
+                return {"arguments": b["automation"]}
+            return {}
+        frames = page["frames"]
+        ctx_of = {fid: 100 + i for i, fid in enumerate(frames)}
+        fid_of = {v: k for k, v in ctx_of.items()}
+        if method == "Page.getFrameTree":
+            page["tree_calls"] = page.get("tree_calls", 0) + 1
+            if page.get("hang"):
+                time.sleep(60)
+            if page.get("reload_after") and page["tree_calls"] > page["reload_after"]:
+                for f in frames.values():
+                    f["loader"] = "L-new"
+            return {"frameTree": self.tree(page, "F0")}
+        if method == "Page.createIsolatedWorld":
+            fid = params["frameId"]
+            if fid not in frames or frames[fid].get("oopif"):
+                raise LookupError("No frame for given id found")
+            return {"executionContextId": ctx_of[fid]}
+        if method == "Runtime.evaluate":
+            e, fid = params["expression"], fid_of.get(params.get("contextId"))
+            if "document.hasFocus()" in e:
+                return {"result": {"type": "object", "value": {"focus": page.get("focus", False), "visible": page.get("visible", True)}}}
+            if fid is None:
+                raise LookupError("evaluate outside an isolated world")
+            fr = frames[fid]
+            if "mcomp:deep-active" in e:
+                if not fr.get("active"):
+                    return {"result": {"type": "object", "subtype": "null", "value": None}}
+                return {"result": {"type": "object", "subtype": "node", "objectId": "el:" + fid}}
+            if "mcomp:frame-origin" in e:
+                return {"result": {"type": "string", "value": fr.get("self_origin", fr["origin"])}}
+            if "mcomp:focus-selector" in e:
+                n = page.get("selector_matches", 1)
+                if n == 1:
+                    fr["active"] = fr.get("active") or {"element": dict(PW)}
+                return {"result": {"type": "number", "value": n}}
+        if method == "DOM.describeNode":
+            fid = params["objectId"].split(":", 1)[1]
+            a = frames[fid]["active"]
+            if "iframe" in a:
+                return {"node": {"nodeName": "IFRAME", "backendNodeId": 50, "frameId": a["iframe"]}}
+            return {"node": {"nodeName": a["element"]["tag"].upper(), "backendNodeId": page.get("backend", 7)}}
+        if method == "Runtime.callFunctionOn":
+            fn = params["functionDeclaration"]
+            fid = params["objectId"].split(":", 1)[1]
+            if "mcomp:describe" in fn:
+                return {"result": {"type": "object", "value": frames[fid]["active"]["element"]}}
+            if "mcomp:select" in fn:
+                page["value"] = ""
+                return {"result": {"type": "boolean", "value": True}}
+            if "mcomp:value-length" in fn:
+                return {"result": {"type": "number", "value": sf.utf16_len(page.get("value", ""))}}
+            if "mcomp:is-focused" in fn:
+                return {"result": {"type": "boolean", "value": True}}
+            if "mcomp:insert" in fn:
+                if page.get("lost_focus"):
+                    return {"result": {"type": "object", "value": {"done": False, "focus": False}}}
+                if page.get("no_exec"):
+                    return {"result": {"type": "object", "value": {"done": False, "focus": True}}}
+                text = params["arguments"][0]["value"]
+                self.inserted.append((page["id"], text))
+                self.routes.append("element")
+                page["value"] = text[:page["maxlen"]] if page.get("maxlen") else text
+                if page.get("moves_focus"):
+                    page["backend"] = 99
+                if page.get("insert_error"):
+                    raise LookupError("cannot insert " + text)
+                if page.get("navigate_on_insert"):
+                    for f in frames.values():
+                        f["loader"] = "L-new"
+                return {"result": {"type": "object", "value": {"done": True, "focus": True}}}
+        if method == "Input.insertText":
+            self.routes.append("keyboard")
+            self.inserted.append((page["id"], params["text"]))
+            v = page.get("value", "") + params["text"]
+            page["value"] = v[:page["maxlen"]] if page.get("maxlen") else v
+            if page.get("moves_focus"):
+                page["backend"] = 99
+            if page.get("insert_error"):
+                raise LookupError("cannot insert " + params["text"])
+            return {}
+        return {}
+
+    def close(self):
+        self.sock.close()
+
+
+SITE = "https://login.example.com"
+EVIL = "https://evil.example"
+PW = {"tag": "input", "type": "password"}
+
+
+def page(pid="A", url=SITE + "/login", frames=None, **kw):
+    p = {"id": pid, "url": url, "frames": frames or {"F0": {"origin": SITE, "url": url, "active": {"element": dict(PW)}}}}
+    p.update(kw)
+    return p
+
+
+def run_script(req, net=(), uid=UID, proc_root="/nonexistent", extra=()):
+    args = [sys.executable, "-I", SCRIPT, "--proc-root", proc_root, *extra]
+    if uid is not None:
+        args += ["--desktop-uid", str(uid)]
+    for n in net:
+        args += ["--proc-net", n]
+    r = subprocess.run(args, input=json.dumps(req).encode(), capture_output=True, timeout=60,
+                       env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+    out, err = r.stdout.decode(), r.stderr.decode()
+    try:
+        res = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res = {"unparsed": out, "stderr": err}
+    return res, out + err
+
+
+def fake_suite(td):
+    # A plain web server and a non-HTTP listener on loopback: listed, probed, ignored.
+    class NotFound(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_error(404)
+
+        def log_message(self, *a):
+            pass
+    decoy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), NotFound)
+    threading.Thread(target=decoy.serve_forever, daemon=True).start()
+    mute = socket.socket()
+    mute.bind(("127.0.0.1", 0))
+    mute.listen(1)
+    proc = os.path.join(td, "proc")
+    os.makedirs(os.path.join(proc, "4242"))
+    open(os.path.join(proc, "4242", "cmdline"), "wb").write(
+        b"/opt/google/chrome/chrome\0--remote-debugging-port=0\0--user-data-dir=/home/u/.local/state/cua-driver/browser-profiles/p1\0")
+
+    def net_for(*ports, other_uid_port=None):
+        p = os.path.join(td, f"tcp-{time.time_ns()}")
+        lines = [TCP_HEAD] + [tcp_line(i, "0100007F", port) for i, port in enumerate(ports)]
+        lines.append(tcp_line(90, "0100007F", decoy.server_address[1]))
+        lines.append(tcp_line(91, "0100007F", mute.getsockname()[1]))
+        lines.append(tcp_line(92, "00000000", 5900))
+        if other_uid_port:
+            lines.append(tcp_line(93, "0100007F", other_uid_port, uid=0))
+        open(p, "w").write("\n".join(lines) + "\n")
+        return [p]
+
+    def scenario(name, pages, req, expect, uid=UID, extra=(), **chrome_kw):
+        chrome = FakeChrome(pages, **chrome_kw)
+        base = {"mode": "fill", "field": "password", "origins": [SITE], "value": VALUE}
+        base.update(req)
+        res, raw = run_script(base, net_for(chrome.port), uid=uid, proc_root=proc, extra=extra)
+        check(f"fake: {name}", expect(res, chrome), json.dumps(res)[:240])
+        check(f"fake: {name}: value not in the output", VALUE not in raw)
+        if chrome.unmasked:
+            check(f"fake: {name}: client frames masked", False, f"{chrome.unmasked} unmasked")
+        chrome.close()
+        return chrome
+
+    c = scenario("fills the focused password field, through the element itself", [page()], {},
+                 lambda r, c: r.get("ok") and r.get("chars") == len(VALUE) and r.get("origin") == SITE and c.inserted == [("A", VALUE)]
+                 and r.get("route") == "element" and c.routes == ["element"])
+    check("fake: answered the server's pings", c.pongs >= 1)
+    scenario("a page that won't take execCommand: the keyboard route, after re-checking", [page(no_exec=True)], {},
+             lambda r, c: r.get("ok") and r.get("route") == "keyboard" and c.routes == ["keyboard"])
+    scenario("the field lost the focus just before the fill: nothing typed", [page(lost_focus=True)], {},
+             lambda r, c: r.get("denied") and "lost the focus" in r["reason"] and not c.inserted)
+    scenario("the page reloaded between the check and the typing: nothing typed", [page(reload_after=1)], {},
+             lambda r, c: r.get("denied") and "changed after the check" in r["reason"] and not c.inserted)
+    scenario("the page navigated during the typing: reported", [page(navigate_on_insert=True)], {},
+             lambda r, c: r.get("ok") is False and not r.get("denied") and "the page changed during the fill" in r["reason"])
+    scenario("the browser and the page's own world disagree about the site: refused",
+             [page(frames={"F0": {"origin": SITE, "url": SITE, "self_origin": EVIL, "active": {"element": PW}}})], {},
+             lambda r, c: r.get("denied") and "no confirmed site" in r["reason"] and not c.inserted)
+    scenario("without the desktop user's uid, nothing is filled (fail closed)", [page()], {},
+             lambda r, c: r.get("ok") is False and "which user runs the desktop" in r["reason"] and not c.inserted, uid=None)
+    t0 = time.time()
+    scenario("an overall deadline: a hung browser can't keep it waiting with the value", [page(hang=True)], {},
+             lambda r, c: r.get("ok") is False and "ran out of time" in r["reason"] and time.time() - t0 < 15,
+             extra=("--deadline", "3"))
+    scenario("check mode types nothing", [page()], {"mode": "check", "value": None},
+             lambda r, c: r.get("ok") and r.get("mode") == "check" and not c.inserted)
+    scenario("no tab on an allowed site", [page(url="https://other.example/")], {},
+             lambda r, c: r.get("denied") and "no open tab" in r["reason"] and not c.inserted)
+    scenario("the browser's frame tree beats the tab list", [page(frames={"F0": {"origin": EVIL, "url": EVIL + "/", "active": {"element": PW}}})], {},
+             lambda r, c: r.get("denied") and "the tab is on " + EVIL in r["reason"] and not c.inserted)
+    scenario("wrong field type", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": {"tag": "input", "type": "text"}}}})], {},
+             lambda r, c: r.get("denied") and "not a password field" in r["reason"] and not c.inserted)
+    scenario("username into an email field", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": {"tag": "input", "type": "email"}}}})],
+             {"field": "username", "value": "dummy-user-qx7"}, lambda r, c: r.get("ok") and c.inserted == [("A", "dummy-user-qx7")])
+    two = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
+           "F1": {"origin": EVIL, "url": EVIL + "/f", "parent": "F0", "active": {"element": PW}}}
+    scenario("field in a cross-origin frame refused", [page(frames=two)], {},
+             lambda r, c: r.get("denied") and "frame from another site (" + EVIL + ")" in r["reason"] and not c.inserted)
+    same = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
+            "F1": {"origin": SITE, "url": SITE + "/f", "parent": "F0", "active": {"element": PW}}}
+    scenario("field in a same-origin frame filled", [page(frames=same)], {},
+             lambda r, c: r.get("ok") and r.get("frame_origin") == SITE and c.inserted == [("A", VALUE)])
+    srcdoc = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
+              "F1": {"origin": "://", "url": "about:srcdoc", "parent": "F0", "self_origin": SITE, "active": {"element": PW}}}
+    scenario("srcdoc frame: its inherited site", [page(frames=srcdoc)], {}, lambda r, c: r.get("ok") and r.get("frame_origin") == SITE)
+    sandboxed = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
+                 "F1": {"origin": "://", "url": "about:srcdoc", "parent": "F0", "self_origin": "null", "active": {"element": PW}}}
+    scenario("sandboxed srcdoc frame refused", [page(frames=sandboxed)], {},
+             lambda r, c: r.get("denied") and "no site" in r["reason"] and not c.inserted)
+    oopif = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
+             "F1": {"origin": SITE, "url": SITE + "/f", "parent": "F0", "oopif": True, "active": {"element": PW}}}
+    scenario("a frame the fill can't look into refused", [page(frames=oopif)], {},
+             lambda r, c: r.get("denied") and "can't look into" in r["reason"] and not c.inserted)
+    scenario("nothing focused", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": None}})], {},
+             lambda r, c: r.get("denied") and "no field is focused" in r["reason"] and not c.inserted)
+    scenario("read-only field refused", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": dict(PW, readonly=True)}}})], {},
+             lambda r, c: r.get("denied") and "read-only" in r["reason"] and not c.inserted)
+    scenario("two tabs: the focused one", [page(pid="A", focus=False), page(pid="B", focus=True)], {},
+             lambda r, c: r.get("ok") and c.inserted == [("B", VALUE)])
+    scenario("two tabs, neither focused nor alone visible: refused", [page(pid="A"), page(pid="B")], {},
+             lambda r, c: r.get("denied") and "2 tabs" in r["reason"] and not c.inserted)
+    scenario("focus moved during the fill", [page(moves_focus=True)], {},
+             lambda r, c: r.get("ok") is False and not r.get("denied") and "focus moved" in r["reason"])
+    scenario("length limit reported", [page(maxlen=4)], {}, lambda r, c: r.get("ok") is False and "holds 4 characters" in r["reason"])
+    scenario("an error answer to the typing never repeats the value", [page(insert_error=True)], {},
+             lambda r, c: r.get("ok") is False and "nothing was typed" in r.get("reason", ""))
+    scenario("...nor on the keyboard route", [page(insert_error=True, no_exec=True)], {},
+             lambda r, c: r.get("ok") is False and r.get("reason") == "Input.insertText failed")
+    scenario("non-ASCII value counted in UTF-16", [page()], {"value": "Dümmy-✓-\U0001F600"},
+             lambda r, c: r.get("ok") and r.get("chars") == sf.utf16_len("Dümmy-✓-\U0001F600"))
+    scenario("selector focuses exactly one element", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": None}})], {"selector": "#pw"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)])
+    scenario("selector matching two elements refused", [page(selector_matches=2)], {"selector": "input"},
+             lambda r, c: r.get("denied") and "matches 2" in r["reason"] and not c.inserted)
+    scenario("invalid selector: a clear message", [page(selector_matches=-1)], {"selector": "#a >>> #b"},
+             lambda r, c: r.get("denied") and "isn't valid CSS" in r["reason"] and not c.inserted)
+    scenario("a target that isn't a tab is ignored", [page(type="service_worker")], {},
+             lambda r, c: r.get("denied") and "no open tab" in r["reason"])
+    scenario("profile: from the browser's command line (SystemInfo.getInfo), no /proc needed", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)], pid=999999)
+    scenario("profile: from the browser pid and /proc when getInfo fails", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)], routes={})
+    scenario("profile: from getBrowserCommandLine when that's the one that answers", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)], pid=999999,
+             routes={"automation": ["--remote-debugging-port=0", "--user-data-dir=/x/browser-profiles/p1"]})
+    scenario("profile: when no route works, the reason says why for each", [page()], {"profile": "p1"},
+             lambda r, c: r.get("ok") is False and "no Chrome is running on profile p1" in r["reason"]
+             and "getInfo: Failed" in r["reason"] and "/proc/999999/cmdline: FileNotFoundError" in r["reason"]
+             and "getBrowserCommandLine: Failed" in r["reason"] and not c.inserted, pid=999999, routes={})
+    scenario("profile: another profile's Chrome isn't used (and the reason names it)", [page()], {"profile": "p2"},
+             lambda r, c: r.get("ok") is False and "no Chrome is running on profile p2" in r["reason"] and "profile p1" in r["reason"]
+             and not c.inserted)
+    scenario("a DevTools-like server for another browser is ignored", [page()], {},
+             lambda r, c: r.get("ok") is False and "no Chrome with DevTools" in r["reason"] and not c.inserted, browser="Firefox/140")
+
+    chrome = FakeChrome([page()])
+    res, raw = run_script({"mode": "fill", "field": "password", "origins": [SITE], "value": VALUE},
+                          net_for(other_uid_port=chrome.port), proc_root=proc)
+    check("fake: a listener owned by another user isn't probed", "no Chrome with DevTools" in res.get("reason", "") and not chrome.inserted)
+    chrome.close()
+    res, raw = run_script({"mode": "fill", "field": "password", "origins": [], "value": VALUE}, net_for())
+    check("fake: no origins is a bad request", res.get("reason") == "bad request" and VALUE not in raw)
+    res, raw = run_script({"mode": "fill", "field": "password", "origins": [SITE], "profile": "../x", "value": VALUE}, net_for())
+    check("fake: bad profile name refused", res.get("denied") and res.get("reason") == "bad profile name")
+    r = subprocess.run([sys.executable, "-I", SCRIPT], input=b"not json", capture_output=True, timeout=30)
+    check("fake: unreadable request", json.loads(r.stdout).get("reason") == "bad request")
+    decoy.shutdown()
+    mute.close()
+
+
+# --- 3. against a real headless Chromium ----------------------------------------------
+def find_chrome():
+    c = os.environ.get("MCOMP_TEST_CHROME")
+    if c:
+        return c if os.access(c, os.X_OK) else None
+    newest_first = sorted(glob.glob(os.path.expanduser(
+        "~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")), reverse=True)
+    for c in newest_first + ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                             "/usr/bin/google-chrome-stable", "/opt/google/chrome/chrome"]:
+        if os.access(c, os.X_OK):
+            return c
+    return None
+
+
+LOGIN_HTML = """<!doctype html><meta charset="utf-8"><title>dummy login</title>
+<form onsubmit="return false">
+<input id="user" type="email" autocomplete="username">
+<input id="pw" type="password" autocomplete="current-password">
+<input id="code" type="text" inputmode="numeric">
+<textarea id="notes"></textarea>
+<input id="ro" type="password" readonly>
+<input id="short" type="password" maxlength="4">
+</form>
+<iframe id="same" src="/frame.html"></iframe>
+<iframe id="cross" src="http://127.0.0.1:%(other)d/frame.html"></iframe>
+<iframe id="srcdoc" srcdoc='<input id="sdpw" type="password">'></iframe>
+<div id="host"></div>
+<script>document.getElementById('host').attachShadow({mode: 'open'}).innerHTML = '<input id="spw" type="password">';</script>
+"""
+FRAME_HTML = """<!doctype html><meta charset="utf-8"><input id="fpw" type="password">"""
+# A page that lies to scripts in its own world: every input claims to be a password field,
+# the focused element is always #pw2, and self.origin names another site.
+TAMPER_HTML = """<!doctype html><meta charset="utf-8"><input id="plain" type="text"><input id="pw2" type="password">
+<script>
+Object.defineProperty(HTMLInputElement.prototype, 'type', {get() { return 'password'; }});
+Object.defineProperty(Document.prototype, 'activeElement', {get() { return document.getElementById('pw2'); }});
+self.origin = 'https://evil.example';
+</script>"""
+
+
+def serve(directory):
+    class H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=directory, **kw)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def chrome_suite(td, chrome):
+    a_dir, b_dir = os.path.join(td, "site-a"), os.path.join(td, "site-b")
+    os.makedirs(a_dir)
+    os.makedirs(b_dir)
+    sa, sb = serve(a_dir), serve(b_dir)
+    pa, pb = sa.server_address[1], sb.server_address[1]
+    open(os.path.join(a_dir, "login.html"), "w").write(LOGIN_HTML % {"other": pb})
+    open(os.path.join(a_dir, "tamper.html"), "w").write(TAMPER_HTML)
+    for d in (a_dir, b_dir):
+        open(os.path.join(d, "frame.html"), "w").write(FRAME_HTML)
+    site, other = f"http://127.0.0.1:{pa}", f"http://127.0.0.1:{pb}"
+    udd = os.path.join(td, "profiles", "real")
+    os.makedirs(udd)
+    proc = subprocess.Popen([chrome, "--headless", "--remote-debugging-port=0", f"--user-data-dir={udd}",
+                             "--no-first-run", "--no-default-browser-check", "--disable-gpu", f"{site}/login.html"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        port = None
+        for _ in range(100):
+            try:
+                port = int(open(os.path.join(udd, "DevToolsActivePort")).readline())
+                break
+            except (OSError, ValueError):
+                time.sleep(0.2)
+        check("chrome: DevTools port", port is not None)
+        if not port:
+            return
+        # What the VM's /proc would show: Chrome's loopback listener, and the browser's command line.
+        net = os.path.join(td, "chrome-tcp")
+        open(net, "w").write("\n".join([TCP_HEAD, tcp_line(0, "0100007F", port, uid=os.getuid()),
+                                        tcp_line(1, "0100007F", pa, uid=os.getuid())]) + "\n")
+        proc_root = os.path.join(td, "chrome-proc")
+        os.makedirs(os.path.join(proc_root, str(proc.pid)))
+        open(os.path.join(proc_root, str(proc.pid), "cmdline"), "wb").write(
+            b"\0".join([chrome.encode(), b"--headless", f"--user-data-dir={udd}".encode(), b""]))
+        ws = None
+        for _ in range(50):
+            tabs = [t for t in sf.page_targets(port) if t["url"].startswith(site)]
+            if tabs:
+                ws = tabs[0]["ws"]
+                break
+            time.sleep(0.2)
+        h = sf.DevTools(ws)
+
+        def wait_for(js):
+            for _ in range(50):
+                try:
+                    if h.value(js):
+                        return True
+                except sf.Failed:      # not loaded yet
+                    pass
+                time.sleep(0.2)
+            return False
+        wait_for("document.readyState === 'complete' && !!document.getElementById('same').contentDocument"
+                 " && !!document.getElementById('same').contentDocument.getElementById('fpw')"
+                 " && !!document.getElementById('srcdoc').contentDocument.getElementById('sdpw')")
+
+        def fill(focus_js, field="password", value=VALUE, origins=(site,), mode="fill", selector=None, profile=None):
+            h.value("(function(){ const a = document.activeElement; if (a && a.blur) a.blur(); " + focus_js + "; return 1; })()")
+            req = {"mode": mode, "field": field, "origins": list(origins), "value": value}
+            if selector:
+                req["selector"] = selector
+            if profile:
+                req["profile"] = profile
+            # No /proc here: the profile comes from the browser's own command line (SystemInfo.getInfo).
+            res, raw = run_script(req, [net], uid=os.getuid(), proc_root="/nonexistent")
+            check(f"chrome: {field} via {(focus_js or selector or '')[:48]}: value not in the output", value not in raw)
+            return res
+
+        r = fill("document.getElementById('pw').focus()")
+        check("chrome: fills a password field, through the element itself", r.get("ok") and r.get("chars") == len(VALUE)
+              and r.get("origin") == site and r.get("route") == "element", r)
+        check("chrome: the page holds the value", h.value(f"document.getElementById('pw').value === {json.dumps(VALUE)}"))
+        r = fill("document.getElementById('pw').focus()", value="Second-Dummy-77", profile="real")
+        check("chrome: a second fill replaces the first; the profile is found from the browser's pid", r.get("ok")
+              and h.value("document.getElementById('pw').value === 'Second-Dummy-77'"), r)
+        r = fill("document.getElementById('pw').focus()", profile="other")
+        check("chrome: another profile's name finds no Chrome", r.get("ok") is False and "profile other" in r.get("reason", ""), r)
+        r = fill("document.getElementById('user').focus()")
+        check("chrome: password refused in an email field", r.get("denied") and "not a password field" in r["reason"], r)
+        r = fill("document.getElementById('user').focus()", field="username", value="dummy-user-qx7")
+        check("chrome: username into the email field", r.get("ok") and h.value("document.getElementById('user').value === 'dummy-user-qx7'"), r)
+        r = fill("document.getElementById('code').focus()", field="otp", value="123456")
+        check("chrome: code into a text field", r.get("ok") and h.value("document.getElementById('code').value === '123456'"), r)
+        r = fill("document.getElementById('notes').focus()", field="text", value="dummy text value 2342")
+        check("chrome: text into a textarea", r.get("ok") and r.get("chars") == 21, r)
+        r = fill("document.getElementById('ro').focus()")
+        check("chrome: read-only field refused", r.get("denied") and "read-only" in r["reason"], r)
+        r = fill("document.getElementById('same').contentDocument.getElementById('fpw').focus()")
+        check("chrome: same-origin frame filled", r.get("ok") and h.value(
+            f"document.getElementById('same').contentDocument.getElementById('fpw').value === {json.dumps(VALUE)}"), r)
+        r = fill("document.getElementById('srcdoc').contentDocument.getElementById('sdpw').focus()")
+        check("chrome: srcdoc frame (inherits the page's site) filled", r.get("ok") and h.value(
+            f"document.getElementById('srcdoc').contentDocument.getElementById('sdpw').value === {json.dumps(VALUE)}"), r)
+        r = fill("document.getElementById('cross').focus()")
+        check("chrome: field in a frame from another origin refused", r.get("denied") and "frame from another site" in r["reason"]
+              and other in r["reason"], r)
+        r = fill("document.getElementById('host').shadowRoot.getElementById('spw').focus()")
+        check("chrome: field in a shadow root filled", r.get("ok") and h.value(
+            f"document.getElementById('host').shadowRoot.getElementById('spw').value === {json.dumps(VALUE)}"), r)
+        r = fill("document.getElementById('pw').focus()", origins=(other,))
+        check("chrome: tab on a site the secret doesn't name refused", r.get("denied") and "no open tab" in r["reason"], r)
+        r = fill("document.getElementById('short').focus()")
+        check("chrome: length limit reported", r.get("ok") is False and "holds 4 characters" in r.get("reason", ""), r)
+        h.value("document.getElementById('pw').value = ''")
+        r = fill("", selector="#pw")
+        check("chrome: --selector focuses the field", r.get("ok") and h.value(f"document.getElementById('pw').value === {json.dumps(VALUE)}"), r)
+        r = fill("", selector="input[type=password]")
+        check("chrome: --selector matching several refused", r.get("denied") and "matches" in r["reason"], r)
+        r = fill("", selector="#same-site >>> #frame-password")
+        check("chrome: an invalid selector gets a clear message", r.get("denied") and "isn't valid CSS" in r["reason"], r)
+        h.value("document.getElementById('pw').value = ''")
+        r = fill("document.getElementById('pw').focus()", mode="check")
+        check("chrome: check mode types nothing", r.get("ok") and r.get("mode") == "check"
+              and h.value("document.getElementById('pw').value === ''"), r)
+        r = fill("")
+        check("chrome: nothing focused refused", r.get("denied") and "no field is focused" in r["reason"], r)
+
+        # The page's own scripts can't fool the checks (isolated worlds, the browser's origins).
+        h.call("Page.navigate", {"url": f"{site}/tamper.html"})
+        wait_for("location.pathname === '/tamper.html' && document.readyState === 'complete'")
+        r = fill("document.getElementById('plain').focus()")
+        check("chrome: a page that redefines type and activeElement can't pass a text field off as a password field",
+              r.get("denied") and "not a password field" in r["reason"]
+              and h.value("document.getElementById('plain').value === '' && document.getElementById('pw2').value === ''"), r)
+        r = fill("document.getElementById('pw2').focus()")
+        check("chrome: ...and the real password field still fills (self.origin rewritten by the page)", r.get("ok") and r.get("origin") == site, r)
+        h.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        sa.shutdown()
+        sb.shutdown()
+
+
+def main():
+    unit()
+    td = tempfile.mkdtemp(prefix="mcomp-sf-")
+    try:
+        fake_suite(td)
+        chrome = find_chrome()
+        if chrome:
+            print(f"(real Chromium: {chrome})")
+            chrome_suite(td, chrome)
+        else:
+            print("SKIP  real Chromium checks (set MCOMP_TEST_CHROME=/path/to/chrome to run them)")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print(f"\n{sum(results)}/{len(results)} passed")
+    return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

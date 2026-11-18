@@ -40,7 +40,7 @@ Run it the moment you stop to wait for a person, every time:
 metacomputer sends these itself, so don't call `notify` for them:
 - **The bridge refused a call because another controller is using the computer** (its error says "in use by another controller"). `needs_you.in_use` went out. Ask in chat.
 - **Bounded mode keeps refusing the same call.** `needs_you.refused` goes out once it repeats. Tell the user what was refused, as the Rules in SKILL.md say.
-- **`metacomputer secrets fill` or `secrets session save|load` exits 3** (the vault isn't unlocked, or doesn't exist yet). `needs_you.vault_locked` went out. Ask in chat for the unlock (or `secrets init`).
+- **`metacomputer secrets fill`, `secrets session save|load` or `secrets token` exits 3** (the vault isn't unlocked, or doesn't exist yet). `needs_you.vault_locked` went out. Ask in chat for the unlock (or `secrets init`).
 - **The secrets vault waiting for the user's typed confirmation.** The vault sends its own event (`needs_you.approval_waiting`). Tell the user in chat that a confirmation is waiting.
 - **Finished work:** `metacomputer task finish` (the task, how long it took, its videos and files) and `metacomputer record stop` (the recording saved, or failed). When the user asked to hear when it's done, finishing the task is the message. Only if the work had no task folder, send `~/.local/bin/metacomputer events emit task finished --message "what is done and where the results are"`. Don't use `notify` for that: it's for being blocked.
 - **Security signals:** connections from the VM that the gateway blocked, the Chrome guard's refusals, a failed `actions verify`, and what `web open-untrusted` found (password prompts, downloads, a redirect to another site).

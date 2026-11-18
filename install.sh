@@ -17,7 +17,8 @@
 #   3. writes config/local.env, this Mac's settings (asks whether to add Chrome)
 #   4. links the `metacomputer` command, the `metacomputer` skill and the
 #      `metacomputer` MCP server into Claude Code, for every project
-#   5. builds the VM (asks; about 10 minutes, unattended)
+#   5. builds the secrets vault, mcomp-vault (`metacomputer secrets`), with swiftc
+#   6. builds the VM (asks; about 10 minutes, unattended)
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 YES=0; CHROME=""; BUILD=""; CLAUDE=1; UNINSTALL=0; LUME_CHOICE=""
@@ -63,6 +64,8 @@ if [ "$UNINSTALL" = 1 ]; then
   step "Removing the Claude Code hooks for $ROOT"
   for l in "$CMD_LINK" "$ALIAS_LINK"; do link_points_here "$l" "$ROOT/bin/metacomputer" && rm "$l" && ok "removed $l"; done
   link_points_here "$SKILL_LINK" "$ROOT/skills/metacomputer" && rm "$SKILL_LINK" && ok "removed the metacomputer skill"
+  [ -f "$HOME/.local/share/metacomputer/bin/mcomp-vault" ] && rm "$HOME/.local/share/metacomputer/bin/mcomp-vault" \
+    && ok "removed the secrets vault program (your vault file stays: ~/Library/Application Support/metacomputer)"
   if command -v claude >/dev/null 2>&1 && claude mcp get metacomputer 2>/dev/null | grep -q "$ROOT/bin/metacomputer"; then
     claude mcp remove metacomputer -s user >/dev/null 2>&1 && ok "removed the metacomputer MCP server"
   fi
@@ -212,7 +215,16 @@ if [ "$CLAUDE" = 1 ]; then
   fi
 fi
 
-# --- 5. the VM ----------------------------------------------------------------------
+# --- 5. the secrets vault -------------------------------------------------------------
+step "Secrets vault (metacomputer secrets)"
+if command -v swiftc >/dev/null 2>&1 && [ "$major" -ge 15 ]; then
+  "$ROOT/scripts/build-vault.sh" | sed 's/^/  /' \
+    || warn "the vault didn't build; metacomputer secrets won't work until scripts/build-vault.sh succeeds"
+else
+  warn "skipped: the vault needs macOS 15 and swiftc (xcode-select --install); then run scripts/build-vault.sh. Everything else works without it"
+fi
+
+# --- 6. the VM ----------------------------------------------------------------------
 step "The virtual computer ($VM_NAME)"
 if "$LUME_BIN" get "$VM_NAME" >/dev/null 2>&1 && "$LUME_BIN" get "$BASELINE_NAME" >/dev/null 2>&1; then
   ok "already built (and its clean snapshot $BASELINE_NAME)"
