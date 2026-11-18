@@ -63,24 +63,24 @@ metacomputer sh -c 'setsid -f mousepad ~/Inbox/notes.txt </dev/null >/tmp/mousep
 
 ## What the VM has for format-aware work
 
-Checked on a default build (Ubuntu 24.04, 2026-11-17). `EXTRA_PACKAGES` adds more at the next build; that's the user's decision.
+Checked on a default build (Ubuntu 24.04, 2026-11-18). A VM built before 2026-11-18 lacks the file tools marked *(since 2026-11-18)*; `metacomputer sh -c 'command -v unzip'` tells you which you have. `EXTRA_PACKAGES` adds more at the next build; that's the user's decision.
 
 - **Python 3.12, standard library:** `csv`, `json`, `sqlite3`, `zipfile`, `xml.etree`, `email`, `tomllib`, `hashlib`. Also PyYAML, requests, Jinja2, chardet, python-magic, rich, dateutil.
   - Command-line forms: `python3 -m zipfile -l|-e|-c`, `python3 -m sqlite3 DB "ONE STATEMENT"`, `python3 -m json.tool`.
-  - **Not installed:** openpyxl, python-docx, odfpy, Pillow, lxml, pandas. There's no pip, and `python3 -m venv` can't add it.
-  - An `.xlsx`, `.docx` or `.odt` is a zip of XML, so `zipfile` and `xml.etree` can read one. LibreOffice can convert a text document.
-- **LibreOffice 24.2, Writer only,** headless. Use a profile of its own so it doesn't hand the job to an open LibreOffice window:
+  - *(since 2026-11-18)* **openpyxl** (.xlsx), **python-docx** (.docx), **odfpy** (.odt/.ods), **Pillow** (images), lxml; `python3 -m venv` and pip for a one-off tool. Not installed: pandas.
+  - An `.xlsx`, `.docx` or `.odt` is also a zip of XML, so `zipfile` and `xml.etree` can read one on an older VM.
+- **LibreOffice 24.2, Writer and Calc** *(Calc since 2026-11-18)*, headless. Use a profile of its own so it doesn't hand the job to an open LibreOffice window:
   ```bash
   soffice -env:UserInstallation=file:///tmp/lo-convert --headless --convert-to pdf --outdir OUT FILE
   ```
-  - Converts text documents: docx, odt, rtf, html and txt into each other and to pdf (`--convert-to txt:Text` for plain text).
-  - Calc isn't installed, so csv, xlsx and ods fail ("source file could not be loaded").
+  - Converts text documents (docx, odt, rtf, html, txt) and spreadsheets (csv, xlsx, ods) into each other and to pdf (`--convert-to txt:Text` for plain text). On an older VM without Calc, spreadsheets fail ("source file could not be loaded").
 - **Command-line tools:**
   - data: `jq` 1.7, `gawk`, `perl` 5.38, `iconv`, `file`, `bc`;
   - images and media: ImageMagick 6 (`convert`, `identify`; there's no `magick`), `ffmpeg` and `ffprobe` 6.1;
-  - archives and network: `tar`, `gzip`, `xz`, `git`, `curl`, `wget`;
+  - archives and network: `tar`, `gzip`, `xz`, `zip`, `unzip` *(since 2026-11-18)*, `git`, `curl`, `wget`;
+  - documents and data *(since 2026-11-18)*: `pdftotext`, `pdfinfo` (poppler-utils), the `sqlite3` CLI;
   - the desktop: `xdotool`, `wmctrl`, `xclip`, `xprop`, `xwininfo`, `xdpyinfo`, `import` (screenshots), `dbus-send`, `gsettings`, `xfconf-query`.
-- **Missing:** `csvtool`, the `sqlite3` CLI, `zip`/`unzip`, `pdftotext` (poppler-utils), `pandoc`, `xmllint`, `xsltproc`, `node`, a C compiler, `bzip2`, `7z`.
+- **Missing:** `csvtool`, `pandoc`, `xmllint`, `xsltproc`, `node`, a C compiler, `bzip2`, `7z`, pandas.
 
 ## Logging
 

@@ -55,8 +55,8 @@ Checks never trust what the agent says. They read the VM's real state:
   the driver. For a baseline of the defaults, point `MCOMP_CONFIG` at a small
   file that sources the test VM's settings and sets `ACTION_LOG=off` (it's
   host-side only). `run.json` records what was on (`vm_options`).
-- **Calc:** a VM built without `EXTRA_PACKAGES="libreoffice-calc"` has no Calc.
-  For the five Calc tasks, setup then does three things (`guest/calc-overlay.sh`,
+- **Calc:** VMs built since 2026-11-18 have Calc, and the Calc tasks use it directly
+  (`calc: system`). On an older VM without it, setup for the five Calc tasks does three things (`guest/calc-overlay.sh`,
   about 5 s, all removed by the next reset):
   - it builds a user-level copy of LibreOffice with Calc added, from
     `libreoffice-calc` packages that match the VM's LibreOffice version (cached
