@@ -261,33 +261,93 @@ def owner_of(client):
     return getattr(client, "claude", None) or getattr(client, "holder", None) or getattr(client, "peer_pid", None)
 
 
+# --- holding the computer for the work ------------------------------------------------------------------
+_current = threading.local()      # the Hold the work on this thread belongs to (driver() names it to the hub)
+
+
+class Hold:
+    """The computer held for one of these tool calls and the work it starts in the background (the vault's question,
+    the fill, the submit): while it lasts, it counts as the client's acting call, so if the client disconnects the hub
+    keeps the computer for it under the client's lease (hub.job_start); past the lease's life the hub stops it (the
+    vault call is ended). end() is idempotent."""
+
+    def __init__(self, hub, client, name):
+        self.hub, self.lock, self.ended, self.proc, self.stopped = hub, threading.Lock(), False, None, False
+        self.background = False
+        start = getattr(hub, "job_start", None)
+        self.key = start(client, name, self.stop) if start else None
+
+    def stop(self):
+        with self.lock:
+            self.stopped = True
+            proc = self.proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def end(self):
+        with self.lock:
+            if self.ended:
+                return
+            self.ended = True
+        if self.key is not None:
+            self.hub.job_end(self.key)
+
+
 # --- the vault and the driver -----------------------------------------------------------------------
-def vault(hub, *args, timeout=330):
-    """`metacomputer secrets ARGS` with the hub's settings; (exit code, its JSON answer, its stderr)."""
+def vault(hub, *args, timeout=330, hold=None):
+    """`metacomputer secrets ARGS` with the hub's settings; (exit code, its JSON answer, its stderr). A hold that is
+    stopped (past its lease's life) ends the vault call."""
     try:
-        r = subprocess.run([CLI, "secrets", *args], capture_output=True, text=True, env=dict(hub.env),
-                           stdin=subprocess.DEVNULL, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return 4, {}, f"could not run metacomputer secrets ({e})"
-    return r.returncode, last_json(r.stdout), r.stderr.strip()
+        proc = subprocess.Popen([CLI, "secrets", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=dict(hub.env), stdin=subprocess.DEVNULL)
+    except OSError as e:
+        return 4, {}, f"could not run metacomputer secrets ({type(e).__name__})"
+    if hold is not None:
+        with hold.lock:
+            hold.proc = proc
+            stopped = hold.stopped
+        if stopped:
+            proc.kill()
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return 4, {}, "metacomputer secrets didn't finish in time"
+    finally:
+        if hold is not None:
+            with hold.lock:
+                hold.proc = None
+    return proc.returncode, last_json(out), err.strip()
 
 
 def driver(hub, client, tool, args, timeout=60):
-    """One driver call the hub makes for this client (the action log names the client); its structured result."""
-    m = hub.call_for(client, tool, args, timeout=timeout)
+    """One driver call the hub makes for this client (the action log names the client and records the call as
+    secret-adjacent); its structured result. Its errors are this module's own words: the VM may hold a value by now
+    and could spell it in an error message or a result's text, so none of that goes back to the client."""
+    tool_name = re.sub(r"[^A-Za-z0-9_]", "", str(tool))[:40]
+    hold = getattr(_current, "hold", None)
+    if hold is not None and hold.stopped:
+        raise ToolError("driver", "stopped: the computer was held past its lease's life")
+    m = hub.call_for(client, tool, args, timeout=timeout, job=hold.key if hold is not None else None)
     if m is None:
-        raise ToolError("driver", f"the virtual computer didn't answer {tool} in time")
+        raise ToolError("driver", f"the virtual computer didn't answer {tool_name} in time")
     if "error" in m:
-        raise ToolError("driver", f"{tool}: {clean((m['error'] or {}).get('message'), 300)}")
+        raise ToolError("driver", f"{tool_name} failed (the driver's own words aren't passed on during a sign-in or session load)")
     res = m.get("result") or {}
-    text = " ".join(c.get("text", "") for c in res.get("content") or [] if c.get("type") == "text")
+    if not isinstance(res, dict):
+        raise ToolError("driver", f"{tool_name} gave an answer in an unexpected form")
     if res.get("isError"):
         try:
             hub.note_driver_refusal(client, tool, res)
         except Exception:
             pass
-        raise ToolError("driver", f"{tool} was refused: {clean(text, 400)}")
-    return res.get("structuredContent") or {}
+        raise ToolError("driver", f"{tool_name} was refused (the driver's own words aren't passed on during a sign-in or session load)")
+    sc = res.get("structuredContent")
+    return sc if isinstance(sc, dict) else {}
 
 
 def session_label(client, args):
@@ -353,7 +413,7 @@ def snapshot(hub, client, tgt, want_origin=None, wait=15):
 
 
 # --- request_site_login ------------------------------------------------------------------------------
-def site_login(hub, client, args):
+def site_login(hub, client, args, hold=None):
     url = args.get("url")
     if not isinstance(url, str) or len(url) > 2048:
         raise ToolError("invalid_argument", "url: the site's sign-in page")
@@ -404,8 +464,7 @@ def site_login(hub, client, args):
     snap = snapshot(hub, client, tgt, origin)
     here = canonical_origin(snap.get("url"))
     if here != origin:
-        raise ToolError("login_refused", f"the tab is on {clean(here or snap.get('url'), 120)}, not the saved login's site "
-                                         f"{origin}; nothing was typed")
+        raise ToolError("login_refused", f"the tab isn't on the saved login's site {origin}; nothing was typed")
     pw, user, submit = find_fields(snap.get("refs"))
     if not pw and not user:
         raise ToolError("login_refused", "no username or password field on the page (a field inside a frame needs "
@@ -417,6 +476,7 @@ def site_login(hub, client, args):
     on_behalf = str(getattr(client, "peer_pid", 0) or 0)
 
     def work():
+        _current.hold = hold
         try:
             # --origin: the vault fills only a tab on the origin checked here, not another of the login's sites.
             if pw:
@@ -435,7 +495,7 @@ def site_login(hub, client, args):
                 cmd += ["--browser-pid", str(bpid)]
             if isinstance(args.get("agent"), str) and args["agent"] and pw:
                 cmd += ["--agent", clean(args["agent"], 64)]
-            rc, res, err = vault(hub, *cmd)
+            rc, res, err = vault(hub, *cmd, hold=hold)
             out = {"request_id": rid, "site": job.info["site"], "space": hub.settings.get("vm_name") or ""}
             if rc == 0 and res.get("ok"):
                 submitted, held = False, None
@@ -481,10 +541,14 @@ def site_login(hub, client, args):
         except ToolError as e:
             job.result = {"status": "error", "error": e.code, "reason": e.message, "request_id": rid}
         except Exception as e:   # never leave a request hanging
-            job.result = {"status": "error", "error": "internal", "reason": clean(repr(e), 200), "request_id": rid}
+            job.result = {"status": "error", "error": "internal", "reason": f"internal error ({type(e).__name__})", "request_id": rid}
         finally:
             job.done.set()
+            if hold is not None:
+                hold.end()
 
+    if hold is not None:
+        hold.background = True
     threading.Thread(target=work, daemon=True).start()
     if job.done.wait(FIRST_WAIT_S):
         return finished(job)
@@ -522,7 +586,7 @@ def covers(session_sites, site):
     return any(site == s or site.endswith("." + s) for s in session_sites)
 
 
-def teleport(hub, client, args):
+def teleport(hub, client, args, hold=None):
     browser = args.get("browser") or "chrome"
     if browser != "chrome":
         raise ToolError("invalid_argument", "only Chrome: the virtual computer's sealed sessions load into page-mode Chrome")
@@ -570,11 +634,12 @@ def teleport(hub, client, args):
     on_behalf = str(getattr(client, "peer_pid", 0) or 0)
 
     def work():
+        _current.hold = hold
         try:
             def load():
                 # --site: the vault sends only the cookies those sites get (filtered on the Mac), whatever else the session holds.
                 return vault(hub, "session", "load", s["name"], *[a for x in sites for a in ("--site", x)], "--request-id", rid,
-                             "--on-behalf-pid", on_behalf)
+                             "--on-behalf-pid", on_behalf, hold=hold)
             rc, res, err = load()
             if rc != 0 and "open it once" in (res.get("reason") or err or ""):
                 # The profile has no cookie store yet: let the driver create it, close it, then load (asked only now).
@@ -600,10 +665,14 @@ def teleport(hub, client, args):
         except ToolError as e:
             job.result = {"status": "error", "error": e.code, "reason": e.message, "request_id": rid}
         except Exception as e:
-            job.result = {"status": "error", "error": "internal", "reason": clean(repr(e), 200), "request_id": rid}
+            job.result = {"status": "error", "error": "internal", "reason": f"internal error ({type(e).__name__})", "request_id": rid}
         finally:
             job.done.set()
+            if hold is not None:
+                hold.end()
 
+    if hold is not None:
+        hold.background = True
     threading.Thread(target=work, daemon=True).start()
     if job.done.wait(FIRST_WAIT_S):
         return finished(job)
@@ -619,9 +688,12 @@ def call(hub, client, msg):
     params = msg.get("params") or {}
     name, args = params.get("name"), params.get("arguments") or {}
 
+    hold = Hold(hub, client, name)
+
     def run():
+        _current.hold = hold
         try:
-            out = site_login(hub, client, args) if name == "request_site_login" else teleport(hub, client, args)
+            out = site_login(hub, client, args, hold) if name == "request_site_login" else teleport(hub, client, args, hold)
             hub.reply(client, msg, {"content": [{"type": "text", "text": json.dumps(out)}], "structuredContent": out})
             what = "signed in" if out.get("status") == "filled" else ("loaded a session" if out.get("moved") else "is waiting for the user")
             hub.note(f"{name} for client {client.cid}: {what}")
@@ -629,6 +701,9 @@ def call(hub, client, msg):
             sc = dict({"error": e.code, "message": e.message}, **{k: v for k, v in e.extra.items() if v is not None})
             hub.tool_error(client, msg, f"{name}: {e.message}", sc)
         except Exception as e:
-            hub.tool_error(client, msg, f"{name} failed: {clean(repr(e), 200)}")
+            hub.tool_error(client, msg, f"{name} failed: internal error ({type(e).__name__})")
+        finally:
+            if not hold.background:
+                hold.end()           # no background work started: the hold ends with the call
 
     threading.Thread(target=run, daemon=True).start()

@@ -13,6 +13,7 @@ Run: python3 tests/test_site_login.py   (MCOMP_VAULT_TEST_BIN=/path/to/test-buil
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -90,6 +91,22 @@ for line in sys.stdin:
         ok(mid, {"windows": wins.get(a.get("pid"), [])})
     elif name == "get_browser_state" and "snapshot_format" not in a and a.get("pid") == 5555:
         ok(mid, {"target_id": "bt-2", "tabs": [{"tab_id": "tab-2", "url": "about:blank"}], "binding_quality": "exact"})
+    elif name == "get_browser_state" and "snapshot_format" in a and s.get("leak") and s.get("snaps", 0) >= 1:
+        # After the first page snapshot (that is, after the fill), a hostile VM spells the marker in every free field:
+        # the refs (so the hub's click carries it), the text, and on the third snapshot an error message.
+        s["snaps"] = s.get("snaps", 0) + 1; save(s)
+        L = s["leak"]
+        if s["snaps"] >= 3:
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "page gone " + L, "data": {"why": L}}})
+        else:
+            sid = "p%d" % s["snaps"]
+            refs = [dict(r, ref=sid + ":" + L + r["ref"].split(":")[1], label=(r["label"] or "") + " title=" + L) for r in REFS]
+            r_ = {"content": [{"type": "text", "text": "snapshot " + L}], "structuredContent": {"status": "ok", "refs": refs,
+                  "url": s.get("url", "about:blank"), "snapshot_id": sid, "note": L}}
+            send({"jsonrpc": "2.0", "id": mid, "result": r_})
+    elif name in ("browser_click", "browser_type") and s.get("leak"):
+        send({"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "refused " + s["leak"]}],
+              "structuredContent": {"error": s["leak"]}, "isError": True}})
     elif name == "get_browser_state" and "snapshot_format" in a:
         # move_on_snap: from that page snapshot on, the tab is on move_url (a page that navigated away after the fill)
         s["snaps"] = s.get("snaps", 0) + 1; save(s)
@@ -463,6 +480,96 @@ def run(td, procs):
           and load_rec and load_rec[-1].get("sites") == ["github.com"], (hosts, r.raw, load_rec[-1:]))
 
     h.close()
+
+    # --- P1: a sign-in job keeps the computer for its client, even after the client disconnects ------------------
+    # The test's own client held the computer in its Claude Code session's name; that claim is let go here, as when its
+    # activity window ends, so the clients below (outside every Claude Code session) are the only controllers.
+    owners_dir = os.path.join(rundir, "owners")
+    for f in os.listdir(owners_dir) if os.path.isdir(owners_dir) else []:
+        if f.endswith(".json"):
+            os.remove(os.path.join(owners_dir, f))
+    json.dump({"url": SITE + "/login.html"}, open(os.path.join(state, "state.json"), "w"))
+    runner = os.path.join(td, "runner.py")
+    open(runner, "w").write(
+        "import json,sys; sys.path.insert(0, %r); import mcomp_sdk\n"
+        "h = mcomp_sdk.Hub(env=json.load(open(sys.argv[1])), timeout=60); h.connect()\n"
+        "r = h.call(sys.argv[3], json.loads(sys.argv[4])); open(sys.argv[2], 'w').write(json.dumps(r.raw)); h.close()\n"
+        % os.path.join(LAB, "lib"))
+    json.dump(env, open(os.path.join(td, "runner-env.json"), "w"))
+
+    def detached(tool, args, tag):
+        out_p = os.path.join(td, f"runner-{tag}.out")
+        subprocess.run(["/bin/sh", "-c", f"({sys.executable} {runner} {td}/runner-env.json {out_p} {tool} "
+                        f"{shlex.quote(json.dumps(args))} >/dev/null 2>&1 &)"], stdin=subprocess.DEVNULL)
+        for _ in range(300):
+            if os.path.exists(out_p) and os.path.getsize(out_p):
+                break
+            time.sleep(0.2)
+        return open(out_p).read() if os.path.exists(out_p) else ""
+
+    ra = detached("request_site_login", {"url": SITE + "/login.html"}, "a")       # pending: it waits for the user
+    rid_a = (re.findall(r'request_id\\?": \\?"([0-9a-f]{8})', ra) or [None])[0]
+    time.sleep(1.0)                                                                  # client A is gone; its job isn't
+    rb = detached("browser_click", {"target_id": "bt-1", "tab_id": "tab-1", "ref": "p1:6", "session": "other"}, "b")
+    subprocess.run([BIN, "deny", rid_a or "00000000"], env=venv, capture_output=True, text=True, timeout=60)
+    free = False
+    for _ in range(50):
+        if not [f for f in (os.listdir(owners_dir) if os.path.isdir(owners_dir) else []) if f.endswith(".json")]:
+            free = True
+            break
+        time.sleep(0.2)
+    rc_ = detached("browser_click", {"target_id": "bt-1", "tab_id": "tab-1", "ref": "p1:6", "session": "other"}, "c")
+    check("P1: a client that disconnects while its sign-in waits for the user leaves the computer held (the hub's lease): "
+          "another controller is refused until the job ends, and acts once it has", rid_a is not None
+          and "in use by another controller" in rb and free and "in use by another controller" not in rc_,
+          (ra[-200:], rb[-200:], rc_[-200:]))
+
+    # --- P1: nothing the VM says after a fill reaches the action log, hub.log, events or the client ---------------
+    def relayed(tag, keep):
+        st2 = os.path.join(td, "drv-" + tag)
+        os.makedirs(st2)
+        leak = "LEAK" + PW.encode().hex()
+        json.dump({"url": SITE4 + "/login.html", "leak": leak}, open(os.path.join(st2, "state.json"), "w"))
+        e2 = dict(env, MCOMP_RUN_DIR=os.path.join(td, "run-" + tag), MCOMP_LOG_DIR=os.path.join(td, "logs-" + tag),
+                  MCOMP_EVENTS_DIR=os.path.join(td, "events-" + tag), MCOMP_EVENTS_SPOOL=os.path.join(td, "spool-" + tag),
+                  MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions-" + tag),
+                  MCOMP_ACTION_LOG_KEY=os.path.join(td, "alkey-" + tag, "action-log"),
+                  MCOMP_HUB_DRIVER_CMD=json.dumps([sys.executable, os.path.join(LAB, "lib", "mcp_relay.py"), sys.executable, fake, st2]))
+        if keep:
+            e2["MCOMP_ACTION_LOG_TEXT"] = "keep"
+        h2 = mcomp_sdk.Hub(env=e2, timeout=200, session="sl2")
+        h2.connect()
+        r2 = h2.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200)
+        h2.close()
+        try:
+            mcp_hub.stop_hub(e2)
+        except Exception:
+            pass
+        time.sleep(1.0)
+        found = []
+        for d in ("actions-", "logs-", "events-", "spool-", "run-"):
+            base = os.path.join(td, d + tag)
+            for dp, _dn, fn in os.walk(base):
+                for f in fn:
+                    try:
+                        if leak in open(os.path.join(dp, f), errors="replace").read():
+                            found.append(os.path.relpath(os.path.join(dp, f), td))
+                    except OSError:
+                        pass
+        logs = [os.path.join(dp, f) for dp, _dn, fn in os.walk(os.path.join(td, "actions-" + tag)) for f in fn if f.endswith(".jsonl")]
+        recs = [json.loads(l) for lp in logs for l in open(lp) if l.strip()]
+        return r2, found, recs, leak
+
+    import mcp_hub
+    for keep in (False, True):
+        r2, found, recs, leak = relayed("keep" if keep else "redact", keep)
+        secret_calls = [x for x in recs if x.get("secret_adjacent")]
+        check(f"P1 (action log text {'kept' if keep else 'redacted'}): a VM that spells the value in the refs, the text, an "
+              "error message and every other free field after a fill: it reaches neither the action log (the hub's calls "
+              "are recorded as secret-adjacent: tool, argument names and sizes, failed or not), nor hub.log, the events or "
+              "the client's answer", not r2.is_error and r2.structured.get("status") == "filled" and leak not in json.dumps(r2.raw)
+              and not found and secret_calls and any(x.get("type") == "call" and x.get("tool") == "browser_click" for x in secret_calls)
+              and not any(x.get("rpc_error", "").startswith("page gone") for x in recs), (r2.raw, found, secret_calls[-3:]))
     u.send("\x03")
     u.wait(15)
     leaked = [v for v in VALUES if any(v in o for o in ts.outputs)]

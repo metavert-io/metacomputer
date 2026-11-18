@@ -82,7 +82,12 @@ How it resists tampering:
 Typed text, values and scripts are recorded as their length only.
 `ACTION_LOG_TEXT=keep` records them in full; only do that when you can keep
 the log as safe as the passwords that might be typed. Results are never stored,
-only their hash, so a log doesn't copy what was on the screen.
+only their hash, so a log doesn't copy what was on the screen. The driver calls the hub
+makes itself for `request_site_login` and `teleport_browser_session` are recorded as
+`secret_adjacent`: the tool, its argument names and sizes, and whether it failed, never
+the arguments, the answer's text, an error message or a hash of them, whatever
+`ACTION_LOG_TEXT` says (the VM may hold a value by then and could spell it in any of
+those).
 
 ```
 metacomputer actions list            # recent sessions
@@ -1306,6 +1311,15 @@ documents (docs/moving-from-spaces.md maps the rest). They add no new way to a v
   `pending` (or `consent_required`) with the vault's own request id while you decide; the
   use goes ahead the moment you approve, and a later call with that `request_id` collects
   the outcome. Outcomes are kept in the hub for 10 minutes, for the session that asked only.
+- **The work holds the computer.** From the call until the fill, the submit or the load is
+  done, the work counts as the client's acting call: if the client disconnects (a script
+  that got `pending` and exited), the hub keeps the computer for it under the client's
+  lease, as for any call a client leaves running, so no other controller can act on the
+  page meanwhile. Past the lease's life the hub ends the driver runtime and the vault call
+  first, and only then lets go.
+- **Nothing the VM says comes back.** The tools' errors are their own words: a driver error
+  or refusal, the page's address, an exception's text are never passed to the client, the
+  action log (above), hub.log or the events.
 
 `metacomputer secrets lock` ends the running unlock from any terminal (anyone may: it only
 restricts). `init --passphrase` and `unlock --passphrase` are accepted as other vaults

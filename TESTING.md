@@ -1036,7 +1036,7 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (36 checks, about a minute) runs the hub with a stand-in
+`python3 tests/test_site_login.py` (39 checks, about two minutes) runs the hub with a stand-in
 driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
 0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
 standing in for the VM. It covers:
@@ -1054,7 +1054,12 @@ standing in for the VM. It covers:
   spelling a value); every request to the VM naming the Chrome the hub opened by its
   browser process id; a tab given without `pid`, or with another Chrome's `pid`, refused
   before anything is typed; a VM spelling the username it got in the site it reports for a
-  failed fill, which reaches neither the answer nor the audit log; no submit when the tab
+  failed fill, which reaches neither the answer nor the audit log; a client that
+  disconnects while its sign-in waits for the user, after which another controller is
+  refused until the job ends; with the action log on (the logging relay around the
+  stand-in driver), text redacted and kept, a VM spelling the value in the refs, the text
+  and an error message after the fill, which reaches neither the action log, hub.log, the
+  events nor the client; no submit when the tab
   leaves the site after the fill; the SDK's
   `request_site_login`; another controller refused by the hub;
 - `teleport_browser_session`: no imported session (naming `import-session`), Firefox

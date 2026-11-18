@@ -10,7 +10,9 @@ responses are recorded (actionlog.py). Notes from the hub (lib/mcp_hub.py) are
 recorded and never passed on to the driver:
 - `notifications/metacomputer/client` names the client (a Claude Code session,
   `metacomputer call`, a script) of the tools/call that follows it, since one hub
-  connection carries every client's calls;
+  connection carries every client's calls; with `"secret": true` the call is one the
+  hub makes for a sign-in or a session load, and only its tool, its argument names and
+  sizes, and whether it failed are recorded (actionlog.py, "secret-adjacent");
 - `notifications/metacomputer/refused` is a call the hub refused.
 """
 import json
@@ -79,13 +81,14 @@ def main(cmd):
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     pending = {}            # json(id) -> tool
     clients = {}            # json(id) -> the hub's note on whose call it is
+    secret_ids = set()      # json(id) of the hub's secret-adjacent calls (sign-ins, session loads)
     plock = threading.Lock()
     out = sys.stdout.buffer
 
     def finish(*_):
         with plock:
             for key, tool in list(pending.items()):
-                log.result(json.loads(key), tool, {"error": {"message": DROPPED}})
+                log.result(json.loads(key), tool, {"error": {"message": DROPPED}}, secret=key in secret_ids)
             pending.clear()
         log.close()
         if events is not None:
@@ -134,8 +137,10 @@ def main(cmd):
                     key = json.dumps(msg["id"])
                     with plock:
                         tool = pending.pop(key, None)
+                        secret = key in secret_ids
+                        secret_ids.discard(key)
                     if tool:
-                        log.result(msg["id"], tool, msg)
+                        log.result(msg["id"], tool, msg, secret=secret)
                 try:
                     out.write(line)
                     out.flush()
@@ -194,6 +199,9 @@ def main(cmd):
                 p = msg.get("params") or {}
                 if "id" in p and isinstance(p.get("client"), dict) and len(clients) < 10000:
                     clients[json.dumps(p["id"])] = p["client"]
+                if "id" in p and p.get("secret") is True and len(secret_ids) < 10000:
+                    with plock:
+                        secret_ids.add(json.dumps(p["id"]))
                 continue
             if isinstance(method, str) and method.startswith(OURS):
                 continue            # anything else of ours never reaches the driver
@@ -201,8 +209,9 @@ def main(cmd):
                 p = msg.get("params") or {}
                 with plock:
                     pending[json.dumps(msg["id"])] = p.get("name", "")
+                    secret = json.dumps(msg["id"]) in secret_ids
                 log.call(msg["id"], p.get("name", ""), p.get("arguments") or {},
-                         client=clients.pop(json.dumps(msg["id"]), None))
+                         client=clients.pop(json.dumps(msg["id"]), None), secret=secret)
         try:
             proc.stdin.write(line)
             proc.stdin.flush()
