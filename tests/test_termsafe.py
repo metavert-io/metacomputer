@@ -252,6 +252,9 @@ def cli_checks():
         check("status on a terminal: the guest's own report (resolution, driver version) is escaped",
               "\x1b]52" not in out and "\x1b[2J" not in out and "resolution 1920x1080\\x1b]52" in out
               and "0.53\\x1b[2J" in out, out[-500:])
+        check("…and a load average or memory figure that isn't numbers shows as '?', its keys never raw",
+              "\x1b]0;pwned" not in out and "\x1b[5m" not in out and "‮" not in out and "load ?," in out
+              and "? MB free" in out, out[-300:])
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
