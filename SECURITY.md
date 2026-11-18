@@ -10,7 +10,7 @@ it:
 - with mcomp-vm, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
   adds a sound card inside the VM that plays into nothing; it never reaches the Mac.)
 
-[README.md](README.md#isolation-and-safety) lists all of it, and
+[docs/guide.md](docs/guide.md#isolation-and-safety-in-detail) lists all of it, and
 [architecture.md](architecture.md) has the design.
 
 This page covers three **optional** protections. All are off by default, so

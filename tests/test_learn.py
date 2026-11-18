@@ -856,7 +856,8 @@ def budget_checks():
 def privacy_wording_check():
     print("audit P2 #8: the docs say what leaves the Mac")
     readme = open(os.path.join(LAB, "README.md")).read()
-    sec = readme[readme.index("## It learns from its own sessions"):readme.index("## Requirements")]
+    sec = readme[readme.index("**`metacomputer learn`"):]
+    sec = sec[:sec.index("\n\n")]
     doc = open(os.path.join(LAB, "docs", "learn.md")).read()
     check("README no longer says lessons never leave the Mac, and says they go to the model",
           "never leave your Mac" not in sec and "model" in sec, sec[:300])
