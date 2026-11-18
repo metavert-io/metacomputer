@@ -71,8 +71,13 @@ if [ "$UNINSTALL" = 1 ]; then
   fi
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$ROOT/config/local.env" ] && . "$ROOT/config/local.env"
-  echo "The VM is untouched. To delete it too: lume delete $VM_NAME && lume delete $BASELINE_NAME"
-  echo "(and its SSH keys: rm -r $SSH_DIR; lume-secure: rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure)"
+  # The runner this checkout uses (LUME in config/local.env; lume-secure by default), named as it's installed.
+  runner="${LUME:-$HOME/.local/bin/lume-secure}"
+  [ -x "$runner" ] || runner="$(command -v lume-secure || command -v lume || echo lume-secure)"
+  echo "The VM is untouched. To delete it too, with the runner that made it ($runner):"
+  echo "  $runner delete $VM_NAME && $runner delete $BASELINE_NAME"
+  echo "  and any checkpoints ($VM_NAME-ckpt-*) and $BASELINE_NAME-prev that '$runner ls' lists"
+  echo "(then its SSH keys: rm -r $SSH_DIR; and last, lume-secure itself: rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure)"
   exit 0
 fi
 

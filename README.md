@@ -165,7 +165,7 @@ entries, no other tools. You store a password, a 2FA (TOTP) seed, a saved
 browser login or an API key once, in your own terminal. To use one, you unlock
 the vault in your terminal, and you can choose to approve each use by typing
 its name.
-- **Logins and 2FA codes.** Claude asks the vault to type the value into the field it has focused, and gets back only "filled, N characters". The value never passes through Claude's context, the transcript, logs or recordings. It goes only to the sites you allowed, only into the right kind of field, and in the VM through a separate, locked account Claude can't change.
+- **Logins and 2FA codes.** Claude asks the vault to type the value into the field it has focused, and gets back only "filled, N characters". The request and its answer never carry the value, so it doesn't pass through Claude's context, the transcript or the logs on the way. It goes only to the sites you allowed, only into the right kind of field, and in the VM through a separate, locked account Claude can't change. Once typed, it's on the page like any other text: a password field shows dots, but a 2FA code in an ordinary field can be seen in screenshots, accessibility reads and recordings until the page moves on.
 - **API keys.** The key never enters the VM. A program there gets a short-lived token for a proxy on your Mac, which puts the real key into requests to that one API host. If the API sends the key back in an answer, the proxy blanks it out.
 - **Keys.** By default the vault file is encrypted under your passphrase together with a key held in this Mac's Secure Enclave, so a copy taken elsewhere can't be opened with the passphrase alone. A recovery key, shown once, opens it on another Mac.
 - **An audit trail.** Every use, refusal and change goes into a hash-chained log, where the records the vault writes carry a MAC under a key only it holds, and into macOS's unified log. It can be sent off the Mac as it happens; a sink you mark as required stops every use while it can't be reached.
@@ -656,7 +656,7 @@ metacomputer secrets audit-sink add phone --kind ntfy --url ask     # the topic 
 - `--required` fails closed: each use is first recorded and must reach every required sink before it goes ahead. While one can't be reached, fills, tokens and session saves and loads are refused, and proxied API requests get 503.
 - The vault signs a record for a sink only after it passes its own checks; a record that fails reaches the sinks as an `audit_tamper` notice instead, and the unlock terminal says `AUDIT LOG CHANGED`.
 - `scripts/verify-audit.py --key KEY FILE...` checks what a sink received: signatures, hashes, chain and gaps (`--require-verified` also fails on records a locked client wrote).
-- Adding or removing a sink needs your terminal and the passphrase; `audit-sink list` and `audit-sink test NAME` work from anywhere.
+- Adding or removing a sink needs your terminal and the passphrase. `audit-sink list` works from anywhere, though while the vault is locked it shows only each sink's delivery state, not its settings. `audit-sink test NAME` works from anywhere while the vault is unlocked; while it's locked, it asks for the passphrase in your terminal.
 
 [SECURITY.md](SECURITY.md#the-audit-log-and-sending-it-off-this-mac) has the event
 fields, each sink's format, what each check proves, an OCSF mapping and collector
@@ -853,6 +853,11 @@ EXTRA_PACKAGES="inkscape audacity"
 ```bash
 metacomputer build --replace     # rebuilds the VM AND its baseline; everything in the VM is lost
 ```
+
+A rebuild gives the VM a new host key. If you use the secrets vault, run
+`metacomputer secrets bind` again in your own terminal afterwards: until you
+do, fills, sessions and tokens refuse the rebuilt VM, since it no longer
+matches the key the vault pinned.
 
 Then:
 - "Draw a simple logo in Inkscape and export it as a PNG."
@@ -1269,8 +1274,10 @@ and `~/.local/bin/lume` instead):
 lume-secure ls                                  # also shows checkpoints (metacomputer-ckpt-*) and metacomputer-baseline-prev
 lume-secure delete metacomputer
 lume-secure delete metacomputer-baseline
+lume-secure delete metacomputer-baseline-prev  # if ls showed it
+lume-secure delete metacomputer-ckpt-NAME      # each checkpoint ls showed
 rm -r ~/.ssh/metacomputer
-rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure
+rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure   # last: the VMs above need it to be deleted
 ```
 
 Recordings and results stay in the checkout until you delete it.
