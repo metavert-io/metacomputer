@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Files copied from the VM to the Mac (lib/guest_import.py and its callers). No VM:
+a fake `ssh` and a fake Lume stand in for a hostile VM that sends a tar stream with
+links and special files. Needs ffmpeg on the Mac.
+
+    python3 tests/test_guest_import.py
+
+It checks that:
+- only regular files and folders arrive; symbolic and hard links, FIFOs, devices,
+  absolute names, `..` and names with control or bidi characters are left out and
+  reported (escaped);
+- a link the VM names `x-contact.png`, pointing at a Mac file, leaves that file
+  untouched through `task finish` (which builds contact sheets) and `get`;
+- a link already on the Mac where a file arrives is replaced, never written through;
+  a folder entered through a link is refused;
+- a stream cut off part-way keeps only the files that arrived whole;
+- `contact-sheet` refuses an output that's a link and writes through a temporary
+  file it then renames;
+- `recordings --sync` goes through the same importer, and the listing escapes what
+  it prints.
+"""
+import io
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(LAB, "lib"))
+import guest_import  # noqa: E402
+
+CLI = os.path.join(LAB, "bin", "metacomputer")
+IMPORT = os.path.join(LAB, "lib", "guest_import.py")
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(("PASS " if cond else "FAIL ") + name + (f"  ({detail})" if detail and not cond else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+def add_file(tf, name, data, mode=0o644):
+    ti = tarfile.TarInfo(name)
+    ti.size = len(data)
+    ti.mode = mode
+    ti.mtime = 1700000000
+    tf.addfile(ti, io.BytesIO(data))
+
+
+def add_special(tf, name, kind, target=""):
+    ti = tarfile.TarInfo(name)
+    ti.type = kind
+    ti.linkname = target
+    ti.mode = 0o644
+    tf.addfile(ti)
+
+
+def add_dir(tf, name):
+    ti = tarfile.TarInfo(name)
+    ti.type = tarfile.DIRTYPE
+    ti.mode = 0o755
+    tf.addfile(ti)
+
+
+def tiny_video(path):
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10", "-t", "2",
+                    "-pix_fmt", "yuv420p", path], check=True, stdin=subprocess.DEVNULL)
+    return open(path, "rb").read()
+
+
+def hostile_tar(video, victim, victim_dir, prefix="."):
+    """What a hostile VM sends: a real video, a link named like its contact sheet pointing at a
+    Mac file, and every other kind of entry that isn't a plain file or folder."""
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        add_dir(tf, prefix)
+        add_dir(tf, f"{prefix}/recording")
+        add_file(tf, f"{prefix}/recording/x.mp4", video)
+        add_special(tf, f"{prefix}/recording/x-contact.png", tarfile.SYMTYPE, victim)
+        add_special(tf, f"{prefix}/pipe", tarfile.FIFOTYPE)
+        add_special(tf, f"{prefix}/hard", tarfile.LNKTYPE, victim)
+        add_special(tf, f"{prefix}/dev", tarfile.CHRTYPE)
+        add_special(tf, f"{prefix}/escape", tarfile.SYMTYPE, victim_dir)
+        add_file(tf, f"{prefix}/escape/owned.txt", b"written through a link\n")
+        add_file(tf, "/abs-planted.txt", b"absolute\n")
+        add_file(tf, f"{prefix}/../up-planted.txt", b"up\n")
+        add_file(tf, f"{prefix}/evil\x1b]52;c;SGk=\x07name.txt", b"escape in the name\n")
+        add_file(tf, f"{prefix}/new\nline.mp4", b"not a video\n")
+        add_dir(tf, f"{prefix}/files")
+        add_file(tf, f"{prefix}/files/result.txt", b"the real output\n", 0o755)
+    return b.getvalue()
+
+
+def links_or_special(root):
+    bad = []
+    for d, dirs, fs in os.walk(root):
+        for n in dirs + fs:
+            st = os.lstat(os.path.join(d, n))
+            if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+                bad.append(os.path.join(d, n))
+    return bad
+
+
+def fake_vm(td, payload):
+    """A fake ssh (prints PAYLOAD for any tar command) and a fake Lume (the VM is running)."""
+    bindir = os.path.join(td, "bin")
+    os.makedirs(bindir, exist_ok=True)
+    with open(os.path.join(bindir, "ssh"), "w") as f:
+        f.write("#!/bin/sh\n"
+                "for a in \"$@\"; do last=\"$a\"; done\n"
+                "case \"$last\" in *tar*) cat \"$MCOMP_TEST_TAR\" ;; *) exit 0 ;; esac\n")
+    with open(os.path.join(bindir, "lume"), "w") as f:
+        f.write("#!/bin/sh\n"
+                "case \"$1\" in get) echo '{\"status\": \"running\"}' ;; ls) echo '[]' ;; esac\n")
+    for n in ("ssh", "lume"):
+        os.chmod(os.path.join(bindir, n), 0o755)
+    tarpath = os.path.join(td, "guest.tar")
+    with open(tarpath, "wb") as f:
+        f.write(payload)
+    cfg = os.path.join(td, "test.env")
+    with open(cfg, "w") as f:
+        f.write(f'VM_NAME=fake-import-vm\nLUME="{bindir}/lume"\nSSH_DIR="{td}/ssh"\nSSH_PORT=1\n'
+                f'RUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\nACTION_LOG=off\n')
+    env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""), MCOMP_CONFIG=cfg,
+               MCOMP_TEST_TAR=tarpath, MCOMP_EVENTS_DIR=os.path.join(td, "events"))
+    return env
+
+
+def main():
+    if not shutil.which("ffmpeg"):
+        print("SKIP: no ffmpeg")
+        return 0
+    td = tempfile.mkdtemp(prefix="mcomp-import-")
+    try:
+        return run(td)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def run(td):
+    victim_dir = os.path.join(td, "mac-files")
+    os.makedirs(victim_dir)
+    victim = os.path.join(victim_dir, "precious.txt")
+    with open(victim, "w") as f:
+        f.write("the Mac's own file\n")
+    before = open(victim, "rb").read()
+    video = tiny_video(os.path.join(td, "v.mp4"))
+    payload = hostile_tar(video, victim, victim_dir)
+
+    # 1. the importer on its own
+    dest = os.path.join(td, "dest")
+    r = subprocess.run([sys.executable, IMPORT, dest], input=payload, capture_output=True)
+    err = r.stderr.decode()
+    check("the importer reads the hostile stream (exit 0) and keeps the plain files", r.returncode == 0
+          and open(os.path.join(dest, "recording", "x.mp4"), "rb").read() == video
+          and open(os.path.join(dest, "files", "result.txt")).read() == "the real output\n", (r.returncode, err))
+    check("...no link, FIFO or device reaches the Mac", links_or_special(dest) == [], links_or_special(dest))
+    check("...the link named x-contact.png, the FIFO, the hard link, the device and the folder link are left out "
+          "(escape/owned.txt lands in a real folder of that name)",
+          not os.path.lexists(os.path.join(dest, "recording", "x-contact.png")) and not os.path.lexists(os.path.join(dest, "pipe"))
+          and not os.path.lexists(os.path.join(dest, "hard")) and not os.path.lexists(os.path.join(dest, "dev"))
+          and not os.path.islink(os.path.join(dest, "escape")), sorted(os.listdir(dest)))
+    check("...nothing was written through the folder link, and the Mac file is untouched",
+          not os.path.exists(os.path.join(victim_dir, "owned.txt")) and open(victim, "rb").read() == before)
+    check("...absolute names and .. are left out", not os.path.exists("/abs-planted.txt")
+          and not os.path.exists(os.path.join(td, "up-planted.txt")))
+    check("...names with escape sequences or newlines are left out", not any("\x1b" in n or "\n" in n for n in os.listdir(dest)))
+    check("...what was left out is reported, escaped", "x-contact.png (symbolic link)" in err and "(FIFO)" in err
+          and "(hard link)" in err and "\x1b" not in err and "\\x1b]52" in err, err)
+    check("...regular files keep an executable bit only as 0755, and the stream's mtime",
+          stat.S_IMODE(os.stat(os.path.join(dest, "files", "result.txt")).st_mode) & 0o111
+          and int(os.stat(os.path.join(dest, "recording", "x.mp4")).st_mtime) == 1700000000)
+    check("...the private staging folder is gone", not [n for n in os.listdir(dest) if n.startswith(".mcomp-import-")])
+
+    # 2. a link already on the Mac where a file arrives is replaced, not written through
+    dest2 = os.path.join(td, "dest2")
+    os.makedirs(os.path.join(dest2, "recording"))
+    os.symlink(victim, os.path.join(dest2, "recording", "x.mp4"))
+    os.symlink(victim_dir, os.path.join(dest2, "files"))
+    r = subprocess.run([sys.executable, IMPORT, dest2], input=payload, capture_output=True)
+    check("a link already on the Mac where the VM's file goes: replaced by the file, its target untouched",
+          r.returncode == 0 and not os.path.islink(os.path.join(dest2, "recording", "x.mp4"))
+          and open(os.path.join(dest2, "recording", "x.mp4"), "rb").read() == video and open(victim, "rb").read() == before)
+    check("...a folder link on the Mac isn't entered: replaced by a real folder, nothing lands in its target",
+          not os.path.islink(os.path.join(dest2, "files")) and os.path.isfile(os.path.join(dest2, "files", "result.txt"))
+          and sorted(os.listdir(victim_dir)) == ["precious.txt"], sorted(os.listdir(victim_dir)))
+
+    # 3. a stream cut off part-way
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        add_file(tf, "whole.txt", b"w" * 5000)
+        add_file(tf, "cut.bin", b"c" * 200000)
+    cut = b.getvalue()[:60000]
+    dest3 = os.path.join(td, "dest3")
+    rep = guest_import.import_tar(io.BytesIO(cut), dest3)
+    check("a stream cut off part-way: the whole file kept, the cut one not, the failure reported",
+          rep.failure is not None and os.path.isfile(os.path.join(dest3, "whole.txt"))
+          and not os.path.exists(os.path.join(dest3, "cut.bin")), (rep.failure, os.listdir(dest3)))
+    r = subprocess.run([sys.executable, IMPORT, os.path.join(td, "dest4")], input=b"", capture_output=True)
+    check("an empty stream: exit 1, nothing came", r.returncode == 1 and b"nothing came" in r.stderr, r.stderr)
+
+    # 4. contact-sheet: never through a link
+    env = fake_vm(td, payload)
+    vdir = os.path.join(td, "vids")
+    os.makedirs(vdir)
+    vid = os.path.join(vdir, "y.mp4")
+    shutil.copy(os.path.join(td, "v.mp4"), vid)
+    os.symlink(victim, os.path.join(vdir, "y-contact.png"))
+    r = subprocess.run([CLI, "contact-sheet", vid], env=env, capture_output=True, text=True)
+    check("contact-sheet refuses a default output that's a link; the Mac file is untouched", r.returncode != 0
+          and "symbolic link" in r.stderr and open(victim, "rb").read() == before, (r.returncode, r.stderr))
+    out = os.path.join(vdir, "z.png")
+    r = subprocess.run([CLI, "contact-sheet", vid, out], env=env, capture_output=True, text=True)
+    check("contact-sheet to a new file: a PNG, no temporary file left", r.returncode == 0
+          and open(out, "rb").read(8) == b"\x89PNG\r\n\x1a\n" and not [n for n in os.listdir(vdir) if n.startswith(".contact")],
+          (r.returncode, r.stderr, os.listdir(vdir)))
+
+    # 5. task finish against the hostile VM, end to end
+    name = time.strftime("mcomp-%Y%m%d-%H%M%S-import-test")
+    host = os.path.join(LAB, "results", name)
+    try:
+        os.makedirs(host)
+        with open(os.path.join(host, "task.json"), "w") as f:
+            json.dump({"name": name, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "requested_from": td}, f)
+        r = subprocess.run([CLI, "task", "finish", name], env=env, capture_output=True, text=True, timeout=120)
+        g = os.path.join(host, "guest")
+        check("task finish with a hostile VM: the video arrives, the link named x-contact.png doesn't",
+              r.returncode == 0 and os.path.isfile(os.path.join(g, "recording", "x.mp4"))
+              and links_or_special(host) == [], (r.returncode, r.stdout[-500:], r.stderr[-800:], links_or_special(host)))
+        check("...the Mac file the link pointed at is untouched", open(victim, "rb").read() == before)
+        sheet = os.path.join(g, "recording", "x-contact.png")
+        check("...the contact sheet is a real PNG of its own", os.path.isfile(sheet) and not os.path.islink(sheet)
+              and open(sheet, "rb").read(8) == b"\x89PNG\r\n\x1a\n")
+        check("...what was left out is reported", "x-contact.png (symbolic link)" in r.stderr and "\x1b" not in r.stderr,
+              r.stderr[-800:])
+        arts = json.load(open(os.path.join(host, "artifacts.json")))
+        check("...artifacts.json lists the video and its sheet", [os.path.basename(v["path"]) for v in arts["videos"]] == ["x.mp4"]
+              and [os.path.basename(p) for p in arts["contact_sheets"]] == ["x-contact.png"], arts)
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+
+    # 6. get: the same importer, into a folder of your choice
+    gdest = os.path.join(td, "got")
+    r = subprocess.run([CLI, "get", "~/metacomputer-runs/x", gdest], env=env, capture_output=True, text=True, timeout=60)
+    check("get with a hostile VM: plain files only, the Mac file untouched", r.returncode == 0
+          and os.path.isfile(os.path.join(gdest, "recording", "x.mp4")) and links_or_special(gdest) == []
+          and open(victim, "rb").read() == before, (r.returncode, r.stderr[-500:]))
+
+    # 7. recordings --sync: the same importer; the listing escapes the VM's words
+    rec_payload = io.BytesIO()
+    with tarfile.open(fileobj=rec_payload, mode="w") as tf:
+        add_dir(tf, ".")
+        add_file(tf, "./run1/clip.mp4", video)
+        add_file(tf, "./run1/clip.json", json.dumps({"task": "demo \x1b[2J\x1b]52;c;SGk=\x07"}).encode())
+        add_special(tf, "./run1/clip-contact.png", tarfile.SYMTYPE, victim)
+    with open(env["MCOMP_TEST_TAR"], "wb") as f:
+        f.write(rec_payload.getvalue())
+    synced = os.path.join(LAB, "recordings", "guest-runs", "run1")
+    existed = os.path.exists(synced)
+    try:
+        r = subprocess.run([CLI, "recordings", "--sync", "5"], env=env, capture_output=True, text=True, timeout=120)
+        check("recordings --sync: the clip arrives, the link doesn't", r.returncode == 0
+              and os.path.isfile(os.path.join(synced, "clip.mp4")) and not os.path.lexists(os.path.join(synced, "clip-contact.png")),
+              (r.returncode, r.stderr[-400:]))
+        check("...the listing shows the VM's description escaped", "run1/clip.mp4" in r.stdout and "\x1b" not in r.stdout
+              and "\\x1b[2J" in r.stdout, r.stdout[-600:])
+    finally:
+        if not existed:
+            shutil.rmtree(synced, ignore_errors=True)
+    check("the Mac file is still untouched at the end", open(victim, "rb").read() == before)
+
+    print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
