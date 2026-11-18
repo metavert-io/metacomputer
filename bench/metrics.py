@@ -18,6 +18,7 @@ POINTER = {"click", "double_click", "right_click", "drag", "scroll", "move_curso
            "mouse_drag", "mouse_button_up", "parallel_mouse_drag"}
 KEYS = {"type_text", "press_key", "hotkey"}
 APP = {"launch_app", "kill_app", "bring_to_front", "set_window_frame"}
+AX_TARGET_KEYS = ("element_token", "target", "role", "name", "element", "element_index", "selector", "label")
 CLI_RE = re.compile(r"(?:^|[\s/;&|(])(?:metacomputer|mcomp)\s+([a-z][a-z-]*)")
 SHELL_SUBCMDS = {"ssh", "sh"}
 
@@ -100,6 +101,8 @@ def compact(ev):
         return keep
     if t == "result":
         return {k: (_clip(v, 4000) if isinstance(v, str) else v) for k, v in ev.items()}
+    if t == "system" and ev.get("subtype") == "thinking_tokens":
+        return {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": ev.get("estimated_tokens")}
     return _compact_value(ev, 500)
 
 
@@ -116,7 +119,8 @@ def action_route(tool, args):
     if tool.startswith("clipboard_"):
         return "clipboard"
     if tool in POINTER or tool in KEYS:
-        if args.get("element_token") or args.get("target"):
+        # by element: a token from a read, or a role/name (or selector) target, as run_steps allows
+        if any(args.get(k) not in (None, "") for k in AX_TARGET_KEYS):
             return "ax"
         if any(k in args for k in ("x", "y", "from_x", "to_x", "drags")):
             return "pixel"

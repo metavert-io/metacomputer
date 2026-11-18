@@ -7,6 +7,7 @@ switch changed at a time (HCU-style). See bench/README.md.
   bench/bench.py check TASK [--setup]       (re)run a task's setup and/or check, no model
   bench/bench.py report RUN_ID              write results/bench/RUN_ID/summary.md
   bench/bench.py compare RUN_A RUN_B        per-task and total differences
+  bench/bench.py remetric RUN_ID            recompute metrics from the saved transcripts
 
 The VM comes from MCOMP_CONFIG (required: the benchmark resets that VM to its
 baseline before every task). Switches (flag or environment variable):
@@ -352,7 +353,8 @@ def cmd_run(a):
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
             "switches": dict(sw, skill_hash=skill_hash(sw["skill"]),
                              coord_guard_in_bridge="MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_lazy.py")).read()),
-            "tasks": [t["id"] for t in tasks]}
+            "tasks": [t["id"] for t in tasks],
+            "vm_options": status().get("options")}   # the optional hardening (action log, SSH, driver mode)
     json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
     log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}")
     work, cfg, shim = prepare_workdir(run_id, sw)
@@ -441,6 +443,27 @@ def run_task(t, sw, rdir, work, cfg, shim):
     return rec
 
 
+def cmd_remetric(a):
+    """Recompute every task's metrics from its saved transcript (after changing metrics.py)."""
+    rdir = os.path.join(RESULTS, a.run_id)
+    recs = [json.loads(l) for l in open(os.path.join(rdir, "results.jsonl")) if l.strip()]
+    for rec in recs:
+        p = os.path.join(rdir, rec["task"], "transcript.jsonl.gz")
+        if not os.path.exists(p):
+            continue
+        events, times = [], []
+        for line in gzip.open(p, "rt"):
+            ev = json.loads(line)
+            times.append(ev.pop("t", 0.0))
+            events.append(ev)
+        rec["metrics"] = metrics.analyze(events, times)
+        json.dump(rec, open(os.path.join(rdir, rec["task"], "result.json"), "w"), indent=2)
+    with open(os.path.join(rdir, "results.jsonl"), "w") as f:
+        for rec in recs:
+            f.write(json.dumps(rec) + "\n")
+    print(report.write_summary(rdir))
+
+
 def cmd_check(a):
     require_config(a.allow_main_vm)
     t = load_tasks(a.task)[0]
@@ -475,9 +498,13 @@ def main():
     cp = sub.add_parser("compare")
     cp.add_argument("run_a")
     cp.add_argument("run_b")
+    rm = sub.add_parser("remetric")
+    rm.add_argument("run_id")
     a = ap.parse_args()
     if a.cmd == "run":
         cmd_run(a)
+    elif a.cmd == "remetric":
+        cmd_remetric(a)
     elif a.cmd == "check":
         cmd_check(a)
     elif a.cmd == "list":

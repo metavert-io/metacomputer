@@ -69,8 +69,9 @@ def write_summary(rdir):
     meta, recs = load(rdir)
     rows = [row(r) for r in recs]
     env = (recs[0].get("env") or {}) if recs else {}
+    calcs = sorted({str((r.get("env") or {}).get("calc")) for r in recs if (r.get("env") or {}).get("calc")})
     out = [f"# Benchmark run {meta['run_id']}", "", header(meta),
-           f"- driver {env.get('driver_version')}, screen {env.get('resolution')}, Calc: {env.get('calc') or 'n/a'}"
+           f"- driver {env.get('driver_version')}, screen {env.get('resolution')}, Calc: {', '.join(calcs) or 'n/a'}"
            if recs else "", "",
            "| Task | Route | Pass | Partial | Cost $ | Turns | Min | Screenshots | Tree reads | AX acts | Pixel acts | Keys | Page acts | run_steps | Shell | Refused | Invalid | Other errors |",
            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]

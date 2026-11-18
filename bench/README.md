@@ -50,13 +50,27 @@ Checks never trust what the agent says. They read the VM's real state:
   refuses the VM named `metacomputer` unless you pass `--allow-main-vm`.
 - **Make sure nobody else is using that VM** (`metacomputer who`). The runner
   checks before every task and stops if another session is active.
+- **Keep the VM's optional hardening as you mean to measure it.** A test VM's
+  settings often turn on `ACTION_LOG`, which puts a relay between the bridge and
+  the driver. For a baseline of the defaults, point `MCOMP_CONFIG` at a small
+  file that sources the test VM's settings and sets `ACTION_LOG=off` (it's
+  host-side only). `run.json` records what was on (`vm_options`).
 - **Calc:** a VM built without `EXTRA_PACKAGES="libreoffice-calc"` has no Calc.
-  For the five Calc tasks, setup then builds a user-level copy of LibreOffice
-  with Calc added (`guest/calc-overlay.sh`, about 3 s, removed by the next
-  reset). It uses `libreoffice-calc` packages that match the VM's LibreOffice
-  version, cached in `results/bench/cache/lodeb/` or downloaded by the VM. Each
-  result records `calc: system` or `calc: overlay`. Compare runs only when both
-  have the same value.
+  For the five Calc tasks, setup then does three things (`guest/calc-overlay.sh`,
+  about 5 s, all removed by the next reset):
+  - it builds a user-level copy of LibreOffice with Calc added, from
+    `libreoffice-calc` packages that match the VM's LibreOffice version (cached
+    in `results/bench/cache/lodeb/`, or downloaded by the VM);
+  - it adds menu entries for the copy;
+  - it starts the copy with no window. The driver launches apps by name with the
+    system's PATH, so `libreoffice --calc FILE` runs the system LibreOffice,
+    which has no Calc. LibreOffice hands every launch to the instance already
+    running for the same profile, so with the copy running, Calc opens.
+
+  The agent sees an ordinary Calc window. One difference remains: the
+  `launch_app` result names a launcher process that exits, and the window
+  belongs to the copy's process. Each result records `calc: system` or
+  `calc: overlay`. Compare runs only when both have the same value.
 - **Disk:** a run keeps little. Per task there's a gzipped transcript with images
   removed and long texts clipped (tens of KB), plus `result.json`. Nothing is
   recorded.
@@ -71,6 +85,7 @@ bench/bench.py run --run-id baseline-2026-11-17            # all 20
 bench/bench.py report baseline-2026-11-17                  # rewrite summary.md
 bench/bench.py compare baseline-2026-11-17 shell-forbid-1  # A vs B, per task and in total
 bench/bench.py check ff-form [--setup]          # run a task's setup and/or check alone, no model
+bench/bench.py remetric baseline-2026-11-17     # recompute metrics from the saved transcripts
 ```
 
 `run` stops the VM at the end unless you pass `--keep-running`. Running the

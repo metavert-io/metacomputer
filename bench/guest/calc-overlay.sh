@@ -53,4 +53,18 @@ EOF
 done
 mkdir -p "$HOME/bin"
 printf '#!/bin/sh\nexec %s/program/soffice --calc "$@"\n' "$L" > "$HOME/bin/localc"; chmod +x "$HOME/bin/localc"
+# Apps launched by name (`libreoffice --calc FILE`) run the system LibreOffice, which
+# has no Calc. LibreOffice hands every launch to the instance already running for
+# the same user profile, so keep the copy running with no window (--nodefault),
+# started with the desktop session's environment (accessibility, gtk3 plugin).
+if ! pgrep -f "[l]o-calc/program/soffice.bin" >/dev/null; then
+  python3 - "$L/program/soffice" <<'EOF'
+import subprocess, sys
+pid = subprocess.run(["pgrep", "-x", "xfce4-session"], capture_output=True, text=True).stdout.split()[0]
+env = dict(l.split("=", 1) for l in open(f"/proc/{pid}/environ").read().split("\0") if "=" in l)
+subprocess.Popen([sys.argv[1], "--nodefault", "--nologo", "--norestore"], env=env, stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+EOF
+  for i in $(seq 1 30); do ls /tmp/OSL_PIPE_"$(id -u)"_SingleOfficeIPC_* >/dev/null 2>&1 && break; sleep 0.5; done
+fi
 echo overlay
