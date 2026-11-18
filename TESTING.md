@@ -187,7 +187,7 @@ maintenance account, then puts them back to the defaults.
   - Standard mode works again afterwards.
 
 - **F** (26 checks), the shell channel (`metacomputer sh`, below).
-- **G** (16 checks), the hub and the coordinate guard (below).
+- **G** (17 checks), the hub and the coordinate guard (below).
 
 The GUI suite also runs under the `desktop` profile: put
 `DRIVER_MODE=bounded` in the test VM's config and run
@@ -292,7 +292,7 @@ Each of these needs no VM and takes seconds.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (85 checks, about 45 s). A stand-in
+`python3 tests/test_hub.py` needs no VM (87 checks, about 45 s). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -338,7 +338,8 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   it doesn't cover; allowed when the window only moved; a `run_steps` batch with a
   pixel step refused before any step runs; non-pixel actions with no extra
   `list_windows`; one `list_windows` for a batch of pixel steps; drag, scroll and
-  `type_text` x,y checked; `move_cursor` without a target allowed; desktop pixels
+  `type_text` x,y checked; `press_key` and `hotkey` with x,y (alone and as a step)
+  checked and without x,y passed on; `move_cursor` without a target allowed; desktop pixels
   refused when the top window at the point changed and allowed after a fresh
   `get_desktop_state`; a screenshot inside a `run_steps` result counts; no
   screenshot the hub saw leaves it to the driver; `COORD_GUARD=off` passes
@@ -354,9 +355,10 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
 - `who`: the hub's own SSH connection (directly or through the relay) isn't
   another controller, another client's is.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (16 checks) runs
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (17 checks) runs
 against a running test VM. It opens Mousepad, the calculator and a throwaway
-Chrome profile and closes them again, and changes no VM settings:
+Chrome profile and closes them again, and changes no VM settings (it turns
+`ACTION_LOG=on` for its own calls, whatever the test VM's config says):
 - a one-shot `call` and two scripts at once share one hub and one SSH connection
   to the driver; with `ACTION_LOG=on` that connection is one log in which each
   call names its client; `status` and `who` show the hub;
@@ -368,7 +370,8 @@ Chrome profile and closes them again, and changes no VM settings:
   the session logs showed), reads still work, and the Chrome guard refuses
   `set_value` and `run_script` from `call`;
 - the coordinate guard passes a click from a current screenshot, refuses it after
-  the window was resized (where Cua Driver alone clicks), allows it after a fresh
+  the window was resized (where Cua Driver alone clicks), and a `press_key` with
+  x,y too, allows it after a fresh
   screenshot, refuses a foreground click under a window that has since covered
   the point, and passes a point that window doesn't cover;
 - `hub stop` stops it and the next call starts a new one.

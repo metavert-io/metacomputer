@@ -155,3 +155,8 @@ not enabled.
 - [trycua/cua#7931](https://github.com/trycua/cua/issues/7931): `invoke_menu`
   that opens a modal GTK 3 dialog (Mousepad's Save As) leaves the app
   unresponsive to AT-SPI.
+
+Both are still open, and both still happen with Cua Driver 0.53.0 (checked
+2026-11-18): background typing leaves a `CUA v1.…` pair behind, and after
+`invoke_menu` File > Save As Mousepad's windows read back as one-element
+partial trees.

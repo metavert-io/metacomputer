@@ -275,3 +275,23 @@ One hub served all 20 sessions and reconnected after each task's reset, and the
 coordinate guard refused nothing: in these tasks no window changed between a
 screenshot and the pixels aimed from it. Per-task differences are within one
 run's noise.
+
+Cua Driver 0.53.0 (2026-11-18, test VM mcdrv built from the update's branch,
+the same switches as `hub-on`, the skill from main at the time) also passed all 20:
+
+| Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Refused | Invalid |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `hub-on-2026-11-18` (driver 0.52.1) | 20/20 | $11.83 | 20.2 | 0.9 | 25 | 0 | 14 |
+| `driver-053-2026-11-18` (driver 0.53.0) | 20/20 | $11.49 | 19.1 | 1.0 | 39 | 0 | 9 |
+
+The driver's own time fell from 1.18 to 1.00 s per tool call. Sessions ran a
+little longer because the model's own time rose, not the VM's. The extra
+screenshots come from the skill: main's skill had gained a section on pixels
+since `hub-on` (screenshot-only reads before pixel clicks), so this comparison
+is not of the driver alone.
+
+A session that uses `metacomputer sh` can stop a run that was started from
+inside Claude Code ("another controller is using …"): the session's claim is
+credited to the Claude Code process that started the runner, which outlives the
+session. Run the same `--run-id` again once `metacomputer who` shows that claim
+idle (ten minutes) to carry on.

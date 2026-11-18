@@ -774,6 +774,20 @@ def coord_checks():
     res2 = h.call("scroll", {"pid": 50, "window_id": W, "x": 10, "y": 10, "direction": "down"})
     res3 = h.call("type_text", {"pid": 50, "window_id": W, "x": 10, "y": 10, "text": "x"})
     check("drag, scroll and type_text with x,y are checked too", res.is_error and res2.is_error and res3.is_error)
+    n_keys = len(tool_calls("press_key")) + len(tool_calls("hotkey"))
+    res5 = h.call("press_key", {"pid": 50, "window_id": W, "x": 10, "y": 10, "key": "Return"})
+    res6 = h.call("hotkey", {"pid": 50, "window_id": W, "x": 10, "y": 10, "keys": ["ctrl", "v"]})
+    res7 = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [{"press_key": {"key": "End"}},
+                                                                    {"hotkey": {"keys": ["ctrl", "a"], "x": 5, "y": 5}}]})
+    check("press_key and hotkey with x,y (a focus click there first) are checked too, alone and as a step, no keys sent",
+          res5.is_error and res6.is_error and res7.is_error and res7.structured.get("failed_step") == 1
+          and res5.structured.get("code") == "windows_changed_since_screenshot"
+          and len(tool_calls("press_key")) + len(tool_calls("hotkey")) == n_keys,
+          (res5.text[:120], res6.text[:120], res7.text[:120]))
+    res8 = h.call("press_key", {"pid": 50, "window_id": W, "key": "Return"})
+    res9 = h.call("hotkey", {"pid": 50, "window_id": W, "keys": ["ctrl", "s"]})
+    check("press_key and hotkey without x,y aren't pixel input: passed on", not res8.is_error and not res9.is_error,
+          (res8.text[:120], res9.text[:120]))
     res4 = h.call("move_cursor", {"x": 10, "y": 10})
     check("move_cursor without a target (the overlay only) isn't input: allowed", not res4.is_error, res4.text[:120])
     # desktop pixels

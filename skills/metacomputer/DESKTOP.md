@@ -1,6 +1,6 @@
 # Desktop notes: the virtual computer
 
-These rules were verified on Cua Driver 0.52.1, Ubuntu 24.04 XFCE on Xorg, on 2026-11-15 and 2026-11-16. Where they differ from Cua Driver's general skill pack, these win: that pack is written for a user's own machine. Browser choice, Chrome and page-level mode: [BROWSER.md](BROWSER.md).
+These rules were verified on Cua Driver 0.52.1 (rechecked on 0.53.0 on 2026-11-18), Ubuntu 24.04 XFCE on Xorg, on 2026-11-15 and 2026-11-16. Where they differ from Cua Driver's general skill pack, these win: that pack is written for a user's own machine. Browser choice, Chrome and page-level mode: [BROWSER.md](BROWSER.md).
 
 ## The desktop
 

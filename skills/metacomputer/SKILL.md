@@ -141,7 +141,7 @@ Do everything else directly with normal tools: code, builds, tests, git, files, 
 
 ## References
 
-- [DESKTOP.md](DESKTOP.md): rules for this desktop, verified on Cua Driver 0.52.1.
+- [DESKTOP.md](DESKTOP.md): rules for this desktop, verified on Cua Driver 0.52.1 (rechecked on 0.53.0).
 - [BROWSER.md](BROWSER.md): choosing Firefox or Chrome and human, page or hybrid mode; profiles; `metacomputer web` checks.
 - [SHELL.md](SHELL.md): `metacomputer sh`, which work goes to the shell and which to the apps, and what the VM has for format-aware work.
 - [EVENTS.md](EVENTS.md): `metacomputer notify` when you're blocked on the user, what's sent automatically, and event sinks.

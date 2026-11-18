@@ -63,7 +63,7 @@ than forty more.
 | Part | What it is |
 | --- | --- |
 | The virtual computer | An Ubuntu 24.04 ARM64 desktop (XFCE on Xorg) in a [Lume](https://github.com/trycua/cua/tree/main/libs/lume) VM on Apple's Virtualization framework. Firefox, LibreOffice Writer and Calc, GNOME Calculator, the Thunar file manager, the Mousepad text editor and a terminal come installed, and Google Chrome is optional. So do tools for scripts: Python with openpyxl, python-docx, odfpy and Pillow, poppler-utils for PDFs, sqlite3, zip, ImageMagick, ffmpeg, and venv and pip for anything else. |
-| Cua Driver, inside the VM | [Cua Driver](https://github.com/trycua/cua) 0.52.1, an MCP server for the desktop: accessibility trees, mouse and keyboard input, screenshots, recordings, and page-level tools for Chrome. It runs only in the VM and is never installed on your Mac. |
+| Cua Driver, inside the VM | [Cua Driver](https://github.com/trycua/cua) 0.53.0, an MCP server for the desktop: accessibility trees, mouse and keyboard input, screenshots, recordings, and page-level tools for Chrome. It runs only in the VM and is never installed on your Mac. |
 | The shell channel | `metacomputer sh` runs a bash script in the VM as the desktop user and brings back its output and exit code. Claude uses it for files no app holds open, and the desktop for everything an app holds. |
 | The secrets vault | `metacomputer secrets`, a small vault on your Mac for passwords, 2FA seeds, sealed browser logins and API keys. It ships here and depends on no password manager. |
 | The `metacomputer` skill and MCP server | The skill ([skills/metacomputer/](skills/metacomputer/)) tells Claude Code when a task belongs on the virtual computer and how to work it. The MCP server, `metacomputer mcp-lazy`, is registered for every project, so the tools (`mcp__metacomputer__*`) are listed even while the VM is off. It reaches the VM through the hub, one process per VM that `metacomputer call` and scripts share, and that applies every guard to each of them. |
@@ -1149,7 +1149,7 @@ plain process that `start` and `stop` manage.
 - No root for the desktop user: system packages are added with `EXTRA_PACKAGES` and a rebuild, which also replaces the baseline.
 - Unattended upgrades patch the working VM after each reset. Refresh the baseline now and then with `metacomputer baseline`, or rebuild, so resets start current.
 
-**Cua Driver 0.52.1 on this desktop** (details in [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md)):
+**Cua Driver 0.53.0 on this desktop** (details in [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md)):
 - **No Firefox page route.** Page tools (`get_browser_state` and the `browser_*` tools) work only with Chrome, so page and hybrid modes need Chrome.
 - **The focused element isn't reported** on Linux. Claude proves focus with a fresh read.
 - **Firefox ignores background typing.** Text entry in Firefox uses foreground input, which moves the real pointer and focus.
