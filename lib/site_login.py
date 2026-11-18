@@ -19,8 +19,10 @@ wait_secs). Here the use goes ahead as soon as the user approves, whether or not
 The vault sees these requests as the hub's own (no Claude Code session, no project): the hub serves every
 session from one process, so the client's pid it passes on (`--on-behalf-pid`) is shown and recorded as an
 unverified claim and never satisfies a project limit, a rule or a grant. What the hub checked is bound into
-the vault's call instead: the login's exact origin (`--origin`), the sites of a session load (`--site`).
-After a login only the page's origin comes back, never its URL (a page can put anything in its URL).
+the vault's call instead: the login's exact origin (`--origin`), the Chrome it read (`--browser-pid` for the one
+it opened, `--profile` for a named one; the vault refuses a hub request without either), the sites of a session
+load (`--site`). After a login nothing the page chose comes back: not its URL, not even its host (a page, or the VM,
+can spell a value in a host name), only whether it's still on the login's own origin (`same_site`).
 """
 import json
 import os
@@ -46,10 +48,11 @@ TOOLS = [
             "path, only on the saved login's exact site, after the user approves (Touch ID, their login password, the "
             "vault passphrase, or their unlock terminal; identity providers always ask). The first call answers "
             "status \"pending\" with a request_id while the user decides; call again with the same url and request_id "
-            "to get \"filled\" (site, origin, a masked username_hint, submitted, page_url (the page's origin only, never "
-            "its path or query) and the tab) or \"denied\". "
-            "Pass the tab you opened (session, target_id, tab_id from get_browser_state) to sign in there; without one "
-            "it opens page-mode Chrome on url itself and returns its tab. A multi-step sign-in needs one call per page "
+            "to get \"filled\" (site, origin, a masked username_hint, submitted, same_site (whether the page is still on "
+            "the login's origin; no address of the page is returned) and the tab) or \"denied\". "
+            "Pass the tab you opened (session, target_id, tab_id from get_browser_state, and the Chrome it's in: pid, or "
+            "profile for a named one) to sign in there; without one it opens page-mode Chrome on url itself and returns its "
+            "tab. The fill refuses when another tab in that Chrome is on the same site. A multi-step sign-in needs one call per page "
             "(a page with only a username field gets only the username). Never returns a password."),
         "inputSchema": {
             "type": "object",
@@ -63,7 +66,8 @@ TOOLS = [
                 "username": {"type": "string", "description": "Which saved username, when the site has several."},
                 "request_id": {"type": "string", "description": "The request id a previous call returned (on the retry)."},
                 "wait_secs": {"type": "integer", "description": "Seconds the retry waits for the user's decision (default 20, at most 120)."},
-                "profile": {"type": "string", "description": "metacomputer only: a named driver profile to open (isolated_named) when no tab is given; default a throwaway one."},
+                "profile": {"type": "string", "description": "metacomputer only: a named driver profile to open (isolated_named) when no tab is given (default a throwaway one), or the named profile of the tab given."},
+                "pid": {"type": "integer", "description": "metacomputer only: the Chrome process of the tab given (the pid you bound with get_browser_state); a tab needs this or profile."},
                 "submit": {"type": "boolean", "description": "metacomputer only: submit the form after filling (default true)."},
                 "relay_plaintext_ack": {"type": "boolean", "description": "Accepted for compatibility; nothing here travels over a relay."},
             },
@@ -301,7 +305,7 @@ def open_page(hub, client, sess, url, profile=None):
     prof = {"mode": "isolated_named", "name": profile} if profile else {"mode": "isolated_new"}
     sc = driver(hub, client, "browser_prepare", {"session": sess, "allow_launch": True, "profile": prof}, timeout=90)
     pid = sc.get("prepared_pid")
-    if not pid:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
         raise ToolError("driver", "browser_prepare didn't start Chrome")
     win = None
     for _ in range(40):
@@ -318,7 +322,7 @@ def open_page(hub, client, sess, url, profile=None):
         raise ToolError("driver", "Chrome's tab couldn't be bound")
     tgt = {"target_id": b["target_id"], "tab_id": tabs[0]["tab_id"], "session": sess}
     driver(hub, client, "browser_navigate", dict(tgt, url=url), timeout=60)
-    return tgt
+    return tgt, pid
 
 
 def snapshot(hub, client, tgt, want_origin=None, wait=15):
@@ -370,10 +374,16 @@ def site_login(hub, client, args):
     secret = logins[0]
     sess = session_label(client, args)
     profile = args.get("profile") if isinstance(args.get("profile"), str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.get("profile")) else None
+    bpid = args.get("pid") if isinstance(args.get("pid"), int) and not isinstance(args.get("pid"), bool) and args.get("pid") > 1 else None
+    # The vault is told which Chrome the hub read (its pid, or its named profile), and the fill refuses when another tab
+    # there is on the site: a value can't go to a same-site tab in another Chrome or profile.
     if args.get("target_id") and args.get("tab_id"):
+        if not profile and not bpid:
+            raise ToolError("invalid_argument", "a tab needs the Chrome it's in: pass pid (the process you bound with get_browser_state) "
+                                                "or profile (its named driver profile), or leave out the tab and let this tool open one")
         tgt = {"target_id": str(args["target_id"])[:200], "tab_id": str(args["tab_id"])[:200], "session": sess}
     else:
-        tgt = open_page(hub, client, sess, url, profile)
+        tgt, bpid = open_page(hub, client, sess, url, profile)
     snap = snapshot(hub, client, tgt, origin)
     here = canonical_origin(snap.get("url"))
     if here != origin:
@@ -404,6 +414,8 @@ def site_login(hub, client, args):
                        "--request-id", rid, "--on-behalf-pid", on_behalf]
             if profile:
                 cmd += ["--profile", profile]
+            if bpid:
+                cmd += ["--browser-pid", str(bpid)]
             if isinstance(args.get("agent"), str) and args["agent"] and pw:
                 cmd += ["--agent", clean(args["agent"], 64)]
             rc, res, err = vault(hub, *cmd)
@@ -417,7 +429,7 @@ def site_login(hub, client, args):
                         snap2 = driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}
                         pw2, user2, submit2 = find_fields(snap2.get("refs"))
                         if canonical_origin(snap2.get("url")) != origin:
-                            held = "the tab left " + origin + " after the fill, so the form wasn't submitted"
+                            held = "the tab left the login's site after the fill, so the form wasn't submitted"
                         elif submit2 and submit2[1]:
                             driver(hub, client, "browser_click", dict(tgt, ref=submit2[1], delivery_mode="foreground"))
                             submitted = True
@@ -429,15 +441,16 @@ def site_login(hub, client, args):
                     except ToolError:
                         submitted = False
                 time.sleep(1.0 if submitted else 0)
-                page = None
+                same = False
                 try:
-                    # Only the origin: a page can write the password, or a token, into its own URL.
-                    page = canonical_origin((driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url"))
+                    # Only whether the page is still on the login's origin: its URL, and even its host, are the page's
+                    # (or the VM's) to choose, and could spell the value that was just typed.
+                    same = canonical_origin((driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url")) == origin
                 except ToolError:
                     pass
-                out.update(status="filled", origin=res.get("origin") or origin,
-                           username_hint=res.get("username_hint") or mask(secret.get("username")), submitted=submitted,
-                           page_url=page or "", fields=res.get("fields") or ["username"],
+                out.update(status="filled", origin=origin,
+                           username_hint=mask(secret.get("username")), submitted=submitted, same_site=same,
+                           fields=[f for f in (res.get("fields") or ["username"]) if f in ("username", "password")],
                            session=tgt["session"], target_id=tgt["target_id"], tab_id=tgt["tab_id"])
                 if held:
                     out["note"] = held

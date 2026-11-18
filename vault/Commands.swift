@@ -50,9 +50,9 @@ You, from any terminal (they need Touch ID / your login password, or the passphr
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
-  fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--origin URL] [--request-id ID]
+  fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin URL] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
-  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--origin URL] [--request-id ID] [--agent TEXT]
+  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--origin URL] [--request-id ID] [--agent TEXT]
                                          sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
   session load NAME --vm VM [--profile P] [--site HOST ...]
@@ -251,18 +251,30 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     let stored = String(decoding: value, as: UTF8.self)
     let now = isoTime()
+    // A replacement of the same kind is the same secret: it keeps its id, and a 2FA code keeps the login it belongs to.
+    // Another kind is a new secret: a new id, and any 2FA code that belonged to the old one belongs to no login now.
+    let sameKind = old?.kind == kind
+    var unlinked: [String] = []
     try updateVault(paths, key) { p in
+        if let o = old, !sameKind, let oldID = o.id {
+            for (k, v) in p.secrets where v.totp_for == oldID { p.secrets[k]?.totp_for = nil; unlinked.append(k) }
+        }
         p.secrets[name] = Secret(kind: kind, value: stored, username: username, origins: origins, approval: approval,
                                  created: old?.created ?? now, rotated: old == nil ? nil : now, last_used: old?.last_used,
                                  uses: old?.uses ?? 0, projects: projects.isEmpty ? nil : projects,
                                  api_host: apiHost, api_header: apiHeader, api_path_prefix: apiPrefix,
-                                 gen: randomBytes(8).map { String(format: "%02x", $0) }.joined())
+                                 gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(),
+                                 totp_for: (sameKind && kind == "totp") ? old?.totp_for : nil,
+                                 id: sameKind ? (old?.id ?? newSecretID()) : newSecretID())
     }
+    unlinked.sort()
     var rec: [String: Any] = ["op": old == nil ? "set" : "rotate", "result": "ok", "name": name, "kind": kind, "approval_mode": approval]
     if !origins.isEmpty { rec["origins"] = origins }
     if let h = apiHost { rec["api_host"] = h }
     if !projects.isEmpty { rec["projects"] = projects }
+    if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
     audit(paths, rec, macKey: vaultAuditKey(paths, key))
+    if !unlinked.isEmpty { oprint("No longer tied to a login (\(name) is a different kind now): \(unlinked.joined(separator: ", ")).") }
     let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
     oprint((old == nil ? "Saved" : "Rotated") + " \(name) (\(kind)) for \(where_)"
            + (projects.isEmpty ? "" : ", only for Claude Code sessions in \(projects.map(tildePath).joined(separator: ", "))")
@@ -278,9 +290,21 @@ func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     installPromptSignalHandlers()
     let (key, existing) = try unlockKey(paths)
     guard existing.secrets[name] != nil else { throw VaultError("no secret named \(name)") }
-    try updateVault(paths, key) { p in p.secrets[name] = nil }
-    audit(paths, ["op": "delete", "result": "ok", "name": name], macKey: vaultAuditKey(paths, key))
-    oprint("Deleted \(name).")
+    // A 2FA code that belonged to this login belongs to none now: a later login, even one given this name, never
+    // inherits it (codes are tied to a login's id, which is never reused).
+    var unlinked: [String] = []
+    try updateVault(paths, key) { p in
+        let gone = p.secrets[name]?.id
+        p.secrets[name] = nil
+        if let g = gone {
+            for (k, v) in p.secrets where v.totp_for == g { p.secrets[k]?.totp_for = nil; unlinked.append(k) }
+        }
+    }
+    unlinked.sort()
+    var rec: [String: Any] = ["op": "delete", "result": "ok", "name": name]
+    if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
+    audit(paths, rec, macKey: vaultAuditKey(paths, key))
+    oprint("Deleted \(name)." + (unlinked.isEmpty ? "" : " Its 2FA code (\(unlinked.joined(separator: ", "))) stays, tied to no login now; delete it too if it's no longer needed."))
     return Exit.ok
 }
 
@@ -383,10 +407,10 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     try requireTTY("unlock")
     let mux = terminalMultiplexer()
     let flag: Bool? = a.has("require-presence") ? true : (a.has("no-require-presence") ? false : nil)
-    let bio = detectBiometry()
+    let (bio, bioDetail) = detectBiometry()
     // With --touch-id or presence mode the confirmation is the system's dialog (or the passphrase), which nothing
     // typed into the pane can give. (The vault's own setting is read after the passphrase; this uses what's known.)
-    if let m = mux, confirm == "each", !a.has("allow-multiplexer"), !a.has("touch-id"), !(flag ?? (bio == .touchID)) {
+    if let m = mux, confirm == "each", !a.has("allow-multiplexer"), !a.has("touch-id"), !(flag ?? (bio == .touchID || bio == .unavailable)) {
         throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), add --require-presence or --touch-id to confirm with Touch ID or your login password instead, or add --allow-multiplexer if you accept that")
     }
     try ensurePrivateDir(paths.dir)
@@ -403,8 +427,17 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     ftruncate(lfd, 0)
     _ = writeAll(lfd, Array("\(getpid())\n".utf8))
     installPromptSignalHandlers()
-    let (key, payload) = try unlockKey(paths)
-    let presence = resolvePresence(flag: flag, setting: payload.require_presence, biometry: bio)
+    let (key, opened) = try unlockKey(paths)
+    var payload = opened
+    // Touch ID enrolled, seen once, keeps presence mode on by default from then on (fail closed): kept in the vault.
+    if bio == .touchID && payload.biometry_seen == nil {
+        let now = isoTime()
+        try updateVault(paths, key) { p in p.biometry_seen = now }
+        payload.biometry_seen = now
+        audit(paths, ["op": "presence", "result": "ok", "mode": "biometry_seen"], macKey: vaultAuditKey(paths, key))
+    }
+    let presence = resolvePresence(flag: flag, setting: payload.require_presence, biometry: bio, detail: bioDetail,
+                                   seen: payload.biometry_seen != nil)
     let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each",
                               multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"), touchID: a.has("touch-id"),
                               presence: presence)
@@ -477,6 +510,13 @@ func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "
     oprint(jsonLine((cleanAll(out) as? [String: Any]) ?? ["ok": false]))
 }
 
+/// --browser-pid PID: the Chrome a fill or sign-in is for, by its browser process id (as it reports it).
+func browserPIDOption(_ a: Args, _ req: inout [String: Any]) throws {
+    guard let s = a.last("browser-pid") else { return }
+    guard let n = Int(s), n > 1, n < Int(Int32.max) else { throw usageError("--browser-pid: a process id") }
+    req["browser_pid"] = n
+}
+
 /// --request-id ID (the id the request gets if it has to wait for approval; 8 hex digits, unused) and
 /// --on-behalf-pid PID (the Claude Code process a client says it asks for: shown and recorded as unverified, never trusted).
 func useOptions(_ a: Args, _ req: inout [String: Any]) throws {
@@ -506,9 +546,9 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
-        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--origin https://site]")
+        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]")
     }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
@@ -526,6 +566,7 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
         req["origin"] = o
     }
+    try browserPIDOption(a, &req)
     try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
@@ -536,8 +577,8 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID] [--origin https://site]"
-    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent", "origin"])
+    let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--request-id ID] [--origin https://site]"
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent", "origin", "browser-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
     if let ag = a.last("agent") {
         guard ag.count <= 200 else { throw usageError("--agent: at most 200 characters") }
@@ -559,6 +600,7 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
         req["origin"] = o
     }
+    try browserPIDOption(a, &req)
     try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
@@ -741,16 +783,19 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         out["enclave"] = h.enclave != nil
         out["recovery_key"] = h.wraps?.contains { $0.kind == "recovery" } ?? false
     }
-    let bio = detectBiometry()
+    let (bio, bioDetail) = detectBiometry()
     out["biometry"] = bio.rawValue
+    if !bioDetail.isEmpty { out["biometry_detail"] = bioDetail }
     if let res = try? request(paths, ["op": "status"], timeout: 10), res["ok"] as? Bool == true {
         out["unlocked"] = true
         for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer", "tokens", "presence", "presence_why"] { if let v = res[k] { out[k] = v } }
     } else {
         // Locked: the default here (the vault's own setting, inside it, and an unlock flag can change it).
-        let (on, why, _) = resolvePresence(flag: nil, setting: nil, biometry: bio)
+        // (The vault's own setting and whether it has seen Touch ID enrolled are inside it: either can only turn it on,
+        // except `presence off`.)
+        let (on, why, _) = resolvePresence(flag: nil, setting: nil, biometry: bio, detail: bioDetail)
         out["presence_default"] = on
-        out["presence_why"] = why
+        out["presence_why"] = on ? why : why + " (unless this vault has seen Touch ID enrolled, or says presence on)"
     }
     if a.has("json") { oprint(jsonLine(out)); return Exit.ok }
     if !(out["exists"] as? Bool ?? false) {

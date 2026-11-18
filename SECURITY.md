@@ -994,7 +994,14 @@ or from any terminal:
 | --- | --- | --- |
 | `approve ID` | macOS's own dialog: Touch ID, or your login password on a Mac without it (LocalAuthentication, `deviceOwnerAuthentication`), shown by the unlock process | this one use |
 | `approve ID --passphrase` | the vault passphrase, typed on that terminal | this one use |
+| `approve ID [--passphrase] --scope session\|unlock` | the same, with the dialog or the passphrase prompt naming the wider scope | the rest of that Claude Code session, or until the vault locks |
 | `deny ID` | nothing | refuses it |
+
+How far an approval reaches is part of what's confirmed. The dialog's text names it ("for
+this one use", "for this use and the rest of this Claude Code session", "for every use of
+NAME until the vault locks"), the passphrase proof covers it, and the grant made is exactly
+that scope and never more: what's typed at the unlock terminal before or after can't
+widen an approval the dialog or the passphrase gave.
 
 `unlock --touch-id` shows that dialog for every question by itself, beside the terminal
 question; either answer counts, and cancelling the dialog refuses. Inside tmux or screen,
@@ -1005,13 +1012,23 @@ starts there with it).
 unlock` grant, needs macOS's dialog (Touch ID, or your login password) or the passphrase
 (`approve ID --passphrase`). What you type at the unlock terminal only chooses how far an
 approval reaches (`NAME`, `NAME session`, `NAME unlock`); it never approves on its own,
-and anything else typed still refuses. Unattended rules are made the same way, as before.
-- **The default depends on the Mac.** On a Mac with Touch ID and a finger enrolled,
-  presence mode is on: a typed line could come from any program that can type into
-  that terminal (a multiplexer, an editor's terminal, `script`, `expect`), and Touch ID
-  can't. On a Mac without Touch ID, or with a sensor and no fingerprint enrolled, typed
-  answers stay the default, and `unlock` says so in one line with how to turn presence
-  mode on (your login password then confirms in the dialog).
+and anything else typed still refuses. Typing a wider scope while a dialog for one use is
+open withdraws that dialog and opens one that names the wider scope: only that one can
+allow it. Once a dialog has allowed a use, nothing typed afterwards changes its scope.
+Unattended rules are made the same way, with the rule and its expiry in the dialog.
+- **The default fails closed.** On a Mac with Touch ID and a finger enrolled, presence
+  mode is on: a typed line could come from any program that can type into that terminal
+  (a multiplexer, an editor's terminal, `script`, `expect`), and Touch ID can't. It stays
+  on when the check can't tell (a paired Touch ID keyboard that's disconnected, Touch ID
+  unavailable, any error), and the unlock says what the check answered. Once this vault
+  has seen Touch ID enrolled on this Mac (kept inside the vault), it stays on even if
+  Touch ID later reports no finger or no sensor, until you turn it off yourself
+  (`presence off`, or `--no-require-presence` for one unlock, both with the passphrase).
+  Only a clean answer, no sensor or no finger enrolled, on a vault that never saw Touch ID
+  enrolled leaves typed answers as the default, and `unlock` says so in one line with how
+  to turn presence mode on (your login password then confirms in the dialog). (macOS
+  answers "no finger enrolled" on a Mac with no sensor that could take a Touch ID
+  keyboard.)
 - **Either way can be switched:** `unlock --require-presence` or
   `--no-require-presence` for one unlock, and `metacomputer secrets presence on|off|auto`
   (with the passphrase) for the vault's own default, kept inside the vault.
@@ -1019,7 +1036,7 @@ and anything else typed still refuses. Unattended rules are made the same way, a
   (while the vault is locked, the default for this Mac).
 - Where the dialog can't be shown (`MCOMP_VAULT_LOCAL_AUTH=noninteractive`, or an SSH
   session with no window), presence-mode approvals come only from `approve ID
-  --passphrase`.
+  --passphrase` (one use, or `--scope session|unlock`).
 - **Its limit:** a program that controls the terminal you type into sees what you type
   there, the passphrase included (the echo is off, but the program reads the keystrokes
   themselves). Only the system dialog defends against that: macOS draws it and reads
@@ -1032,14 +1049,16 @@ and anything else typed still refuses. Unattended rules are made the same way, a
 `metacomputer` or `mcomp-vault` command, or write to the vault's socket directly, so a
 request on the socket proves nothing about who sent it:
 - `approve ID` only asks the unlock process to show the system dialog. macOS draws it,
-  naming the program and what it allows (`approve request 5f2c9a0e: fill x-login
-  (password) into https://x.com on VM metacomputer, asked by Claude Code in
-  ~/Projects/foo`), and only a finger or the login password answers it.
+  naming the program and what it allows (`approve request 5f2c9a0e, for this one use:
+  fill x-login (password) into https://x.com on VM metacomputer, asked by Claude Code in
+  ~/Projects/foo`), and only a finger or the login password answers it. An `approve`
+  for another scope withdraws an open dialog for a different one and shows its own.
 - `approve ID --passphrase` opens the vault with the passphrase on that terminal and
   sends a proof: an HMAC, under a key derived from the vault's data key (which only the
-  passphrase or the running unlock gives), over the request's id, a one-time challenge
-  and the summary you were shown. The unlock process checks it; a forged proof, one
-  made for other text, or one kept from an earlier request approves nothing.
+  passphrase or the running unlock gives), over the request's id, a one-time challenge,
+  the scope and the summary you were shown. The unlock process checks it; a forged
+  proof, one made for other text or another scope, or one kept from an earlier request
+  approves nothing.
 - A terminal of its own isn't the bar: `script` or `expect` can make one. The
   passphrase, the dialog or (outside presence mode) a line typed at the unlock terminal
   is.
@@ -1150,8 +1169,13 @@ the macOS Passwords app's (`Title,URL,Username,Password,Notes,OTPAuth`), 1Passwo
 login_username,login_password,login_totp`), recognized by their headers. A one-time-code
 column (`OTPAuth`, `login_totp`) becomes a TOTP secret beside the login (`NAME-otp`) when
 it's a SHA1, 6-digit, 30-second code; others are skipped and said. The code is recorded as
-that login's own (`totp_for` in the vault and the audit record), and importing again
-replaces only that one, never another account's code on the same site; every code made or
+that login's own by the login's id (`totp_for` in the vault, `totp_for_id` and the name in
+the audit record): a random id each secret gets once and keeps through `set --replace`,
+never reused, unlike a name. Importing again replaces only that one, never another
+account's code on the same site, not even one whose login had the same name before.
+Deleting a login leaves its code tied to no login (`delete` says so); replacing a code with
+`set --replace` keeps its login, and replacing a secret with one of another kind unties
+any code from it; every code made or
 replaced has its own audit record (`set` or `rotate`, `kind: totp`), even when the password
 is unchanged. Bitwarden's non-login items are skipped; a login's URIs become its sites, at
 most its first 20 (the import says when it cut one). An export file holds every password in
@@ -1216,14 +1240,17 @@ documents (docs/moving-from-spaces.md maps the rest). They add no new way to a v
   the login's other sites, asks you as for any fill, and types the values through its fill
   account to that site only. Before clicking the submit button the hub reads the tab
   again, and doesn't submit if it has left the site. The answer carries status, the site,
-  a masked username, the tab and `page_url`, which is the page's origin only: a page can
-  write the password, or a token, into its own address, so no path, query or fragment
-  comes back.
-- **Not everything is bound.** The vault can't be told which tab the hub checked: the
-  driver's tab ids aren't the ones Chrome's DevTools uses, so the fill finds its tab by
-  site (and Chrome profile when one is named) and refuses when that's ambiguous, as
-  `metacomputer secrets fill` does. Two tabs on the same site in one profile can't be told
-  apart.
+  a masked username, the tab and `same_site`: whether the page is still on the login's
+  origin. Nothing of the page's address comes back, not its path or query and not its
+  host: a page, or the VM, could spell the password or a token in any of them.
+- **The Chrome is bound, the tab isn't.** The hub tells the vault which Chrome it read:
+  the one it opened, by its browser process id (`--browser-pid`), or the named profile
+  given with a tab; a tab given without either is refused, and the vault refuses a request
+  through the hub that names neither. In that Chrome, the fill goes only to a tab that's
+  alone on the site: two or more are refused outright, never chosen between by focus or
+  visibility (the pages' own answers). The tab itself can't be bound: the driver's tab ids
+  aren't the ones Chrome's DevTools uses. The process id and the profile are Chrome's own
+  answers, like everything secret-fill reads from DevTools.
 - **`teleport_browser_session`** finds a session you imported with `import-session` that
   covers the sites, and runs `metacomputer secrets session load NAME --site ...` for it:
   only the cookies a browser sends to those sites go to the VM, filtered on the Mac,
@@ -1387,7 +1414,8 @@ no spaces, ASCII), and each event is chained to the one before:
 | `request_id`, `use` | the request a use waited on (`request` when it was filed, `authorize` when you allowed it), and what it was for |
 | `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked) |
 | `username_hint` | a password secret's username, masked (`a***@example.com`) |
-| `totp_for` | the login an imported 2FA code belongs to |
+| `totp_for`, `totp_for_id` | the login an imported 2FA code belongs to (its name, and its id) |
+| `totp_unlinked` | on `delete` or a `set --replace` of another kind: the 2FA codes no longer tied to that login |
 | `sites`, `cookies` | the sites a cookie session's load was narrowed to (`--site`), and how many cookies went |
 | `identity_provider` | `true` on a request for an identity provider's site |
 | `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted; `hub_pid` (and no `claude_pid` or `project`) for a request through the metacomputer hub |
@@ -1739,6 +1767,11 @@ something waits for you:
 - **A compromised guest kernel or root** can do anything in the VM, including
   replacing `secret-fill`. Values go only to the VM you bound, but what happens
   inside it is up to the VM.
+- **The keyboard route isn't atomic.** When a field takes no direct insertion, the fill
+  checks the document and the focus, then types with `Input.insertText`; a page that
+  navigates or moves the focus in between could receive the text elsewhere on the same
+  tab. The fill reads the page again afterwards and reports a change, but it can't undo
+  what was typed: same-site delivery isn't race-free on that route.
 - **A page on the allowed site sees what's typed.** A filled value is visible to the
   page's own scripts and to its extensions. A site you name is trusted with the value.
   Once typed, the value is the page's and Chrome's, as if typed by hand. Chrome may
@@ -1774,8 +1807,9 @@ something waits for you:
   asks each DevTools for its browser's command line and reads `--user-data-dir` from
   it. It uses `SystemInfo.getInfo` first, then the browser's process id with
   `/proc/PID/cmdline`, then `Browser.getBrowserCommandLine`; a failure says what each
-  route answered. Without a profile, it matches tabs by site only, and refuses when
-  that's ambiguous.
+  route answered. Without a profile (or `--browser-pid`), it matches tabs by site only,
+  across every Chrome. Wherever it looks, two or more tabs on the site are refused, never
+  chosen between by which one is focused or visible.
 - **`SSH_AUTH=cert`.** Fills and API tokens use their own accounts and work. Sealed sessions sign in
   with the static `ops` key, which a VM on certificates refuses, so for now they need
   `SSH_AUTH=key`: `metacomputer secrets session save|load` refuses at once under `cert`

@@ -461,14 +461,18 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     oprint(clean("\(source): \(summary.read) entries read, \(summary.logins.count) logins to bring in", max: 300))
     var taken = Set((existing?.secrets.keys).map(Array.init) ?? [])
-    var planned: [(String, String, ImportedLogin, String?)] = []   // (status, name, login, totp name)
+    var planned: [(String, String, ImportedLogin, String?, String)] = []   // (status, name, login, totp name, login id)
     for l in summary.logins {
         let o = l.origins[0]
         let match = existing?.secrets.first { $0.value.kind == "password" && $0.value.origins.contains(o) && ($0.value.username ?? "") == l.username }
         var status = "new", name: String
+        // The login's own id, which never changes and is never reused (a name is: after a delete, the next import may
+        // take it). A login from before ids existed gets one now.
+        var loginID = newSecretID()
         if let m = match {
             name = m.key
             status = (m.value.value == l.password) ? "unchanged" : "updated"
+            if let i = m.value.id { loginID = i }
         } else {
             name = importName(o, taken)
             taken.insert(name)
@@ -477,8 +481,9 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if let seed = l.totp, (try? parseTOTPSeed(seed)) == nil {
             summary.skip("a 2FA seed this vault can't use (only SHA1, 6-digit, 30-second codes); the login itself comes in")
         } else if l.totp != nil {
-            // Only the code recorded as this login's own (totp_for) is replaced: never another account's on the same site.
-            let mine = (existing?.secrets ?? [:]).filter { $0.value.kind == "totp" && $0.value.totp_for == name }.map(\.key).sorted()
+            // Only the code recorded as this login's own (totp_for: the login's id) is replaced: never another account's,
+            // not even one whose login had this name before.
+            let mine = (existing?.secrets ?? [:]).filter { $0.value.kind == "totp" && $0.value.totp_for == loginID }.map(\.key).sorted()
             if mine.count > 1 {
                 summary.skip("a 2FA seed for a login with more than one 2FA code already recorded as its own (left as they are; the login itself comes in)")
             } else if let t = mine.first {
@@ -488,9 +493,9 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                 taken.insert(totpName!)
             }
         }
-        planned.append((dry ? "would import" : status, name, l, totpName))
+        planned.append((dry ? "would import" : status, name, l, totpName, loginID))
     }
-    for (status, name, l, totpName) in planned {
+    for (status, name, l, totpName, _) in planned {
         oprint(clean("  \(status.padding(toLength: 12, withPad: " ", startingAt: 0)) \(name)  \(l.origins.joined(separator: " "))"
                      + (l.username.isEmpty ? "" : "  \(maskUsername(l.username))") + (totpName.map { "  + 2FA code as \($0)" } ?? ""), max: 400))
     }
@@ -501,16 +506,20 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     guard let key else { return Exit.failed }
     var counts: [String: Int] = [:], totpBad = 0
-    var totpChanges: [(String, String, String, String)] = []   // (op, totp name, login name, origin)
+    var totpChanges: [(String, String, String, String, String)] = []   // (op, totp name, login name, login id, origin)
     let now = isoTime()
     try updateVault(paths, key) { p in
-        for (status, name, l, totpName) in planned {
+        for (status, name, l, totpName, loginID) in planned {
             counts[status, default: 0] += 1
             if status == "new" {
                 p.secrets[name] = Secret(kind: "password", value: l.password, username: l.username.isEmpty ? nil : l.username, origins: l.origins,
                                          approval: "each", created: now, rotated: nil, last_used: nil, uses: 0, projects: nil,
-                                         api_host: nil, api_header: nil, api_path_prefix: nil, gen: randomBytes(8).map { String(format: "%02x", $0) }.joined())
-            } else if status == "updated" {
+                                         api_host: nil, api_header: nil, api_path_prefix: nil, gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(),
+                                         id: loginID)
+            } else if p.secrets[name]?.id == nil {
+                p.secrets[name]?.id = loginID
+            }
+            if status == "updated" {
                 p.secrets[name]?.value = l.password
                 p.secrets[name]?.rotated = now
                 p.secrets[name]?.gen = randomBytes(8).map { String(format: "%02x", $0) }.joined()
@@ -522,28 +531,29 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                 if p.secrets[tn] == nil {
                     p.secrets[tn] = Secret(kind: "totp", value: b32, username: nil, origins: [l.origins[0]], approval: "each", created: now,
                                            rotated: nil, last_used: nil, uses: 0, projects: nil, api_host: nil, api_header: nil,
-                                           api_path_prefix: nil, gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(), totp_for: name)
-                    totpChanges.append(("set", tn, name, l.origins[0]))
-                } else if p.secrets[tn]?.kind == "totp", p.secrets[tn]?.totp_for == name, p.secrets[tn]?.value != b32 {
+                                           api_path_prefix: nil, gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(),
+                                           totp_for: loginID, id: newSecretID())
+                    totpChanges.append(("set", tn, name, loginID, l.origins[0]))
+                } else if p.secrets[tn]?.kind == "totp", p.secrets[tn]?.totp_for == loginID, p.secrets[tn]?.value != b32 {
                     p.secrets[tn]?.value = b32
                     p.secrets[tn]?.rotated = now
                     p.secrets[tn]?.gen = randomBytes(8).map { String(format: "%02x", $0) }.joined()
-                    totpChanges.append(("rotate", tn, name, l.origins[0]))
+                    totpChanges.append(("rotate", tn, name, loginID, l.origins[0]))
                 }
             }
         }
     }
     let ak = vaultAuditKey(paths, key)
-    for (status, name, l, _) in planned where status != "unchanged" {
+    for (status, name, l, _, _) in planned where status != "unchanged" {
         var rec: [String: Any] = ["op": status == "new" ? "set" : "rotate", "result": "ok", "name": name, "kind": "password",
                                   "approval_mode": "each", "origins": l.origins, "imported_from": source]
         if !l.username.isEmpty { rec["username_hint"] = maskUsername(l.username) }
         audit(paths, rec, macKey: ak)
     }
     // Every 2FA code made or replaced has its own record, whether or not its login changed.
-    for (op, tn, login, origin) in totpChanges {
+    for (op, tn, login, loginID, origin) in totpChanges {
         audit(paths, ["op": op, "result": "ok", "name": tn, "kind": "totp", "approval_mode": "each", "origins": [origin],
-                      "totp_for": login, "imported_from": source], macKey: ak)
+                      "totp_for": login, "totp_for_id": loginID, "imported_from": source], macKey: ak)
     }
     audit(paths, ["op": "import_passwords", "result": "ok", "source": source, "new": counts["new"] ?? 0, "updated": counts["updated"] ?? 0,
                   "unchanged": counts["unchanged"] ?? 0, "totp_changed": totpChanges.count, "skipped": summary.skipped.values.reduce(0, +)], macKey: ak)

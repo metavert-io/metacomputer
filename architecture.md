@@ -236,8 +236,9 @@ Keyvault tools for agents written for Spaces. The hub adds them to the driver's
 list and serves them after its one-controller check. Their driver calls go
 through `Hub.call_for`, so the action log names the client and bounded mode's
 manifest applies. The values stay in the vault: they call `metacomputer secrets
-list|login|fill|session load`, binding what the hub checked (`--origin` for a login,
-`--site` for a session load), and the unlock process asks and types. The vault
+list|login|fill|session load`, binding what the hub checked (`--origin` and the Chrome,
+`--browser-pid` or `--profile`, for a login; `--site` for a session load), and the unlock
+process asks and types. After a login only `same_site` comes back, no page address. The vault
 treats these requests as the hub's own, with no session or project; the client's
 pid (`--on-behalf-pid`) is recorded only as an unverified claim (SECURITY.md,
 "Tools for agents written for Cua Spaces").

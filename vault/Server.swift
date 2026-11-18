@@ -345,14 +345,13 @@ final class UnlockServer {
         switch outcome {
         case .terminal(let scope):
             how = grant(scope, "each:yes")
-        case .localAuth:
-            let scope = p.selectedScope ?? .use
-            say("          allowed with Touch ID or the login password" + (scope == .use ? " (this use only)" : ""))
+        case .localAuth(let scope):
+            // Exactly the scope the dialog named: what was typed before or after it never widens it.
+            say("          allowed with Touch ID or the login password, \(scopeWords(scope, name: name))")
             how = grant(scope, "each:local-auth")
             confirmed = "local-auth"
-        case .passphrase:
-            let scope = p.selectedScope ?? .use
-            say("          allowed with the vault passphrase (`approve \(id) --passphrase`" + (scope == .use ? "; this use only)" : ")"))
+        case .passphrase(let scope):
+            say("          allowed with the vault passphrase (`approve \(id) --passphrase`), \(scopeWords(scope, name: name))")
             how = grant(scope, "each:passphrase")
             confirmed = "passphrase"
         case .terminalNo:
@@ -373,6 +372,20 @@ final class UnlockServer {
     /// (`--touch-id`, or one `approve ID` asked for), a passphrase proof or `deny ID`. Meanwhile other
     /// connections are served: status, list, tokens, requests, rule lists, approve and deny at once, the rest
     /// once this one is decided. Returns .terminalNo for no answer in time, Ctrl-C or the terminal closing.
+    /// How far an approval of `p` can reach: an identity provider's use, and a use from outside Claude Code, never
+    /// further than this use (so no dialog claims more than it can grant).
+    func reachable(_ p: PendingRequest, _ scope: ApprovalScope) -> ApprovalScope {
+        if p.identityProvider { return .use }
+        if scope == .session && p.who.claudePID == nil { return .use }
+        return scope
+    }
+
+    /// macOS's dialog for `p`, naming how far allowing it reaches; allowing it grants that and nothing more.
+    func scopedLocalAuth(_ p: PendingRequest, _ scope: ApprovalScope) -> LocalAuthAttempt {
+        let sc = reachable(p, scope)
+        return startLocalAuth("approve request \(p.id), \(scopeWords(sc, name: p.name)): \(p.summary)", scope: sc)
+    }
+
     func waitForDecision(_ p: PendingRequest, prompt: String?, name: String, timeout: Int) -> Decision {
         if let pr = prompt {
             _ = tcflush(0, TCIFLUSH)
@@ -380,7 +393,7 @@ final class UnlockServer {
             promptOpen = true
         }
         if touchID || requirePresence {
-            p.localAuth = startLocalAuth("approve request \(p.id): \(p.summary)")
+            p.localAuth = scopedLocalAuth(p, .use)
             p.autoLocalAuth = true
         }
         let deadline = Date().addingTimeInterval(TimeInterval(timeout))
@@ -390,10 +403,10 @@ final class UnlockServer {
         defer {
             if promptOpen { eprint(""); promptOpen = false }
             p.localAuth?.cancel()
-            let approved: Bool
-            if case .localAuth = result { approved = true } else { approved = false }
-            replyWaiters(p, approved ? ["ok": true, "status": "ok", "id": p.id]
-                                     : denied("request \(p.id) was decided another way, or not in time"))
+            var allowed: ApprovalScope? = nil
+            if case .localAuth(let sc) = result { allowed = sc }
+            replyWaiters(p, allowed.map { ["ok": true, "status": "ok", "id": p.id, "scope_words": scopeWords($0, name: p.name)] }
+                            ?? denied("request \(p.id) was decided another way, or not in time"))
         }
         while true {
             if receivedSignal != 0 { return result }
@@ -407,7 +420,7 @@ final class UnlockServer {
             }
             if let la = p.localAuth, la.done {
                 if la.ok {
-                    p.decision = .localAuth
+                    p.decision = .localAuth(la.scope)
                     continue
                 }
                 replyWaiters(p, denied("not approved: \(la.why)"))
@@ -416,7 +429,7 @@ final class UnlockServer {
                     continue
                 }
                 say("          Touch ID / login password: \(la.why)" + (requirePresence
-                    ? "; approve with `metacomputer secrets approve \(p.id) --passphrase` instead" + (stdinOpen ? " (typing here only chooses how far it reaches)" : "")
+                    ? "; approve with `metacomputer secrets approve \(p.id) --passphrase` instead (one use; add --scope session or --scope unlock to reach further)"
                     : (stdinOpen ? "; you can still answer in this terminal" : "")))
                 p.localAuth = nil
                 p.autoLocalAuth = false
@@ -451,15 +464,27 @@ final class UnlockServer {
                         line = []
                         guard let scope = approvalAnswer(answer, name: name) else { result = .terminalNo; return result }
                         if !requirePresence { result = .terminal(scope); return result }
-                        // Presence mode: what's typed only chooses; the dialog (shown again if it was closed) or a
-                        // passphrase proof confirms it.
-                        p.selectedScope = scope
-                        say("  chosen: " + (scope == .use ? "this use" : (scope == .session ? "this Claude Code session" : "until the vault locks"))
-                            + ". Now confirm it with Touch ID or your login password in macOS's dialog, or `metacomputer secrets approve \(p.id) --passphrase`.")
-                        if p.localAuth == nil || p.localAuth!.done {
-                            p.localAuth = startLocalAuth("approve request \(p.id): \(p.summary)")
-                            p.autoLocalAuth = true
+                        // Presence mode: what's typed only chooses, and the choice is part of what's confirmed. A dialog
+                        // already allowed decides with its own scope (a scope typed after it isn't applied); one still
+                        // open for another scope is withdrawn, and a new one names the scope typed.
+                        let want = reachable(p, scope)
+                        if let la = p.localAuth, la.done, la.ok {
+                            p.decision = .localAuth(la.scope)
+                            say("  (already allowed \(scopeWords(la.scope, name: name)); what was typed after that isn't applied)")
+                            continue
                         }
+                        if let la = p.localAuth, !la.done, la.scope == want {
+                            say("  chosen: \(scopeWords(want, name: name)). The dialog open now asks for exactly that.")
+                            continue
+                        }
+                        if let la = p.localAuth, !la.done {
+                            la.cancel()
+                            replyWaiters(p, denied("not approved: a different scope was chosen at the unlock terminal, and a new dialog asks for it"))
+                        }
+                        say("  chosen: \(scopeWords(want, name: name)). Confirm it in macOS's dialog, which names it, or with "
+                            + "`metacomputer secrets approve \(p.id) --passphrase --scope \(scopeName(want))`.")
+                        p.localAuth = scopedLocalAuth(p, want)
+                        p.autoLocalAuth = true
                         continue
                     }
                     if line.count < 120 { line.append(ch) }
@@ -531,23 +556,32 @@ final class UnlockServer {
             return failed("no request \(clean(req["id"] as? String ?? "", max: 12)) waits for approval (metacomputer secrets requests)")
         }
         guard p.decision == nil else { return failed("request \(id) is already decided") }
+        // How far it reaches is part of what's confirmed: one use unless the approver asked for more, and named it.
+        guard let asked = parseScope(req["scope"] as? String ?? "use") else { return failed("approve: the scope is use, session or unlock") }
+        let scope = reachable(p, asked)
         switch req["method"] as? String ?? "local-auth" {
         case "passphrase":
             var k = approvalProofKey(key)
             defer { wipe(&k) }
             guard let proof = req["proof"] as? String,
-                  constantTimeEqual(proof, approvalProof(k, id: id, challenge: p.challenge, summary: p.summary)) else {
+                  constantTimeEqual(proof, approvalProof(k, id: id, challenge: p.challenge, summary: p.summary, scope: asked)) else {
                 record(["op": "approve", "result": "denied", "request_id": id, "method": "passphrase",
                         "reason": "the passphrase proof doesn't check out", "requester": who.record])
                 say("\(clockTime())  an approval of request \(id) was refused: its passphrase proof doesn't check out (from \(who.describe))")
                 return denied("the passphrase proof doesn't check out")
             }
-            p.decision = .passphrase
-            return ["ok": true, "status": "ok", "id": id]
+            p.decision = .passphrase(scope)
+            return ["ok": true, "status": "ok", "id": id, "scope_words": scopeWords(scope, name: p.name)]
         case "local-auth":
+            // A dialog open for another scope is withdrawn: the new one names this approval's scope.
+            if let la = p.localAuth, !la.done, la.scope != scope {
+                la.cancel()
+                replyWaiters(p, denied("not approved: another `approve` asked for a different scope, and a new dialog names it"))
+                p.localAuth = nil
+            }
             if p.localAuth == nil || p.localAuth!.done {
-                say("\(clockTime())  request \(id): asking macOS for Touch ID or the login password (`approve` from \(who.describe))")
-                p.localAuth = startLocalAuth("approve request \(id): \(p.summary)")
+                say("\(clockTime())  request \(id): asking macOS for Touch ID or the login password, \(scopeWords(scope, name: p.name)) (`approve` from \(who.describe))")
+                p.localAuth = scopedLocalAuth(p, scope)
                 p.autoLocalAuth = false
             }
             p.waiters.append(c)
@@ -587,7 +621,7 @@ final class UnlockServer {
         do { p = try load() } catch { return failed("cannot read the vault") }
         let (rule, why) = buildRule(p, use: "", secret: secret, site: site, session: session, project: project, seconds: secs, confirmed: "local-auth")
         guard let rule else { return failed(why ?? "can't make that rule") }
-        let text = "allow \(rule.what) without asking, for Claude Code sessions in \(tildePath(project)), until \(rule.expires)"
+        let text = "make an unattended rule: allow \(rule.what) without asking, for Claude Code sessions in \(tildePath(project)), until \(rule.expires)"
         say("\(clockTime())  rule asked for: \(text) (from \(who.describe)); asking macOS for Touch ID or the login password")
         let la = startLocalAuth(text)
         let deadline = Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining()))))
@@ -867,6 +901,8 @@ final class UnlockServer {
         if requirePresence {
             say("  Presence mode (\(presenceWhy)): every approval, and every `session` or `unlock` answer, needs Touch ID or your")
             say("  login password in macOS's dialog, or the vault passphrase (`metacomputer secrets approve ID --passphrase`).")
+            say("  The dialog and the passphrase prompt name how far each approval reaches; only what they name is granted.")
+            if let w = presenceWarning { say("  Note: \(w).") }
             if ProcessInfo.processInfo.environment["MCOMP_VAULT_LOCAL_AUTH"] == "noninteractive" {
                 say("  (MCOMP_VAULT_LOCAL_AUTH=noninteractive: no dialog is shown, so approvals come only from the passphrase.)")
             }
@@ -1134,6 +1170,9 @@ final class UnlockServer {
         if let sel = selector { fields["selector"] = clean(sel, max: 300) }
         let only = req["origin"] as? String
         if let o = only { fields["for_origin"] = clean(o, max: 300) }
+        let browserPID = (req["browser_pid"] as? NSNumber)?.intValue
+        if let bp = browserPID { fields["browser_pid"] = bp }
+        if let why = browserBindingProblem(req, profile: profile, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
             + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who.describe)")
         let p: Payload
@@ -1166,6 +1205,7 @@ final class UnlockServer {
         }
         var base: [String: Any] = ["field": field]
         if let pr = profile { base["profile"] = pr }
+        if let bp = browserPID { base["browser_pid"] = bp }
         if let sel = selector { base["selector"] = sel }
         // --origin: the one site the caller checked (request_site_login's page); a tab on any other of the secret's
         // sites is refused, not filled.
@@ -1270,6 +1310,9 @@ final class UnlockServer {
         let userSel = req["username_selector"] as? String
         let only = req["origin"] as? String
         if let o = only { fields["for_origin"] = clean(o, max: 300) }
+        let browserPID = (req["browser_pid"] as? NSNumber)?.intValue
+        if let bp = browserPID { fields["browser_pid"] = bp }
+        if let why = browserBindingProblem(req, profile: profile, who) { return finish("login", fields, denied(why), who, approval: "-") }
         // What the agent calls itself (request_site_login's `agent`): shown and recorded, never trusted.
         let agent = (req["agent"] as? String).map { promptText($0, max: 64) }.flatMap { $0.isEmpty ? nil : $0 }
         fields["password_selector"] = clean(passSel, max: 300)
@@ -1306,6 +1349,7 @@ final class UnlockServer {
         }
         var base: [String: Any] = [:]
         if let pr = profile { base["profile"] = pr }
+        if let bp = browserPID { base["browser_pid"] = bp }
         // Check both fields, without the values: the password field names the site.
         func check(_ field: String, _ sel: String, _ origins: [String]) -> ([String: Any], String?) {
             var chk = base
@@ -1762,6 +1806,21 @@ final class UnlockServer {
         } catch { say("          (couldn't record the use in the vault)") }
         return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": archive.count], who, approval: approval)
     }
+}
+
+/// A fill or sign-in names the Chrome it's for: its profile, its browser process id, or both. One through the
+/// metacomputer hub must name it (the hub checked a tab in one Chrome, and the value goes only to that Chrome); in
+/// any case the VM refuses when more than one tab there is on the site (secret-fill). nil: fine.
+func browserBindingProblem(_ req: [String: Any], profile: String?, _ who: Requester) -> String? {
+    if let raw = req["browser_pid"] {
+        guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.intValue > 1, n.intValue < Int(Int32.max) else {
+            return "--browser-pid: a process id"
+        }
+    }
+    if who.hubPID != nil && profile == nil && req["browser_pid"] == nil {
+        return "a request through the metacomputer hub must name the Chrome it checked (--profile or --browser-pid)"
+    }
+    return nil
 }
 
 /// Why a sealed-session save or load failed, from its exit status alone: the VM's stderr is never passed on,
