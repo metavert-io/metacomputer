@@ -1391,10 +1391,10 @@ def run(td, procs):
     st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
     check("...and the proxy still serves", st == 200, st)
     apis = [x for x in audit_recs() if x.get("op") == "api"]
-    check("each proxied request is audited: method, host, the path prefix it's within (never the path: it's the VM's), status, "
-          "bytes, token id, key withheld",
-          any(x.get("method") == "GET" and x.get("host") == upstream and "path" not in x and x.get("status") == 200
-              and x.get("bytes", 0) > 0 and x.get("token_id") == tok.get("token_id") and x.get("key_withheld", 0) >= 1 for x in apis)
+    check("each proxied request is audited: method, host, the path prefix it's within (never the path: it's the VM's), the "
+          "API's status class, a size class, token id, whether the key was withheld",
+          any(x.get("method") == "GET" and x.get("host") == upstream and "path" not in x and x.get("status") == "2xx"
+              and x.get("bytes", 0) > 0 and x.get("token_id") == tok.get("token_id") and x.get("key_withheld") is True for x in apis)
           and not any("dummy-query-77" in json.dumps(x) for x in apis) and any(x.get("status") == 401 for x in apis), apis[-3:])
     r = client("token", "api2", "--vm", "opsvm", "--ttl", "2s")
     tok2 = js(r.stdout)
@@ -1570,6 +1570,22 @@ def run(td, procs):
     check("...the proxy records the method as one of a few words and no path: PROPFIND as 'other', the name only when it's "
           "a stored api secret's", apis and all("path" not in x for x in apis) and any(x.get("method") == "other" for x in apis)
           and any("name" not in x and x.get("status") == 404 for x in apis), apis)
+    # Sizes and counts it can steer: an echo API answers with what it got, so N characters of padding give an answer of
+    # C + N bytes. The audit keeps one of a few sizes, the API's status class and whether the key was withheld, never counts.
+    sizes = (0, 1 << 10, 1 << 16, 1 << 20, 1 << 24, 1 << 28, 1 << 32, 1 << 40)
+    n_api = len([x for x in audit_recs() if x.get("op") == "api"])
+    for pad in (3000, 3001, 3077):
+        vm_request("POST", "/api1/v1/echo", {"Authorization": "Bearer " + tokl.get("token", ""), "Content-Type": "text/plain"},
+                   body=("x" * pad).encode())
+    padded = [x for x in audit_recs() if x.get("op") == "api"][n_api:]
+    lst = client("tokens", "--json")
+    toks = (json.loads(lst.stdout or "{}").get("tokens") or []) if lst.returncode == 0 else []
+    mine = [t for t in toks if t.get("id") == tokl.get("token_id")]
+    check("...and nothing it can steer is recorded as a number it chose: answers 3000, 3001 and 3077 characters apart get the "
+          "same size class, the API's status as its class, whether the key was withheld (not how often), and the token list "
+          "counts requests in words", len(padded) == 3 and len({x.get("bytes") for x in padded}) == 1
+          and all(x.get("bytes") in sizes and x.get("status") == "2xx" and x.get("key_withheld") in (True, None) for x in padded)
+          and mine and mine[0].get("requests") in ("none", "1-9", "10-99", "100 or more"), (padded, mine))
 
     # --- 10. a rekey while unlocked locks the running unlock; tokens die with it ---------------------------
     rc, out = tty([BIN, "rekey"], [("Vault passphrase", current + "\n"), ("New vault passphrase", PASS + "\n"),

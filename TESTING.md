@@ -859,7 +859,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (214 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (215 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
@@ -896,7 +896,9 @@ pseudo-terminal for the rest of the vault:
   secret-fill's DevTools-error form, into a sealed-session save's and load's stderr, and
   into an API proxy request's path and name. None of it reaches the command's output,
   the audit log (`audit --json` too) or any sink. The proxy records the method as one of
-  a few words and no path;
+  a few words and no path. Echoed answers 3000, 3001 and 3077 characters apart get one
+  size class, the API's status class and a yes/no for the withheld key, and `tokens`
+  counts requests in words;
 - **ssh:** the vault's own ssh options, replayed with the real `/usr/bin/ssh` against an
   sshd of the test's own on 127.0.0.1: it connects with the pinned key and refuses
   another (no known_hosts file takes part);

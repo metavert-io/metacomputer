@@ -820,8 +820,8 @@ def run(td, procs):
     u2.send("s1\n")
     rc, out, _ = finish(proc)
     sealed = os.path.join(vdir, "sessions", "s1.sealed")
-    check("session save seals the profile after the name is typed (its size, the VM's to choose, rounded up to whole MiB)",
-          rc == 0 and json.loads(out).get("bytes") == ((len(archive) + (1 << 20) - 1) >> 20) << 20
+    check("session save seals the profile after the name is typed (its size, the VM's to choose, as one of a few sizes)",
+          rc == 0 and json.loads(out).get("bytes") == next(b for b in (0, 1 << 10, 1 << 16, 1 << 20, 1 << 24) if len(archive) <= b)
           and os.path.exists(sealed), out)
     blob = open(sealed, "rb").read() if os.path.exists(sealed) else b""
     check("the sealed file is encrypted", archive not in blob and b"dummy-cookie-jar" not in blob and (os.stat(sealed).st_mode & 0o777) == 0o600)

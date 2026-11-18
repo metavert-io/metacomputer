@@ -1574,7 +1574,7 @@ final class UnlockServer {
         if let p = try? load() { hub.prune(p) }   // a secret replaced or deleted ends its tokens
         let list: [[String: Any]] = hub.live().map { t in
             var d: [String: Any] = ["id": t.id, "name": t.name, "vm": t.vm, "expires": isoTime(t.expires),
-                                    "expires_in_s": max(0, Int(t.expires.timeIntervalSinceNow)), "requests": t.requests]
+                                    "expires_in_s": max(0, Int(t.expires.timeIntervalSinceNow)), "requests": countClass(t.requests)]
             if let pr = t.requester["project"] as? String { d["project"] = pr }
             return d
         }
@@ -1748,8 +1748,8 @@ final class UnlockServer {
         do {
             try ensurePrivateDir(paths.sessions)
             // The archive's size is the VM's to choose (a number it could spell something in): it's kept, shown and
-            // recorded only rounded up to whole MiB.
-            let bytes = sizeInWholeMiB(archive.count)
+            // recorded only as one of a few sizes (sizeBound).
+            let bytes = sizeBound(archive.count)
             let a = archive
             // Sealed and recorded under the vault's lock, with whatever session key is current then.
             try updateVault(paths, key) { p in
@@ -1892,7 +1892,7 @@ final class UnlockServer {
                 p.sessions[name]?.last_loaded = isoTime()
             }
         } catch { say("          (couldn't record the use in the vault)") }
-        return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": sizeInWholeMiB(archive.count)], who, approval: approval)
+        return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": sizeBound(archive.count)], who, approval: approval)
     }
 }
 
@@ -1906,9 +1906,6 @@ func browserBindingProblem(_ req: [String: Any], profile: String?, _ who: Reques
     }
     return nil
 }
-
-/// A size the VM chose (a sealed session's archive), rounded up to whole MiB before it's kept, shown or recorded.
-func sizeInWholeMiB(_ n: Int) -> Int { ((max(0, n) + (1 << 20) - 1) >> 20) << 20 }
 
 /// Why a sealed-session save or load failed, from its exit status alone: the VM's stderr is never passed on,
 /// since after a load the VM holds the session's cookies and could write them there.

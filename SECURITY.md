@@ -914,8 +914,18 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    No field of the VM's free text is left, and the audit record is built from that
    filtered result, never from the raw answer. That holds for the result, the audit log,
    the unified log, the sinks, `audit --json`, the unlock terminal and the events alike.
-   What's left to a hostile VM is which of those few fixed outcomes it reports, a few bits
-   per request.
+   What's left to a hostile VM is a few bits per request:
+   - which of those few fixed outcomes it reports;
+   - which of a few size classes an answer falls into (below);
+   - how many requests it makes, and when. Every record is timestamped, and the VM can
+     delay its answer. macOS stamps the unified log too, so rounding the vault's own
+     timestamps wouldn't close this.
+
+   No number the VM can steer is recorded as it chose it. Sizes are one of 0, 1 KiB,
+   64 KiB, 1 MiB, 16 MiB, 256 MiB, 4 GiB or 1 TiB (the smallest that holds it). An API's
+   status is recorded by its class (`2xx`). Whether the key was withheld is a yes or no,
+   not a count, and a token's requests are counted in words (`none`, `1-9`, `10-99`,
+   `100 or more`).
 
 **The fill account** is always present on VMs built with this version. Nothing else
 can use it, so it's safe to leave on:
@@ -946,7 +956,7 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   words, from the VM's exit status (one of a few known meanings; any other status isn't
   shown). The VM knows every value it was ever given, so its error output is never
   passed on. A saved session's size is the VM's to choose too, so it's kept, shown and
-  recorded rounded up to whole MiB.
+  recorded only as one of a few sizes (step 7 of "How a fill works").
 - Save and load refuse while a Chrome is using that profile. A load unpacks with
   Python's safe tar filter: no absolute paths, no `..`, no links leading outside, no
   special files.
@@ -1339,14 +1349,20 @@ it expires.
    - checks again, just before forwarding, that the token is still live (not revoked,
      not expired, the vault not locking) and the secret unchanged, and uses the value
      read then: a request that waited on delivery can't outlive its token;
-   - audits it: the method (one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, else
-     `other`), host, status, bytes, token id, the secret's path prefix if it has one, and
-     how many copies were withheld. The request's own path and the name it asked for are
-     the VM's to choose, so they're never recorded: the name only once it's a stored api
-     secret's. Never bodies or headers.
+   - audits it:
+     - the method (one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, else `other`);
+     - the host, the token id, and the secret's path prefix if it has one;
+     - the API's status class (`2xx`), or the proxy's own status when it refused;
+     - the answer's size as one of a few classes;
+     - whether a copy of the key was withheld.
+
+     The VM chooses the request's path, the name it asked for, the answer's exact size
+     (through an API that echoes) and how many copies of the key the answer carried, so
+     none of those is recorded. The name is recorded only once it's a stored api secret's.
+     Never bodies or headers.
 5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
    when the vault locks: the proxy and its SSH forwards stop. `tokens` lists the live
-   ones (id, secret, VM, time left, requests, requester).
+   ones (id, secret, VM, time left, requests in words, requester).
 
 **The proxy account**, like the fill account, is always present on VMs built with this
 version, and does nothing else:
@@ -1441,7 +1457,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
-| `method`, `host`, `path_within`, `status`, `token_id`, `key_withheld` | a proxied API request (never its path, which the VM chose; `path_within` is the secret's own prefix) |
+| `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
 **What each check proves.** Claude Code runs as you, so it can edit any file of yours,
 this log included. What it can't reach is the vault's **audit key**: 32 random bytes

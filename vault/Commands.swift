@@ -790,7 +790,7 @@ func cmdTokens(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if a.has("json") { oprint(jsonPretty(["tokens": list])); return Exit.ok }
     oprint(list.isEmpty ? "No live tokens." : "Live tokens:")
     for t in list {
-        oprint(clean("  \(t["id"] ?? "")  \(t["name"] ?? "") on VM \(t["vm"] ?? ""), \(t["expires_in_s"] ?? 0) s left, \(t["requests"] ?? 0) requests"
+        oprint(clean("  \(t["id"] ?? "")  \(t["name"] ?? "") on VM \(t["vm"] ?? ""), \(t["expires_in_s"] ?? 0) s left, \(((t["requests"] as? String) ?? "none") == "none" ? "no" : (t["requests"] as? String ?? "no")) requests"
                      + ((t["project"] as? String).map { ", for Claude Code in \(tildePath($0))" } ?? ""), max: 300))
     }
     return Exit.ok

@@ -395,14 +395,20 @@ final class ProxyHub: @unchecked Sendable {
             if let pre = token?.prefix { d["path_within"] = pre }
             return d
         }
-        func log(_ status: Int, _ bytes: Int, _ token: APIToken?, _ host: String, _ why: String? = nil, redacted: Int = 0) {
-            var rec: [String: Any] = ["op": "api", "vm": l.vm, "method": methodWord, "host": host, "status": status, "bytes": bytes,
+        // The numbers the VM can steer are kept to a few values too: the answer's size as one of eight (sizeBound), whether
+        // the key was withheld (not how often), and an answer the API gave by its status class ("2xx"): an exact count or
+        // status could spell a value the VM was given, a few bytes per request. This process's own refusals keep theirs.
+        func log(_ status: Int, _ bytes: Int, _ token: APIToken?, _ host: String, _ why: String? = nil, redacted: Int = 0,
+                 upstream: Bool = false) {
+            var rec: [String: Any] = ["op": "api", "vm": l.vm, "method": methodWord, "host": host,
+                                      "status": upstream ? "\(min(9, max(1, status / 100)))xx" as Any : status as Any,
+                                      "bytes": sizeBound(bytes),
                                       "result": (200..<400).contains(status) ? "ok" : (status == 401 || status == 403 ? "denied" : "error")]
             rec.merge(pathFields(token)) { a, _ in a }
             if let n = known { rec["name"] = n }
             if let t = token { rec["token_id"] = t.id; rec["requester"] = t.requester }
             if let w = why { rec["reason"] = w }
-            if redacted > 0 { rec["key_withheld"] = redacted }
+            if redacted > 0 { rec["key_withheld"] = true }
             if let r = recorder { _ = r(rec) } else { audit(paths, rec) }
         }
         guard let p = try? loadPayload(paths, key), let s = p.secrets[name], s.kind == "api", let host = s.api_host,
@@ -493,7 +499,7 @@ final class ProxyHub: @unchecked Sendable {
         // ...and whatever it does, no callback writes to this connection from here on: the caller
         // closes the descriptor next, and its number could soon belong to another connection.
         stream.closeOutput()
-        log(stream.status, stream.bytes, token, host, stream.failure, redacted: stream.redactions)
+        log(stream.status, stream.bytes, token, host, stream.failure, redacted: stream.redactions, upstream: true)
     }
 }
 

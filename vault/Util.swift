@@ -710,6 +710,19 @@ func clean(_ s: String, max: Int = 300) -> String {
 /// Keep a message short, printable and on one line (terminal, results, audit log).
 func oneLine(_ s: String, max: Int = 300) -> String { clean(s, max: max) }
 
+/// A size the VM can steer (an API answer through the proxy, a sealed session's archive), as one of a few fixed values:
+/// the smallest of 0, 1 KiB, 64 KiB, 1 MiB, 16 MiB, 256 MiB, 4 GiB and 1 TiB that holds it. An exact count could spell a
+/// value the VM was given, a few bytes per request; one of eight values carries three bits at most.
+func sizeBound(_ n: Int) -> Int {
+    for b in [0, 1 << 10, 1 << 16, 1 << 20, 1 << 24, 1 << 28, 1 << 32] where n <= b { return b }
+    return 1 << 40
+}
+
+/// A count the VM can steer (requests made with a token), as one of a few words.
+func countClass(_ n: Int) -> String {
+    n <= 0 ? "none" : n < 10 ? "1-9" : n < 100 ? "10-99" : "100 or more"
+}
+
 /// A client's text (a selector) inside a question: printable, runs of spaces collapsed, short.
 func promptText(_ s: String, max: Int) -> String {
     clean(clean(s, max: 4096).split(whereSeparator: { $0 == " " }).joined(separator: " "), max: max)
