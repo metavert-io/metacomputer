@@ -10,6 +10,78 @@ way a programmer would, with a shell, Python, LibreOffice, ImageMagick and
 ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what Claude does there can be logged, limited and approved.
 
+## The 5-minute install
+
+Paste this into Terminal on a Mac with Apple silicon:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash
+```
+
+There's no VM for you to set up. The script builds it, with everything around
+it, and checks that it works. Then, in any Claude Code session:
+
+> Get yourself a virtual computer and tell me what's on its screen.
+
+**What happens:**
+1. It checks the Mac: Apple silicon, macOS 14 or later, free disk, memory, the network.
+2. It offers Homebrew and Apple's Command Line Tools, only if they're missing.
+3. It clones metacomputer into `~/metacomputer` and runs `./install.sh --yes`, which
+   adds Go, GnuPG and ffmpeg from Homebrew if they're missing, builds the VM runner
+   (mcomp-vm) and the secrets vault from source, writes this Mac's settings, installs
+   the Claude Code plugin, and builds the VM: about 1.5 GB of downloads (Ubuntu's
+   cloud image and packages, Cua Driver, the Go and Swift code the build needs),
+   unattended provisioning, then a clean snapshot.
+4. It starts the VM, runs `metacomputer status` and a short self-test, and prints
+   three prompts to try. The VM is left running; `metacomputer stop` stops it, and
+   Claude starts it again when it needs it.
+
+**What you click or answer.** On a Mac that already has Homebrew and Apple's
+Command Line Tools: nothing. On a new Mac, press Enter when get.sh offers to run
+Homebrew's installer, then Return and your Mac password in Homebrew's own
+installer (it needs an administrator account); if the Command Line Tools are
+still missing, click **Install** and **Agree** in Apple's dialog. get.sh itself
+never asks for a password and never runs `sudo`.
+
+Google Chrome goes into the VM next to Firefox, which means accepting
+[Google's terms](https://www.google.com/chrome/terms/). To leave it out:
+`curl … | bash -s -- --no-chrome`.
+
+**How long it takes.** Measured from scratch (nothing cached, no VM) on a Mac that
+already had Homebrew, its packages and the Command Line Tools, on a fast
+connection: 5 min 5 s, about 5 min 15 s, and 5 min 40 s. About a minute of that
+is yours (pasting the command and reading what it printed); the rest runs
+unattended. Estimates, not yet measured, for when it takes longer:
+- Homebrew still has to install Go, GnuPG and ffmpeg: add 2-5 minutes;
+- the connection is slower: at about 50 Mbit/s, 10-15 minutes in all;
+- the Mac is brand new: 15-30 minutes, mostly Apple's and Homebrew's downloads,
+  of which about 5 minutes need you.
+
+It needs about 15 GB of free disk and refuses to start with less (it checks each
+disk it writes to). The install itself uses about 6 GB. Running it again is safe:
+finished steps are skipped, and it never deletes a VM.
+
+**From Claude Code first.** If you'd rather start in Claude Code, add the plugin:
+
+```text
+/plugin marketplace add metavert-io/metacomputer
+/plugin install metacomputer@metacomputer
+```
+
+Then ask Claude to set up metacomputer. The plugin brings the skills and tools
+but not the VM. Its skill sees that nothing is set up, says what setup does and
+asks you; on a yes it runs the plugin's own `metacomputer setup --yes`, the same
+get.sh shipped inside the plugin, so nothing is downloaded and run from
+elsewhere. If Homebrew is missing, run that setup command in Terminal instead,
+since Homebrew asks for your password.
+
+Or by hand: `git clone https://github.com/metavert-io/metacomputer.git ~/metacomputer && cd ~/metacomputer && ./install.sh`.
+
+[docs/install.md](docs/install.md) has every option, the stage-by-stage timings,
+what goes where, updating, uninstalling and troubleshooting.
+
+## What you get
+
 | Control | What it gives you |
 | --- | --- |
 | **Isolation, always on** | No clipboard, audio or Rosetta sharing with your Mac ([mcomp-vm](https://github.com/metavert-io/metacomputer-vm), metacomputer's build of Lume). A network gateway on the Mac lets the VM reach the public internet and nothing else. A firewall in the VM, SSH by role with a pinned host key, and every download checked against a pinned checksum or signing key. |
@@ -37,6 +109,7 @@ You ask for it in plain words, in any Claude Code session:
 than forty more.
 
 **Contents:**
+[The 5-minute install](#the-5-minute-install) ·
 [What it is](#what-it-is) ·
 [Why I made it](#why-i-made-it) ·
 [Security](#security) ·
@@ -250,7 +323,7 @@ SECURITY.md the protections and their limits.
 ## Requirements
 
 - A Mac with Apple silicon and macOS 14 or later.
-- About 15 GB of free disk for the VM and its clean snapshot (the installer warns below 20 GB), and as much again for each extra VM. The build downloads about 600 MB.
+- About 15 GB of free disk for the VM and its clean snapshot (the installer warns below 20 GB), and as much again for each extra VM. The install downloads about 1.5 GB.
 - Memory for the VM: it gets 4 vCPUs and 8 GB by default, or 4 GB on a Mac with less than 16 GB.
 - [Homebrew](https://brew.sh), to install any missing tools: git, curl, Go, GnuPG, ffmpeg and Python 3.
 - Apple's Command Line Tools (`xcode-select --install`), to build mcomp-vm and the secrets vault. Without them, use `--lume=standard`.
@@ -282,8 +355,8 @@ with a message saying to set it up.
 
 **The VM and the command, on your Mac**, in one command (it checks the Mac,
 offers Homebrew and Apple's Command Line Tools if they're missing, clones into
-`~/metacomputer` and runs `./install.sh --yes`; about 5 minutes with the
-prerequisites in place). [docs/install.md](docs/install.md) has the details,
+`~/metacomputer` and runs `./install.sh --yes`; see [The 5-minute install](#the-5-minute-install)
+above). [docs/install.md](docs/install.md) has the details,
 measured times, the plugin-first path, updating, uninstalling and
 troubleshooting:
 
@@ -344,10 +417,10 @@ names a runner that isn't installed, it uses lume-secure and prints a notice).
 The installer then builds mcomp-vm beside it and points `LUME` there. Both see
 the same VMs, and lume-secure stays until you remove it.
 
-The build then runs unattended for about 10 minutes, sometimes longer. It
-downloads Ubuntu's cloud image and the Cua Driver release, checks their
-signatures and checksums, provisions the desktop, and takes a clean snapshot
-(the baseline). Its log goes to `logs/build-*.log`.
+The VM build then runs unattended, about 2-3 minutes on a fast connection
+(longer on a slow one). It downloads Ubuntu's cloud image and the Cua Driver
+release, checks their signatures and checksums, provisions the desktop, and
+takes a clean snapshot (the baseline). Its log goes to `logs/build-*.log`.
 
 ## Quick start
 
