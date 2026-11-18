@@ -29,7 +29,7 @@ PERMISSION = re.compile(r"(permission|permissions) to use .* (has been )?denied|
 DRIVER_REFUSED = re.compile(r"outside the capability manifest|not permitted|forbidden|refused|"
                             r"denied by (the )?(driver|policy)", re.I)
 INVALID = re.compile(r"invalid (argument|param|input|value|type|request)|InputValidationError|"
-                     r"missing (the )?required|required (field|property|parameter|argument)|"
+                     r"missing (the )?(required )?(field|property|parameter|argument|key)|missing (the )?required|required (field|property|parameter|argument)|"
                      r"unknown (field|variant|parameter|argument|key)|unexpected (field|argument|property|key)|"
                      r"-32602|failed to (parse|deserialize)|deserializ|must be (a|an|one of)|is not (a valid|one of)|"
                      r"expected (a |an )?[a-z_]+,? (but )?(got|found)", re.I)
@@ -256,6 +256,7 @@ def analyze(events, times=None):
     inp = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
     m.update({
         "result_subtype": final.get("subtype"), "is_error": final.get("is_error"),
+        "api_error_status": final.get("api_error_status"),
         "cost_usd": final.get("total_cost_usd"), "turns": final.get("num_turns"),
         "duration_s": round((final.get("duration_ms") or 0) / 1000, 1),
         "api_s": round((final.get("duration_api_ms") or 0) / 1000, 1),

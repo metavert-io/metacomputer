@@ -27,6 +27,7 @@ import glob
 import gzip
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -355,12 +356,20 @@ def cmd_run(a):
                              coord_guard_in_bridge="MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_lazy.py")).read()),
             "tasks": [t["id"] for t in tasks],
             "vm_options": status().get("options")}   # the optional hardening (action log, SSH, driver mode)
+    # Resuming: keep the first start time, and count what the run has spent already against the cap.
+    old = json.load(open(os.path.join(rdir, "run.json"))) if os.path.exists(os.path.join(rdir, "run.json")) else None
+    all_recs = report.load_all(rdir)
+    if old:
+        meta["started"] = old.get("started", meta["started"])
+        meta["resumed"] = old.get("resumed", []) + [datetime.datetime.now().isoformat(timespec="seconds")]
+        if old.get("switches") != meta["switches"] or (old.get("metacomputer") or {}).get("sha") != meta["metacomputer"]["sha"]:
+            meta["resume_note"] = {"earlier_switches": old.get("switches"), "earlier_metacomputer": old.get("metacomputer")}
     json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
     log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}")
     work, cfg, shim = prepare_workdir(run_id, sw)
-    spent, cap = 0.0, float(sw["cap"])
-    done = {json.loads(l)["task"] for l in open(os.path.join(rdir, "results.jsonl"))} if os.path.exists(
-        os.path.join(rdir, "results.jsonl")) else set()
+    spent, cap = sum((r.get("metrics") or {}).get("cost_usd") or 0.0 for r in all_recs), float(sw["cap"])
+    # done = the latest record of each task, unless that was an infrastructure failure (retried)
+    done = {r["task"] for r in report.latest(all_recs) if not infra_reason(r)}
     try:
         for i, t in enumerate(tasks, 1):
             if t["id"] in done:
@@ -385,6 +394,13 @@ def cmd_run(a):
             log(f"  {'PASS' if rec['check'].get('pass') else 'fail'} score={rec['check'].get('score')} "
                 f"cost=${mm.get('cost_usd') or 0:.2f} turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
                 f"shots={mm.get('screenshots')} tree={mm.get('tree_reads')} shell={mm.get('shell_calls')}  (run total ${spent:.2f})")
+            why = infra_reason(rec)
+            if why and why.startswith("api"):
+                # A usage or rate limit fails every later task in a second; stop, and retry
+                # these tasks by running the same --run-id again later.
+                log(f"stopping: {why}")
+                meta["stopped"] = why
+                break
     finally:
         meta["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
         meta["spent_usd"] = round(spent, 4)
@@ -394,6 +410,21 @@ def cmd_run(a):
             mc("stop", timeout=300)
     path = report.write_summary(rdir)
     log(f"summary: {path}")
+
+
+API_FAIL = re.compile(r"hit your (weekly |daily |session )?limit|usage limit|rate limit|overloaded|credit balance|"
+                      r"API Error|authentication", re.I)
+
+
+def infra_reason(rec):
+    """Why a task's record isn't a real attempt (and gets retried on resume), or None."""
+    if rec.get("infra_failure"):
+        return rec["infra_failure"] if isinstance(rec["infra_failure"], str) else "setup failed"
+    m = rec.get("metrics") or {}
+    if m.get("is_error") and not (m.get("cost_usd") or 0) and (
+            m.get("api_error_status") or API_FAIL.search(m.get("final_text") or "")):
+        return f"api error {m.get('api_error_status') or ''}: {(m.get('final_text') or '')[:120]}".replace("  ", " ")
+    return None
 
 
 def run_task(t, sw, rdir, work, cfg, shim):
@@ -439,6 +470,9 @@ def run_task(t, sw, rdir, work, cfg, shim):
     rec["metrics"] = metrics.analyze(events, times)
     if rec["env"]["resolution"] and sw["screen"]:
         rec["env"]["resolution"] = rec.get("screen")
+    why = infra_reason(rec)
+    if why:
+        rec["infra_failure"] = why
     json.dump(rec, open(os.path.join(tdir, "result.json"), "w"), indent=2)
     return rec
 
@@ -446,10 +480,11 @@ def run_task(t, sw, rdir, work, cfg, shim):
 def cmd_remetric(a):
     """Recompute every task's metrics from its saved transcript (after changing metrics.py)."""
     rdir = os.path.join(RESULTS, a.run_id)
-    recs = [json.loads(l) for l in open(os.path.join(rdir, "results.jsonl")) if l.strip()]
-    for rec in recs:
+    recs = report.load_all(rdir)
+    last = {r["task"]: i for i, r in enumerate(recs)}   # a task's folder holds its latest attempt only
+    for i, rec in enumerate(recs):
         p = os.path.join(rdir, rec["task"], "transcript.jsonl.gz")
-        if not os.path.exists(p):
+        if last[rec["task"]] != i or not os.path.exists(p):
             continue
         events, times = [], []
         for line in gzip.open(p, "rt"):

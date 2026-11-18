@@ -4,12 +4,34 @@ import json
 import os
 
 
+def load_all(rdir):
+    """Every record in results.jsonl, retried tasks included."""
+    p = os.path.join(rdir, "results.jsonl")
+    return [json.loads(l) for l in open(p) if l.strip()] if os.path.exists(p) else []
+
+
+def latest(recs):
+    """The last record of each task (a resumed run appends retries), in first-seen order;
+    each carries `earlier_attempts`: the infrastructure failures it replaced."""
+    by, order = {}, []
+    for r in recs:
+        if r["task"] not in by:
+            order.append(r["task"])
+            by[r["task"]] = []
+        by[r["task"]].append(r)
+    out = []
+    for t in order:
+        r = dict(by[t][-1])
+        r["earlier_attempts"] = [x.get("infra_failure") or "earlier attempt" for x in by[t][:-1]]
+        out.append(r)
+    return out
+
+
 def load(rdir):
     meta = json.load(open(os.path.join(rdir, "run.json")))
-    recs = []
-    p = os.path.join(rdir, "results.jsonl")
-    if os.path.exists(p):
-        recs = [json.loads(l) for l in open(p) if l.strip()]
+    recs = latest(load_all(rdir))
+    order = {t: i for i, t in enumerate(meta.get("tasks") or [])}
+    recs.sort(key=lambda r: order.get(r["task"], len(order)))
     return meta, recs
 
 
@@ -62,6 +84,7 @@ def header(meta):
             f"screen {sw.get('screen') or 'VM default'}\n"
             f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
             f"spent ${meta.get('spent_usd', 0):.2f}; {meta.get('started')} to {meta.get('finished', '?')}"
+            + (f" (resumed {', '.join(meta['resumed'])})" if meta.get("resumed") else "")
             + (f"\n- stopped early: {meta['stopped']}" if meta.get("stopped") else ""))
 
 
@@ -97,6 +120,10 @@ def write_summary(rdir):
         for k in sorted(by):
             t = totals(by[k])
             out.append(f"| {k} | {t['n']} | {t['passed']} | {t['score']:.2f} | {t['cost_mean']:.2f} | {t['turns_mean']:.1f} | {t['shots']} | {t['shell']} |")
+        retried = [(r["task"], r["earlier_attempts"]) for r in recs if r.get("earlier_attempts")]
+        if retried:
+            out += ["", "Retried after infrastructure failures (the table shows the retry):", ""]
+            out += [f"- {task}: {'; '.join(str(x)[:140] for x in why)}" for task, why in retried]
         samples = [(r["task"], s) for r in recs for s in (r.get("metrics") or {}).get("error_samples", [])]
         if samples:
             out += ["", "Error samples (first 160 characters):", ""]

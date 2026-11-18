@@ -145,3 +145,15 @@ Each session costs real API usage.
 
 A headless session with only the MCP tools does a recorded calculator task by
 reasoning over trees and screenshots, with no scripted steps.
+
+## Benchmark: `bench/bench.py`
+
+Twenty desktop tasks (Calculator, Mousepad, Writer, Calc, Thunar, Firefox,
+Chrome, a data task and a multi-app task), each run in a fresh headless
+session on a test VM that is reset to its baseline first. A check reads the VM's
+real state afterwards. Each task records pass, partial score, cost, turns,
+time, tokens and the tool-call mix. Switches (skill, shell channel,
+coordinate guard, screen size, model) change one thing at a time, and
+`bench/bench.py compare A B` puts two runs side by side. See
+[bench/README.md](bench/README.md). Each run costs real API usage: about $1 per
+task, and it needs a test VM (`MCOMP_CONFIG`).

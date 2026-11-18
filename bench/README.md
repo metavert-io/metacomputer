@@ -88,9 +88,19 @@ bench/bench.py check ff-form [--setup]          # run a task's setup and/or chec
 bench/bench.py remetric baseline-2026-11-17     # recompute metrics from the saved transcripts
 ```
 
-`run` stops the VM at the end unless you pass `--keep-running`. Running the
-same `--run-id` again skips the tasks already done in it, so an interrupted run
-can be resumed.
+`run` stops the VM at the end unless you pass `--keep-running`.
+
+A task whose VM didn't start or whose setup failed is retried once, then
+recorded as an infrastructure failure. A session that ends on an API error
+(a usage or rate limit, at no cost) is recorded the same way, and the run stops
+there, since every later task would fail the same way.
+
+Running the same `--run-id` again resumes the run:
+- it skips the tasks already done;
+- it retries the ones that failed for infrastructure reasons;
+- it counts what the run has already spent against the cap.
+
+The summary shows the latest attempt of each task and lists the retries.
 
 Results go to `results/bench/<run-id>/`, or to `$BENCH_RESULTS/<run-id>/`:
 - `run.json`: the switches, the git sha, the model and the Claude Code version;
@@ -188,7 +198,7 @@ Add `bench/tasks/<id>.toml`:
 
 ```toml
 id = "mousepad-new"
-title = "Mousepad: new file, three lines, Save As into a new folder"
+title = "Mousepad: new file, three lines, Save As"
 apps = ["mousepad"]
 route = "ax"                 # ax | shell | visual | mixed
 requires = []                # ["calc"] for LibreOffice Calc

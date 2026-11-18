@@ -1,5 +1,5 @@
 id = "mousepad-new"
-title = "Mousepad: new file, three lines, Save As into a new folder"
+title = "Mousepad: new file, three lines, Save As"
 apps = ["mousepad"]
 route = "ax"
 prompt = """
