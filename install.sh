@@ -96,11 +96,25 @@ remove_skill_link_and_server() {
   fi
   return 0
 }
-# Is the installed plugin this checkout's? From its marketplace, or from GitHub/git (that copy runs this
-# checkout through ~/.local/bin/metacomputer), but not from another checkout's marketplace.
+# The project's own repository: a marketplace named metacomputer from anywhere else (another repository, a
+# URL, a fork) could hand Claude Code plugin code that runs on this Mac, so it isn't used.
+CANON_REPO=metavert-io/metacomputer
+# Is "SOURCE<TAB>WHERE" the canonical GitHub repository? (github owner/repo, or its git URL)
+mkt_is_canonical() {
+  local src="${1%%"$TAB"*}" w gh=github.com
+  w="$(printf '%s' "${1#*"$TAB"}" | tr '[:upper:]' '[:lower:]')"; w="${w%/}"; w="${w%.git}"
+  case "$src" in
+    github) [ "$w" = "$CANON_REPO" ] ;;
+    git) case "$w" in "https://$gh/$CANON_REPO"|"git@$gh:$CANON_REPO"|"ssh://git@$gh/$CANON_REPO") return 0 ;; esac
+         return 1 ;;
+    *) return 1 ;;
+  esac
+}
+# Is the installed plugin this checkout's? From its marketplace, or from the canonical GitHub repository (that
+# copy runs this checkout through ~/.local/bin/metacomputer), but not from another checkout or any other source.
 plugin_is_ours() {
   local mkt; mkt="$(mkt_info)"
-  [ -z "$mkt" ] || [ "$mkt" = "directory${TAB}$ROOT" ] || [ "${mkt%%"$TAB"*}" != directory ]
+  [ -z "$mkt" ] || [ "$mkt" = "directory${TAB}$ROOT" ] || mkt_is_canonical "$mkt"
 }
 remove_plugin() { # uninstall the plugin; remove the marketplace when it is this checkout
   local mkt; mkt="$(mkt_info)"
@@ -160,7 +174,7 @@ fi
 # --- the Claude Code step (4; --only-claude runs it alone) ------------------------------------
 # Plugin mode: this checkout is the marketplace `metacomputer`, and its plugin (plugin/: links to
 # skills/metacomputer, the driver pack and bin/metacomputer) loads in place from here.
-plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so), 1 = failed
+plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so), 1 = failed, 3 = refused
   local mkt; mkt="$(mkt_info)"
   case "$mkt" in
     "directory${TAB}$ROOT") ok "marketplace $MKT: this checkout (already added)" ;;
@@ -172,7 +186,14 @@ plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so
       claude plugin marketplace add "$ROOT" >/dev/null 2>&1 \
         || { warn "could not add this checkout as a marketplace (claude plugin marketplace add $ROOT)"; return 1; }
       ok "marketplace $MKT: this checkout" ;;
-    *) ok "marketplace $MKT: ${mkt//$TAB/ } (its plugin runs this checkout through $CMD_LINK)" ;;
+    *)
+      if ! mkt_is_canonical "$mkt"; then
+        warn "a marketplace named $MKT is already registered from ${mkt//$TAB/ }, which is neither this checkout nor"
+        warn "github.com/$CANON_REPO, so its plugin is NOT installed: its code would run on this Mac. If it isn't"
+        warn "yours, remove it (claude plugin marketplace remove $MKT) and run ./install.sh --only-claude again."
+        return 3
+      fi
+      ok "marketplace $MKT: ${mkt//$TAB/ } (its plugin runs this checkout through $CMD_LINK)" ;;
   esac
   case "$(plugin_state)" in
     on) ok "plugin $PLUGIN_ID already installed" ;;

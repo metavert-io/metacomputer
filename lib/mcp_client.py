@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Minimal MCP stdio client for metacomputer (no third-party dependencies).
 
-It launches `bin/metacomputer mcp` with MCOMP_DIRECT_BRIDGE=1: its own SSH
-connection to Cua Driver's MCP server inside the guest, outside the hub (the
-GUI test harness, `web`, the status probe and the transport tests use it).
-Clients that should get the hub's guards use lib/mcomp_sdk.py instead.
+MCPClient speaks MCP to a command's stdin/stdout. Run as `bin/metacomputer mcp`
+(the default command) it is the raw transport: MCOMP_DIRECT_BRIDGE=1, its own SSH
+connection to Cua Driver in the guest, outside the hub and its guards. Only the
+transport tests may open that, and they say so (MCPClient(transport_test=True));
+everything else that acts on the desktop goes through the hub (lib/mcomp_sdk.py:
+`metacomputer call`, `web`, the GUI test harness, the status probe). ToolResult
+is shared with the SDK.
 
-    python3 lib/mcp_client.py --probe                 # handshake + tool count (JSON)
+    python3 lib/mcp_client.py --probe                 # handshake + tool count (JSON), through the hub
     python3 lib/mcp_client.py --tools                 # list tool names
     python3 lib/mcp_client.py --describe TOOL         # one tool's input schema
     python3 lib/mcp_client.py --call TOOL '{"k":1}'   # = metacomputer call (through the hub and its guards)
@@ -26,12 +29,16 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
+import wirelimits  # noqa: E402
 
 LAB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BRIDGE = [os.path.join(LAB_ROOT, "bin", "metacomputer"), "mcp"]
 PROTOCOL = "2025-06-18"
 MAX_MSG = 64 << 20          # one message from the VM (a native 4K screenshot is well under this)
-MAX_QUEUED = 4096           # messages from the VM waiting to be read
+MAX_QUEUED = 1024           # messages from the VM waiting to be read
+MAX_QUEUED_BYTES = 256 << 20    # and their bytes together
+RAW_ONLY_FOR_TESTS = ("the raw driver connection (`metacomputer mcp` with MCOMP_DIRECT_BRIDGE=1) skips the hub's guards; "
+                      "only the transport tests open it (MCPClient(transport_test=True)). Use lib/mcomp_sdk.py's Hub.")
 
 
 class MCPError(RuntimeError):
@@ -39,30 +46,39 @@ class MCPError(RuntimeError):
 
 
 class MCPClient:
-    """One persistent MCP connection (one Cua Driver runtime in the guest)."""
+    """One persistent MCP connection (one Cua Driver runtime in the guest when cmd is the raw transport)."""
 
-    def __init__(self, cmd=None, stderr_path=None, log=None):
+    def __init__(self, cmd=None, stderr_path=None, log=None, transport_test=False):
         self.cmd = cmd or BRIDGE
         self.stderr_path = stderr_path
         self.log = log  # callable(dict) for an action log, optional
+        self.transport_test = transport_test
         self.proc = None
         self.q: "queue.Queue[dict]" = queue.Queue(MAX_QUEUED)
+        self.qbytes = 0
+        self.qlock = threading.Lock()
         self.closed_why = None
         self.next_id = 1
         self.server_info = {}
         self.protocol = None
         self.calls = 0
+        self.stderr_tail = None
 
     # -- transport --------------------------------------------------------
     def start(self, timeout=90):
-        # The settings this connection starts with (MCOMP_CONFIG may differ per client, e.g. in tests).
-        self.bounded = driver_profiles.bounded(labconfig.load())
-        err = open(self.stderr_path, "ab") if self.stderr_path else subprocess.DEVNULL
         # `metacomputer mcp` is the raw driver connection only with MCOMP_DIRECT_BRIDGE=1 (else, with the hub
         # on, it's the guarded bridge); `mcp-lazy` and anything else run as given.
-        env = dict(os.environ, MCOMP_DIRECT_BRIDGE="1") if self.cmd[-1:] == ["mcp"] else None
+        raw = self.cmd[-1:] == ["mcp"]
+        if raw and not self.transport_test:
+            raise MCPError(RAW_ONLY_FOR_TESTS)
+        # The settings this connection starts with (MCOMP_CONFIG may differ per client, e.g. in tests).
+        self.bounded = driver_profiles.bounded(labconfig.load())
+        env = dict(os.environ, MCOMP_DIRECT_BRIDGE="1") if raw else None
         self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=err, bufsize=0, env=env)
+                                     stderr=subprocess.PIPE if self.stderr_path else subprocess.DEVNULL,
+                                     bufsize=0, env=env)
+        if self.stderr_path:       # SSH carries the VM's stderr: a capped log, never an unbounded file
+            self.stderr_tail = wirelimits.StderrTail(self.proc.stderr, self.stderr_path, append=True)
         threading.Thread(target=self._reader, daemon=True).start()
         res = self.request("initialize", {
             "protocolVersion": PROTOCOL,
@@ -76,44 +92,65 @@ class MCPClient:
 
     def _reader(self):
         # Each message is read up to MAX_MSG bytes (the VM is untrusted: a line without an end must not grow
-        # without limit), and at most MAX_QUEUED wait to be read; past either, the connection is dropped.
+        # without limit), and at most MAX_QUEUED messages or MAX_QUEUED_BYTES wait to be read; past any of
+        # these, the connection is dropped.
         out = self.proc.stdout if hasattr(self.proc.stdout, "peek") else io.BufferedReader(self.proc.stdout, 1 << 16)
-        while True:
-            try:
-                line = out.readline(MAX_MSG + 1)
-            except (OSError, ValueError):
-                line = b""
-            if not line:
-                self._put({"__eof__": True})
-                return
-            if len(line) > MAX_MSG and not line.endswith(b"\n"):
-                self.closed_why = f"the VM sent a message over {MAX_MSG >> 20} MB"
-                self._kill()
-                self._put({"__eof__": True})
-                return
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                msg = {"__garbage__": line[:200].decode(errors="replace")}
-            if not self._put(msg):
-                return
-
-    def _put(self, msg):
         try:
-            self.q.put(msg, timeout=30)
-            return True
-        except queue.Full:
-            self.closed_why = f"more than {MAX_QUEUED} messages from the VM waited unread"
-            self._kill()
+            while True:
+                try:
+                    line = out.readline(MAX_MSG + 1)
+                except (OSError, ValueError):
+                    line = b""
+                if not line:
+                    break
+                if len(line) > MAX_MSG and not line.endswith(b"\n"):
+                    self.closed_why = f"the VM sent a message over {MAX_MSG >> 20} MB"
+                    self._kill()
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = wirelimits.loads(line)         # nested too deeply counts as garbage, not a dead reader
+                except ValueError:
+                    msg = {"__garbage__": line[:200].decode(errors="replace")}
+                if not isinstance(msg, dict):
+                    msg = {"__garbage__": "not a JSON object"}
+                if not self._put(msg, len(line)):
+                    return
+        finally:
+            self._put({"__eof__": True}, 0, final=True)
+
+    def _put(self, msg, size, final=False):
+        with self.qlock:
+            over = not final and self.qbytes + size > MAX_QUEUED_BYTES
+            if not over:
+                self.qbytes += size
+        if over:
+            self.closed_why = f"more than {MAX_QUEUED_BYTES >> 20} MB from the VM waited unread"
+        else:
             try:
-                self.q.get_nowait()
-                self.q.put_nowait({"__eof__": True})
-            except (queue.Empty, queue.Full):
-                pass
-            return False
+                self.q.put((msg, size), timeout=30 if not final else 1)
+                return True
+            except queue.Full:
+                with self.qlock:
+                    self.qbytes -= size
+                if final:
+                    return False
+                self.closed_why = f"more than {MAX_QUEUED} messages from the VM waited unread"
+        self._kill()
+        try:
+            self.q.get_nowait()
+            self.q.put_nowait(({"__eof__": True}, 0))
+        except (queue.Empty, queue.Full):
+            pass
+        return False
+
+    def _get(self, timeout):
+        msg, size = self.q.get(timeout=timeout)
+        with self.qlock:
+            self.qbytes -= size
+        return msg
 
     def _kill(self):
         try:
@@ -138,7 +175,7 @@ class MCPClient:
             if left <= 0:
                 raise MCPError(f"timeout after {timeout}s waiting for {method}")
             try:
-                msg = self.q.get(timeout=left)
+                msg = self._get(left)
             except queue.Empty:
                 continue
             if msg.get("__eof__"):
@@ -259,32 +296,18 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
+    # Everything here goes through the hub (lib/mcomp_sdk.py), like `metacomputer call`.
+    import mcomp_sdk
     if argv[0] == "--probe":
-        t0 = time.time()
-        try:
-            with MCPClient() as c:
-                n = len(c.tools())
-                print(json.dumps({"ok": True, "server": f"{c.server_info.get('name', '')} {c.server_info.get('version', '')}".strip(),
-                                  "protocol": c.protocol, "tools": n, "ms": int((time.time() - t0) * 1000)}))
-                return 0
-        except Exception as e:  # noqa: BLE001
-            print(json.dumps({"ok": False, "error": str(e)}))
-            return 1
+        return mcomp_sdk.probe_main()
     if argv[0] == "--call":
-        # A tool call acts on the desktop: through the hub and its guards, as `metacomputer call`.
-        import mcomp_sdk
         return mcomp_sdk.call_main(argv[1:])
-    import termsafe
-    with MCPClient(stderr_path=os.path.join(os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB_ROOT, "logs"), "mcp-client-stderr.log")) as c:
-        if argv[0] == "--tools":
-            for t in c.tools():
-                line = f"{t['name']:28s} {((t.get('description') or '').splitlines() or [''])[0][:110]}"
-                print(termsafe.escape_for_terminal(line) if sys.stdout.isatty() else line)
-        elif argv[0] == "--describe":
-            for t in c.tools():
-                if t["name"] == argv[1]:
-                    print(json.dumps(t, indent=2))
-    return 0
+    if argv[0] == "--tools":
+        return mcomp_sdk.tools_main(["tools"])
+    if argv[0] == "--describe" and len(argv) > 1:
+        return mcomp_sdk.tools_main(["describe", argv[1]])
+    print(__doc__)
+    return 2
 
 
 if __name__ == "__main__":

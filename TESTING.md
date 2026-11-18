@@ -68,7 +68,7 @@ a fake `git`.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (57 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (64 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. `--real-claude` repeats the
 install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
@@ -90,8 +90,11 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   and installs the plugin at user scope; a second run changes nothing; an earlier
   install's skill link and user-scope server are removed when they're this
   checkout's (or a moved checkout's, dangling), and left alone when another
-  existing checkout's. `--no-plugin` swaps back. A GitHub marketplace is kept,
-  another checkout's marketplace is replaced, a plugin that's turned off is left
+  existing checkout's. `--no-plugin` swaps back. The project's own GitHub
+  marketplace is kept (by `owner/repo` or git URL); one named `metacomputer` from
+  another repository, a fork or a URL is refused (its plugin isn't installed, the
+  installer says how to remove it and falls back to the skill link and server, and
+  `--uninstall` leaves it alone); another checkout's marketplace is replaced, a plugin that's turned off is left
   so, and without `claude plugin` (or when the plugin can't be added) it falls back
   to the skill link and server. `--uninstall` removes whichever is there.
 - The skill and the driver pack name both prefixes; bench's metrics and allowed
@@ -295,7 +298,7 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 
 Each of these needs no VM and takes seconds.
 
-- `python3 tests/test_guest_import.py` (24 checks; needs ffmpeg): files copied from the
+- `python3 tests/test_guest_import.py` (52 checks; needs ffmpeg): files copied from the
   VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
   stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
   a device, a folder link with a file behind it, absolute and `..` names and names with
@@ -304,9 +307,27 @@ Each of these needs no VM and takes seconds.
   finish` (which builds contact sheets), `get` and `recordings --sync`. A link already on
   the Mac where a file arrives is replaced, not written through; a stream cut off
   part-way keeps only whole files; `contact-sheet` refuses an output that's a link.
-- `python3 tests/test_termsafe.py` (13 checks): text from the VM and from pages reaches
+  Limits against a hostile stream: the size, free-space and entry limits; a GNU
+  long-name or pax header claiming 100 MB is refused before its payload is read; a
+  chain of extension headers, global pax headers past their cap and GNU sparse
+  entries are refused, pax-marked sparse entries (formats 0.1 and 1.0) before their
+  map is read; members aren't kept as the stream goes by, and every extension
+  header counts against one metadata budget; folders a path implies count toward the object limit; a
+  stream of folders only meets the free-space floor; the whole stream is capped
+  (left-out entries' data counts); a compressed stream isn't decompressed. Copying
+  from a command (the GUI test harness): streamed, stopped at the limit with the
+  command killed (also for an entry that never ends), its stderr kept to a short
+  tail, and the limits taken from the settings; a command that exits nonzero or a
+  copy cut short is reported (exit code, escaped stderr) and the evidence marked
+  incomplete, keeping what arrived whole.
+- `python3 tests/test_termsafe.py` (20 checks): text from the VM and from pages reaches
   the terminal escaped in `inspect`, `browser`'s profile list, `web` (its report, its
-  messages and errors) and `record moments`; `--json` stays exact.
+  messages and errors) and `record moments`; `web --json` stays exact. With a fake
+  `ssh` writing escape sequences on stdout and stderr: `record start`, `record status`,
+  `status` (the guest's report and the probes), `inspect --json`
+  (written again as ASCII-only JSON) and `input-reset` on a terminal show them
+  escaped, SSH's stderr included, and `input-reset` in a pipe stays exact; the
+  `termsafe.py` filter escapes line by line and caps what it passes.
 - `python3 tests/test_key_pinning.py` (12 checks; needs gpg): `scripts/pin-gpg-key.sh`
   keeps only the pinned key from a download with an extra key appended (or first),
   refuses one without it, drops a subkey grafted on without a binding signature, and
@@ -326,7 +347,7 @@ Each of these needs no VM and takes seconds.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (87 checks, about 45 s). A stand-in
+`python3 tests/test_hub.py` needs no VM (148 checks, about 90 s). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -334,7 +355,11 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
 - the socket is 0600 in a 0700 folder; the peer's uid and pid come from the
   kernel; a peer with another uid is refused before anything is read; a second
   hub for the same VM exits 3; a RUN_DIR too long for a socket gets a short
-  private folder in `/tmp`; stopping removes the socket and frees the lock;
+  folder in this user's own temporary folder (not `/tmp`); stopping removes the
+  socket and frees the lock; a client refuses a socket folder that isn't private
+  to it and a socket served by another uid before it sends a byte, and doesn't
+  start a hub behind such a folder; a hub listening where its own record says
+  (an earlier version's folder) is still found;
 - multiplexing: two clients with the same request ids each get their own
   answer over one driver connection, the driver sees distinct rewritten ids,
   `initialize` and `tools/list` never reach it, `tools/list_changed` reaches the
@@ -387,9 +412,48 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   is `metacomputer sh`'s (`lib/termsafe.py`); `metacomputer mcp` is the guarded
   bridge unless `MCOMP_DIRECT_BRIDGE=1`;
 - `who`: the hub's own SSH connection (directly or through the relay) isn't
-  another controller, another client's is.
+  another controller, another client's is; shell claims and leases are described
+  (not mistaken for direct connections);
+- what a hostile driver can't do: 2,000 `tools/list_changed` notices start at most
+  two refreshes and no thread each, and reach the clients once or twice; a tool
+  list that always has one more page, or repeats a cursor, is cut off and the
+  earlier list kept; 4 MB on stderr leaves a log at its cap and a short memory
+  tail; a 100,000-deep line and a 5,000-deep answer are skipped by the hub, the
+  action-log relay and the direct client, whose readers carry on, and a client
+  sending one gets a parse error; the direct client won't open the raw driver
+  connection unless a transport test asks, and drops a connection past its byte
+  budget; the depth check's memory follows the depth, not the width, and a frame
+  with millions of values is refused before parsing; screenshot layouts keep only
+  checked geometry within their window caps; 200 messages of the wrong shape write a
+  handful of log lines and make the hub hang up on the driver (the next call
+  reconnects); hub.log rotates while the hub runs;
+- `web` and the GUI tests: `web` is a hub client whose claim is refused while
+  another session acts, `--override` releases that claim and claims, closing lets
+  go, and of two runs started together exactly one gets the computer;
+- a lease: a client that times out and closes leaves its call running and the hub
+  holding the computer (another controller refused, the same process not) until
+  the call ends; the hand-over waits for the owners lock with no moment without a
+  claim; the lease stays active past the activity window while its call runs, and
+  past its longest life the driver runtime ends before the computer is let go; a
+  one-shot `call` gets one too; a lease that can't be written keeps the client's
+  claim until it can; a call finishing during a hand-over leaves no lease behind;
+  another controller's running acting call counts as busy without its claim file;
+  a status connection can't claim, and one holding a claim drops it on disconnect;
+- element tokens: `set_value` by a Chrome token alone refused (alone and as a
+  step), input by a Chrome token sent in the foreground, another app's token passed
+  as it was, a token from a read the hub never saw refused (`element_token_unknown`),
+  also when the call names a non-Chrome window or app, a token with another app's
+  pid refused (`target_conflict`), a window the driver doesn't list refused
+  (`window_unknown`);
+  what the hub remembers from results is capped; progress tokens are forgotten;
+- the coordinate guard in a batch: a pixel step after Super+Up, F11, Ctrl+S, a
+  double click (also a click with count 2), a click with Alt held, Escape, a click on
+  a dialog's OK button, a drag, a desktop press or Alt+Tab is refused before the
+  batch runs (`pixels_after_window_change`), while clicks (a shift-click, a Bold
+  button), typing, Return and Ctrl+A between pixel steps, pixels before such a step
+  and role/name targets after it pass.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (17 checks) runs
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (19 checks) runs
 against a running test VM. It opens Mousepad, the calculator and a throwaway
 Chrome profile and closes them again, and changes no VM settings (it turns
 `ACTION_LOG=on` for its own calls, whatever the test VM's config says):
@@ -402,12 +466,14 @@ Chrome profile and closes them again, and changes no VM settings (it turns
   call (with `MCP_HUB=off` it closes as the call ends);
 - `call` is refused while another session acts (the route around the bridge that
   the session logs showed), reads still work, and the Chrome guard refuses
-  `set_value` and `run_script` from `call`;
+  `set_value` and `run_script` from `call`, also `set_value` by a token from
+  Chrome's window alone, and refuses a token from a read the hub never saw;
 - the coordinate guard passes a click from a current screenshot, refuses it after
   the window was resized (where Cua Driver alone clicks), and a `press_key` with
   x,y too, allows it after a fresh
-  screenshot, refuses a foreground click under a window that has since covered
-  the point, and passes a point that window doesn't cover;
+  screenshot, refuses a batch whose pixel step comes after Alt+F10 (nothing runs:
+  the window keeps its size), refuses a foreground click under a window that has
+  since covered the point, and passes a point that window doesn't cover;
 - `hub stop` stops it and the next call starts a new one.
 
 ## SSH options: `tests/test_ssh_options.py`

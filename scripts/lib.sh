@@ -280,7 +280,14 @@ ssh_base() { # ROLE(admin|ops|mcp) -> prints nothing; sets SSH_ARGS array
 }
 gssh() { # ROLE CMD...  (non-interactive)
   local role="$1"; shift
-  ssh_base "$role"; ssh -T "${SSH_ARGS[@]}" "$@"
+  ssh_base "$role"
+  if [ -t 2 ]; then
+    # The remote side writes this stderr, and the VM is untrusted: on a terminal it's shown escaped (and at
+    # most 1 MB of it), never raw (lib/termsafe.py). Pipes and files get it exactly; `metacomputer ssh` is raw.
+    ssh -T "${SSH_ARGS[@]}" "$@" 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
+  else
+    ssh -T "${SSH_ARGS[@]}" "$@"
+  fi
 }
 wait_ssh() { # ROLE TIMEOUT_S
   local role="$1" t="${2:-300}" start; start=$(date +%s)

@@ -17,11 +17,13 @@ outlive any one call. Every guard runs here, for every client:
 - the signed action log (the relay records which client made each call) and
   the event stream.
 
-The socket is RUN_DIR/hub/sock (a 0700 folder, the socket 0600; a short folder
-in /tmp when that path is too long for a Unix socket), and the hub serves only
-peers that run as this user (LOCAL_PEERCRED / SO_PEERCRED). A lock on
-RUN_DIR/hub/hub.pid keeps it to one hub per VM. A client starts it when it
-isn't running; it exits after HUB_IDLE with no client and no recording, or on
+The socket is RUN_DIR/hub/sock (a 0700 folder, the socket 0600; a folder in this
+user's own temporary folder, never the shared /tmp, when that path is too long for
+a Unix socket). The hub serves only peers that run as this user (LOCAL_PEERCRED /
+SO_PEERCRED), and a client checks the socket's folder and the hub's user id the
+same way before it sends anything. A lock on RUN_DIR/hub/hub.pid keeps it to one
+hub per VM. A client starts it when it isn't running; it exits after HUB_IDLE
+with no client, no recording and no call still running, or on
 `metacomputer stop` / `metacomputer hub stop`.
 
 With MCP_HUB=off the same core runs inside each client process instead
@@ -39,11 +41,13 @@ import fcntl
 import hashlib
 import itertools
 import json
+import math
 import os
 import re
 import select
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -55,6 +59,7 @@ sys.path.insert(0, LIB)
 import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
+import wirelimits  # noqa: E402
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
 except Exception:  # never let it stop the hub
@@ -70,12 +75,33 @@ MAX_BACKLOG_MSGS = 256              # what may wait for one client before it's d
 MAX_BACKLOG_BYTES = 128 << 20
 HELLO_TIMEOUT_S = 10
 WRITE_TIMEOUT_S = 30                # a driver that doesn't take a message within this is dropped
-LOG_MAX = 5 << 20                   # hub.log is rotated (one old copy) past this, when a hub starts
+LOG_MAX = 5 << 20                   # hub.log is rotated (one old copy) past this, at start and while it runs
+NOTE_REPEAT_MAX = 5                 # the same kind of note at most this often per NOTE_WINDOW_S, then one summary
+NOTE_WINDOW_S = 60.0
+BAD_UPSTREAM_MAX = 50               # unusable messages from the driver within BAD_UPSTREAM_WINDOW_S: the hub hangs up
+BAD_UPSTREAM_WINDOW_S = 60.0
+LEASE_TICK_S = 1.0                  # how often the lease keeper looks
+LEASE_REFRESH_S = 60.0              # a lease's claim is rewritten this often while its calls run (it stays active)
+LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub ends the driver runtime, and only then
+                                                               # lets the computer go
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
 LIVE_WINDOWS_TTL_S = 1.0            # list_windows reused within one batch, never across an action
 DIRECT_TTL_S = 3.0                  # direct SSH connections (owners.py) are looked up at most this often
+# What the driver can make the hub keep or do, whatever its messages' size (the VM is untrusted):
+MAX_TOOL_PAGES = 50                 # a tools/list refresh: pages, tools, bytes and time (the driver sends one page)
+MAX_TOOLS = 2000
+MAX_TOOLS_BYTES = 16 << 20
+REFRESH_DEADLINE_S = 60
+REFRESH_GAP_S = 2.0                 # tools/list_changed: one refresh at a time, at most one start per this
+MAX_SNAPSHOTS = 2048                # snapshot ids remembered (an element token -> the window and app it came from)
+MAX_APPS = 4096                     # pid -> app name
+MAX_WINDOW_PIDS = 4096              # window id -> pid
+MAX_LAYOUTS = 512                   # screenshot layouts kept for the coordinate guard
+MAX_LAYOUT_WINDOWS = 256            # windows kept per layout (only their checked geometry)
+MAX_LAYOUT_WINDOWS_TOTAL = 32768    # windows kept in all layouts together
 SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-KINDS = ("claude-code", "call", "sdk", "status", "test")
+TOKEN_RE = re.compile(r"^(s[0-9a-f]{8}):[0-9]+$")    # an element token: <snapshot_id>:<row>
+KINDS = ("claude-code", "call", "sdk", "status", "test", "web")
 
 CLI = owners.cli()
 IDENTITY = (
@@ -107,6 +133,8 @@ HABITS = (
 )
 OVERSIZE_MSG = ("The virtual computer sent a message larger than the hub accepts ({} MB), so the hub closed its "
                 "connection to it. Call again; element tokens from earlier reads are stale.").format(MAX_UPSTREAM_MSG >> 20)
+PROTOCOL_MSG = ("The virtual computer kept sending messages the hub can't use, so the hub closed its connection to "
+                "it. Call again; element tokens from earlier reads are stale.")
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
 BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
 REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
@@ -149,6 +177,22 @@ SCRIPT_CHROME = (
     "Refused by the metacomputer bridge: run_script can't keep Chrome's input in the foreground, and background "
     "input to Chrome blocks its keyboard. For Chrome use run_steps with delivery_mode \"foreground\", or the "
     "browser_* page tools; run_script is fine for other apps.")
+TOKEN_UNKNOWN = (
+    "Refused by the metacomputer bridge: this element_token isn't from a window read the bridge has seen on this "
+    "connection, so it can't tell which app it belongs to (input to Chrome has to go in the foreground, and set_value "
+    "to Chrome is refused), and a pid or window_id next to it doesn't say. Read the window again (get_window_state) "
+    "and use a token from that read.")
+TOKEN_CODE = "element_token_unknown"
+WINDOW_UNKNOWN = (
+    "Refused by the metacomputer bridge: the driver doesn't list this window_id, so the bridge can't tell which app "
+    "the call is aimed at (input to Chrome has to go in the foreground, and set_value to Chrome is refused). Run "
+    "list_windows and use a current window_id with its pid.")
+TARGET_CONFLICT = (
+    "Refused by the metacomputer bridge: this element_token belongs to another app than the pid or window_id the "
+    "call also names, so it can't tell where the input would go. Read the window again (get_window_state) and use "
+    "that read's tokens with its own pid and window_id.")
+UNKNOWN_TARGET = {"token": (TOKEN_UNKNOWN, TOKEN_CODE), "window": (WINDOW_UNKNOWN, "window_unknown"),
+                  "conflict": (TARGET_CONFLICT, "target_conflict")}
 
 # --- coordinate guard ----------------------------------------------------------------
 # Pixel input is aimed from a screenshot. Cua Driver (0.52.1, 0.53.0) maps window-local x,y
@@ -163,6 +207,18 @@ SCRIPT_CHROME = (
 PIXEL_TOOLS = {"click", "double_click", "right_click", "drag", "scroll", "move_cursor", "type_text",
                "press_key", "hotkey", "mouse_button_down", "mouse_drag", "mouse_button_up"}
 COORD_CODE = "windows_changed_since_screenshot"
+# Inside one run_steps batch the hub can't look between steps, so a pixel step that comes after a step able to
+# move, resize, open, close or raise a window is refused before the batch runs (geometry_step below says which).
+BATCH_CODE = "pixels_after_window_change"
+PRESS_TOOLS = {"click", "right_click", "double_click", "type_text", "press_key", "hotkey"}
+DRAG_TOOLS = {"drag", "mouse_drag", "mouse_button_down", "mouse_button_up", "parallel_mouse_drag"}
+WM_MODIFIERS = ("super", "meta", "win", "hyper", "alt", "cmd", "command", "option", "mod1", "mod4")
+CTRL_NAMES = {"ctrl", "control", "ctrl_l", "ctrl_r", "control_l", "control_r"}
+CTRL_WINDOW_KEYS = {"n", "w", "q", "o", "s", "p"}     # new, close, quit; the open, save and print dialogs
+FKEY_RE = re.compile(r"^f(?:[1-9]|[12][0-9]|3[0-5])$")
+# Buttons that open or close a dialog, when a step names its target by role and name.
+DIALOG_BUTTON_RE = re.compile(r"^(?:ok|cancel|close|save|save as\W*|open|apply|yes|no|insert|print|delete|replace all|"
+                              r"don.?t save|discard|keep current format|use .{1,40} format!?|done|finish|next)\b", re.I)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -212,15 +268,45 @@ def settings_of(env=None):
     return out
 
 
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
+
+def _owned_private(path, strict=True):
+    """True when path (links resolved) is a folder of this user's that nobody else can write to (strict: nor
+    read or enter)."""
+    try:
+        st = os.lstat(os.path.realpath(path))
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & (0o077 if strict else 0o022)
+
+
+def user_runtime_dir():
+    """A folder of this user's that other accounts can't write to, for a socket that doesn't fit in RUN_DIR:
+    macOS's per-user temporary folder (/var/folders/.../T, 0700), else $XDG_RUNTIME_DIR, else ~/.cache. Never the
+    shared /tmp, where another account could make the folder first."""
+    cands = []
+    try:
+        cands.append(os.confstr(_CS_DARWIN_USER_TEMP_DIR))
+    except (ValueError, OSError, TypeError):
+        pass
+    cands.append(os.environ.get("XDG_RUNTIME_DIR"))
+    for c in cands:
+        if c and _owned_private(c, strict=False):
+            return os.path.realpath(c)
+    return os.path.join(os.path.expanduser("~"), ".cache", "metacomputer")
+
+
 def paths(env=None):
     """The hub's files for this VM. The socket stays in RUN_DIR/hub/ unless that path is too long for a Unix
-    socket (about 104 bytes on macOS); then it goes to a private folder in /tmp named after RUN_DIR."""
+    socket (about 104 bytes on macOS); then it goes to a private folder named after RUN_DIR in this user's own
+    temporary folder (user_runtime_dir)."""
     rd = run_dir(env)
     d = os.path.join(rd, "hub")
     sock = os.path.join(d, "sock")
     if len(sock.encode()) > 100:
         h = hashlib.sha256(os.path.realpath(rd).encode()).hexdigest()[:12]
-        sock = f"/tmp/mcomp-hub-{os.getuid()}-{h}/sock"
+        sock = os.path.join(user_runtime_dir(), f"mcomp-hub-{h}", "sock")
     return {"dir": d, "pid": os.path.join(d, "hub.pid"), "sock": sock, "sockdir": os.path.dirname(sock),
             "log": os.path.join(log_dir(env), "hub.log"), "cache": os.path.join(rd, "driver-mcp-cache.json"),
             "stderr": os.path.join(d, "upstream.stderr")}
@@ -233,8 +319,7 @@ def private_dir(path):
     except FileExistsError:
         pass
     st = os.lstat(path)
-    import stat as _stat
-    if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
         raise PermissionError(f"unsafe hub folder {path} (not a folder of this user's)")
     if st.st_mode & 0o077:
         os.chmod(path, 0o700)
@@ -350,7 +435,13 @@ class Client:
 
     def send(self, msg):
         """Queue a message without waiting. A client whose backlog is full is disconnected."""
-        data = json.dumps(msg, separators=(",", ":")).encode() + b"\n"
+        try:
+            data = json.dumps(msg, separators=(",", ":")).encode() + b"\n"
+        except (ValueError, TypeError, RecursionError):
+            if not isinstance(msg, dict) or msg.get("id") is None:
+                return False
+            data = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {
+                "code": -32603, "message": "the virtual computer's answer couldn't be passed on"}}).encode() + b"\n"
         with self.cv:
             if self.closed:
                 return False
@@ -420,7 +511,7 @@ class Client:
                 if not line:
                     continue
                 try:
-                    msg = json.loads(line)
+                    msg = wirelimits.loads(line)
                 except ValueError:
                     self.send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
                     continue
@@ -488,12 +579,16 @@ class Hub:
         self.started = time.time()
         self.last_activity = time.time()
         self.up_since = None
-        self.app_of = {}            # guest pid -> app name (learned from results / list_windows)
+        self.stderr_tail = None     # the driver connection's stderr (wirelimits.StderrTail)
+        # What the hub learns from results is capped (the driver could send endless ids): oldest out first.
+        self.app_of = collections.OrderedDict()      # guest pid -> app name (results, list_windows)
+        self.window_pid = collections.OrderedDict()  # window id -> guest pid
+        self.snapshots = collections.OrderedDict()   # snapshot id -> (pid, window id, app name): whose tokens
         self.mpx_dirty = None       # None = unknown since connecting; True = a virtual-device route was used
         self.refusals = {}          # tool -> times the driver refused it (bounded mode)
-        self.layouts = {}           # (session, "w", window_id) | (session, "desktop") -> layout at the last screenshot
+        self.layouts = collections.OrderedDict()     # (session, "w", wid) | (session, "desktop") -> layout at the last screenshot
         self.layout_pending = {}    # upstream id of a screenshot read -> its layout record
-        self.zooms = {}             # (session, window_id) -> the last zoom region (screenshot pixels)
+        self.zooms = collections.OrderedDict()       # (session, window_id) -> the last zoom region (screenshot pixels)
         self.recordings = {}        # driver session label ("" = the default) -> when it started recording
         self._rec_checked = 0.0
         self.progress = {}          # upstream progress token -> (client, the client's token)
@@ -502,20 +597,69 @@ class Hub:
         self._direct = (0.0, None)
         self.owner_lock = threading.Lock()
         self.chrome_lock = threading.Lock()
+        self.leases = {}            # client id -> its acting calls still running after it disconnected (detach)
+        self.lease_lock = threading.Lock()
+        self.refresh_lock = threading.Lock()
+        self._refreshing = False    # one tools/list refresh at a time (schedule_refresh)
+        self._refresh_again = False
+        self._refresh_last = 0.0
+        self._lease_keeper = None   # the thread that refreshes leases and ends a runtime past LEASE_MAX_S
+        self._bad_upstream = collections.deque()   # times of unusable messages from the driver (BAD_UPSTREAM_*)
+        self.log_lock = threading.Lock()
+        self._note_kinds = {}       # kind -> [window start, notes written, notes left out] (NOTE_REPEAT_MAX)
+        self.log = None
+        self.log_bytes = 0
+        self._open_log()
+
+    # --- bookkeeping ---------------------------------------------------------------
+    def _open_log(self):
         try:
             os.makedirs(os.path.dirname(self.paths["log"]), exist_ok=True)
             fd = os.open(self.paths["log"], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self.log = os.fdopen(fd, "a", buffering=1)
+            self.log_bytes = os.fstat(fd).st_size
         except OSError:
             self.log = None
 
-    # --- bookkeeping ---------------------------------------------------------------
-    def note(self, text):
-        if self.log:
-            try:
-                self.log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {text}\n")
-            except (OSError, ValueError):
-                pass
+    def rotate_log(self):
+        """hub.log past LOG_MAX: it becomes hub.log.1 (one old copy) and a new one starts. Caller holds log_lock."""
+        try:
+            if self.log:
+                self.log.close()
+            os.replace(self.paths["log"], self.paths["log"] + ".1")
+        except OSError:
+            pass
+        self._open_log()
+
+    def note(self, text, kind=None):
+        """A line in hub.log. Notes of one kind (a misbehaving driver's, say) are written at most NOTE_REPEAT_MAX times
+        per NOTE_WINDOW_S, then counted; and the file is rotated at LOG_MAX while the hub runs, so nothing the VM
+        does can fill the disk through it."""
+        now = time.monotonic()
+        lines = []
+        with self.log_lock:
+            if kind is not None:
+                st = self._note_kinds.setdefault(kind, [now, 0, 0])
+                if now - st[0] >= NOTE_WINDOW_S:
+                    if st[2]:
+                        lines.append(f"({st[2]} more notes like '{kind}' in the last {int(now - st[0])} s were left out)")
+                    st[:] = [now, 0, 0]
+                if st[1] >= NOTE_REPEAT_MAX:
+                    st[2] += 1
+                    return
+                st[1] += 1
+            lines.append(text)
+            if not self.log:
+                return
+            for line in lines:
+                data = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {line}\n"
+                try:
+                    self.log.write(data)
+                except (OSError, ValueError):
+                    return
+                self.log_bytes += len(data.encode())
+            if self.log_bytes > LOG_MAX:
+                self.rotate_log()
 
     def event(self, client, family, type_, message, severity=None, action=None, data=None, debounce=None):
         """The optional event stream (docs/events.md), on a background thread: never delays a call."""
@@ -612,12 +756,15 @@ class Hub:
         with self.clock:
             if self.clients.pop(client.cid, None) is None:
                 return
-        if not client.hello or client.kind == "status":
+        if not client.hello or (client.kind == "status" and not client.has_claim):
             return
         self.last_activity = time.time()
+        running = []
         for key, pend in list(self.pending.items()):
             if pend["client"] is client:
                 pend["orphan"] = True       # its answer has nowhere to go; the call itself runs on
+                if pend.get("acting"):
+                    running.append((key, pend.get("tool")))
         if self.server is not None and self.server.stopping:
             return                          # the hub is going away, not the client: its claim stays
         if client.auto_session and client.used_auto and self.connected():
@@ -625,35 +772,187 @@ class Hub:
             self.ask_up_async("tools/call", {"name": "end_session", "arguments": {"session": client.auto_session}},
                               lambda _m: None)
             self.recordings.pop(client.auto_session, None)
-        if client.holder == client.peer_pid:
-            owners.drop_claim(client.peer_pid)
-            if client.has_claim:
-                self.event(client, "lifecycle", "controller_released",
-                           f"The Claude Code session in {owners.short(client.cwd)} let go of the virtual computer",
-                           data={"bridge_pid": client.peer_pid, "claude_pid": client.claude})
+        # Every kind of client: calls still running keep the computer held (a lease). The client's own claim goes
+        # when it was held in the client's name; a one-shot `call` held by its Claude Code session or shell keeps it.
+        leased = self.hand_over_claim(client, running, drop_own=client.holder == client.peer_pid)
+        if client.holder == client.peer_pid and client.has_claim and not leased:
+            self.event(client, "lifecycle", "controller_released",
+                       f"The Claude Code session in {owners.short(client.cwd)} let go of the virtual computer",
+                       data={"bridge_pid": client.peer_pid, "claude_pid": client.claude})
         self.note(f"client {client.cid} detached ({client.close_reason or 'closed'})")
         if self.local and not self.active_clients():
             self.shutdown()
 
+    # --- a claim outliving its client's calls ----------------------------------------------
+    def hand_over_claim(self, client, running, drop_own=True):
+        """The client is gone. If acting calls it made are still running in the driver (a script that timed out, a
+        session that closed mid-call), the hub holds the computer for them in a claim of its own (kind "lease"),
+        kept fresh until they finish or the driver connection ends; past LEASE_MAX_S the hub ends the driver runtime
+        first and only then lets go (_lease_keeper). With drop_own, the client's own claim goes: after the lease is
+        written, under the owners lock, so no other controller can claim in between, and not at all if the lease
+        couldn't be written. True when a lease was taken."""
+        with self.owner_lock:
+            lease = None
+            with self.lease_lock:                    # the same lock as removing a pending request (on_upstream)
+                keys = set()
+                for key, _tool in running:
+                    pend = self.pending.get(key)
+                    if pend is not None and not self.local:     # in-process: the connection ends with the client
+                        pend["lease"] = client.cid
+                        keys.add(key)
+                if keys:
+                    tools = sorted({str(t) for k, t in running if k in keys and t})
+                    lease = {"keys": keys, "tool": ", ".join(tools)[:60] or "a call", "claude": client.claude,
+                             "cwd": client.cwd, "client_pid": client.peer_pid, "kind": client.kind,
+                             "t0": time.monotonic(), "written": False, "refreshed": 0.0,
+                             "drop_pid": client.peer_pid if drop_own and client.peer_pid != self.pid else None}
+                    self.leases[client.cid] = lease
+
+            def swap():
+                if lease:
+                    self._write_lease(lease)        # first, so there's no moment without a claim
+                    if lease["written"] and lease["drop_pid"]:
+                        owners.drop_claim(lease["drop_pid"])
+                        lease["drop_pid"] = None    # else kept, and dropped once a later write works
+                elif drop_own:
+                    owners.drop_claim(client.peer_pid)
+            try:
+                with owners.lock():
+                    swap()
+            except (OSError, TimeoutError) as e:
+                self.note(f"claim hand-over without the owners lock: {e!r}")
+                swap()
+        if lease:
+            self.note(f"client {client.cid} left {len(lease['keys'])} acting call(s) running ({lease['tool']}); "
+                      "the hub holds the computer until they end")
+            self._start_lease_keeper()
+        return bool(lease)
+
+    def _write_lease(self, lease):
+        """Write (or refresh) the hub's lease claim. Caller holds the owners lock. Sets lease["written"]."""
+        try:
+            owners.write_claim(self.pid, lease["claude"], lease["cwd"] or os.getcwd(), lease["tool"], time.time(),
+                               kind="lease", extra={"client_pid": lease["client_pid"], "via": lease["kind"]})
+            lease["written"], lease["refreshed"] = True, time.monotonic()
+        except OSError as e:
+            lease["written"] = False             # the keeper tries again; a claim it would replace stays
+            self.note(f"could not write the lease: {e!r}", kind="lease write failed")
+        return lease["written"]
+
+    def _start_lease_keeper(self):
+        with self.lease_lock:
+            if self._lease_keeper is not None and self._lease_keeper.is_alive():
+                return
+            self._lease_keeper = threading.Thread(target=self._lease_keeper_run, daemon=True, name="hub-lease-keeper")
+            self._lease_keeper.start()
+
+    def _lease_keeper_run(self):
+        """While leases exist: keep their claim fresh (and retry a failed write); past LEASE_MAX_S, end the driver
+        runtime the calls run in. The lease itself ends only when those calls are gone (_pend_finished)."""
+        ended = None
+        while True:
+            time.sleep(LEASE_TICK_S)
+            with self.lease_lock:
+                if not self.leases:
+                    self._lease_keeper = None
+                    return
+                leases = list(self.leases.values())
+            now = time.monotonic()
+            every = min(LEASE_REFRESH_S, max(1.0, owners.ACTIVE_S / 3))    # well inside the activity window
+            if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for l in leases):
+                with self.owner_lock:
+                    try:
+                        with owners.lock():
+                            self._refresh_leases()
+                    except (OSError, TimeoutError):
+                        self._refresh_leases()
+            oldest = min(l["t0"] for l in leases)
+            proc = self.up
+            if now - oldest > LEASE_MAX_S and proc is not None and proc is not ended:
+                ended = proc
+                self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending the driver "
+                          "runtime before letting the computer go")
+                try:
+                    proc.kill()                      # the reader sees the end: those calls fail, the lease ends
+                except OSError:
+                    pass
+
+    def _refresh_leases(self):
+        with self.lease_lock:
+            leases = list(self.leases.values())
+        if not leases:
+            return
+        newest = max(leases, key=lambda l: l["t0"])
+        if self._write_lease(newest):
+            for l in leases:
+                l["written"], l["refreshed"] = True, newest["refreshed"]
+                if l["drop_pid"]:
+                    owners.drop_claim(l["drop_pid"])
+                    l["drop_pid"] = None
+
+    def _pend_finished(self, key, pend):
+        """A request is done (answered, failed, or its connection ended): forget its progress token, and end the
+        lease it belonged to once that lease has no call left. Whether it had a lease is read under the lease lock,
+        the lock hand_over_claim assigns it under, so a call that finishes during a hand-over can't leave a lease
+        waiting for it."""
+        if pend.get("ptok"):
+            self.progress.pop(pend["ptok"], None)
+        with self.lease_lock:
+            cid = pend.get("lease")
+            if cid is None:
+                return
+            lease = self.leases.get(cid)
+            if lease is None:
+                return
+            lease["keys"].discard(key)
+            if lease["keys"]:
+                return
+        threading.Thread(target=self._end_lease, args=(cid,), daemon=True, name="hub-lease").start()
+
+    def _end_lease(self, cid):
+        with self.owner_lock:
+            def drop():
+                with self.lease_lock:
+                    lease = self.leases.get(cid)
+                    if lease is None or lease["keys"]:
+                        return False
+                    del self.leases[cid]
+                    if self.leases:
+                        return False
+                owners.drop_claim(self.pid)
+                if lease.get("drop_pid"):
+                    owners.drop_claim(lease["drop_pid"])
+                return True
+            try:
+                with owners.lock():
+                    done = drop()
+            except (OSError, TimeoutError):
+                done = drop()
+        if done:
+            self.note("the calls a disconnected client left running have ended; the hub's hold on the computer ends")
+            self.event(None, "lifecycle", "controller_released",
+                       "The calls a disconnected client left running have ended; the virtual computer is free",
+                       data={"hub_pid": self.pid})
+
     # --- the driver connection ------------------------------------------------------
+    def _stderr_path(self):
+        return self.paths["stderr"] if not self.local else os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr")
+
     def _spawn_bridge(self):
         os.makedirs(self.paths["dir"], exist_ok=True)
-        err = open(self.paths["stderr"] if not self.local else
-                   os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr"), "w")
         env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, close_fds=True)
-        err.close()
+        # SSH carries the VM's stderr: drained with a fixed memory tail and a capped log file, so a VM that writes
+        # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail).
+        self.stderr_tail = wirelimits.StderrTail(proc.stderr, self._stderr_path())
         return proc
 
     def _stderr_text(self):
-        p = self.paths["stderr"] if not self.local else os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr")
-        try:
-            return open(p).read().strip()
-        except OSError:
-            return ""
+        tail = self.stderr_tail
+        return tail.text(wait=2.0).strip() if tail is not None else ""
 
     def connected(self):
         up = self.up
@@ -693,6 +992,8 @@ class Hub:
 
     def _reset_runtime(self):
         self.app_of.clear()
+        self.window_pid.clear()
+        self.snapshots.clear()          # a new driver runtime: earlier element tokens mean nothing
         self.mpx_dirty = None
         self.layouts.clear()
         self.layout_pending.clear()
@@ -751,16 +1052,63 @@ class Hub:
         self.refresh_cache(params)
         return None
 
-    def refresh_cache(self, params):
-        tools, cursor = [], None
+    def schedule_refresh(self):
+        """The driver said its tools changed: refresh on one worker. Notices that arrive while a refresh runs are
+        folded into one more pass, and passes start at most every REFRESH_GAP_S, so a driver that repeats the
+        notice can't start threads or refreshes without end. True when this notice started the worker."""
+        with self.refresh_lock:
+            if self._refreshing:
+                self._refresh_again = True
+                return False
+            self._refreshing = True
+        threading.Thread(target=self._refresh_worker, daemon=True, name="hub-refresh").start()
+        return True
+
+    def _refresh_worker(self):
         while True:
-            r = self.ask_up("tools/list", {"cursor": cursor} if cursor else {})
-            if not r or "result" not in r:
+            wait = REFRESH_GAP_S - (time.monotonic() - self._refresh_last)
+            if wait > 0:
+                time.sleep(wait)
+            self._refresh_last = time.monotonic()
+            try:
+                self.refresh_cache(DEFAULT_INIT)
+            except Exception as e:  # never let it take the hub down
+                self.note(f"tools refresh failed: {e!r}")
+            with self.refresh_lock:
+                if not self._refresh_again:
+                    self._refreshing = False
+                    return
+                self._refresh_again = False
+
+    def refresh_cache(self, params):
+        """Ask the driver for its tools (every page) and save the handshake. Pages, tools, bytes, time and repeated
+        cursors are capped: past any of them the earlier list stays."""
+        tools, cursor, seen, size, pages = [], None, set(), 0, 0
+        end = time.monotonic() + REFRESH_DEADLINE_S
+        while True:
+            left = end - time.monotonic()
+            r = self.ask_up("tools/list", {"cursor": cursor} if cursor else {}, timeout=max(0.1, min(25.0, left)))
+            if not r or not isinstance(r.get("result"), dict):
                 return
-            tools.extend(r["result"].get("tools", []))
+            page = r["result"].get("tools", [])
+            if not isinstance(page, list):
+                return
+            pages += 1
+            size += len(json.dumps(page))
+            tools.extend(t for t in page if isinstance(t, dict))
             cursor = r["result"].get("nextCursor")
+            problem = ("more than {} pages".format(MAX_TOOL_PAGES) if pages > MAX_TOOL_PAGES
+                       else "more than {} tools".format(MAX_TOOLS) if len(tools) > MAX_TOOLS
+                       else "more than {} MB".format(MAX_TOOLS_BYTES >> 20) if size > MAX_TOOLS_BYTES
+                       else "more than {} s".format(REFRESH_DEADLINE_S) if time.monotonic() > end
+                       else "a cursor that isn't text" if cursor and not isinstance(cursor, str)
+                       else "a cursor it sent before" if cursor and cursor in seen else None)
+            if problem:
+                self.note(f"the driver's tool list went past a limit ({problem}); keeping the list from before")
+                return
             if not cursor:
                 break
+            seen.add(cursor)
         old = self.cache if self.cache.get("driver_version") == pinned_version() else {}
         inits = dict(old.get("initialize") or {})
         inits[params.get("protocolVersion") or "default"] = self.live_init
@@ -820,24 +1168,50 @@ class Hub:
                     why = "oversize"
                     self.note(f"the driver sent a message over {MAX_UPSTREAM_MSG >> 20} MB; closing the connection")
                     break
-                try:
-                    msg = json.loads(line)
-                except ValueError:
+                if not line.strip():
                     continue
+                try:
+                    msg = wirelimits.loads(line)       # too deep, too many values or not JSON: never a dead reader
+                except ValueError:
+                    msg = None
+                usable = False
                 if isinstance(msg, dict) and msg.get("method") == "notifications/metacomputer/closing":
-                    why = str((msg.get("params") or {}).get("reason") or "closed")[:40]   # the relay's reason
+                    p = msg.get("params")
+                    why = str((p.get("reason") if isinstance(p, dict) else None) or "closed")[:40]   # the relay's
                     continue
                 if isinstance(msg, dict):
                     try:
-                        self.on_upstream(msg)
+                        usable = self.on_upstream(msg) is not False
                     except Exception as e:
-                        self.note(f"error handling a message from the driver: {e!r}")
-        except (OSError, ValueError):
-            pass
-        self._upstream_closed(proc, gen, why)
+                        self.note(f"error handling a message from the driver: {e!r}"[:300], kind="driver message error")
+                if not usable and self._bad_upstream_message(gen):
+                    why = "protocol"
+                    self.note(f"the driver sent more than {BAD_UPSTREAM_MAX} unusable messages in "
+                              f"{int(BAD_UPSTREAM_WINDOW_S)} s; closing the connection")
+                    break
+        except Exception as e:  # whatever ends the reading, the connection is closed and its calls fail
+            if not isinstance(e, (OSError, ValueError)):
+                self.note(f"the driver connection's reader stopped: {e!r}"[:300])
+        finally:
+            self._upstream_closed(proc, gen, why)
+
+    def _bad_upstream_message(self, gen):
+        """One more unusable message from the driver (not JSON, the wrong shape, one the hub couldn't handle). True
+        once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S: a driver that keeps doing it
+        is hung up on rather than logged without end."""
+        now = time.monotonic()
+        q = self._bad_upstream
+        q.append(now)
+        while q and now - q[0] > BAD_UPSTREAM_WINDOW_S:
+            q.popleft()
+        self.note("the driver sent a message the hub couldn't use; skipped", kind="driver unusable message")
+        if len(q) > BAD_UPSTREAM_MAX:
+            q.clear()
+            return True
+        return False
 
     def _upstream_closed(self, proc, gen, why=None):
-        if why == "oversize":
+        if why in ("oversize", "protocol"):
             try:
                 proc.kill()
             except OSError:
@@ -845,11 +1219,13 @@ class Hub:
         # No connect_lock here: connect() holds it while it waits for the handshake this closing may answer.
         if self.up is proc:
             self.up, self.ready = None, False
-        text = OVERSIZE_MSG if why == "oversize" else DROPPED_MSG
+        text = OVERSIZE_MSG if why == "oversize" else PROTOCOL_MSG if why == "protocol" else DROPPED_MSG
         for key, pend in list(self.pending.items()):
             if pend.get("gen") == gen:
-                self.pending.pop(key, None)
+                with self.lease_lock:
+                    self.pending.pop(key, None)
                 self.layout_pending.pop(key, None)
+                self._pend_finished(key, pend)      # the connection ended: so did its calls (and their lease)
                 if not pend.get("orphan"):
                     pend["client"].send({"jsonrpc": "2.0", "id": pend["id"], "error": {"code": -32603, "message": text}})
         for key, slot in list(self.internal.items()):
@@ -874,8 +1250,15 @@ class Hub:
             pass
 
     def on_upstream(self, msg):
+        """Handle one message from the driver. False when its shape is wrong (counted by the reader)."""
         mid, method = msg.get("id"), msg.get("method")
+        if method is not None and not isinstance(method, str):
+            return False
+        if "params" in msg and msg["params"] is not None and not isinstance(msg["params"], dict):
+            return False
         if method is None and mid is not None:
+            if not isinstance(mid, (str, int)) or isinstance(mid, bool):
+                return False
             key = mid if isinstance(mid, str) else json.dumps(mid)
             slot = self.internal.pop(key, None)
             if slot:
@@ -886,39 +1269,50 @@ class Hub:
                     try:
                         slot[2](msg)
                     except Exception as e:
-                        self.note(f"internal callback failed: {e!r}")
-                return
-            pend = self.pending.pop(key, None)
+                        self.note(f"internal callback failed: {e!r}"[:300], kind="internal callback failed")
+                return True
+            with self.lease_lock:                    # removed, leased and finished under one lock (_pend_finished)
+                pend = self.pending.pop(key, None)
             if not pend:
-                return
+                return True
+            self._pend_finished(key, pend)
             try:
                 self.observe(pend, msg, key)
             except Exception as e:  # never let bookkeeping break the relay
                 self.note(f"observe failed: {e!r}")
             if pend.get("orphan"):
-                return
+                return True
             out = dict(msg)
             out["id"] = pend["id"]
             pend["client"].send(out)
-            return
+            return True
         if method is not None and mid is not None:     # the driver asks its client something: the hub answers
+            if not isinstance(mid, (str, int)) or isinstance(mid, bool):
+                return False
             if method == "ping":
                 self.send_up({"jsonrpc": "2.0", "id": mid, "result": {}})
             else:
                 self.send_up({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32601, "message": f"{method} isn't supported through the metacomputer hub"}})
-            return
+                    "code": -32601, "message": f"{clean(method, 80)} isn't supported through the metacomputer hub"}})
+            return True
         if method == "notifications/tools/list_changed":
-            for c in self.active_clients():           # the driver's own tools changed: everyone asks again
-                c.send(msg)
-            threading.Thread(target=self.refresh_cache, args=(DEFAULT_INIT,), daemon=True).start()
+            # The driver's own tools changed: one refresh, and everyone asks again. Repeats while a refresh is
+            # under way fold into it (no new thread, no new notice to the clients).
+            if self.schedule_refresh():
+                for c in self.active_clients():
+                    c.send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
         elif method == "notifications/progress":
             p = msg.get("params") or {}
             tok = p.get("progressToken")
+            if not isinstance(tok, (str, int)) or isinstance(tok, bool):
+                return False
             target = self.progress.get(json.dumps(tok))
             if target and not target[0].closed:
                 target[0].send({**msg, "params": {**p, "progressToken": target[1]}})
+        elif method is None:
+            return False                             # neither an answer nor a notification
         # other notifications (log messages, ...) aren't any one client's: dropped
+        return True
 
     # --- client requests ----------------------------------------------------------------
     def reply(self, client, msg, result):
@@ -976,6 +1370,24 @@ class Hub:
             self.reply(client, msg, {})          # one driver connection can't keep a level per client
         elif method == "metacomputer/status":
             self.reply(client, msg, self.status())
+        elif method == "metacomputer/claim" and mid is not None:
+            # Check for other controllers and claim the computer now, as an acting call would, for a client that
+            # wants to know before it starts (`metacomputer web`, the GUI tests). The same one step under the lock.
+            p = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            tool = re.sub(r"[^A-Za-z0-9 _.-]", "", str(p.get("tool") or client.kind))[:40]
+            if client.kind == "status":          # a status connection only reads: it never holds the computer
+                self.reply(client, msg, {"claimed": False, "others": [],
+                                         "message": "a status connection to the metacomputer hub can only read"})
+                return
+            busy = self.check_and_claim(client, tool) if not client.expired else None
+            if busy is None:
+                self.reply(client, msg, {"claimed": False, "others": [],
+                                         "message": BOUNDED_END if client.expired else
+                                         f"couldn't record the claim; check `{CLI} who`"})
+            elif busy:
+                self.reply(client, msg, {"claimed": False, "others": [owners.describe(o) for o in busy]})
+            else:
+                self.reply(client, msg, {"claimed": True, "others": []})
         elif method == "notifications/cancelled":
             p = msg.get("params") or {}
             for key, pend in list(self.pending.items()):
@@ -999,7 +1411,8 @@ class Hub:
         p = out.get("params")
         if isinstance(p, dict) and isinstance(p.get("_meta"), dict) and "progressToken" in p["_meta"]:
             tok = f"{key}.p"
-            self.progress[json.dumps(tok)] = (client, p["_meta"]["progressToken"])
+            pend["ptok"] = json.dumps(tok)           # forgotten with the request (_pend_finished)
+            self.progress[pend["ptok"]] = (client, p["_meta"]["progressToken"])
             out["params"] = {**p, "_meta": {**p["_meta"], "progressToken": tok}}
         self.pending[key] = pend
         msgs = []
@@ -1010,8 +1423,10 @@ class Hub:
             pre(key)
         msgs.append(out)
         if not self.send_up(*msgs):
-            self.pending.pop(key, None)
+            with self.lease_lock:
+                self.pending.pop(key, None)
             self.layout_pending.pop(key, None)
+            self._pend_finished(key, pend)
             if out.get("method") == "tools/call":
                 self.tool_error(client, msg, DROPPED_MSG)
             else:
@@ -1032,6 +1447,9 @@ class Hub:
             self.tool_error(client, msg, BOUNDED_END)
             return
         acting = name not in READ_ONLY
+        if acting and client.kind == "status":   # a status connection (the probe) only reads: it never claims
+            self.tool_error(client, msg, "a status connection to the metacomputer hub can only read")
+            return
         err = self.connect()
         if err:
             self.tool_error(client, msg, err)
@@ -1080,6 +1498,11 @@ class Hub:
             err, note = self.chrome_guard(name, args)
             if launch_note:
                 note = "metacomputer bridge: " + launch_note + ("; " + note if note else "")
+            unknown = next((code for text, code in UNKNOWN_TARGET.values() if err == text), None)
+            if unknown:
+                self.refuse(client, msg, err, {"code": unknown, "effect": "refused",
+                                               "hint": "read the window again and use its pid, window_id and tokens"})
+                return
             if err:
                 self.refuse(client, msg, err)
                 tool = re.sub(r"[^A-Za-z0-9_.-]", "", str(name))[:40] or "a tool"
@@ -1092,7 +1515,8 @@ class Hub:
         if self.coord_on and name == "get_window_state" and args.get("include_screenshot", True) is not False \
                 and not args.get("display_only"):
             pre = lambda key: self.capture_layout(key)  # noqa: E731  (list_windows goes just before the read)
-        self.forward(client, msg, {"tool": name, "args": args, "session": sess, "note": note}, pre=pre)
+        self.forward(client, msg, {"tool": name, "args": args, "session": sess, "note": note, "acting": acting},
+                     pre=pre)
 
     def session_for(self, client, name, args):
         """The driver session a call runs in: its own `session`, else the client's (`call --session`, or the
@@ -1118,7 +1542,23 @@ class Hub:
     def busy_others(self, client):
         others = owners.others(client.peer_pid, mine=client.mine, my_claude=client.claude,
                                direct=self.direct_cached(), table={}, sid=client.sid)
-        return [o for o in others if o["active"] and not (o["kind"] == "session" and o.get("bridge_pid") == client.holder)]
+        mine = set(client.mine) | {client.peer_pid}
+        # A lease is the hub holding the computer for calls a client left running: not another controller to
+        # that same client process (a script that reconnects), nor (through owners) to its Claude Code session.
+        busy = [o for o in others if o["active"] and not (o["kind"] == "session" and o.get("bridge_pid") == client.holder)
+                and not (o.get("claim") == "lease" and o.get("client_pid") in mine)]
+        # Ownership follows the actions themselves too: an acting call another controller still has running in the
+        # driver counts even when its claim file is gone (its Claude Code session or shell exited meanwhile).
+        for pend in list(self.pending.values()):
+            c = pend.get("client")
+            if (not pend.get("acting") or c is None or c is client or pend.get("lease") is not None
+                    or c.holder == client.holder or c.peer_pid in mine or client.peer_pid in c.mine
+                    or (client.claude and c.claude == client.claude)):
+                continue
+            busy.append({"kind": "session", "claim": "pending", "active": True, "bridge_pid": c.holder,
+                         "claude_pid": c.claude, "cwd": c.cwd, "last_tool": pend.get("tool"),
+                         "idle_s": int(time.time() - pend.get("t0", time.time()))})
+        return busy
 
     def check_and_claim(self, client, tool):
         """[] after claiming the computer for this client; the other controllers when it's in use; None when the
@@ -1162,38 +1602,116 @@ class Hub:
                              "via": client.kind})
 
     # --- Chrome guard -------------------------------------------------------------------------
-    def learn_apps(self, obj, depth=0):
+    @staticmethod
+    def _remember(table, key, value, cap):
+        table[key] = value
+        table.move_to_end(key)
+        while len(table) > cap:
+            table.popitem(last=False)
+
+    def learn_apps(self, obj, depth=0, by_name=True):
+        """pid -> app name, window id -> pid and snapshot id -> (pid, window id, app name), from a result.
+        by_name: a "name" beside a pid is the app's (list_apps); in batch results it can be an element's."""
         if depth > 6:
             return
         if isinstance(obj, dict):
-            pid, name = obj.get("pid"), obj.get("app_name") or obj.get("name")
-            if isinstance(pid, int) and pid > 0 and isinstance(name, str) and name:
-                self.app_of[pid] = name
+            pid, name = obj.get("pid"), obj.get("app_name") or (obj.get("name") if by_name else None)
+            pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+            if pid and isinstance(name, str) and name:
+                self._remember(self.app_of, pid, name[:200], MAX_APPS)
+            wid = obj.get("window_id")
+            if pid and isinstance(wid, int) and not isinstance(wid, bool):
+                self._remember(self.window_pid, wid, pid, MAX_WINDOW_PIDS)
+            sid = obj.get("snapshot_id")
+            if isinstance(sid, str) and re.fullmatch(r"s[0-9a-f]{8}", sid) and (pid or isinstance(wid, int)):
+                app = obj.get("app_name") if isinstance(obj.get("app_name"), str) else None
+                self._remember(self.snapshots, sid, (pid, wid if isinstance(wid, int) else None,
+                                                     app[:200] if app else None), MAX_SNAPSHOTS)
             for v in obj.values():
                 if isinstance(v, (dict, list)):
-                    self.learn_apps(v, depth + 1)
+                    self.learn_apps(v, depth + 1, by_name)
         elif isinstance(obj, list):
             for v in obj[:400]:
-                self.learn_apps(v, depth + 1)
+                self.learn_apps(v, depth + 1, by_name)
 
     def app_name(self, pid):
         if not isinstance(pid, int) or isinstance(pid, bool):
             return ""
         if pid not in self.app_of:
             r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {"pid": pid}}, timeout=10)
+            name = ""
             for w in (((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows") or []:
-                if w.get("app_name"):
-                    self.app_of[pid] = w["app_name"]
+                if isinstance(w, dict) and isinstance(w.get("app_name"), str) and w["app_name"]:
+                    name = w["app_name"][:200]
                     break
-            self.app_of.setdefault(pid, "")
-        return self.app_of[pid]
+            self._remember(self.app_of, pid, name, MAX_APPS)
+        return self.app_of.get(pid, "")
+
+    def window_owner(self, wid):
+        """The pid of window wid: from what the hub has seen, else from one list_windows; None when the driver
+        doesn't list it."""
+        pid = self.window_pid.get(wid)
+        if pid is None and self.connected():
+            r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {}}, timeout=10)
+            self.learn_apps((((r or {}).get("result") or {}).get("structuredContent") or {}))
+            pid = self.window_pid.get(wid)
+        return pid
+
+    def chrome_verdict(self, args, outer=None):
+        """Is a call (or a run_steps step; outer = its batch, whose target applies when the step names none) aimed at
+        Chrome? (True, None) or (False, None) when that's known; (None, reason) when it can't be told, which the
+        guard refuses: an element token whose read the hub never saw ("token"; the token carries its pid to the
+        driver, not to the hub), a window id the driver doesn't list ("window"), or a token whose app disagrees with
+        the pid or window the call also names ("conflict"). Naming something else never makes a target safe."""
+        if not isinstance(args, dict):
+            return False, None
+        own = any(args.get(k) not in (None, "") for k in ("app", "window", "pid", "window_id", "element_token"))
+        layer = args if own or not isinstance(outer, dict) else outer
+        for k in ("app", "window"):
+            v = layer.get(k)
+            if isinstance(v, str) and v and CHROME_RE.search(v):
+                return True, None
+        hints = set()
+        pid = layer.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool):
+            hints.add(pid)
+        wid = layer.get("window_id")
+        wpid = None
+        if isinstance(wid, int) and not isinstance(wid, bool):
+            wpid = self.window_owner(wid)
+            if wpid is not None:
+                hints.add(wpid)
+        if any(CHROME_RE.search(self.app_name(p)) for p in hints):
+            return True, None                    # Chrome by what the call names: the stricter handling applies
+        if wid is not None and wpid is None and isinstance(wid, int) and not isinstance(wid, bool):
+            return None, "window"
+        tok_pid = None
+        tok = layer.get("element_token")
+        if tok is not None and tok != "":
+            m = TOKEN_RE.match(tok) if isinstance(tok, str) else None
+            snap = self.snapshots.get(m.group(1)) if m else None
+            if snap is None:
+                return None, "token"
+            tok_pid, twid, tapp = snap
+            if tapp and CHROME_RE.search(tapp):
+                return True, None
+            if tok_pid is None and twid is not None:
+                tok_pid = self.window_owner(twid)
+            if tok_pid is None:
+                return None, "token"
+        pids = hints | ({tok_pid} if tok_pid is not None else set())
+        if any(CHROME_RE.search(self.app_name(p)) for p in pids):
+            return True, None
+        if tok_pid is not None and hints and tok_pid not in hints:
+            return None, "conflict"
+        return False, None
+
+    def chrome_target(self, args, outer=None):
+        """True, False, or None (can't be told: see chrome_verdict)."""
+        return self.chrome_verdict(args, outer)[0]
 
     def is_chrome(self, args):
-        if not isinstance(args, dict):
-            return False
-        if any(isinstance(args.get(k), str) and CHROME_RE.search(args[k]) for k in ("app", "window")):
-            return True
-        return bool(CHROME_RE.search(self.app_name(args.get("pid"))))
+        return bool(self.chrome_target(args))
 
     def input_reset(self):
         """Remove leftover virtual device pairs in the guest. Returns a note or None."""
@@ -1231,9 +1749,13 @@ class Hub:
                 return SCRIPT_CHROME, None
             return None, None
         if name == "set_value":
-            return (SET_VALUE_CHROME, None) if self.is_chrome(args) else (None, None)
+            target, why = self.chrome_verdict(args)
+            return (UNKNOWN_TARGET[why][0] if target is None else SET_VALUE_CHROME if target else None), None
         if name in INPUT_TOOLS:
-            if not self.is_chrome(args):
+            target, why = self.chrome_verdict(args)
+            if target is None:
+                return UNKNOWN_TARGET[why][0], None
+            if not target:
                 return None, None
             if args.get("delivery_mode") != "foreground":
                 args["delivery_mode"] = "foreground"
@@ -1242,7 +1764,14 @@ class Hub:
         elif name == "run_steps":
             top_chrome = self.is_chrome(args)
             steps = steps_of(args)
-            chrome_steps = [(t, a) for t, a in steps if top_chrome or self.is_chrome(a)]
+            chrome_steps = []
+            for t, a in steps:
+                target, why = (True, None) if top_chrome else self.chrome_verdict(a, args) \
+                    if (t in INPUT_TOOLS or t == "set_value") else (self.is_chrome(a), None)
+                if target is None:
+                    return UNKNOWN_TARGET[why][0], None
+                if target:
+                    chrome_steps.append((t, a))
             if not chrome_steps:
                 return None, None
             if any(t == "set_value" for t, _ in chrome_steps):
@@ -1275,26 +1804,38 @@ class Hub:
         self.layout_pending[key] = rec
 
         def got(m):
-            ws = (((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-            rec["windows"] = ws if isinstance(ws, list) else None
+            rec["windows"] = compact_windows((((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows"))
             rec["ready"].set()
+            self._trim_layouts()
         self.ask_up_async("tools/call", {"name": "list_windows", "arguments": {}}, got)
 
     def capture_after(self, rec):
         """A screenshot that came back inside a batch: its layout, asked for right away."""
         def got(m):
-            ws = (((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-            rec["windows"] = ws if isinstance(ws, list) else None
+            rec["windows"] = compact_windows((((m or {}).get("result") or {}).get("structuredContent") or {}).get("windows"))
             rec["ready"].set()
+            self._trim_layouts()
         self.ask_up_async("tools/call", {"name": "list_windows", "arguments": {}}, got)
+
+    def _trim_layouts(self):
+        """Layouts keep only checked geometry (compact_windows), at most MAX_LAYOUT_WINDOWS_TOTAL windows in all:
+        the oldest go first."""
+        while True:
+            total = sum(len(r.get("windows") or []) for r in list(self.layouts.values()))
+            if total <= MAX_LAYOUT_WINDOWS_TOTAL or not self.layouts:
+                return
+            try:
+                self.layouts.popitem(last=False)
+            except KeyError:
+                return
 
     def live_windows(self):
         t, seq, ws = self._live
         if ws is not None and seq == self.act_seq and time.time() - t < LIVE_WINDOWS_TTL_S:
             return ws
         r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {}}, timeout=10)
-        ws = (((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-        if not isinstance(ws, list):
+        ws = compact_windows((((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows"))
+        if ws is None:
             return None
         self._live = (time.time(), self.act_seq, ws)
         return ws
@@ -1307,10 +1848,18 @@ class Hub:
         targets = []
         if name == "run_steps":
             dwid = args.get("window_id")
+            changer = None                       # the first step that can move, resize, open or close windows
             for i, (t, a) in enumerate(steps_of(args)):
                 tg = pixel_target(t, a, dwid, args)
+                if tg and changer is not None:
+                    # The hub can't look between steps: these pixels were aimed before the batch started.
+                    return batch_refusal(changer, i, t, sess)
                 if tg:
                     targets.append((i, t, tg))
+                if changer is None:
+                    why = geometry_step(t, a, dwid, args)
+                    if why:
+                        changer = (i, t, why)
         else:
             tg = pixel_target(name, args)
             if tg:
@@ -1389,8 +1938,9 @@ class Hub:
         elif res.get("isError") and self.bounded_mode and BOUNDED_REFUSED_RE.search(blob):
             self.bounded_refused(client, tool or "a tool", res)
         sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), dict) else {}
-        if tool in ("list_windows", "launch_app", "get_window_state", "list_apps"):
-            self.learn_apps(sc)
+        if tool in ("list_windows", "launch_app", "get_window_state", "list_apps", "get_desktop_state", "run_steps"):
+            # also whose element tokens a read handed out (chrome_target)
+            self.learn_apps(sc, by_name=tool not in ("get_desktop_state", "run_steps"))
         if tool and MPX_RE.search(json.dumps(res)[:200000]):
             self.mpx_dirty = True
             self.note(f"virtual-device route used by {tool}")
@@ -1417,28 +1967,32 @@ class Hub:
             if (res.get("isError") or not (has_image or sc.get("screenshot_file_path")) or not isinstance(wid, int)
                     or sc.get("screenshot_frame_valid") is False):
                 return
-            rec.update(bounds=sc.get("window_bounds"), shot=(sc.get("screenshot_width"), sc.get("screenshot_height")))
-            self.layouts[(sess, "w", wid)] = rec
+            rec.update(bounds=geometry(sc.get("window_bounds")),
+                       shot=shot_size(sc.get("screenshot_width"), sc.get("screenshot_height")))
+            self._remember(self.layouts, (sess, "w", wid), rec, MAX_LAYOUTS)
             self.zooms.pop((sess, wid), None)
+            self._trim_layouts()
         elif tool == "get_desktop_state" and not res.get("isError") and isinstance(sc.get("windows"), list):
-            r = {"ready": threading.Event(), "windows": sc["windows"], "t": time.time(),
-                 "bounds": {"x": 0, "y": 0, "width": sc.get("screen_width"), "height": sc.get("screen_height")},
-                 "shot": (sc.get("screenshot_width"), sc.get("screenshot_height"))}
+            r = {"ready": threading.Event(), "windows": compact_windows(sc["windows"]), "t": time.time(),
+                 "bounds": geometry({"x": 0, "y": 0, "width": sc.get("screen_width"), "height": sc.get("screen_height")}),
+                 "shot": shot_size(sc.get("screenshot_width"), sc.get("screenshot_height"))}
             r["ready"].set()
-            self.layouts[(sess, "desktop")] = r
+            self._remember(self.layouts, (sess, "desktop"), r, MAX_LAYOUTS)
+            self._trim_layouts()
         elif tool == "run_steps":
             state = ((sc.get("observation") or {}).get("state") or {}) if isinstance(sc.get("observation"), dict) else {}
             wid = state.get("window_id")
-            if has_image and isinstance(wid, int) and state.get("screenshot_frame_valid") and state.get("window_bounds"):
-                r = {"ready": threading.Event(), "windows": None, "t": time.time(), "bounds": state["window_bounds"],
-                     "shot": (state.get("screenshot_width"), state.get("screenshot_height"))}
-                self.layouts[(sess, "w", wid)] = r
+            bounds = geometry(state.get("window_bounds"))
+            if has_image and isinstance(wid, int) and state.get("screenshot_frame_valid") and bounds:
+                r = {"ready": threading.Event(), "windows": None, "t": time.time(), "bounds": bounds,
+                     "shot": shot_size(state.get("screenshot_width"), state.get("screenshot_height"))}
+                self._remember(self.layouts, (sess, "w", wid), r, MAX_LAYOUTS)
                 self.zooms.pop((sess, wid), None)
                 self.capture_after(r)
         elif tool == "zoom" and not res.get("isError") and isinstance(args.get("window_id"), int):
             region = zoom_region(args)
             if region:
-                self.zooms[(sess, args["window_id"])] = region
+                self._remember(self.zooms, (sess, args["window_id"]), region, MAX_LAYOUTS)
 
     # --- state ---------------------------------------------------------------------------
     def recording_active(self):
@@ -1474,7 +2028,8 @@ class Hub:
                 "idle_exit_s": int(self.server.idle_s) if self.server else None,
                 "clients": [c.describe() for c in self.active_clients()],
                 "driver": {"connected": self.connected(), "since": self.up_since if self.connected() else None,
-                           "pending": len(self.pending)},
+                           "pending": len(self.pending),
+                           "left_running": sum(len(lease["keys"]) for lease in list(self.leases.values()))},
                 "recordings": len(self.recordings), "coord_guard": "on" if self.coord_on else "off",
                 "socket": None if self.local else self.paths["sock"]}
 
@@ -1490,6 +2045,10 @@ class Hub:
                     proc.kill()
                 except OSError:
                     pass
+        with self.lease_lock:
+            had_lease, self.leases = bool(self.leases), {}
+        if had_lease and not self.local:
+            owners.drop_claim(self.pid)          # the driver connection is closed: nothing it held is running
         if self.local:
             try:
                 os.remove(os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr"))
@@ -1524,6 +2083,48 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def geometry(b):
+    """A window frame from the driver as {x, y, width, height} of finite, sane numbers, or None."""
+    if not isinstance(b, dict):
+        return None
+    try:
+        vals = [float(b[k]) for k in ("x", "y", "width", "height")]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(v) and abs(v) < 1e7 for v in vals) or vals[2] < 0 or vals[3] < 0:
+        return None
+    return dict(zip(("x", "y", "width", "height"), vals))
+
+
+def shot_size(w, h):
+    return (w if _num(w) else None, h if _num(h) else None)
+
+
+def compact_windows(ws):
+    """The part of a window list the coordinate guard compares (id, stacking, frame, visibility, a short app name),
+    for at most MAX_LAYOUT_WINDOWS windows with a valid frame. Anything else a result carried isn't kept. None when
+    there's no list."""
+    if not isinstance(ws, list):
+        return None
+    out = []
+    for w in ws:
+        if not isinstance(w, dict):
+            continue
+        wid = w.get("window_id")
+        if not isinstance(wid, int) or isinstance(wid, bool):
+            continue
+        g = geometry(w.get("bounds") if isinstance(w.get("bounds"), dict) else w)
+        if g is None:
+            continue
+        z = w.get("z_index")
+        out.append({"window_id": wid, "z_index": z if _num(z) else None, "bounds": g,
+                    "is_on_screen": w.get("is_on_screen") is not False, "minimized": bool(w.get("minimized")),
+                    "app_name": clean(w.get("app_name"), 40)})
+        if len(out) >= MAX_LAYOUT_WINDOWS:
+            break
+    return out
+
+
 def pixel_target(tool, a, default_wid=None, batch=None):
     """("window", window_id, points, from_zoom) or ("desktop", None, points, False) for pixel-addressed input;
     None for anything else (element tokens, role/name targets, keys, the cursor overlay)."""
@@ -1552,6 +2153,61 @@ def pixel_target(tool, a, default_wid=None, batch=None):
     if not isinstance(wid, int) or isinstance(wid, bool):
         return None                              # a window named by title: the driver resolves it
     return ("window", wid, pts, bool(a.get("from_zoom")))
+
+
+def key_names(a):
+    """The key names a press_key / hotkey step sends, lowercased ("ctrl+s" and ["ctrl", "s"] alike)."""
+    out = []
+    for v in (a.get("keys"), a.get("key")):
+        if isinstance(v, str):
+            v = re.split(r"[+\s]+", v)
+        if isinstance(v, list):
+            out += [str(x).strip().lower() for x in v if str(x).strip()]
+    return out
+
+
+def geometry_step(tool, a, default_wid=None, batch=None):
+    """Why a run_steps step can move, resize, open, close or raise a window, or open or close a dialog over it (a
+    few words), or None. Pixels in a later step of the same batch were aimed from a screenshot taken before it, so
+    the hub refuses them and asks for a fresh screenshot. Equivalent spellings count the same (a click with count 2
+    is a double click). Not counted, because ordinary batches put pixel clicks after them (click a field, type,
+    Return, click the next field): a single plain click inside a window except on a dialog's button named by role
+    and name, typing (newlines too), set_value, scroll, and keys such as Return, Tab or Ctrl+A, even though a
+    click or Return can open or close a dialog."""
+    if not isinstance(a, dict):
+        return None
+    if tool == "double_click":
+        return "a double click can maximize a window"
+    count = a.get("count")
+    if tool == "click" and _num(count) and count >= 2:
+        return "a double click (click with count 2) can maximize a window"
+    if tool in DRAG_TOOLS:
+        return "a drag can move or resize a window"
+    mods = next((a[k] for k in ("modifier", "modifiers") if isinstance(a.get(k), list)), [])
+    held = [str(m).strip().lower() for m in mods]
+    if tool in ("click", "right_click", "double_click") and any(m.startswith(WM_MODIFIERS) for m in held):
+        return f"a click with {'+'.join(held)[:30]} held can move or resize a window"
+    if tool in ("click", "right_click") and str(a.get("button") or "").lower() == "middle":
+        return "a middle click on a title bar can raise or lower a window"
+    if tool in PRESS_TOOLS:
+        tg = pixel_target(tool, a, default_wid, batch)
+        if tg and tg[0] == "desktop":
+            return "a press on the desktop can hit a window's title bar, buttons or edge"
+    if tool in ("click", "double_click") and str(a.get("role") or "").lower() in ("button", "push button") \
+            and DIALOG_BUTTON_RE.match(str(a.get("name") or "").strip()):
+        return f"a click on \"{clean(a.get('name'), 30)}\" can open or close a dialog"
+    if tool in ("press_key", "hotkey"):
+        keys = key_names(a)
+        combo = "+".join(keys)[:40]
+        if any(k.startswith(WM_MODIFIERS) for k in keys):
+            return f"{combo} can move, resize or switch windows"
+        if any(FKEY_RE.match(k) for k in keys):
+            return f"{combo} can make a window full screen or open one"
+        if any(k in CTRL_NAMES for k in keys) and any(k in CTRL_WINDOW_KEYS for k in keys):
+            return f"{combo} can open or close a window"
+        if any(k in ("escape", "esc") for k in keys):
+            return f"{combo} can close a dialog or menu"
+    return None
 
 
 def zoom_region(a):
@@ -1698,6 +2354,20 @@ def coord_refusal(change, wid, step, tool, args, sess):
     return text, sc
 
 
+def batch_refusal(changer, step, tool, sess):
+    """(text, structured) for a pixel step that comes after a step able to change the windows (geometry_step)."""
+    ci, ct, why = changer
+    text = (f"Refused by the metacomputer bridge (coordinate guard) (step {step + 1}, {tool}): step {ci + 1} ({ct}) "
+            f"comes before it in this batch, and {why}. Pixels aimed from a screenshot taken before the batch may "
+            f"not land where you aimed, so no step was run. Send the steps up to step {ci + 1} on their own, take a "
+            f"fresh screenshot, then aim the pixel steps from that image (or target them by role and name).")
+    sc = {"code": BATCH_CODE, "effect": "refused", "failed_step": step, "window_step": ci,
+          "hint": "a step before this pixel step can change the windows; run it on its own, then take a fresh screenshot"}
+    if sess:
+        sc["session"] = sess
+    return text, sc
+
+
 # --- the server -------------------------------------------------------------------------
 class Server:
     def __init__(self, hub, idle_s):
@@ -1729,9 +2399,8 @@ class Server:
         self.lock_fd = fd
         try:
             if os.path.getsize(self.paths["log"]) > LOG_MAX:
-                os.replace(self.paths["log"], self.paths["log"] + ".1")
-                self.hub.log = os.fdopen(os.open(self.paths["log"], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
-                                         "a", buffering=1)
+                with self.hub.log_lock:
+                    self.hub.rotate_log()
         except OSError:
             pass
         os.ftruncate(fd, 0)
@@ -1807,8 +2476,9 @@ class HubError(RuntimeError):
     pass
 
 
-def hub_pid(env=None):
-    """The running hub's pid for this VM, or None (nobody holds the lock)."""
+def _hub_record(env=None):
+    """What the running hub wrote in RUN_DIR/hub/hub.pid ({"pid", "socket", ...}), or None when nobody holds its
+    lock. The folder is private to this user, so the record is the hub's own word."""
     p = paths(env)
     try:
         fd = os.open(p["pid"], os.O_RDONLY)
@@ -1822,21 +2492,64 @@ def hub_pid(env=None):
         except BlockingIOError:
             pass
         try:
-            return int(json.loads(os.read(fd, 4096) or b"{}").get("pid") or 0) or None
+            rec = json.loads(os.read(fd, 4096) or b"{}")
         except ValueError:
             return None
+        return rec if isinstance(rec, dict) else None
     finally:
         os.close(fd)
 
 
+def hub_pid(env=None):
+    """The running hub's pid for this VM, or None (nobody holds the lock)."""
+    rec = _hub_record(env) or {}
+    try:
+        return int(rec.get("pid") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def hub_sockets(env=None):
+    """Where to find this VM's hub: where the running hub says it listens (a hub started by another version of
+    this code may use another folder), then where this version puts it. Each is checked like any other."""
+    mine = paths(env)["sock"]
+    said = (_hub_record(env) or {}).get("socket")
+    return ([said] if isinstance(said, str) and said and said != mine else []) + [mine]
+
+
+def _connect_any(socks):
+    """_connect to the first of socks that answers; OSError (the last one's) when none does."""
+    err = None
+    for path in socks:
+        try:
+            return _connect(path)
+        except OSError as e:
+            err = e
+    raise err or FileNotFoundError("no hub socket")
+
+
 def _connect(path):
+    """A socket connected to the hub at path, checked before a byte is sent: the socket's folder must be this
+    user's own and private (FileNotFoundError when it doesn't exist yet), and the process listening on it must run
+    as this user (the kernel's word, LOCAL_PEERCRED / SO_PEERCRED). Anything else is HubError: another account
+    could have made the folder and a socket first, and the hello and every tool call would go to it."""
+    d = os.path.dirname(path)
+    st = os.lstat(d)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise HubError(f"the hub's folder {d} isn't a private folder of this user's (owner uid {st.st_uid}, mode "
+                       f"{stat.S_IMODE(st.st_mode):o}); not connecting. Remove it if you don't know it.")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         s.connect(path)
-        return s
     except OSError:
         s.close()
         raise
+    uid, _pid = peer_cred(s)
+    if uid is None or uid != os.getuid():
+        s.close()
+        raise HubError(f"the process serving {path} runs as uid {uid}, not this user ({os.getuid()}); nothing was "
+                       "sent to it")
+    return s
 
 
 def connect_or_start(env=None, timeout=15.0, start=True):
@@ -1844,7 +2557,7 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     env = dict(os.environ if env is None else env)
     p = paths(env)
     try:
-        return _connect(p["sock"])
+        return _connect_any(hub_sockets(env))
     except OSError:
         if not start:
             raise HubError("the metacomputer hub isn't running")
@@ -1861,7 +2574,7 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         try:
-            return _connect(p["sock"])
+            return _connect_any(hub_sockets(env))
         except OSError:
             pass
         rc = proc.poll()
@@ -1905,8 +2618,8 @@ def query_status(env=None, timeout=5.0):
     if not hub_pid(env):
         return None
     try:
-        s = _connect(paths(env)["sock"])
-    except OSError:
+        s = _connect_any(hub_sockets(env))
+    except (OSError, HubError):
         return None
     s.settimeout(timeout)
     try:
@@ -1932,13 +2645,17 @@ def describe_status(st, brief=False):
     if not st:
         return None
     cl = st.get("clients") or []
-    kinds = {"claude-code": "Claude Code", "call": "metacomputer call", "sdk": "script", "test": "test"}
+    kinds = {"claude-code": "Claude Code", "call": "metacomputer call", "sdk": "script", "test": "test",
+             "web": "metacomputer web"}
     parts = [f"pid {st['pid']}", f"{len(cl)} client{'s' if len(cl) != 1 else ''}",
              "driver connected" if (st.get("driver") or {}).get("connected") else "driver not connected"]
     if not cl:
         parts.append(f"idle {st.get('idle_s', 0)} s (exits after {st.get('idle_exit_s')} s)")
     if st.get("recordings"):
         parts.append("recording")
+    left = (st.get("driver") or {}).get("left_running")
+    if left:
+        parts.append(f"{left} call(s) a disconnected client left running (the hub holds the computer for them)")
     parts.append(f"coordinate guard {st.get('coord_guard')}")
     line = ", ".join(parts)
     if brief:

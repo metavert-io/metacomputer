@@ -35,9 +35,11 @@ G  The hub (MCP_HUB=on): a one-shot call and two scripts share one hub and one
    driver connection, logged as one connection with each call's client; `status`
    and `who` show it; `call --session` carries element tokens over; a Chrome from
    browser_prepare outlives the call that started it; `call` is refused while
-   another session acts and the Chrome guard applies to it; the coordinate guard
-   refuses pixels after a resize and under a new window and allows them after a
-   fresh screenshot; `hub stop`. Changes no VM settings.
+   another session acts and the Chrome guard applies to it, also to a Chrome
+   element token alone; the coordinate guard refuses pixels after a resize and
+   under a new window and allows them after a fresh screenshot, and refuses a
+   batch's pixel step after a step that can maximize the window; `hub stop`.
+   Changes no VM settings.
 """
 import hashlib
 import http.server
@@ -90,7 +92,9 @@ def client(cfg):
     old = os.environ.get("MCOMP_CONFIG")
     os.environ["MCOMP_CONFIG"] = cfg
     try:
-        c = MCPClient(cmd=[BIN, "mcp"], stderr_path=os.path.join(TMP, "mcp-stderr.log"))
+        # These groups test the transport itself (SSH roles, the relay, bounded mode at the driver), so they open
+        # the raw driver connection on purpose.
+        c = MCPClient(cmd=[BIN, "mcp"], stderr_path=os.path.join(TMP, "mcp-stderr.log"), transport_test=True)
         c.start(timeout=60)
         return c
     finally:
@@ -789,6 +793,16 @@ def test_g():
             check("the Chrome guard applies to `call`: set_value and run_script aimed at Chrome are refused",
                   rc == 1 and "browser_type" in text_of_result(res) and rc2 == 1 and "run_steps" in text_of_result(res2),
                   (text_of_result(res)[:120], text_of_result(res2)[:120]))
+            rc, res, _ = call_json(cfg, "--session", "ct", "get_window_state", json.dumps(
+                {"pid": cpid, "window_id": cw["window_id"], "include_screenshot": False}))
+            sid = (res.get("structuredContent") or {}).get("snapshot_id")
+            rc, res, _ = call_json(cfg, "--session", "ct", "set_value", json.dumps({"element_token": f"{sid}:1", "value": "x"}))
+            rc2, res2, _ = call_json(cfg, "--session", "ct", "set_value", json.dumps({"element_token": "s0fffff0:1",
+                                                                                      "value": "x"}))
+            check("…by an element token alone too: the hub knows the token came from Chrome's window; a token from a "
+                  "read it never saw is refused", sid and rc == 1 and "browser_type" in text_of_result(res) and rc2 == 1
+                  and (res2.get("structuredContent") or {}).get("code") == "element_token_unknown",
+                  (sid, text_of_result(res)[:120], text_of_result(res2)[:120]))
         guest_ok(cfg, "pkill -f '[b]rowser-profiles'; true")
 
         # 5. the coordinate guard
@@ -819,6 +833,20 @@ def test_g():
         rc, res, _ = click(300, 300)
         check("coordinate guard: allowed again after a fresh screenshot", rc == 0 and "coordinate guard" not in text_of_result(res),
               text_of_result(res)[:200])
+        def size_of():
+            _rc, r_, _o = call_json(cfg, "list_windows", json.dumps({"pid": pid}))
+            w_ = next((w for w in (r_.get("structuredContent") or {}).get("windows") or [] if w.get("window_id") == wid), {})
+            b_ = w_.get("bounds") if isinstance(w_.get("bounds"), dict) else w_
+            return (b_.get("width"), b_.get("height"))
+        before = size_of()
+        rc, res, _ = call_json(cfg, "--session", "cg", "run_steps", json.dumps(
+            {"pid": pid, "window_id": wid, "steps": [{"hotkey": {"keys": ["alt", "F10"]}}, {"click": {"x": 300, "y": 300}}]}))
+        time.sleep(1)
+        after = size_of()
+        check("coordinate guard: in a batch, a pixel step after a key that can maximize the window is refused, and no "
+              "step runs (the window keeps its size)", rc == 1
+              and (res.get("structuredContent") or {}).get("code") == "pixels_after_window_change" and before == after
+              and before[0], (text_of_result(res)[:200], before, after))
         mcomp(cfg, "call", "launch_app", '{"name": "gnome-calculator"}')
         time.sleep(2)
         rc, cres, _ = call_json(cfg, "list_windows", '{"app": "calculator"}')

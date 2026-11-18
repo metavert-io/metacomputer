@@ -10,13 +10,13 @@ Your Mac (Apple silicon, macOS 14+) - trusted controller
 │
 ├── Claude Code ──stdio──▶ bin/metacomputer mcp-lazy ─┐                      │
 ├── metacomputer call [--session NAME] ───────────────┤ Unix socket          │
-├── scripts (lib/mcomp_sdk.py) ───────────────────────┤ RUN_DIR/hub/sock     │
-│                                                     ▼ (0600, uid-checked)  │
+├── scripts, web, GUI tests (lib/mcomp_sdk.py) ───────┤ RUN_DIR/hub/sock     │
+│                                                     ▼ (0600, uid-checked   │
+│                                                        on both ends)       │
 │   the hub, lib/mcp_hub.py: one per VM; every guard, every client           │
 │     one controller (.run/owners/) · Chrome guard · bounded mode ·         │
 │     coordinate guard · action-log notes · events                          │
 │     └── bin/metacomputer mcp (MCOMP_DIRECT_BRIDGE=1) ──ssh─────────────────┐
-├── tests/run_tests.py, web (MCP client, direct bridge `metacomputer mcp`)    │
 ├── bin/metacomputer (start/stop/status/reset/test/record/recordings/view)    │
 │                                                                            │
 ├── cua-netgw (user-mode gateway, host-enforced egress policy)               │
@@ -115,36 +115,50 @@ without closing the bridge's stdin, the bridge notices within 5 s and exits.
 `lib/mcp_hub.py` is one process per VM on the Mac. It holds the single MCP
 connection to Cua Driver in the VM (`bin/metacomputer mcp` with
 `MCOMP_DIRECT_BRIDGE=1`, below) and serves every client on this Mac: Claude
-Code's bridge, `metacomputer call` and scripts (`lib/mcomp_sdk.py`). The idea
-comes from Microsoft's Hybrid Computer Use study: one daemon per desktop that
-the MCP server, the CLI and an SDK share, so references and state carry over.
+Code's bridge, `metacomputer call`, `metacomputer web`, the GUI test harness,
+the status probe and scripts (`lib/mcomp_sdk.py`). The idea comes from
+Microsoft's Hybrid Computer Use study: one daemon per desktop that the MCP
+server, the CLI and an SDK share, so references and state carry over.
 
 - **Where it listens.** A Unix socket, `RUN_DIR/hub/sock`: the folder is 0700 and
   the socket 0600. When that path is too long for a Unix socket (about 104 bytes
-  on macOS), the socket goes in a private folder in `/tmp` named after RUN_DIR
-  (`/tmp/mcomp-hub-UID-HASH/`), checked the same way. Each connection's peer is
-  identified by the kernel (`LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS,
-  `SO_PEERCRED` on Linux, `getpeereid` as a fallback), and anything that isn't
-  this user is closed before a byte is read. The first message must be a
-  `metacomputer/hello` naming the client's kind (Claude Code, `call`, a script),
-  folder, optional driver session and settings.
+  on macOS), the socket goes in a folder named after RUN_DIR inside this user's
+  own temporary folder (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, `/var/folders/.../T/`,
+  0700; `$XDG_RUNTIME_DIR` on Linux; else `~/.cache/metacomputer`), never the
+  shared `/tmp`, where another account could make the folder first. Each
+  connection's peer is identified by the kernel (`LOCAL_PEERCRED` and
+  `LOCAL_PEERPID` on macOS, `SO_PEERCRED` on Linux, `getpeereid` as a fallback),
+  and anything that isn't this user is closed before a byte is read. Clients
+  check the other way before they send anything: the socket's folder must be
+  theirs and private, and the listening process must run as them (the same
+  kernel call on the client's end). Clients look first where the running hub's
+  record (`RUN_DIR/hub/hub.pid`) says it listens, so a hub started by an earlier
+  version, with its socket elsewhere, is still found. The first message must be a
+  `metacomputer/hello` naming the client's kind (Claude Code, `call`, a script,
+  `web`, a test), folder, optional driver session and settings.
 - **One per VM.** `RUN_DIR/hub/hub.pid` is held under `flock` while the hub runs;
   a second hub for the same VM exits (code 3). A client that finds no socket
-  starts one (`mcp_hub.py serve`, detached, logging to `LOG_DIR/hub.log`) and
-  waits for its socket. A client whose settings differ (another `ACTION_LOG`,
+  starts one (`mcp_hub.py serve`, detached, logging to `LOG_DIR/hub.log`,
+  rotated at 5 MB while it runs, with one old copy and repeated notes of one kind
+  summarized past five a minute) and waits for its socket. A client whose settings differ (another `ACTION_LOG`,
   `DRIVER_MODE`, `COORD_GUARD`, …) is refused while others use the hub; when
   it's alone the hub restarts with that client's settings.
-- **When it ends.** After `HUB_IDLE` (10 minutes) with no client and no
-  driver recording (it asks the driver before exiting while one was started
-  through it), on `metacomputer stop`, or on `metacomputer hub stop`.
+- **When it ends.** After `HUB_IDLE` (10 minutes) with no client, no call in
+  flight and no driver recording (it asks the driver before exiting while one
+  was started through it), on `metacomputer stop`, or on `metacomputer hub stop`.
 - **Multiplexing.** Each client's JSON-RPC ids are rewritten on the way to the
   driver (`c<client>.<n>`) and restored on the way back, so each answer reaches
   only its client. `initialize`, `tools/list`, `ping` and `logging/setLevel` are
   answered by the hub from the driver's handshake. The driver's
-  `tools/list_changed` goes to every client; progress notifications go to the
-  client whose token they carry; other notifications aren't any one client's
-  and are dropped. Requests the driver makes of its client (`ping`) are answered
-  by the hub. A client's cancellation is passed on with the rewritten id.
+  `tools/list_changed` starts one refresh of the tool list on a single worker
+  (repeats while it runs fold into one more pass, at most one every 2 s) and
+  goes to every client once per refresh; progress notifications go to the
+  client whose token they carry (the token is forgotten with its request);
+  other notifications aren't any one client's and are dropped. Requests the
+  driver makes of its client (`ping`) are answered by the hub. A client's
+  cancellation is passed on with the rewritten id. `metacomputer/claim` checks
+  for other controllers and claims the computer without a tool call, for
+  clients that want to know before they start (`web`, the GUI tests).
 - **Driver sessions.** Every client shares one driver runtime, so element
   tokens, driver sessions, recordings and a Chrome that `browser_prepare`
   started outlive any one call. Screenshot frames are per driver session (Cua
@@ -165,7 +179,19 @@ the MCP server, the CLI and an SDK share, so references and state carry over.
   connection with a plain error: a client's own, or, for the VM, the driver
   connection, failing every call in flight. A driver that doesn't take a message
   within 30 s is dropped the same way, so a stuck VM can't hold every client's
-  call forever.
+  call forever. JSON nested more than 100 levels deep, or with more than a
+  million values (counted before parsing), is a bad line, skipped
+  (`lib/wirelimits.py`, whose depth check keeps one iterator per level; the
+  readers' cleanup runs whatever stops them). So is a message of the wrong
+  shape (an id, method or params of the wrong type); past 50 bad lines in a
+  minute the hub closes the driver connection like an oversized one. What
+  the driver can make the hub keep is capped regardless of message size: a tool
+  list refresh stops after 50 pages, 2,000 tools, 16 MB, 60 s or a repeated
+  cursor (the earlier list stays); pid, window and snapshot maps and screenshot
+  layouts keep the newest few thousand entries, and a layout keeps only checked
+  geometry, at most 256 windows each and 32,768 in all. The driver connection's stderr
+  is drained on a thread into a 64 KB tail (what error messages quote) and at
+  most 1 MB per connection in `RUN_DIR/hub/upstream.stderr`.
 - **Reconnecting.** When the driver connection drops (the VM stopped or
   restarted), every pending request fails with a plain message, everything the
   hub learned about that runtime is forgotten, and the next call reconnects.
@@ -188,7 +214,23 @@ no refusals), and the GUI and option tests pass with both on.
   Code session's under its bridge's pid (dropped when it disconnects), a
   one-shot `metacomputer call`'s under its Claude Code process, or else, like
   `metacomputer sh`'s, the shell that ran it (kept for the activity window, and
-  the same controller from the same terminal session). `metacomputer stop/reset/restore/test`
+  the same controller from the same terminal session). `metacomputer web` and
+  the GUI tests are clients too and claim before they start (`metacomputer/claim`;
+  `web --override` first releases other sessions' claims, as `metacomputer
+  release` does); a status connection can't claim. When a client of any kind
+  disconnects while acting calls it made are still running in the driver, the
+  hub holds the computer for them in a claim of its own (kind `lease`,
+  `.run/owners/<hub pid>.json`), written before the client's claim is dropped,
+  both under the owners lock (if it can't be written, the client's claim stays
+  until a later write works). A keeper thread rewrites it while those calls run,
+  so it stays active; it's dropped when the last of them is answered or the
+  driver connection closes, and past the activity window (`MCOMP_ACTIVE_S`) the
+  keeper closes the driver connection first, so nothing keeps acting after the
+  computer is let go. Removing a request, assigning it to a lease and finishing
+  it happen under one lock. An acting call another controller still has running
+  counts as busy even without its claim file (`who` and the refusal describe
+  it). A lease isn't another controller to the same client process or its Claude
+  Code session. `metacomputer stop/reset/restore/test`
   refuse too unless given `--override`. The hub's own SSH connection isn't
   counted as a controller; any other direct connection is.
 - **Chrome** (docs/chrome-investigation.md). When the driver delivers
@@ -197,7 +239,18 @@ no refusals), and the GUI and option tests pass with both on.
   input, and while such a pair exists Chrome ignores all keyboard input, for any
   app's background input, until the pair is removed. So the hub:
   - learns which guest pids are Chrome from results it relays, asking
-    `list_windows` when needed;
+    `list_windows` when needed, and which window and app each read's snapshot
+    belongs to, so a call that names its target only by an element token
+    (`<snapshot_id>:<row>`, which carries the pid to the driver but not to the
+    hub) is resolved too. Every hint a call gives (pid, window id through the
+    hub's window list or one `list_windows`, app or window name, token) is
+    resolved: any that's Chrome makes the call Chrome's; a token from a read the
+    hub doesn't have is refused whatever else the call names
+    (`element_token_unknown`: read the window again), a window id the driver
+    doesn't list is refused (`window_unknown`), and a token whose app differs from
+    the pid or window the call names is refused (`target_conflict`). A
+    `run_steps` step is judged on its own target when it names one, else on its
+    batch's;
   - rewrites input tools and `run_steps` aimed at Chrome to
     `delivery_mode: "foreground"`;
   - refuses `set_value` and `run_script` aimed at Chrome;
@@ -264,10 +317,38 @@ targets, and `parallel_mouse_drag`'s paths. The active window isn't reported by 
 doesn't change where a point lands; a window raised over the point is caught
 by the stacking check.
 
+Inside a `run_steps` batch the comparison happens once, before the batch, and
+the hub can't look between steps. So a pixel step that comes after a step able
+to move, resize, open, close or raise a window is refused before anything runs
+(code `pixels_after_window_change`, with `failed_step` and `window_step`):
+- a `double_click` or a `click` with `count` 2 or more (a title bar
+  maximizes), or a drag (`drag`, `mouse_*`);
+- a click with Super, Meta, Alt or Hyper held (window-manager move and
+  resize), or a middle click (raises or lowers a window);
+- a press on the desktop frame (`scope: "desktop"`: a title bar, its buttons,
+  a window edge);
+- a click on a dialog's button named by role and name (OK, Cancel, Close,
+  Save, Open, Apply, Yes, No, Don't Save, …);
+- `press_key` / `hotkey` with Super, Meta, Alt or Hyper (window-manager
+  shortcuts), a function key (F11 is full screen), Ctrl with N, W, Q, O, S
+  or P (new, close, quit; the open, save and print dialogs), or Escape (closes
+  a dialog or menu).
+
+The rule is narrow on purpose: a single plain click inside a window, typing
+(newlines too), `set_value`, scroll and keys such as Return, Tab or Ctrl+A
+don't count, although a click or Return can open or close a dialog, because
+the benchmark's own batches put pixel clicks after them (click a field,
+Ctrl+A, type, Return, click the next field). Checked against the 373 recorded
+benchmark batches: the rule refuses none of them; counting Return would refuse
+three. The refusal says to send the steps up to
+that one on their own, take a fresh screenshot and aim from it.
+
 The direct bridge, `bin/metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1`, is
 `ssh -T` with the `mcp` key to `cua@127.0.0.1:2277`. It's the hub's own
-connection, and the GUI tests and `web` use it for theirs (they check for other
-controllers and claim the computer themselves). Without that variable, and with
+connection; apart from it only the transport tests open it (`lib/mcp_client.py`
+refuses it unless a test passes `transport_test=True`), since it skips the
+hub's guards. Everything else that drives the desktop, `web` and the GUI test
+harness included, goes through the hub (`lib/mcomp_sdk.py`). Without that variable, and with
 `MCP_HUB=on`, `metacomputer mcp` runs the same bridge as `mcp-lazy`, so an MCP
 client registered with the older command gets the hub and its guards. In the
 guest the key is `restrict,command="/opt/metacomputer/bin/driver-mcp"`: no
@@ -459,8 +540,10 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
    30 fps, H.264) of the
    X display plus a trajectory folder per action (`turn-NNNNN/` with
    before/after accessibility state, before/after window images, click
-   markers, `action.json`). The test harness uses this for every test and
-   copies everything to `recordings/<run>/` and `results/<run>/<test>/guest/`.
+   markers, `action.json`). The test harness uses this for every test (in a
+   driver session of its own, through the hub) and copies everything to
+   `recordings/<run>/` and `results/<run>/<test>/guest/`, unpacked as it streams
+   in, with the same limits as `metacomputer get` (`guest_import.import_from_command`).
 2. **Whole-desktop (any task, any driver):** `metacomputer record start|stop` runs
    `desktop-record` (ffmpeg x11grab, visible pointer, 20 fps, H.264) and
    saves to `recordings/manual/`.
@@ -473,7 +556,7 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | --- | --- |
 | `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
 | `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
-| `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe, the hub (pid, clients, idle time) |
+| `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe (through the hub, as a status client), the hub (pid, clients, idle time) |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
 

@@ -25,8 +25,13 @@ request; `h.tools()` lists the tools; `h.status()` is the hub's own report.
 With MCP_HUB=off the same guards run inside this process instead, on a connection
 of its own that ends with close().
 
-CLI (what `metacomputer call` runs):
+`h.claim(what)` checks for other controllers and claims the computer before a
+script starts acting (an acting call does the same on its own); it returns
+{"claimed": bool, "others": [...]}.
+
+CLI (what `metacomputer call` runs, and the status probe):
   mcomp_sdk.py call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON']
+  mcomp_sdk.py probe | tools | describe TOOL
 On a terminal, the result's text has control characters escaped (termsafe.py);
 --raw prints it exactly, --json prints the whole result as JSON.
 """
@@ -45,6 +50,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import mcp_hub  # noqa: E402
 import termsafe  # noqa: E402
+import wirelimits  # noqa: E402
 from mcp_client import ToolResult  # noqa: E402
 
 LAB = os.path.dirname(LIB)
@@ -96,7 +102,9 @@ class Connection:
             line = self._f.readline(mcp_hub.MAX_UPSTREAM_MSG + 1)
         finally:
             self.sock.settimeout(None)
-        return json.loads(line) if line else None
+        if len(line) > mcp_hub.MAX_UPSTREAM_MSG and not line.endswith(b"\n"):
+            raise ValueError("a message over the limit")
+        return wirelimits.loads(line) if line else None
 
     def start(self):
         threading.Thread(target=self._reader, daemon=True, name="mcomp-sdk-reader").start()
@@ -110,7 +118,7 @@ class Connection:
                 if len(line) > mcp_hub.MAX_UPSTREAM_MSG and not line.endswith(b"\n"):
                     break                        # a frame over the limit: drop the connection, never parse pieces
                 try:
-                    msg = json.loads(line)
+                    msg = wirelimits.loads(line)
                 except ValueError:
                     continue
                 if isinstance(msg, dict) and self.on_message:
@@ -118,14 +126,15 @@ class Connection:
                         self.on_message(msg)
                     except Exception:
                         pass
-        except (OSError, ValueError):
+        except Exception:
             pass
-        self.alive = False
-        if self.on_close:
-            try:
-                self.on_close()
-            except Exception:
-                pass
+        finally:                                 # whatever ended the reading, the waiting calls hear of it
+            self.alive = False
+            if self.on_close:
+                try:
+                    self.on_close()
+                except Exception:
+                    pass
 
     def close(self):
         self.alive = False
@@ -187,10 +196,12 @@ def open_connection(env=None, kind="sdk", session=None, tools_hash=None, timeout
 class Hub:
     """A connection to the virtual computer through the metacomputer hub. See the module's docstring."""
 
-    def __init__(self, cfg=None, session=None, timeout=120, kind="sdk", env=None):
+    def __init__(self, cfg=None, session=None, timeout=120, kind="sdk", env=None, log=None):
         if session is not None and not mcp_hub.SESSION_RE.match(str(session)):
             raise ValueError("session names: 1-64 letters, digits, '.', '_' or '-'")
         self.cfg, self.session, self.timeout, self.kind, self._env = cfg, session, timeout, kind, env
+        self.log = log                           # callable(dict) for each call (ToolResult.log_entry), optional
+        self.calls = 0
         self.conn = None
         self.ids = itertools.count(1)
         self.waiting = {}
@@ -256,17 +267,28 @@ class Hub:
 
     def call(self, tool, args=None, timeout=None):
         t0 = time.time()
+        err = None
+        self.calls += 1
         try:
             res = self.request("tools/call", {"name": tool, "arguments": args or {}}, timeout)
         except HubError as e:
-            res = {"isError": True, "content": [{"type": "text", "text": str(e)}]}
-        return ToolResult(tool, args or {}, res if isinstance(res, dict) else {}, time.time() - t0)
+            err = str(e)
+            res = {"isError": True, "content": [{"type": "text", "text": err}]}
+        r = ToolResult(tool, args or {}, res if isinstance(res, dict) else {}, time.time() - t0)
+        if self.log:
+            self.log(r.log_entry(err))
+        return r
 
     def tools(self):
         return (self.request("tools/list") or {}).get("tools") or []
 
     def status(self):
         return self.request("metacomputer/status")
+
+    def claim(self, what=None):
+        """Check for other controllers and claim the computer now (one step under the owners lock, as an acting
+        call does). {"claimed": True} or {"claimed": False, "others": [descriptions]}."""
+        return self.request("metacomputer/claim", {"tool": what or self.kind}) or {}
 
     def close(self):
         if self.conn:
@@ -355,8 +377,52 @@ def call_main(argv):
     return 1 if r.is_error else 0
 
 
+def probe_main():
+    """`metacomputer status` / `start`: does the driver answer? Through the hub (a status client: it changes
+    nothing and doesn't keep the hub running), one JSON line."""
+    t0 = time.time()
+    try:
+        with Hub(kind="status", timeout=60, env=resolve_env()) as h:
+            r = h.call("get_screen_size", {})            # a read the driver itself has to answer
+            if r.is_error:
+                raise HubError(r.text[:300])
+            init = h.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                            "clientInfo": {"name": "mcomp-probe", "version": "1"}}) or {}
+            n = len(h.tools())
+        server = init.get("serverInfo") or {}
+        print(json.dumps({"ok": True, "server": f"{server.get('name', '')} {server.get('version', '')}".strip(),
+                          "protocol": init.get("protocolVersion"), "tools": n, "ms": int((time.time() - t0) * 1000)}))
+        return 0
+    except (HubError, OSError, ValueError) as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return 1
+
+
+def tools_main(argv):
+    """The driver's tools (names and first lines), or one tool's schema: `mcp_client.py --tools | --describe`."""
+    try:
+        with Hub(kind="status", timeout=60, env=resolve_env()) as h:
+            tools = h.tools()
+    except HubError as e:
+        say_err(e)
+        return 1
+    if argv[:1] == ["describe"]:
+        hit = [t for t in tools if t.get("name") == (argv[1] if len(argv) > 1 else None)]
+        for t in hit:
+            print(json.dumps(t, indent=2))
+        return 0 if hit else 1
+    for t in tools:
+        line = f"{str(t.get('name')):28s} {((t.get('description') or '').splitlines() or [''])[0][:110]}"
+        print(for_tty(line))
+    return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "call":
         sys.exit(call_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "probe":
+        sys.exit(probe_main())
+    if len(sys.argv) > 1 and sys.argv[1] in ("tools", "describe"):
+        sys.exit(tools_main(sys.argv[1:]))
     print(__doc__)
     sys.exit(2)

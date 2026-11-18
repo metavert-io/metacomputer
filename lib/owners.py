@@ -9,15 +9,22 @@ Two kinds of controller can drive the VM's desktop:
   folder, the time and name of its last tool call. The hub writes them for its
   clients; a one-shot `metacomputer call` is held by its Claude Code process,
   or else the shell that ran it.
-- Direct connections (`metacomputer mcp` with MCOMP_DIRECT_BRIDGE=1: the GUI
-  tests, `web`, mcp_client.py). They are found as live SSH processes using the
-  MCP key. The hub's own connection (and a bridge's) isn't one of them.
+- Direct connections (`metacomputer mcp` with MCOMP_DIRECT_BRIDGE=1: the
+  transport tests, or any program running as you that sets it). They are found
+  as live SSH processes using the MCP key. The hub's own connection (and a
+  bridge's) isn't one of them.
 
 The shell channel (`metacomputer sh`) acts too: each run (except --read-only)
 keeps .run/owners/<pid>.json up to date, where pid is its Claude Code process,
 or outside Claude Code the shell that ran it, since the command itself exits.
 Such a claim (kind "shell") lasts the activity window from its last run even after
 that shell exits, and runs from the same terminal session (sid) are the same controller.
+
+The hub holds a claim of its own (kind "lease", .run/owners/<hub pid>.json) while
+acting calls that a client left running when it disconnected are still running in
+the driver: until they end or the driver connection closes, at most the activity
+window. It isn't another controller to that client's process or its Claude Code
+session.
 
 "Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
 or a shell it runs under, so a session never blocks itself.
@@ -152,14 +159,18 @@ def lock(timeout=10.0):
         os.close(fd)   # releases the lock
 
 
-def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None):
+def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None, extra=None):
     os.makedirs(OWNERS_DIR, exist_ok=True)
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
     if kind:
-        rec["kind"] = kind      # "shell": metacomputer sh outside Claude Code (kept by its time, see claims())
+        # "shell": metacomputer sh outside Claude Code (kept by its time, see claims()); "lease": the hub holding
+        # the computer for acting calls a client left running when it disconnected (mcp_hub.Hub.hand_over_claim)
+        rec["kind"] = kind
     if sid is not None:
         rec["sid"] = sid        # the terminal session it ran in: later runs from it are the same controller
+    for k, v in (extra or {}).items():
+        rec.setdefault(k, v)
     # A temporary file of its own: two writers for one claim (two runs under one session) don't collide.
     fd, tmp = tempfile.mkstemp(dir=OWNERS_DIR, prefix=".claim-", suffix=".tmp")
     try:
@@ -322,6 +333,15 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
 def describe(o):
     if o["kind"] == "session":
         state = "ACTIVE" if o["active"] else "idle"
+        if o.get("claim") == "pending":
+            src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (holder pid {o.get('bridge_pid')})"
+            return (f"an unfinished {o.get('last_tool')} call from a {src}, still running in the driver, in "
+                    f"{short(o.get('cwd'))}: started {o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [ACTIVE]")
+        if o.get("claim") == "lease":
+            src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (pid {o.get('client_pid')})"
+            return (f"unfinished call(s) ({o.get('last_tool')}) that a {src} left running when it disconnected, held by "
+                    f"the hub (pid {o.get('bridge_pid')}) until they end, in {short(o.get('cwd'))}: "
+                    f"{o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [{state}]")
         who = (f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid")
                else f"metacomputer sh outside Claude Code (shell pid {o.get('bridge_pid')}"
                     f"{', exited' if o.get('holder_gone') else ''}, terminal session {o.get('sid')})" if o.get("claim") == "shell"
@@ -355,7 +375,7 @@ def main(argv):
             return 0
         for c in all_claims:
             tag = "  <- this session" if me and c.get("claude_pid") == me else ""
-            print("  " + describe({"kind": "session", **c}) + tag)
+            print("  " + describe({**c, "kind": "session", "claim": c.get("kind") or "bridge"}) + tag)
         for d in direct:
             print("  " + describe({"kind": "direct", **d}))
         return 0

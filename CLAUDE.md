@@ -50,14 +50,18 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `set`, `bind`, `unlock`, `rekey`, `recover` and `audit-sink add|remove`.
 - The hub (`lib/mcp_hub.py`, `MCP_HUB=on`; architecture.md "The hub") is one
   process per VM holding the one driver connection; Claude Code's bridge,
-  `metacomputer call` and scripts (`lib/mcomp_sdk.py`) all go through it, and it
-  applies every guard to every client: one controller (check and claim under
-  `owners.lock()`), the Chrome guard, bounded mode, the coordinate guard
+  `metacomputer call`, `web`, the GUI test harness and scripts (`lib/mcomp_sdk.py`)
+  all go through it, and it applies every guard to every client: one controller
+  (check and claim under `owners.lock()`, a lease for calls a client left
+  running), the Chrome guard, bounded mode, the coordinate guard
   (`COORD_GUARD`), action-log notes, events. A refusal from any of them is the
   user's control: report it, never route around it (`call`, a script,
-  `MCOMP_DIRECT_BRIDGE=1`, the shell). New guards go in the hub, never in one
-  client. The VM is untrusted: keep the hub's frame limits and per-client
-  backlogs, and escape the VM's text on a terminal (`lib/termsafe.py`).
+  `MCOMP_DIRECT_BRIDGE=1`, the shell). The raw driver connection is for the hub
+  and transport tests only (`MCPClient(transport_test=True)`). New guards go in
+  the hub, never in one client. The VM is untrusted: keep the hub's frame limits,
+  per-client backlogs and caps on what the driver can make it keep, parse wire
+  JSON and drain stderr with `lib/wirelimits.py`, and escape the VM's text on a
+  terminal (`lib/termsafe.py`).
   `metacomputer call --session NAME` keeps element tokens and driver state
   between calls. Tests: `python3 tests/test_hub.py` (no VM) and
   `tests/test_options.py G` (VM).

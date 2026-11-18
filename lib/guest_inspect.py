@@ -383,9 +383,19 @@ def host_escape():
 
 
 def main(argv):
+    if argv[:1] == ["--json-out"]:
+        # `inspect --json`: the VM's snapshot as JSON, written again by this Mac (ASCII only: every control or
+        # non-ASCII character is a \u escape), so nothing the VM sent reaches a terminal raw. The same JSON.
+        try:
+            d = json.load(sys.stdin)
+        except (ValueError, RecursionError):
+            print("metacomputer: the VM's snapshot isn't JSON", file=sys.stderr)
+            return 1
+        print(json.dumps(d, ensure_ascii=True))
+        return 0
     if argv[:1] in (["--render"], ["--render-profiles"]):
         # Titles, names and commands come from the VM: escape sequences in them are shown,
-        # never sent to the terminal. --json (the raw JSON) stays exact.
+        # never sent to the terminal. --json is the same data as ASCII-only JSON (--json-out).
         esc = host_escape()
         try:
             d = json.load(sys.stdin)
@@ -395,7 +405,7 @@ def main(argv):
                 ps = d["browser"]["named_profiles"]
                 text = "\n".join([f"{p['name']:<40} {p['bytes'] // 2**20:>6} MiB  {'in use' if p['in_use'] else ''}"
                                   for p in ps] or ["no driver-owned Chrome profiles in the VM"])
-        except (ValueError, KeyError, TypeError, AttributeError, IndexError):
+        except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError):
             print("metacomputer: the VM's snapshot isn't in the expected shape (metacomputer inspect --json shows it)",
                   file=sys.stderr)
             return 1
