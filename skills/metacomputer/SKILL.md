@@ -7,7 +7,7 @@ description: Claude's own disposable computer (metacomputer): an isolated Ubuntu
 
 Run its commands as `~/.local/bin/metacomputer <command>`: that absolute path works from any folder. Below, `metacomputer X` is short for it. Use one command per Bash call, with no shell variables, `;` or `&&` chains, which trip permission checks.
 
-- **What it is.** Claude Code runs on this Mac (macOS). The virtual computer is a separate Ubuntu 24.04 ARM64 XFCE desktop in a Lume VM (`metacomputer where` shows the project folder). Its wallpaper and panel say **VIRTUAL COMPUTER**.
+- **What it is.** Claude Code runs on this Mac (macOS). The virtual computer is a separate Ubuntu 24.04 ARM64 XFCE desktop in a Lume VM (`metacomputer where` shows the project folder). Its wallpaper and panel say **VIRTUAL COMPUTER**. The desktop user is `cua`, and `~` in the VM is its home.
 - **How you reach it.** Use the `mcp__metacomputer__*` tools only. They are Cua Driver running inside the VM, reached through a hub on this Mac, and they cannot reach the Mac.
 - **What it can reach.** It has the public internet. It cannot reach your local network, a tailnet or the Mac's own services, and it holds none of the user's accounts, files or logins.
 

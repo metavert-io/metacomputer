@@ -95,8 +95,8 @@ Quoted as the driver or the hub prints them; `…` stands for the parts that var
 | `run_steps rejected before running anything: …`, `unknown argument …; accepted: …`, `invalid arguments` | The call's shape is wrong; nothing ran | Fix the shape ([batch shape](#acting)) and resend |
 | `refusing click: the target reports it is not enabled` | The control is disabled; nothing was sent | Do what enables it first. After a `set_value`, type the text with keys instead: some dialogs enable their buttons only on typing. |
 | `invoke_menu: menu path segment N was not found` | Other menu titles, or the app is in another mode | Read the menu bar for the exact titles. In Calc, leave chart edit mode first. |
-| `Background delivery is not available: this menu only publishes its items once it is open …` | The menu shows its items only when open | Resend with `delivery_mode: "foreground"` |
-| Typing goes nowhere after a dialog opened through an accessibility action; `atspi_app_unresponsive` | The app is frozen | Check the process once (`metacomputer inspect processes`), then `kill_app` and relaunch. Next time open dialogs with shortcuts. |
+| `Background delivery is not available: this menu only publishes its items once it is open …` | The menu shows its items only when open | If the item opens a dialog in Mousepad or Thunar, use its shortcut instead (a foreground menu froze them). Otherwise resend with `delivery_mode: "foreground"`. |
+| Typing goes nowhere after a dialog opened through an accessibility action; `atspi_app_unresponsive` | The app is frozen | Check the process once (`metacomputer inspect processes`), then `kill_app` and relaunch. If `kill_app` refuses (it stops only apps the driver launched), don't work around it: ask the user, or report it. Next time open dialogs with shortcuts. |
 | `The virtual computer is in use by another controller` | The one-controller rule | Stop. Ask the user, or in a headless run report it and end. |
 | `Refused by the metacomputer bridge: …` (Chrome), `outside the capability manifest` (bounded mode) | The user's controls | Follow the route it names, or report it. Never reach the same effect another way. |
 | `metacomputer sh: unknown argument '…'` | The shell command needs `-c` | `metacomputer sh -c 'COMMANDS'` |
@@ -163,8 +163,12 @@ End each task, and each checkpoint that matters, with the cheapest check that pr
 
 ### Other apps
 
-- **Mousepad (and other plain GTK 3 apps): open dialogs with their shortcut, not `invoke_menu`.** `invoke_menu {path:["File","Save As..."]}` opens the dialog, but the app then stops answering accessibility calls (`atspi_app_unresponsive`) and has to be killed. A background `hotkey ["ctrl","s"]` (or `["ctrl","shift","s"]`) opens a working dialog; then follow the file-dialog steps above. LibreOffice's Save As through `invoke_menu` is fine.
-- **Thunar.** Icon view has no accessible items. Click the `List View` button first; files then appear as `table cell` rows, and `double_click` on a cell opens it.
+- **Mousepad, Thunar and other plain GTK 3 apps: open dialogs with their shortcuts, never `invoke_menu`.** An `invoke_menu` that opens a dialog (Mousepad's Save As, Thunar's Create Folder), even in the foreground, left the app not answering accessibility calls (`atspi_app_unresponsive`). Background shortcuts open working dialogs: Mousepad Ctrl+S and Ctrl+Shift+S (then the file-dialog steps above). LibreOffice's menus through `invoke_menu` are fine.
+- **Thunar.**
+  - Icon view has no accessible items. Click the `List View` button first; files then appear as `table cell` rows, and `double_click` on a cell opens it.
+  - Shortcuts that work in the background: Ctrl+Shift+N (new folder), F2 (rename), Ctrl+C, Ctrl+X, Ctrl+V, Delete (to the Trash), Alt+Up (parent folder), Ctrl+L (type a path, then Return), Ctrl+S (select by pattern).
+  - In the Create Folder and Rename dialogs, `set_value` on the name commits it and closes the dialog. Don't click Create or Rename after it; check with `list_windows` or the shell.
+  - Thunar runs as a daemon the driver didn't start, so `kill_app` refuses it.
 - **xfce4-terminal:** its text isn't in the tree. Read command output with `metacomputer sh`, or from a screenshot.
 - **Closing apps.** Prefer each app's own Close or Quit control. Use `kill_app` only if the app is stuck.
 
