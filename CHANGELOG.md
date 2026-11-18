@@ -32,6 +32,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - A benchmark (`bench/`, bench/README.md): 20 desktop tasks run in fresh headless Claude Code sessions on a test VM, scored by checks that read the VM's real state, with switches to compare one change at a time. The first baseline passed all 20 for $11.95.
 
 ### Changed
+- The README is rewritten as an overview: the one-line install, what it can do, security first, the features and the prompt gallery. Its reference sections moved, unchanged apart from updates for this release: the how-to guide, isolation in detail, known limitations and troubleshooting to docs/guide.md, and every command and setting to docs/commands.md. Install options and uninstalling are in docs/install.md, and the tests in TESTING.md.
 - Storage, after a second audit (docs/storage.md, SECURITY.md "Storage"):
   - S3 volumes sync in two stages: rclone works only on a private sync copy in metacomputer's
     state folder, and metacomputer exchanges it with the folder the VM sees through
