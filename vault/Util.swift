@@ -425,28 +425,49 @@ func lastAuditEvent(_ path: String) -> (Int, String) {
 }
 
 /// Append one event (metadata only, never a value) to audit.jsonl (0600) and the unified log.
+/// With `macKey` (the vault's audit key: only a process holding the vault key has it), the
+/// record carries `mac`, HMAC-SHA256 over its canonical JSON without `mac` and `hash`: the
+/// unlock process checks it before it signs the record for a sink. Without one (a refusal
+/// written while the vault is locked), the record is unauthenticated. Returns the stored
+/// record, or nil when it couldn't be written (the caller decides whether to go on).
 @discardableResult
-func audit(_ paths: Paths, _ record: [String: Any]) -> [String: Any] {
+func audit(_ paths: Paths, _ record: [String: Any], macKey: [UInt8]? = nil) -> [String: Any]? {
     var r = (cleanAll(record) as? [String: Any]) ?? [:]
     r["ts"] = auditTime()
     r["id"] = UUID().uuidString.lowercased()   // the CloudEvents id: receivers drop repeated deliveries by it
-    r["time"] = nil
-    var stored: [String: Any] = r
+    for k in ["time", "mac", "hash", "seq", "prev"] { r[k] = nil }
+    var stored: [String: Any]?
+    var why = "can't lock the audit log"
     _ = try? withFileLock(paths.dir + "/audit.lock") {
         let (seq, prev) = lastAuditEvent(paths.audit)
         r["seq"] = seq + 1
         r["prev"] = prev
+        if let k = macKey { r["mac"] = auditRecordMAC(k, r) }
         r["hash"] = eventHash(r)
         let line = canonicalJSON(r)
         let fd = open(paths.audit, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
-        if fd >= 0 {
-            _ = writeAll(fd, Array((line + "\n").utf8))
-            close(fd)
+        guard fd >= 0 else { why = "can't open audit.jsonl: \(String(cString: strerror(errno)))"; return }
+        defer { close(fd) }
+        var st = stat()
+        let before = fstat(fd, &st) == 0 ? st.st_size : -1
+        guard writeAll(fd, Array((line + "\n").utf8)), fsync(fd) == 0 else {
+            why = "can't write audit.jsonl: \(String(cString: strerror(errno)))"
+            if before >= 0 { _ = ftruncate(fd, before) }   // no half line for the chain to trip over
+            return
         }
         unifiedLog(line)
         stored = r
     }
+    if stored == nil { unifiedLog("audit record NOT written (\(why)): " + canonicalJSON(r)) }
     return stored
+}
+
+/// The creation MAC of an audit record: over its canonical JSON without `mac` and `hash`.
+func auditRecordMAC(_ key: [UInt8], _ r: [String: Any]) -> String {
+    var x = r
+    x["mac"] = nil
+    x["hash"] = nil
+    return hmacSHA256Hex(key: key, data: Array(canonicalJSON(x).utf8))
 }
 
 /// Every audit event in the unified log too: `log show --predicate 'subsystem == "io.metavert.metacomputer.vault"'`.

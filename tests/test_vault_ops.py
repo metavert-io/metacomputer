@@ -51,7 +51,9 @@ PASS3 = "dummy passphrase three 47"
 PW_VALUE = ts.PW_VALUE
 UPSTREAM_VALUE = "dummy-api-key-7Hq2Zp9W"
 SITE = ts.SITE
-VALUES = [PASS, PASS2, PASS3, PW_VALUE, UPSTREAM_VALUE]
+UPSTREAM_VALUE2 = "dummy-api-key-2nd-Qm4x"
+RACE_VALUE = "dummy race value 5"
+VALUES = [PASS, PASS2, PASS3, PW_VALUE, UPSTREAM_VALUE, UPSTREAM_VALUE2, RACE_VALUE]
 RECOVERY_RE = re.compile(r"\b([A-Z2-7]{4}(?:-[A-Z2-7]{4}){7})\b")
 KEY_RE = re.compile(r"signing key[^\n]*\n\s+([A-Za-z0-9+/]{43}=)")
 SPOOL_NAME = re.compile(r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{16}\.json")
@@ -387,6 +389,35 @@ def run(td, procs):
     def audit_recs():
         return [json.loads(l) for l in open(alog)] if os.path.exists(alog) else []
 
+    def canon(o):
+        return json.dumps(o, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def rehash(e):
+        e.pop("hash", None)
+        e["hash"] = hashlib.sha256(canon(e).encode()).hexdigest()
+        return e
+
+    def rewrite_last(change):
+        """What an agent running as the user can do: change the newest record and recompute its hash."""
+        lines = open(alog).read().splitlines()
+        e = json.loads(lines[-1])
+        change(e)
+        rehash(e)
+        lines[-1] = canon(e)
+        with open(alog, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        return e
+
+    def append_forged(fields):
+        """A whole new record, chained and hashed correctly, without the vault's key."""
+        last = json.loads(open(alog).read().splitlines()[-1])
+        e = dict(fields, seq=last["seq"] + 1, prev=last["hash"], ts="2026-01-01T00:00:00.000000Z",
+                 id="00000000-0000-4000-8000-%012d" % (last["seq"] + 1))
+        rehash(e)
+        with open(alog, "a") as f:
+            f.write(canon(e) + "\n")
+        return e
+
     def start_unlock(args=(), extra=None, passphrase=PASS):
         p = ts.Pty([BIN, "unlock", *args], dict(env, **(extra or {})))
         procs.append(p)
@@ -545,6 +576,20 @@ def run(td, procs):
         current = PASS2
     rc, out = tty([BIN, "delete", "short"], [("Vault passphrase", current + "\n")])
     check("the current passphrase opens the vault", "wrong passphrase" not in out, out)
+    pause = os.path.join(td, "rekey-pause")
+    pr = ts.Pty([BIN, "rekey"], dict(env, MCOMP_VAULT_TEST_PAUSE_REKEY=pause))
+    procs.append(pr)
+    for want, say in (("Vault passphrase", current), ("New vault passphrase", current), ("same passphrase again", current)):
+        pr.expect(want)
+        pr.send(say + "\n")
+    waited = wait_for(lambda: os.path.exists(pause + ".waiting"), 60)
+    rc, out = tty([BIN, "set", "race-secret", "--kind", "text", "--origin", SITE],
+                  [("Vault passphrase", current + "\n"), ("Value for race-secret", RACE_VALUE + "\n")])
+    open(pause, "w").close()
+    rrc = pr.wait(90)
+    rc2, out2 = tty([BIN, "delete", "race-secret"], [("Vault passphrase", current + "\n")])
+    check("rekey keeps a secret set while it was making its new keys (one lock across reload and save)",
+          waited and rc == 0 and rrc == 0 and rc2 == 0 and "no secret named" not in out2, (waited, rc, rrc, out2[-300:]))
 
     # --- 6. audit sinks: four kinds at once ----------------------------------------------------------------
     rx = http_server(Receiver)
@@ -588,9 +633,14 @@ def run(td, procs):
 
     T = {"MCOMP_VAULT_TEST_LISTENERS": my_name, "MCOMP_VAULT_TEST_PROMPT_TIMEOUT": "8", "MCOMP_VAULT_TEST_API_HTTP": "1",
          "MCOMP_EVENTS_SPOOL": spool}
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    locked_rec = audit_recs()[-1]
+    check("a refusal while locked is recorded without a creation MAC (the client has no vault key)", r.returncode == 3
+          and locked_rec.get("result") == "locked" and "mac" not in locked_rec, locked_rec)
     u = start_unlock(["--for", "20m", *allow], T, passphrase=current)
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("a fill while four sinks are set", r.returncode == 0, r.stdout + r.stderr)
+    check("records the vault writes carry a creation MAC", "mac" in audit_recs()[-1], audit_recs()[-1])
 
     def last_seq():
         recs = audit_recs()
@@ -609,7 +659,7 @@ def run(td, procs):
             return evs
         if name in ("hook", "req"):
             return [json.loads(g["body"])["data"] for g in rx.got if g["path"] == "/" + name]
-        return [json.loads(g["body"])["message"] for g in rx.got if g["path"].startswith("/ntfy")]
+        return [json.loads(g["body"])["message"].removeprefix("[unverified] ") for g in rx.got if g["path"].startswith("/ntfy")]
 
     def caught_up(names):
         last = last_seq()
@@ -630,6 +680,7 @@ def run(td, procs):
           and all(g["path"] == "/ntfy/" for g in rx.got if g["path"].startswith("/ntfy"))
           and all(n.get("topic") == "topic-dummy" and n.get("priority") in (3, 4) and "vault:" in n.get("title", "")
                   and "lock" in n.get("tags", []) for n in nt)
+          and any(n["message"].startswith(f"[unverified] #{locked_rec['seq']} ") for n in nt)
           and not any(v in p for p in ph for v in VALUES), nt[-2:])
     hooks = [g for g in rx.got if g["path"] == "/hook"]
     ce = json.loads(hooks[-1]["body"]) if hooks else {}
@@ -657,7 +708,20 @@ def run(td, procs):
           "[metacomputer@32473 seq family vm id hash prev sig]",
           re.match(r"^<1[1-4]>1 \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z \S+ metacomputer-vault - \S+ "
                    r"\[metacomputer@32473 seq=\"\d+\" family=\"vault\"( vm=\"[^\"]+\")? id=\"[0-9a-f-]{36}\" hash=\"[0-9a-f]{64}\" "
-                   r"prev=\"[0-9a-f]{64}\" sig=\"sha256=[0-9a-f]{64}\"\] \{", msg) is not None, msg[:300])
+                   r"prev=\"[0-9a-f]{64}\" verified=\"(true|false)\" sig=\"sha256=[0-9a-f]{64}\"\] \{", msg) is not None, msg[:300])
+    hook_ces = [json.loads(g["body"]) for g in rx.got if g["path"] == "/hook"]
+    lce = next((c for c in hook_ces if c["data"].get("seq") == locked_rec["seq"]), None)
+    otl_recs = [lr for g in rx.got if g["path"].startswith("/otlp") for rl in json.loads(g["body"])["resourceLogs"]
+                for sc in rl["scopeLogs"] for lr in sc["logRecords"]]
+    lotl = next((lr for lr in otl_recs if json.loads(lr["body"]["stringValue"]).get("seq") == locked_rec["seq"]), None)
+    lsys = next((m for m in (sl.got if sl else []) if f'seq="{locked_rec["seq"]}"' in m), "")
+    check("sinks mark the locked client's record unverified, and the vault's own records verified",
+          lce is not None and lce.get("mcompverified") is False and any(c.get("mcompverified") is True for c in hook_ces)
+          and lotl is not None and {"key": "metacomputer.verified", "value": {"boolValue": False}} in lotl["attributes"]
+          and 'verified="false"' in lsys, (lce, lsys[:200]))
+    r = client("audit", "--verify")
+    check("audit --verify (unlocked): every record's creation MAC checks out; locked refusals counted as unverified",
+          r.returncode == 0 and "checks out" in r.stdout and "written without the vault key" in r.stdout, r.stdout + r.stderr)
     check("no sink received a value", not any(v in g["body"] for g in rx.got for v in VALUES)
           and not any(v in m for m in (sl.got if sl else []) for v in VALUES))
 
@@ -674,7 +738,7 @@ def run(td, procs):
     check("verify-audit.py: the local log's hashes and chain check out", r.returncode == 0 and r.stdout.startswith("OK"), r.stdout + r.stderr)
     for n in ("hook", "otel", "sys"):
         r = subprocess.run([sys.executable, "-I", verify, "--key", keys[n] or "00", cap[n]], capture_output=True, text=True)
-        check(f"verify-audit.py: the {n} capture (signatures, hashes, chain, no gaps)", r.returncode == 0 and "signature(s) verified" in r.stdout,
+        check(f"verify-audit.py: the {n} capture (signatures, hashes, chain, no gaps)", r.returncode == 0 and "every event signed with this sink's key" in r.stdout,
               r.stdout + r.stderr)
     r = subprocess.run([sys.executable, "-I", verify, "--key", keys["otel"] or "00", cap["hook"]], capture_output=True, text=True)
     check("verify-audit.py: another sink's key fails", r.returncode == 1 and "signature" in r.stdout, r.stdout)
@@ -689,7 +753,48 @@ def run(td, procs):
     check("verify-audit.py: a changed event fails (hash)", r.returncode == 1 and "hash doesn't match" in r.stdout, r.stdout)
     open(bad, "w").write("\n".join(lines[:3] + lines[4:]) + "\n")
     r = subprocess.run([sys.executable, "-I", verify, bad], capture_output=True, text=True)
-    check("verify-audit.py: a removed event fails (gap)", r.returncode == 1 and "missing seq" in r.stdout, r.stdout)
+    check("verify-audit.py: a removed event fails (gap)", r.returncode == 1 and "missing" in r.stdout, r.stdout)
+
+    # M6: capture mode needs every event signed; local mode keeps order; checkpoints pin the ends
+    def vrun(*args):
+        return subprocess.run([sys.executable, "-I", verify, *args], capture_output=True, text=True)
+    hook_lines = open(cap["hook"]).read().splitlines()
+    raw_cap = os.path.join(td, "raw-as-capture.jsonl")
+    open(raw_cap, "w").write("\n".join(canon(json.loads(json.loads(l)["body"])["data"]) for l in hook_lines) + "\n")
+    r = vrun("--key", keys["hook"], raw_cap)
+    check("verify-audit.py --key: raw events in place of the signed wrappers fail (capture mode needs every event signed)",
+          r.returncode == 1 and "unsigned event" in r.stdout, r.stdout)
+    mixed = os.path.join(td, "mixed.jsonl")
+    open(mixed, "w").write("\n".join(hook_lines + [lines[-1]]) + "\n")
+    r = vrun("--key", keys["hook"], mixed)
+    check("...and so does a signed capture with one raw event added", r.returncode == 1 and "unsigned event" in r.stdout, r.stdout)
+    for what, content in (("a repeated line", lines + [lines[-1]]), ("two lines swapped", lines[:-2] + [lines[-1], lines[-2]])):
+        open(bad, "w").write("\n".join(content) + "\n")
+        r = vrun(bad)
+        check(f"verify-audit.py, local log: {what} fails", r.returncode == 1, r.stdout)
+    rep_cap = os.path.join(td, "cap-repeat.jsonl")
+    open(rep_cap, "w").write("\n".join(hook_lines + [hook_lines[-1]]) + "\n")
+    r = vrun("--key", keys["hook"], rep_cap)
+    check("verify-audit.py, capture: a repeated delivery is fine", r.returncode == 0 and "repeated" in r.stdout, r.stdout)
+    open(rep_cap, "w").write("\n".join(hook_lines[:-2] + [hook_lines[-1], hook_lines[-2]]) + "\n")
+    r = vrun("--key", keys["hook"], rep_cap)
+    check("verify-audit.py, capture: events out of order fail", r.returncode == 1 and "out of order" in r.stdout, r.stdout)
+    head = client("audit", "--head").stdout.strip()
+    r = vrun("--expect-start", "1", "--expect-head", head, alog)
+    check("verify-audit.py --expect-start/--expect-head with the right checkpoints: OK, and it says what that proves",
+          r.returncode == 0 and "ends at the expected head" in r.stdout and "Doesn't prove: that nothing came before" not in r.stdout, r.stdout)
+    r = vrun("--expect-head", "1:" + "0" * 64, alog)
+    check("verify-audit.py --expect-head with another head fails", r.returncode == 1 and "expected head" in r.stdout, r.stdout)
+    sliced = os.path.join(td, "slice.jsonl")
+    open(sliced, "w").write("\n".join(lines[5:]) + "\n")
+    r = vrun(sliced)
+    check("verify-audit.py on a slice: OK as far as it goes, and says it can't prove nothing is missing at the ends",
+          r.returncode == 0 and "Doesn't prove" in r.stdout and "nothing came before" in r.stdout, r.stdout)
+    r = vrun("--expect-start", "1", sliced)
+    check("...with --expect-start 1 the slice fails", r.returncode == 1, r.stdout)
+    r = vrun("--key", keys["hook"], "--require-verified", cap["hook"])
+    check("verify-audit.py --require-verified fails on events written without the vault key", r.returncode == 1
+          and "not producer-verified" in r.stdout, r.stdout)
     ul = subprocess.run(["/usr/bin/log", "show", "--predicate", 'subsystem == "io.metavert.metacomputer.vault.test"', "--last", "5m",
                          "--style", "ndjson"], capture_output=True, text=True, timeout=120).stdout
     fill_hash = next((x["hash"] for x in audit_recs() if x.get("op") == "fill"), "none")
@@ -720,6 +825,24 @@ def run(td, procs):
     rx.down.discard("/req")
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("...and works again once it's back", r.returncode == 0, r.stdout)
+    rx.down.add("/req")
+    st_path = os.path.join(vdir, "sinks", "req.state")
+    stj = json.load(open(st_path))
+    stj.update(delivered=999999, error=None, failures=0)
+    json.dump(stj, open(st_path, "w"))
+    n = len(calls())
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("a forged sinks/req.state (its place far ahead, no error) doesn't let a use through while req is down", r.returncode == 2
+          and "required audit sink req" in js(r.stdout).get("reason", "") and len(calls()) == n, r.stdout)
+    rx.down.discard("/req")
+    os.chmod(alog, 0o400)
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    os.chmod(alog, 0o600)
+    check("an audit log that can't be written stops uses while a sink is required, and says so", r.returncode == 2
+          and "audit log can't be written" in js(r.stdout).get("reason", "") and len(calls()) == n, r.stdout)
+    check("...the unlock terminal warns about it", "the audit log couldn't be written" in u.text())
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("...and uses work again once it can be written", r.returncode == 0, r.stdout)
     rx.down.discard("/hook")
     r = client("audit-sink", "test", "hook")
     check("audit-sink test: the optional sink catches up", r.returncode == 0 and "Sent: hook has every event" in r.stdout, r.stdout + r.stderr)
@@ -743,6 +866,37 @@ def run(td, procs):
         r = client("audit-sink", "test", "noca")
         check("a syslog sink without --ca refuses the self-signed server (system trust only)", r.returncode != 0, r.stdout + r.stderr)
         tty([BIN, "audit-sink", "remove", "noca"], [("Vault passphrase", current + "\n")])
+        tty([BIN, "audit-sink", "add", "badhost", "--kind", "syslog", "--url", f"syslog+tls://localhost:{sl.port}", "--ca", ca],
+            [("Vault passphrase", current + "\n")])
+        hf = sl.handshake_failures
+        got_before = len(sl.got)
+        r = client("audit-sink", "test", "badhost")
+        check("a syslog sink with --ca still checks the host name (the certificate is for 127.0.0.1, the URL says localhost)",
+              r.returncode != 0 and sl.handshake_failures > hf and len(sl.got) == got_before, (r.stdout + r.stderr, hf, sl.handshake_failures))
+        tty([BIN, "audit-sink", "remove", "badhost"], [("Vault passphrase", current + "\n")])
+
+    # H2: the dispatcher signs only what the vault wrote
+    rx.down.add("/hook")
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    forged = rewrite_last(lambda e: e.update(result="denied", reason="forged by the agent"))
+    rx.down.discard("/hook")
+    r = client("audit-sink", "test", "hook")
+    hook_data = [json.loads(g["body"])["data"] for g in rx.got if g["path"] == "/hook"]
+    at_seq = [d for d in hook_data if d.get("seq") == forged["seq"]]
+    check("a record changed after the vault wrote it (hash recomputed) is never signed for a sink: an audit_tamper notice goes instead",
+          forged.get("op") == "fill" and at_seq and all(d.get("op") == "audit_tamper" for d in at_seq)
+          and not any("forged by the agent" in json.dumps(d) for d in hook_data), at_seq)
+    check("...the unlock terminal says so, and the local log records it", "AUDIT LOG CHANGED" in u.text()
+          and any(x.get("op") == "audit_tamper" and x.get("target_seq") == forged["seq"] for x in audit_recs()))
+    r = client("audit", "--verify")
+    check("audit --verify finds the changed record (exit 4)", r.returncode == 4 and f"seq {forged['seq']}" in r.stdout, r.stdout)
+    tcap = os.path.join(td, "cap-tamper.jsonl")
+    with open(tcap, "w") as f:
+        for g in rx.got:
+            if g["path"] == "/hook":
+                f.write(json.dumps({"signature": g["signature"], "body": g["body"]}) + "\n")
+    r = subprocess.run([sys.executable, "-I", verify, "--key", keys["hook"], tcap], capture_output=True, text=True)
+    check("verify-audit.py reports the tamper notice in a capture", r.returncode == 1 and "tamper notice" in r.stdout, r.stdout)
 
     # --- 7. requester identities, approval scopes, projects ---------------------------------------------
     for f in glob.glob(os.path.join(spool, "*.json")):
@@ -856,14 +1010,59 @@ def run(td, procs):
     st, _, data = vm_request("GET", "/api1/v1/echo", {"X-Metacomputer-Token": tok.get("token", "")})
     check("X-Metacomputer-Token works too", st == 200, (st, data))
     rx.down.add("/req")
-    client("audit-sink", "test", "req")
     st, _, data = vm_request("GET", "/api1/v1/echo", bearer)
-    check("while a required audit sink can't be reached, proxied requests are refused (503)", st == 503
-          and "required audit sink req" in data, (st, data))
+    check("a required audit sink that goes down: the very next proxied request is refused (503), no earlier failure needed",
+          st == 503 and "required audit sink req" in data, (st, data))
     rx.down.discard("/req")
-    r = client("audit-sink", "test", "req")
     st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
-    check("...and pass again once it's back", r.returncode == 0 and st == 200, (r.stdout, st))
+    req_begins = [d for d in received("req") if d.get("op") == "begin" and d.get("use") == "api"]
+    check("...and passes again once it's back, each request's own begin record having reached the sink first", st == 200
+          and req_begins and req_begins[-1].get("token_id") == tok.get("token_id") and req_begins[-1].get("path") == "/v1/echo",
+          (st, req_begins[-1:]))
+
+    # M2: the request parser, against malformed and hostile requests
+    def raw_request(data):
+        sk = socket.create_connection(("127.0.0.1", mport), timeout=15)
+        resp = b""
+        try:
+            sk.sendall(data)
+            sk.shutdown(socket.SHUT_WR)
+            while True:
+                d = sk.recv(4096)
+                if not d:
+                    break
+                resp += d
+        except OSError:
+            pass
+        finally:
+            sk.close()
+        m = re.match(rb"HTTP/1\.1 (\d{3})", resp)
+        return int(m.group(1)) if m else None
+    auth = b"Authorization: Bearer " + tok.get("token", "").encode() + b"\r\n"
+    post = b"POST /api1/v1/echo HTTP/1.1\r\nHost: x\r\n" + auth
+    cases = [
+        ("a chunk size that would overflow after a 1-byte chunk", post + b"Transfer-Encoding: chunked\r\n\r\n1\r\nA\r\n7fffffffffffffff\r\n", 400),
+        ("a 4 GB chunk", post + b"Transfer-Encoding: chunked\r\n\r\n1\r\nA\r\nFFFFFFFF\r\n", 413),
+        ("a 20-digit Content-Length", post + b"Content-Length: 99999999999999999999\r\n\r\n", 400),
+        ("a Content-Length over 32 MB", post + b"Content-Length: 4000000000\r\n\r\n", 413),
+        ("Content-Length and Transfer-Encoding together", post + b"Content-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400),
+        ("two Content-Lengths", post + b"Content-Length: 1\r\nContent-Length: 2\r\n\r\nab", 400),
+        ("a Transfer-Encoding other than chunked", post + b"Transfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n", 501),
+        ("a bare CR in a header", post + b"X-A: b\rc\r\n\r\n", 400),
+        ("a bare LF in a header", post + b"X-A: b\nc\r\n\r\n", 400),
+        ("a NUL in a header value", post + b"X-A: b\x00c\r\n\r\n", 400),
+        ("a folded header", post + b"X-A: b\r\n c\r\n\r\n", 400),
+        ("an absolute-URI request line", b"GET http://127.0.0.1:1/api1/v1/echo HTTP/1.1\r\nHost: x\r\n" + auth + b"\r\n", 400),
+        ("CONNECT", b"CONNECT api.example:443 HTTP/1.1\r\nHost: api.example:443\r\n\r\n", 405),
+        ("a request line with two spaces", b"GET  /api1/v1/echo HTTP/1.1\r\nHost: x\r\n" + auth + b"\r\n", 400),
+        ("HTTP/2.0 in the request line", b"GET /api1/v1/echo HTTP/2.0\r\nHost: x\r\n" + auth + b"\r\n", 505),
+    ]
+    for what, data, want in cases:
+        st = raw_request(data)
+        check(f"request parser: {what} is refused ({want})", st == want, st)
+    r = client("status")
+    st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
+    check("...and the unlock process is still serving afterwards", r.returncode == 0 and st == 200, (r.stdout[-200:], st))
     st, _, data = vm_request("POST", "/api1/v1/echo", dict(bearer, **{"Content-Type": "application/json", "Connection": "X-Drop",
                                                                       "X-Drop": "1", "Proxy-Authorization": "dummy", "X-Keep": "2"}),
                              body=b'{"a": 1}')
@@ -909,6 +1108,29 @@ def run(td, procs):
     r = client("revoke", "--all")
     st, _, _ = vm_request("GET", "/api1/v1/echo", {"Authorization": "Bearer " + tok3.get("token", "")})
     check("revoke --all", st == 401)
+    tok5 = js(client("token", "api1", "--vm", "opsvm").stdout)
+    st0, _, _ = vm_request("GET", "/api1/v1/echo", {"Authorization": "Bearer " + tok5.get("token", "")})
+    rc, out = tty([BIN, "set", "api1", "--kind", "api", "--api-host", upstream, "--header", "Authorization: Bearer {value}",
+                   "--api-path-prefix", "/v1/", "--replace"], [("Vault passphrase", current + "\n"), ("API key for api1", UPSTREAM_VALUE2 + "\n")])
+    st, _, data = vm_request("GET", "/api1/v1/echo", {"Authorization": "Bearer " + tok5.get("token", "")})
+    check("a token made before set --replace stops working: it's bound to the secret's generation", st0 == 200 and rc == 0
+          and st == 401 and "changed since this token was made" in data, (st0, rc, st, data))
+    tok6 = js(client("token", "api1", "--vm", "opsvm").stdout)
+    st, _, _ = vm_request("GET", "/api1/v1/echo", {"Authorization": "Bearer " + tok6.get("token", "")})
+    check("...a new token carries the new value", st == 200 and up.got[-1]["headers"].get("authorization") == "Bearer " + UPSTREAM_VALUE2,
+          st)
+    rc, out = tty([BIN, "set", "api1", "--kind", "api", "--api-host", upstream, "--header", "Authorization: Bearer {value}", "--replace"],
+                  [("Vault passphrase", current + "\n"), ("API key for api1", UPSTREAM_VALUE2 + "\n")])
+    n_up = len(up.got)
+    st, _, _ = vm_request("GET", "/api1/v2/other", {"Authorization": "Bearer " + tok6.get("token", "")})
+    check("a token can't widen with its secret: after a replace that drops the path prefix, the old token gets 401 everywhere",
+          rc == 0 and st == 401 and len(up.got) == n_up, st)
+    tok8 = js(client("token", "api2", "--vm", "opsvm").stdout)
+    rc, out = tty([BIN, "delete", "api2"], [("Vault passphrase", current + "\n")])
+    st, _, _ = vm_request("GET", "/api2/anything", {"x-api-key": tok8.get("token", "")})
+    r = client("tokens")
+    check("deleting a secret ends its tokens (refused, and gone from the list)", rc == 0 and st in (401, 404)
+          and tok8.get("token_id", "?") not in r.stdout, (st, r.stdout))
     tok4 = js(client("token", "api1", "--vm", "opsvm").stdout)
 
     # --- 9. sealed sessions and rotate-session-key -------------------------------------------------------
@@ -930,6 +1152,40 @@ def run(td, procs):
     loaded = open(os.path.join(stubdir, "loaded.tgz"), "rb").read() if os.path.exists(os.path.join(stubdir, "loaded.tgz")) else b""
     check("...and it still loads, unchanged", rc == 0 and loaded == open(os.path.join(stubdir, "archive.tgz"), "rb").read(), out)
     check("list shows when the session key was rotated", "key rotated" in client("list").stdout)
+    h = detached_start("session", "save", "s2", "--vm", "opsvm", "--profile", "prof1")
+    u.expect("as the sealed session s2?")
+    u.send("s2\n")
+    rc, out = detached_wait(h)
+    sealed2 = os.path.join(vdir, "sessions", "s2.sealed")
+
+    def both():
+        return (open(sealed, "rb").read(), open(sealed2, "rb").read())
+    a1, a2 = both()
+    stop1 = {"MCOMP_VAULT_TEST_STOP_ROTATE_AFTER": "1"}
+    rc1, _ = tty([BIN, "rotate-session-key"], [("Vault passphrase", current + "\n")], extra=stop1)
+    b1, b2 = both()
+    rc2, _ = tty([BIN, "rotate-session-key"], [("Vault passphrase", current + "\n")], extra=stop1)
+    c1, c2 = both()
+    check("rotate-session-key cut short twice (each time after its first file): s1 moved each time, s2 still under the oldest key",
+          rc == 0 and rc1 == 9 and rc2 == 9 and b1 != a1 and c1 != b1 and b2 == a2 and c2 == a2, (rc, rc1, rc2))
+    ok_loads = []
+    for name in ("s1", "s2"):
+        h = detached_start("session", "load", name, "--vm", "opsvm")
+        u.expect(f"Load the sealed session {name}")
+        u.send(name + "\n")
+        lrc, lout = detached_wait(h)
+        ok_loads.append(lrc == 0 and open(os.path.join(stubdir, "loaded.tgz"), "rb").read() == open(os.path.join(stubdir, "archive.tgz"), "rb").read())
+    check("...both sessions still load: every older key is kept until a rotation finishes", all(ok_loads), ok_loads)
+    rc, out = tty([BIN, "rotate-session-key"], [("Vault passphrase", current + "\n")])
+    d1, d2 = both()
+    check("running it again finishes: both files under the new key, and it says the earlier rotation was cut short", rc == 0
+          and "2 sealed session(s) re-encrypted" in out and "cut short" in out and d2 != a2, out)
+    os.chmod(sealed2, 0)
+    vault_before = open(os.path.join(vdir, "vault.json")).read()
+    rc, out = tty([BIN, "rotate-session-key"], [("Vault passphrase", current + "\n")])
+    os.chmod(sealed2, 0o600)
+    check("a sealed session that can't be read stops rotate-session-key, with nothing changed", rc != 0 and "can't be read" in out
+          and "nothing changed" in out and open(os.path.join(vdir, "vault.json")).read() == vault_before, out)
 
     # --- 10. a rekey while unlocked locks the running unlock; tokens die with it ---------------------------
     rc, out = tty([BIN, "rekey"], [("Vault passphrase", current + "\n"), ("New vault passphrase", PASS + "\n"),
@@ -954,6 +1210,31 @@ def run(td, procs):
     check("...and its ssh tunnels are stopped", wait_for(lambda: all(gone(x) for x in tunnel_pids), 10))
     r = subprocess.run([sys.executable, "-I", verify, alog], capture_output=True, text=True)
     check("verify-audit.py: the whole local log, after everything", r.returncode == 0, r.stdout)
+
+    # Locked: a forged saved place for a sink isn't trusted
+    hst = os.path.join(vdir, "sinks", "hook.state")
+    stj = json.load(open(hst))
+    stj["delivered"] = 999999
+    json.dump(stj, open(hst, "w"))
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    lock_seq = audit_recs()[-1]["seq"]
+    n_hook = len([g for g in rx.got if g["path"] == "/hook"])
+    rc, out = tty([BIN, "audit-sink", "test", "hook"], [("Vault passphrase", PASS + "\n")])
+    new_hook = [json.loads(g["body"])["data"] for g in rx.got if g["path"] == "/hook"][n_hook:]
+    check("a forged saved place (sinks/hook.state, MAC no longer matching) is ignored: delivery starts again from the sink's "
+          "first event, and the new record arrives", rc == 0 and "didn't check out" in out and any(d.get("seq") == lock_seq for d in new_hook)
+          and any(d.get("seq") == starts["hook"] + 1 for d in new_hook), out[-400:])
+    # Locked: forged records appended with a correct chain, without the vault key
+    f1 = append_forged({"op": "fill", "result": "ok", "name": "web-login", "vm": "opsvm", "field": "password", "chars": 9})
+    f2 = append_forged({"op": "token", "result": "ok", "name": "api1", "vm": "opsvm", "mac": "0" * 64})
+    n_hook = len([g for g in rx.got if g["path"] == "/hook"])
+    rc, out = tty([BIN, "audit-sink", "test", "hook"], [("Vault passphrase", PASS + "\n")])
+    new_hook = [json.loads(g["body"])["data"] for g in rx.got if g["path"] == "/hook"][n_hook:]
+    d1 = [d for d in new_hook if d.get("seq") == f1["seq"]]
+    d2 = [d for d in new_hook if d.get("seq") == f2["seq"]]
+    check("records appended without the vault key (a fill with no MAC, a token with a wrong one) aren't signed for a sink: notices instead",
+          d1 and d2 and all(d.get("op") == "audit_tamper" for d in d1 + d2) and "no creation MAC" in d1[0].get("reason", "")
+          and "fails its creation MAC" in d2[0].get("reason", "") and "AUDIT LOG CHANGED" in out, (d1, d2))
     term = u.text()
     check("the unlock terminal never showed a value or a token", not any(v in term for v in VALUES)
           and tok.get("token", "x") not in term)

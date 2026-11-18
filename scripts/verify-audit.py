@@ -1,28 +1,43 @@
 #!/usr/bin/env python3
-"""verify-audit.py: check metacomputer secrets' audit events wherever they ended up.
+"""verify-audit.py: check metacomputer secrets' audit events, in the local log or as a sink got them.
 
-    verify-audit.py [--key KEY | --key-file FILE] FILE...
+    verify-audit.py [--expect-start SEQ] [--expect-head SEQ:HASH] audit.jsonl          (local mode)
+    verify-audit.py --key KEY [--require-verified] [--expect-start SEQ] [--expect-head SEQ:HASH] CAPTURE...
+                                                                                     (capture mode)
 
-Each FILE may be (detected line by line, mixed files are fine):
-  - the vault's own log, audit.jsonl (one event per line);
-  - what a webhook sink received: JSON lines {"signature": "sha256=...", "body": "<the request body>"},
-    each body a CloudEvent whose `data` is the event;
-  - what an OTLP sink received: the same {"signature", "body"} lines, each body an OTLP/HTTP JSON
-    logs request; every log record carries its own metacomputer.signature attribute;
-  - what a syslog sink received: one RFC 5424 message per line (octet count removed), the event as
-    MSG and its signature in the [metacomputer@32473 ... sig="sha256=..."] element.
-The ntfy sink's one-line summaries carry no signature and aren't accepted.
+Local mode (no --key) reads the vault's own log, audit.jsonl: one event per line, in order. It
+checks each event's hash (SHA-256 of its canonical JSON without "hash"), the chain (each "prev"
+is the previous event's hash) and that seq goes up by one, line by line, with no repeats. A
+signed capture is refused here (give --key). This proves the file is self-consistent; it can't
+prove that nobody rewrote the whole file, since your account can recompute every hash. Only the
+unlock process can check each record's creation MAC: `metacomputer secrets audit --verify`.
 
-Checks: every event's hash (SHA-256 of the event's canonical JSON without "hash"), the chain (each
-event's "prev" is the previous event's hash), gaps and conflicting duplicates in "seq", and, with the
-sink's key, every HMAC-SHA256 signature. The key is what `metacomputer secrets audit-sink add` printed
-once: 32 bytes in base64 (hex is accepted too); the HMAC uses the decoded bytes. A signed capture
-needs the key. A repeated delivery of the same event (same seq, same hash) is fine.
-Exit 0 when everything checks out, 1 when something doesn't, 2 for usage errors. Standard library only.
+Capture mode (--key, the sink's key as `audit-sink add` printed it: 32 bytes in base64, hex also
+accepted; the HMAC uses the decoded bytes) reads what a sink received. Every event must come
+signed: a raw event line is refused. Accepted inputs, detected line by line:
+  - webhook: JSON lines {"signature": "<X-Metacomputer-Signature>", "body": "<request body>"},
+    each body a CloudEvent whose `data` is the event and `mcompverified` its producer check;
+  - OTLP: the same {"signature", "body"} lines, each body an OTLP/HTTP JSON logs request; every
+    log record also carries its own metacomputer.signature and metacomputer.verified;
+  - syslog: one RFC 5424 message per line (octet count removed), the event as MSG, with
+    sig= and verified= in the [metacomputer@32473 ...] element.
+Repeated deliveries of the same event (same seq, same hash) are fine (delivery is at least
+once); otherwise each new seq must follow the one before, in the order received. An
+`audit_tamper` notice (the vault found a record it wouldn't sign) fails the check. Events marked
+unverified were written without the vault key (refusals while the vault was locked); they're
+counted, and --require-verified fails on them.
+
+--expect-start SEQ and --expect-head SEQ:HASH (from `metacomputer secrets audit --head`, noted at a
+moment you trust, or from another sink) pin the ends; without them a check can't tell whether
+events are missing before the first or after the last one given.
+
+The ntfy sink's summaries carry no signature and aren't accepted. Exit 0 when everything checks
+out, 1 when something doesn't, 2 for usage errors. Standard library only.
 """
 import argparse, base64, binascii, hashlib, hmac, json, re, sys
 
 SD_ID = "metacomputer@32473"
+ZERO = "0" * 64
 
 
 def parse_key(text):
@@ -52,29 +67,34 @@ def sig_ok(key, data, sig):
     return hmac.compare_digest(want, sig or "")
 
 
+SYSLOG = re.compile(r"^<(\d{1,3})>1 (\S+) (\S+) (\S+) (\S+) (\S+) (\[.*?(?<!\\)\](?:\[.*?(?<!\\)\])*|-) (.*)$")
+
+
 class Checker:
-    def __init__(self, key):
+    def __init__(self, key, require_verified):
         self.key = key
-        self.events = {}        # seq -> (hash, where)
-        self.order = []         # (seq, event, where) in input order
+        self.capture = key is not None
+        self.require_verified = require_verified
+        self.seen = {}           # seq -> (hash, where)
+        self.order = []          # (seq, event, where) for each new seq, in order
         self.problems = []
         self.signed = 0
-        self.legacy_prev = {}   # hash of a pre-chain line -> where (the first chained event links to it)
+        self.unverified = []     # seqs marked unverified by the sink's wrapping
+        self.legacy = set()      # hashes of pre-chain lines (local mode)
+        self.dups = 0
 
     def bad(self, where, what):
         self.problems.append(f"{where}: {what}")
 
     def signature(self, where, data, sig):
-        if self.key is None:
-            self.bad(where, "signed, but no --key given to check it")
-            return False
         if not sig_ok(self.key, data, sig):
             self.bad(where, "signature doesn't match (wrong key, or changed after signing)")
             return False
         self.signed += 1
         return True
 
-    def event(self, where, raw):
+    # one event, from either mode
+    def event(self, where, raw, verified=None):
         try:
             ev = json.loads(raw)
         except ValueError:
@@ -83,9 +103,16 @@ class Checker:
         if not isinstance(ev, dict):
             self.bad(where, "not an event")
             return
+        if ev.get("op") == "audit_tamper" and "hash" not in ev:
+            self.bad(where, f"tamper notice from the vault for seq {ev.get('seq')}: {ev.get('reason')}")
+            return
         if "seq" not in ev or "hash" not in ev:
-            # A line written before the chain existed: the first chained event's prev is its SHA-256.
-            self.legacy_prev[hashlib.sha256(raw.encode()).hexdigest()] = where
+            if self.capture:
+                self.bad(where, "an event without seq and hash")
+            elif self.order:
+                self.bad(where, "a line without seq and hash after the chain began")
+            else:
+                self.legacy.add(hashlib.sha256(raw.encode()).hexdigest())
             return
         seq = ev.get("seq")
         if not isinstance(seq, int) or seq < 1:
@@ -93,22 +120,40 @@ class Checker:
             return
         if ev["hash"] != event_hash(ev):
             self.bad(where, f"seq {seq}: hash doesn't match the event (changed after it was written)")
-        if seq in self.events:
-            if self.events[seq][0] != ev["hash"]:
-                self.bad(where, f"seq {seq}: a different event with the same seq is at {self.events[seq][1]}")
+        if seq in self.seen:
+            if self.capture and self.seen[seq][0] == ev["hash"]:
+                self.dups += 1
+                return
+            self.bad(where, f"seq {seq} again (first at {self.seen[seq][1]})" + ("" if self.capture else ": a local log has each seq once"))
             return
-        self.events[seq] = (ev["hash"], where)
+        if self.order and seq != self.order[-1][0] + 1:
+            self.bad(where, f"seq {seq} after seq {self.order[-1][0]}: out of order, or seq {self.order[-1][0] + 1}"
+                            + (f"..{seq - 1}" if seq - 1 > self.order[-1][0] + 1 else "") + " missing")
+        if self.order and self.order[-1][0] == seq - 1 and ev.get("prev") != self.order[-1][1]["hash"]:
+            self.bad(where, f"seq {seq}: prev isn't seq {seq - 1}'s hash (the chain is broken here)")
+        if not self.order and seq == 1 and ev.get("prev") not in (ZERO, *self.legacy):
+            self.bad(where, "seq 1: prev is neither the zero hash nor an earlier line's hash")
+        if verified is False:
+            self.unverified.append(seq)
+        self.seen[seq] = (ev["hash"], where)
         self.order.append((seq, ev, where))
 
     def local_line(self, where, line):
+        if self.capture:
+            self.bad(where, "an unsigned event: with --key every event must come signed from a sink")
+            return
         self.event(where, line)
 
-    def capture(self, where, rec):
+    def wrapper(self, where, rec):
+        if not self.capture:
+            self.bad(where, "a signed capture: give the sink's --key")
+            return
         body, sig = rec.get("body"), rec.get("signature")
         if not isinstance(body, str):
             self.bad(where, "capture without a body")
             return
-        self.signature(where, body.encode(), sig)
+        if not self.signature(where, body.encode(), sig):
+            return
         try:
             doc = json.loads(body)
         except ValueError:
@@ -119,10 +164,9 @@ class Checker:
             if not isinstance(data, dict):
                 self.bad(where, "CloudEvent without event data")
                 return
-            raw = canonical(data)
             if doc.get("id") != (data.get("id") or data.get("hash")):
                 self.bad(where, "CloudEvent id isn't the event's id")
-            self.event(where, raw)
+            self.event(where, canonical(data), doc.get("mcompverified"))
             return
         if isinstance(doc, dict) and "resourceLogs" in doc:
             n = 0
@@ -133,18 +177,19 @@ class Checker:
                         w = f"{where} record {n}"
                         raw = ((lr.get("body") or {}).get("stringValue")) or ""
                         attrs = {a.get("key"): (a.get("value") or {}) for a in lr.get("attributes") or []}
-                        rsig = (attrs.get("metacomputer.signature") or {}).get("stringValue")
-                        self.signature(w, raw.encode(), rsig)
-                        self.event(w, raw)
+                        if not self.signature(w, raw.encode(), (attrs.get("metacomputer.signature") or {}).get("stringValue")):
+                            continue
+                        self.event(w, raw, (attrs.get("metacomputer.verified") or {}).get("boolValue"))
             if n == 0:
                 self.bad(where, "OTLP request without log records")
             return
         self.bad(where, "body is neither a CloudEvent nor an OTLP logs request")
 
-    SYSLOG = re.compile(r"^(?:\d+ )?<(\d{1,3})>1 (\S+) (\S+) (\S+) (\S+) (\S+) (\[.*?(?<!\\)\](?:\[.*?(?<!\\)\])*|-) (.*)$")
-
     def syslog(self, where, line):
-        m = self.SYSLOG.match(line)
+        if not self.capture:
+            self.bad(where, "a signed syslog capture: give the sink's --key")
+            return
+        m = SYSLOG.match(line)
         if not m:
             self.bad(where, "not an RFC 5424 message")
             return
@@ -159,42 +204,40 @@ class Checker:
         if not params:
             self.bad(where, f"no [{SD_ID}] element")
             return
-        self.signature(where, msg.encode(), params.get("sig"))
+        if not self.signature(where, msg.encode(), params.get("sig")):
+            return
         try:
             ev = json.loads(msg)
-            if (str(ev.get("seq")) != params.get("seq") or ev.get("hash") != params.get("hash")
-                    or ev.get("id", "") != params.get("id", "")):
+            if ev.get("op") != "audit_tamper" and (str(ev.get("seq")) != params.get("seq") or ev.get("hash") != params.get("hash")
+                                                   or ev.get("id", "") != params.get("id", "")):
                 self.bad(where, "structured data doesn't match the event")
         except (ValueError, AttributeError):
             pass
-        self.event(where, msg)
+        v = params.get("verified")
+        self.event(where, msg, None if v is None else v == "true")
 
-    def finish(self):
+    def finish(self, start, head):
         if not self.order:
             self.bad("input", "no chained events found")
             return
-        seqs = sorted(self.events)
-        missing, prev_seq = [], None
-        for s in seqs:
-            if prev_seq is not None and s != prev_seq + 1:
-                missing.append(f"{prev_seq + 1}" if s == prev_seq + 2 else f"{prev_seq + 1}-{s - 1}")
-            prev_seq = s
-        if missing:
-            self.bad("chain", "missing seq " + ", ".join(missing))
-        by_seq = {s: ev for s, ev, _ in self.order}
-        for s, ev, where in self.order:
-            p = ev.get("prev")
-            if s - 1 in by_seq:
-                if p != by_seq[s - 1]["hash"]:
-                    self.bad(where, f"seq {s}: prev isn't seq {s - 1}'s hash (the chain is broken here)")
-            elif s == 1 and p not in ("0" * 64, *self.legacy_prev):
-                self.bad(where, "seq 1: prev is neither the zero hash nor an earlier line's hash")
+        first, last = self.order[0], self.order[-1]
+        if start is not None and first[0] != start:
+            self.bad("input", f"the first event is seq {first[0]}, not the expected {start}")
+        if head is not None:
+            hs, hh = head
+            if last[0] != hs or last[1].get("hash") != hh:
+                self.bad("input", f"the last event is {last[0]}:{last[1].get('hash')}, not the expected head {hs}:{hh}")
+        if self.require_verified and self.unverified:
+            self.bad("input", f"{len(self.unverified)} event(s) not producer-verified: seq {', '.join(map(str, self.unverified[:20]))}")
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Check metacomputer secrets audit events (hashes, chain, signatures).")
-    ap.add_argument("--key", help="the sink's signing key as printed (base64; hex also accepted), to check signatures")
-    ap.add_argument("--key-file", help="a file holding that key")
+    ap = argparse.ArgumentParser(description="Check metacomputer secrets audit events (hashes, chain, order, signatures).")
+    ap.add_argument("--key", help="capture mode: the sink's signing key as printed (base64; hex also accepted)")
+    ap.add_argument("--key-file", help="capture mode: a file holding that key")
+    ap.add_argument("--expect-start", type=int, help="the first event must have this seq")
+    ap.add_argument("--expect-head", help="SEQ:HASH the last event must be")
+    ap.add_argument("--require-verified", action="store_true", help="capture mode: fail on events the vault marked unverified")
     ap.add_argument("--quiet", action="store_true", help="print only problems")
     ap.add_argument("files", nargs="+")
     a = ap.parse_args(argv)
@@ -208,7 +251,17 @@ def main(argv):
     except (OSError, ValueError) as e:
         print(f"verify-audit: can't read the key: {e}", file=sys.stderr)
         return 2
-    c = Checker(key)
+    head = None
+    if a.expect_head:
+        m = re.fullmatch(r"(\d+):([0-9a-f]{64})", a.expect_head.strip())
+        if not m:
+            print("verify-audit: --expect-head SEQ:HASH (64 hex digits)", file=sys.stderr)
+            return 2
+        head = (int(m.group(1)), m.group(2))
+    if a.require_verified and key is None:
+        print("verify-audit: --require-verified goes with --key (capture mode)", file=sys.stderr)
+        return 2
+    c = Checker(key, a.require_verified)
     for path in a.files:
         try:
             f = sys.stdin if path == "-" else open(path, encoding="utf-8")
@@ -231,19 +284,39 @@ def main(argv):
                     c.bad(where, "neither JSON nor a syslog message")
                     continue
                 if isinstance(rec, dict) and "body" in rec and "signature" in rec:
-                    c.capture(where, rec)
+                    c.wrapper(where, rec)
                 else:
                     c.local_line(where, line)
-    c.finish()
-    seqs = sorted(c.events)
+    c.finish(a.expect_start, head)
+    seqs = [s for s, _, _ in c.order]
     if c.problems:
         for p in c.problems:
             print("BAD  " + p)
         print(f"{len(c.problems)} problem(s) in {len(seqs)} event(s)")
         return 1
     if not a.quiet:
-        sig = f", {c.signed} signature(s) verified" if c.signed else " (no signatures in the input)"
-        print(f"OK   {len(seqs)} event(s), seq {seqs[0]}..{seqs[-1]}, hashes and chain intact{sig}")
+        mode = "capture" if c.capture else "local log"
+        print(f"OK   {mode}: {len(seqs)} event(s), seq {seqs[0]}..{seqs[-1]}"
+              + (f", {c.dups} repeated delivery(ies) dropped" if c.dups else ""))
+        proves = ["each event's hash and its link to the one before", "no gaps or reordering between them"]
+        if c.capture:
+            proves.append(f"every event signed with this sink's key ({c.signed} signature(s))")
+            proves.append(f"{len(seqs) - len(c.unverified)} event(s) producer-verified by the vault"
+                          + (f"; {len(c.unverified)} written without the vault key (seq {', '.join(map(str, c.unverified[:10]))})" if c.unverified else ""))
+        if a.expect_start is not None:
+            proves.append(f"it starts at seq {a.expect_start}")
+        if head:
+            proves.append(f"it ends at the expected head {head[0]}")
+        print("     Proves: " + "; ".join(proves) + ".")
+        not_proven = []
+        if a.expect_start is None:
+            not_proven.append("that nothing came before the first event (--expect-start)")
+        if not head:
+            not_proven.append("that nothing came after the last one (--expect-head)")
+        if not c.capture:
+            not_proven.append("that the file wasn't rewritten whole (a sink's capture, or `metacomputer secrets audit --verify`, can)")
+        if not_proven:
+            print("     Doesn't prove: " + "; ".join(not_proven) + ".")
     return 0
 
 

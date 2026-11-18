@@ -163,9 +163,20 @@ final class UnlockServer {
     var grants: [Grant] = []
     var stopReason: String?
     lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
-    // audit sinks: when each may be tried next, the last problem shown, the log's size last time
+    // The audit log and its sinks. The audit key (from the vault) MACs every record this
+    // process writes; `known` holds their hashes. Sink places, backoff and acknowledged begins
+    // live here, in memory, under sinkLock (the proxy's threads deliver too).
+    var auditKey: [UInt8] = []
+    let knownLock = NSLock()
+    var known: [Int: String] = [:]
+    let sinkLock = NSLock()
+    var cursors: [String: Int] = [:]
     var sinkNext: [String: Date] = [:]
     var sinkShown: [String: String] = [:]
+    var sinkFailures: [String: Int] = [:]
+    var waitingBegins: Set<Int> = []
+    var ackedBegins: [String: Set<Int>] = [:]
+    var tamperSeen: Set<String> = []
     var auditSize: off_t = -1
 
     init(paths: Paths, key: VaultKey, seconds: Int, confirmEach: Bool, multiplexer: String?, allowMultiplexer: Bool) {
@@ -237,25 +248,83 @@ final class UnlockServer {
         dropSpoolEvent(family: "needs_you", type: type, severity: severity, vm: vm, message: message, action: action, project: project, data: data)
     }
 
-    // MARK: audit sinks
+    // MARK: the audit log and its sinks
+
+    /// Write an audit record with the vault's audit MAC, and remember its hash: delivery
+    /// refuses a record at that seq with any other hash. nil when it couldn't be written.
+    @discardableResult
+    func record(_ rec: [String: Any]) -> [String: Any]? {
+        guard let stored = audit(paths, rec, macKey: auditKey) else {
+            say("\(clockTime())  WARNING: the audit log couldn't be written (look at audit.jsonl and the unified log)")
+            return nil
+        }
+        if let s = (stored["seq"] as? NSNumber)?.intValue, let h = stored["hash"] as? String {
+            knownLock.lock()
+            known[s] = h
+            knownLock.unlock()
+        }
+        return stored
+    }
+
+    func knownSnapshot() -> [Int: String] {
+        knownLock.lock()
+        defer { knownLock.unlock() }
+        return known
+    }
+
+    /// This process's own place for a sink (sinkLock held). Starts from the saved state, whose
+    /// MAC must check out; otherwise from the sink's first event.
+    func cursor(_ name: String, _ sink: AuditSink) -> Int {
+        let k = name + "|" + sinkStamp(sink)
+        if let c = cursors[k] { return c }
+        let (st, trusted) = loadSinkState(paths, name, sink, key: auditKey)
+        if !trusted {
+            say("\(clockTime())  audit sink \(name): its saved delivery state doesn't check out (changed outside the vault?); sending again from its first event")
+        }
+        cursors[k] = st.delivered
+        return st.delivered
+    }
+
+    /// Deliver to one sink (sinkLock held); notes tamper notices, acknowledged begins and problems.
+    func deliver(_ name: String, _ sink: AuditSink) -> String? {
+        let k = name + "|" + sinkStamp(sink)
+        let d = deliverSink(paths, name, sink, auditKey: auditKey, from: cursor(name, sink), known: knownSnapshot())
+        cursors[k] = d.delivered
+        for s in d.genuine where waitingBegins.contains(s) { ackedBegins[k, default: []].insert(s) }
+        for t in d.tampered {
+            let reason = (t.e["reason"] as? String) ?? "a record failed its checks"
+            if tamperSeen.insert("\(t.seq)|\(reason)").inserted {
+                say("\(clockTime())  AUDIT LOG CHANGED: \(reason); sinks get a notice in its place")
+                record(["op": "audit_tamper", "result": "error", "target_seq": t.seq, "reason": reason])
+            }
+        }
+        return d.problem
+    }
 
     /// Try to deliver what's pending. force: ignore the backoff. Returns the sinks still
     /// behind, with why, and whether any of those is required.
     @discardableResult
     func flushSinks(force: Bool, onlyRequired: Bool = false) -> [(String, String, Bool)] {
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
+        return flushLocked(force: force, onlyRequired: onlyRequired)
+    }
+
+    func flushLocked(force: Bool, onlyRequired: Bool) -> [(String, String, Bool)] {
         guard let p = try? load(), let sinks = p.audit_sinks, !sinks.isEmpty else { return [] }
         var behind: [(String, String, Bool)] = []
+        let last = lastAuditEvent(paths.audit).0
         for name in sinks.keys.sorted() {
             let sink = sinks[name]!
             if onlyRequired && !sink.required { continue }
-            if sinkBacklog(paths, name, sink) == 0 { sinkShown[name] = nil; continue }
+            if cursor(name, sink) >= last { sinkShown[name] = nil; continue }
             if !force, let next = sinkNext[name], next > Date() {
-                behind.append((name, loadSinkState(paths, name, sink).error ?? "retrying", sink.required))
+                behind.append((name, sinkShown[name] ?? "retrying", sink.required))
                 continue
             }
-            if let problem = deliverSink(paths, name, sink) {
-                let failures = loadSinkState(paths, name, sink).failures
-                sinkNext[name] = Date().addingTimeInterval(min(60, pow(2, Double(min(failures, 6)))))
+            if let problem = deliver(name, sink) {
+                sinkFailures[name, default: 0] += 1
+                sinkNext[name] = Date().addingTimeInterval(min(60, pow(2, Double(min(sinkFailures[name]!, 6)))))
                 if sinkShown[name] != problem {
                     say("\(clockTime())  audit sink \(name): can't deliver (\(problem)); retrying" + (sink.required ? "; uses are refused until it can" : ""))
                     sinkShown[name] = problem
@@ -265,40 +334,67 @@ final class UnlockServer {
                 if sinkShown[name] != nil { say("\(clockTime())  audit sink \(name): delivering again") }
                 sinkShown[name] = nil
                 sinkNext[name] = nil
+                sinkFailures[name] = 0
             }
         }
         return behind
     }
 
-    /// nil when every required sink has the record of this use before it happens; else the
-    /// refusal. With a required sink, each use is first recorded as op "begin" (what, which
-    /// secret, VM, requester) and that record must reach every required sink; the outcome
-    /// follows as its own event. Without one, nothing extra is written.
-    func requiredSinkProblem(_ op: String, _ fields: [String: Any], _ who: Requester) -> String? {
-        guard let p = try? load(), p.audit_sinks?.values.contains(where: { $0.required }) == true else { return nil }
+    /// nil when every required sink has acknowledged the record of this use before it happens;
+    /// else the refusal. With a required sink, each use is first recorded as op "begin" (what,
+    /// which secret, VM, requester); this process must see every required sink accept that very
+    /// record (its seq, with the hash it wrote) before the use goes ahead. A saved delivery
+    /// place or an empty backlog proves nothing. Without a required sink, nothing extra is written.
+    func requiredSinkProblem(_ op: String, _ fields: [String: Any], requester: [String: Any]) -> String? {
+        guard let p = try? load() else { return "the vault can't be read" }
+        let required = (p.audit_sinks ?? [:]).filter { $0.value.required }
+        if required.isEmpty { return nil }
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
         var rec = fields
         rec["op"] = "begin"
         rec["use"] = op
         rec["result"] = "pending"
-        rec["requester"] = who.record
-        audit(paths, rec)
-        guard let (name, why, _) = flushSinks(force: true, onlyRequired: true).first(where: { $0.2 }) else { return nil }
-        return "the required audit sink \(name) can't be reached (\(why)); uses are refused until it can"
+        rec["requester"] = requester
+        guard let stored = record(rec), let seq = (stored["seq"] as? NSNumber)?.intValue else {
+            return "the audit log can't be written, and a required audit sink must get a record of every use first; uses are refused until it can"
+        }
+        waitingBegins.insert(seq)
+        defer { waitingBegins.remove(seq) }
+        let behind = flushLocked(force: true, onlyRequired: true)
+        for name in required.keys.sorted() {
+            let k = name + "|" + sinkStamp(required[name]!)
+            if ackedBegins[k]?.remove(seq) != nil { continue }
+            let why = behind.first(where: { $0.0 == name })?.1 ?? "it didn't acknowledge the record of this use"
+            return "the required audit sink \(name) can't be reached (\(why)); uses are refused until it can"
+        }
+        return nil
+    }
+
+    func requiredSinkProblem(_ op: String, _ fields: [String: Any], _ who: Requester) -> String? {
+        requiredSinkProblem(op, fields, requester: who.record)
     }
 
     /// Only when the audit log grew, or a sink is behind and its retry time has come.
     func sinkTick() {
         var st = stat()
         let size = stat(paths.audit, &st) == 0 ? st.st_size : 0
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
         if size != auditSize || sinkNext.values.contains(where: { $0 <= Date() }) {
             auditSize = size
-            flushSinks(force: false)
+            _ = flushLocked(force: false, onlyRequired: false)
         }
     }
+
 
     // MARK: serving
 
     func serve() throws -> Int32 {
+        guard let ak = vaultAuditKey(paths, key) else { throw VaultError("cannot read the vault's audit key") }
+        auditKey = ak
+        hub.recorder = { [unowned self] rec in self.record(rec) }
+        hub.preUse = { [unowned self] fields, requester in self.requiredSinkProblem("api", fields, requester: requester) }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw VaultError("cannot make a socket") }
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
@@ -331,7 +427,7 @@ final class UnlockServer {
         #if MCOMP_VAULT_TESTING
         say("  TEST BUILD: honours MCOMP_VAULT_TEST_* settings; never use it for real secrets")
         #endif
-        audit(paths, ["op": "unlock", "result": "ok", "until": isoTime(expires), "confirm": confirmEach ? "each" : "session",
+        record(["op": "unlock", "result": "ok", "until": isoTime(expires), "confirm": confirmEach ? "each" : "session",
                       "multiplexer": multiplexer ?? "none", "pid": Int(getpid()), "enclave": key.usesEnclave])
         flushSinks(force: true)
 
@@ -359,7 +455,7 @@ final class UnlockServer {
         close(fd)
         unlink(paths.socket)
         hub.shutdown()
-        audit(paths, ["op": "lock", "result": "ok", "reason": why])
+        record(["op": "lock", "result": "ok", "reason": why])
         flushSinks(force: true)
         key.wipeKey()
         if why == "Ctrl-C" { oprint("") }
@@ -370,7 +466,7 @@ final class UnlockServer {
     func handle(_ c: Int32) {
         setTimeouts(c, seconds: 10)
         guard let uid = peerUID(c), uid == getuid() else {
-            audit(paths, ["op": "connect", "result": "denied", "reason": "another user"])
+            record(["op": "connect", "result": "denied", "reason": "another user"])
             say("\(clockTime())  refused a connection from another user")
             return
         }
@@ -395,7 +491,8 @@ final class UnlockServer {
         case "tokens": res = opTokens()
         case "revoke": res = opRevoke(req, who)
         case "sinks": res = opSinks()
-        case "sink_flush": res = opSinkFlush(req)
+        case "sink_flush": res = opSinkFlush(req, who)
+        case "audit_verify": res = opAuditVerify()
         default: res = ["ok": false, "status": "error", "reason": "unknown request \(clean(op, max: 40))"]
         }
         setTimeouts(c, seconds: 10)
@@ -486,7 +583,7 @@ final class UnlockServer {
         rec["approval"] = approval
         rec["requester"] = who.record
         for k in ["origin", "chars", "reason", "bytes", "route", "token_id", "ttl_s"] { if let v = out[k] ?? res[k] { rec[k] = v } }
-        audit(paths, rec)
+        record(rec)
         var line = "          -> \(status)"
         if let o = out["origin"] as? String { line += ": \(o)" }
         if let n = out["chars"] as? Int { line += ", \(n) characters" }
@@ -674,7 +771,7 @@ final class UnlockServer {
             return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
         }
         let ttl = max(1, min(ttlAsked, 8 * 3600, remaining()))
-        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who.record)
+        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who.record, secret: s)
         let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
         var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
         res = finish("token", fields, res, who, approval: approval)
@@ -695,6 +792,7 @@ final class UnlockServer {
     }
 
     func opTokens() -> [String: Any] {
+        if let p = try? load() { hub.prune(p) }   // a secret replaced or deleted ends its tokens
         let list: [[String: Any]] = hub.live().map { t in
             var d: [String: Any] = ["id": t.id, "name": t.name, "vm": t.vm, "expires": isoTime(t.expires),
                                     "expires_in_s": max(0, Int(t.expires.timeIntervalSinceNow)), "requests": t.requests]
@@ -709,7 +807,7 @@ final class UnlockServer {
         guard id == nil || (id.map { matches($0, "^[0-9a-f]{8}$") } ?? false) else { return ["ok": false, "status": "error", "reason": "bad token id"] }
         let gone = hub.revoke(id)
         say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? " (all)") + ", asked by \(who.describe)")
-        audit(paths, ["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
+        record(["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
         flushSinks(force: true)
         return ["ok": true, "status": "ok", "revoked": gone.map { $0.id }]
     }
@@ -718,12 +816,15 @@ final class UnlockServer {
 
     func opSinks() -> [String: Any] {
         guard let p = try? load() else { return ["ok": false, "status": "error", "reason": "cannot read the vault"] }
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
         let list: [[String: Any]] = (p.audit_sinks ?? [:]).keys.sorted().map { n in
             let s = p.audit_sinks![n]!
-            let st = loadSinkState(paths, n, s)
+            let st = loadSinkState(paths, n, s).0
+            let place = cursor(n, s)
             var d: [String: Any] = ["name": n, "kind": s.kind, "url": maskedURL(s.url), "required": s.required, "created": s.created,
-                                    "headers": s.headers.compactMap { $0.first }, "delivered": st.delivered, "backlog": sinkBacklog(paths, n, s)]
-            if let e = st.error { d["error"] = e }
+                                    "headers": s.headers.compactMap { $0.first }, "delivered": place, "backlog": sinkBacklog(paths, n, s, from: place)]
+            if let e = sinkShown[n] ?? st.error { d["error"] = e }
             if let a = st.attempt { d["last_attempt"] = a }
             if s.ca_pem != nil { d["ca"] = true }
             return d
@@ -731,12 +832,49 @@ final class UnlockServer {
         return ["ok": true, "status": "ok", "sinks": list]
     }
 
-    func opSinkFlush(_ req: [String: Any]) -> [String: Any] {
-        guard let name = req["name"] as? String, let p = try? load(), let s = p.audit_sinks?[name] else {
+    func opSinkFlush(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        guard let name = req["name"] as? String, validName(name), let p = try? load(), let s = p.audit_sinks?[name] else {
             return ["ok": false, "status": "error", "reason": "no such audit sink"]
         }
-        if let why = deliverSink(paths, name, s) { return ["ok": false, "status": "error", "reason": why] }
-        return ["ok": true, "status": "ok", "delivered": loadSinkState(paths, name, s).delivered]
+        record(["op": "audit_sink_test", "result": "ok", "name": name, "requester": who.record])
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
+        if let why = deliver(name, s) {
+            sinkShown[name] = why
+            return ["ok": false, "status": "error", "reason": why]
+        }
+        sinkShown[name] = nil
+        sinkNext[name] = nil
+        sinkFailures[name] = 0
+        return ["ok": true, "status": "ok", "delivered": cursor(name, s)]
+    }
+
+    /// Every record's creation MAC and the chain, checked by the one process holding the audit key.
+    func opAuditVerify() -> [String: Any] {
+        guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return ["ok": false, "status": "error", "reason": "cannot read audit.jsonl"] }
+        var verified = 0, unverified = 0, total = 0, prev: String?, lastSeq = 0
+        var bad: [String] = []
+        let known = knownSnapshot()
+        for l in bytes.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            guard let e = parseJSONObject(Array(l)), let seq = (e["seq"] as? NSNumber)?.intValue else { continue }
+            total += 1
+            let h = e["hash"] as? String
+            if seq != lastSeq + 1 && lastSeq != 0 { bad.append("seq \(seq) follows \(lastSeq)") }
+            if h != eventHash(e) { bad.append("seq \(seq): its hash doesn't match") }
+            if let p = prev, (e["prev"] as? String) != p { bad.append("seq \(seq): doesn't link to the record before") }
+            if let k = known[seq], k != h { bad.append("seq \(seq): not the record this unlock wrote") }
+            if let m = e["mac"] as? String {
+                if m == auditRecordMAC(auditKey, e) { verified += 1 } else { bad.append("seq \(seq): fails its creation MAC") }
+            } else if clientMayWrite(e) {
+                unverified += 1
+            } else {
+                bad.append("seq \(seq) (\(clean(e["op"] as? String ?? "?", max: 40))): no creation MAC")
+            }
+            prev = h
+            lastSeq = seq
+        }
+        return ["ok": bad.isEmpty, "status": bad.isEmpty ? "ok" : "error", "records": total, "verified": verified,
+                "unverified": unverified, "problems": Array(bad.prefix(50)), "head": lastSeq, "head_hash": prev ?? ""]
     }
 
     // MARK: sealed browser sessions (the desktop account)
@@ -747,10 +885,8 @@ final class UnlockServer {
     /// was cut short, the previous one.
     func openSession(_ p: Payload, _ name: String) -> [UInt8]? {
         guard let sealed = try? readFileBytes(paths.sessions + "/\(name).sealed") else { return nil }
-        for k in [p.session_key, p.session_key_prev].compactMap({ $0 }) {
-            if let d = Data(base64Encoded: k), d.count == 32, let plain = try? openGCM(key: Array(d), combined: sealed, aad: sessionAAD(name)) {
-                return plain
-            }
+        for k in p.sessionKeyring {
+            if let plain = try? openGCM(key: k, combined: sealed, aad: sessionAAD(name)) { return plain }
         }
         return nil
     }

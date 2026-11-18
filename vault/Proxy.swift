@@ -24,6 +24,17 @@ struct APIToken {
     let expires: Date
     let requester: [String: Any]
     var requests: Int
+    // What was approved: the secret's generation and its scope then. A token works only while
+    // the secret is still that one (no set --replace or delete since) with that host, header
+    // and path prefix.
+    let gen: String
+    let host: String
+    let header: String
+    let prefix: String?
+
+    func fits(_ s: Secret) -> Bool {
+        s.kind == "api" && secretGen(s) == gen && s.api_host == host && s.api_header == header && s.api_path_prefix == prefix
+    }
 }
 
 final class Tunnel: @unchecked Sendable {
@@ -72,6 +83,10 @@ final class ProxyHub: @unchecked Sendable {
     var listeners: [String: ProxyListener] = [:]
     var closed = false
     let slots = DispatchSemaphore(value: 32)    // connections at once
+    // Set by the unlock process before the first token: write an audit record with the vault's
+    // MAC, and get a request's pre-use record acknowledged by every required audit sink.
+    var recorder: (([String: Any]) -> [String: Any]?)?
+    var preUse: (([String: Any], [String: Any]) -> String?)?
 
     init(paths: Paths, key: VaultKey, sshPath: String) {
         self.paths = paths
@@ -93,12 +108,23 @@ final class ProxyHub: @unchecked Sendable {
 
     // MARK: tokens
 
-    func issue(name: String, vm: String, ttl: Int, requester: [String: Any]) -> (APIToken, String) {
+    func issue(name: String, vm: String, ttl: Int, requester: [String: Any], secret s: Secret) -> (APIToken, String) {
         let raw = "mct_" + base64url(randomBytes(24))
         let t = APIToken(id: randomBytes(4).map { String(format: "%02x", $0) }.joined(), hash: sha256Hex(Array(raw.utf8)), name: name, vm: vm,
-                         issued: Date(), expires: Date().addingTimeInterval(TimeInterval(ttl)), requester: requester, requests: 0)
+                         issued: Date(), expires: Date().addingTimeInterval(TimeInterval(ttl)), requester: requester, requests: 0,
+                         gen: secretGen(s), host: s.api_host ?? "", header: s.api_header ?? "", prefix: s.api_path_prefix)
         withLock { tokens[t.hash] = t }
         return (t, raw)
+    }
+
+    /// Drop tokens whose secret is gone or changed (set --replace, delete); returns them.
+    @discardableResult
+    func prune(_ p: Payload) -> [APIToken] {
+        withLock {
+            let gone = tokens.values.filter { t in p.secrets[t.name].map { !t.fits($0) } ?? true }
+            for t in gone { tokens[t.hash] = nil }
+            return gone
+        }
     }
 
     func live() -> [APIToken] {
@@ -280,7 +306,11 @@ final class ProxyHub: @unchecked Sendable {
 
     func serve(_ c: Int32, _ l: ProxyListener) {
         setTimeouts(c, seconds: 30)
-        guard let req = readHTTPRequest(c) else { respond(c, 400, "bad request"); return }
+        let req: HTTPRequest
+        switch readHTTPRequest(c) {
+        case .ok(let r): req = r
+        case .bad(let code, let why): respond(c, code, why); return
+        }
         // /<NAME>/<path>
         var target = req.target
         var query = ""
@@ -300,7 +330,7 @@ final class ProxyHub: @unchecked Sendable {
             if let t = token { rec["token_id"] = t.id; rec["requester"] = t.requester }
             if let w = why { rec["reason"] = w }
             if redacted > 0 { rec["key_withheld"] = redacted }
-            audit(paths, rec)
+            if let r = recorder { _ = r(rec) } else { audit(paths, rec) }
         }
         guard let p = try? loadPayload(paths, key), let s = p.secrets[name], s.kind == "api", let host = s.api_host,
               let template = s.api_header, let (hName, hPrefix, hSuffix) = splitTemplate(template) else {
@@ -319,17 +349,25 @@ final class ProxyHub: @unchecked Sendable {
             log(401, 0, nil, host, "no live token")
             return
         }
-        // A required audit sink whose last delivery failed stops requests too (as it stops fills).
-        for (n, sk) in (p.audit_sinks ?? [:]) where sk.required && loadSinkState(paths, n, sk).error != nil {
-            respond(c, 503, "the required audit sink \(n) can't be reached; requests are refused until it can")
-            log(503, 0, token, host, "required audit sink down")
+        // The token covers the secret as it was approved: not a newer value, host or scope.
+        guard token.fits(s) else {
+            _ = revoke(token.id)
+            respond(c, 401, "\(name) changed since this token was made (set --replace or delete); get a new one")
+            log(401, 0, token, host, "the secret changed since the token was made")
             return
         }
         let segments = rest.split(separator: "/").map { $0.removingPercentEncoding ?? "/" }
         guard !segments.contains(where: { $0 == ".." || $0 == "." || $0.contains("/") || $0.contains("\\") }),
-              s.api_path_prefix.map({ rest.hasPrefix($0) }) ?? true else {
+              token.prefix.map({ rest.hasPrefix($0) }) ?? true else {
             respond(c, 403, "that path isn't allowed for \(name)")
             log(403, 0, token, host, "path not allowed")
+            return
+        }
+        // With a required audit sink, this request's own record must reach it first.
+        if let gate = preUse, let why = gate(["name": name, "vm": l.vm, "method": clean(req.method, max: 16), "host": host,
+                                              "path": clean(rest, max: 200), "token_id": token.id], token.requester) {
+            respond(c, 503, why)
+            log(503, 0, token, host, "required audit sink: \(why)")
             return
         }
         guard let url = URL(string: "\(upstreamScheme)://\(host)\(rest)\(query)") else { respond(c, 400, "bad path"); return }
@@ -378,65 +416,128 @@ struct HTTPRequest {
     func header(_ name: String) -> String? { headers.first { $0.0.lowercased() == name.lowercased() }?.1 }
 }
 
-/// One HTTP/1.x request: head up to 64 KB, body by Content-Length or chunked, up to 32 MB.
-func readHTTPRequest(_ c: Int32) -> HTTPRequest? {
+/// A request the proxy will take, or why not (an HTTP status and a reason).
+enum ParsedRequest {
+    case ok(HTTPRequest)
+    case bad(Int, String)
+}
+
+/// One HTTP/1.x request, strictly: origin-form targets only (no absolute URIs, no CONNECT or
+/// TRACE), CRLF line ends only, no folded or control-character headers, Content-Length or
+/// chunked but never both, a head of at most 64 KB and a body of at most 32 MB. Every size is
+/// bounded before it's added, so no arithmetic can overflow.
+func readHTTPRequest(_ c: Int32) -> ParsedRequest {
+    let headLimit = 65536
+    let bodyLimit = 32 << 20
     var buf = [UInt8]()
     var chunk = [UInt8](repeating: 0, count: 16384)
     var headEnd: Int?
     while headEnd == nil {
         let n = read(c, &chunk, chunk.count)
-        if n <= 0 { return nil }
+        if n <= 0 { return .bad(400, "incomplete request") }
+        let searchFrom = max(0, buf.count - 3)
         buf.append(contentsOf: chunk[0..<n])
-        if let r = findSubsequence(buf, [13, 10, 13, 10]) { headEnd = r }
-        if buf.count > 65536 && headEnd == nil { return nil }
+        headEnd = findSubsequence(buf, [13, 10, 13, 10], from: searchFrom)
+        if headEnd == nil && buf.count > headLimit { return .bad(431, "request head too large") }
     }
-    let head = String(decoding: buf[0..<headEnd!], as: UTF8.self)
-    var rest = Array(buf[(headEnd! + 4)...])
+    guard let he = headEnd, he <= headLimit else { return .bad(431, "request head too large") }
+    guard let head = String(bytes: buf[0..<he], encoding: .utf8) else { return .bad(400, "request head isn't UTF-8") }
     let lines = head.components(separatedBy: "\r\n")
-    let first = lines[0].split(separator: " ")
-    guard first.count == 3, first[2].hasPrefix("HTTP/1."), matches(String(first[0]), "^[A-Z]{1,16}$") else { return nil }
+    if lines.contains(where: { $0.contains("\r") || $0.contains("\n") }) { return .bad(400, "bare CR or LF in the request head") }
+    let first = lines[0].components(separatedBy: " ")
+    guard first.count == 3 else { return .bad(400, "malformed request line") }
+    let (method, target, version) = (first[0], first[1], first[2])
+    guard matches(method, "^[A-Z]{1,16}$") else { return .bad(400, "malformed method") }
+    if method == "CONNECT" || method == "TRACE" { return .bad(405, "\(method) isn't allowed") }
+    guard version == "HTTP/1.1" || version == "HTTP/1.0" else { return .bad(505, "HTTP/1.0 or 1.1 only") }
+    guard target.hasPrefix("/"), target.unicodeScalars.allSatisfy({ $0.value > 0x20 && $0.value < 0x7F }) else {
+        return .bad(400, "the target must be a path (/NAME/...), not an absolute URI")
+    }
     var headers: [(String, String)] = []
     for l in lines.dropFirst() {
-        guard let c = l.firstIndex(of: ":"), !l.hasPrefix(" "), !l.hasPrefix("\t") else { return nil }
-        let k = String(l[..<c]), v = String(l[l.index(after: c)...]).trimmingCharacters(in: .whitespaces)
-        guard validHeaderName(k) else { return nil }
+        if l.hasPrefix(" ") || l.hasPrefix("\t") { return .bad(400, "folded header lines aren't allowed") }
+        guard let colon = l.firstIndex(of: ":") else { return .bad(400, "malformed header line") }
+        let k = String(l[..<colon])
+        let v = String(l[l.index(after: colon)...]).trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        guard validHeaderName(k) else { return .bad(400, "malformed header name") }
+        if v.unicodeScalars.contains(where: { ($0.value < 0x20 && $0.value != 0x09) || $0.value == 0x7F }) {
+            return .bad(400, "control characters in a header value")
+        }
         headers.append((k, v))
     }
-    let req0 = HTTPRequest(method: String(first[0]), target: String(first[1]), headers: headers, body: [])
-    let limit = 32 << 20
+    let cl = headers.filter { $0.0.lowercased() == "content-length" }.map { $0.1 }
+    let te = headers.filter { $0.0.lowercased() == "transfer-encoding" }.map { $0.1 }
+    if !cl.isEmpty && !te.isEmpty { return .bad(400, "both Content-Length and Transfer-Encoding") }
+    if cl.count > 1 { return .bad(400, "more than one Content-Length") }
+    if te.count > 1 || (te.count == 1 && te[0].lowercased() != "chunked") { return .bad(501, "only Transfer-Encoding: chunked") }
+    var rest = Array(buf[(he + 4)...])
+    // Read until `want` bytes are buffered; want is always bounded by the limits above.
     func fill(_ want: Int) -> Bool {
         while rest.count < want {
             let n = read(c, &chunk, chunk.count)
             if n <= 0 { return false }
             rest.append(contentsOf: chunk[0..<n])
-            if rest.count > limit + 65536 { return false }
+            if rest.count > bodyLimit + (4 << 20) { return false }   // the body plus chunk framing, at most
         }
         return true
     }
     var body = [UInt8]()
-    if (req0.header("Transfer-Encoding") ?? "").lowercased().contains("chunked") {
+    if te.count == 1 {
         var pos = 0
+        // One CRLF-ended line starting at pos, of at most 1 KB.
+        func line() -> String?? {
+            while true {
+                if let e = findSubsequence(rest, [13, 10], from: pos) {
+                    guard e - pos <= 1024, let s = String(bytes: rest[pos..<e], encoding: .utf8) else { return .some(nil) }
+                    pos = e + 2
+                    return .some(s)
+                }
+                if rest.count - pos > 1024 { return .some(nil) }
+                if !fill(rest.count + 1) { return nil }
+            }
+        }
         while true {
-            while findSubsequence(Array(rest[pos...]), [13, 10]) == nil { if !fill(rest.count + 1) { return nil } }
-            let lineEnd = pos + findSubsequence(Array(rest[pos...]), [13, 10])!
-            let sizeText = String(decoding: rest[pos..<lineEnd], as: UTF8.self).split(separator: ";").first.map(String.init) ?? ""
-            guard let size = Int(sizeText.trimmingCharacters(in: .whitespaces), radix: 16), size >= 0, body.count + size <= limit else { return nil }
-            pos = lineEnd + 2
-            if size == 0 { break }
-            if !fill(pos + size + 2) { return nil }
+            guard let l = line() else { return .bad(400, "incomplete chunked body") }
+            guard let text = l, let sizeText = text.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first,
+                  matches(String(sizeText), "^[0-9A-Fa-f]{1,8}$"), let size = Int(sizeText, radix: 16) else {
+                return .bad(400, "malformed chunk size")
+            }
+            guard size <= bodyLimit - body.count else { return .bad(413, "request body too large") }
+            if size == 0 {
+                // Trailers, up to the empty line that ends the body.
+                for _ in 0..<64 {
+                    guard let t = line() else { return .bad(400, "incomplete chunked body") }
+                    guard let tt = t else { return .bad(400, "malformed trailer") }
+                    if tt.isEmpty { return .ok(HTTPRequest(method: method, target: target, headers: headers, body: body)) }
+                }
+                return .bad(400, "too many trailers")
+            }
+            guard fill(pos + size + 2) else { return .bad(400, "incomplete chunked body") }
+            guard rest[pos + size] == 13, rest[pos + size + 1] == 10 else { return .bad(400, "a chunk isn't followed by CRLF") }
             body.append(contentsOf: rest[pos..<(pos + size)])
             pos += size + 2
         }
-    } else if let cl = req0.header("Content-Length") {
-        guard let n = Int(cl), n >= 0, n <= limit, fill(n) else { return nil }
+    } else if let c0 = cl.first {
+        guard matches(c0, "^[0-9]{1,10}$"), let n = Int(c0) else { return .bad(400, "malformed Content-Length") }
+        guard n <= bodyLimit else { return .bad(413, "request body too large") }
+        guard fill(n) else { return .bad(400, "incomplete body") }
         body = Array(rest[0..<n])
     }
-    return HTTPRequest(method: req0.method, target: req0.target, headers: headers, body: body)
+    return .ok(HTTPRequest(method: method, target: target, headers: headers, body: body))
 }
 
-func findSubsequence(_ hay: [UInt8], _ needle: [UInt8]) -> Int? {
-    guard hay.count >= needle.count else { return nil }
-    for i in 0...(hay.count - needle.count) where hay[i] == needle[0] && Array(hay[i..<(i + needle.count)]) == needle { return i }
+/// The first place `needle` occurs in `hay` at or after `from`.
+func findSubsequence(_ hay: [UInt8], _ needle: [UInt8], from: Int = 0) -> Int? {
+    guard !needle.isEmpty, hay.count >= needle.count, from <= hay.count - needle.count else { return nil }
+    var i = max(0, from)
+    while i <= hay.count - needle.count {
+        if hay[i] == needle[0] {
+            var j = 1
+            while j < needle.count && hay[i + j] == needle[j] { j += 1 }
+            if j == needle.count { return i }
+        }
+        i += 1
+    }
     return nil
 }
 

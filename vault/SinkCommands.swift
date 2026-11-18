@@ -69,7 +69,7 @@ func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
     }
     // The sink's own first event is this one.
     audit(paths, ["op": "audit_sink_add", "result": "ok", "name": name, "kind": kind, "url_host": URLComponents(string: url)?.host ?? "?",
-                  "required": a.has("required")])
+                  "required": a.has("required")], macKey: vaultAuditKey(paths, key))
     oprint("Added the audit sink \(name) (\(kind), \(maskedURL(url)))" + (a.has("required") ? "; uses are refused while it can't be reached." : "."))
     if kind != "ntfy" {
         oprint("""
@@ -94,7 +94,7 @@ func sinkRemove(_ paths: Paths, _ name: String) throws -> Int32 {
     guard existing.audit_sinks?[name] != nil else { throw VaultError("no audit sink named \(name)") }
     try updateVault(paths, key) { p in p.audit_sinks?[name] = nil }
     for ext in ["state", "lock"] { unlink(sinkDir(paths) + "/\(name).\(ext)") }
-    audit(paths, ["op": "audit_sink_remove", "result": "ok", "name": name])
+    audit(paths, ["op": "audit_sink_remove", "result": "ok", "name": name], macKey: vaultAuditKey(paths, key))
     oprint("Removed the audit sink \(name).")
     return Exit.ok
 }
@@ -149,7 +149,7 @@ func sinkList(_ paths: Paths, _ only: String?, json: Bool) throws -> Int32 {
 }
 
 func sinkTest(_ paths: Paths, _ name: String) throws -> Int32 {
-    audit(paths, ["op": "audit_sink_test", "result": "ok", "name": name])
+    // Unlocked: the unlock process records the test (with the vault's MAC) and delivers.
     if let res = try? request(paths, ["op": "sink_flush", "name": name], timeout: 60) {
         if res["ok"] as? Bool == true {
             oprint("Sent: \(name) has every event through #\((res["delivered"] as? NSNumber)?.intValue ?? 0).")
@@ -161,9 +161,16 @@ func sinkTest(_ paths: Paths, _ name: String) throws -> Int32 {
     // Locked: deliver from here, with the passphrase.
     try requireTTY("audit-sink test (while the vault is locked)")
     installPromptSignalHandlers()
-    let (_, p) = try unlockKey(paths)
-    guard let s = p.audit_sinks?[name] else { throw VaultError("no audit sink named \(name)") }
-    if let why = deliverSink(paths, name, s) { throw VaultError("\(name): \(why)", code: Exit.error) }
-    oprint("Sent: \(name) has every event through #\(loadSinkState(paths, name, s).delivered).")
+    let (key, p0) = try unlockKey(paths)
+    guard p0.audit_sinks?[name] != nil, let ak = vaultAuditKey(paths, key), let p = try? loadPayload(paths, key),
+          let s = p.audit_sinks?[name] else { throw VaultError("no audit sink named \(name)") }
+    audit(paths, ["op": "audit_sink_test", "result": "ok", "name": name], macKey: ak)
+    let d = deliverSink(paths, name, s, auditKey: ak, from: nil, known: [:])
+    if !d.stateTrusted {
+        oprint("\(name): its saved delivery state didn't check out (changed outside the vault?); sent again from its first event.")
+    }
+    for t in d.tampered { eprint("mcomp-vault: AUDIT LOG CHANGED: \(clean(t.e["reason"] as? String ?? "a record failed its checks", max: 300))") }
+    if let why = d.problem { throw VaultError("\(name): \(why)", code: Exit.error) }
+    oprint("Sent: \(name) has every event through #\(d.delivered).")
     return Exit.ok
 }

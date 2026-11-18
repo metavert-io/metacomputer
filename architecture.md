@@ -254,11 +254,16 @@ The rest of the vault, briefly (details in SECURITY.md):
   session and project, for the prompt, the audit log, `NAME session` grants and
   `--project` limits. Attribution, not isolation.
 - **Audit** (`vault/Util.swift`, `Sinks.swift`, `SinkCommands.swift`): `audit.jsonl`
-  is hash-chained (`seq`, `prev`, `hash`, `id`) and mirrored to the unified log; the
-  unlock process delivers it, in order and at least once, to any number of webhook
-  (CloudEvents), OTLP/HTTP JSON, syslog-over-TLS and ntfy sinks, each with its own HMAC
-  key and delivery state (`sinks/`). `scripts/verify-audit.py` checks the log and sink
-  captures.
+  is hash-chained (`seq`, `prev`, `hash`, `id`), each record the vault writes carries a
+  creation MAC under the vault's audit key (inside the encrypted vault), and every
+  record goes to the unified log too. The unlock process delivers it, in order and at
+  least once, to any number of webhook (CloudEvents), OTLP/HTTP JSON, syslog-over-TLS
+  and ntfy sinks, each with its own HMAC key. It checks each record's hash, MAC and the
+  hash it wrote before signing it for a sink (a failure goes as an `audit_tamper`
+  notice), keeps each sink's place in memory (the saved `sinks/NAME.state` carries a
+  MAC), and, for a required sink, waits for that sink to acknowledge the `begin` record
+  of each use. `scripts/verify-audit.py` checks the log and sink captures;
+  `audit --verify` checks the MACs.
 - **Needs-you files**: while a question waits, the unlock process drops an
   `approval_waiting` file into the event spool
   (`~/Library/Application Support/metacomputer/events/spool/`); `bin/metacomputer`

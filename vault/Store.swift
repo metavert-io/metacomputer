@@ -32,7 +32,11 @@ struct Secret: Codable {
     var api_host: String?           // api: the host the proxy forwards to (host[:port])
     var api_header: String?         // api: "Name: template with {value}"
     var api_path_prefix: String?    // api: only paths under this
+    var gen: String? = nil          // random, new with every set: API tokens are bound to it
 }
+
+/// A secret's generation: tokens made for an earlier value or policy don't fit a newer one.
+func secretGen(_ s: Secret) -> String { s.gen ?? "\(s.created)|\(s.rotated ?? "-")" }
 
 struct VMBinding: Codable {
     var ssh_port: Int
@@ -75,18 +79,42 @@ struct Payload: Codable {
     var secrets: [String: Secret]
     var vms: [String: VMBinding]
     var session_key: String         // base64, 32 bytes: seals browser sessions
-    var session_key_prev: String?   // the previous one, only while rotate-session-key runs
+    var session_key_prev: String?   // an earlier format's single previous key (read, never written)
     var session_key_rotated: String?
     var sessions: [String: SessionMeta]
     var audit_sinks: [String: AuditSink]?
     var created: String
+    var session_keys_old: [String]? = nil   // every earlier session key a sealed file may still use (rotation cut short)
+    var audit_key: String? = nil            // base64, 32 bytes: the MAC on each audit record and on sink states
 
     static func fresh() -> Payload {
         var k = randomBytes(32)
-        defer { wipe(&k) }
+        var a = randomBytes(32)
+        defer { wipe(&k); wipe(&a) }
         return Payload(secrets: [:], vms: [:], session_key: Data(k).base64EncodedString(), session_key_prev: nil,
-                       session_key_rotated: nil, sessions: [:], audit_sinks: nil, created: isoTime())
+                       session_key_rotated: nil, sessions: [:], audit_sinks: nil, created: isoTime(),
+                       session_keys_old: nil, audit_key: Data(a).base64EncodedString())
     }
+
+    /// Every session key a sealed file may use: the current one first.
+    var sessionKeyring: [[UInt8]] {
+        var out: [[UInt8]] = []
+        for k in [session_key] + (session_keys_old ?? []) + (session_key_prev.map { [$0] } ?? []) {
+            if let d = Data(base64Encoded: k), d.count == 32, !out.contains(Array(d)) { out.append(Array(d)) }
+        }
+        return out
+    }
+
+    /// The audit MAC key, made if this vault predates it.
+    mutating func ensureAuditKey() {
+        if audit_key.flatMap({ Data(base64Encoded: $0) })?.count != 32 {
+            var a = randomBytes(32)
+            defer { wipe(&a) }
+            audit_key = Data(a).base64EncodedString()
+        }
+    }
+
+    var auditKeyBytes: [UInt8]? { audit_key.flatMap { Data(base64Encoded: $0) }.map(Array.init).flatMap { $0.count == 32 ? $0 : nil } }
 }
 
 struct KDFParams: Codable, Equatable {
@@ -361,9 +389,17 @@ func savePayload(_ paths: Paths, _ key: VaultKey, _ payload: Payload) throws {
 func updateVault(_ paths: Paths, _ key: VaultKey, _ change: (inout Payload) throws -> Void) throws {
     try withFileLock(paths.lock) {
         var p = try loadPayload(paths, key)
+        p.ensureAuditKey()
         try change(&p)
         try savePayload(paths, key, p)
     }
+}
+
+/// The audit MAC key of an open vault (made and saved first if the vault predates it).
+func vaultAuditKey(_ paths: Paths, _ key: VaultKey) -> [UInt8]? {
+    if let k = (try? loadPayload(paths, key))?.auditKeyBytes { return k }
+    try? updateVault(paths, key) { _ in }
+    return (try? loadPayload(paths, key))?.auditKeyBytes
 }
 
 /// "ssh-ed25519 AAAA..." from a known_hosts line ("[127.0.0.1]:2277 ssh-ed25519 AAAA...")

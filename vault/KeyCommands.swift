@@ -30,17 +30,24 @@ func cmdInit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard !vaultExists(paths) else { throw VaultError("a vault already exists at \(paths.vault)") }
         try savePayload(paths, key, Payload.fresh())
     }
-    audit(paths, ["op": "init", "result": "ok", "enclave": enclave, "recovery_key": recovery != nil])
+    audit(paths, ["op": "init", "result": "ok", "enclave": enclave, "recovery_key": recovery != nil], macKey: vaultAuditKey(paths, key))
     oprint("Created the vault at \(paths.vault)" + (enclave ? ", bound to this Mac's Secure Enclave." : " (passphrase only, no Secure Enclave)."))
     if let r = recovery { showRecoveryKey(r) }
     oprint("Next: metacomputer secrets set NAME --kind password --origin https://site.example --username you")
     return Exit.ok
 }
 
-/// Re-encrypt the payload under a fresh data key and new key settings.
-func rewrite(_ paths: Paths, _ payload: Payload, passphrase: [UInt8], enclave: Bool) throws -> (VaultKey, String?) {
+/// Re-encrypt the payload under a fresh data key and new key settings. The new key setup
+/// (PBKDF2, the Enclave) is made first; then one lock covers reading the latest contents
+/// with the old key and writing them with the new one, so nothing written meanwhile is lost.
+func rewrite(_ paths: Paths, from old: VaultKey, passphrase: [UInt8], enclave: Bool) throws -> (VaultKey, String?) {
     let (key, recovery) = try newVaultKey(passphrase: passphrase, enclave: enclave)
-    try withFileLock(paths.lock) { try savePayload(paths, key, payload) }
+    testPause("rekey")
+    try withFileLock(paths.lock) {
+        var current = try loadPayload(paths, old)
+        current.ensureAuditKey()
+        try savePayload(paths, key, current)
+    }
     return (key, recovery)
 }
 
@@ -50,17 +57,14 @@ func cmdRekey(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     try requireTTY("rekey")
     installPromptSignalHandlers()
     oprint("The current passphrase:")
-    let (old, payload) = try unlockKey(paths)
+    let (old, _) = try unlockKey(paths)
     let enclave = a.has("enclave") ? true : (a.has("no-enclave") ? false : old.usesEnclave)
     if enclave && !enclaveAvailable() { throw VaultError("this Mac has no Secure Enclave; use --no-enclave") }
     oprint("The new passphrase:")
     var pass = try readPassphrase(confirm: true)
     defer { wipe(&pass) }
-    // Read again under the lock, so nothing written since is lost.
-    let current = try withFileLock(paths.lock) { try loadPayload(paths, old) }
-    let (_, recovery) = try rewrite(paths, current, passphrase: pass, enclave: enclave)
-    _ = payload
-    audit(paths, ["op": "rekey", "result": "ok", "enclave": enclave, "recovery_key": recovery != nil])
+    let (key, recovery) = try rewrite(paths, from: old, passphrase: pass, enclave: enclave)
+    audit(paths, ["op": "rekey", "result": "ok", "enclave": enclave, "recovery_key": recovery != nil], macKey: vaultAuditKey(paths, key))
     oprint("Rekeyed: new passphrase, new salt, new data key" + (enclave ? ", a new Secure Enclave key" : "")
            + (old.hasRecovery ? "; the old recovery key no longer works" : "") + ". An unlocked vault locks itself; unlock again.")
     if let r = recovery { showRecoveryKey(r) }
@@ -81,52 +85,92 @@ func cmdRecover(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     oprint("Opened with the recovery key. Choose a passphrase for this Mac:")
     var pass = try readPassphrase(confirm: true)
     defer { wipe(&pass) }
-    let current = try withFileLock(paths.lock) { try loadPayload(paths, old) }
-    let (_, recovery) = try rewrite(paths, current, passphrase: pass, enclave: enclave)
-    audit(paths, ["op": "recover", "result": "ok", "enclave": enclave])
+    let (key, recovery) = try rewrite(paths, from: old, passphrase: pass, enclave: enclave)
+    audit(paths, ["op": "recover", "result": "ok", "enclave": enclave], macKey: vaultAuditKey(paths, key))
     oprint("Recovered: new passphrase, new data key" + (enclave ? ", bound to this Mac's Secure Enclave" : " (passphrase only)")
            + "; the old recovery key no longer works.")
     if let r = recovery { showRecoveryKey(r) }
     return Exit.ok
 }
 
+/// A new key for sealed browser sessions. The whole run holds the vault's lock. Every sealed
+/// session the vault lists must open with a key it holds (the current one, or one kept from a
+/// rotation that was cut short) before anything changes; an unreadable one stops it with
+/// nothing changed. The new key is saved with every older key kept, then each file is
+/// rewritten, then checked; only then are the older keys dropped. Cut short at any point,
+/// every file still opens, and running it again finishes the job.
 func cmdRotateSessionKey(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     _ = try parseArgs(argv, values: [])
     try requireTTY("rotate-session-key")
     installPromptSignalHandlers()
     let (key, _) = try unlockKey(paths)
     var n = 0
+    var resumed = false
     try withFileLock(paths.lock) {
         var p = try loadPayload(paths, key)
-        guard let oldKey = Data(base64Encoded: p.session_key).map(Array.init), oldKey.count == 32 else { throw VaultError("the vault's session key is damaged") }
-        let prev = p.session_key_prev.flatMap { Data(base64Encoded: $0).map(Array.init) }
-        var newKey = randomBytes(32)
-        defer { wipe(&newKey) }
-        // 1. every sealed session, re-encrypted to NAME.sealed.new
-        var staged: [String] = []
+        p.ensureAuditKey()
+        resumed = !(p.session_keys_old ?? []).isEmpty || p.session_key_prev != nil
+        let ring = p.sessionKeyring
+        guard !ring.isEmpty else { throw VaultError("the vault's session key is damaged") }
+        var plains: [(String, [UInt8])] = []
+        defer { for i in plains.indices { wipe(&plains[i].1) } }
         for name in p.sessions.keys.sorted() {
             let path = paths.sessions + "/\(name).sealed"
-            guard let sealed = try? readFileBytes(path) else { continue }
-            let aad = Array("mcomp-session|1|\(name)".utf8)
-            guard var plain = (try? openGCM(key: oldKey, combined: sealed, aad: aad)) ?? prev.flatMap({ try? openGCM(key: $0, combined: sealed, aad: aad) }) else {
-                throw VaultError("the sealed session \(name) can't be opened (changed or damaged); delete it first")
+            guard let sealed = try? readFileBytes(path) else {
+                throw VaultError("the sealed session \(name) can't be read (\(path)); nothing changed. Fix it, or remove it with `metacomputer secrets session delete \(name)`")
             }
-            defer { wipe(&plain) }
-            try writeFileAtomic(path + ".new", try sealGCM(key: newKey, plaintext: plain, aad: aad))
-            staged.append(path)
+            let aad = Array("mcomp-session|1|\(name)".utf8)
+            guard let plain = ring.lazy.compactMap({ try? openGCM(key: $0, combined: sealed, aad: aad) }).first else {
+                throw VaultError("the sealed session \(name) doesn't open with any key the vault holds (changed or damaged); nothing changed. Remove it with `metacomputer secrets session delete \(name)`")
+            }
+            plains.append((name, plain))
         }
-        // 2. the new key in the vault, the old one kept until the files are in place
-        p.session_key_prev = p.session_key
+        var newKey = randomBytes(32)
+        defer { wipe(&newKey) }
+        // 1. The new key in the vault, every older one kept.
+        p.session_keys_old = ring.map { Data($0).base64EncodedString() }
+        p.session_key_prev = nil
         p.session_key = Data(newKey).base64EncodedString()
         try savePayload(paths, key, p)
-        // 3. the new files in place; 4. the old key gone
-        for path in staged { guard rename(path + ".new", path) == 0 else { throw VaultError("cannot replace \(path)") } }
-        p.session_key_prev = nil
+        testPause("rotate-saved")
+        // 2. Each file under the new key, one at a time.
+        for (i, (name, plain)) in plains.enumerated() {
+            let path = paths.sessions + "/\(name).sealed"
+            try writeFileAtomic(path, try sealGCM(key: newKey, plaintext: plain, aad: Array("mcomp-session|1|\(name)".utf8)))
+            testStopAfter("rotate", i + 1)
+        }
+        // 3. Every file opens with the new key: the older ones go.
+        for (name, _) in plains {
+            guard let sealed = try? readFileBytes(paths.sessions + "/\(name).sealed"),
+                  (try? openGCM(key: newKey, combined: sealed, aad: Array("mcomp-session|1|\(name)".utf8))) != nil else {
+                throw VaultError("the sealed session \(name) didn't check out under the new key; the older keys stay in the vault, so nothing is lost. Run rotate-session-key again")
+            }
+        }
+        p.session_keys_old = nil
         p.session_key_rotated = isoTime()
         try savePayload(paths, key, p)
-        n = staged.count
+        n = plains.count
     }
-    audit(paths, ["op": "rotate_session_key", "result": "ok", "sessions": n])
-    oprint("New session key; \(n) sealed session(s) re-encrypted.")
+    audit(paths, ["op": "rotate_session_key", "result": "ok", "sessions": n, "resumed": resumed], macKey: vaultAuditKey(paths, key))
+    oprint("New session key; \(n) sealed session(s) re-encrypted." + (resumed ? " (An earlier rotation had been cut short; it's finished too.)" : ""))
     return Exit.ok
+}
+
+/// Test builds only: wait at a named point until the file $MCOMP_VAULT_TEST_PAUSE_<NAME> exists
+/// (after creating <that>.waiting), so a test can act in between.
+func testPause(_ point: String) {
+    #if MCOMP_VAULT_TESTING
+    let v = "MCOMP_VAULT_TEST_PAUSE_" + point.uppercased().replacingOccurrences(of: "-", with: "_")
+    guard let path = ProcessInfo.processInfo.environment[v], !path.isEmpty else { return }
+    _ = FileManager.default.createFile(atPath: path + ".waiting", contents: Data())
+    for _ in 0..<600 where !FileManager.default.fileExists(atPath: path) { usleep(50_000) }
+    #endif
+}
+
+/// Test builds only: exit (as if killed) after the Nth step of a named loop.
+func testStopAfter(_ point: String, _ step: Int) {
+    #if MCOMP_VAULT_TESTING
+    let v = "MCOMP_VAULT_TEST_STOP_" + point.uppercased() + "_AFTER"
+    if let s = ProcessInfo.processInfo.environment[v], Int(s) == step { _exit(9) }
+    #endif
 }

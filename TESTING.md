@@ -302,25 +302,36 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (124 checks, about 90 s) reuses that stub and
+`python3 tests/test_vault_ops.py` (176 checks, about 2 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
   working); on a Mac whose Enclave can't use the key (a test-build switch), only the
   recovery key opens the vault, and `recover`, then `rekey --enclave`, move it back; a
-  changed header breaks every wrap;
+  changed header breaks every wrap; a `set` made while `rekey` builds its keys (a
+  test-build pause) is kept;
 - **rotation:** `set` over a secret needs `--replace`; `list` shows ages;
-  `rotate-session-key` re-encrypts sealed sessions, which still load;
-- **audit:** the hash chain, `scripts/verify-audit.py` (a changed or removed event
-  fails), the unified log;
+  `rotate-session-key` re-encrypts sealed sessions, which still load; cut short twice
+  in a row (a test-build switch), both sessions still load and a third run finishes;
+  an unreadable sealed session stops it with nothing changed;
+- **audit:** the hash chain, creation MACs (`audit --verify`; a locked refusal has none
+  and is marked unverified), the unified log; `scripts/verify-audit.py` in both modes
+  (a changed, removed, repeated or reordered local line fails; raw events in place of a
+  signed capture fail; repeated deliveries pass; `--expect-start` and `--expect-head`;
+  `--require-verified`);
+- **forgeries:** a record rewritten (and rehashed) after the vault wrote it, a forged
+  record without a MAC and one with a wrong MAC each reach the sink as an
+  `audit_tamper` notice, never signed as genuine; a forged `sinks/NAME.state` is ignored;
 - **audit sinks, all four at once** against local receivers: webhook (CloudEvents,
   signature, user header), OTLP (`/v1/logs`, attributes, a header typed with `{ask}`),
   syslog over TLS with a throwaway CA passed with `--ca` (and refused without it), and
   ntfy (JSON publishing, its URL typed with `ask`). Each gets every event since it was
   added, in order, identical to the local log; captures verify with their own key and
   fail with another's; an optional sink that's down stops nothing and catches up in
-  order; a required one refuses uses (and proxied requests) until it's back; removing
-  one leaves the others;
+  order; a required one refuses uses until it's back, even with its saved state forged
+  to look caught up, and stops the very next proxied request when it goes down; an
+  audit log that can't be written refuses uses while a sink is required; a `--ca`
+  syslog sink still checks the host name; removing one leaves the others;
 - **requesters** through a stand-in process named `claude`: the prompt and audit name
   its project and pid; `NAME session`, `NAME unlock` and plain `NAME` last as long as
   they should; `--project` limits;
@@ -329,7 +340,10 @@ pseudo-terminal for the rest of the vault:
   (also split across reads), path limits, redirects, hop-by-hop headers, expiry,
   `revoke`, a VM without the proxy account, the tunnel's ssh arguments, the action log
   holding only the token's id, and the proxy and tunnels gone after the vault locks
-  (a `rekey` while unlocked);
+  (a `rekey` while unlocked); tokens ended by `set --replace` (no new value, no wider
+  path) and `delete`; the request parser refusing overflowing chunk sizes, huge or
+  doubled Content-Length, CL with TE, other transfer codings, bare CR/LF, NULs, folded
+  headers, absolute URIs, CONNECT and HTTP/2.0, with the unlock process still serving;
 - **the events spool:** `approval_waiting` while a question waits, `vault_locked` from
   `bin/metacomputer` on exit 3, file names and a folder made if missing.
 

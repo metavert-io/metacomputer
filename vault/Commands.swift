@@ -41,7 +41,7 @@ From anywhere (Claude uses these; they work only while the vault is unlocked):
   audit-sink list | show NAME | test NAME
 
 Any time:
-  status [--json]    audit [--tail N] [--json]    selftest    version [--json]
+  status [--json]    audit [--tail N] [--json] | --head | --verify    selftest    version [--json]
 
 fill, session and token: exit 0 ok, 2 refused, 3 locked, 4 error.
 """
@@ -212,13 +212,14 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         p.secrets[name] = Secret(kind: kind, value: stored, username: username, origins: origins, approval: approval,
                                  created: old?.created ?? now, rotated: old == nil ? nil : now, last_used: old?.last_used,
                                  uses: old?.uses ?? 0, projects: projects.isEmpty ? nil : projects,
-                                 api_host: apiHost, api_header: apiHeader, api_path_prefix: apiPrefix)
+                                 api_host: apiHost, api_header: apiHeader, api_path_prefix: apiPrefix,
+                                 gen: randomBytes(8).map { String(format: "%02x", $0) }.joined())
     }
     var rec: [String: Any] = ["op": old == nil ? "set" : "rotate", "result": "ok", "name": name, "kind": kind, "approval_mode": approval]
     if !origins.isEmpty { rec["origins"] = origins }
     if let h = apiHost { rec["api_host"] = h }
     if !projects.isEmpty { rec["projects"] = projects }
-    audit(paths, rec)
+    audit(paths, rec, macKey: vaultAuditKey(paths, key))
     let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
     oprint((old == nil ? "Saved" : "Rotated") + " \(name) (\(kind)) for \(where_)"
            + (projects.isEmpty ? "" : ", only for Claude Code sessions in \(projects.map(tildePath).joined(separator: ", "))")
@@ -235,7 +236,7 @@ func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let (key, existing) = try unlockKey(paths)
     guard existing.secrets[name] != nil else { throw VaultError("no secret named \(name)") }
     try updateVault(paths, key) { p in p.secrets[name] = nil }
-    audit(paths, ["op": "delete", "result": "ok", "name": name])
+    audit(paths, ["op": "delete", "result": "ok", "name": name], macKey: vaultAuditKey(paths, key))
     oprint("Deleted \(name).")
     return Exit.ok
 }
@@ -316,7 +317,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                       fill_key_path: fillKey, fill_user: fillUser, proxy_key_path: proxyKey, proxy_user: proxyUser, proxy_port: proxyPort,
                       gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime())
     try updateVault(paths, key) { p in p.vms[vm] = b }
-    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway, "proxy": proxyUser != nil])
+    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway, "proxy": proxyUser != nil], macKey: vaultAuditKey(paths, key))
     oprint("Bound VM \(vm): 127.0.0.1:\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser)"
            + (proxyUser.map { ", api tokens as \($0)" } ?? "") + ", gateway \(gateway)")
     return Exit.ok
@@ -507,7 +508,7 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         let (key, existing) = try unlockKey(paths)
         guard existing.sessions[name] != nil else { throw VaultError("no saved session named \(name)") }
         try updateVault(paths, key) { p in p.sessions[name]?.approval = ap }
-        audit(paths, ["op": "session_policy", "result": "ok", "name": name, "approval_mode": ap])
+        audit(paths, ["op": "session_policy", "result": "ok", "name": name, "approval_mode": ap], macKey: vaultAuditKey(paths, key))
         oprint(ap == "session"
                ? "Loading \(name) into the VM it was saved from no longer asks (other VMs and replacing it still do)."
                : "Loading \(name) asks at the unlock terminal each time.")
@@ -522,7 +523,7 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard existing.sessions[name] != nil else { throw VaultError("no saved session named \(name)") }
         try updateVault(paths, key) { p in p.sessions[name] = nil }
         unlink(paths.sessions + "/\(name).sealed")
-        audit(paths, ["op": "session_delete", "result": "ok", "name": name])
+        audit(paths, ["op": "session_delete", "result": "ok", "name": name], macKey: vaultAuditKey(paths, key))
         oprint("Deleted the sealed session \(name).")
         return Exit.ok
     }
@@ -623,9 +624,30 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["tail"], flags: ["json"])
+    let a = try parseArgs(argv, values: ["tail"], flags: ["json", "verify", "head"])
     let n = Int(a.last("tail") ?? "20") ?? 20
     guard fileExists(paths.audit) else { oprint("No audit records yet (\(paths.audit))."); return Exit.ok }
+    if a.has("head") {
+        // The last record as SEQ:HASH, for verify-audit.py --expect-head (note it at a moment you trust).
+        let (seq, h) = lastAuditEvent(paths.audit)
+        oprint("\(seq):\(h)")
+        return Exit.ok
+    }
+    if a.has("verify") {
+        // Only the unlock process holds the audit key that checks each record's creation MAC.
+        let res: [String: Any]
+        do { res = try request(paths, ["op": "audit_verify"], timeout: 120) } catch ClientError.locked {
+            eprint("mcomp-vault: \(lockedHint(paths)) (checking the records' creation MACs needs the unlocked vault)")
+            return Exit.locked
+        }
+        if a.has("json") { oprint(jsonPretty(res)); return res["ok"] as? Bool == true ? Exit.ok : Exit.error }
+        let probs = res["problems"] as? [String] ?? []
+        oprint(clean("\(res["records"] ?? 0) records: \(res["verified"] ?? 0) with a valid creation MAC, \(res["unverified"] ?? 0) "
+                     + "written without the vault key (refusals while locked); head \(res["head"] ?? 0):\(res["head_hash"] ?? "")", max: 400))
+        for p in probs { oprint(clean("  BAD " + p, max: 300)) }
+        oprint(probs.isEmpty ? "The local log checks out." : "The local log was changed.")
+        return probs.isEmpty ? Exit.ok : Exit.error
+    }
     let lines = String(decoding: try readFileBytes(paths.audit, max: 256 << 20), as: UTF8.self).split(separator: "\n").suffix(max(1, n))
     for l in lines {
         if a.has("json") { oprint(clean(String(l), max: 4000)); continue }

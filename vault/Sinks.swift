@@ -1,19 +1,29 @@
 // mcomp-vault: audit sinks, places off this Mac that receive every audit event.
 //
-// The local audit log (audit.jsonl, a hash chain) is the spool: each sink keeps its own
-// place in it (sinks/NAME.state, 0600) and receives every later event, in order. The
-// unlock process delivers (and `audit-sink test`); each delivery holds sinks/NAME.lock.
-// Before sending, the chain is checked: a changed local log stops delivery.
+// The local audit log (audit.jsonl, a hash chain) is the spool: each sink receives every
+// event after the one that added it, in order. The unlock process delivers (and
+// `audit-sink test` while locked); each delivery holds sinks/NAME.lock.
 //
-// Kinds (any number of each):
-//   webhook  one CloudEvents 1.0 event per audit event (structured mode), POSTed as
-//            application/cloudevents+json; X-Metacomputer-Signature: sha256=HMAC(body)
-//   otlp     OpenTelemetry logs over OTLP/HTTP (JSON): POST URL/v1/logs, one LogRecord
-//            per event (body = the event's JSON, which metacomputer.signature signs);
-//            the batch body is signed in X-Metacomputer-Signature too
-//   syslog   RFC 5424 messages over TLS (RFC 5425, octet counting) to syslog+tls://host:port;
-//            [mcomp@32473 seq= hash= prev= sig=] with sig = HMAC(MSG); MSG = the event's JSON
-//   ntfy     one line per event for a phone (no signature; seq shows gaps)
+// Nothing a process of this user can edit is taken on trust:
+// - each record made by a process holding the vault key carries a creation MAC under the
+//   vault's audit key (audit() in Util.swift); the dispatcher checks it, and a record whose MAC
+//   fails, or that the unlock process wrote with another hash, or that only the vault
+//   writes but has no MAC, is never signed for a sink: an `audit_tamper` notice goes in
+//   its place. Records without a MAC that a locked client may write (refusals while
+//   locked) are sent marked unverified;
+// - the place each sink got to is kept in memory by the unlock process; the saved copy
+//   (sinks/NAME.state) carries a MAC under the audit key and is ignored when it fails;
+// - a required sink must acknowledge the very `begin` record of a use (in memory) before
+//   the use goes ahead.
+//
+// Kinds (any number of each), in the event stream's wrappings:
+//   webhook  one CloudEvents 1.0 event per audit event (structured mode);
+//            X-Metacomputer-Signature: sha256=HMAC(body); mcompverified: the creation MAC checked out
+//   otlp     OpenTelemetry logs over OTLP/HTTP (JSON): POST URL/v1/logs, one LogRecord per
+//            event (body = the event's JSON, which metacomputer.signature signs)
+//   syslog   RFC 5424 over TLS (RFC 5425 octet counting) to syslog+tls://host:port;
+//            [metacomputer@32473 ... verified= sig=] with sig = HMAC(MSG)
+//   ntfy     one message per event for a phone (no signature)
 // Each sink has its own HMAC key (shown once when it's added).
 import Foundation
 import Network
@@ -27,22 +37,37 @@ struct SinkState: Codable {
     var error: String?
     var attempt: String?
     var failures: Int
-    var sink: String?      // the sink's `created` stamp: a state file left by an earlier sink of the same name doesn't apply
+    var sink: String?      // the sink's stamp: a state file left by an earlier sink of the same name doesn't apply
+    var mac: String? = nil // over name, stamp and delivered, under the vault's audit key
 }
 
 func sinkDir(_ paths: Paths) -> String { paths.dir + "/sinks" }
 
-func loadSinkState(_ paths: Paths, _ name: String, _ sink: AuditSink) -> SinkState {
-    if let b = try? readFileBytes(sinkDir(paths) + "/\(name).state", max: 1 << 16),
-       let s = try? JSONDecoder().decode(SinkState.self, from: Data(b)), s.sink == "\(sink.created)|\(sink.start_seq)" {
-        return s
-    }
-    return SinkState(delivered: sink.start_seq, error: nil, attempt: nil, failures: 0, sink: "\(sink.created)|\(sink.start_seq)")
+func sinkStamp(_ sink: AuditSink) -> String { "\(sink.created)|\(sink.start_seq)" }
+
+func sinkStateMAC(_ key: [UInt8], _ name: String, _ s: SinkState) -> String {
+    hmacSHA256Hex(key: key, data: Array("mcomp-vault|sink-state|\(name)|\(s.sink ?? "")|\(s.delivered)".utf8))
 }
 
-func saveSinkState(_ paths: Paths, _ name: String, _ s: SinkState) {
+/// A sink's saved state, and whether its place can be trusted. Without the audit key (display
+/// only) it's returned as found. A state whose MAC fails is replaced by a fresh one: delivery
+/// starts again from the sink's first event (receivers drop what they already have by `id`).
+func loadSinkState(_ paths: Paths, _ name: String, _ sink: AuditSink, key: [UInt8]? = nil) -> (SinkState, Bool) {
+    let fresh = SinkState(delivered: sink.start_seq, error: nil, attempt: nil, failures: 0, sink: sinkStamp(sink))
+    guard let b = try? readFileBytes(sinkDir(paths) + "/\(name).state", max: 1 << 16),
+          let s = try? JSONDecoder().decode(SinkState.self, from: Data(b)), s.sink == sinkStamp(sink) else { return (fresh, true) }
+    guard let k = key else { return (s, true) }
+    if let m = s.mac, m == sinkStateMAC(k, name, s) { return (s, true) }
+    var f = fresh
+    f.error = "its saved delivery state didn't check out; sending again from its first event"
+    return (f, false)
+}
+
+func saveSinkState(_ paths: Paths, _ name: String, _ s: SinkState, key: [UInt8]) {
+    var st = s
+    st.mac = sinkStateMAC(key, name, st)
     try? ensurePrivateDir(sinkDir(paths))
-    if let d = try? JSONEncoder().encode(s) { try? writeFileAtomic(sinkDir(paths) + "/\(name).state", Array(d)) }
+    if let d = try? JSONEncoder().encode(st) { try? writeFileAtomic(sinkDir(paths) + "/\(name).state", Array(d)) }
 }
 
 /// nil when the URL suits the kind, else why not.
@@ -232,11 +257,14 @@ func epochNanos(_ iso: String) -> String {
 
 /// CloudEvents 1.0, structured mode, as the events stream sends them: `id` the event's UUID
 /// (at-least-once delivery: receivers drop duplicates by it), `source` metacomputer/<host>,
-/// `subject` the VM, `type` io.metavert.metacomputer.vault.<op>, `data` the event itself.
-func cloudEventBody(_ raw: String, _ e: [String: Any]) -> String {
+/// `subject` the VM, `type` io.metavert.metacomputer.vault.<op>, `data` the event itself;
+/// the extension `mcompverified` says whether its creation MAC checked out.
+func cloudEventBody(_ ev: OutEvent) -> String {
+    let e = ev.e
     let op = (e["op"] as? String) ?? "event"
-    var s = "{\"data\":" + raw + ",\"datacontenttype\":\"application/json\",\"id\":"
+    var s = "{\"data\":" + ev.raw + ",\"datacontenttype\":\"application/json\",\"id\":"
         + canonicalString((e["id"] as? String) ?? (e["hash"] as? String) ?? "")
+        + ",\"mcompverified\":" + (ev.verified ? "true" : "false")
         + ",\"source\":" + canonicalString("metacomputer/" + hostLabel()) + ",\"specversion\":\"1.0\""
     if let vm = e["vm"] as? String { s += ",\"subject\":" + canonicalString(vm) }
     return s + ",\"time\":" + canonicalString((e["ts"] as? String) ?? "") + ",\"type\":"
@@ -245,12 +273,14 @@ func cloudEventBody(_ raw: String, _ e: [String: Any]) -> String {
 
 /// OTLP/HTTP JSON logs, as the events stream sends them (family "vault", type = op), plus the
 /// chain (hash, prev) and each record's own signature.
-func otlpBody(_ events: [(String, [String: Any])], key: [UInt8]) -> String {
+func otlpBody(_ events: [OutEvent], key: [UInt8]) -> String {
     func s(_ k: String, _ v: String) -> [String: Any] { ["key": k, "value": ["stringValue": v]] }
     func i(_ k: String, _ v: Int) -> [String: Any] { ["key": k, "value": ["intValue": String(v)]] }
     let observed = epochNanos(auditTime())
-    let records: [[String: Any]] = events.map { raw, e in
-        var attrs: [[String: Any]] = [s("metacomputer.family", "vault")]
+    let records: [[String: Any]] = events.map { ev in
+        let raw = ev.raw, e = ev.e
+        var attrs: [[String: Any]] = [s("metacomputer.family", "vault"),
+                                      ["key": "metacomputer.verified", "value": ["boolValue": NSNumber(value: ev.verified)]]]
         for (k, name) in [("op", "metacomputer.type"), ("vm", "metacomputer.vm"), ("id", "metacomputer.id"), ("name", "metacomputer.secret"),
                           ("field", "metacomputer.field"), ("origin", "metacomputer.origin"), ("result", "metacomputer.outcome"),
                           ("hash", "metacomputer.hash"), ("prev", "metacomputer.prev")] {
@@ -280,14 +310,15 @@ func sdEscape(_ s: String) -> String {
 /// One RFC 5424 message, as the events stream sends them (facility user, PROCID "-",
 /// SD-ID metacomputer@32473 with seq, family, vm, id), plus hash, prev and the signature
 /// of MSG; without the octet count.
-func syslogMessage(_ raw: String, _ e: [String: Any], key: [UInt8]) -> String {
+func syslogMessage(_ ev: OutEvent, key: [UInt8]) -> String {
+    let raw = ev.raw, e = ev.e
     let pri = 1 * 8 + severityOf(e).syslog
     let op = String(((e["op"] as? String) ?? "event").unicodeScalars.filter { $0.value > 32 && $0.value < 127 }.prefix(32).map(Character.init))
     let sig = "sha256=" + hmacSHA256Hex(key: key, data: Array(raw.utf8))
     var sd = "[\(syslogSDID) seq=\"\((e["seq"] as? NSNumber)?.intValue ?? 0)\" family=\"vault\""
     if let vm = e["vm"] as? String { sd += " vm=\"\(sdEscape(vm))\"" }
     sd += " id=\"\(sdEscape((e["id"] as? String) ?? ""))\" hash=\"\(sdEscape((e["hash"] as? String) ?? ""))\""
-        + " prev=\"\(sdEscape((e["prev"] as? String) ?? ""))\" sig=\"\(sig)\"]"
+        + " prev=\"\(sdEscape((e["prev"] as? String) ?? ""))\" verified=\"\(ev.verified)\" sig=\"\(sig)\"]"
     let ts = (e["ts"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "-"
     return "<\(pri)>1 \(ts) \(hostLabel()) metacomputer-vault - \(op.isEmpty ? "-" : op) \(sd) \(raw)"
 }
@@ -305,7 +336,8 @@ func ntfySummary(_ e: [String: Any]) -> String {
 
 /// ntfy's JSON publishing, as the events stream does it: POST to the server's root with the
 /// topic in the body; priority 4 for warn and error, 3 for info.
-func ntfyRequest(_ sinkURL: String, _ e: [String: Any]) -> (URL, String)? {
+func ntfyRequest(_ sinkURL: String, _ ev: OutEvent) -> (URL, String)? {
+    let e = ev.e
     guard var u = URLComponents(string: sinkURL) else { return nil }
     let parts = u.path.split(separator: "/").map(String.init)
     guard let topic = parts.last, !topic.isEmpty else { return nil }
@@ -316,93 +348,166 @@ func ntfyRequest(_ sinkURL: String, _ e: [String: Any]) -> (URL, String)? {
     let sev = severityOf(e)
     let title = "\((e["vm"] as? String) ?? hostLabel()) - vault: \(((e["op"] as? String) ?? "event").replacingOccurrences(of: "_", with: " "))"
     let tags = ["lock"] + (sev.name == "warn" ? ["warning"] : sev.name == "error" ? ["rotating_light"] : [])
-    let body: [String: Any] = ["topic": topic, "title": clean(title, max: 200), "message": ntfySummary(e),
+    let body: [String: Any] = ["topic": topic, "title": clean(title, max: 200), "message": (ev.verified ? "" : "[unverified] ") + ntfySummary(e),
                                "priority": sev.name == "info" ? 3 : 4, "tags": tags]
     return (root, canonicalJSON(body))
 }
 
 // MARK: - delivery
 
-/// The audit events after `after`, in order, checked against the chain. On a broken chain,
-/// the error names the first bad seq and nothing past it is returned.
-func pendingEvents(_ paths: Paths, after: Int, limit: Int = 200) -> ([(String, [String: Any])], String?) {
-    guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return ([], nil) }
+/// One event as a sink gets it: the record's own line, whether its creation MAC checked out,
+/// or, for a record that failed the checks, an `audit_tamper` notice in its place.
+struct OutEvent {
+    let seq: Int
+    let raw: String
+    let e: [String: Any]
+    let verified: Bool
+    let tamper: Bool
+}
+
+/// Uses a locked client may record without the vault key (it has none): refusals while locked.
+func clientMayWrite(_ e: [String: Any]) -> Bool {
+    (e["result"] as? String) == "locked" && ["fill", "session_save", "session_load", "token"].contains(e["op"] as? String ?? "")
+}
+
+/// A notice that stands in for a record that failed its checks. Its id is fixed by the seq and
+/// the reason, so a repeated delivery is dropped like any other.
+func tamperEvent(_ seq: Int, _ reason: String, seen: String?) -> OutEvent {
+    let h = sha256Hex(Array("mcomp-tamper|\(seq)|\(reason)|\(seen ?? "")".utf8))
+    let c = Array(h)
+    let id = String(c[0..<8]) + "-" + String(c[8..<12]) + "-5" + String(c[13..<16]) + "-a" + String(c[17..<20]) + "-" + String(c[20..<32])
+    var e: [String: Any] = ["op": "audit_tamper", "result": "error", "seq": seq, "reason": reason, "id": id, "ts": auditTime()]
+    if let s = seen { e["hash_seen"] = s }
+    return OutEvent(seq: seq, raw: canonicalJSON(e), e: e, verified: true, tamper: true)
+}
+
+/// The events after `after`, in order, each checked: its hash, its place in the chain, the
+/// hash the unlock process saw when it wrote it (`known`), and its creation MAC.
+func pendingEvents(_ paths: Paths, after: Int, limit: Int, auditKey: [UInt8], known: [Int: String]) -> [OutEvent] {
+    guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return [] }
     var prevHash: String?
-    var out: [(String, [String: Any])] = []
+    var last = after
+    var linkOK = true
+    var out: [OutEvent] = []
     for l in bytes.split(separator: 0x0A, omittingEmptySubsequences: true) {
         guard let e = parseJSONObject(Array(l)), let seq = (e["seq"] as? NSNumber)?.intValue else { continue }
         if seq <= after {
-            prevHash = seq == after ? e["hash"] as? String : nil
+            if seq == after { prevHash = e["hash"] as? String }
             continue
         }
-        let raw = String(decoding: l, as: UTF8.self)
-        let expectSeq = (out.last.flatMap { ($0.1["seq"] as? NSNumber)?.intValue }).map { $0 + 1 } ?? after + 1
-        guard (e["hash"] as? String) == eventHash(e), seq == expectSeq,
-              prevHash == nil || (e["prev"] as? String) == prevHash else {
-            return (out, "the local audit log was changed at seq \(seq); not sending past it (look at audit.jsonl)")
+        if seq <= last {
+            out.append(tamperEvent(seq, "a second record with seq \(seq), or one out of order, in the local log; not sent", seen: e["hash"] as? String))
+            linkOK = false
+            continue
         }
-        out.append((raw, e))
-        prevHash = e["hash"] as? String
+        if seq > last + 1 {
+            out.append(tamperEvent(last + 1, "records \(last + 1)..\(seq - 1) are missing from the local log", seen: nil))
+            linkOK = false
+        }
+        let h = e["hash"] as? String
+        let raw = String(decoding: l, as: UTF8.self)
+        var problem: String?
+        if h != eventHash(e) {
+            problem = "record \(seq) doesn't match its own hash (changed after it was written); not sent"
+        } else if let k = known[seq], k != h {
+            problem = "record \(seq) isn't the one the unlock process wrote; not sent"
+        } else if let m = e["mac"] as? String {
+            if m != auditRecordMAC(auditKey, e) { problem = "record \(seq) fails its creation MAC; not sent" }
+        } else if !clientMayWrite(e) {
+            problem = "record \(seq) (\(clean(e["op"] as? String ?? "?", max: 40))) has no creation MAC, which only a locked client's refusals may lack; not sent"
+        }
+        if problem == nil, linkOK, let p = prevHash, (e["prev"] as? String) != p {
+            out.append(tamperEvent(seq, "record \(seq) doesn't link to record \(seq - 1) (the chain was changed)", seen: h))
+        }
+        if let why = problem {
+            out.append(tamperEvent(seq, why, seen: h))
+        } else {
+            out.append(OutEvent(seq: seq, raw: raw, e: e, verified: e["mac"] != nil, tamper: false))
+        }
+        prevHash = h
+        linkOK = true
+        last = seq
         if out.count >= limit { break }
     }
-    return (out, nil)
+    return out
 }
 
-/// Send what's pending for one sink; returns nil when nothing is left pending, else why.
-func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink) -> String? {
+struct Delivery {
+    var problem: String?
+    var delivered: Int          // the place reached: every event up to here was sent and acknowledged
+    var genuine: [Int] = []     // seqs sent as the records themselves (not tamper notices)
+    var tampered: [OutEvent] = []
+    var stateTrusted = true     // false: the saved place failed its MAC (delivery started again from the first event)
+}
+
+/// Send what's pending for one sink, starting after `from` (the unlock process's own place in
+/// memory) or, without it, after the sink's saved place (MAC-checked).
+func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [UInt8], from: Int?, known: [Int: String]) -> Delivery {
     try? ensurePrivateDir(sinkDir(paths))
-    let res: String?? = try? withFileLock(sinkDir(paths) + "/\(name).lock") { () -> String? in
-        var state = loadSinkState(paths, name, sink)
-        guard let key = Data(base64Encoded: sink.hmac_key).map(Array.init) else { return "the sink's key is damaged" }
-        var problem: String?
-        while problem == nil {
-            let (events, chainError) = pendingEvents(paths, after: state.delivered, limit: sink.kind == "otlp" ? 50 : 100)
-            if events.isEmpty { problem = chainError; break }
-            var sentThrough = state.delivered
+    let res: Delivery? = try? withFileLock(sinkDir(paths) + "/\(name).lock") { () -> Delivery in
+        let loaded = loadSinkState(paths, name, sink, key: auditKey)
+        var state = loaded.0
+        let trusted = loaded.1
+        if let f = from { state.delivered = f }
+        guard let key = Data(base64Encoded: sink.hmac_key).map(Array.init) else {
+            return Delivery(problem: "the sink's key is damaged", delivered: state.delivered)
+        }
+        var d = Delivery(problem: nil, delivered: state.delivered)
+        d.stateTrusted = from != nil || trusted
+        while d.problem == nil {
+            let events = pendingEvents(paths, after: d.delivered, limit: sink.kind == "otlp" ? 50 : 100, auditKey: auditKey, known: known)
+            if events.isEmpty { break }
+            var sentThrough = d.delivered
+            var sent: [OutEvent] = []
             switch sink.kind {
             case "otlp":
                 var url = sink.url.hasSuffix("/") ? String(sink.url.dropLast()) : sink.url
                 if !url.hasSuffix("/v1/logs") { url += "/v1/logs" }
                 let body = otlpBody(events, key: key)
-                problem = URL(string: url).map { httpPost($0, headers: sinkHeaders(sink, body, contentType: "application/json"), body: Data(body.utf8)) }
+                d.problem = URL(string: url).map { httpPost($0, headers: sinkHeaders(sink, body, contentType: "application/json"), body: Data(body.utf8)) }
                     ?? "bad URL"
-                if problem == nil { sentThrough = (events.last?.1["seq"] as? NSNumber)?.intValue ?? sentThrough }
+                if d.problem == nil { sent = events }
             case "syslog":
-                guard let u = URLComponents(string: sink.url), let host = u.host else { problem = "bad URL"; break }
-                let frames = events.map { raw, e -> Data in
-                    let m = Array(syslogMessage(raw, e, key: key).utf8)
+                guard let u = URLComponents(string: sink.url), let host = u.host else { d.problem = "bad URL"; break }
+                let frames = events.map { ev -> Data in
+                    let m = Array(syslogMessage(ev, key: key).utf8)
                     return Data(Array("\(m.count) ".utf8) + m)
                 }
-                problem = syslogSend(host: host, port: UInt16(u.port ?? 6514), caPEM: sink.ca_pem, frames: frames)
-                if problem == nil { sentThrough = (events.last?.1["seq"] as? NSNumber)?.intValue ?? sentThrough }
+                d.problem = syslogSend(host: host, port: UInt16(u.port ?? 6514), caPEM: sink.ca_pem, frames: frames)
+                if d.problem == nil { sent = events }
             default:
-                for (raw, e) in events {
+                for ev in events {
                     var target: URL?
                     let body: String
                     if sink.kind == "ntfy" {
-                        guard let (root, b) = ntfyRequest(sink.url, e) else { problem = "bad URL (https://server/topic)"; break }
+                        guard let (root, b) = ntfyRequest(sink.url, ev) else { d.problem = "bad URL (https://server/topic)"; break }
                         target = root
                         body = b
                     } else {
                         target = URL(string: sink.url)
-                        body = cloudEventBody(raw, e)
+                        body = cloudEventBody(ev)
                     }
                     let headers = sinkHeaders(sink, body, contentType: sink.kind == "ntfy" ? "application/json" : "application/cloudevents+json; charset=utf-8")
-                    problem = target.map { httpPost($0, headers: headers, body: Data(body.utf8)) } ?? "bad URL"
-                    if problem != nil { break }
-                    sentThrough = (e["seq"] as? NSNumber)?.intValue ?? sentThrough
+                    d.problem = target.map { httpPost($0, headers: headers, body: Data(body.utf8)) } ?? "bad URL"
+                    if d.problem != nil { break }
+                    sent.append(ev)
                 }
             }
-            if sentThrough > state.delivered { state.delivered = sentThrough; state.failures = 0 }
-            if problem == nil && chainError != nil { problem = chainError }
+            for ev in sent {
+                sentThrough = max(sentThrough, ev.seq)
+                if ev.tamper { d.tampered.append(ev) } else { d.genuine.append(ev.seq) }
+            }
+            if sentThrough > d.delivered { d.delivered = sentThrough; state.failures = 0 }
+            if sent.isEmpty && d.problem == nil { break }
         }
-        state.error = problem
+        state.delivered = d.delivered
+        state.error = d.problem
         state.attempt = isoTime()
-        if problem != nil { state.failures += 1 }
-        saveSinkState(paths, name, state)
-        return problem
+        if d.problem != nil { state.failures += 1 }
+        saveSinkState(paths, name, state, key: auditKey)
+        return d
     }
-    return res ?? "can't lock the sink's state"
+    return res ?? Delivery(problem: "can't lock the sink's state", delivered: from ?? sink.start_seq)
 }
 
 func sinkHeaders(_ sink: AuditSink, _ body: String, contentType: String) -> [(String, String)] {
@@ -412,7 +517,7 @@ func sinkHeaders(_ sink: AuditSink, _ body: String, contentType: String) -> [(St
         + sink.headers.compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
 }
 
-/// The events not yet delivered to a sink.
-func sinkBacklog(_ paths: Paths, _ name: String, _ sink: AuditSink) -> Int {
-    max(0, lastAuditEvent(paths.audit).0 - loadSinkState(paths, name, sink).delivered)
+/// The events not yet delivered to a sink, from its saved place (for display).
+func sinkBacklog(_ paths: Paths, _ name: String, _ sink: AuditSink, from: Int? = nil) -> Int {
+    max(0, lastAuditEvent(paths.audit).0 - (from ?? loadSinkState(paths, name, sink).0.delivered))
 }

@@ -554,7 +554,14 @@ it expires.
    the token where the key would go (`Authorization: Bearer mct_...`, or the secret's
    own header, or `X-Metacomputer-Token`).
 4. For each request the proxy:
-   - checks the token: this secret, this VM, not expired, not revoked (401 otherwise);
+   - takes only a strict HTTP/1.1 request: a path (no absolute URI, no `CONNECT` or
+     `TRACE`), CRLF line ends, no folded or control-character headers, `Content-Length`
+     or chunked but never both, at most 64 KB of head and 32 MB of body; anything else
+     gets a 4xx or 5xx before a token is even looked at;
+   - checks the token: this secret, this VM, not expired, not revoked, and still the
+     secret it was made for (401 otherwise). A token is bound to the secret's
+     generation and to its host, header and path prefix as approved: `set --replace` or
+     `delete` ends it, so a token can never pick up a new value, host or wider scope;
    - checks the path: under `--api-path-prefix` if set, no `.` or `..` segments, no
      encoded slashes (403 otherwise);
    - sends it to `https://<api-host><path>` with the real header in place of the token,
@@ -566,6 +573,8 @@ it expires.
    - streams the answer back, replacing every exact copy of the key in its headers
      and body with `[key withheld by metacomputer secrets]` (an echo endpoint such as
      httpbin.org/anything would otherwise hand the key to the VM);
+   - with a required audit sink, first records the request (`begin`, use `api`) and
+     waits for every required sink to acknowledge that record; otherwise 503;
    - audits it: method, host, path without the query, status, bytes, token id and how
      many copies were withheld. Never bodies or headers.
 5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
@@ -619,10 +628,16 @@ other host or path prefix, or outlive the unlock. The proxy's Mac end listens on
 - `rekey` (old passphrase, then the new one twice): new passphrase, new salt, new data
   key, new Enclave key and a new recovery key; the old recovery key stops working. A
   running unlock notices the key change and locks itself. `rekey --enclave` moves a
-  passphrase-only vault onto this Mac's Enclave; `--no-enclave` the other way.
-- `rotate-session-key` (passphrase): a new key for sealed browser logins; each one is
-  re-encrypted under it. If it's cut short, the previous key still opens the ones not
-  yet done, and running it again finishes.
+  passphrase-only vault onto this Mac's Enclave; `--no-enclave` the other way. The new
+  keys are made first; then one lock covers reading the latest contents and writing
+  them under the new key, so a change made meanwhile (a `set`, a saved session) is
+  kept. `recover` works the same way.
+- `rotate-session-key` (passphrase): a new key for sealed browser logins. It holds the
+  vault's lock throughout. Every sealed session must open first (an unreadable one
+  stops it, with nothing changed); the new key is saved with every older key kept;
+  each file is rewritten and checked; only then are the older keys dropped. Cut short
+  at any point (even twice in a row), every file still opens, and running it again
+  finishes.
 - An audit sink's signing key: remove the sink and add it again.
 
 ### The audit log, and sending it off this Mac
@@ -639,7 +654,8 @@ no spaces, ASCII), and each event is chained to the one before:
 | `ts` | UTC, RFC 3339 with microseconds |
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
-| `op` | `unlock`, `lock`, `fill`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `set`, `rotate`, `delete`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test` |
+| `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
+| `op` | `unlock`, `lock`, `fill`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `set`, `rotate`, `delete`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
 | `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
 | `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `grant:session` / `grant:unlock` (covered by one), `-` |
@@ -648,10 +664,36 @@ no spaces, ASCII), and each event is chained to the one before:
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
 | `method`, `host`, `path`, `status`, `token_id`, `key_withheld` | a proxied API request (the path without its query) |
 
-- `python3 scripts/verify-audit.py audit.jsonl` recomputes every hash and checks the
-  chain and the sequence. Changing or removing a line shows. Your account can still
-  rewrite the whole file consistently: the off-Mac copies below are what make it
-  tamper-evident.
+**What each check proves.** Claude Code runs as you, so it can edit any file of yours,
+this log included. What it can't reach is the vault's **audit key**: 32 random bytes
+kept inside the encrypted vault, held in memory by the unlock process and by a command
+you've just given the passphrase.
+- The **hash chain** makes the file self-consistent: a changed, removed or reordered line
+  shows, unless the whole tail is rewritten and rehashed, which your account can do.
+  `python3 scripts/verify-audit.py audit.jsonl` checks it (`--expect-start 1` and
+  `--expect-head SEQ:HASH` pin the ends; `metacomputer secrets audit --head` prints the
+  current head, to note at a moment you trust).
+- The **creation MAC** says a process holding the vault key wrote the record. Only the
+  vault can check it: `metacomputer secrets audit --verify` (while unlocked) checks every
+  record's MAC and chain and names what fails. Refusals written while the vault is
+  locked come from a client without the key; they carry no MAC and are counted as
+  unverified. A record of a kind only the vault writes (a fill that went ahead, a token,
+  a `begin`, an unlock) without a valid MAC is a forgery.
+- The unlock process also remembers the hash of every record it writes, so a record it
+  wrote and that was rewritten since is caught even before the MAC is checked.
+- A **sink's signature** (its own HMAC key, held by you and the receiver) says the
+  record reached the receiver exactly as the vault sent it. The vault signs only records
+  that pass the checks above: one that fails reaches every sink as an `audit_tamper`
+  notice in its place (with the seq and why), the unlock terminal says `AUDIT LOG
+  CHANGED`, and the local log records it. Each sink also says whether the vault verified
+  the record's creation MAC (`mcompverified` in a CloudEvent, `metacomputer.verified` in
+  OTLP, `verified=` in syslog, `[unverified]` in ntfy): `false` means a locked client
+  wrote it, and anything running as you could have.
+- So a capture checked with `verify-audit.py --key` proves the events are intact, in
+  order, signed for that sink and (where marked) written by the vault; records the agent
+  wrote or changed before delivery never arrive signed as genuine. It doesn't prove what
+  was never delivered: pin the ends with `--expect-start` and `--expect-head`, and use a
+  required sink for uses that must be recorded before they happen.
 - Every event also goes to macOS's unified log: `log show --predicate 'subsystem ==
   "io.metavert.metacomputer.vault"' --last 1d`.
 
@@ -688,18 +730,26 @@ metacomputer secrets audit-sink add hec --kind webhook --url https://splunk.exam
 - **Delivery.** The unlock process sends each sink its events in order, at least once
   (after a failed attempt, a batch may arrive twice: drop duplicates by `id`), retrying with
   backoff up to a minute. Events made while the vault is locked go at the next unlock.
-  A sink starts with the event that added it. It stops at a break in the local chain,
-  naming the `seq`, rather than send events past it.
+  A sink starts with the event that added it. Where each sink got to is kept in the
+  unlock process's memory; the saved copy (`sinks/NAME.state`) carries a MAC under the
+  audit key, and one that fails it is ignored: delivery starts again from the sink's
+  first event (receivers drop what they have by `id`) and the terminal says so.
 - **`--required` fails closed.** With a required sink, each use is first recorded as
-  `begin` (what, which secret, the VM, the requester), and that record must reach every
-  required sink before the use goes ahead; the outcome follows as its own event. While
-  one can't be reached, fills, tokens and session saves and loads are refused (exit 2)
-  and proxied requests get 503. Optional sinks never stop anything; removing one leaves
-  the others as they were.
-- **Checking a copy.** `scripts/verify-audit.py --key KEY FILE...` checks signatures,
-  hashes, the chain and gaps in what a sink received: webhook and OTLP captures as JSON
-  lines `{"signature": "<X-Metacomputer-Signature>", "body": "<request body>"}`,
-  syslog as one message per line. Standard library only.
+  `begin` (what, which secret, the VM, the requester), and the unlock process must see
+  every required sink accept that very record (its seq, as it wrote it) before the use
+  goes ahead; the outcome follows as its own event. A saved delivery place or an empty
+  backlog proves nothing. While one can't be reached, fills, tokens and session saves
+  and loads are refused (exit 2) and each proxied request gets 503. If the audit log
+  itself can't be written (a full disk, changed permissions), uses are refused too
+  while a sink is required, and the terminal warns either way. Optional sinks never
+  stop anything; removing one leaves the others as they were.
+- **Checking a copy.** `scripts/verify-audit.py --key KEY FILE...` reads what a sink
+  received: webhook and OTLP captures as JSON lines `{"signature":
+  "<X-Metacomputer-Signature>", "body": "<request body>"}`, syslog as one message per
+  line. With `--key`, every event must come signed (a raw event fails); repeats of the
+  same event are dropped, and otherwise each seq must follow the one before. Tamper
+  notices fail the check, `--require-verified` fails on unverified events, and the
+  output says what the result proves and what it doesn't. Standard library only.
 
 **In OCSF terms** the closest class is API Activity (`class_uid` 6003, category
 Application Activity). A suggested mapping; fields without a clear home go in
@@ -711,6 +761,7 @@ Application Activity). A suggested mapping; fields without a clear home go in
 | `api.operation` | `op` |
 | `time` | `ts` (as epoch milliseconds) |
 | `metadata.uid`, `metadata.sequence` | `id`, `seq` |
+| `metadata.labels` | `producer_verified` when the sink says the creation MAC checked out |
 | `metadata.product.name` | `metacomputer-vault` |
 | `status_id` / `status` | 1 Success for `ok`; 2 Failure for `denied`, `locked`, `error` (`pending` for `begin`: 0 Unknown) |
 | `status_detail` | `reason` |
@@ -960,16 +1011,21 @@ fails a request.
 - **The local audit log isn't secret, and only partly tamper-evident.** It names your
   secrets, sites and projects (never values), and anyone with your account can read
   it. The chain shows a changed or missing line, but your account can rewrite the
-  whole file, or delete it. What an audit sink has received can't be changed from
-  here, and the signed action log is another record.
+  whole file, or delete it. A rewritten record fails its creation MAC (`audit
+  --verify`) and is never signed for a sink, but records that were deleted, or never
+  delivered before the file was rewritten, are simply missing: what an audit sink has
+  received, a required sink's `begin` records and the signed action log are the
+  records to rely on.
 - **Requesters can be faked by your own processes.** Who asked, `NAME session` grants
   and `--project` rest on process names, parents and folders, all of which a program
   running as you controls ("Who is asking").
 - **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac
   (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends. The
-  key is withheld from answers only as an exact copy: an API that returned it encoded
-  (in base64, say) would hand it over. What the API itself does with your requests is
-  up to the API.
+  key is withheld from answers only as an exact copy. Compressed answers are
+  decompressed before that check (the proxy asks for and unpacks gzip, deflate and
+  Brotli itself), but an API that returned the key transformed (in base64, hashed into
+  a URL, inside a compressed file it serves as data) would hand it over. What the API
+  itself does with your requests is up to the API.
 - **A sealed login is a login.** Anyone who loads it is signed in, so treat it like
   the password.
 - **Memory.** While unlocked, the unlock process holds the decrypted vault. When it
@@ -989,7 +1045,7 @@ fails a request.
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
 | `audit-sink list`, `audit-sink show NAME`, `audit-sink test NAME` | anywhere | Sinks, their backlog and last error (URLs masked); deliver now |
-| `status`, `audit [--tail N]`, `selftest` | anywhere | State, the audit log, and the program's own checks |
+| `status`, `audit [--tail N]`, `audit --head`, `audit --verify`, `selftest` | anywhere (`--verify` while unlocked) | State; the audit log; its head as SEQ:HASH; every record's creation MAC and the chain checked by the vault; the program's own checks |
 
 `metacomputer secrets ...` fills in the current VM (`--vm`). `bind` takes its port,
 host key, keys, accounts and gateway from the config (`MCOMP_CONFIG` for another VM),
