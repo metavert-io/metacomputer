@@ -13,20 +13,25 @@
   learn remove ID...     take approved lessons out
   learn edit ID          change a lesson's or a proposal's text (your terminal only)
   learn add              write a lesson of your own (your terminal only)
+  learn reseal           accept lessons.json after it changed outside learn (your terminal only)
   learn bench [--config TEST_ENV] [--tasks a,b] [--budget USD] [--cap USD] [--run-id ID] [--yes]
                          run the benchmark without and with the approved lessons and compare
                          (a test VM; it spends your Claude usage and asks first)
 
-Proposals are built only from structured data (lib/learn_mine.py): failure classes, counts, tool
-names, app names from a fixed list, durations. Their wording comes from the built-in templates
-below, or, with --draft-with-claude, from one headless Claude Code session that gets only that
-structured summary. Approved lessons go in a private store outside the checkout
-(lib/learn_store.py) and reach every later session through the hub's MCP instructions, as advice
-only: no guard reads them. Nothing here sends anything off the Mac, except --draft-with-claude,
-which uses your own Claude Code and says so.
+Proposals are built only from structured data (lib/learn_mine.py): failure classes, counts, the
+driver's own tool names, app names from a fixed list, durations. Their wording comes from the
+built-in templates below, or, with --draft-with-claude, from one headless Claude Code session that
+gets only that structured summary (sent to Anthropic through your own Claude Code, and it says so).
+Approved lessons go in a private store outside the checkout (lib/learn_store.py), each change
+recorded with hashes in approvals.jsonl and its event, and reach every later session through the
+hub's MCP instructions: advice that no guard reads, and model context like the rest of the
+instructions. Mining and the store stay on the Mac. None of this stops a program running as the
+user from approving a lesson; it makes that visible (SECURITY.md, "Lessons from your own sessions").
 """
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -41,6 +46,7 @@ LAB = os.path.dirname(LIB)
 sys.path.insert(0, LIB)
 import learn_mine  # noqa: E402
 import learn_store  # noqa: E402
+import transcripts  # noqa: E402
 import termsafe  # noqa: E402
 try:
     import events  # noqa: E402  (the optional event stream; never let it stop a command)
@@ -252,19 +258,43 @@ def save(lessons=None, proposals=None):
         learn_store.write_json(learn_store.proposals_path(), proposals)
 
 
-def emit(type_, lesson, active):
-    """security.lesson_approved | lesson_removed | lesson_edited: the id, a short title and the source; never
-    the lesson's text."""
+def emit(type_, lesson, active, entry=None):
+    """security.lesson_approved | lesson_removed | lesson_edited | lessons_resealed: the id, a short title, the
+    source, the lesson's text hash and the store's hash after the change (as approvals.jsonl records them);
+    never the lesson's text."""
     if events is None:
         return
     try:
-        title = learn_store.clean_title(lesson.get("title") or lesson.get("id"), 60)
-        verb = {"lesson_approved": "approved", "lesson_removed": "removed", "lesson_edited": "edited"}[type_]
-        events.emit("security", type_, f"A lesson for the virtual computer's instructions was {verb}: {title}",
-                    data={"id": lesson.get("id"), "title": title, "source": lesson.get("source"), "active": active},
+        title = learn_store.clean_title((lesson or {}).get("title") or (lesson or {}).get("id") or "", 60)
+        verb = {"lesson_approved": "approved", "lesson_removed": "removed", "lesson_edited": "edited",
+                "lessons_resealed": "resealed (accepted as they are)"}[type_]
+        what = f"was {verb}: {title}" if lesson else f"were {verb}"
+        events.emit("security", type_, f"{'A lesson' if lesson else 'The lessons'} for the virtual computer's "
+                    f"instructions {what}",
+                    data={"id": (lesson or {}).get("id"), "title": title, "source": (lesson or {}).get("source"),
+                          "active": active, "text_hash": (entry or {}).get("text_hash"),
+                          "store_hash": (entry or {}).get("store_hash")},
                     origin="cli")
     except Exception:
         pass
+
+
+def commit_change(action, lesson, lessons):
+    """Save lessons.json, then record the change in approvals.jsonl (the caller holds the Lock). Returns the
+    record's entry for the event."""
+    save(lessons)
+    return learn_store.record_change(action, lesson, lessons["lessons"],
+                                     origin="terminal" if is_tty() else "no terminal")
+
+
+def require_sealed():
+    """Refuse a change while lessons.json doesn't match the record of changes made through `learn`: a change now
+    would record whatever was written there as approved."""
+    st = learn_store.state()
+    if st["private"]:
+        die(f"the lessons store can't be used: {st['private']}")
+    if st["changed"]:
+        die(st["changed"])
 
 
 def is_tty():
@@ -455,6 +485,12 @@ def cmd_report(a):
     print(f"Store: {esc(learn_store.store_dir())}")
 
 
+def proposal_digest(p):
+    """What the user is shown of a proposal, as a hash: approval in review is bound to it."""
+    return hashlib.sha256(json.dumps({k: p.get(k) for k in ("id", "title", "text", "source", "pattern")},
+                                     sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
 def cmd_review(a):
     props = load_proposals()
     pending = list(props["pending"])
@@ -467,9 +503,15 @@ def cmd_review(a):
         for p in pending:
             show_proposal(p)
         return
-    for i, p in enumerate(pending, 1):
+    require_sealed()
+    queue = list(pending)
+    i = 0
+    while i < len(queue):
+        p = queue[i]
+        i += 1
+        shown = proposal_digest(p)
         print()
-        show_proposal(p, i, len(pending))
+        show_proposal(p, i, len(queue))
         while True:
             sys.stderr.write("  [a]pprove, [e]dit then approve, [r]eject, [s]kip, [q]uit: ")
             sys.stderr.flush()
@@ -480,28 +522,37 @@ def cmd_review(a):
             break
         if ans == "s":
             continue
+        lesson = entry = None
         with learn_store.Lock():
+            require_sealed()
             lessons, props = load_lessons(), load_proposals()
+            q = find(props["pending"], p["id"])
+            if q is None or proposal_digest(q) != shown:
+                # it changed (or went) while you were reading: show what is there now and ask again
+                print(f"  {esc(p['id'])} changed since it was shown; nothing was done"
+                      + ("; here it is again" if q else ""))
+                if q is not None:
+                    queue.insert(i, q)
+                continue
             if ans == "r":
-                q = find(props["pending"], p["id"])
-                if q:
-                    props["pending"].remove(q)
-                    props["rejected"].append(dict(q, rejected_at=now_iso()))
-                    save(proposals=props)
+                props["pending"].remove(q)
+                props["rejected"].append(dict(q, rejected_at=now_iso()))
+                save(proposals=props)
                 print(f"  {esc(p['id'])}: rejected")
                 continue
-            if ans == "e":
-                q = find(props["pending"], p["id"])
-                if not q or not edit_text(q):
-                    continue
+            if ans == "e" and not edit_text(q):
+                continue
             lesson = approve_one(p["id"], lessons, props, ask=False)
             if lesson:
-                save(lessons, props)
-                emit("lesson_approved", lesson, len(lessons["lessons"]))
+                save(proposals=props)
+                entry = commit_change("approved", lesson, lessons)
+        if lesson:
+            emit("lesson_approved", lesson, len(lessons["lessons"]), entry)
 
 
 def cmd_approve(a):
     with learn_store.Lock():
+        require_sealed()
         lessons, props = load_lessons(), load_proposals()
         done = []
         for pid in a.ids:
@@ -510,10 +561,14 @@ def cmd_approve(a):
             lesson = approve_one(pid, lessons, props)
             if lesson:
                 done.append(lesson)
+        entries = []
         if done:
-            save(lessons, props)
-    for lesson in done:
-        emit("lesson_approved", lesson, len(lessons["lessons"]))
+            save(proposals=props)
+            save(lessons)
+            entries = [learn_store.record_change("approved", x, lessons["lessons"],
+                                                 origin="terminal" if is_tty() else "no terminal") for x in done]
+    for lesson, entry in zip(done, entries):
+        emit("lesson_approved", lesson, len(lessons["lessons"]), entry)
     if done:
         s = learn_store.summary()
         print(f"Active in the MCP instructions of new sessions: {esc(learn_store.status_line(s))}")
@@ -534,6 +589,7 @@ def cmd_reject(a):
 
 def cmd_remove(a):
     with learn_store.Lock():
+        require_sealed()
         lessons = load_lessons()
         gone = []
         for pid in a.ids:
@@ -544,8 +600,34 @@ def cmd_remove(a):
             gone.append(x)
             print(f"{esc(pid)}: removed")
         save(lessons)
-    for x in gone:
-        emit("lesson_removed", x, len(lessons["lessons"]))
+        entries = [learn_store.record_change("removed", x, lessons["lessons"],
+                                             origin="terminal" if is_tty() else "no terminal") for x in gone]
+    for x, entry in zip(gone, entries):
+        emit("lesson_removed", x, len(lessons["lessons"]), entry)
+
+
+def cmd_reseal(a):
+    """Accept lessons.json as it is now, after it changed outside `learn` (your terminal only)."""
+    require_terminal("learn reseal")
+    with learn_store.Lock():
+        st = learn_store.state()
+        if st["private"]:
+            die(f"the lessons store can't be used: {st['private']}")
+        if not st["changed"]:
+            print("The lessons match the record of changes; nothing to reseal.")
+            return
+        print(f"lessons.json holds {len(st['lessons'])} lessons that weren't all approved through `metacomputer learn`. "
+              "Every new session would get exactly these:")
+        for x in st["lessons"]:
+            print(f"  {esc(x['id'])}  {esc(x.get('title', ''))}  (source: {esc(x.get('source') or 'unknown')})")
+            print(f"      {esc(x['text'])}")
+        sys.stderr.write(f"Accept exactly these {len(st['lessons'])} lessons as yours? [y/N] ")
+        sys.stderr.flush()
+        if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+            die("not resealed; nothing is sent until you do, or until lessons.json is removed")
+        entry = learn_store.record_change("resealed", None, st["lessons"], origin="terminal")
+    emit("lessons_resealed", None, len(st["lessons"]), entry)
+    print(f"Resealed: {len(st['lessons'])} lessons, store hash {entry['store_hash']}.")
 
 
 def read_line(prompt, limit):
@@ -585,9 +667,10 @@ def cmd_edit(a):
         lessons, props = load_lessons(), load_proposals()
         x = find(lessons["lessons"], a.id)
         if x:
+            require_sealed()
             if edit_text(x):
-                save(lessons)
-                emit("lesson_edited", x, len(lessons["lessons"]))
+                entry = commit_change("edited", x, lessons)
+                emit("lesson_edited", x, len(lessons["lessons"]), entry)
                 print(f"{esc(a.id)}: changed; new sessions get the new text")
             else:
                 print("unchanged")
@@ -606,6 +689,7 @@ def cmd_edit(a):
 def cmd_add(a):
     require_terminal("learn add")
     with learn_store.Lock():
+        require_sealed()
         lessons = load_lessons()
         n = 1
         while find(lessons["lessons"], f"user-{n}"):
@@ -618,15 +702,16 @@ def cmd_add(a):
                   "pattern": None, "approved_at": now_iso(), "approved_from": "terminal",
                   "evidence": {"summary": "written by you"}}
         lessons["lessons"].append(lesson)
-        save(lessons)
-    emit("lesson_approved", lesson, len(lessons["lessons"]))
+        entry = commit_change("approved", lesson, lessons)
+    emit("lesson_approved", lesson, len(lessons["lessons"]), entry)
     print(f"{esc(lesson['id'])}: added")
 
 
 def cmd_list(a):
     s = learn_store.summary()
-    lessons, problem = learn_store.approved()
-    props = None if problem else load_proposals()
+    st = learn_store.state()
+    lessons = st["lessons"]                     # shown even when changed outside learn (then none is sent)
+    props = None if st["private"] else load_proposals()
     if a.json:
         print(json.dumps({"summary": s, "lessons": lessons, "instructions": learn_store.instructions_text(),
                           "pending": (props or {}).get("pending", []), "rejected": (props or {}).get("rejected", [])},
@@ -637,6 +722,8 @@ def cmd_list(a):
         print(esc(text) if text else "(nothing: no approved lessons reach the instructions)")
         return
     print(f"Lessons: {esc(learn_store.status_line(s))}   (store {esc(s['dir'])})")
+    if st["changed"]:
+        print("  What lessons.json holds now (NOT sent until you reseal or remove it):")
     for x in lessons:
         ev = (x.get("evidence") or {}).get("summary") or ""
         print(f"  {esc(x['id'])}  {esc(x.get('title', ''))}   approved {esc(str(x.get('approved_at', ''))[:10])}, "
@@ -666,7 +753,8 @@ def draft_summary(rep, covered, min_count=2):
                          "sessions": f["sessions"]})
     for key, n in rep.get("failures_by_tool", {}).items():
         tool, _, cls = key.partition(":")
-        if cls == "other" and n >= need and re.match(r"^[a-z][a-z0-9_]{0,47}$", tool):
+        # only the driver's own tool names (transcripts.KNOWN_TOOLS) ever reach the prompt
+        if cls == "other" and n >= need and tool in transcripts.KNOWN_TOOLS:
             patterns.append({"pattern": f"other-errors-{tool.replace('_', '-')}", "tool": tool,
                              "meaning": "errors of this tool that match no known class", "count": n})
     for a in rep["time"]["by_app"]:
@@ -811,13 +899,15 @@ def cmd_bench(a):
     import report  # noqa: E402
     tasks = bench.load_tasks(a.tasks)
     n = len(tasks)
-    budget = float(a.budget or 3)
-    cap = float(a.cap or max(budget * n, 1))
-    vm, main_vm = (vm_name_of(c) for c in (config, ""))
+    budget = positive_usd(a.budget or 3, "--budget")
+    cap = positive_usd(a.cap or max(budget * n, 1), "--cap")
+    ident, main_vm = config_identity(config), vm_name_of("")
+    vm = ident["vm"]
     if not vm or vm in ("metacomputer", main_vm):
         die(f"{config} names your main VM ({vm or 'unknown'}); learn bench needs a test VM (bench/README.md)")
     est, mins = 2 * n * BENCH_EST_PER_TASK, 2 * n * BENCH_MIN_PER_TASK
-    print(f"learn bench runs the benchmark twice on the test VM {esc(vm)} ({esc(config)}): {n} tasks without your "
+    print(f"learn bench runs the benchmark twice on the test VM {esc(vm)} (baseline {esc(ident['baseline'])}, "
+          f"settings {esc(config)}, sha256 {ident['sha'][:12]}): {n} tasks without your "
           f"{s['approved']} approved lessons, then the same {n} with them.")
     print(f"  That is {2 * n} headless Claude Code sessions on your own Claude account: about ${est:.0f} and "
           f"{mins:.0f} minutes (each run capped at ${cap:.2f}, each task at ${budget:.2f}).")
@@ -832,7 +922,10 @@ def cmd_bench(a):
     prefix = a.run_id or time.strftime("learn-%Y%m%d-%H%M")
     if not re.match(r"^[A-Za-z0-9._-]{1,60}$", prefix):
         die("--run-id: letters, digits, '.', '_' and '-'")
-    env = dict(os.environ, MCOMP_CONFIG=config)
+    if config_identity(config) != ident:
+        die(f"{config} changed while you were asked (it now names VM {config_identity(config)['vm'] or 'unknown'}); "
+            "nothing was run")
+    env = bench_env(config, ident, main_vm)
     runs = {}
     for variant, sw in (("without", "off"), ("with", "on")):
         rid = f"{prefix}-{variant}"
@@ -847,6 +940,42 @@ def cmd_bench(a):
         runs[variant] = os.path.join(bench_results_dir(), rid)
     path = report.write_compare(runs["without"], runs["with"])
     print_bench_comparison(report, runs, path)
+
+
+def positive_usd(v, flag):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        die(f"{flag} takes a number of US dollars")
+    if not math.isfinite(x) or x <= 0:
+        die(f"{flag} must be a positive number of US dollars")
+    return x
+
+
+def config_identity(config):
+    """What a settings file resolves to (it's shell code, so this runs it the way the benchmark will) and the
+    file's sha256: the confirmation is bound to all of it."""
+    env = {k: v for k, v in os.environ.items() if k != "MCOMP_CONFIG"}
+    env["MCOMP_CONFIG"] = config
+    out = subprocess.run(["bash", "-c", '. "$1/scripts/lib.sh" >/dev/null 2>&1; '
+                          'printf "%s\\n" "$VM_NAME" "$BASELINE_NAME" "$SSH_PORT" "$RUN_DIR"', "_", LAB],
+                         env=env, capture_output=True, text=True).stdout.split("\n")
+    try:
+        with open(config, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        sha = ""
+    return {"vm": out[0] if out else "", "baseline": out[1] if len(out) > 1 else "",
+            "ssh_port": out[2] if len(out) > 2 else "", "run_dir": out[3] if len(out) > 3 else "", "sha": sha}
+
+
+def bench_env(config, ident, main_vm):
+    """The benchmark's environment, carrying what was confirmed: bench.py checks the VM, its baseline and the
+    settings file's hash again before every reset, and bin/metacomputer refuses any command whose settings name
+    another VM than MCOMP_EXPECT_VM."""
+    return dict(os.environ, MCOMP_CONFIG=config, MCOMP_EXPECT_VM=ident["vm"], BENCH_EXPECT_VM=ident["vm"],
+                BENCH_EXPECT_BASELINE=ident["baseline"], BENCH_EXPECT_CONFIG_SHA=ident["sha"],
+                BENCH_PROTECTED_VM=main_vm or "metacomputer")
 
 
 def vm_name_of(config):
@@ -878,8 +1007,10 @@ def print_bench_comparison(report, runs, path):
     for label, x, y, d in rows:
         print(f"  {label:24} {str(x):>10} {str(y):>10} {d:>8}")
     spent = (ma.get("spent_usd") or 0) + (mb.get("spent_usd") or 0)
-    print(f"Spent on this comparison: ${spent:.2f}. One run of each is noisy: for a decision, repeat it and compare "
-          "the totals.")
+    unknown = sum(1 for r in xa + xb if r.get("cost_unknown"))
+    print(f"Spent on this comparison: ${spent:.2f}"
+          + (f" (counting {unknown} sessions that reported no cost at their full budget)" if unknown else "")
+          + ". One run of each is noisy: for a decision, repeat it and compare the totals.")
     print(f"Per task: {esc(path)}")
 
 
@@ -905,6 +1036,7 @@ def main(argv=None):
     e = sub.add_parser("edit")
     e.add_argument("id")
     sub.add_parser("add")
+    sub.add_parser("reseal", help="accept lessons.json as it is after a change outside learn (your terminal)")
     li = sub.add_parser("list")
     li.add_argument("--json", action="store_true")
     li.add_argument("--instructions", action="store_true", help="print the exact text the hub adds")
@@ -919,7 +1051,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         {"report": cmd_report, "review": cmd_review, "approve": cmd_approve, "reject": cmd_reject,
-         "remove": cmd_remove, "edit": cmd_edit, "add": cmd_add, "list": cmd_list, "bench": cmd_bench}[a.cmd](a)
+         "remove": cmd_remove, "edit": cmd_edit, "add": cmd_add, "list": cmd_list, "bench": cmd_bench,
+         "reseal": cmd_reseal}[a.cmd](a)
     except learn_store.NotPrivate as e:
         die(f"the lessons store can't be used: {e}")
     except (TimeoutError, ValueError) as e:

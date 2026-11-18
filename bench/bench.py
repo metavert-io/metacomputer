@@ -28,7 +28,9 @@ import argparse
 import datetime
 import glob
 import gzip
+import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -249,6 +251,8 @@ def prepare_workdir(run_id, sw):
         os.symlink(CLI, os.path.join(shim, n))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
+    if os.environ.get("MCOMP_EXPECT_VM"):
+        env["MCOMP_EXPECT_VM"] = os.environ["MCOMP_EXPECT_VM"]
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
     env.update(lessons_env(sw))
@@ -382,15 +386,88 @@ def switches_from(a):
         sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off)")
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
+    for k in ("budget", "cap"):
+        try:
+            x = float(sw[k])
+        except (TypeError, ValueError):
+            x = float("nan")
+        if not math.isfinite(x) or x <= 0:
+            sys.exit(f"--{k} must be a positive number of US dollars (got {sw[k]!r})")
     return sw
+
+
+def charge(rec):
+    """What a task's record counts against the cap: its reported cost, or, when a session ran and reported none
+    (killed at the timeout, crashed, cut off), its whole budget: an unknown cost is never free."""
+    cost = (rec.get("metrics") or {}).get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+        return float(cost)
+    sess = rec.get("session") or {}
+    if sess:
+        return float(sess.get("budget_usd") or rec.get("budget_usd") or 0)
+    return 0.0
+
+
+def spent_so_far(recs, old_meta):
+    """(spent, reservation): what a run being resumed has spent, every record charged as charge() says, plus a
+    task whose budget was reserved but which was never recorded (the runner died during its session)."""
+    spent = sum(charge(r) for r in recs)
+    pend = (old_meta or {}).get("reserved")
+    if isinstance(pend, dict) and not any(r.get("task") == pend.get("task") and str(r.get("started", "")) >=
+                                          str(pend.get("at", "")) for r in recs):
+        try:
+            spent += max(0.0, float(pend.get("usd") or 0))
+        except (TypeError, ValueError):
+            pass
+        return spent, pend
+    return spent, None
+
+
+def main_vm():
+    """The VM this checkout's own settings name (config/local.env, without MCOMP_CONFIG)."""
+    env = {k: v for k, v in os.environ.items() if k != "MCOMP_CONFIG"}
+    return subprocess.run(["bash", "-c", '. "$1/scripts/lib.sh" >/dev/null 2>&1; printf %s "$VM_NAME"', "_", LAB],
+                          env=env, capture_output=True, text=True).stdout.strip()
+
+
+def config_sha():
+    try:
+        with open(os.environ["MCOMP_CONFIG"], "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except (OSError, KeyError):
+        return ""
+
+
+ALLOW_MAIN = {"on": False}
+
+
+def verify_target():
+    """The VM about to be reset, checked again: never the main VM (unless --allow-main-vm), and, when a caller
+    confirmed one (`metacomputer learn bench`: BENCH_EXPECT_VM, _BASELINE, _CONFIG_SHA), exactly that VM from
+    exactly that settings file. The settings are shell code that can change between runs. Returns vm_config()."""
+    vc = vm_config()
+    e = os.environ.get
+    if not vc["vm"]:
+        sys.exit("the settings name no VM")
+    protected = {"metacomputer", e("BENCH_PROTECTED_VM") or main_vm()} - {""}
+    if vc["vm"] in protected and not ALLOW_MAIN["on"]:
+        sys.exit(f"MCOMP_CONFIG names the main VM '{vc['vm']}'; use a test VM (or pass --allow-main-vm).")
+    for key, now in (("BENCH_EXPECT_VM", vc["vm"]), ("BENCH_EXPECT_BASELINE", vc["baseline"]),
+                     ("BENCH_EXPECT_CONFIG_SHA", config_sha())):
+        if e(key) and e(key) != now:
+            sys.exit(f"refusing: the settings changed since they were confirmed ({key}: expected {e(key)[:16]}, "
+                     f"now {now[:16] or 'nothing'}); no VM was reset")
+    return vc
 
 
 def require_config(allow_main):
     if not os.environ.get("MCOMP_CONFIG"):
         sys.exit("Set MCOMP_CONFIG to the test VM's settings file: the benchmark resets that VM before each task.")
-    vc = vm_config()
-    if vc["vm"] == "metacomputer" and not allow_main:
-        sys.exit("MCOMP_CONFIG names the main VM 'metacomputer'; use a test VM (or pass --allow-main-vm).")
+    ALLOW_MAIN["on"] = bool(allow_main)
+    vc = verify_target()
+    # Every metacomputer command this run starts (reset, stop, the sessions' bridge) refuses once the settings
+    # name another VM than this one (bin/metacomputer, MCOMP_EXPECT_VM).
+    os.environ["MCOMP_EXPECT_VM"] = vc["vm"]
     return vc
 
 
@@ -420,7 +497,10 @@ def cmd_run(a):
     json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
     log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}")
     work, cfg, shim = prepare_workdir(run_id, sw)
-    spent, cap = sum((r.get("metrics") or {}).get("cost_usd") or 0.0 for r in all_recs), float(sw["cap"])
+    spent, pend = spent_so_far(all_recs, old)
+    cap = float(sw["cap"])
+    if pend:
+        meta.setdefault("unrecorded_reservations", []).append(pend)
     # done = the latest record of each task, unless that was an infrastructure failure (retried)
     done = {r["task"] for r in report.latest(all_recs) if not infra_reason(r)}
     try:
@@ -439,10 +519,18 @@ def cmd_run(a):
                 meta["stopped"] = "VM in use by another controller"
                 break
             log(f"[{i}/{len(tasks)}] {t['id']}: {t.get('title', '')}")
+            # reserve the task's budget before its session starts, so a crash here still counts on resume
+            meta["reserved"] = {"task": t["id"], "usd": budget,
+                                "at": datetime.datetime.now().isoformat(timespec="seconds")}
+            json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
             rec = run_task(t, sw, rdir, work, cfg, shim)
-            spent += rec["metrics"].get("cost_usd") or 0.0
+            rec["budget_usd"] = budget
+            if rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
+                rec["cost_unknown"] = True       # no cost reported: counted at its budget
+            spent += charge(rec)
             with open(os.path.join(rdir, "results.jsonl"), "a") as f:
                 f.write(json.dumps(rec) + "\n")
+            meta.pop("reserved", None)
             mm = rec["metrics"]
             log(f"  {'PASS' if rec['check'].get('pass') else 'fail'} score={rec['check'].get('score')} "
                 f"cost=${mm.get('cost_usd') or 0:.2f} turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
@@ -478,6 +566,7 @@ def run_task(t, sw, rdir, work, cfg, shim):
     st = {}
     for attempt in range(2):
         if sw["reset"] == "each":
+            verify_target()                     # right before every reset
             ok, msg, st = reset_vm()
         else:
             st = status()

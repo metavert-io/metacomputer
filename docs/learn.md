@@ -17,8 +17,17 @@ your sessions ──▶ learn report ──▶ proposals ──▶ you approve �
                                                          learn bench ◀───┘  with vs without, on a test VM
 ```
 
-Everything stays on your Mac, except with `--draft-with-claude`, which runs one
-headless Claude Code session on your own account and sends it only counts.
+**What leaves your Mac.** Reading your sessions, the report, the proposals and
+the store all stay on your Mac. Three things go further:
+- **Approved lessons are model context.** They are part of the MCP instructions
+  every new Claude Code session gets, so they reach the model (Anthropic's API,
+  or whichever provider your Claude Code uses) with the rest of the session. Don't
+  put anything in a lesson you wouldn't send to Claude.
+- **`--draft-with-claude` sends a structured summary to Anthropic** through your
+  own Claude Code: counts, failure classes, the driver's own tool names and app
+  names from a fixed list, never transcript text, session names or paths.
+- **Event sinks you configured** get each lesson change: its id, a short title,
+  its source and two hashes, never its text.
 
 ## Commands
 
@@ -32,6 +41,7 @@ metacomputer learn list [--instructions]     # the approved lessons; --instructi
 metacomputer learn remove no-frame
 metacomputer learn edit no-frame             # change a lesson's text (your terminal only)
 metacomputer learn add                       # write one of your own (your terminal only)
+metacomputer learn reseal                    # accept lessons.json after it changed outside learn (your terminal only)
 metacomputer learn bench --config results/my-test-vm/test.env      # measure: with vs without, on a test VM
 ```
 
@@ -48,12 +58,15 @@ walks you through the proposals; Claude approves only the IDs you name.
 | `remove ID...` | anywhere | Takes approved lessons out |
 | `edit ID` | your terminal | New text (and title) for an approved lesson or a proposal; an edited proposal then needs `approve` at your terminal |
 | `add` | your terminal | A lesson in your own words, approved at once |
+| `reseal` | your terminal | After `lessons.json` changed outside `learn` (and so isn't sent): shows exactly what it holds and, on your yes, accepts it |
 | `bench` | your terminal, or `--yes` | The benchmark without and with the approved lessons; it states the number of runs and the likely cost, and asks first |
 
 "Your terminal" is the bar the secrets vault uses for its user-only commands:
 standard input must be a terminal, so Claude's Bash tool, a script or a pipe is
 refused with "needs your own terminal". Free text goes into every later
-session's instructions, so only you write it.
+session's instructions, so it should come from you. This is friction, not proof
+that you were there: a program running as you can open a pseudo-terminal and
+type the answers (see "Tampering" below).
 
 ## What `report` reads
 
@@ -139,6 +152,7 @@ plugin cache: `~/.local/share/metacomputer/lessons/`, or `LESSONS_DIR` in
 | File | Holds |
 | --- | --- |
 | `lessons.json` | Each approved lesson: id, title, text, source (built-in, Claude's draft, edited, yours), the date, where it was approved from, and the evidence summary |
+| `approvals.jsonl` | One line per change made through `learn` (approved, edited, removed, resealed): the time, the lesson's id and title, a hash of its text, and a hash of the whole store after the change (`store_hash`) |
 | `proposals.json` | The last report's proposals and the ones you rejected |
 
 The folder is made 0700 and the files 0600. They are read only when private:
@@ -165,9 +179,40 @@ what is added. The block:
 the hub reads them only to build that text (`learned_notes()` in
 `lib/mcp_hub.py`).
 
-Approving, editing and removing a lesson emit `security.lesson_approved`,
-`lesson_edited` and `lesson_removed` on the event stream when you have sinks
-(docs/events.md): the id, a short title and the source, never the lesson's text.
+Approving, editing, removing and resealing emit `security.lesson_approved`,
+`lesson_edited`, `lesson_removed` and `lessons_resealed` (docs/events.md): the
+id, a short title, the source, the text hash and the store hash, never the
+lesson's text. They go to this VM's local event log and to any sinks you added.
+
+## Tampering
+
+Lessons are sent only when `lessons.json` matches the last `store_hash` that
+`learn` recorded in `approvals.jsonl`. So a `lessons.json` written some other way
+(by an editor, a script, or an agent that has your account) isn't sent:
+`metacomputer status`, `security` and `learn list` say "changed outside
+`metacomputer learn`", every change through `learn` is refused until you deal
+with it, and `metacomputer learn reseal`, at your terminal, shows exactly what
+the file holds and accepts it on your yes. To discard it instead, delete
+`lessons.json` and `approvals.jsonl`.
+
+That catches tampering; it can't prevent it. **Anything running as your macOS
+user can approve a lesson**: it can rewrite `approvals.jsonl` to match, type
+into a pseudo-terminal to pass the terminal check, or change the checkout's code
+that does the checking. What makes that visible:
+- `metacomputer security` warns when the event log's last lesson change names a
+  store hash that `approvals.jsonl` doesn't have (the record was rewritten);
+- the hub's status (`metacomputer hub status --json`) reports the store's hash
+  and the hash `learn` recorded;
+- an event sink off the Mac (docs/events.md) keeps a copy of every change, with
+  its hashes, that nothing on the Mac can rewrite afterwards. That is the record
+  to trust.
+
+A follow-up, once the secrets vault's presence-based approvals (Touch ID through
+LocalAuthentication) are merged: have `learn approve` ask the vault to sign each
+record with a key that needs your presence, and have the hub send only signed
+lessons. That would make a silent approval need your fingerprint rather than
+your account; the code that checks it would still live in a checkout your
+account can change.
 
 ## Measuring: `learn bench`
 
@@ -186,6 +231,16 @@ comparison spent. The per-task table goes to `results/bench/compare-*.md`.
   `SSH_DIR`, `RUN_DIR` and `LOG_DIR`; see `config/local.env.example`, "a second
   VM") and pass it as `--config`. It refuses the VM named in your own
   `config/local.env` and the VM named `metacomputer`.
+- **What you confirm is what runs.** The question names the VM, its baseline and
+  the settings file's sha256. The file is shell code, so it's resolved again after
+  your answer, and the benchmark checks the VM, the baseline and the hash again
+  right before every reset; any change stops it with no VM reset. Every
+  `metacomputer` command it starts also refuses if the settings name another VM
+  (`MCOMP_EXPECT_VM`).
+- **Unknown costs count.** A session that ends without reporting its cost (killed
+  at its timeout, crashed) is counted at its whole budget against the cap, and a
+  task's budget is reserved before its session starts, so a resumed run counts it
+  even if the runner died.
 - **It spends your Claude usage.** A full comparison is 40 headless sessions,
   about $20 and an hour. It says so and asks first; `--yes` skips the question.
   `--tasks` takes a subset, `--budget` caps each task and `--cap` each run.
@@ -223,6 +278,8 @@ The threat is a prompt-injected session trying to plant a lesson, so that
 every later session follows it. SECURITY.md, "Lessons from your own sessions",
 has the protections and where they end. In short: proposals are built only from
 structured fields, never from what the VM showed; `--draft-with-claude` gets only
-counts; free text needs your terminal; the store must be private; the lessons
-are advice that no guard reads; and nothing about them leaves the Mac beyond a
-short title in an event.
+counts and fixed names; free text needs your terminal; the store must be
+private, and is sent only while it matches the record of changes made through
+`learn`; the lessons are advice that no guard reads. None of that stops a
+program running as you from approving a lesson ("Tampering" above); it makes it
+visible.

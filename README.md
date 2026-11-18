@@ -234,14 +234,18 @@ and the rule that avoids them.
 You decide which lessons to keep (`metacomputer learn review`, or tell Claude
 in a chat which ones to approve). Approved lessons go to every later session
 as advice, after the skill's own habits. They can't switch off a safety check,
-override a refusal or overrule you, and they never leave your Mac.
+override a refusal or overrule you. Reading your sessions and storing the
+lessons happen on your Mac, but an approved lesson becomes part of the
+instructions each Claude Code session sends to the model, like the skill
+itself, so don't put anything in one you wouldn't send to Claude.
 `metacomputer learn bench` runs the benchmark on a test VM with and without
 them, so you can see whether they help.
 
 Nothing a web page or document in the VM says can become a lesson: proposals
 are built only from counts and fixed names, and lessons in your own words need
-your own terminal. [docs/learn.md](docs/learn.md) has the details, and
-SECURITY.md the protections.
+your own terminal. A lessons file changed some other way isn't sent until you
+look at it and accept it. [docs/learn.md](docs/learn.md) has the details, and
+SECURITY.md the protections and their limits.
 
 ## Requirements
 

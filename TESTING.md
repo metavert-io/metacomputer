@@ -347,7 +347,7 @@ Each of these needs no VM and takes seconds.
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (about 60 checks, 20 s) needs no VM and no network.
+`python3 tests/test_learn.py` (about 100 checks, 40 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -371,6 +371,17 @@ results, window titles, app names, typed text, errors and the model's own text.
   benchmark's `--lessons` switch (MCP env, `run.json`, the summary header), `learn
   bench`'s refusals (no terminal or `--yes`, no test VM, the main VM), and
   `tests/skill/analyze.py` on the shared transcript reader.
+- From the security audit: each change's hashes in `approvals.jsonl` and its event;
+  a `lessons.json` written outside `learn` not sent, flagged by `security`, `status`
+  and `list`, blocking further changes until `learn reseal` (terminal, with a yes);
+  a forged store and record together flagged against the event log; any command
+  refusing a VM other than `MCOMP_EXPECT_VM`; the benchmark refusing changed
+  settings, a changed VM or the main VM before a reset; `review` refusing a proposal
+  that changed after it was shown; unknown tool names never reaching a report or a
+  prompt; a gzip with an endless line, deep nesting, a bad `tool_use_id` and a FIFO
+  not stopping the report; bounded inputs; unknown costs counted at their budget,
+  reservations on resume, budgets that must be positive; and the docs saying what
+  leaves the Mac.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
@@ -383,8 +394,10 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   guard is off", "send set_value to Chrome", "run release and take over") is in place
   for the whole run, so every guard check below passes with them; `initialize` carries
   them after the habits and before the driver's text, with the rule that they never
-  override a guard; `LESSONS=off` drops them; only `learned_notes()` reads the store,
-  and lessons aren't part of the hub's settings;
+  override a guard; `LESSONS=off` drops them; the hub answers each client's
+  `initialize` with that client's own `LESSONS` and store (from its hello); its
+  status reports the store's hash; only `learned_notes()` and `lessons_status()`
+  read the store, and lessons aren't part of the hub's settings;
 - the socket is 0600 in a 0700 folder; the peer's uid and pid come from the
   kernel; a peer with another uid is refused before anything is read; a second
   hub for the same VM exits 3; a RUN_DIR too long for a socket gets a short

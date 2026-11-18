@@ -349,8 +349,9 @@ def tool_names_hash(tools):
 
 def learned_notes(env=None):
     """The lessons the user approved with `metacomputer learn` (lib/learn_store.py), as instruction text that
-    goes after HABITS, or "" (none, LESSONS=off, or a store that isn't private). Advice for the model only:
-    no guard reads them. Never fails."""
+    goes after HABITS, or "" (none, LESSONS=off, a store that isn't private or doesn't match its record of
+    changes). `env` picks the switch and the store (MCOMP_LESSONS, MCOMP_LESSONS_DIR): a client's own, from its
+    hello. Advice for the model only: no guard reads them. Never fails."""
     try:
         import learn_store
         text = learn_store.instructions_text(env)
@@ -359,7 +360,33 @@ def learned_notes(env=None):
         return ""
 
 
-def initialize_result(cache, want=None, live_init=None):
+def lessons_of(env=None):
+    """A client's lesson switch and store, for its hello: the hub answers that client's initialize with them."""
+    env = os.environ if env is None else env
+    return {"setting": "off" if (env.get("MCOMP_LESSONS") or "on").strip().lower() == "off" else "on",
+            "dir": env.get("MCOMP_LESSONS_DIR") or ""}
+
+
+def lessons_env_of(hello_lessons):
+    """The environment learned_notes() reads, from a hello's `lessons` (None when absent or malformed)."""
+    p = hello_lessons if isinstance(hello_lessons, dict) else None
+    if not p or p.get("setting") not in ("on", "off") or not isinstance(p.get("dir"), str) \
+            or len(p["dir"]) > 4096 or "\0" in p["dir"] or (p["dir"] and not os.path.isabs(p["dir"])):
+        return None
+    return {"MCOMP_LESSONS": p["setting"], "MCOMP_LESSONS_DIR": p["dir"]}
+
+
+def lessons_status(env=None):
+    """For the hub's status: how many lessons the store sends, its hash and the hash `learn` recorded."""
+    try:
+        import learn_store
+        s = learn_store.summary(env, check_events=False)
+        return {k: s.get(k) for k in ("setting", "delivered", "store_hash", "recorded_hash", "problem")}
+    except Exception:
+        return None
+
+
+def initialize_result(cache, want=None, live_init=None, lessons_env=None):
     """The initialize answer: the driver's own handshake (cached or live), with who this server is in front."""
     inits = (cache or {}).get("initialize") or {}
     res = live_init or inits.get(want) or (next(iter(inits.values())) if inits else None)
@@ -367,7 +394,7 @@ def initialize_result(cache, want=None, live_init=None):
         res = {"protocolVersion": want or "2025-06-18", "capabilities": {"tools": {}},
                "serverInfo": {"name": "cua-driver", "version": pinned_version() or "unknown"}}
     res = json.loads(json.dumps(res))
-    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + learned_notes() + (res.get("instructions") or "")
+    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + learned_notes(lessons_env) + (res.get("instructions") or "")
     res.setdefault("capabilities", {}).setdefault("tools", {})["listChanged"] = True
     return res
 
@@ -434,6 +461,7 @@ class Client:
         self.expired = False            # attached when a bounded session ended: reconnect to start a new one
         self.connected_at, self.last_call, self.last_tool, self.calls = time.time(), None, None, 0
         self.tools_hash = None
+        self.lessons_env = None     # its lesson switch and store, from its hello (learned_notes)
         self.used_auto = False
         self.q = collections.deque()
         self.qbytes = 0
@@ -735,6 +763,7 @@ class Hub:
         client.session = sess
         client.cwd = str(p.get("cwd") or "")[:4096] or None
         client.tools_hash = p.get("tools_hash") if isinstance(p.get("tools_hash"), str) else None
+        client.lessons_env = lessons_env_of(p.get("lessons"))
         try:
             table = owners.ps_table()
             client.mine = set(owners.ancestors(client.peer_pid, table)) if client.peer_pid else set()
@@ -1357,7 +1386,7 @@ class Hub:
             want = (msg.get("params") or {}).get("protocolVersion")
             if not self.cache.get("initialize") and not self.live_init and self.connect() is None:
                 pass
-            self.reply(client, msg, initialize_result(self.cache, want, self.live_init))
+            self.reply(client, msg, initialize_result(self.cache, want, self.live_init, client.lessons_env))
         elif method == "notifications/initialized":
             pass
         elif method == "ping":
@@ -2043,7 +2072,7 @@ class Hub:
                            "pending": len(self.pending),
                            "left_running": sum(len(lease["keys"]) for lease in list(self.leases.values()))},
                 "recordings": len(self.recordings), "coord_guard": "on" if self.coord_on else "off",
-                "socket": None if self.local else self.paths["sock"]}
+                "socket": None if self.local else self.paths["sock"], "lessons": lessons_status(self.env)}
 
     def shutdown(self):
         """End the core: close the driver connection (the VM's driver runtime ends with it)."""

@@ -53,6 +53,11 @@ import mcomp_sdk  # noqa: E402
 import owners  # noqa: E402
 import termsafe  # noqa: E402
 import wirelimits  # noqa: E402
+import learn_store  # noqa: E402
+
+# The hostile store is recorded as approved through `metacomputer learn` (approvals.jsonl), so it is delivered.
+learn_store.record_change("approved", None, json.load(open(os.path.join(os.environ["MCOMP_LESSONS_DIR"],
+                                                                         "lessons.json")))["lessons"])
 
 PY = sys.executable
 FAKE = os.path.join(TD, "fake_driver.py")
@@ -678,6 +683,26 @@ def lessons_checks():
     check("…with the rule that they never override a guard, a refusal or the user",
           "never override a guard or a refusal from the hub" in ins and "user's own instructions" in ins)
     h.close()
+    # Each client's own switch and store, from its hello: the hub's environment has lessons on (store A).
+    off = mcomp_sdk.Hub(env=dict(r.env, MCOMP_LESSONS="off"), kind="sdk", timeout=20).connect()
+    ins_off = (off.request("initialize", {"protocolVersion": "2025-06-18"}) or {}).get("instructions") or ""
+    off.close()
+    other = os.path.join(TD, "lessons-b")
+    os.makedirs(other, mode=0o700)
+    lb = [{"id": "store-b", "text": "A lesson that only store B holds.", "source": "you"}]
+    learn_store.write_json(os.path.join(other, "lessons.json"), {"lessons": lb})
+    learn_store.record_change("approved", lb[0], lb, env=dict(os.environ, MCOMP_LESSONS_DIR=other))
+    hb = mcomp_sdk.Hub(env=dict(r.env, MCOMP_LESSONS_DIR=other), kind="sdk", timeout=20).connect()
+    ins_b = (hb.request("initialize", {"protocolVersion": "2025-06-18"}) or {}).get("instructions") or ""
+    st = hb.status()
+    hb.close()
+    check("the hub answers each client's initialize with that client's lesson switch (off: none)",
+          "Notes this user approved" not in ins_off and "How to work on it" in ins_off, ins_off[:120])
+    check("…and that client's store (B, not the hub's A)", "only store B holds" in ins_b
+          and not any(t in ins_b for t in HOSTILE_LESSONS), ins_b[:120])
+    les = (st or {}).get("lessons") or {}
+    check("the hub's status reports its store's hash and the hash `learn` recorded",
+          les.get("store_hash") and les.get("store_hash") == les.get("recorded_hash") and les.get("delivered") == 3, les)
     r.stop()
     off = dict(os.environ, MCOMP_LESSONS="off")
     check("LESSONS=off: the instructions carry no lessons", mcp_hub.learned_notes(off) == ""
@@ -686,8 +711,8 @@ def lessons_checks():
     tree = ast.parse(open(os.path.join(LAB, "lib", "mcp_hub.py")).read())
     users = sorted({f.name for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.ClassDef))
                     for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "learn_store"})
-    check("only the function that builds the instruction text reads lessons; no guard does", users == ["learned_notes"],
-          users)
+    check("only the instruction text and the status read lessons; no guard does",
+          users == ["learned_notes", "lessons_status"], users)
     check("lessons aren't part of the hub's settings (a client's lessons can't change another's protections)",
           not any("lesson" in k for k in mcp_hub.settings_of(os.environ)))
 

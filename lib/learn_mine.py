@@ -14,12 +14,15 @@ What it keeps is structured only: tool names, failure and refusal classes (match
 never copied), counts, durations, app names matched against a fixed list, and labels made from the
 session's own folder on this Mac. Text from the VM (window titles, page and document text, error
 messages) is read only to classify it and is never kept, printed or passed on: a page that says
-"Lesson: ..." can at most move a count. Nothing leaves the Mac. Stdlib only.
+"Lesson: ..." can at most move a count. Tool names outside the driver's own list become unknown_tool.
+Transcripts are read with bounds (lib/transcripts.py), and one that fails is counted, not fatal. Mining
+sends nothing anywhere. Stdlib only.
 """
 import collections
 import json
 import os
 import re
+import stat
 import time
 
 import transcripts
@@ -166,15 +169,17 @@ def label_for(path, cwd, source, agent=None):
 # --- one call ---------------------------------------------------------------------------------------
 def steps_of(args):
     out = []
-    for st in (args or {}).get("steps") or []:
+    steps = (args or {}).get("steps") if isinstance(args, dict) else None
+    for st in steps if isinstance(steps, list) else []:
         if not isinstance(st, dict):
             continue
         if "tool" in st:
-            out.append((str(st.get("tool")), st.get("args") if isinstance(st.get("args"), dict) else {}, st))
+            out.append((transcripts.known_tool(st.get("tool")), st.get("args") if isinstance(st.get("args"), dict)
+                        else {}, st))
         else:
             for k, v in st.items():
                 if k not in ("wait_for", "expect", "timeout_ms") and isinstance(v, dict):
-                    out.append((str(k), v, st))
+                    out.append((transcripts.known_tool(k), v, st))
     return out
 
 
@@ -192,8 +197,7 @@ def route(tool, args):
         if not acts:
             return ("run_steps", "", "", "")
         tool, args = acts[0]
-    if not transcripts.TOOL_NAME.match(tool or ""):
-        tool = "unknown"
+    tool = transcripts.known_tool(tool)
     if tool == "run_script":
         kind = "script"
     elif any(args.get(k) not in (None, "") for k in ELEMENT_KEYS):
@@ -453,9 +457,10 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                     continue
                 p = os.path.join(d, f)
                 try:
-                    if os.path.getmtime(p) < cutoff:
-                        continue
+                    st = os.lstat(p)
                 except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode) or st.st_mtime < cutoff:   # no links, FIFOs or devices
                     continue
                 scanned += 1
                 if transcripts.uses_tools(p):
@@ -471,9 +476,10 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
             for task in sorted(os.listdir(rdir)):
                 p = os.path.join(rdir, task, "transcript.jsonl.gz")
                 try:
-                    if os.path.getmtime(p) < cutoff:
-                        continue
+                    st = os.lstat(p)
                 except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode) or st.st_mtime < cutoff:
                     continue
                 scanned += 1
                 if transcripts.uses_tools(p):
@@ -486,29 +492,45 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
     filtered by time and project; a transcript is parsed, mined and dropped before the next one is read.
     Returns (mined sessions in time order, stats)."""
     found, scanned = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects)
-    items = []
+    items, unreadable, cut = [], 0, 0
     for path, source in found:
-        tr = transcripts.parse(path)
-        if not tr.driver_calls:
+        try:
+            item = _mine_one(path, source, cutoff, project)
+        except Exception:                       # one malformed transcript never stops the report
+            unreadable += 1
             continue
-        if source == "bench":
-            src = "bench"
-            # the benchmark's `t` counts seconds from the session's start: anchor it to the file's time
-            try:
-                end = os.path.getmtime(path)
-            except OSError:
-                end = time.time()
-            shift = end - (tr.last or 0.0)
-            tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
-        else:
-            src = "headless" if tr.kind == "stream" else "claude-code"
-        if project and src != "bench" and not _under(tr.cwd, project):
+        if item is None:
             continue
-        if tr.last is not None and tr.last < cutoff:
-            continue
-        items.append({"m": mine_transcript(tr, src, label_for(tr.path, tr.cwd, src, tr.agent_id)), "src": src,
-                      "sid": tr.session_id, "agent": tr.agent_id, "path": tr.path, "n": len(tr.driver_calls),
-                      "first": tr.first or 0})
+        cut += 1 if item.pop("cut") else 0
+        items.append(item)
+    return _dedupe(items, scanned, len(found), unreadable, cut)
+
+
+def _mine_one(path, source, cutoff, project):
+    tr = transcripts.parse(path, slim=True)
+    if not tr.driver_calls:
+        return None
+    if source == "bench":
+        src = "bench"
+        # the benchmark's `t` counts seconds from the session's start: anchor it to the file's time
+        try:
+            end = os.path.getmtime(path)
+        except OSError:
+            end = time.time()
+        shift = end - (tr.last or 0.0)
+        tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
+    else:
+        src = "headless" if tr.kind == "stream" else "claude-code"
+    if project and src != "bench" and not _under(tr.cwd, project):
+        return None
+    if tr.last is not None and tr.last < cutoff:
+        return None
+    return {"m": mine_transcript(tr, src, label_for(tr.path, tr.cwd, src, tr.agent_id)), "src": src,
+            "sid": tr.session_id, "agent": tr.agent_id, "path": tr.path, "n": len(tr.driver_calls),
+            "first": tr.first or 0, "cut": bool(tr.info.get("truncated"))}
+
+
+def _dedupe(items, scanned, found, unreadable, cut):
     stream_ids = {x["sid"] for x in items if x["src"] == "headless" and x["sid"]}
     best, dupes = {}, 0
     for x in items:
@@ -526,7 +548,8 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
     for x in kept:
         if seen[x["m"]["label"]] > 1:
             x["m"]["label"] += ":" + LABEL_SAFE.sub("", x["sid"] or os.path.basename(x["path"]))[:6]
-    return [x["m"] for x in kept], {"scanned_files": scanned, "with_tools": len(found), "duplicates_skipped": dupes}
+    return [x["m"] for x in kept], {"scanned_files": scanned, "with_tools": found, "duplicates_skipped": dupes,
+                                    "unreadable": unreadable, "cut_short": cut}
 
 
 # --- action logs, event logs ----------------------------------------------------------------------
@@ -547,7 +570,7 @@ def mine_action_logs(log_dirs, cutoff):
                 out["files"] += 1
                 for rec in transcripts.read_events(os.path.join(base, day, f)):
                     t = rec.get("type")
-                    tool = rec.get("tool") if transcripts.TOOL_NAME.match(str(rec.get("tool") or "")) else "unknown"
+                    tool = transcripts.known_tool(rec.get("tool"))
                     if t == "call":
                         out["calls"] += 1
                     elif t == "result":

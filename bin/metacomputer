@@ -83,6 +83,12 @@ SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
+# A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM: settings that now name
+# another VM (they are shell code, and can change) stop every command here, before anything touches a VM.
+if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
+  echo "metacomputer: the settings now name the VM '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed (MCOMP_EXPECT_VM); refusing" >&2
+  exit 1
+fi
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 
@@ -343,8 +349,13 @@ else:
 for pr in sh["problems"]:
     print(f"  ! {pr}")
 if out["lessons"] is not None:
-    print("Lessons (metacomputer learn: notes you approved, sent as advice; no guard reads them; docs/learn.md)")
-    print(f"  lessons      {learn_store.status_line(out['lessons'])}   (metacomputer learn list)")
+    lo = out["lessons"]
+    print("Lessons (metacomputer learn: notes you approved, sent to the model as advice; no guard reads them; docs/learn.md)")
+    print(f"  lessons      {learn_store.status_line(dict(lo, problem=None, warning=None)) if not lo.get('problem') else 'none sent'}"
+          "   (metacomputer learn list)")
+    for pr in (lo.get("problem"), lo.get("warning")):
+        if pr:
+            print(f"  ! {pr}")
 EOF
 }
 

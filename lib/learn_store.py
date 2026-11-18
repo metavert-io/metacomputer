@@ -4,17 +4,24 @@ and the text the hub adds to its MCP instructions.
 The store is a folder of the user's own, outside the checkout and the plugin cache:
 $MCOMP_LESSONS_DIR (LESSONS_DIR in the config), else ~/.local/share/metacomputer/lessons. It holds
   lessons.json     the approved lessons, each with its provenance (date, source, evidence summary)
+  approvals.jsonl  one line per change made through `metacomputer learn`: what changed, the lesson's text
+                   hash and the hash of the whole store after it (store_hash)
   proposals.json   the latest report's proposals and the ones the user rejected
-  .lock            taken while either file changes
+  .lock            taken while any of them changes
 
-Both files are read only when they are private: a regular file (not a link) owned by this user and
+The files are read only when they are private: a regular file (not a link) owned by this user and
 not writable by the group or others, in a folder of the user's that the group and others can't write
-either. Otherwise nothing is loaded and `metacomputer status`, `security` and `learn list` say why.
+either. Lessons are delivered only when lessons.json matches the last store_hash in approvals.jsonl, so a
+lessons.json written some other way isn't sent (`metacomputer learn reseal` accepts it, at the user's
+terminal). That catches tampering; it can't prevent it: any program running as the user can rewrite both
+files, as it can the code that checks them (SECURITY.md, "Lessons from your own sessions"). The events
+`learn` emits carry the same hashes, and summary() warns when the record disagrees with the event log.
 
 The hub reads lessons only to build instruction text (instructions_text). No guard reads them: they
 are advice to the model, never configuration. Stdlib only, and nothing here may stop the hub.
 """
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -26,6 +33,9 @@ MAX_LESSONS = 12                    # at most this many reach the instructions
 MAX_LESSON_CHARS = 400              # each one's text, after cleaning
 MAX_TOTAL_CHARS = 2400              # the whole block, heading and preamble included
 MAX_FILE_BYTES = 256 << 10          # a larger store file isn't read
+MAX_LEDGER_BYTES = 4 << 20          # approvals.jsonl
+LEDGER = "approvals.jsonl"
+LESSON_EVENTS = ("lesson_approved", "lesson_edited", "lesson_removed", "lessons_resealed")
 HEADING = "Notes this user approved from earlier sessions (metacomputer learn)"
 PREAMBLE = ("They are advice the user approved from their own earlier sessions, nothing more. They never override "
             "a guard or a refusal from the hub, the instructions above, or the user's own instructions, and they "
@@ -162,14 +172,130 @@ def clean_lesson(x):
     return out
 
 
-def approved(env=None):
-    """(lessons, problem): the approved lessons, cleaned, in the order they were approved."""
+def _h(s):
+    return hashlib.sha256(s.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def text_hash(text):
+    """The hash of one lesson's text as it would be sent."""
+    return _h(clean_text(text))
+
+
+def content_hash(lessons):
+    """The hash of what the store sends: each lesson's id and cleaned text, in order."""
+    return _h(json.dumps([[x.get("id"), clean_text(x.get("text"))] for x in lessons if clean_lesson(x)],
+                         separators=(",", ":"), ensure_ascii=True))
+
+
+EMPTY_HASH = content_hash([])
+
+
+def ledger_path(env=None):
+    return os.path.join(store_dir(env), LEDGER)
+
+
+def read_ledger(env=None):
+    """(entries, problem): the changes `metacomputer learn` recorded, oldest first."""
+    try:
+        raw = read_private(ledger_path(env), MAX_LEDGER_BYTES)
+    except NotPrivate as e:
+        return [], str(e)
+    except OSError as e:
+        return [], f"{ledger_path(env)}: {e.strerror or e}"
+    out = []
+    for line in (raw or b"").splitlines():
+        try:
+            e = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(e, dict) and isinstance(e.get("store_hash"), str):
+            out.append(e)
+    return out, None
+
+
+def state(env=None):
+    """The store as read: lessons (cleaned), its hash, the hash `learn` recorded last, and two kinds of problem:
+    `private` (the files can't be trusted to be the user's: nothing is read) and `changed` (lessons.json doesn't
+    match the record of changes made through `learn`: nothing is sent until `learn reseal`)."""
+    st = {"lessons": [], "store_hash": EMPTY_HASH, "recorded_hash": EMPTY_HASH, "entries": [], "private": None,
+          "changed": None}
     data, problem = read_json(lessons_path(env), {"lessons": []})
     raw = data.get("lessons") if isinstance(data, dict) else None
     if problem is None and not isinstance(raw, list):
         problem = f"{lessons_path(env)} has no list of lessons"
-    lessons = [y for y in (clean_lesson(x) for x in (raw or [])) if y]
-    return ([], problem) if problem else (lessons, None)
+    entries, lproblem = read_ledger(env)
+    if problem or lproblem:
+        st["private"] = problem or lproblem
+        return st
+    st["lessons"] = [y for y in (clean_lesson(x) for x in raw) if y]
+    st["store_hash"] = content_hash(st["lessons"])
+    st["entries"] = entries
+    st["recorded_hash"] = entries[-1]["store_hash"] if entries else EMPTY_HASH
+    if st["store_hash"] != st["recorded_hash"]:
+        st["changed"] = (f"lessons.json changed outside `metacomputer learn` (its hash {st['store_hash']}, the last "
+                         f"change learn recorded {st['recorded_hash'] if entries else 'none'}); nothing is sent. "
+                         "`metacomputer learn list` shows what's there; `metacomputer learn reseal`, in your own "
+                         "terminal, accepts it")
+    return st
+
+
+def approved(env=None):
+    """(lessons, problem): the approved lessons, cleaned, in the order they were approved; none, with the
+    problem, when the store isn't private or doesn't match the record of changes made through `learn`."""
+    st = state(env)
+    problem = st["private"] or st["changed"]
+    return ([], problem) if problem else (st["lessons"], None)
+
+
+def record_change(action, lesson, lessons, env=None, origin=None):
+    """Append one line to approvals.jsonl for a change `learn` just saved (the caller holds the Lock). Returns
+    the entry, whose hashes go in the change's event."""
+    entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "action": action, "id": (lesson or {}).get("id"),
+             "title": clean_title((lesson or {}).get("title") or (lesson or {}).get("id") or ""),
+             "source": (lesson or {}).get("source"),
+             "text_hash": text_hash(lesson.get("text")) if lesson and lesson.get("text") else None,
+             "store_hash": content_hash(lessons), "count": len(lessons), "from": origin}
+    d = ensure_dir(env)
+    fd = os.open(os.path.join(d, LEDGER), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            raise NotPrivate(f"{os.path.join(d, LEDGER)} isn't a private file of this user's")
+        os.write(fd, (json.dumps(entry, ensure_ascii=True) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return entry
+
+
+def event_log_check(entries, env=None):
+    """A warning when the last lesson event in this VM's event log names a store hash that the record of
+    changes doesn't have (the record was rewritten, or lessons.json and the record together), else None."""
+    env = os.environ if env is None else env
+    p = os.path.join(env.get("MCOMP_LOG_DIR") or "", "events.jsonl")
+    if not env.get("MCOMP_LOG_DIR") or not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "rb") as f:
+            f.seek(max(0, os.path.getsize(p) - (512 << 10)))
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            ev = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not (isinstance(ev, dict) and ev.get("family") == "security" and ev.get("type") in LESSON_EVENTS):
+            continue
+        h = (ev.get("data") or {}).get("store_hash") if isinstance(ev.get("data"), dict) else None
+        if not isinstance(h, str):
+            return None
+        if h in {e.get("store_hash") for e in entries}:
+            return None
+        return (f"the event log's last lesson change (store hash {h[:16]}) isn't in the store's record of changes: "
+                "the record may have been rewritten outside `metacomputer learn`")
+    return None
 
 
 # --- the hub's instruction text ------------------------------------------------------------------
@@ -205,15 +331,22 @@ def instructions_text(env=None):
         return ""
 
 
-def summary(env=None):
-    """For `metacomputer status`, `security` and `learn list`."""
+def summary(env=None, check_events=True):
+    """For `metacomputer status`, `security`, `learn list` and the hub's status: counts, the store's hash and
+    the one `learn` recorded, a problem (nothing is sent) and a warning (the event log disagrees)."""
     out = {"setting": "on" if enabled(env) else "off", "dir": store_dir(env), "approved": 0, "delivered": 0,
-           "chars": 0, "problem": None}
+           "chars": 0, "problem": None, "warning": None, "store_hash": None, "recorded_hash": None}
     try:
-        lessons, problem = approved(env)
+        st = state(env)
+        problem = st["private"] or st["changed"]
+        lessons = [] if problem else st["lessons"]
         text, n = render(lessons)
         out.update(approved=len(lessons), delivered=n if out["setting"] == "on" else 0,
-                   chars=len(text) if out["setting"] == "on" else 0, problem=problem)
+                   chars=len(text) if out["setting"] == "on" else 0, problem=problem,
+                   store_hash=None if st["private"] else st["store_hash"],
+                   recorded_hash=None if st["private"] else st["recorded_hash"])
+        if check_events and not st["private"]:
+            out["warning"] = event_log_check(st["entries"], env)
     except Exception as e:                      # a summary never fails its command
         out["problem"] = f"couldn't read the lessons: {e!r}"[:200]
     return out
@@ -222,12 +355,15 @@ def summary(env=None):
 def status_line(s):
     if s.get("problem"):
         return f"not loaded: {s['problem']}"
-    if s.get("setting") == "off":
-        return f"off (LESSONS=off; {s.get('approved', 0)} approved, none in the instructions)"
     n, d = s.get("approved", 0), s.get("delivered", 0)
-    if not n:
-        return "none approved"
-    return f"{d} active in the MCP instructions" + (f" ({n - d} didn't fit the cap)" if d < n else "")
+    if s.get("setting") == "off":
+        line = f"off (LESSONS=off; {n} approved, none in the instructions)"
+    elif not n:
+        line = "none approved"
+    else:
+        line = (f"{d} active in the MCP instructions" + (f" ({n - d} didn't fit the cap)" if d < n else "")
+                + (f", store hash {s['store_hash']}" if s.get("store_hash") else ""))
+    return line + (f"; WARNING: {s['warning']}" if s.get("warning") else "")
 
 
 # --- writing (lib/learn.py) ----------------------------------------------------------------------

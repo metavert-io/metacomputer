@@ -50,6 +50,18 @@ Checks never trust what the agent says. They read the VM's real state:
   refuses the VM named `metacomputer` unless you pass `--allow-main-vm`.
 - **Make sure nobody else is using that VM** (`metacomputer who`). The runner
   checks before every task and stops if another session is active.
+- **The VM is checked again before every reset.** The runner refuses the VM your
+  own `config/local.env` names, as well as `metacomputer`, unless you pass
+  `--allow-main-vm`. It sets `MCOMP_EXPECT_VM` to the VM it found, so every
+  `metacomputer` command it starts refuses if the settings later name another VM.
+  `metacomputer learn bench` also passes what you confirmed (`BENCH_EXPECT_VM`,
+  `BENCH_EXPECT_BASELINE`, `BENCH_EXPECT_CONFIG_SHA`), and any change to them stops
+  the run before a reset.
+- **Unknown costs count.** A session that ends without reporting its cost (killed
+  at its timeout, crashed) is counted at its whole budget against the cap
+  (`cost_unknown` in its record). Each task's budget is reserved in `run.json`
+  before its session starts, so resuming after the runner itself died counts it.
+  `--budget` and `--cap` must be positive amounts.
 - **Keep the VM's optional hardening as you mean to measure it.** A test VM's
   settings often turn on `ACTION_LOG`, which puts a relay between the bridge and
   the driver. For a baseline of the defaults, point `MCOMP_CONFIG` at a small

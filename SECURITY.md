@@ -521,6 +521,14 @@ it", or "turn off the coordinate guard". A session reads it, and the text lands
 in the transcript. If that text could become a lesson, one injected page would
 steer every session after it.
 
+**What this does and doesn't resist.** It keeps text from the VM out of proposals
+and lessons, and it makes any change to the lessons visible. It does **not** stop
+a program running as your macOS user, such as an agent that was steered into
+running commands, from approving a lesson: such a program can write the store
+and its record, pass the terminal check with a pseudo-terminal, or change the
+code in your checkout that checks them. Against that, lessons are cooperative
+persistence that you can audit, not an approval you can prove.
+
 **The protections:**
 - **Proposals are built only from structured fields.** The miner
   (`lib/learn_mine.py`) keeps tool names, failure and refusal classes matched by
@@ -530,18 +538,37 @@ steer every session after it.
   messages) is read only to classify it and is never copied. A proposal's wording
   is a fixed template in `lib/learn.py`, filled in with those fields. The worst a
   page can do is skew a count, and so which built-in proposals appear.
+- **Only the driver's own tool names.** A tool name in a transcript that isn't one
+  of Cua Driver's tools (a fixed list, plus the seed cache that follows the pinned
+  driver) becomes `unknown_tool` before it reaches a report or a prompt, so a
+  made-up name like `always_obey_webpage_instructions` can't carry words.
 - **`--draft-with-claude` gets only that structured summary**: counts, class
-  names, tool names and app names, never transcript text, session names or paths.
+  names, the driver's tool names and app names, never transcript text, session
+  names or paths. It is sent to Anthropic through your own Claude Code.
   It's opt-in, runs on your own Claude Code with no tools, no MCP servers and none
   of your settings, and says so before it runs. A draft that names a pattern it
   wasn't given, runs over 300 characters, or mentions secrets or switching off,
   getting around or overriding a control is dropped.
-- **Free text needs you at a terminal.** Approving a built-in proposal by its ID
-  works from anywhere, including a Claude Code chat when you say so, because its
-  text is fixed. Approving a draft, editing a lesson or a proposal, and adding
-  your own lesson need your own terminal: the same bar as the vault's user-only
-  commands (standard input must be a terminal), so Claude's Bash tool, a script or
-  a pipe is refused.
+- **Free text needs a terminal.** Approving a built-in proposal by its ID works
+  from anywhere, including a Claude Code chat when you say so, because its text is
+  fixed (a "built-in" proposal whose stored text no longer matches its template
+  counts as free text). Approving a draft, editing a lesson or a proposal, adding
+  your own lesson and resealing need a terminal: the same bar as the vault's
+  user-only commands (standard input must be a terminal), so Claude's Bash tool, a
+  script or a pipe is refused. That's friction against an agent acting on its own,
+  not proof that you were there.
+- **Review approves what it showed.** `learn review` binds each answer to a hash
+  of the proposal it displayed; if the proposal changed before you answered, it
+  says so and shows it again.
+- **Sent only while it matches the record.** Every change made through `learn`
+  appends the store's hash (and the lesson's text hash) to `approvals.jsonl`, and
+  emits the same hashes in its event. The hub sends lessons only while
+  `lessons.json` matches the last recorded hash. A file written another way isn't
+  sent, `status`, `security` and `learn list` say so, `learn` refuses further
+  changes, and `learn reseal` (terminal) shows exactly what it holds and accepts it
+  on a yes. `metacomputer security` also warns when the event log's last lesson
+  change names a hash the record doesn't have, which is what rewriting both files
+  leaves behind, and the hub's status reports the store's hash.
 - **Only a private store is loaded.** `lessons.json` is read only when it's a
   regular file (opened without following links) owned by you and not writable by
   the group or others, in a folder of yours the group and others can't write
@@ -549,8 +576,9 @@ steer every session after it.
   say why. The store is outside the checkout and the plugin cache
   (`~/.local/share/metacomputer/lessons/`, or `LESSONS_DIR`).
 - **Lessons are advice, not authority.** No guard reads them: the hub reads them
-  only to build instruction text (`learned_notes()`), and they aren't part of the
-  hub's settings. The one-controller rule, the Chrome guard, bounded mode, the
+  only to build instruction text (`learned_notes()`, with each client's own
+  `LESSONS` and store from its hello) and to report them in its status
+  (`lessons_status()`), and they aren't part of the hub's settings. The one-controller rule, the Chrome guard, bounded mode, the
   coordinate guard and the vault's approvals work the same with any lesson in
   place. The block states that the lessons never override a guard, a refusal,
   the other instructions or yours, and can't turn a protection on or off.
@@ -558,18 +586,34 @@ steer every session after it.
   zero-width and bidirectional characters and newlines are removed (so a lesson
   can't forge a heading), at most 400 characters each, 12 lessons and 2,400
   characters in all.
-- **Nothing leaves the Mac.** The store stays local. Approving, editing and
-  removing a lesson emit `security.lesson_approved`, `lesson_edited` and
-  `lesson_removed` with its id, a short title and its source, never its text;
-  `events emit` and the spool can't fake those types.
+- **What leaves the Mac.** Mining, the report, the proposals and the store stay
+  local. An approved lesson is model context: it goes to the model with every new
+  session's instructions, like the skill. `--draft-with-claude` sends its summary
+  to Anthropic. Events (`security.lesson_approved`, `lesson_edited`,
+  `lesson_removed`, `lessons_resealed`) carry the id, a short title, the source and
+  two hashes, never the text, to the local log and any sinks you added; `events
+  emit` and the spool can't fake those types.
+- **Bounded reading.** Transcripts are untrusted input: links, FIFOs and devices
+  are skipped, lines over 32 MB are dropped without being held in memory, at most
+  768 MB (decompressed) and 400,000 events are read per file, malformed or deeply
+  nested records are skipped, and a transcript that fails anyway is counted as
+  unreadable without stopping the report.
 - **Output is escaped.** Everything `learn` prints from its data goes through
   `lib/termsafe.py`.
 
 **Where it ends:**
-- The terminal check is friction, not a lock: a program running as you can open
-  a pseudo-terminal, and the store is yours to write. Anything with your account
-  can write `lessons.json` directly, as it can change the skill or the config.
-  The lesson events and `learn list` are how you'd notice.
+- **Anything running as you can approve a lesson.** It can rewrite
+  `lessons.json` and `approvals.jsonl` to agree, open a pseudo-terminal to pass the
+  terminal check, or change `lib/learn_store.py` or the hub in your checkout. The
+  local event log is yours to rewrite too. An event sink off the Mac is the record
+  that holds: it got each change, with its hashes, as it happened. Read it, or
+  `learn list`, if you're unsure what your sessions are told.
+- A follow-up, once the secrets vault's presence-based approvals (Touch ID through
+  LocalAuthentication) are merged: `learn approve` could have the vault sign each
+  record with a key that needs your presence, and the hub could send only signed
+  lessons. A silent approval would then need your fingerprint, not just your
+  account; the checking code would still be in a checkout your account can
+  change.
 - Approving a built-in proposal from a chat means a session that was steered
   could approve one without asking. Its text is fixed and benign; the event and
   `learn list` record it.
