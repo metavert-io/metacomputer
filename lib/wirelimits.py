@@ -33,14 +33,39 @@ class LimitError(ValueError):
     """A message over a content limit (too many values, nested too deeply), as opposed to one that isn't JSON."""
 
 
-_QUOTE_S = re.compile(r'(\\*)"')
-_QUOTE_B = re.compile(rb'(\\*)"')
-
-
-def _structural(seg):
+def _structural(seg, start=0, end=None):
+    end = len(seg) if end is None else end
     if isinstance(seg, (bytes, bytearray)):
-        return seg.count(b"[") + seg.count(b"{") + seg.count(b",") + seg.count(b":")
-    return seg.count("[") + seg.count("{") + seg.count(",") + seg.count(":")
+        return sum(seg.count(c, start, end) for c in (b"[", b"{", b",", b":"))
+    return sum(seg.count(c, start, end) for c in ("[", "{", ",", ":"))
+
+
+def _spans(data):
+    """(in_string, start, end) for the text outside and inside JSON strings (quotes included), in order, in one
+    linear pass: each quote is found with find(), and the backslashes right before it (counted back only to the
+    quote before it, so no character is looked at twice) say whether it's escaped. An unterminated string runs to
+    the end. No regular expression: nothing here can backtrack."""
+    b = isinstance(data, (bytes, bytearray))
+    q, bs = (b'"', b"\\") if b else ('"', "\\")
+    n, pos = len(data), 0
+    while True:
+        i = data.find(q, pos)
+        if i < 0:
+            yield False, pos, n
+            return
+        yield False, pos, i
+        prev = i
+        while True:
+            k = data.find(q, prev + 1)
+            if k < 0:
+                yield True, i, n
+                return
+            between = data[prev + 1:k]
+            if (len(between) - len(between.rstrip(bs))) % 2 == 0:
+                break                                # not escaped: the string ends here
+            prev = k
+        yield True, i, k + 1
+        pos = k + 1
 
 
 def _brackets(data):
@@ -53,23 +78,11 @@ def _nodes(data, limit=None):
     """An upper bound on the Python objects a JSON text becomes: the top value, and one more for every container
     ([ or {), every value after the first in a container (a comma) and every object key (a colon), counted outside
     strings. When the same count over the whole text (strings included, so never lower) is within limit, that's
-    the answer; otherwise strings are skipped in one pass over the quotes, each quote's run of backslashes saying
-    whether it ends a string."""
+    the answer; otherwise strings are skipped (_spans, linear)."""
     quick = 1 + _structural(data)
     if limit is not None and quick <= limit:
         return quick
-    pat = _QUOTE_B if isinstance(data, (bytes, bytearray)) else _QUOTE_S
-    total, start, inside = 1, 0, False
-    for m in pat.finditer(data):
-        if inside:
-            if not len(m.group(1)) % 2:          # not escaped: the string ends here
-                inside, start = False, m.end()
-        else:
-            total += _structural(data[start:m.start()])
-            inside = True
-    if not inside:
-        total += _structural(data[start:])
-    return total
+    return 1 + sum(_structural(data, s, e) for in_str, s, e in _spans(data) if not in_str)
 
 
 def _children(o):

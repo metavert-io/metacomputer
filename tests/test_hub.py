@@ -221,6 +221,15 @@ for line in sys.stdin:
     elif name == "toomany":              # an answer with more values than the hub takes
         out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"content":[{"type":"text","text":"x"}],'
                   '"v":[' + ",".join(["0"] * int(a.get("size", 10))) + ']}}\n'); out.flush()
+    elif name == "hold":                 # takes the call and doesn't answer it (its id is kept for the next two)
+        open(os.path.join(STATE, "held"), "w").write(json.dumps(mid))
+    elif name in ("nestedid", "nestedonly"):   # an answer over the hub's limits naming the held call's id inside it
+        held = json.load(open(os.path.join(STATE, "held")))
+        top = ('"id":' + json.dumps(mid) + ',') if name == "nestedid" else ""
+        out.write('{"jsonrpc":"2.0",' + top + '"result":{"content":[{"type":"text","text":"x"}],"rows":[{"id":'
+                  + json.dumps(held) + '}],"v":[' + ",".join(["0"] * int(a.get("size", 10))) + ']}}\n'); out.flush()
+        if name == "nestedonly":
+            ok(mid, "after the nested id")
     elif name == "deep":                 # a small line nested far deeper than any parser recursion
         out.write("[" * int(a.get("size", 100000)) + "\n"); out.flush()
         out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"deep":' + "[" * 5000 + "]" * 5000 + '}}\n')
@@ -278,7 +287,7 @@ def setup_driver():
     extra = {"type": "object", "properties": {"session": {"type": "string"}, "s": {"type": "number"},
                                               "size": {"type": "integer"}, "tag": {"type": "string"}}}
     for n in ("whoami", "echo", "slow", "big", "huge", "nonl", "die", "deaf", "expire", "listchange", "flood",
-              "stderrflood", "deep", "badflood", "commas", "toomany"):
+              "stderrflood", "deep", "badflood", "commas", "toomany", "hold", "nestedid", "nestedonly"):
         tools.append({"name": n, "description": "test tool", "inputSchema": extra})
     json.dump(tools, open(os.path.join(STATE, "tools.json"), "w"))
     open(FAKE, "w").write(FAKE_DRIVER)
@@ -2099,6 +2108,21 @@ def notes_checks():
         mcp_hub.NOTE_WINDOW_S, mcp_hub.BAD_UPSTREAM_MAX = saved
 
 
+def linear_scan_checks():
+    print("#36: skipping strings to count values is one linear pass")
+    data = ('["' + "," * 1_100_000 + "\\\\" * 30_000 + 'x"]').encode()
+    t0 = time.time()
+    n = wirelimits._nodes(data, wirelimits.MAX_JSON_NODES)
+    took = time.time() - t0
+    check("a string of 1.1 million commas ending in 60,000 backslashes is counted well under a second (one value "
+          "in an array)", n == 2 and took < 1.0, (n, took))
+    t0 = time.time()
+    n = wirelimits._nodes(('{"a":"' + '\\"' * 400_000 + '","b":[' + "0," * 600_000 + '0]}').encode(), 10)
+    took = time.time() - t0
+    check("…and so is one of 400,000 escaped quotes before 600,001 real values", n == 600_006 and took < 1.0,
+          (n, took))
+
+
 def main():
     setup_driver()
     try:
@@ -2139,6 +2163,7 @@ def main():
         coord_incomplete_checks()
         batch3_checks()
         notes_checks()
+        linear_scan_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
