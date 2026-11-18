@@ -611,8 +611,8 @@ def test_folders():
     items, problems, notes = storage.build_plan()
     check("folders plan read-only by default, rw when asked", not problems and [i["rw"] for i in items] == [False, True],
           (problems, items))
-    check("...only the read-write one is locked (overlap-checked)", items[0]["lock"] is None and items[1]["lock"]
-          and items[1]["lock_overlap"])
+    check("...the read-write one takes an exclusive record, the read-only one a shared one",
+          items[1]["exclusive"] is True and items[0]["exclusive"] is False and items[0]["lock"] and items[1]["lock"])
     args = storage.lume_args(items)
     check("run arguments: --shared-dir PATH:ro and PATH:rw", args == ["--shared-dir", os.path.realpath(plain) + ":ro",
                                                                       "--shared-dir", os.path.realpath(noidx) + ":rw"], args)
@@ -641,7 +641,12 @@ def test_folders():
     e = raises(storage.acquire, storage.build_plan()[0], "vm-b", "/lab", os.getpid())
     check("...and a folder inside it can't be read-write elsewhere either", e and "vm-a" in e, e)
     os.environ["MCOMP_VOLUMES"] = "finner"
-    check("...but it can be read-only elsewhere", storage.build_plan()[0][0]["lock"] is None)
+    e = raises(storage.acquire, storage.build_plan()[0], "vm-b", "/lab", os.getpid())
+    check("...nor read-only (vm-a could swap it for another folder)", e and "inside a folder shared read-write" in e, e)
+    os.environ["MCOMP_VOLUMES"] = "fnoidx"
+    check("...while the same folder read-only elsewhere is fine (vm-a can't replace the folder it was given)",
+          raises(storage.acquire, storage.build_plan()[0], "vm-b", "/lab", os.getpid()) is None)
+    storage.release_locks("vm-b", "/lab")
     storage.release_locks("vm-a", "/lab")
     os.environ["MCOMP_VOLUMES"] = ""
 
@@ -723,6 +728,257 @@ def test_watcher():
     check("a pass with nothing new changes nothing", stats["restored"] == 3 and not links and not special)
 
 
+def protect_once(root, prev=None, ours=None, stats=None, **kw):
+    """One watcher pass over root, whatever the watcher's internals: returns (picture, stats)."""
+    stats = stats if stats is not None else {"quarantined": 0, "restored": 0, "links_removed": 0, "special_removed": 0,
+                                             "errors": 0}
+    ours = ours if ours is not None else set()
+    if hasattr(storage, "protect_path"):
+        cur = storage.protect_path(root, prev or {}, ours, stats, **kw)[0]
+    else:
+        cur = storage.protect(root, prev or {}, ours, stats)[0]
+    return cur, stats
+
+
+def test_watcher_ancestor_swap():
+    """Audit F2: a folder swapped for a link to a private folder mid-pass: nothing outside is touched."""
+    root = os.path.join(TMP, "swap.noindex")
+    private = os.path.join(TMP, "private-dir")
+    os.makedirs(os.path.join(root, "d"))
+    os.makedirs(private)
+    open(os.path.join(private, "config"), "w").write("the Mac's ssh config\n")
+    open(os.path.join(private, "new.txt"), "w").write("private\n")
+    os.mkfifo(os.path.join(root, "d", "config"))
+    open(os.path.join(root, "d", "new.txt"), "w").write("from the VM\n")
+    real_scandir = os.scandir
+    done = {"x": False}
+
+    def scandir(arg=None):
+        it = real_scandir(arg) if arg is not None else real_scandir()
+        entries = list(it)
+        it.close()
+        if not done["x"] and any(e.name == "config" for e in entries):
+            done["x"] = True
+            os.rename(os.path.join(root, "d"), os.path.join(root, "d-was"))
+            os.symlink(private, os.path.join(root, "d"))
+
+        class It(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def close(self):
+                pass
+        return It(entries)
+    os.scandir = scandir
+    try:
+        try:
+            protect_once(root)
+        except Exception as e:  # noqa: BLE001
+            print(f"  (the pass raised {e!r})")
+    finally:
+        os.scandir = real_scandir
+    check("a folder swapped for a link mid-pass: the private file the FIFO's path now names isn't deleted",
+          done["x"] and os.path.isfile(os.path.join(private, "config")))
+    check("...and the private folder's files get no attribute through it",
+          storage.get_xattr(os.path.join(private, "new.txt"), storage.QUARANTINE) is None)
+
+
+def test_watcher_limits():
+    """Audit F7: a folder the watcher can't cover completely is a protection failure, not silence."""
+    root = os.path.join(TMP, "big.noindex")
+    os.makedirs(root)
+    for i in range(30):
+        open(os.path.join(root, f"f{i}"), "w").close()
+    real = storage.MAX_WATCH
+    storage.MAX_WATCH = 10
+    try:
+        try:
+            cur, st = protect_once(root)
+            ok = False
+        except getattr(storage, "ProtectionFailure", ()) or Exception:
+            ok = hasattr(storage, "ProtectionFailure")
+    finally:
+        storage.MAX_WATCH = real
+    check("past the watcher's limit, the pass fails loudly (ProtectionFailure)", ok)
+    root2 = os.path.join(TMP, "locked.noindex")
+    os.makedirs(os.path.join(root2, "hidden"))
+    os.mkfifo(os.path.join(root2, "hidden", "pipe"))
+    os.chmod(os.path.join(root2, "hidden"), 0)
+    try:
+        protect_once(root2)
+    except Exception as e:  # noqa: BLE001
+        print(f"  (the pass raised {e!r})")
+    os.chmod(os.path.join(root2, "hidden"), 0o755)
+    check("a folder the VM made unreadable is opened again and checked (its FIFO goes)",
+          not os.path.lexists(os.path.join(root2, "hidden", "pipe")))
+
+
+def test_quarantine_race():
+    """Audit F8: the attribute removed right after the watcher set it is put back on a later pass."""
+    root = os.path.join(TMP, "race.noindex")
+    os.makedirs(root)
+    f = os.path.join(root, "vm.txt")
+    open(f, "w").write("x")
+    names = [n for n in ("fsetxattr_fd", "set_xattr") if hasattr(storage, n)]
+    real = {n: getattr(storage, n) for n in names}
+
+    def racing(name):
+        def inner(*a, **k):
+            r = real[name](*a, **k)
+            subprocess.run(["xattr", "-d", storage.QUARANTINE, f], capture_output=True)   # the guest, right after
+            return r
+        return inner
+    for n in names:
+        setattr(storage, n, racing(n))
+    try:
+        cur, st = protect_once(root)
+    finally:
+        for n in names:
+            setattr(storage, n, real[n])
+    cur, st = protect_once(root, cur, stats=st, ours={"vm.txt"} | set())
+    v = storage.get_xattr(f, storage.QUARANTINE)
+    check("a quarantine the guest removed right after it was set is back after the next pass",
+          v is not None and storage.QUAR_OK.match(v), v)
+
+
+def test_low_space():
+    """Audit F10 (folders): a read-write folder filling the Mac's disk stops protection, loudly."""
+    root = os.path.join(TMP, "space.noindex")
+    os.makedirs(root)
+    if not hasattr(storage, "free_bytes_at"):
+        check("the watcher checks the Mac's free space (free_bytes_at)", False)
+        return
+    real = storage.free_bytes_at
+    storage.free_bytes_at = lambda fd: 1 << 20
+    try:
+        try:
+            protect_once(root)
+            ok = False
+        except storage.ProtectionFailure as e:
+            ok = "free" in str(e)
+    finally:
+        storage.free_bytes_at = real
+    check("with less free space than IMPORT_MIN_FREE_GB, the pass fails (the VM is stopped)", ok)
+
+
+def test_folder_binding():
+    """Audit F5: what start attaches is what it checked, and no VM's read-write share can swap it."""
+    base = os.path.join(TMP, "bind")
+    parent = os.path.join(base, "parent.noindex")
+    child = os.path.join(parent, "child")
+    os.makedirs(child)
+    for n, path in (("bparent", parent), ("bchild", child)):
+        quiet(storage.cmd_volume_create, Args(name=n, folder=path, size=None, dir=None))
+    os.environ["MCOMP_VOLUMES"] = "bparent:rw"
+    storage.acquire(storage.build_plan()[0], "vm-a", "/lab", os.getpid())
+    os.environ["MCOMP_VOLUMES"] = "bchild"
+    items = storage.build_plan()[0]
+    e = raises(storage.acquire, items, "vm-b", "/lab", os.getpid())
+    check("a folder inside another VM's read-write share is refused, even read-only", e is not None, e)
+    storage.release_locks("vm-a", "/lab")
+    os.environ["MCOMP_VOLUMES"] = "bchild"
+    storage.acquire(storage.build_plan()[0], "vm-b", "/lab", os.getpid())
+    os.environ["MCOMP_VOLUMES"] = "bparent:rw"
+    e = raises(storage.acquire, storage.build_plan()[0], "vm-a", "/lab", os.getpid())
+    check("a read-write share holding another VM's folder is refused", e is not None, e)
+    storage.release_locks("vm-b", "/lab")
+    img = os.path.join(parent, "inner.img")
+    with open(img, "wb") as f:
+        f.truncate(16 << 20)
+    storage.reg_save("volume", {"name": "binner", "kind": "disk", "path": img, "uuid": "11111111-2222-4333-8444-555555555555",
+                                "created": "x"})
+    os.environ["MCOMP_VOLUMES"] = "bparent:rw"
+    storage.acquire(storage.build_plan()[0], "vm-a", "/lab", os.getpid())
+    os.environ["MCOMP_VOLUMES"] = "binner"
+    e = raises(storage.acquire, storage.build_plan()[0], "vm-c", "/lab", os.getpid())
+    check("a disk image inside another VM's read-write share is refused", e is not None, e)
+    storage.release_locks("vm-a", "/lab")
+    os.environ["MCOMP_VOLUMES"] = "bchild"
+    items = storage.build_plan()[0]
+    os.rename(child, child + "-was")
+    os.makedirs(child)
+    changed = storage.changed_items(items)
+    check("a folder replaced after it was checked is noticed (start stops the VM)", changed, changed)
+    os.environ["MCOMP_VOLUMES"] = ""
+
+
+def test_watcher_started_first():
+    """Audit F6 (folders): the watcher starts with the VM, before the VM is asked anything, or the VM stops."""
+    root = os.path.join(TMP, "first.noindex")
+    os.makedirs(root)
+    quiet(storage.cmd_volume_create, Args(name="wfirst", folder=root, size=None, dir=None))
+    os.environ["MCOMP_VOLUMES"] = "wfirst:rw"
+    with open(os.path.join(TMP, "ssh", "guest-features"), "w") as f:
+        f.write("storage=1\n")
+    vm = subprocess.Popen(["sleep", "60"])
+    open(os.path.join(TMP, "run", "lume.pid"), "w").write(str(vm.pid))
+    try:
+        quiet(storage.cmd_prepare, Args(pid=os.getpid(), no_volumes=False))
+        real = storage.watcher_start
+        storage.watcher_start = lambda: 0
+        try:
+            rc = quiet(storage.cmd_started, Args(pid=vm.pid))
+        finally:
+            storage.watcher_start = real
+        check("if the watcher can't start, start fails (and stops the VM)", rc != 0, rc)
+        rc = quiet(storage.cmd_started, Args(pid=vm.pid))
+        pid = storage.watcher_alive()
+        check("the watcher starts when the VM's process does, before the VM is asked to mount anything",
+              rc == 0 and pid, (rc, pid))
+        open(os.path.join(root, "late"), "w").close()
+        os.mkfifo(os.path.join(root, "pipe"))
+        time.sleep(5)
+        check("...and it works from then on (a FIFO goes)", not os.path.lexists(os.path.join(root, "pipe")))
+        storage.MAX_WATCH_SAVED = storage.MAX_WATCH
+        for i in range(12):
+            os.mkfifo(os.path.join(root, f"p{i}"))
+        stats = storage.watcher_stop()
+        check("the watcher stops when asked", not storage.watcher_alive())
+    finally:
+        vm.kill()
+        vm.wait()
+        storage.release_locks(storage.vm_name(), storage.lab_root())
+        storage.clear_state()
+        os.environ["MCOMP_VOLUMES"] = ""
+
+
+def test_watcher_failure_stops_vm():
+    """Audit F6/F7: when protection can't run (here: over the watcher's limit), the watcher stops the VM."""
+    if not hasattr(storage, "ProtectionFailure"):
+        check("a protection failure stops the VM", False, "no ProtectionFailure")
+        return
+    root = os.path.join(TMP, "fail.noindex")
+    os.makedirs(root)
+    quiet(storage.cmd_volume_create, Args(name="wfail", folder=root, size=None, dir=None))
+    os.environ["MCOMP_VOLUMES"] = "wfail:rw"
+    vm = subprocess.Popen(["sleep", "60"])
+    open(os.path.join(TMP, "run", "lume.pid"), "w").write(str(vm.pid))
+    try:
+        quiet(storage.cmd_prepare, Args(pid=os.getpid(), no_volumes=False))
+        for i in range(40):
+            open(os.path.join(root, f"f{i}"), "w").close()
+        env = dict(os.environ, MCOMP_WATCH_MAX="20")
+        r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "storage.py"), "watch"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        try:
+            vm.wait(10)
+            stopped = True
+        except subprocess.TimeoutExpired:
+            stopped = False
+        check("a protection failure stops the VM (its process is ended) and says why", stopped and r.returncode != 0
+              and "protection" in (r.stdout + r.stderr).lower(), (stopped, r.returncode, r.stderr[-300:]))
+    finally:
+        if vm.poll() is None:
+            vm.kill()
+        vm.wait()
+        storage.release_locks(storage.vm_name(), storage.lab_root())
+        storage.clear_state()
+        os.environ["MCOMP_VOLUMES"] = ""
+
+
 def main():
     try:
         test_parsing()
@@ -740,6 +996,13 @@ def main():
         test_manifest_parsing()
         test_folders()
         test_watcher()
+        test_watcher_ancestor_swap()
+        test_watcher_limits()
+        test_quarantine_race()
+        test_low_space()
+        test_folder_binding()
+        test_watcher_started_first()
+        test_watcher_failure_stops_vm()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")

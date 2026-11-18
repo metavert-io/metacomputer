@@ -512,26 +512,58 @@ def sidecar_path(item):
     return item["path"] + ".lock"
 
 
+def strictly_inside(child, parent):
+    return inside(child, parent) and fold(child.rstrip("/")) != fold(parent.rstrip("/"))
+
+
+def item_conflicts(it, others):
+    """Why item it can't be taken while the live records others (other VMs, other operations) exist."""
+    out = []
+    p, kind = it["path"], it["kind"]
+    folderish = ("folder", "s3")
+    for rec in others:
+        rp, rk = rec.get("path", ""), rec.get("kind")
+        why = None
+        if it.get("lock") and it.get("exclusive", True) and rec.get("exclusive", True) \
+                and rec["_file"] == it["lock"] + ".json":
+            why = "is in use by"
+        elif kind in folderish and rk in folderish:
+            if it.get("rw") and rec.get("rw") and host_overlapping(rp, p):
+                why = "overlaps a folder shared read-write with"
+            elif it.get("rw") and not rec.get("rw") and strictly_inside(rp, p):
+                why = "holds a folder shared with"          # it could swap that VM's folder for another
+            elif not it.get("rw") and rec.get("rw") and strictly_inside(p, rp):
+                why = "is inside a folder shared read-write with"
+        elif kind in ("disk", "refdisk") and rk in folderish and rec.get("rw") and inside(p, rp):
+            why = "is inside a folder shared read-write with"
+        if why:
+            out.append(f"{kind} '{it['name']}' {why} {describe_holder(rec)}")
+    return out
+
+
+def record_name(it, vm, lab):
+    """An exclusive item's record is one file for everyone; a shared one's is one per holder."""
+    if it.get("exclusive", True):
+        return it["lock"]
+    import hashlib
+    return it["lock"] + "-ro-" + hashlib.sha256(f"{vm}|{lab}".encode()).hexdigest()[:12]
+
+
 def acquire(items, vm, lab, pid):
-    """Lock every read-write item for this VM, or none. items: plan items with "lock" set.
-    Returns the list of lock files written; raises StorageError naming each conflict."""
-    want = [it for it in items if it.get("lock")]
-    if not want:
+    """Take this VM's records for its items, or none: exclusive ones for what it writes (disk volumes,
+    read-write folders), shared ones for read-only folders. Every item is checked against the live records
+    of other holders (item_conflicts). Returns the record names written; raises StorageError naming each
+    conflict."""
+    if not items:
         return []
     pstart = proc_start(pid)
     host = hostname()
     with GlobalLock():
-        existing = all_locks()
+        others = [r for r in all_locks() if not same_holder(r, vm, lab) and holder_alive(r)]
         conflicts = []
-        for it in want:
-            key = it["lock"]
-            for rec in existing:
-                if same_holder(rec, vm, lab) or not holder_alive(rec):
-                    continue
-                if rec["_file"] == key + ".json" or (
-                        it.get("lock_overlap") and rec.get("overlap") and host_overlapping(rec.get("path", ""), it["path"])):
-                    conflicts.append(f"{it['kind']} '{it['name']}' is in use by {describe_holder(rec)}")
-            if it["kind"] == "disk":
+        for it in items:
+            conflicts += item_conflicts(it, others)
+            if it["kind"] == "disk" and it.get("lock"):
                 side = read_json(sidecar_path(it))
                 if isinstance(side, dict) and side.get("host") and side.get("host") != host:
                     conflicts.append(f"disk '{it['name']}': its lock file says computer '{side['host']}' has it "
@@ -540,12 +572,15 @@ def acquire(items, vm, lab, pid):
         if conflicts:
             raise StorageError("; ".join(conflicts) + ". Stop that VM first, or start this one with --no-volumes")
         written = []
-        for it in want:
+        for it in items:
+            if not it.get("lock"):
+                continue
             rec = {"kind": it["kind"], "name": it["name"], "path": it["path"], "vm": vm, "lab": lab,
                    "pid": int(pid), "pstart": pstart, "host": host, "since": now(), "state": "starting",
-                   "overlap": bool(it.get("lock_overlap"))}
-            atomic_json(os.path.join(locks_dir(), it["lock"] + ".json"), rec)
-            written.append(it["lock"])
+                   "rw": bool(it.get("rw", True)), "exclusive": bool(it.get("exclusive", True))}
+            name = record_name(it, vm, lab)
+            atomic_json(os.path.join(locks_dir(), name + ".json"), rec)
+            written.append(name)
             if it["kind"] == "disk":
                 try:
                     atomic_json(sidecar_path(it), {"host": host, "vm": vm, "since": rec["since"]}, mode=0o644)
@@ -729,7 +764,7 @@ def plan_folder(rec, v, problems, notes):
         problems.append(f"volume '{name}': the folder {path} is missing (is its drive connected?)")
         return None
     try:
-        real = check_shareable(path)
+        real, ident = check_shareable_id(path)
     except StorageError as e:
         problems.append(f"volume '{name}': {e}")
         return None
@@ -748,8 +783,10 @@ def plan_folder(rec, v, problems, notes):
         if net:
             notes.append(f"volume '{name}' is on a network filesystem ({net[0]} at {net[1]}): locks don't hold across "
                          "computers, so another computer could write it at the same time")
-    return {"kind": rec["kind"], "name": name, "path": real, "mount": v["mount"], "rw": rw,
-            "lock": lock_key("folder", real) if rw else None, "lock_overlap": rw}
+    # Every folder takes a record: read-write ones exclusive, read-only ones shared, so a later start
+    # can see what another VM has and refuse an overlap that would let one VM swap another's folder.
+    return {"kind": rec["kind"], "name": name, "path": real, "ident": list(ident), "mount": v["mount"], "rw": rw,
+            "lock": lock_key("folder", real), "exclusive": rw}
 
 
 def share_names(paths):
@@ -1112,11 +1149,11 @@ def cmd_prepare(a):
     snaps = {}
     for it in items:
         if it["kind"] in FOLDER_KINDS and it["rw"]:
-            sigs = walk_sigs(it["path"])
-            if sigs is None:
-                raise StorageError(f"not starting: volume '{it['name']}' holds over {MAX_WATCH} files and folders, more "
-                                   "than the watcher protects; attach it read-only, or share a smaller folder")
-            snaps[it["name"]] = sigs
+            try:
+                snaps[it["name"]] = snapshot(it["path"], it.get("ident"))
+            except ProtectionFailure as e:
+                raise StorageError(f"not starting: volume '{it['name']}': {e}; attach it read-only, or share a "
+                                   "smaller folder")
     acquire(items, vm, lab, a.pid)
     for name, sigs in snaps.items():
         atomic_json(snap_path(name), {k: list(v) for k, v in sigs.items()})
@@ -1138,7 +1175,21 @@ def cmd_started(a):
         print("metacomputer: the VM was started, but " + "; ".join(changed) + ": it's no longer what was checked. "
               "Stopping it.", file=sys.stderr)
         return 1
+    if needs_watcher(st.get("items", [])):
+        # Protection starts with the VM, before the VM is asked anything: a read-write folder is writable from
+        # the moment it boots. No watcher, no VM.
+        pid = watcher_start()
+        if not pid:
+            print("metacomputer: the folder watcher didn't start (see storage-watcher.log), so a read-write folder "
+                  "would be unprotected. Stopping the VM.", file=sys.stderr)
+            return 1
+        print(f"  ✓ folder watcher running (pid {pid}): what the VM writes is quarantined, links out of a folder are "
+              "removed")
     return 0
+
+
+def needs_watcher(items):
+    return any(it["kind"] in FOLDER_KINDS and it["rw"] for it in items)
 
 
 def changed_items(items):
@@ -1240,10 +1291,7 @@ def attached(data):
         print(f"  ✓ {it['kind']} '{it['name']}' at {it['mount']} ({mode})" + (f", {', '.join(extra)}" if extra else ""))
     st["attached"] = now()
     atomic_json(state_files()["state"], st)
-    if any(it["kind"] in FOLDER_KINDS and it["rw"] for it in want.values()):
-        pid = watcher_start()
-        print(f"  ✓ folder watcher running (pid {pid}): what the VM writes is quarantined, links out of a folder are "
-              "removed" if pid else "  ! the folder watcher didn't start (see storage-watcher.log)")
+
     emit("lifecycle", "storage_attached",
          f"Storage attached to {vm_name()}: " + ", ".join(f"{it['kind']} {it['name']} ({'rw' if it['rw'] else 'ro'})"
                                                          for it in want.values()),
@@ -1824,134 +1872,331 @@ XATTR_NOFOLLOW = 0x0001
 WATCH_EVERY = 2.0
 
 
+class ProtectionFailure(Exception):
+    """The watcher can't cover a read-write folder completely (too many entries or too deep, unreadable, an
+    attribute that won't stick, the Mac's disk nearly full): protection fails loudly and the VM is stopped."""
+
+
+MAX_DEPTH = 128
+
+
+def watch_limit():
+    """MAX_WATCH; MCOMP_WATCH_MAX can only lower it (the tests use that)."""
+    v = os.environ.get("MCOMP_WATCH_MAX", "")
+    return min(MAX_WATCH, int(v)) if v.isdigit() else MAX_WATCH
+
+
+def reserve_bytes():
+    try:
+        gb = float(env("IMPORT_MIN_FREE_GB", "10") or 10)
+    except ValueError:
+        gb = 10.0
+    return int(max(gb, 0) * (1 << 30))
+
+
+def free_bytes_at(fd):
+    st = os.fstatvfs(fd)
+    return st.f_bavail * st.f_frsize
+
+
 def _xlibc():
     libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-    libc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
-                              ctypes.c_int]
-    libc.getxattr.restype = ctypes.c_ssize_t
-    libc.setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
-                              ctypes.c_int]
+    for fn, first in (("getxattr", ctypes.c_char_p), ("setxattr", ctypes.c_char_p),
+                      ("fgetxattr", ctypes.c_int), ("fsetxattr", ctypes.c_int)):
+        f = getattr(libc, fn)
+        f.argtypes = [first, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        f.restype = ctypes.c_ssize_t if fn.endswith("getxattr") else ctypes.c_int
     return libc
 
 
 def get_xattr(path, name):
-    libc = _xlibc()
+    """An attribute of the file at path itself (links not followed). For reports and tests: the watcher uses
+    descriptors."""
     buf = ctypes.create_string_buffer(256)
-    n = libc.getxattr(path.encode(), name.encode(), buf, 256, 0, XATTR_NOFOLLOW)
+    n = _xlibc().getxattr(path.encode(), name.encode(), buf, 256, 0, XATTR_NOFOLLOW)
     return None if n < 0 else buf.raw[:n]
 
 
 def set_xattr(path, name, value):
-    libc = _xlibc()
-    if libc.setxattr(path.encode(), name.encode(), value, len(value), 0, XATTR_NOFOLLOW) != 0:
+    if _xlibc().setxattr(path.encode(), name.encode(), value, len(value), 0, XATTR_NOFOLLOW) != 0:
         e = ctypes.get_errno()
         raise OSError(e, os.strerror(e), path)
+
+
+def fget_xattr(fd, name):
+    buf = ctypes.create_string_buffer(256)
+    n = _xlibc().fgetxattr(fd, name.encode(), buf, 256, 0, 0)
+    return None if n < 0 else buf.raw[:n]
+
+
+def fsetxattr_fd(fd, name, value):
+    if _xlibc().fsetxattr(fd, name.encode(), value, len(value), 0, 0) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
 
 
 def quarantine_value():
     return f"0081;{int(time.time()):08x};metacomputer;".encode()
 
 
-def ensure_quarantine(path):
-    """True when it had to be set (it was missing or not ours)."""
-    v = get_xattr(path, QUARANTINE)
+def ensure_quarantine_fd(fd):
+    """The open file or folder carries our quarantine value, exactly; True when it had to be set. A file the
+    VM made unwritable gets its owner's write bit back first (the owner may always change the mode)."""
+    v = fget_xattr(fd, QUARANTINE)
     if v is not None and QUAR_OK.match(v):
         return False
-    set_xattr(path, QUARANTINE, quarantine_value())
+    try:
+        fsetxattr_fd(fd, QUARANTINE, quarantine_value())
+    except OSError as e:
+        if e.errno not in (errno.EACCES, errno.EPERM):
+            raise ProtectionFailure(f"couldn't set the quarantine attribute ({e.strerror})")
+        st = os.fstat(fd)
+        os.fchmod(fd, stat.S_IMODE(st.st_mode) | (0o700 if stat.S_ISDIR(st.st_mode) else 0o600))
+        try:
+            fsetxattr_fd(fd, QUARANTINE, quarantine_value())
+        except OSError as e2:
+            raise ProtectionFailure(f"couldn't set the quarantine attribute ({e2.strerror})")
     return True
 
 
-def walk_sigs(root, limit=MAX_WATCH):
-    """{relative path: (type, mode, inode, mtime_ns, ctime_ns, size)} for everything under root, links not
-    followed; None past limit entries. A changed attribute changes ctime, so it shows here too."""
-    out, stack = {}, [""]
-    while stack:
-        rel = stack.pop()
-        try:
-            it = os.scandir(os.path.join(root, rel) if rel else root)
-        except OSError:
-            continue
-        with it:
-            for e in it:
-                r = os.path.join(rel, e.name) if rel else e.name
-                try:
-                    st = e.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                t = stat.S_IFMT(st.st_mode)
-                out[r] = (t, st.st_mode, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
-                if len(out) > limit:
-                    return None
-                if t == stat.S_IFDIR:
-                    stack.append(r)
-    return out
+def ensure_quarantine(path):
+    """By path, for a file this program made (a note); never through a folder the VM controls."""
+    fd = os.open(path, FILE_NOFOLLOW)
+    try:
+        return ensure_quarantine_fd(fd)
+    finally:
+        os.close(fd)
 
 
-def sig_of(path):
-    st = os.lstat(path)
+def _sig(st):
     return (stat.S_IFMT(st.st_mode), st.st_mode, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
 
 
-def neutralize_link(path, target):
-    """Replace a link that leads out of the folder with a note saying what it pointed to."""
-    os.unlink(path)
-    note = path + ".link-removed.txt"
+def _stat_at(dfd, name):
+    """lstat relative to a folder descriptor; a folder the VM left without search permission gets it back."""
+    try:
+        return os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except PermissionError:
+        os.fchmod(dfd, stat.S_IMODE(os.fstat(dfd).st_mode) | 0o700)
+        return os.stat(name, dir_fd=dfd, follow_symlinks=False)
+
+
+def _open_at(dfd, name, st, flags):
+    """Open name in dfd without following links; None when it's no longer the entry st describes (it changed
+    since it was listed: the next pass sees it). An entry the VM made unreadable gets its owner's bits back."""
+    try:
+        fd = os.open(name, flags, dir_fd=dfd)
+    except PermissionError:
+        os.chmod(name, stat.S_IMODE(st.st_mode) | (0o700 if flags & os.O_DIRECTORY else 0o600), dir_fd=dfd,
+                 follow_symlinks=False)
+        fd = os.open(name, flags, dir_fd=dfd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+            return None
+        raise
+    fst = os.fstat(fd)
+    if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+        os.close(fd)
+        return None
+    return fd
+
+
+def link_escapes(rel, target, rootcanon):
+    """Whether a link at rel (inside the folder) with this target leads out of it, judged from the text alone
+    (no lookups, so nothing the VM changes meanwhile matters): an absolute target must name this folder's own
+    Mac path; a relative one may not climb above the folder. Each link is judged on its own, so a chain of
+    links that each stay inside stays inside."""
+    if not target:
+        return True
+    if target.startswith("/"):
+        return not inside(target, rootcanon)
+    parts = rel.split("/")[:-1]
+    for c in target.split("/"):
+        if c in ("", "."):
+            continue
+        if c == "..":
+            if not parts:
+                return True
+            parts.pop()
+        else:
+            parts.append(c)
+    return False
+
+
+def _note_at(dfd, name, target):
     shown = esc(target)[:500]
     try:
-        fd = os.open(note, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        fd = os.open(name + ".link-removed.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=dfd)
     except OSError:
-        return None
-    with os.fdopen(fd, "w") as f:
-        f.write("metacomputer removed a symbolic link the VM made here: it pointed outside this shared folder,\n"
-                f"to {shown!r}, where a program on the Mac following it would have left the folder.\n")
+        return
     try:
-        set_xattr(note, QUARANTINE, quarantine_value())
-    except OSError:
-        pass
-    return note
-
-
-def protect(root, prev, ours, stats):
-    """One pass over a read-write folder; returns the new picture and what it did."""
-    rootreal = _real(root)
-    cur = walk_sigs(root, MAX_WATCH * 2) or {}
-    links, special = [], []
-    for rel in sorted(cur):
-        sig = cur[rel]
-        if prev.get(rel) == tuple(sig):
-            continue
-        p = os.path.join(root, rel)
-        t = sig[0]
+        os.write(fd, ("metacomputer removed a symbolic link the VM made here: it pointed outside this shared folder,\n"
+                      f"to {shown!r}, where a program on the Mac following it would have left the folder.\n").encode())
         try:
-            if t == stat.S_IFLNK:
-                target = os.readlink(p)
-                if not inside(_real(p), rootreal):
-                    neutralize_link(p, target)
-                    links.append((rel, target))
+            fsetxattr_fd(fd, QUARANTINE, quarantine_value())
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+
+
+def open_root(path, ident=None):
+    """The folder's descriptor, checked to be the folder that was checked (device and inode)."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    st = os.fstat(fd)
+    if ident is not None and [st.st_dev, st.st_ino] != list(ident):
+        os.close(fd)
+        raise ProtectionFailure(f"{path} is no longer the folder that was checked")
+    return fd
+
+
+def walk_fd(rootfd, visit, limit=None):
+    """Every entry under rootfd, through descriptors: visit(dirfd, name, rel, st) is called for each, and
+    returns a folder descriptor to enter (which walk_fd closes) or None. Over limit entries or MAX_DEPTH
+    levels is a ProtectionFailure."""
+    limit = limit or watch_limit()
+    count = [0]
+
+    def walk(dfd, rel, depth):
+        if depth > MAX_DEPTH:
+            raise ProtectionFailure(f"folders nested more than {MAX_DEPTH} deep")
+        try:
+            with os.scandir(dfd) as it:
+                names = [e.name for e in it]
+        except PermissionError:
+            os.fchmod(dfd, stat.S_IMODE(os.fstat(dfd).st_mode) | 0o700)
+            with os.scandir(dfd) as it:
+                names = [e.name for e in it]
+        for n in names:
+            count[0] += 1
+            if count[0] > limit:
+                raise ProtectionFailure(f"over {limit} files and folders, more than the watcher covers")
+            r = f"{rel}/{n}" if rel else n
+            try:
+                st = _stat_at(dfd, n)
+            except FileNotFoundError:
+                continue
+            cfd = visit(dfd, n, r, st)
+            if cfd is not None:
+                try:
+                    walk(cfd, r, depth + 1)
+                finally:
+                    os.close(cfd)
+    walk(rootfd, "", 0)
+
+
+def snapshot(path, ident=None):
+    """What a read-write folder holds before the VM boots: {relative path: signature}."""
+    fd = open_root(path, ident)
+    out = {}
+    try:
+        def visit(dfd, n, r, st):
+            out[r] = _sig(st)
+            return _open_at(dfd, n, st, DIR_NOFOLLOW) if stat.S_ISDIR(st.st_mode) else None
+        walk_fd(fd, visit)
+    finally:
+        os.close(fd)
+    return out
+
+
+def walk_sigs(root, limit=None):
+    """snapshot() without the identity check; None past the limit (kept for callers that only report)."""
+    try:
+        return snapshot(root) if limit is None else _snapshot_limited(root, limit)
+    except ProtectionFailure:
+        return None
+
+
+def _snapshot_limited(root, limit):
+    fd = open_root(root)
+    out = {}
+    try:
+        def visit(dfd, n, r, st):
+            out[r] = _sig(st)
+            return _open_at(dfd, n, st, DIR_NOFOLLOW) if stat.S_ISDIR(st.st_mode) else None
+        walk_fd(fd, visit, limit)
+    finally:
+        os.close(fd)
+    return out
+
+
+def protect_fd(rootfd, rootcanon, prev, ours, stats):
+    """One pass over a read-write folder, every action relative to a folder descriptor opened without
+    following links, so a folder the VM swaps for a link mid-pass leads nowhere. Entries unchanged since the
+    VM booted are left alone; everything else gets the quarantine attribute, verified through its own
+    descriptor on every pass (so one the VM strips right after it was set is put back next time); links out
+    of the folder become notes; FIFOs, sockets and devices go; set-id bits go. Returns (picture, links,
+    special); raises ProtectionFailure when the pass can't cover the folder."""
+    if free_bytes_at(rootfd) < reserve_bytes():
+        raise ProtectionFailure(f"the Mac's disk has less than {reserve_bytes() >> 30} GB free (IMPORT_MIN_FREE_GB); "
+                                "a read-write folder could fill it")
+    cur, links, special = {}, [], []
+
+    def quarantine(fd, r):
+        if ensure_quarantine_fd(fd):
+            stats["restored" if r in ours else "quarantined"] += 1
+        ours.add(r)
+
+    def visit(dfd, n, r, st):
+        sig = _sig(st)
+        untouched = r not in ours and prev.get(r) == sig
+        t = stat.S_IFMT(st.st_mode)
+        if t == stat.S_IFLNK:
+            if not untouched:
+                target = os.readlink(n, dir_fd=dfd)
+                if link_escapes(r, target, rootcanon):
+                    os.unlink(n, dir_fd=dfd)
+                    _note_at(dfd, n, target)
+                    links.append((r, target))
                     stats["links_removed"] += 1
-                    cur.pop(rel)
-                continue
-            if t in (stat.S_IFREG, stat.S_IFDIR):
-                if t == stat.S_IFREG and sig[1] & (stat.S_ISUID | stat.S_ISGID):
-                    os.chmod(p, stat.S_IMODE(sig[1]) & ~(stat.S_ISUID | stat.S_ISGID), follow_symlinks=False)
-                if ensure_quarantine(p):
-                    if rel in ours:
-                        stats["restored"] += 1
-                    else:
-                        stats["quarantined"] += 1
-                    ours.add(rel)
-                cur[rel] = sig_of(p)
-                continue
-            os.unlink(p)                     # FIFO, socket, device
-            special.append(rel)
-            stats["special_removed"] += 1
-            cur.pop(rel)
-        except FileNotFoundError:
-            cur.pop(rel, None)
-        except OSError as e:
-            stats["errors"] += 1
-            stats["last_error"] = f"{rel}: {e.strerror}"
+                    return None
+            cur[r] = sig
+            return None
+        if t == stat.S_IFDIR:
+            cfd = _open_at(dfd, n, st, DIR_NOFOLLOW)
+            if cfd is None:
+                return None
+            if not untouched:
+                quarantine(cfd, r)
+                cur[r] = _sig(os.fstat(cfd))
+            else:
+                cur[r] = sig
+            return cfd
+        if t == stat.S_IFREG:
+            if untouched:
+                cur[r] = sig
+                return None
+            ffd = _open_at(dfd, n, st, FILE_NOFOLLOW)
+            if ffd is None:
+                return None
+            try:
+                fst = os.fstat(ffd)
+                if fst.st_mode & (stat.S_ISUID | stat.S_ISGID):
+                    os.fchmod(ffd, stat.S_IMODE(fst.st_mode) & ~(stat.S_ISUID | stat.S_ISGID))
+                quarantine(ffd, r)
+                cur[r] = _sig(os.fstat(ffd))
+            finally:
+                os.close(ffd)
+            return None
+        os.unlink(n, dir_fd=dfd)                     # FIFO, socket, device
+        special.append(r)
+        stats["special_removed"] += 1
+        return None
+    walk_fd(rootfd, visit)
     return cur, links, special
+
+
+def protect_path(root, prev, ours, stats, ident=None):
+    """protect_fd on a folder given by path (opened and checked once)."""
+    fd = open_root(root, ident)
+    try:
+        return protect_fd(fd, canon(root, directory=True)[0], prev, ours, stats)
+    finally:
+        os.close(fd)
+
+
+protect = protect_path
 
 
 def watcher_pid_path():
@@ -1969,6 +2214,26 @@ def lume_pid():
         return 0
 
 
+def stop_vm(vm_pid, vm_start):
+    """Stop the VM by ending its `lume run` process (an immediate power-off), if it's still that process."""
+    import signal
+    if not vm_pid or proc_start(vm_pid) != vm_start:
+        return False
+    try:
+        os.kill(vm_pid, signal.SIGTERM)
+    except OSError:
+        return False
+    for _ in range(50):
+        if proc_start(vm_pid) != vm_start:
+            return True
+        time.sleep(0.2)
+    try:
+        os.kill(vm_pid, signal.SIGKILL)
+    except OSError:
+        pass
+    return True
+
+
 def cmd_watch(a):
     import signal
     st = load_state() or {}
@@ -1982,14 +2247,40 @@ def cmd_watch(a):
     signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
     vm_pid = lume_pid()
     vm_start = proc_start(vm_pid)
-    known, ours = {}, {}
+    known, ours, roots = {}, {}, {}
     stats = {"pid": os.getpid(), "started": now(), "vm": vm_name(), "folders": {}}
-    for it in folders:
-        snap = read_json(snap_path(it["name"])) or {}
-        known[it["name"]] = {k: tuple(v) for k, v in snap.items()}
-        ours[it["name"]] = set()
-        stats["folders"][it["name"]] = {"path": it["path"], "quarantined": 0, "restored": 0, "links_removed": 0,
-                                        "special_removed": 0, "errors": 0, "last_scan": None}
+    try:
+        for it in folders:
+            roots[it["name"]] = (open_root(it["path"], it.get("ident")), canon(it["path"], directory=True)[0])
+            snap = read_json(snap_path(it["name"])) or {}
+            known[it["name"]] = {k: tuple(v) for k, v in snap.items()}
+            ours[it["name"]] = set()
+            stats["folders"][it["name"]] = {"path": it["path"], "quarantined": 0, "restored": 0, "links_removed": 0,
+                                            "special_removed": 0, "errors": 0, "last_scan": None}
+        rc = watch_loop(folders, roots, known, ours, stats, stop, vm_pid, vm_start)
+    except Exception as e:  # noqa: BLE001 - protection that can't run stops the VM
+        reason = str(e) if isinstance(e, ProtectionFailure) else f"the watcher failed: {type(e).__name__}: {e}"
+        stats["failed"] = reason
+        atomic_json(watch_stats_path(), stats, mode=0o644)
+        print(f"metacomputer: storage protection failed: {esc(reason)}; stopping the VM", file=sys.stderr, flush=True)
+        emit("security", "storage_protection_failed",
+             f"Protection of a read-write folder failed ({reason[:200]}); the VM {vm_name()} was stopped", "error",
+             data={"reason": reason[:300], "folders": [it["name"] for it in folders]},
+             action="metacomputer stop, then look at the folder (and storage-watcher.log) before starting again",
+             origin="watcher")
+        stop_vm(vm_pid, vm_start)
+        rc = 1
+    finally:
+        for fd, _ in roots.values():
+            os.close(fd)
+        try:
+            os.unlink(watcher_pid_path())
+        except OSError:
+            pass
+    return rc
+
+
+def watch_loop(folders, roots, known, ours, stats, stop, vm_pid, vm_start):
     last_write = 0
     while True:
         t0 = time.monotonic()
@@ -1997,7 +2288,8 @@ def cmd_watch(a):
         for it in folders:
             fs = stats["folders"][it["name"]]
             before = dict(fs)
-            known[it["name"]], links, special = protect(it["path"], known[it["name"]], ours[it["name"]], fs)
+            rootfd, rootcanon = roots[it["name"]]
+            known[it["name"]], links, special = protect_fd(rootfd, rootcanon, known[it["name"]], ours[it["name"]], fs)
             fs["last_scan"] = now()
             if links:
                 emit("security", "symlink_neutralized",
@@ -2020,15 +2312,10 @@ def cmd_watch(a):
             atomic_json(watch_stats_path(), stats, mode=0o644)
             last_write = time.monotonic()
         if final:
-            break
+            return 0
         end = time.monotonic() + max(WATCH_EVERY, 5 * elapsed)
         while time.monotonic() < end and not stop["now"]:
             time.sleep(0.2)
-    try:
-        os.unlink(watcher_pid_path())
-    except OSError:
-        pass
-    return 0
 
 
 def watcher_alive():

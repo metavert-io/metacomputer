@@ -85,7 +85,8 @@ RESERVED = {("needs_you", "in_use"), ("needs_you", "refused"), ("security", "chr
             ("security", "blocked_connections"), ("lifecycle", "health"),
             ("security", "sink_added"), ("security", "sink_removed"), ("security", "sink_config_changed"),
             ("lifecycle", "test"), ("lifecycle", "storage_attached"), ("security", "symlink_neutralized"),
-            ("security", "special_file_removed"), ("security", "quarantine_restored")}
+            ("security", "special_file_removed"), ("security", "quarantine_restored"),
+            ("security", "storage_protection_failed")}
 RESERVED_TYPES = {"suppressed"}
 ADMIN_TYPES = {"sink_added", "sink_removed", "sink_config_changed"}
 

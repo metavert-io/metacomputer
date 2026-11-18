@@ -84,7 +84,11 @@ mount the folder if the Mac lets it.
 **Read-write** (`:rw`) is for handing work back and forth. It's an explicit opt-in, and:
 - **One VM at a time.** A lock, like a disk volume's; a folder inside a folder that
   another VM has read-write (or one containing it) is refused too. Other VMs may
-  still have it read-only.
+  still have the same folder read-only, but nothing inside it: a VM with a folder
+  read-write could replace a subfolder (with a link to anywhere) just as another VM
+  attaches it. For the same reason a read-write folder can't hold a folder, disk
+  volume or reference disk another VM has attached, and none of those may live inside
+  another VM's read-write folder.
 - **Spotlight stays out.** The folder's name, or a parent's, must end in `.noindex`
   (for example `~/vm-share.noindex`; Finder shows the name like that). Spotlight
   doesn't index such folders, so its importers never parse files the VM wrote. Measured
@@ -92,12 +96,19 @@ mount the folder if the Mac lets it.
   `.metadata_never_index` file in a folder no longer kept that folder out, and neither
   did `.metadata_never_index_unless_rootfs`. `mdutil` works only on whole volumes.
   Without `.noindex`, a read-write attach is refused, with the rename to make.
-- **A watcher on the Mac** (`lib/storage.py watch`, started by `start`, stopped by
-  `stop`) goes over the folder every 2 seconds (longer for big folders: five times as
-  long as a pass takes) and compares it with what was there when the VM booted:
+- **A watcher on the Mac** (`lib/storage.py watch`) starts together with the VM's process,
+  before the VM is asked anything, and `start` stops the VM if it doesn't. It goes over
+  the folder every 2 seconds (longer for big folders: five times as long as a pass takes)
+  and compares it with what was there when the VM booted. It works through descriptors:
+  the folder is opened once and checked to be the folder that was checked, every
+  subfolder is opened without following links and checked to be the entry it listed, and
+  every change is made relative to those descriptors, so a folder the VM swaps for a link
+  in the middle of a pass leads nowhere:
   - every new or changed file and folder gets macOS's quarantine attribute
     (`com.apple.quarantine`, `0081;<time>;metacomputer;`), so Gatekeeper checks it like
-    a download;
+    a download, and it's checked again through the file's own descriptor on every pass
+    (not only when the file looks changed), so an attribute the VM strips right after it
+    was set comes back on the next pass;
   - a symbolic link whose target resolves outside the folder is replaced by a short
     note, `NAME.link-removed.txt`, saying where it pointed; a link that stays inside
     is kept;
@@ -108,7 +119,13 @@ mount the folder if the Mac lets it.
   What was in the folder before the VM booted is left alone, so your own files and
   links stay as they were. Files you change in the folder while the VM runs are
   treated as the VM's (the watcher can't tell who wrote them) and get the attribute too.
-- Folders holding more than 500,000 files and folders can't be attached read-write.
+- **When it can't protect the folder, the VM stops.** More than 500,000 files and folders
+  (or folders nested more than 128 deep), an attribute that won't stick, an error the
+  watcher didn't expect, or the Mac's disk with less free space than
+  `IMPORT_MIN_FREE_GB` (10 GB by default: a read-write folder could otherwise fill it) end
+  the VM's process at once and send `security.storage_protection_failed`. A folder or
+  file the VM made unreadable or unwritable gets its owner's permission bits back so it
+  can be checked. A folder already over the limit isn't attached read-write at all.
 
 What the VM can do through virtiofs, measured on macOS 27 with Apple's virtiofs
 (Lume 0.7.2): read and write files (they're owned by your Mac account), create links
@@ -131,8 +148,12 @@ Mac, where ours had it killed by Gatekeeper.
   makes.
 - The VM can set other extended attributes (Finder tags, custom icons and the like) on
   files in a read-write folder; only quarantine is enforced.
-- Only the watcher stands between the VM and the folder's files while it runs; if it
-  stops, `status` says so in red.
+- Only the watcher stands between the VM and the folder's files while it runs. If it
+  fails it stops the VM; if it's killed outright (`kill -9`), it can't, and `status` says
+  so in red.
+- The free-space check is a poll too: the VM can write a few seconds' worth past the
+  reserve before it's stopped. For a hard limit, put the folder on a disk image or a
+  volume of its own size.
 
 ## Reference disks
 
@@ -312,7 +333,9 @@ What isn't offered:
   fails, and records what it mounted in `/run/metacomputer/storage.json`, which
   `guest-status` reports.
 - For a read-write folder, `start` records what's in it before the VM boots
-  (`RUN_DIR/storage-snap-NAME.json`), and the watcher starts from that.
+  (`RUN_DIR/storage-snap-NAME.json`, through descriptors), and the watcher starts from
+  that, with the VM's process. Every folder attachment takes a record (read-write ones
+  exclusive, read-only ones shared), so later starts can refuse the overlaps above.
 - `checkpoint --with-volumes`, `restore`, `volume resize` and `volume delete` hold each disk
   volume they work on through the same locks, from before they check it to when they finish,
   so no VM can attach it in between (and they're refused while a VM holds it).

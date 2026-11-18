@@ -351,7 +351,15 @@ spellings one lock; a file swapped for a link to a private file while a referenc
 isn't packed; `put` and the attach cutting off a VM that floods or stalls; checkpoint, restore and
 resize holding the volume so no VM can attach it meanwhile; and the bounded manifest read as YAML
 (an inline comment isn't policy, a `files:` block outside `resources` grants nothing, unsupported
-forms grant nothing, the shipped profiles parse).
+forms grant nothing, the shipped profiles parse). For folders: a folder swapped for a link to a
+private folder in the middle of a watcher pass (the private files are neither deleted nor given an
+attribute); a folder over the watcher's limit is a protection failure; a folder the VM made
+unreadable is opened again and checked; an attribute stripped right after it was set comes back on
+the next pass; low free space is a protection failure; a folder inside another VM's read-write
+share (even read-only), a read-write share holding another VM's folder, and a disk image inside
+another VM's read-write share are refused; a folder replaced after it was checked is noticed; the
+watcher starts with the VM's process (and `start` fails if it can't); a protection failure ends the
+VM's process and says why.
 
 `MCOMP_CONFIG=... python3 tests/test_storage_vm.py [V] [R] [P] [F]` needs a test VM built
 from this version (it stops, starts and resets it, and leaves it stopped; its volumes and
