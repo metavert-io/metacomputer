@@ -147,6 +147,7 @@ host_sharing_args() {
   fi
 }
 
+STORAGE_RUN_ARGS=()   # extra `lume run` arguments for this VM's storage (bin/metacomputer storage_prepare)
 vm_start() { # NAME [seed.iso]
   local name="$1" seed="${2:-}" mac
   vm_running "$name" && { ok "$name already running"; return 0; }
@@ -156,7 +157,9 @@ vm_start() { # NAME [seed.iso]
   [ -n "$seed" ] && args="$args --mount $seed"
   args="$args$(host_sharing_args)"
   # shellcheck disable=SC2086
-  daemonize "$LOG_DIR/lume-$name.log" "$LUME" $args
+  daemonize "$LOG_DIR/lume-$name.log" "$LUME" $args ${STORAGE_RUN_ARGS[@]+"${STORAGE_RUN_ARGS[@]}"}
+  # The run process is the VM (Virtualization.framework runs in it): storage locks name it as their holder.
+  echo "$!" > "$RUN_DIR/lume.pid"
   local i=0; while ! vm_running "$name" && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done
   vm_running "$name" || { tail -5 "$LOG_DIR/lume-$name.log" >&2; netgw_stop; die "VM $name did not start"; }
 }
@@ -186,7 +189,8 @@ export_options() {
          MCOMP_SSH_AUTH="$SSH_AUTH" MCOMP_SSH_CERT_TTL="$SSH_CERT_TTL" MCOMP_DRIVER_MODE="$DRIVER_MODE" MCOMP_DRIVER_PROFILE="$DRIVER_PROFILE" \
          MCOMP_DRIVER_MANIFEST="$DRIVER_MANIFEST" MCOMP_DRIVER_ORIGINS="$DRIVER_ORIGINS" MCOMP_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
          MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
-         MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}"
+         MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
+         MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}"
   # The hub (lib/mcp_hub.py) and its coordinate guard. MCOMP_MCP_HUB / MCOMP_COORD_GUARD already in the
   # environment win over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \

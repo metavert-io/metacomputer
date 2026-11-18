@@ -5,7 +5,8 @@ your Mac that Claude drives through Cua Driver. The defaults already isolate
 it:
 - the VM reaches only the public internet, not your Mac or your network;
 - nothing listens off your Mac's loopback;
-- the VM has no shared folders;
+- the VM shares no storage with your Mac or other VMs unless you attach some
+  ([Storage](#storage));
 - with mcomp-vm, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
   adds a sound card inside the VM that plays into nothing; it never reaches the Mac.)
 
@@ -388,7 +389,7 @@ What it can't do:
   every connection to the VM (`sh`, `ssh`, the driver, recordings, status).
   The VM's side of the key refuses forwarding too, but a hostile VM's sshd
   wouldn't, so the Mac's side is what counts. The gateway refuses every connection from the VM to the
-  Mac, your network and the tailnet, and the VM has no shared folders. The
+  Mac, your network and the tailnet, and the VM shares no Mac folders. The
   script travels on SSH's stdin and is never run by a shell on the Mac.
 - **Get root.** `cua` has no sudo.
 - **Get around the one-controller rule by accident.** A run counts as acting:
@@ -444,6 +445,49 @@ Settings:
   starting in the same moment can't both pass the check.)
 - `--read-only` isn't enforced; it only skips the one-controller check and
   leaves out the desktop's environment.
+
+## Storage
+
+Out of the box the VM shares no storage with your Mac or with other VMs. Storage
+([docs/storage.md](docs/storage.md)) adds it, one kind at a time, and only what you
+attach in `VOLUMES` and `REFDISKS` (`start --no-volumes` attaches none of it). What
+each kind lets a hostile VM (root in the VM included) do, and what protects the Mac:
+
+| Kind | A hostile VM can | It can't | What protects the Mac |
+| --- | --- | --- | --- |
+| **Disk volume** (read-write, one VM) | Read, change, encrypt or delete everything on the volume; write a filesystem crafted to be hostile to whoever mounts it next | Reach anything on the Mac but the image file: it sees a block device, not a Mac folder; attach the volume while another VM holds it | The Mac never mounts the image (macOS has no ext4 driver, and nothing here asks it to); the next VM's kernel checks it with `e2fsck` before mounting it `nodev,nosuid`; a disk that isn't blank and isn't this volume's ext4 (by UUID) is refused, never formatted; the lock |
+| **Reference disk** (read-only, any VMs) | Read everything on it | Change it: it's read-only at the hypervisor (`--mount` / USB storage attached read-only), whatever the VM does | Read-only attachment; the image file is read-only on the Mac; `refdisk create` refuses private folders and leaves links out, so nothing outside the folder is packed |
+
+Common to every kind:
+- **Choose what goes in.** Whatever you attach can be read by anything running in the
+  VM, which can reach the public internet. Don't put credentials or personal files on a
+  volume or a reference disk; keep credentials in the vault.
+- **Private folders are refused** for reference disks, links resolved first: your home
+  folder and its personal folders (and their parents), `~/Library` with iCloud Drive and
+  other cloud drives, home dot-folders such as `.ssh`, `SSH_DIR`, this checkout, Lume's
+  VMs, the storage registry and system folders ([the list](docs/storage.md#what-may-not-go-into-the-vm)).
+- **Mount points** in the VM are limited to `/volume`, `/mnt`, `/data`, `/srv`,
+  `/workspace` and the desktop user's own folders, checked on the Mac and again in the VM,
+  where the root helper opens every component without following links. So a link the
+  desktop user plants can't make root mount a volume over `/etc`, `~/.ssh` or another
+  system path. The helper takes its plan only from the maintenance account's fixed verb
+  (`sudo metacomputer-admin storage attach`).
+- **Nothing half-attached:** problems found before boot refuse the start; a mount that
+  fails after boot stops the VM again.
+- **The VM's answers are data.** What the helper reports back is size-limited, checked
+  and escaped before it reaches your terminal; it decides nothing on the Mac.
+- **Bounded mode** attaches only what the driver's manifest lists.
+
+**Where it ends:**
+- A volume holds whatever the VM wrote. Copying files out of one (`metacomputer get`)
+  goes through the same checks as any copy from the VM (links and special files left
+  out, size limits), but opening those files on the Mac is up to you.
+- Locks are files on this Mac. They stop a second VM on this Mac; across computers
+  sharing a network drive, the lock file beside the image is advisory, and a dropped
+  connection can damage a volume that's being written. `start` warns about
+  network filesystems.
+- A volume isn't versioned: the VM can delete its files. Checkpoints
+  (`--with-volumes`) are your history.
 
 ## Secrets and logins (`metacomputer secrets`)
 

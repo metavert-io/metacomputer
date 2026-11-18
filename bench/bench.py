@@ -153,15 +153,15 @@ def setup_task(t):
         info["error"] = (err or out)[-300:]
         return info
     for f in t.get("files", []):
-        rc, out, err = mc("put", os.path.join(FIX, "files", f), "--to", "~/bench")
+        rc, out, err = mc("put", os.path.join(FIX, "files", f), "--to", "~/bench", "--overwrite")
         if rc != 0:
             info["error"] = f"put {f}: {(err or out)[-200:]}"
             return info
     if "calc" in t.get("requires", []):
         cache = os.path.join(RESULTS, "cache", "lodeb")
-        mc("put", os.path.join(GUEST, "calc-overlay.sh"), "--to", SRV)
+        mc("put", os.path.join(GUEST, "calc-overlay.sh"), "--to", SRV, "--overwrite")
         if os.path.isdir(cache):
-            mc("put", cache, "--to", SRV)
+            mc("put", cache, "--to", SRV, "--overwrite")
         rc, out, err = guest(f"cd {SRV} && if [ ! -e /usr/lib/libreoffice/program/libsclo.so ] && ! ls lodeb/*.deb >/dev/null 2>&1; "
                              "then mkdir -p lodeb && (cd lodeb && apt-get download libreoffice-calc libreoffice-uiconfig-calc >/dev/null); fi; "
                              "bash calc-overlay.sh lodeb", timeout=300)
@@ -170,8 +170,8 @@ def setup_task(t):
             info["error"] = f"calc: {(err or out)[-300:]}"
             return info
     if t.get("serve"):
-        mc("put", os.path.join(FIX, "site"), "--to", SRV)
-        mc("put", os.path.join(GUEST, "server.py"), "--to", SRV)
+        mc("put", os.path.join(FIX, "site"), "--to", SRV, "--overwrite")
+        mc("put", os.path.join(GUEST, "server.py"), "--to", SRV, "--overwrite")
         rc, out, err = guest(
             f"cd {SRV} && : > requests.jsonl && (setsid nohup python3 server.py site requests.jsonl 8000 "
             "</dev/null >server.err 2>&1 &) && for i in 1 2 3 4 5 6 7 8 9 10; do python3 -c "
@@ -194,7 +194,7 @@ CHECK_HEAD = "import sys\nsys.path.insert(0, '/tmp/bench-check')\nfrom checklib 
 
 
 def check_task(t):
-    mc("put", os.path.join(GUEST, "checklib.py"), "--to", "/tmp/bench-check")
+    mc("put", os.path.join(GUEST, "checklib.py"), "--to", "/tmp/bench-check", "--overwrite")
     script = CHECK_HEAD + t["check"] + "\nC.report()\n"
     rc, out, err = mc("ssh", "ops", "cd /tmp/bench-check && python3 -", input=script, timeout=120)
     for line in reversed(out.strip().split("\n")):

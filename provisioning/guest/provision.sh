@@ -249,6 +249,27 @@ grep -q "PermitListen 127\.0\.0\.1:$PROXY_PORT\$" /etc/ssh/sshd_config.d/16-meta
   || { echo "16-metacomputer-proxy.conf: couldn't set the proxy port"; false; }
 printf 'proxy_port=%s\n' "$PROXY_PORT" >> /etc/metacomputer/fill.conf
 
+step "storage: volumes, Mac folders and reference disks (metacomputer-admin storage)"
+# The host attaches them at start and asks metacomputer-admin to mount them
+# (/opt/metacomputer/bin/storage-helper); nothing mounts them otherwise (udev rule 61).
+printf 'desktop_user=%s\n' "$GUSER" > /etc/metacomputer/storage.conf
+chmod 0644 /etc/metacomputer/storage.conf
+# ext4 is built in; folders need virtiofs, reference disks ISO 9660 or UDF (virtio or USB).
+# Check the newest installed kernel (the one the reboot starts) and add its extra modules if needed.
+KVER="$(ls /lib/modules | sort -V | tail -1)"
+missing=""
+for m in virtiofs isofs udf usb_storage; do
+  modinfo -k "$KVER" "$m" >/dev/null 2>&1 || missing="$missing $m"
+done
+if [ -n "$missing" ]; then
+  echo "kernel $KVER has no$missing; installing its extra modules"
+  "${APT[@]}" install --no-install-recommends "linux-modules-extra-$KVER"
+  "${APT[@]}" install --no-install-recommends linux-image-extra-virtual || echo "(no linux-image-extra-virtual; later kernels may lack$missing)"
+fi
+for m in virtiofs isofs udf usb_storage; do
+  modinfo -k "$KVER" "$m" >/dev/null 2>&1 && echo "kernel module $m: present" || { echo "kernel module $m: MISSING"; false; }
+done
+
 step "identity wallpaper (desktop screenshots and recordings say this is the virtual computer)"
 # Applied at each login by session-init, with the Applications-menu title.
 install -d -m 0755 /usr/share/backgrounds/metacomputer

@@ -422,6 +422,37 @@ The rest of the vault, briefly (details in SECURITY.md):
 
 Threat model and limits: [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
+## Storage
+
+[docs/storage.md](docs/storage.md). Disks the VM keeps across `reset`, attached when it
+starts (Lume has no hot-plug), all of it outside the VM:
+
+```text
+Mac                                                         VM
+registry + locks  ~/.local/share/metacomputer/storage/      storage-helper (root; only via
+images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-admin storage attach)
+                  STORAGE_DIR/refdisks/NAME.iso --mount ─▶   ext4 nodev,nosuid at ~/data/NAME
+                                         (more: --usb-storage)  UDF read-only at ~/ref/NAME
+```
+
+- **`start`** runs `storage.py prepare` before `lume run`: it reads `VOLUMES` and
+  `REFDISKS`, refuses missing images, unknown names, disallowed or overlapping mount
+  points and a VM without storage support (`SSH_DIR/guest-features`, written by a
+  finished build), leaves out what a bounded manifest doesn't list, takes a lock per
+  read-write volume (held by the start command, then by the `lume run` process), and
+  writes the extra `lume run` arguments and the VM's plan to `RUN_DIR`.
+- Once SSH is up, the plan goes to `sudo metacomputer-admin storage attach`. The
+  helper finds each volume among the extra read-write virtio disks in order and checks
+  its size, formats only a blank disk (ext4 with the volume's UUID), runs `e2fsck -p`,
+  grows the filesystem after `volume resize`, finds reference disks by volume label,
+  and mounts through descriptors opened without following links. It mounts all of it
+  or nothing; on failure, `start` stops the VM again.
+- **`stop`**, `reset`, `restore` and `baseline` release the locks once the VM is off.
+  `restore NAME` of a checkpoint taken `--with-volumes` first puts back each volume
+  from its snapshot (an APFS clone beside the image, or a sparse copy).
+- `guest-status` reports what the helper mounted (`/run/metacomputer/storage.json`,
+  checked against the live mount table); `status` and `security` show it.
+
 ## Network
 
 Lume runs the VM in `gateway:` mode: its network device is a datagram socket
@@ -471,8 +502,8 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 
 | Command | Implementation |
 | --- | --- |
-| `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
-| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
+| `start` | check and lock the storage (`VOLUMES`, `REFDISKS`; none with `--no-volumes`), start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags) and the storage's `--disk`/`--mount`/`--usb-storage`, wait for SSH, mount the storage, wait for the XFCE session and an MCP handshake |
+| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw, release the storage locks |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe, the hub (pid, clients, idle time) |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |

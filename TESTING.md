@@ -324,6 +324,35 @@ Each of these needs no VM and takes seconds.
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run.
 
+## Storage: `tests/test_storage.py`, `tests/test_storage_vm.py`
+
+`python3 tests/test_storage.py` needs no VM (about 10 s). It works in a temporary
+registry and data folder and checks: `VOLUMES` / `REFDISKS` parsing (default and custom
+mount points; system folders, dot-folders and the home folder refused) and that the VM's
+helper agrees on every mount point; the folders that may never go into the VM (personal
+folders and their parents, Library and iCloud Drive, dot-folders, `SSH_DIR`, the checkout,
+system folders, the gateway's socket folders), with links resolved; locks (a live holder
+refuses and is named, a dead or reused pid doesn't count, the same VM may take its own
+again, a lock file from another computer refuses, release); the statfs network-filesystem
+classifier and the warning; the plan for a start (missing images, read-only disk volumes,
+a VM without storage support, bounded mode, the order of the run arguments, the helper
+accepting the plan); sizes and names; sparse copies, APFS clones and checkpoints of
+volumes; reference disks leaving links out; and `put`'s SHA-256 comparison and collision
+names.
+
+`MCOMP_CONFIG=... python3 tests/test_storage_vm.py [V] [R] [P]` needs a test VM built
+from this version (it stops, starts and resets it, and leaves it stopped; its volumes and
+registry live in a temporary folder):
+- **V** disk volumes: formatted on first use, writable by the desktop user, `nodev,nosuid`;
+  kept across `reset`; a custom mount point (`/volume`); `--no-volumes`; another VM refused
+  while one holds the volume; a missing image refuses the start; a VM without storage
+  support is refused before it boots; `checkpoint --with-volumes` and `restore`; `volume
+  resize` and the filesystem growing at the next start.
+- **R** reference disks: long and non-ASCII names, the exec bit, the link left out, two
+  attached (one by `--mount`, one by USB), read-only in the VM.
+- **P** `put`: SHA-256 checked, `name (1).ext` collisions, `--overwrite`, a binary file
+  byte for byte, into a volume.
+
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
 `python3 tests/test_hub.py` needs no VM (87 checks, about 45 s). A stand-in
