@@ -175,7 +175,7 @@ def on_pty(argv, env, timeout=60, marker=None):
 FAKE_SSH = r'''#!/bin/sh
 printf 'ssh says \033]52;c;SGk=\007\033[2J\n' >&2
 case "$*" in
-  *guest-status*) printf '%s\n' '{"ready": true, "resolution": "1920x1080\u001b]52;c;SGk=\u0007", "driver_version": "0.53\u001b[2J", "active_window_title": "t", "loadavg": {"\u001b]0;pwned\u0007": 1, "‮": 2}, "mem_available_mb": {"\u001b[5m": 1}, "uptime_s": 5}' ;;
+  *guest-status*) printf '%s\n' '{"ready": true, "resolution": "1920x1080\u001b]52;c;SGk=\u0007", "driver_version": "0.53\u001b[2J", "active_window_title": "t", "loadavg": {"\u001b]0;pwned\u0007": 1, "‮": 2}, "mem_available_mb": {"\u001b[5m": 1}, "disk_free_gb": 1'"$(printf '%0400d' 0)"', "uptime_s": 5}' ;;
   *desktop-record*)
     if [ "${FAKE_REC:-}" = slow ]; then    # a recorder that keeps talking: its words must stream, not pile up
       printf 'recording stream:y \033[2J\n'; sleep 3; printf 'still going\n'; exit "${FAKE_REC_RC:-0}"
@@ -255,6 +255,8 @@ def cli_checks():
         check("…and a load average or memory figure that isn't numbers shows as '?', its keys never raw",
               "\x1b]0;pwned" not in out and "\x1b[5m" not in out and "‮" not in out and "load ?," in out
               and "? MB free" in out, out[-300:])
+        check("…and a 401-digit disk figure is '?' too, not a crash", "? GB disk free" in out
+              and "Traceback" not in out, out[-300:])
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

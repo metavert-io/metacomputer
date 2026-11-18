@@ -465,12 +465,14 @@ if gs:
         print("api proxy     no proxy account: built before API tokens (rebuild to use metacomputer secrets token)")
     if gs.get("virtual_audio"):
         print("sound         virtual sound card: plays into nothing, recordings include it")
-    def num(v):    # a number from the guest's report, shown as one; anything else is '?'
+    def num(v):    # a number from the guest's report, shown as one; anything else (or past 10^15) is '?'
         if isinstance(v, str) and re.fullmatch(r"-?[0-9]{1,12}(\.[0-9]{1,6})?", v):
             v = float(v)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
             return "?"
-        return f"{v:g}" if isinstance(v, float) else str(v)
+        if isinstance(v, int):                       # compared as an int: a 400-digit one never becomes a float
+            return str(v) if -10 ** 15 < v < 10 ** 15 else "?"
+        return f"{v:g}" if math.isfinite(v) and abs(v) < 1e15 else "?"
     la = gs.get("loadavg")
     load = " ".join(num(x) for x in la) if isinstance(la, list) and 0 < len(la) <= 3 else "?"
     up = num(gs.get("uptime_s", 0))
