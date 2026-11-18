@@ -319,7 +319,7 @@ class Client:
         self.hub, self.sock, self.peer_pid = hub, sock, peer_pid
         self.cid = next(Client._ids)
         self.kind, self.cwd, self.session, self.auto_session = "unknown", None, None, None
-        self.claude, self.mine, self.holder = None, set(), peer_pid
+        self.claude, self.mine, self.holder, self.sid = None, set(), peer_pid, None
         self.hello = False
         self.has_claim = False
         self.expired = False            # attached when a bounded session ended: reconnect to start a new one
@@ -571,6 +571,7 @@ class Hub:
             table = owners.ps_table()
             client.mine = set(owners.ancestors(client.peer_pid, table)) if client.peer_pid else set()
             client.claude = owners.claude_of(client.peer_pid, table) if client.peer_pid else None
+            client.sid = owners.sid_of(client.peer_pid) if client.peer_pid else None
             parent = table.get(client.peer_pid, (None, ""))[0]
         except Exception:
             table, parent = {}, None
@@ -1104,7 +1105,7 @@ class Hub:
 
     def busy_others(self, client):
         others = owners.others(client.peer_pid, mine=client.mine, my_claude=client.claude,
-                               direct=self.direct_cached(), table={})
+                               direct=self.direct_cached(), table={}, sid=client.sid)
         return [o for o in others if o["active"] and not (o["kind"] == "session" and o.get("bridge_pid") == client.holder)]
 
     def check_and_claim(self, client, tool):
@@ -1131,7 +1132,14 @@ class Hub:
             existed = True
         except (OSError, ValueError):
             pass
-        owners.write_claim(client.holder, client.claude, client.cwd or os.getcwd(), tool, started)
+        if client.kind == "call" and not client.claude:
+            # Outside Claude Code, a call's claim is held like `metacomputer sh`'s: in the name of the shell
+            # that ran it, kept for the activity window after the last call even when that shell is gone,
+            # and the same controller for later calls from the same terminal session (owners.claims()).
+            owners.write_claim(client.holder, None, client.cwd or os.getcwd(), tool, started, kind="shell",
+                               sid=client.sid)
+        else:
+            owners.write_claim(client.holder, client.claude, client.cwd or os.getcwd(), tool, started)
         client.has_claim = True
         if not existed:
             self.event(client, "lifecycle", "controller_connected",

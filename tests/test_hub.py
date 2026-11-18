@@ -911,7 +911,8 @@ def cli_checks():
                         env=hub_env, capture_output=True, text=True, timeout=30)
     exact = json.loads(js.stdout)["content"][0]["text"] if js.returncode == 0 else None
     check("--raw prints it exactly; --json is the result exactly", evil in raw.stdout and exact == evil, (raw.stdout[:120], exact))
-    check("termsafe is vm_shell's escaping (one helper)", __import__("vm_shell").clean is termsafe.clean)
+    check("the escaping is the shared helper's (termsafe.escape_for_terminal, as in sh, inspect and web)",
+          termsafe.escape_for_terminal(evil).encode() in got)
     r.stop()
     cfg = os.path.join(TD, "none.env")
     open(cfg, "w").write(f'VM_NAME=mcomp-hub-test-none\nRUN_DIR="{os.path.join(TD, "run2")}"\nLOG_DIR="{os.path.join(TD, "logs2")}"\n')

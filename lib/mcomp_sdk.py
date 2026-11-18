@@ -278,9 +278,21 @@ class Hub:
 USAGE = "usage: metacomputer call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON']"
 
 
+def is_tty(f=None):
+    try:
+        return (f or sys.stdout).isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def for_tty(text, f=None):
+    """The VM's text for a terminal: escaped there (termsafe.escape_for_terminal), exact in a pipe."""
+    return termsafe.escape_for_terminal(text) if is_tty(f) else text
+
+
 def say_err(text):
     """Diagnostics can carry the VM's words: always escaped."""
-    sys.stderr.write(f"metacomputer call: {termsafe.clean(str(text))}\n")
+    sys.stderr.write(f"metacomputer call: {termsafe.escape_for_terminal(str(text))}\n")
 
 
 def call_main(argv):
@@ -329,11 +341,11 @@ def call_main(argv):
         return 1
     if as_json:
         # The result exactly as it came (images included); \\u escapes only on a terminal.
-        print(json.dumps(r.raw, indent=1, ensure_ascii=termsafe.is_tty()))
+        print(json.dumps(r.raw, indent=1, ensure_ascii=is_tty()))
         return 1 if r.is_error else 0
     # The VM's words reach a terminal escaped (no cursor moves, screen rewrites, OSC 52 clipboard writes or
     # bidi tricks); a pipe, or --raw, gets them exactly. The JSON below escapes everything outside ASCII.
-    print(r.text if raw else termsafe.for_tty(r.text))
+    print(r.text if raw else for_tty(r.text))
     if r.structured:
         print(json.dumps(r.structured, indent=2)[:6000])
     shots = os.path.join(LAB, "screenshots")

@@ -246,8 +246,8 @@ def prepare_workdir(run_id, sw):
         os.symlink(CLI, os.path.join(shim, n))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
-    if sw["hub"]:
-        env["MCOMP_MCP_HUB"] = sw["hub"]
+    if sw.get("hub"):
+        env["MCOMP_MCP_HUB"] = sw.get("hub")
     json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
               open(cfg, "w"))
     return work, cfg, shim
@@ -279,8 +279,8 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     claude = claude or trusted_claude(env.get("PATH", ""))   # resolved before the shim goes first
     env["PATH"] = shim + os.pathsep + env.get("PATH", "")
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
-    if sw["hub"]:
-        env["MCOMP_MCP_HUB"] = sw["hub"]
+    if sw.get("hub"):
+        env["MCOMP_MCP_HUB"] = sw.get("hub")
     timeout = int(t.get("timeout_s", 600))
     events, times = [], []
     t0 = time.time()

@@ -278,7 +278,8 @@ def main(argv):
     with MCPClient(stderr_path=os.path.join(os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB_ROOT, "logs"), "mcp-client-stderr.log")) as c:
         if argv[0] == "--tools":
             for t in c.tools():
-                print(termsafe.for_tty(f"{t['name']:28s} {((t.get('description') or '').splitlines() or [''])[0][:110]}"))
+                line = f"{t['name']:28s} {((t.get('description') or '').splitlines() or [''])[0][:110]}"
+                print(termsafe.escape_for_terminal(line) if sys.stdout.isatty() else line)
         elif argv[0] == "--describe":
             for t in c.tools():
                 if t["name"] == argv[1]:

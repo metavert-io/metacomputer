@@ -181,8 +181,9 @@ no refusals), and the GUI and option tests pass with both on.
   The check and the claim are one step under this VM's owners lock, shared with
   `metacomputer sh`. Claims are written per client in `.run/owners/`: a Claude
   Code session's under its bridge's pid (dropped when it disconnects), a
-  one-shot `metacomputer call`'s under its Claude Code process, or else the shell
-  that ran it, like `metacomputer sh`. `metacomputer stop/reset/restore/test`
+  one-shot `metacomputer call`'s under its Claude Code process, or else, like
+  `metacomputer sh`'s, the shell that ran it (kept for the activity window, and
+  the same controller from the same terminal session). `metacomputer stop/reset/restore/test`
   refuse too unless given `--override`. The hub's own SSH connection isn't
   counted as a controller; any other direct connection is.
 - **Chrome** (docs/chrome-investigation.md). When the driver delivers

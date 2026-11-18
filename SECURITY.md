@@ -360,8 +360,10 @@ your screenshot; take a fresh one" (code `windows_changed_since_screenshot`).
   `run_script`'s `[x, y]` targets, aren't checked. When the hub saw no screenshot
   for that driver session and window, or `list_windows` fails, the action is
   passed on to the driver's own checks (fail open, and logged in `hub.log`).
-- `metacomputer call`'s claim belongs to its Claude Code process or, outside
-  Claude Code, to the shell that ran it, as for `metacomputer sh`.
+- `metacomputer call`'s claim belongs to its Claude Code process. Outside Claude
+  Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
+  kept for the activity window after the last call even when that shell exits,
+  and the same controller for later calls from the same terminal session.
 
 ## The shell channel (`metacomputer sh`)
 
