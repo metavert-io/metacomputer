@@ -254,7 +254,8 @@ def prepare_workdir(run_id, sw):
 
 
 def session_args(t, sw, cfg):
-    allowed = ["Skill", "Read", "Glob", "Grep", "ToolSearch", "mcp__metacomputer",
+    # The session's own --mcp-config server gives mcp__metacomputer__*; the plugin's name is allowed too.
+    allowed = ["Skill", "Read", "Glob", "Grep", "ToolSearch", "mcp__metacomputer", "mcp__plugin_metacomputer_metacomputer",
                f"Bash({CLI}:*)", "Bash(metacomputer:*)", "Bash(mcomp:*)"]
     denied = []
     if sw["shell"] == "forbid":

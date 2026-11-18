@@ -8,7 +8,8 @@ that were refused or rejected for malformed arguments.
 import json
 import re
 
-MCP = "mcp__metacomputer__"
+# The metacomputer tools: from a user-scope or --mcp-config server named metacomputer, or from the plugin.
+MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
 TREE_READS = {"get_window_state", "get_accessibility_tree", "get_browser_state", "verify_state"}
 OTHER_READS = {"list_windows", "list_apps", "get_screen_size", "get_cursor_position", "get_recording_state",
                "health_report", "get_session", "list_sessions", "get_config", "get_guide", "check_permissions",
@@ -33,6 +34,14 @@ INVALID = re.compile(r"invalid (argument|param|input|value|type|request)|InputVa
                      r"unknown (field|variant|parameter|argument|key)|unexpected (field|argument|property|key)|"
                      r"-32602|failed to (parse|deserialize)|deserializ|must be (a|an|one of)|is not (a valid|one of)|"
                      r"expected (a |an )?[a-z_]+,? (but )?(got|found)", re.I)
+
+
+def mcp_tool(name):
+    """The driver tool's own name (e.g. "click") for a metacomputer MCP tool, under either prefix; else None."""
+    for p in MCP_PREFIXES:
+        if name.startswith(p):
+            return name[len(p):]
+    return None
 
 
 # --- compact transcript ---------------------------------------------------------------------
@@ -189,9 +198,9 @@ def analyze(events, times=None):
         m["screenshot_calls"] += 1 if imgs else 0
         if res and c.get("id") in t_use:
             dt = max(0.0, res["t"] - t_use[c["id"]])
-            m["tool_time_s"]["mcp" if name.startswith(MCP) else "bash" if name == "Bash" else "other"] += dt
-        if name.startswith(MCP):
-            tool = name[len(MCP):]
+            m["tool_time_s"]["mcp" if mcp_tool(name) else "bash" if name == "Bash" else "other"] += dt
+        tool = mcp_tool(name)
+        if tool:
             m["mcp_calls"] += 1
             m["mcp_tools"][tool] = m["mcp_tools"].get(tool, 0) + 1
             if tool in TREE_READS:
@@ -238,14 +247,14 @@ def analyze(events, times=None):
                 kind = "denied_permission"
             elif INVALID.search(text):
                 kind = "invalid_args"
-            elif name.startswith(MCP) and DRIVER_REFUSED.search(text):
+            elif mcp_tool(name) and DRIVER_REFUSED.search(text):
                 kind = "refused_driver"
             else:
                 kind = "errors_other"
             m[kind] += 1
             if len(samples) < 12:
-                samples.append({"tool": name.replace(MCP, "mcp:"), "kind": kind, "text": text[:160]})
-        elif name.startswith(MCP) and BRIDGE_REFUSED.search(text[:300]):
+                samples.append({"tool": "mcp:" + mcp_tool(name) if mcp_tool(name) else name, "kind": kind, "text": text[:160]})
+        elif mcp_tool(name) and BRIDGE_REFUSED.search(text[:300]):
             m["refused_bridge"] += 1
     m["observation_calls"] = m["tree_reads"] + m["other_reads"] + sum(
         n for t, n in m["mcp_tools"].items() if t in SCREEN_TOOLS)

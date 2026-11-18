@@ -1,0 +1,30 @@
+{
+  "name": "metacomputer",
+  "description": "Claude's own disposable computer: an isolated Ubuntu 24.04 desktop VM on your Mac, driven through Cua Driver's MCP tools, with skills for when and how to use it. The VM itself is built by the repository's ./install.sh (macOS on Apple silicon).",
+  "author": {
+    "name": "Metavert",
+    "url": "https://github.com/metavert-io"
+  },
+  "homepage": "https://github.com/metavert-io/metacomputer",
+  "repository": "https://github.com/metavert-io/metacomputer",
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "virtual-machine",
+    "desktop",
+    "linux",
+    "mcp",
+    "cua-driver",
+    "sandbox"
+  ],
+  "skills": ["./.claude/skills"],
+  "mcpServers": {
+    "metacomputer": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer",
+      "args": [
+        "mcp-lazy"
+      ]
+    }
+  }
+}

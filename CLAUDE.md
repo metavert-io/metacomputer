@@ -3,11 +3,14 @@
 This project is a disposable Ubuntu 24.04 ARM64 XFCE desktop (a Lume VM, named
 by `VM_NAME` in `config/local.env`, default `metacomputer`) that you operate
 through **Cua Driver's MCP server running inside the VM**, exposed as the
-`metacomputer` MCP server (`install.sh` registers it for every project →
-`bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
-`lib/mcp_hub.py`). Tools appear as `mcp__metacomputer__<tool>`. The user-level `metacomputer` skill
-(`skills/metacomputer/`) is the entry point from any project; its
-[DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rules.
+`metacomputer` MCP server of the `metacomputer` Claude Code plugin (`plugin/`,
+listed by `.claude-plugin/marketplace.json`; `install.sh` installs it for every
+project → `bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
+`lib/mcp_hub.py`). Tools appear as `mcp__plugin_metacomputer_metacomputer__<tool>`,
+or `mcp__metacomputer__<tool>` where the server is registered without the plugin
+(`install.sh --no-plugin`, and the MCP configs of the benchmark and tests). The
+plugin's `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
+project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rules.
 
 ## Rules
 
@@ -113,13 +116,24 @@ metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
   version to take a different name, so don't give it a Lume-based name in new text.
   `scripts/lib.sh` falls back to `~/.local/bin/lume-secure` (with a notice) while
   `LUME`'s runner isn't installed; keep that until old installs are gone.
+- The Claude Code plugin is `plugin/`: relative links to `skills/metacomputer`,
+  `.claude/skills/cua-driver` and `bin/metacomputer`, laid out like the repository so
+  the driver pack's `../../../skills/metacomputer/` links resolve in both. A local
+  marketplace (`install.sh`) loads it in place; a GitHub install copies it, links
+  resolved, and that copy's `bin/metacomputer` hands over to the installed checkout
+  (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`): keep that block first in
+  `bin/metacomputer`, before anything reads config. Anything that names the tools
+  (skill, bench, tests, scripts) must accept both prefixes. No `version` in
+  `plugin.json` until the first tagged release (users track commits). Checks:
+  `claude plugin validate .` and `python3 tests/test_plugin.py` (its only accepted
+  warnings: no version, the links in `plugin/skills`).
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
-  `test_bench_workdir`, `test_vm_runner` (no VM),
+  `test_bench_workdir`, `test_vm_runner`, `test_plugin` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
@@ -130,5 +144,5 @@ metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),
 docs/chrome-investigation.md, and `.claude/skills/cua-driver/` (the
-driver's own skill pack, Linux guide). Machine-local notes, if any, are
+driver's own skill pack, Linux guide; the plugin's `metacomputer:cua-driver`). Machine-local notes, if any, are
 indexed from `CLAUDE.local.md` (not committed).

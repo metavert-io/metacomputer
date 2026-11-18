@@ -66,7 +66,7 @@ than forty more.
 | Cua Driver, inside the VM | [Cua Driver](https://github.com/trycua/cua) 0.53.0, an MCP server for the desktop: accessibility trees, mouse and keyboard input, screenshots, recordings, and page-level tools for Chrome. It runs only in the VM and is never installed on your Mac. |
 | The shell channel | `metacomputer sh` runs a bash script in the VM as the desktop user and brings back its output and exit code. Claude uses it for files no app holds open, and the desktop for everything an app holds. |
 | The secrets vault | `metacomputer secrets`, a small vault on your Mac for passwords, 2FA seeds, sealed browser logins and API keys. It ships here and depends on no password manager. |
-| The `metacomputer` skill and MCP server | The skill ([skills/metacomputer/](skills/metacomputer/)) tells Claude Code when a task belongs on the virtual computer and how to work it. The MCP server, `metacomputer mcp-lazy`, is registered for every project, so the tools (`mcp__metacomputer__*`) are listed even while the VM is off. It reaches the VM through the hub, one process per VM that `metacomputer call` and scripts share, and that applies every guard to each of them. |
+| The `metacomputer` plugin for Claude Code | A Claude Code plugin ([plugin/](plugin/), listed by this repository's marketplace) with two skills and an MCP server, in every project. The `metacomputer` skill ([skills/metacomputer/](skills/metacomputer/)) tells Claude Code when a task belongs on the virtual computer and how to work it; `cua-driver` is Cua Driver's own guide. The MCP server, `metacomputer mcp-lazy`, lists the tools (`mcp__plugin_metacomputer_metacomputer__*`) even while the VM is off. It reaches the VM through the hub, one process per VM that `metacomputer call` and scripts share, and that applies every guard to each of them. Without the plugin (`./install.sh --no-plugin`) the same skill and server are a skill link and a user-scope MCP server, and the tools are `mcp__metacomputer__*`. |
 | The `metacomputer` command | `bin/metacomputer`, installed as `~/.local/bin/metacomputer` with the short alias `mcomp`. It starts and stops the VM, checks it, runs scripts in it, moves files, records, runs browser checks, keeps snapshots and opens the live view. |
 
 ```text
@@ -227,16 +227,49 @@ audit are the tamper-evident records. Details in
 - [Homebrew](https://brew.sh), to install any missing tools: git, curl, Go, GnuPG, ffmpeg and Python 3.
 - Apple's Command Line Tools (`xcode-select --install`), to build mcomp-vm and the secrets vault. Without them, use `--lume=standard`.
 - For `metacomputer secrets` only: macOS 15 or later. Everything else works without it.
-- [Claude Code](https://claude.com/claude-code), for the skill and the MCP server.
+- [Claude Code](https://claude.com/claude-code), for the plugin (the skills and the MCP server). `claude plugin` needs a recent version; with an older one, `install.sh` links the skill and registers the server instead.
 - Optional: Google Chrome in the VM. Installing it means accepting [Google's terms](https://www.google.com/chrome/terms/).
 
 ## Install
+
+metacomputer has two parts, and you need both:
+
+| Part | Where you get it | What it gives you |
+| --- | --- | --- |
+| The Claude Code plugin | A Claude Code session, or `./install.sh` | The skills and the MCP tools, in every project |
+| The checkout and `./install.sh` | Your Mac's terminal | The VM, the `metacomputer` command, this Mac's settings and the secrets vault. The plugin runs this checkout's `bin/metacomputer` |
+
+**The plugin, from Claude Code** (in a session):
+
+```text
+/plugin marketplace add metavert-io/metacomputer
+/plugin install metacomputer@metacomputer
+```
+
+On Claude Code 2.1.275 or later, one step does both:
+`/plugin install metacomputer --marketplace metavert-io/metacomputer` (or, in a
+shell, `claude plugin install metacomputer --marketplace metavert-io/metacomputer`).
+The plugin alone has no VM: until the next step is done, its MCP server stops
+with a message saying to set it up.
+
+**The VM and the command, on your Mac:**
 
 ```bash
 git clone https://github.com/metavert-io/metacomputer.git
 cd metacomputer
 ./install.sh
 ```
+
+`./install.sh` installs the plugin too, from the checkout, so you can skip the
+`/plugin` commands. If you added the plugin from GitHub first, it keeps that one.
+The two sources update differently:
+- **From the checkout** (what `install.sh` does), the plugin loads in place: after
+  a `git pull`, Claude Code picks up the new skills at the next session start.
+- **From GitHub**, Claude Code keeps a copy that follows the repository's commits.
+  Update it with `/plugin marketplace update metacomputer` or
+  `claude plugin update metacomputer@metacomputer`. Its copy of `bin/metacomputer`
+  runs your checkout's, through `~/.local/bin/metacomputer` (or the checkout that
+  `MCOMP_HOME` names).
 
 The installer asks at most four questions:
 1. whether to install missing tools with Homebrew;
@@ -250,16 +283,24 @@ The installer asks at most four questions:
 | `--no-chrome` | Firefox only in the VM |
 | `--lume=mcomp-vm` / `--lume=standard` | Choose mcomp-vm or Cua's standard Lume without being asked (`--lume=secure`, from before the rename, still means mcomp-vm) |
 | `--no-build` | Set everything up but don't build the VM yet |
-| `--no-claude` | Don't touch Claude Code (no command links, skill or MCP server) |
-| `--uninstall` | Remove the command, the skill, the MCP registration and the vault program (the VM and your vault file stay) |
+| `--no-claude` | Don't touch Claude Code (no command links, plugin, skill or MCP server) |
+| `--no-plugin` | Claude Code without the plugin: the skill link and a user-scope MCP server, as before the plugin (tools: `mcp__metacomputer__*`). It removes this checkout's plugin |
+| `--only-claude` | Only the Claude Code step: the command links and the plugin (or, with `--no-plugin`, the skill and server) |
+| `--uninstall` | Remove the command, the plugin (or the skill and the MCP registration) and the vault program (the VM and your vault file stay) |
 
 Everything else is automatic. Each step is skipped when it's already done, so
 running `./install.sh` again is safe.
+
+The tools' names depend on how the server is registered:
+`mcp__plugin_metacomputer_metacomputer__*` from the plugin, `mcp__metacomputer__*`
+without it. The skill works with either. Permission rules, scripts and MCP
+configurations of your own that name `mcp__metacomputer__` need the plugin's
+prefix too (for example `"permissions": {"allow": ["mcp__plugin_metacomputer_metacomputer__*"]}`).
 - **mcomp-vm** (or standard Lume), at a pinned and verified version. Telemetry off, no background service.
 - **This Mac's settings** in `config/local.env`, never committed.
 - **The command** `~/.local/bin/metacomputer` and its alias `mcomp`.
-- **The skill**, linked at `~/.claude/skills/metacomputer`.
-- **The MCP server** `metacomputer`, registered at user scope (`claude mcp add -s user metacomputer …/bin/metacomputer mcp-lazy`).
+- **The plugin** `metacomputer@metacomputer`, at user scope, from the marketplace `metacomputer` (this checkout): the skills `metacomputer` and `cua-driver` and the MCP server `metacomputer` (`…/bin/metacomputer mcp-lazy`). An earlier install's skill link and user-scope MCP server are removed when they point at this checkout, so the tools aren't listed twice.
+- **Without the plugin** (`--no-plugin`, or a Claude Code without `claude plugin`): the skill, linked at `~/.claude/skills/metacomputer`, and the MCP server `metacomputer` at user scope (`claude mcp add -s user metacomputer …/bin/metacomputer mcp-lazy`).
 - **The secrets vault program**, `~/.local/share/metacomputer/bin/mcomp-vault`, built from `vault/` by `scripts/build-vault.sh` (skipped, with a note, before macOS 15 or without `swiftc`).
 
 mcomp-vm goes to `~/.local/bin/mcomp-vm` (its files in
@@ -1198,7 +1239,9 @@ serves one VM process (so `start` launches a fresh one).
 | Symptom | What to do |
 | --- | --- |
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the Lume, gateway and VM logs; `metacomputer restart` stops the VM and starts it again. |
-| A Claude Code session has no `mcp__metacomputer__*` tools | Run `/mcp` and reconnect `metacomputer`, or restart Claude Code. `claude mcp get metacomputer` should show `…/bin/metacomputer mcp-lazy`; `./install.sh --no-build` registers it again. |
+| A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `plugin:metacomputer:metacomputer` (or `metacomputer` without the plugin), or restart Claude Code. `claude plugin list` should show `metacomputer@metacomputer` enabled (without the plugin, `claude mcp get metacomputer` shows `…/bin/metacomputer mcp-lazy`); `./install.sh --only-claude` sets it up again. |
+| The plugin's MCP server stops with "no metacomputer set up yet" | The plugin came from GitHub, and this Mac has no checkout set up: clone the repository and run `./install.sh`, or set `MCOMP_HOME` to a checkout. |
+| The tools are listed twice (`mcp__metacomputer__*` and `mcp__plugin_metacomputer_metacomputer__*`) | Both the plugin and an older user-scope server are registered. `./install.sh --only-claude` removes the old one (or `--only-claude --no-plugin` removes the plugin). |
 | "The virtual computer is off" | `metacomputer start`, then try again. |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release` (or `--override` on the command). |
 | Chrome ignores typing | `metacomputer input-reset`. |
@@ -1240,6 +1283,7 @@ go to `results/`, `recordings/` and `screenshots/` (all ignored by git).
 | `python3 tests/test_events.py` | nothing | The event stream: cleaning, sinks, delivery, limits, sink-change detection |
 | `python3 tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py` | nothing | The secrets vault: fills, keys and rotation, approvals and requesters, API tokens and the proxy, audit sinks and tamper checks, and the VM's fill program |
 | `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py` | a separate test VM | The action log, SSH certificates, bounded mode, events (E) and the shell channel (F); it switches that VM's settings |
+| `python3 tests/test_plugin.py` | nothing (`--real-claude`: the `claude` CLI, in a temporary config) | The Claude Code plugin: its manifests and layout, `claude plugin validate`, the plugin's copy of `bin/metacomputer` handing over to the checkout, `install.sh`'s plugin mode, and both tool prefixes |
 | `tests/skill/run_headless.sh` | the VM, API usage | The skill end to end in a headless Claude Code session |
 
 ### The benchmark
@@ -1270,7 +1314,7 @@ minutes. Tasks are capped at $3 each and a run at $60 by default.
 
 ```bash
 metacomputer stop
-./install.sh --uninstall      # removes the command, the alias, the skill, the MCP registration and the vault program
+./install.sh --uninstall      # removes the command, the alias, the plugin (or the skill and the MCP registration) and the vault program
 ```
 
 Your secrets vault stays in `~/Library/Application Support/metacomputer/`, and
@@ -1306,6 +1350,7 @@ Recordings and results stay in the checkout until you delete it.
 - [skills/metacomputer/](skills/metacomputer/): the skill itself. [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md) hold the verified desktop and browser rules; [SHELL.md](skills/metacomputer/SHELL.md), [SECRETS.md](skills/metacomputer/SECRETS.md) and [EVENTS.md](skills/metacomputer/EVENTS.md) what Claude does with each.
 - [docs/chrome-investigation.md](docs/chrome-investigation.md): how Chrome was added and why the input guard exists.
 - `.claude/skills/cua-driver/`: Cua Driver's own skill pack, trimmed to its Linux guide.
+- `.claude-plugin/marketplace.json` and [plugin/](plugin/): the Claude Code plugin, made of links to the skill, the driver pack and `bin/metacomputer` (the same layout as the repository, so their relative links work in both).
 
 ## Contributing
 

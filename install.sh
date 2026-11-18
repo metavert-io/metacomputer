@@ -8,7 +8,10 @@
 #                              VM then always shares your clipboard, audio and Rosetta);
 #                              (--lume=mcomp-vm, or --lume=secure as before the rename, picks mcomp-vm)
 #   ./install.sh --no-build    set everything up but don't build the VM yet
-#   ./install.sh --no-claude   don't touch Claude Code (skill, MCP server, metacomputer command)
+#   ./install.sh --no-claude   don't touch Claude Code (plugin, skill, MCP server, metacomputer command)
+#   ./install.sh --no-plugin   Claude Code without the plugin: a skill link and a user-scope MCP
+#                              server, as before the plugin (tools: mcp__metacomputer__*)
+#   ./install.sh --only-claude only the Claude Code step (no tools, Lume, settings, vault or VM)
 #   ./install.sh --uninstall   remove the Claude Code hooks this installed (the VM stays)
 #
 # What it does (each step is skipped when already done):
@@ -16,23 +19,26 @@
 #   2. installs Lume, the VM runner: mcomp-vm (default; metacomputer's build of Lume
 #      from the pinned tag, can leave out clipboard/audio/Rosetta sharing) or Cua's release
 #   3. writes config/local.env, this Mac's settings (asks whether to add Chrome)
-#   4. links the `metacomputer` command, the `metacomputer` skill and the
-#      `metacomputer` MCP server into Claude Code, for every project
+#   4. links the `metacomputer` command and adds this checkout to Claude Code as the
+#      `metacomputer` plugin (its skills and MCP server, for every project; tools:
+#      mcp__plugin_metacomputer_metacomputer__*). Without `claude plugin`, or with
+#      --no-plugin: the `metacomputer` skill link and a user-scope MCP server instead
 #   5. builds the secrets vault, mcomp-vault (`metacomputer secrets`), with swiftc
 #   6. builds the VM (asks; about 10 minutes, unattended)
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-YES=0; CHROME=""; BUILD=""; CLAUDE=1; UNINSTALL=0; LUME_CHOICE=""
+YES=0; CHROME=""; BUILD=""; CLAUDE=1; PLUGIN=1; ONLY_CLAUDE=0; UNINSTALL=0; LUME_CHOICE=""
 for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;; --no-chrome) CHROME=no ;; --no-build) BUILD=no ;;
-    --no-claude) CLAUDE=0 ;; --uninstall) UNINSTALL=1 ;;
+    --no-claude) CLAUDE=0 ;; --no-plugin) PLUGIN=0 ;; --only-claude) ONLY_CLAUDE=1 ;; --uninstall) UNINSTALL=1 ;;
     --lume=mcomp-vm|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
     --lume=secure) LUME_CHOICE=mcomp-vm ;;   # mcomp-vm's former name, lume-secure
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -Eeuo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $a (see --help)" >&2; exit 2 ;;
   esac
 done
+[ "$ONLY_CLAUDE" = 0 ] || [ "$CLAUDE" = 1 ] || { echo "--only-claude and --no-claude together leave nothing to do" >&2; exit 2; }
 
 b=$'\033[1m'; g=$'\033[32m'; y=$'\033[33m'; r=$'\033[31m'; o=$'\033[0m'
 [ -t 1 ] || { b=; g=; y=; r=; o=; }
@@ -52,8 +58,61 @@ link_points_here() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
 old_target() {
   case "$1" in "$ROOT"/*) return 0 ;; esac
   [ ! -e "$1" ] || return 1
-  case "$1" in */bin/vc|*/bin/cua-lab|*/bin/virtual-computer|*/skills/virtual-computer) return 0 ;; esac
+  case "$1" in */bin/vc|*/bin/cua-lab|*/bin/virtual-computer|*/skills/virtual-computer) return 0 ;;
+    */bin/metacomputer|*/skills/metacomputer) return 0 ;; esac
   return 1
+}
+# --- Claude Code: the plugin, or (before plugins, --no-plugin) a skill link and a user-scope MCP server
+MKT=metacomputer; PLUGIN_ID=metacomputer@metacomputer; TAB=$'\t'
+has_claude() { command -v claude >/dev/null 2>&1; }
+has_plugin_cli() { has_claude && claude plugin --help >/dev/null 2>&1; }
+# The marketplace named metacomputer as "SOURCE<TAB>WHERE" ("directory<TAB>/path", "github<TAB>owner/repo"), or nothing.
+mkt_info() {
+  claude plugin marketplace list --json 2>/dev/null | python3 -c 'import json,sys
+for m in json.load(sys.stdin):
+    if m.get("name") == "metacomputer":
+        print(m.get("source", ""), m.get("path") or m.get("repo") or m.get("url") or "", sep="\t")' 2>/dev/null || true
+}
+# The plugin metacomputer@metacomputer at user scope: "on", "off" (installed, turned off) or nothing.
+plugin_state() {
+  claude plugin list --json 2>/dev/null | python3 -c 'import json,sys
+for p in json.load(sys.stdin):
+    if p.get("id") == "metacomputer@metacomputer" and p.get("scope") == "user":
+        print("on" if p.get("enabled") else "off")' 2>/dev/null || true
+}
+mcp_server_cmd() { # NAME: the command of the MCP server NAME that `claude mcp get` shows, or nothing
+  claude mcp get "$1" 2>/dev/null | sed -n 's/^ *Command: //p' | head -1 || true
+}
+# Earlier installs' skill link and user-scope MCP server, removed only when they are this checkout's
+# (or a moved checkout's that no longer exists), so the tools aren't listed twice.
+remove_skill_link_and_server() {
+  if [ -L "$SKILL_LINK" ] && old_target "$(readlink "$SKILL_LINK")"; then
+    rm "$SKILL_LINK" && ok "removed the skill link $SKILL_LINK (the plugin brings the skill)"
+  fi
+  local cmd; cmd="$(mcp_server_cmd metacomputer)"
+  if [ -n "$cmd" ] && old_target "$cmd"; then
+    claude mcp remove metacomputer -s user >/dev/null 2>&1 \
+      && ok "removed the user-scope MCP server metacomputer (the plugin brings it; tools are now mcp__plugin_metacomputer_metacomputer__*)"
+  fi
+  return 0
+}
+# Is the installed plugin this checkout's? From its marketplace, or from GitHub/git (that copy runs this
+# checkout through ~/.local/bin/metacomputer), but not from another checkout's marketplace.
+plugin_is_ours() {
+  local mkt; mkt="$(mkt_info)"
+  [ -z "$mkt" ] || [ "$mkt" = "directory${TAB}$ROOT" ] || [ "${mkt%%"$TAB"*}" != directory ]
+}
+remove_plugin() { # uninstall the plugin; remove the marketplace when it is this checkout
+  local mkt; mkt="$(mkt_info)"
+  if [ -n "$(plugin_state)" ]; then
+    claude plugin uninstall "$PLUGIN_ID" --scope user >/dev/null 2>&1 && ok "uninstalled the plugin $PLUGIN_ID"
+  fi
+  if [ "$mkt" = "directory${TAB}$ROOT" ]; then
+    claude plugin marketplace remove "$MKT" >/dev/null 2>&1 && ok "removed the marketplace $MKT (this checkout)"
+  elif [ -n "$mkt" ]; then
+    echo "  The marketplace $MKT (${mkt//$TAB/ }) stays; to remove it: claude plugin marketplace remove $MKT"
+  fi
+  return 0
 }
 trap 'printf "%s\n" "${r}install: stopped at line $LINENO: $BASH_COMMAND${o}" "Details: the newest file in $ROOT/logs/ (for a build), or the messages above. Fix it and run ./install.sh again; finished steps are skipped." >&2' ERR
 
@@ -68,9 +127,15 @@ if [ "$UNINSTALL" = 1 ]; then
   link_points_here "$SKILL_LINK" "$ROOT/skills/metacomputer" && rm "$SKILL_LINK" && ok "removed the metacomputer skill"
   [ -f "$HOME/.local/share/metacomputer/bin/mcomp-vault" ] && rm "$HOME/.local/share/metacomputer/bin/mcomp-vault" \
     && ok "removed the secrets vault program (your vault file stays: ~/Library/Application Support/metacomputer)"
-  if command -v claude >/dev/null 2>&1 && claude mcp get metacomputer 2>/dev/null | grep -q "$ROOT/bin/metacomputer"; then
-    claude mcp remove metacomputer -s user >/dev/null 2>&1 && ok "removed the metacomputer MCP server"
+  if has_claude; then
+    cmd="$(mcp_server_cmd metacomputer)"
+    if [ -n "$cmd" ] && old_target "$cmd"; then
+      claude mcp remove metacomputer -s user >/dev/null 2>&1 && ok "removed the metacomputer MCP server"
+    fi
   fi
+  # The plugin: from this checkout's marketplace, or from GitHub (its copy runs this checkout
+  # through ~/.local/bin/metacomputer, removed above, so it can't work without it).
+  if has_plugin_cli && plugin_is_ours; then remove_plugin; fi
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$ROOT/config/local.env" ] && . "$ROOT/config/local.env"
   # The runner this checkout uses (LUME in config/local.env; mcomp-vm by default), found as
@@ -89,6 +154,102 @@ if [ "$UNINSTALL" = 1 ]; then
   if [ "$name" != lume-secure ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
     echo "(lume-secure, mcomp-vm's former name, is installed too: rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure)"
   fi
+  exit 0
+fi
+
+# --- the Claude Code step (4; --only-claude runs it alone) ------------------------------------
+# Plugin mode: this checkout is the marketplace `metacomputer`, and its plugin (plugin/: links to
+# skills/metacomputer, the driver pack and bin/metacomputer) loads in place from here.
+plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so), 1 = failed
+  local mkt; mkt="$(mkt_info)"
+  case "$mkt" in
+    "directory${TAB}$ROOT") ok "marketplace $MKT: this checkout (already added)" ;;
+    directory*|"")
+      if [ -n "$mkt" ]; then
+        claude plugin marketplace remove "$MKT" >/dev/null 2>&1 || true
+        ok "removed the marketplace $MKT, which was ${mkt#*"$TAB"}"
+      fi
+      claude plugin marketplace add "$ROOT" >/dev/null 2>&1 \
+        || { warn "could not add this checkout as a marketplace (claude plugin marketplace add $ROOT)"; return 1; }
+      ok "marketplace $MKT: this checkout" ;;
+    *) ok "marketplace $MKT: ${mkt//$TAB/ } (its plugin runs this checkout through $CMD_LINK)" ;;
+  esac
+  case "$(plugin_state)" in
+    on) ok "plugin $PLUGIN_ID already installed" ;;
+    off) warn "the plugin $PLUGIN_ID is installed but turned off; left so (to turn it on: claude plugin enable $PLUGIN_ID)"; return 2 ;;
+    *) claude plugin install "$PLUGIN_ID" --scope user >/dev/null 2>&1 \
+         || { warn "could not install the plugin (claude plugin install $PLUGIN_ID --scope user)"; return 1; }
+       ok "plugin $PLUGIN_ID installed for every project: skills metacomputer and cua-driver, MCP server metacomputer (tools: mcp__plugin_metacomputer_metacomputer__*, there even while the VM is off)" ;;
+  esac
+}
+skill_link_and_server() { # without the plugin: the skill link and a user-scope MCP server
+  mkdir -p "$HOME/.claude/skills"
+  if [ -e "$SKILL_LINK" ] && [ ! -L "$SKILL_LINK" ]; then
+    warn "$SKILL_LINK exists and isn't a link; left alone (move it away and run this again to install the skill)"
+  else
+    ln -sfn "$ROOT/skills/metacomputer" "$SKILL_LINK" && ok "skill: metacomputer"
+  fi
+  if ! has_claude; then
+    warn "Claude Code's 'claude' command isn't installed; after installing it, run: ./install.sh --only-claude"
+    return 0
+  fi
+  if [ "$(mcp_server_cmd metacomputer)" = "$ROOT/bin/metacomputer" ]; then
+    ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
+  else
+    claude mcp remove metacomputer -s user >/dev/null 2>&1 || true
+    if claude mcp add -s user metacomputer "$ROOT/bin/metacomputer" mcp-lazy >/dev/null 2>&1; then
+      ok "MCP server metacomputer registered for every project (tools: mcp__metacomputer__*, there even while the VM is off)"
+    else
+      warn "could not register the MCP server; run: claude mcp add -s user metacomputer $ROOT/bin/metacomputer mcp-lazy"
+    fi
+  fi
+}
+claude_step() {
+  step "Claude Code"
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$ROOT/bin/metacomputer" "$CMD_LINK" && ok "command: $CMD_LINK"
+  if [ -e "$ALIAS_LINK" ] && ! link_points_here "$ALIAS_LINK" "$ROOT/bin/metacomputer"; then
+    warn "$ALIAS_LINK already exists and is something else; left alone (the full name works)"
+  else
+    ln -sfn "$ROOT/bin/metacomputer" "$ALIAS_LINK" && ok "alias: mcomp"
+  fi
+  # Names used by earlier versions (commands vc, cua-lab, virtual-computer, vcomp; the
+  # virtual-computer skill; MCP servers cua-linux, virtual-computer).
+  local old cmd rc=0
+  for old in "$HOME/.local/bin/vc" "$HOME/.local/bin/cua-lab" "$HOME/.local/bin/virtual-computer" \
+             "$HOME/.local/bin/vcomp" "$HOME/.claude/skills/virtual-computer"; do
+    if [ -L "$old" ] && old_target "$(readlink "$old")"; then
+      rm "$old" && ok "removed the old name $old"
+    fi
+  done
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin isn't on your PATH; add it to use 'metacomputer' directly (Claude uses the full path)" ;; esac
+  if has_claude; then
+    for old in cua-linux virtual-computer; do
+      cmd="$(mcp_server_cmd "$old")"
+      if [ -n "$cmd" ] && old_target "$cmd"; then
+        claude mcp remove "$old" -s user >/dev/null 2>&1 && ok "removed the old MCP server name $old (now metacomputer)"
+      fi
+    done
+  fi
+  if [ "$PLUGIN" = 1 ] && has_plugin_cli; then
+    plugin_install || rc=$?
+    case "$rc" in
+      0) remove_skill_link_and_server ;;
+      2) ;;
+      *) warn "using a skill link and a user-scope MCP server instead (as ./install.sh --no-plugin does)"; skill_link_and_server ;;
+    esac
+  else
+    if [ "$PLUGIN" = 1 ] && has_claude; then
+      warn "this Claude Code has no 'claude plugin' command (update Claude Code for the plugin); using a skill link and a user-scope MCP server"
+    elif [ "$PLUGIN" = 0 ] && has_plugin_cli && [ -n "$(plugin_state)" ] && plugin_is_ours; then
+      remove_plugin   # --no-plugin after the plugin: don't list the tools twice
+    fi
+    skill_link_and_server
+  fi
+}
+if [ "$ONLY_CLAUDE" = 1 ]; then
+  claude_step
+  printf '\n%s\n' "Restart open Claude Code sessions (or run /reload-plugins in them) to pick this up."
   exit 0
 fi
 
@@ -211,48 +372,7 @@ fi
 . "$CONF"
 
 # --- 4. Claude Code ----------------------------------------------------------------
-if [ "$CLAUDE" = 1 ]; then
-  step "Claude Code"
-  mkdir -p "$HOME/.local/bin" "$HOME/.claude/skills"
-  ln -sfn "$ROOT/bin/metacomputer" "$CMD_LINK" && ok "command: $CMD_LINK"
-  if [ -e "$ALIAS_LINK" ] && ! link_points_here "$ALIAS_LINK" "$ROOT/bin/metacomputer"; then
-    warn "$ALIAS_LINK already exists and is something else; left alone (the full name works)"
-  else
-    ln -sfn "$ROOT/bin/metacomputer" "$ALIAS_LINK" && ok "alias: mcomp"
-  fi
-  # Names used by earlier versions (commands vc, cua-lab, virtual-computer, vcomp; the
-  # virtual-computer skill).
-  for old in "$HOME/.local/bin/vc" "$HOME/.local/bin/cua-lab" "$HOME/.local/bin/virtual-computer" \
-             "$HOME/.local/bin/vcomp" "$HOME/.claude/skills/virtual-computer"; do
-    if [ -L "$old" ] && old_target "$(readlink "$old")"; then
-      rm "$old" && ok "removed the old name $old"
-    fi
-  done
-  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin isn't on your PATH; add it to use 'metacomputer' directly (Claude uses the full path)" ;; esac
-  if [ -e "$SKILL_LINK" ] && [ ! -L "$SKILL_LINK" ]; then
-    warn "$SKILL_LINK exists and isn't a link; left alone (move it away and run this again to install the skill)"
-  else
-    ln -sfn "$ROOT/skills/metacomputer" "$SKILL_LINK" && ok "skill: metacomputer"
-  fi
-  if command -v claude >/dev/null 2>&1; then
-    for old in cua-linux virtual-computer; do  # MCP server names of earlier versions
-      cmd="$(claude mcp get "$old" 2>/dev/null | sed -n 's/^ *Command: //p' | head -1 || true)"
-      if [ -n "$cmd" ] && old_target "$cmd"; then
-        claude mcp remove "$old" -s user >/dev/null 2>&1 && ok "removed the old MCP server name $old (now metacomputer)"
-      fi
-    done
-    if claude mcp get metacomputer 2>/dev/null | grep -q "$ROOT/bin/metacomputer"; then
-      ok "MCP server metacomputer already registered"
-    else
-      claude mcp remove metacomputer -s user >/dev/null 2>&1 || true
-      claude mcp add -s user metacomputer "$ROOT/bin/metacomputer" mcp-lazy >/dev/null \
-        && ok "MCP server metacomputer registered for every project (tools appear even while the VM is off)" \
-        || warn "could not register the MCP server; run: claude mcp add -s user metacomputer $ROOT/bin/metacomputer mcp-lazy"
-    fi
-  else
-    warn "Claude Code's 'claude' command isn't installed; after installing it, run: claude mcp add -s user metacomputer $ROOT/bin/metacomputer mcp-lazy"
-  fi
-fi
+[ "$CLAUDE" = 0 ] || claude_step
 
 # --- 5. the secrets vault -------------------------------------------------------------
 step "Secrets vault (metacomputer secrets)"
@@ -286,6 +406,6 @@ cat <<EOF
   metacomputer test       run the GUI checks (recorded)
   metacomputer view       watch or take over the desktop
   metacomputer help       everything else
-In Claude Code (restart open sessions first), try:
+In Claude Code (restart open sessions, or run /reload-plugins in them), try:
   "Get yourself a virtual computer and tell me what's on its screen."
 EOF
