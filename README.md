@@ -40,6 +40,7 @@ than forty more.
 [What it is](#what-it-is) ·
 [Why I made it](#why-i-made-it) ·
 [Security](#security) ·
+[It learns](#it-learns-from-its-own-sessions) ·
 [Requirements](#requirements) ·
 [Install](#install) ·
 [Quick start](#quick-start) ·
@@ -219,6 +220,32 @@ audit are the tamper-evident records. Details in
 
 [SECURITY.md](SECURITY.md) explains each control and where it ends, and
 [Isolation and safety](#isolation-and-safety) has the specifics.
+
+## It learns from its own sessions
+
+Claude makes some of the same mistakes again and again on a desktop: clicking
+by pixel without a fresh screenshot, or trying a third way to do something
+without checking why the first two failed. `metacomputer learn report` reads
+your own Claude Code sessions that used the virtual computer, counts what went
+wrong and where the time went, and proposes short lessons with the evidence:
+"34 pixel clicks refused for lack of a screenshot, in 17 of 33 sessions", say,
+and the rule that avoids them.
+
+You decide which lessons to keep (`metacomputer learn review`, or tell Claude
+in a chat which ones to approve). Approved lessons go to every later session
+as advice, after the skill's own habits. They can't switch off a safety check,
+override a refusal or overrule you. Reading your sessions and storing the
+lessons happen on your Mac, but an approved lesson becomes part of the
+instructions each Claude Code session sends to the model, like the skill
+itself, so don't put anything in one you wouldn't send to Claude.
+`metacomputer learn bench` runs the benchmark on a test VM with and without
+them, so you can see whether they help.
+
+Nothing a web page or document in the VM says can become a lesson: proposals
+are built only from counts and fixed names, and lessons in your own words need
+your own terminal. A lessons file changed some other way isn't sent until you
+look at it and accept it. [docs/learn.md](docs/learn.md) has the details, and
+SECURITY.md the protections and their limits.
 
 ## Requirements
 
@@ -1022,6 +1049,10 @@ alias). `metacomputer help` prints the same list with every option.
 | `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action TEXT]` | Tell your event sinks that Claude is blocked on you |
 | `events sink add\|remove NAME ...` | Add or remove an event sink (your own terminal) |
 | `events sink list\|show\|test`, `events status\|tail`, `events emit`, `events drain`, `events watcher start\|stop\|status` | The sinks, the stream's state and local log, an event from a script, a retry now, the watcher |
+| `learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude]` | Mine your sessions with the VM for repeated mistakes and time sinks; propose lessons with their evidence |
+| `learn review`, `learn approve\|reject\|remove ID...`, `learn list [--instructions]` | Go through the proposals; keep or drop lessons; see what every new session gets |
+| `learn edit ID`, `learn add` | Change a lesson's text, or write your own (your own terminal) |
+| `learn bench --config TEST_ENV [--yes]` | The benchmark with and without your lessons, on a test VM (asks first: it spends your Claude usage) |
 | `test [A-F]` | The GUI smoke suite, each test recorded |
 | `ssh [ops\|admin] [CMD...]` | A raw SSH shell in the VM (`ops` is the desktop user); prefer `sh` |
 | `logs [N]` | The last lines of the Lume, gateway and VM logs |
@@ -1081,6 +1112,13 @@ instead.
 | `MCP_HUB` | `on` | `on`: Claude Code's bridge, `metacomputer call` and scripts share one hub per VM, which applies every guard to each of them; `off`: each connects on its own, with the same guards |
 | `HUB_IDLE` | `10m` | The hub exits after this long with no client and no driver recording |
 | `COORD_GUARD` | `on` | `on`: pixel input is refused when the windows changed since the screenshot it was aimed from; `off`: only Cua Driver's own checks |
+
+**Lessons** (`metacomputer learn`; [docs/learn.md](docs/learn.md)):
+
+| Key | Default | |
+| --- | --- | --- |
+| `LESSONS` | `on` | `on`: the lessons you approved go in every new session's MCP instructions, as advice; `off`: kept, not sent |
+| `LESSONS_DIR` | `~/.local/share/metacomputer/lessons` | Their private store (a 0700 folder, 0600 files, read only when private) |
 
 **Shell channel** (`metacomputer sh`; [docs/shell.md](docs/shell.md)):
 
@@ -1284,6 +1322,7 @@ go to `results/`, `recordings/` and `screenshots/` (all ignored by git).
 | `python3 tests/test_events.py` | nothing | The event stream: cleaning, sinks, delivery, limits, sink-change detection |
 | `python3 tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py` | nothing | The secrets vault: fills, keys and rotation, approvals and requesters, API tokens and the proxy, audit sinks and tamper checks, and the VM's fill program |
 | `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py` | a separate test VM | The action log, SSH certificates, bounded mode, events (E) and the shell channel (F); it switches that VM's settings |
+| `python3 tests/test_learn.py` | nothing | `metacomputer learn`: mining synthetic sessions in both formats and both tool prefixes, injected text that must never reach a proposal, a lesson or the instructions, the approval rules, the store's permissions, events, and the benchmark's lessons switch |
 | `python3 tests/test_plugin.py` | nothing (`--real-claude`: the `claude` CLI, in a temporary config) | The Claude Code plugin: its manifests and layout, `claude plugin validate`, the plugin's copy of `bin/metacomputer` handing over to the checkout, `install.sh`'s plugin mode, and both tool prefixes |
 | `tests/skill/run_headless.sh` | the VM, API usage | The skill end to end in a headless Claude Code session |
 
@@ -1347,6 +1386,7 @@ Recordings and results stay in the checkout until you delete it.
 - [TESTING.md](TESTING.md): every test and how to run it.
 - [docs/shell.md](docs/shell.md): `metacomputer sh`, its design and how it treats the VM.
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
+- [docs/learn.md](docs/learn.md): `metacomputer learn`, lessons from your own sessions: what it reads and reports, proposals, approval, delivery and measuring.
 - [bench/README.md](bench/README.md): the benchmark.
 - [skills/metacomputer/](skills/metacomputer/): the skill itself. [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md) hold the verified desktop and browser rules; [SHELL.md](skills/metacomputer/SHELL.md), [SECRETS.md](skills/metacomputer/SECRETS.md) and [EVENTS.md](skills/metacomputer/EVENTS.md) what Claude does with each.
 - [docs/chrome-investigation.md](docs/chrome-investigation.md): how Chrome was added and why the input guard exists.

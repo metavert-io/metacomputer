@@ -50,6 +50,25 @@ Checks never trust what the agent says. They read the VM's real state:
   refuses the VM named `metacomputer` unless you pass `--allow-main-vm`.
 - **Make sure nobody else is using that VM** (`metacomputer who`). The runner
   checks before every task and stops if another session is active.
+- **The VM is checked again before every reset.** The runner refuses the VM your
+  own `config/local.env` names, as well as `metacomputer`, unless you pass
+  `--allow-main-vm`. It sets `MCOMP_EXPECT_VM` to the VM it found, so every
+  `metacomputer` command it starts refuses if the settings later name another VM.
+  `metacomputer learn bench` also passes what you confirmed (`BENCH_EXPECT_VM`,
+  `BENCH_EXPECT_BASELINE`, `BENCH_EXPECT_CONFIG_SHA`), and any change to them stops
+  the run before a reset.
+- **Unknown costs count.** A session that ends without reporting its cost (killed
+  at its timeout, crashed) is counted at its whole budget against the cap
+  (`cost_unknown` in its record). Each task's budget is reserved in `run.json`
+  (`reservations`, each with its own id) before its session starts, and only the
+  record of that attempt (which names the id) settles it: a reservation left by a
+  runner that died stays and is charged on every later resume, and a later retry
+  of the same task never settles it, including one migrated from a run before
+  reservation ids. `--budget` and `--cap` must be positive amounts.
+- **A reset checks what it replaces.** The runner also sets `MCOMP_EXPECT_BASELINE`
+  and `MCOMP_EXPECT_CONFIG_SHA`, and `metacomputer reset` compares them, and the VM
+  name, with the values it is about to use, in its own process and again right
+  before the copy.
 - **Keep the VM's optional hardening as you mean to measure it.** A test VM's
   settings often turn on `ACTION_LOG`, which puts a relay between the bridge and
   the driver. For a baseline of the defaults, point `MCOMP_CONFIG` at a small
@@ -128,6 +147,7 @@ version and the model.
 | `--budget USD` | `BENCH_BUDGET` | `3` | Per-task cap (`--max-budget-usd`); a task file can set `budget_usd` |
 | `--cap USD` | `BENCH_CAP` | `60` | The whole run's cap: a task doesn't start if its budget could take the total over |
 | `--reset each\|none` | `BENCH_RESET` | `each` | Reset the VM to its baseline before every task |
+| `--lessons on\|off` | `BENCH_LESSONS` | `off` | `on`: the sessions' MCP instructions carry the lessons approved with `metacomputer learn` (from `MCOMP_LESSONS_DIR`, else the default store), passed as `MCOMP_LESSONS`; `run.json` records how many and a hash of the exact text (`lessons_count`, `lessons_hash`). `metacomputer learn bench` runs off, then on, and compares them (docs/learn.md) |
 
 On screen size: the VM's display device offers many modes (from 1280x800 up to
 4096x2160), and `xrandr` switches between them while the VM runs. The desktop
@@ -289,6 +309,18 @@ little longer because the model's own time rose, not the VM's. The extra
 screenshots come from the skill: main's skill had gained a section on pixels
 since `hub-on` (screenshot-only reads before pixel clicks), so this comparison
 is not of the driver alone.
+
+Lessons from `metacomputer learn` (2026-11-18, a test VM with 0.53.0, budget $1.50
+a task, `learn bench` with two approved built-in lessons, `no-frame` and `check-text`):
+
+| Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Invalid | Other errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `learn-2026-11-18-without` (`--lessons off`) | 19/20 | $9.67 | 17.1 | 0.86 | 30 | 0 | 12 |
+| `learn-2026-11-18-with` (`--lessons on`) | 19/20 | $9.81 | 16.6 | 0.86 | 29 | 0 | 9 |
+
+The same task (writer-format) failed at the same check in both. The two
+lessons' patterns didn't come up without them either, so the differences are
+noise; see docs/learn.md.
 
 A session's claims go with that session: Claude Code is recognized however it's
 installed, including the native installer's `~/.local/share/claude/versions/X.Y.Z`

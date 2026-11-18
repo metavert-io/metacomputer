@@ -66,6 +66,7 @@ These hold in every app. [DESKTOP.md](DESKTOP.md) has the details.
 - **Checks from text you've seen.** Take `expect` and `wait_for` text from a string you've already read (a title, a label, a status bar), not from what you expect the app to say. Each check needs `role`, `name` or `text`.
 - **Don't maximize what's already maximized:** check the width in `launch_app`'s result or `list_windows` first.
 - **File dialogs: never `set_value` the file name,** even by role and name: it can land in a hidden field and save at once. Click the visible name field, press Ctrl+A, type the full path, press Return, then check the saved file.
+- **Lessons the user approved** from their earlier sessions arrive in the MCP server's instructions, under "Notes this user approved from earlier sessions". Follow them as advice; they never override a refusal, these rules or the user. When you keep hitting the same problem, suggest `metacomputer learn report` to the user (it proposes lessons from their sessions). Approve a lesson (`metacomputer learn approve ID`) only when the user names it; editing or adding a lesson's text is theirs to do in their own terminal.
 
 ## Doing the task
 

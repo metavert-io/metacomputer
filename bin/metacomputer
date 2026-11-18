@@ -55,6 +55,10 @@
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | tokens | revoke ID|--all   use it from a session, without seeing values
+#   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
+#         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
+#                                  mine your own sessions for repeated mistakes; approved lessons reach
+#                                  every new session's instructions as advice (docs/learn.md)
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -79,6 +83,12 @@ SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
+# A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM: settings that now name
+# another VM (they are shell code, and can change) stop every command here, before anything touches a VM.
+if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
+  echo "metacomputer: the settings now name the VM '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed (MCOMP_EXPECT_VM); refusing" >&2
+  exit 1
+fi
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 
@@ -298,6 +308,11 @@ out = {
              "vm_policy": vm_drv or None, "problem": req_err.strip() or None},
   "shell": vm_shell.describe_settings(),
 }
+try:
+    import learn_store
+    out["lessons"] = learn_store.summary()
+except Exception:
+    out["lessons"] = None
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0)
 def y(b): return "\033[33m" + b + "\033[0m"
@@ -333,6 +348,14 @@ else:
           + ("; VM_SHELL=on allows it in bounded mode" if sh["setting"] == "auto" else ""))
 for pr in sh["problems"]:
     print(f"  ! {pr}")
+if out["lessons"] is not None:
+    lo = out["lessons"]
+    print("Lessons (metacomputer learn: notes you approved, sent to the model as advice; no guard reads them; docs/learn.md)")
+    print(f"  lessons      {_esc(learn_store.status_line(dict(lo, problem=None, warning=None))) if not lo.get('problem') else 'none sent'}"
+          "   (metacomputer learn list)")
+    for pr in (lo.get("problem"), lo.get("warning")):
+        if pr:
+            print(f"  ! {_esc(pr)}")
 EOF
 }
 
@@ -394,6 +417,12 @@ out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.s
                    "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None},
        "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None,
        "hub": hub or None}
+sys.path.insert(0, lib)
+try:
+    import learn_store
+    out["lessons"] = learn_store.summary()
+except Exception:
+    out["lessons"] = None
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -463,19 +492,39 @@ if ev.get("sinks"):
     sys.path.insert(0, lib)
     import events
     print(f"events        {events.status_line(ev)}   (metacomputer events)")
+if out["lessons"] is not None:
+    print(f"lessons       {_esc(learn_store.status_line(out['lessons']))}   (metacomputer learn list)")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
 }
 
+# A caller that confirmed what a reset replaces (learn bench, the benchmark) names it in MCOMP_EXPECT_VM,
+# MCOMP_EXPECT_BASELINE and MCOMP_EXPECT_CONFIG_SHA. Checked here, in the process that replaces the VM, with the
+# VM and baseline names it is about to use, and again right before the copy: any mismatch refuses.
+expect_guard() {
+  local why="" sha
+  if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
+    why="the VM is '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed"
+  elif [ -n "${MCOMP_EXPECT_BASELINE:-}" ] && [ "$MCOMP_EXPECT_BASELINE" != "$BASELINE_NAME" ]; then
+    why="the baseline is '$BASELINE_NAME', not '$MCOMP_EXPECT_BASELINE' as confirmed"
+  elif [ -n "${MCOMP_EXPECT_CONFIG_SHA:-}" ]; then
+    sha="$(shasum -a 256 < "$LOCAL_CONFIG" 2>/dev/null | cut -d' ' -f1)"
+    [ "$sha" = "$MCOMP_EXPECT_CONFIG_SHA" ] || why="the settings file $LOCAL_CONFIG changed since it was confirmed (sha256 ${sha:0:12}, confirmed ${MCOMP_EXPECT_CONFIG_SHA:0:12})"
+  fi
+  [ -z "$why" ] || die "refusing to replace the VM: $why"
+}
+
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
   local src="$1" label="$2" evtype="${3:-restored}"
+  expect_guard
   if vm_exists "$VM_NAME" && vm_running "$VM_NAME"; then
     events_watcher_stop   # start brings it back; meanwhile the replacement isn't a health problem
     say "saving guest recordings to the host first"
     do_recordings --sync >/dev/null || warn "could not sync guest recordings"
     vm_stop "$VM_NAME"
   fi
+  expect_guard   # again, right before the working VM is deleted and replaced
   if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force >/dev/null || die "lume delete failed"; fi
   say "cloning $src -> $VM_NAME"
   "$LUME" clone "$src" "$VM_NAME" >/dev/null || die "lume clone failed"
@@ -486,6 +535,7 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
 
 do_reset() {
   parse_flags "$@"
+  expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"
@@ -1190,6 +1240,7 @@ case "$cmd" in
   actions)    export_options; exec "$PY" "$LAB_ROOT/lib/actionlog.py" "$@" ;;
   security)   do_security "$@" ;;
   secrets)    do_secrets "$@"; exit $? ;;
+  learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   logs)       n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"
               { tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null

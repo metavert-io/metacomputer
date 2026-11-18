@@ -21,12 +21,16 @@ baseline before every task). Switches (flag or environment variable):
   --budget / BENCH_BUDGET          per-task cap in USD (default 3; a task file may set its own)
   --cap / BENCH_CAP                total cap in USD for the run (default 60)
   --reset / BENCH_RESET            each | none    (reset the VM before each task)
+  --lessons / BENCH_LESSONS        off | on       (the lessons approved with `metacomputer learn`, from
+                                                   MCOMP_LESSONS_DIR or the default store; default off)
 """
 import argparse
 import datetime
 import glob
 import gzip
+import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -36,6 +40,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import uuid
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(BENCH)
@@ -54,7 +59,8 @@ PREFIX = ("Use your virtual computer (the metacomputer) for this. Leave the virt
 SHELL_FORBID = ("\n\nDon't use a shell inside the virtual computer for this (no `metacomputer ssh` or "
                 "`metacomputer sh`): work through its desktop.")
 DEFAULTS = {"model": "claude-opus-5-5", "skill": os.path.join(LAB, "skills", "metacomputer"), "shell": "allow",
-            "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each"}
+            "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each",
+            "lessons": "off"}
 
 
 def log(msg):
@@ -246,8 +252,11 @@ def prepare_workdir(run_id, sw):
         os.symlink(CLI, os.path.join(shim, n))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
+    if os.environ.get("MCOMP_EXPECT_VM"):
+        env["MCOMP_EXPECT_VM"] = os.environ["MCOMP_EXPECT_VM"]
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
+    env.update(lessons_env(sw))
     json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
               open(cfg, "w"))
     return work, cfg, shim
@@ -274,6 +283,28 @@ def session_args(t, sw, cfg):
     return args, budget
 
 
+def lessons_env(sw):
+    """The lessons switch for the session's MCP server: MCOMP_LESSONS on|off, and the store it reads
+    (MCOMP_LESSONS_DIR as this run has it, else the default store)."""
+    env = {"MCOMP_LESSONS": sw.get("lessons") or "off"}
+    if os.environ.get("MCOMP_LESSONS_DIR"):
+        env["MCOMP_LESSONS_DIR"] = os.environ["MCOMP_LESSONS_DIR"]
+    return env
+
+
+def lessons_record(sw):
+    """What the sessions get: how many lessons and a hash of the exact instruction text (lib/learn_store.py)."""
+    import hashlib
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    import learn_store
+    env = dict(os.environ, **lessons_env(sw))
+    text = learn_store.instructions_text(env)
+    s = learn_store.summary(env)
+    return {"lessons_count": s["delivered"] if text else 0,
+            "lessons_hash": hashlib.sha256(text.encode()).hexdigest()[:12] if text else None,
+            "lessons_problem": s["problem"]}
+
+
 def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     args, budget = session_args(t, sw, cfg)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -282,6 +313,7 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
+    env.update(lessons_env(sw))
     timeout = int(t.get("timeout_s", 600))
     events, times = [], []
     t0 = time.time()
@@ -351,19 +383,137 @@ def switches_from(a):
         sw[k] = v if v not in (None, "") else os.environ.get("BENCH_" + k.upper(), d)
     sw["skill"] = os.path.abspath(os.path.expanduser(sw["skill"]))
     if sw["shell"] not in ("allow", "forbid") or sw["coord_guard"] not in ("on", "off") or sw["reset"] not in ("each", "none") \
-            or sw["hub"] not in ("", "on", "off"):
-        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none)")
+            or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off"):
+        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off)")
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
+    for k in ("budget", "cap"):
+        try:
+            x = float(sw[k])
+        except (TypeError, ValueError):
+            x = float("nan")
+        if not math.isfinite(x) or x <= 0:
+            sys.exit(f"--{k} must be a positive number of US dollars (got {sw[k]!r})")
     return sw
+
+
+def charge(rec):
+    """What a task's record counts against the cap: its reported cost, or, when a session ran and reported none
+    (killed at the timeout, crashed, cut off), its whole budget: an unknown cost is never free."""
+    cost = (rec.get("metrics") or {}).get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+        return float(cost)
+    sess = rec.get("session") or {}
+    if sess:
+        return float(sess.get("budget_usd") or rec.get("budget_usd") or 0)
+    return 0.0
+
+
+def reservations_of(meta):
+    """The budget reservations a run.json holds: `reservations` (each with its own id), plus the single
+    `reserved` and the `unrecorded_reservations` that runs before them wrote."""
+    out = []
+    for r in (meta or {}).get("reservations") or []:
+        if isinstance(r, dict) and r.get("id"):
+            out.append(r)
+    legacy = [(meta or {}).get("reserved")] + list((meta or {}).get("unrecorded_reservations") or [])
+    for r in legacy:
+        if isinstance(r, dict) and r.get("task"):
+            out.append(dict(r, id=r.get("id") or f"legacy-{r.get('task')}-{r.get('at')}", legacy=True))
+    seen, uniq = set(), []
+    for r in out:
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            uniq.append(r)
+    return uniq
+
+
+def reconciled(res, recs):
+    """A reservation is settled only by the record of its own attempt (its cost, or its budget when the cost is
+    unknown, is then charged through that record): one that names its id. A reservation migrated from a run
+    before ids can be settled only by a record from before ids too (one with no `reservation`) for its task and
+    time; a later attempt's record names its own reservation and never settles an older one. Deterministic and
+    idempotent: records are only ever appended, so a settled reservation stays settled and an unsettled one is
+    charged on every resume."""
+    if res.get("legacy"):
+        return any("reservation" not in r and r.get("task") == res.get("task")
+                   and str(r.get("started", "")) >= str(res.get("at", "")) for r in recs)
+    return any(r.get("reservation") == res["id"] for r in recs)
+
+
+def spent_so_far(recs, reservations):
+    """(spent, outstanding): what the run has spent, each record charged as charge() says, plus every reservation
+    no record settles: a session whose runner died before recording it. Outstanding reservations stay in run.json
+    and are charged on every later resume, however many there are."""
+    outstanding = [r for r in reservations if not reconciled(r, recs)]
+    spent = sum(charge(r) for r in recs)
+    for r in outstanding:
+        try:
+            spent += max(0.0, float(r.get("usd") or 0))
+        except (TypeError, ValueError):
+            pass
+    return spent, outstanding
+
+
+def write_meta(rdir, meta):
+    """run.json, replaced atomically (a reservation must never be lost to a half-written file)."""
+    p = os.path.join(rdir, "run.json")
+    tmp = p + f".tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(meta, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
+
+
+def main_vm():
+    """The VM this checkout's own settings name (config/local.env, without MCOMP_CONFIG)."""
+    env = {k: v for k, v in os.environ.items() if k != "MCOMP_CONFIG"}
+    return subprocess.run(["bash", "-c", '. "$1/scripts/lib.sh" >/dev/null 2>&1; printf %s "$VM_NAME"', "_", LAB],
+                          env=env, capture_output=True, text=True).stdout.strip()
+
+
+def config_sha():
+    try:
+        with open(os.environ["MCOMP_CONFIG"], "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except (OSError, KeyError):
+        return ""
+
+
+ALLOW_MAIN = {"on": False}
+
+
+def verify_target():
+    """The VM about to be reset, checked again: never the main VM (unless --allow-main-vm), and, when a caller
+    confirmed one (`metacomputer learn bench`: BENCH_EXPECT_VM, _BASELINE, _CONFIG_SHA), exactly that VM from
+    exactly that settings file. The settings are shell code that can change between runs. Returns vm_config()."""
+    vc = vm_config()
+    e = os.environ.get
+    if not vc["vm"]:
+        sys.exit("the settings name no VM")
+    protected = {"metacomputer", e("BENCH_PROTECTED_VM") or main_vm()} - {""}
+    if vc["vm"] in protected and not ALLOW_MAIN["on"]:
+        sys.exit(f"MCOMP_CONFIG names the main VM '{vc['vm']}'; use a test VM (or pass --allow-main-vm).")
+    for key, now in (("BENCH_EXPECT_VM", vc["vm"]), ("BENCH_EXPECT_BASELINE", vc["baseline"]),
+                     ("BENCH_EXPECT_CONFIG_SHA", config_sha())):
+        if e(key) and e(key) != now:
+            sys.exit(f"refusing: the settings changed since they were confirmed ({key}: expected {e(key)[:16]}, "
+                     f"now {now[:16] or 'nothing'}); no VM was reset")
+    return vc
 
 
 def require_config(allow_main):
     if not os.environ.get("MCOMP_CONFIG"):
         sys.exit("Set MCOMP_CONFIG to the test VM's settings file: the benchmark resets that VM before each task.")
-    vc = vm_config()
-    if vc["vm"] == "metacomputer" and not allow_main:
-        sys.exit("MCOMP_CONFIG names the main VM 'metacomputer'; use a test VM (or pass --allow-main-vm).")
+    ALLOW_MAIN["on"] = bool(allow_main)
+    vc = verify_target()
+    # Every metacomputer command this run starts (reset, stop, the sessions' bridge) refuses once the settings
+    # name another VM than this one (bin/metacomputer, MCOMP_EXPECT_VM); a reset also checks, in its own process
+    # and right before it replaces the VM, the baseline and the settings file's hash (expect_guard).
+    os.environ["MCOMP_EXPECT_VM"] = vc["vm"]
+    os.environ["MCOMP_EXPECT_BASELINE"] = os.environ.get("BENCH_EXPECT_BASELINE") or vc["baseline"]
+    os.environ["MCOMP_EXPECT_CONFIG_SHA"] = os.environ.get("BENCH_EXPECT_CONFIG_SHA") or config_sha()
     return vc
 
 
@@ -377,7 +527,7 @@ def cmd_run(a):
     claude_v = subprocess.run([trusted_claude(), "--version"], capture_output=True, text=True).stdout.strip()
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
-            "switches": dict(sw, skill_hash=skill_hash(sw["skill"]),
+            "switches": dict(sw, skill_hash=skill_hash(sw["skill"]), **lessons_record(sw),
                              coord_guard_in_bridge=os.path.exists(os.path.join(LAB, "lib", "mcp_hub.py"))
                              and "MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_hub.py")).read()),
             "tasks": [t["id"] for t in tasks],
@@ -390,10 +540,13 @@ def cmd_run(a):
         meta["resumed"] = old.get("resumed", []) + [datetime.datetime.now().isoformat(timespec="seconds")]
         if old.get("switches") != meta["switches"] or (old.get("metacomputer") or {}).get("sha") != meta["metacomputer"]["sha"]:
             meta["resume_note"] = {"earlier_switches": old.get("switches"), "earlier_metacomputer": old.get("metacomputer")}
-    json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
-    log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}")
+    spent, meta["reservations"] = spent_so_far(all_recs, reservations_of(old))
+    cap = float(sw["cap"])
+    write_meta(rdir, meta)
+    log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}"
+        + (f"; ${spent:.2f} spent already, {len(meta['reservations'])} unsettled reservation(s) counted"
+           if old else ""))
     work, cfg, shim = prepare_workdir(run_id, sw)
-    spent, cap = sum((r.get("metrics") or {}).get("cost_usd") or 0.0 for r in all_recs), float(sw["cap"])
     # done = the latest record of each task, unless that was an infrastructure failure (retried)
     done = {r["task"] for r in report.latest(all_recs) if not infra_reason(r)}
     try:
@@ -412,10 +565,24 @@ def cmd_run(a):
                 meta["stopped"] = "VM in use by another controller"
                 break
             log(f"[{i}/{len(tasks)}] {t['id']}: {t.get('title', '')}")
+            # reserve the task's budget before its session starts: if this process dies before the record is
+            # written, every later resume charges it
+            res = {"id": uuid.uuid4().hex[:12], "task": t["id"], "usd": budget,
+                   "at": datetime.datetime.now().isoformat(timespec="seconds")}
+            meta["reservations"].append(res)
+            write_meta(rdir, meta)
             rec = run_task(t, sw, rdir, work, cfg, shim)
-            spent += rec["metrics"].get("cost_usd") or 0.0
+            rec["budget_usd"] = budget
+            rec["reservation"] = res["id"]
+            if rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
+                rec["cost_unknown"] = True       # no cost reported: counted at its budget
+            spent += charge(rec)
             with open(os.path.join(rdir, "results.jsonl"), "a") as f:
                 f.write(json.dumps(rec) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            meta["reservations"] = [r for r in meta["reservations"] if r["id"] != res["id"]]   # settled by the record
+            write_meta(rdir, meta)
             mm = rec["metrics"]
             log(f"  {'PASS' if rec['check'].get('pass') else 'fail'} score={rec['check'].get('score')} "
                 f"cost=${mm.get('cost_usd') or 0:.2f} turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
@@ -430,7 +597,7 @@ def cmd_run(a):
     finally:
         meta["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
         meta["spent_usd"] = round(spent, 4)
-        json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
+        write_meta(rdir, meta)
         shutil.rmtree(work, ignore_errors=True)
         if not a.keep_running:
             log(f"stopping {vc['vm']}")
@@ -451,6 +618,7 @@ def run_task(t, sw, rdir, work, cfg, shim):
     st = {}
     for attempt in range(2):
         if sw["reset"] == "each":
+            verify_target()                     # right before every reset
             ok, msg, st = reset_vm()
         else:
             st = status()

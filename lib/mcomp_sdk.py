@@ -159,7 +159,8 @@ def open_connection(env=None, kind="sdk", session=None, tools_hash=None, timeout
     env = dict(os.environ if env is None else env)
     hello = {"jsonrpc": "2.0", "id": "mcomp-hello", "method": "metacomputer/hello",
              "params": {"protocol": mcp_hub.PROTOCOL, "kind": kind, "session": session, "cwd": os.getcwd(),
-                        "settings": mcp_hub.settings_of(env), "tools_hash": tools_hash, "pid": os.getpid()}}
+                        "settings": mcp_hub.settings_of(env), "tools_hash": tools_hash, "pid": os.getpid(),
+                        "lessons": mcp_hub.lessons_of(env)}}
     for attempt in range(3):
         core = None
         if mcp_hub.mode(env) == "off":
