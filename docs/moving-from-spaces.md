@@ -67,8 +67,10 @@ question still waiting is withdrawn, and no further step starts.
 
 ## What's the same
 
-- Every use asks by default, and one approval covers one use (a sign-in's username and
-  password together).
+- Everything you import asks before every use by default (`each`), and one approval
+  covers one use (a sign-in's username and password together). A secret you add yourself
+  with `set` doesn't ask once the vault is unlocked, unless you give it `--approval each`
+  (or later `policy NAME --approval each`, or unlock with `--confirm each`).
 - Approving with Touch ID or your login password, from any terminal (`approve ID`). With
   `unlock --touch-id`, every question also shows that dialog by itself.
 - Items you relax (`policy ... --approval session`) and unattended rules that expire.

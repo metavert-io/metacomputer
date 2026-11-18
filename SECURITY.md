@@ -775,7 +775,13 @@ from your own terminal. An API key never enters the VM at all: the VM gets a
 short-lived token for a proxy that adds the key on the way out.
 
 **The limit, up front.** This keeps values out of Claude's view in normal operation,
-and every use waits for you. It is not a wall against a deliberately hostile agent.
+and nothing is used until you unlock the vault in your own terminal.
+- Whether each use then asks depends on the secret. Imported secrets ask at every use
+  (`each`). A secret you add with `set` doesn't, once the vault is unlocked (`session`).
+- For per-use approval on such a secret, add `--approval each`, change it later with
+  `policy NAME --approval each`, or unlock with `--confirm each`.
+
+It is not a wall against a deliberately hostile agent.
 - By default Claude also has a shell in the VM as the desktop user, and Chrome runs as
   that user. Code running there can pose as Chrome's DevTools to receive a fill, or
   read a filled field back.
@@ -1083,9 +1089,17 @@ Unattended rules are made the same way, with the rule and its expiry in the dial
 - Test builds decide "has Touch ID" from `MCOMP_VAULT_TEST_BIOMETRY` instead of asking
   macOS, and release builds don't contain that switch.
 
-**Nothing a program does can approve.** Claude Code runs as you and can run any
+**What a program can and can't approve.** Claude Code runs as you and can run any
 `metacomputer` or `mcomp-vault` command, or write to the vault's socket directly, so a
-request on the socket proves nothing about who sent it:
+request on the socket proves nothing about who sent it.
+- **In presence mode** (the default on a Mac with Touch ID and a finger enrolled), nothing
+  a program does can approve. Only the system dialog or the passphrase does, as below.
+- **With typed approvals** (presence mode off, or a Mac without Touch ID), a line typed at
+  the unlock terminal approves. So a program that can type into that terminal could
+  approve a use: a multiplexer allowed with `--allow-multiplexer`, an editor's built-in
+  terminal, and the other cases under "Keystroke injection into the unlock terminal" in
+  "What doesn't hold".
+- In either mode, the dialog and the passphrase proof can't be produced by a program:
 - `approve ID` only asks the unlock process to show the system dialog. macOS draws it,
   naming the program and what it allows (`approve request 5f2c9a0e, for this one use:
   fill x-login (password) into https://x.com on VM metacomputer, asked by Claude Code in
@@ -1690,13 +1704,17 @@ something waits for you:
     screenshots and recordings show them.
   - Values are never put on a command line or in an environment variable. A VM answer
     that contains the value (at any length, even a 6-digit code) is withheld.
-- **Every use waits for you.** The vault is locked until you unlock it in your own
-  terminal with its passphrase.
+- **Nothing is used until you unlock.** The vault is locked until you unlock it in your
+  own terminal with its passphrase. Imported secrets then ask at every use; secrets you
+  add with `set` ask only with `--approval each` (or `policy NAME --approval each`, or
+  `unlock --confirm each`).
   - It locks again on Ctrl-C, when its time is up, or when that terminal closes.
   - Your terminal shows every request and its outcome, never the values.
   - With `each`, you confirm each use by typing its name, or with Touch ID, your login
-    password or the passphrase through `approve ID`; nothing a program sends can do it
-    for you. Identity providers' sign-in pages always ask.
+    password or the passphrase through `approve ID`. In presence mode nothing a program
+    sends can confirm it for you. With typed approvals, a program that can type into the
+    unlock terminal could (see "Keystroke injection into the unlock terminal" below).
+    Identity providers' sign-in pages always ask.
   - Adding, changing or deleting a secret, binding a VM and relaxing a session's
     approval each need the passphrase again, even while the vault is unlocked.
 - **The request travels to a program Claude can't change or read from.** The value
