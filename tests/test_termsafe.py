@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
@@ -143,13 +144,16 @@ def stream_checks():
           and len(out) < 4000, (r.returncode, len(out)))
 
 
-def on_pty(argv, env, timeout=60):
-    """Run argv with stdout and stderr on a terminal; everything it printed."""
+def on_pty(argv, env, timeout=60, marker=None):
+    """Run argv with stdout and stderr on a terminal; everything it printed. With marker: also the seconds after
+    the start at which the marker text first appeared and at which the output ended."""
     import pty
     m, s = pty.openpty()
+    t0 = time.time()
     p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=s, stderr=s, env=env, close_fds=True)
     os.close(s)
     got = b""
+    seen = None
     while True:
         try:
             chunk = os.read(m, 65536)
@@ -158,16 +162,25 @@ def on_pty(argv, env, timeout=60):
         if not chunk:
             break
         got += chunk
+        if marker and seen is None and marker.encode() in got:
+            seen = time.time() - t0
+    ended = time.time() - t0
     p.wait(timeout)
     os.close(m)
+    if marker:
+        return p.returncode, got.decode("utf-8", "replace"), seen, ended
     return p.returncode, got.decode("utf-8", "replace")
 
 
 FAKE_SSH = r'''#!/bin/sh
 printf 'ssh says \033]52;c;SGk=\007\033[2J\n' >&2
 case "$*" in
-  *guest-status*) printf '%s\n' '{"ready": true, "resolution": "1920x1080\u001b]52;c;SGk=\u0007", "driver_version": "0.53\u001b[2J", "active_window_title": "t", "loadavg": ["0.1"], "uptime_s": 5}' ;;
-  *desktop-record*) printf 'recording stream:x \033]52;c;SGk=\007\033[2J\n' ;;
+  *guest-status*) printf '%s\n' '{"ready": true, "resolution": "1920x1080\u001b]52;c;SGk=\u0007", "driver_version": "0.53\u001b[2J", "active_window_title": "t", "loadavg": {"\u001b]0;pwned\u0007": 1, "‮": 2}, "mem_available_mb": {"\u001b[5m": 1}, "uptime_s": 5}' ;;
+  *desktop-record*)
+    if [ "${FAKE_REC:-}" = slow ]; then    # a recorder that keeps talking: its words must stream, not pile up
+      printf 'recording stream:y \033[2J\n'; sleep 3; printf 'still going\n'; exit "${FAKE_REC_RC:-0}"
+    fi
+    printf 'recording stream:x \033]52;c;SGk=\007\033[2J\n' ;;
   *python3*) cat >/dev/null; printf '{"note": "n\\u001b]52;c;SGk=\\u0007 \342\200\256"}\n' ;;
   *input-reset*) printf '0\033[2J\n' ;;
   *) exit 0 ;;
@@ -210,6 +223,20 @@ def cli_checks():
         rc, out = on_pty([cli, "record", "start", "clip1"], dict(env, RECORD_DIR=os.path.join(td, "rec")))
         check("record start on a terminal: the recorder's answer is escaped", "\x1b]52" not in out and "\x1b[2J" not in out
               and "\\x1b]52" in out and "recording the guest desktop" in out, (rc, out[-300:]))
+        state = os.path.join(td, "run", "manual-recording")
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(state)
+        renv = dict(env, RECORD_DIR=os.path.join(td, "rec2"), FAKE_REC="slow")
+        rc, out, seen, ended = on_pty([cli, "record", "start", "clip2"], renv, marker="recording stream:y")
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(state)
+        check("record start streams the recorder's words, escaped, as they come (not held until it ends)",
+              seen is not None and ended - seen > 2 and "\x1b[2J" not in out and "\\x1b[2J" in out and rc == 0,
+              (seen, ended, rc, out[-200:]))
+        rc, out = on_pty([cli, "record", "start", "clip3"], dict(renv, RECORD_DIR=os.path.join(td, "rec3"),
+                                                                  FAKE_REC_RC="1"))
+        check("…and the recorder's own exit status still decides (a failed start says so)",
+              rc != 0 and "could not start recording" in out, (rc, out[-200:]))
         # status: a gateway that looks alive, so the guest's own report is read and shown
         gw = subprocess.Popen(["sleep", "60"])
         try:

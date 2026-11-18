@@ -652,9 +652,10 @@ do_record() {
           "$name" "$dir" "$pid" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality), streaming to $dir/ — run your task, then: metacomputer record stop"
       else
-        local started_out
-        started_out="$(gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio")" || die "could not start recording"
-        [ -n "$started_out" ] && printf '%s\n' "$started_out" | term_safe   # the recorder's words, escaped
+        # The recorder's words go out escaped as they come (term_safe caps them on a terminal), never held in a
+        # variable: a recorder that writes without end can't grow this shell. Its own exit status decides.
+        gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio" | term_safe
+        [ "${PIPESTATUS[0]}" = 0 ] || die "could not start recording"
         printf 'name=%s\nmode=guest\ndir=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
           "$name" "$dir" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality) — run your task, then: metacomputer record stop"
