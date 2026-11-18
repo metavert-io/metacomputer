@@ -196,6 +196,16 @@ if rec["user"] == "mcfill":
         out = {{"ok": True, "mode": req["mode"], "field": req["field"], "origin": "https://evil.example", "chars": 3}}
     elif flag("echo-value-next"):
         out = {{"ok": False, "denied": False, "reason": "saw " + str(req.get("value"))}}
+    elif req.get("value") and flag("reason-leak-next"):
+        # A hostile VM that has the value puts it, encoded, into its answer...
+        import base64
+        out = {{"ok": False, "denied": True, "reason": "the field holds " + base64.b64encode(req["value"].encode()).decode()}}
+    elif req.get("value") and flag("stderr-leak-next"):
+        # ...or into its stderr, with no answer at all.
+        import base64
+        log()
+        sys.stderr.write("debug " + base64.b64encode(req["value"].encode()).decode() + "\n")
+        sys.exit(1)
     elif flag("nested-value-next"):
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": {{"value": req.get("value")}},
                "route": "element"}}
@@ -241,6 +251,11 @@ elif "-czf -" in remote:
 elif "mcomp-session-load" in remote:
     rec["kind"] = "session:load"
     open(os.path.join(d, "loaded.tgz"), "wb").write(sys.stdin.buffer.read())
+    if flag("load-leak-next"):
+        # A hostile VM that got the session writes part of it to stderr and fails.
+        log()
+        sys.stderr.write("SECRET-FROM-GUEST-7731\n")
+        sys.exit(7)
 else:
     rec["kind"] = "other"
 log()
@@ -639,11 +654,22 @@ def run(td, procs):
 
     flag("deny-next")
     r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
-    check("a refusal from the VM side: exit 2 with its reason", r.returncode == 2 and "not a password field" in js(r).get("reason", ""))
+    check("a refusal from the VM side after it got the value: exit 2, its reason in the vault's own words",
+          r.returncode == 2 and "isn't the kind of field this fills" in js(r).get("reason", ""), r.stdout)
     flag("ansi-next")
     r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
-    check("control and bidi characters from the VM never reach the output", r.returncode == 2 and "pwned" in r.stdout
-          and not any(x in r.stdout + r.stderr for x in NASTY), repr(r.stdout))
+    check("control and bidi characters from the VM never reach the output (nor its words, once it has the value)",
+          r.returncode == 2 and "pwned" not in r.stdout and not any(x in r.stdout + r.stderr for x in NASTY), repr(r.stdout))
+    import base64 as b64
+    enc = b64.b64encode(PW_VALUE.encode()).decode()
+    flag("reason-leak-next")
+    r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    flag("stderr-leak-next")
+    r2 = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    alog_now = open(os.path.join(vdir, "audit.jsonl")).read()
+    check("a VM that encodes the value it got into its answer or its stderr: neither reaches the result or the audit log",
+          r.returncode in (2, 4) and r2.returncode == 4 and enc not in r.stdout + r.stderr + r2.stdout + r2.stderr and enc not in alog_now,
+          (r.stdout, r2.stdout))
     flag("echo-value-next")
     r = client("fill", "web-otp", "--vm", "testvm", "--field", "otp")
     check("a VM answer holding the value is withheld, even a 6-digit code", r.returncode == 4
@@ -768,11 +794,31 @@ def run(td, procs):
     r = subprocess.run([sys.executable, "-I", "-c", loader, root, "prof1"], input=archive, capture_output=True, timeout=60)
     check("loader refuses a profile folder that is a symbolic link", r.returncode == 5 and "symbolic link" in r.stderr.decode())
 
-    # a passphrase-gated policy: same-VM loads stop asking; other VMs still ask
+    # A whole browser profile may hold an identity provider's sign-in: every load asks, whatever its policy, and
+    # no rule or grant covers it.
     rc, out = tty([BIN, "session", "policy", "s1", "--approval", "session"], [("Vault passphrase", PASS + "\n")])
-    check("session policy (with the passphrase)", rc == 0 and "no longer asks" in out, out)
-    r = client("session", "load", "s1", "--vm", "testvm")
-    check("with policy 'session', loading into the same VM doesn't ask", r.returncode == 0, r.stdout)
+    check("session policy (with the passphrase) on a whole-profile session: saved, and says loading still asks", rc == 0
+          and "still asks every time" in out, out)
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.expect("identity provider")
+    u2.send("s1 unlock\n")
+    rc, out, _ = finish(proc)
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.send("s1\n")
+    rc2, out2, _ = finish(proc)
+    check("...a whole-profile load still asks with policy 'session', and `s1 unlock` covers only that one load", rc == 0 and rc2 == 0, (out, out2))
+    r = client("rule", "add", "--session", "s1", "--project", td, "--for", "1h")
+    check("...and no unattended rule can cover it", r.returncode != 0 and "asks at every load" in r.stderr, r.stderr)
+    flag("load-leak-next")
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.send("s1\n")
+    rc, out, err = finish(proc)
+    check("a VM that writes what it got to stderr and fails: its words reach neither the result nor the audit log",
+          rc == 4 and "SECRET-FROM-GUEST" not in out + err and "exit 7" in out
+          and "SECRET-FROM-GUEST" not in open(os.path.join(vdir, "audit.jsonl")).read(), out)
     proc = background("session", "load", "s1", "--vm", "testvm2")
     u2.expect("Load the sealed session s1, saved from VM testvm, into a different VM, testvm2")
     u2.send("s1\n")
@@ -783,8 +829,11 @@ def run(td, procs):
         b = f.read(1)
         f.seek(40)
         f.write(bytes([b[0] ^ 1]))
-    r = client("session", "load", "s1", "--vm", "testvm")
-    check("a changed sealed file is refused", r.returncode == 4 and "changed" in js(r).get("reason", ""))
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.send("s1\n")
+    rc, out, _ = finish(proc)
+    check("a changed sealed file is refused", rc == 4 and "changed" in (json.loads(out.strip().splitlines()[-1]) if out.strip() else {}).get("reason", ""), out)
 
     # changes while unlocked need the passphrase; the server sees them at once
     rc, out = tty([BIN, "delete", "web-text"], [("Vault passphrase", PASS + "\n")])

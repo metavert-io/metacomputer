@@ -381,9 +381,9 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
   fi
   export_options
   local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
-  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" "$stg" <<'EOF'
+  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" "$stg" "$VAULT_BIN" <<'EOF'
 import json, os, subprocess, sys
-js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir, stg = sys.argv[1:]
+js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir, stg, vault_bin = sys.argv[1:]
 sys.path.insert(0, libdir)
 import storage
 import vm_shell
@@ -415,6 +415,18 @@ try:
     out["lessons"] = learn_store.summary()
 except Exception:
     out["lessons"] = None
+# The vault's approvals: presence mode (Touch ID / login password / passphrase for every approval) or typed answers.
+vs = None
+if os.access(vault_bin, os.X_OK):
+    try:
+        r = subprocess.run([vault_bin, "status", "--json"], capture_output=True, text=True, timeout=20)
+        vs = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        vs = None
+if vs is not None:
+    on = vs.get("presence", vs.get("presence_default"))
+    out["vault"] = {"approvals": ("presence" if on else "typed") if on is not None else None, "why": vs.get("presence_why"),
+                    "unlocked": vs.get("unlocked"), "decided": "presence" in vs}
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0)
 def y(b): return "\033[33m" + b + "\033[0m"
@@ -460,6 +472,11 @@ if out["lessons"] is not None:
             print(f"  ! {_esc(pr)}")
 for line in storage.describe_security(out["storage"]):
     print(line)
+v = out.get("vault")
+if v and v["approvals"]:
+    print("Secrets vault approvals (SECURITY.md, \"Approving from elsewhere\")")
+    print(f"  approvals    {'presence mode' if v['approvals'] == 'presence' else y('typed')}   {_esc(str(v['why']))}"
+          + ("" if v["decided"] else "; by default here (`metacomputer secrets presence on|off|auto` or an unlock flag changes it)"))
 EOF
 }
 

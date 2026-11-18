@@ -10,9 +10,10 @@
 #   scripts/build-vault.sh --test PATH  build a TEST binary at PATH, never in the install
 #                                       folder: it honours MCOMP_VAULT_TEST_SSH (a stub
 #                                       instead of /usr/bin/ssh), MCOMP_VAULT_TEST_LISTENERS,
-#                                       MCOMP_VAULT_TEST_PROMPT_TIMEOUT and MCOMP_VAULT_TEST_LOCAL_AUTH
+#                                       MCOMP_VAULT_TEST_PROMPT_TIMEOUT, MCOMP_VAULT_TEST_LOCAL_AUTH
 #                                       (a stand-in for the person at the Touch ID dialog, which a
-#                                       test build never shows), and runs only with
+#                                       test build never shows) and MCOMP_VAULT_TEST_BIOMETRY (a
+#                                       stand-in for "this Mac has Touch ID"), and runs only with
 #                                       MCOMP_VAULT_DIR outside ~/Library; tests/test_secrets.py
 #                                       uses it. Release builds don't contain that code.
 #

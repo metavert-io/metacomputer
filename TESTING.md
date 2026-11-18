@@ -798,7 +798,7 @@ connection to the VM and checks:
 
 Both need no VM, and every value in them is a dummy.
 
-`python3 tests/test_secrets.py` (127 checks, about 50 s) builds two copies of
+`python3 tests/test_secrets.py` (130 checks, about 50 s) builds two copies of
 `mcomp-vault`:
 - a release build, which must not contain the test switches;
 - a test build that runs a stub instead of `ssh` (`scripts/build-vault.sh --test`).
@@ -829,6 +829,8 @@ person would. It checks that:
   - `y` and wrong words refuse, and send only a check without the value;
   - the question shows the Chrome profile and the selector (one line, at most 80 characters);
   - the secret's name allows, and only the approved site goes with the value;
+  - once the value has gone to the VM, a failure reason or error output that carries it
+    (a stand-in leaks it) is replaced by the vault's own words;
   - a check naming another site is refused;
   - the listener is checked again after approval;
   - no answer times out, and a question can't outlast the unlock;
@@ -837,8 +839,11 @@ person would. It checks that:
 - control and bidi characters from the VM or a hostile request reach no output,
   terminal or log, and a VM answer holding the value (even a 6-digit code) is withheld;
 - sealed sessions:
-  - save and replace always ask, and load asks unless the passphrase-gated policy
-    says otherwise;
+  - save, replace and load always ask, whatever the passphrase-gated policy says, and
+    no rule can be made for a whole profile;
+  - when a save or load fails after the session reached the VM, the reason is the
+    vault's own and the VM's error output (a stand-in writes a marker there) reaches no
+    result or log;
   - loading into another VM asks, naming both, and loading under another profile name
     is refused;
   - a changed file is refused;
@@ -931,7 +936,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (77 checks, about 3 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (93 checks, about 3 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -952,9 +957,20 @@ person at it, and without it there is none. It covers:
 - **`login`:** one question, then username and password into their own fields on the
   checked site; a client-chosen request id, never reused;
 - **unattended rules:** `--for` required (at most 30 days), none for identity providers,
-  covering only sessions in the project (and requests passed on for one with
-  `--on-behalf-pid`, never one claimed from inside another session), site rules, removal,
-  expiry, `--passphrase` with and without the right passphrase;
+  covering only sessions in the project (never a request that only claims one with
+  `--on-behalf-pid`, which is recorded as unverified), site rules, removal, expiry,
+  `--passphrase` with and without the right passphrase;
+- **binding:** a use covered by a grant or a rule is still checked in the VM and the
+  value goes only to the site checked, including a site rule on the secret's second
+  site;
+- **presence mode** (`MCOMP_VAULT_TEST_BIOMETRY=available|not-enrolled|none` stands in
+  for macOS's Touch ID check): on by default with Touch ID, where a typed answer only
+  chooses the scope and the passphrase or the dialog approves; the warning without
+  Touch ID or with no finger enrolled; `--require-presence`, `--no-require-presence`
+  and `presence on|off|auto`; the mode in `status` (locked and unlocked) and
+  `metacomputer security`; and that a release build ignores the stand-in;
+- **audit continuity:** after a last record of several megabytes, the next one still
+  links to it;
 - **`unlock --touch-id`:** the dialog allows or refuses; inside tmux a typed answer
   doesn't approve;
 - **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit

@@ -28,9 +28,11 @@ In your own terminal (these ask for the vault passphrase):
                                          `ask` and {ask} are typed with the echo off)
   audit-sink show NAME --key | remove NAME
   policy NAME --approval session|each    whether a secret's uses ask first (without typing its value again)
-  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id]
+  presence on|off|auto                   presence mode by default (auto: on where this Mac has Touch ID)
+  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]
                                          serve requests from this terminal until Ctrl-C or the time is up;
-                                         --touch-id also shows macOS's Touch ID / login password dialog per question
+                                         --touch-id also shows macOS's Touch ID / login password dialog per question;
+                                         presence mode: every approval needs that dialog or the passphrase
 
 You, from any terminal (they need Touch ID / your login password, or the passphrase):
   approve ID [--passphrase]              allow one waiting request, for this one use
@@ -96,6 +98,7 @@ func runMain(_ argv: [String]) -> Int32 {
         case "deny": return try cmdDeny(paths, rest)
         case "rule": return try cmdRule(paths, rest)
         case "policy": return try cmdPolicy(paths, rest)
+        case "presence": return try cmdPresence(paths, rest)
         case "session": return try cmdSession(paths, rest)
         case "token": return try cmdToken(paths, rest)
         case "tokens": return try cmdTokens(paths, rest)
@@ -352,17 +355,23 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 // MARK: - unlock
 
 func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id"])
-    guard a.positional.isEmpty else { throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id]") }
+    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id", "require-presence", "no-require-presence"])
+    guard a.positional.isEmpty else {
+        throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]")
+    }
+    guard !(a.has("require-presence") && a.has("no-require-presence")) else { throw usageError("--require-presence or --no-require-presence, not both") }
     let dur = a.last("for") ?? "30m"
     guard let seconds = parseDuration(dur), seconds <= 12 * 3600 else { throw usageError("--for: like 90s, 30m or 2h (at most 12h)") }
     let confirm = a.last("confirm") ?? "session"
     guard ["session", "each"].contains(confirm) else { throw usageError("--confirm session or each") }
     try requireTTY("unlock")
     let mux = terminalMultiplexer()
-    // With --touch-id the confirmation is the system's dialog, which nothing typed into the pane can answer.
-    if let m = mux, confirm == "each", !a.has("allow-multiplexer"), !a.has("touch-id") {
-        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), add --touch-id to confirm with Touch ID or your login password instead, or add --allow-multiplexer if you accept that")
+    let flag: Bool? = a.has("require-presence") ? true : (a.has("no-require-presence") ? false : nil)
+    let bio = detectBiometry()
+    // With --touch-id or presence mode the confirmation is the system's dialog (or the passphrase), which nothing
+    // typed into the pane can give. (The vault's own setting is read after the passphrase; this uses what's known.)
+    if let m = mux, confirm == "each", !a.has("allow-multiplexer"), !a.has("touch-id"), !(flag ?? (bio == .touchID)) {
+        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), add --require-presence or --touch-id to confirm with Touch ID or your login password instead, or add --allow-multiplexer if you accept that")
     }
     try ensurePrivateDir(paths.dir)
     _ = try readHeader(paths)
@@ -378,9 +387,11 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     ftruncate(lfd, 0)
     _ = writeAll(lfd, Array("\(getpid())\n".utf8))
     installPromptSignalHandlers()
-    let (key, _) = try unlockKey(paths)
+    let (key, payload) = try unlockKey(paths)
+    let presence = resolvePresence(flag: flag, setting: payload.require_presence, biometry: bio)
     let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each",
-                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"), touchID: a.has("touch-id"))
+                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"), touchID: a.has("touch-id"),
+                              presence: presence)
     let rc = try server.serve()
     ftruncate(lfd, 0)
     close(lfd)
@@ -434,7 +445,7 @@ func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "
 }
 
 /// --request-id ID (the id the request gets if it has to wait for approval; 8 hex digits, unused) and
-/// --on-behalf-pid PID (a program outside Claude Code passing a request on for a Claude Code process).
+/// --on-behalf-pid PID (the Claude Code process a client says it asks for: shown and recorded as unverified, never trusted).
 func useOptions(_ a: Args, _ req: inout [String: Any]) throws {
     if let id = a.last("request-id") {
         guard validRequestID(id) else { throw usageError("--request-id: 8 hex digits (0-9, a-f)") }
@@ -580,7 +591,9 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         try updateVault(paths, key) { p in p.sessions[name]?.approval = ap }
         audit(paths, ["op": "session_policy", "result": "ok", "name": name, "approval_mode": ap], macKey: vaultAuditKey(paths, key))
         oprint(ap == "session"
-               ? "Loading \(name) into the VM it was saved from no longer asks (other VMs and replacing it still do)."
+               ? (existing.sessions[name]!.alwaysAsks
+                  ? "Saved, but loading \(name) still asks every time: it holds, or as a whole browser profile may hold, an identity provider's sign-in."
+                  : "Loading \(name) into the VM it was saved from no longer asks (other VMs and replacing it still do).")
                : "Loading \(name) asks at the unlock terminal each time.")
         return Exit.ok
     }
@@ -671,9 +684,16 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         out["enclave"] = h.enclave != nil
         out["recovery_key"] = h.wraps?.contains { $0.kind == "recovery" } ?? false
     }
+    let bio = detectBiometry()
+    out["biometry"] = bio.rawValue
     if let res = try? request(paths, ["op": "status"], timeout: 10), res["ok"] as? Bool == true {
         out["unlocked"] = true
-        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer", "tokens"] { if let v = res[k] { out[k] = v } }
+        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer", "tokens", "presence", "presence_why"] { if let v = res[k] { out[k] = v } }
+    } else {
+        // Locked: the default here (the vault's own setting, inside it, and an unlock flag can change it).
+        let (on, why, _) = resolvePresence(flag: nil, setting: nil, biometry: bio)
+        out["presence_default"] = on
+        out["presence_why"] = why
     }
     if a.has("json") { oprint(jsonLine(out)); return Exit.ok }
     if !(out["exists"] as? Bool ?? false) {
@@ -685,6 +705,13 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     if out["exists"] as? Bool == true {
         oprint("keys:     format \(out["format"] ?? "?"), " + ((out["enclave"] as? Bool == true) ? "bound to this Mac's Secure Enclave, with a recovery key" : "passphrase only (no Secure Enclave)"))
+    }
+    if let on = out["presence"] as? Bool {
+        oprint("approvals: " + (on ? "presence mode: Touch ID or the login password (or the passphrase) for every approval" : "typed at the unlock terminal")
+               + " (\(out["presence_why"] ?? "?"))")
+    } else if let on = out["presence_default"] as? Bool {
+        oprint("approvals: " + (on ? "presence mode by default here" : "typed by default here") + " (\(out["presence_why"] ?? "?"); "
+               + "`secrets presence on|off|auto` or an unlock flag changes it)")
     }
     oprint("file:     \(paths.vault)")
     oprint("socket:   \(paths.socket)")

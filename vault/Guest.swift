@@ -245,7 +245,8 @@ final class GuestRunner {
         }
         let last = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
         guard let raw = parseJSONObject(Array(last.utf8)), raw["ok"] is Bool else {
-            let why = stderr.isEmpty ? "exit \(r.status)" : oneLine(stderr, max: 200)
+            // Once the VM has the value, nothing it writes is passed on (it could hold the value in any form).
+            let why = (stderr.isEmpty || valueString != nil) ? "exit \(r.status)" : oneLine(stderr, max: 200)
             return ["ok": false, "status": "error", "reason": "the VM side failed (\(why))"]
         }
         // Never pass the value on, whatever came back: anything holding it, at any depth or length.
@@ -260,9 +261,34 @@ final class GuestRunner {
         let ok = out["ok"] as? Bool ?? false
         out["status"] = ok ? "ok" : ((out["denied"] as? Bool ?? false) ? "denied" : "error")
         out["denied"] = nil
-        if let reason = out["reason"] as? String { out["reason"] = oneLine(reason) }
+        if let reason = out["reason"] as? String {
+            // With the value sent, the VM's words are replaced by this process's own (secret-fill's known reasons).
+            out["reason"] = valueString != nil ? fillReasonAfterValue(reason) : oneLine(reason)
+        }
         return out
     }
+}
+
+/// Why a fill that carried the value failed, in this process's words: the reasons secret-fill gives, matched by
+/// how they start, never copied, since the VM had the value and could put it in any form into its answer.
+func fillReasonAfterValue(_ guest: String) -> String {
+    let known: [(String, String)] = [
+        ("the page changed during the fill", "the page changed during the fill; the value may have gone elsewhere (check the page)"),
+        ("the focus moved while filling", "the focus moved while filling; the text may have gone to another field (check the page)"),
+        ("the field holds", "the field doesn't hold as many characters as were typed (a length limit, or the page changed it)"),
+        ("no open tab on", "no open tab on the secret's sites in the driver's Chrome; open the site first"),
+        ("no Chrome with DevTools", "no Chrome with DevTools is running; fills need page-mode Chrome (browser_prepare)"),
+        ("no Chrome is running on profile", "no Chrome is running on that profile"),
+        ("the selector isn't valid CSS", "the selector isn't valid CSS (it searches the page itself, not frames or shadow roots)"),
+        ("the selector matches", "the selector doesn't match exactly one element"),
+        ("no field is focused", "no field is focused in the page; click into the field first"),
+        ("the focused field is read-only", "the focused field is read-only or disabled"),
+        ("the focused element is", "the focused element isn't the kind of field this fills"),
+        ("tabs are open on the allowed sites", "several tabs are open on the allowed sites; close the others or bring the right one to the front"),
+    ]
+    let g = guest.lowercased()
+    for (prefix, text) in known where g.hasPrefix(prefix.lowercased()) || g.contains(prefix.lowercased()) { return text }
+    return "the VM reported that the fill didn't complete (its own words aren't passed on once it has the value); check the page and the focused field"
 }
 
 
