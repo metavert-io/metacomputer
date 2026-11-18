@@ -229,6 +229,9 @@ FKEY_RE = re.compile(r"^f(?:[1-9]|[12][0-9]|3[0-5])$")
 # Buttons that open or close a dialog, when a step names its target by role and name.
 DIALOG_BUTTON_RE = re.compile(r"^(?:ok|cancel|close|save|save as\W*|open|apply|yes|no|insert|print|delete|replace all|"
                               r"don.?t save|discard|keep current format|use .{1,40} format!?|done|finish|next)\b", re.I)
+# A window's own controls, when a step names one by role and name (a title bar's buttons, an app's full-screen button).
+WINDOW_BUTTON_RE = re.compile(r"^(?:maximi[sz]e|minimi[sz]e|restore|unmaximi[sz]e|full ?screen|exit full ?screen)\b",
+                              re.I)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -2375,9 +2378,10 @@ def geometry_step(tool, a, default_wid=None, batch=None):
     few words), or None. Pixels in a later step of the same batch were aimed from a screenshot taken before it, so
     the hub refuses them and asks for a fresh screenshot. Equivalent spellings count the same (a click with count 2
     is a double click). Not counted, because ordinary batches put pixel clicks after them (click a field, type,
-    Return, click the next field): a single plain click inside a window except on a dialog's button named by role
-    and name, typing (newlines too), set_value, scroll, and keys such as Return, Tab or Ctrl+A, even though a
-    click or Return can open or close a dialog."""
+    Return, click the next field): a single plain click inside a window except on a dialog's or the window's own
+    button named by role and name, typing (newlines too), set_value, scroll, and keys such as Return, Tab or
+    Ctrl+A, even though a click or Return can open or close a dialog. Counting single clicks would refuse 10 of
+    the 373 recorded benchmark batches, Return 3 and typed newlines 2 (SECURITY.md says what's left)."""
     if not isinstance(a, dict):
         return None
     if tool == "double_click":
@@ -2400,6 +2404,10 @@ def geometry_step(tool, a, default_wid=None, batch=None):
     if tool in ("click", "double_click") and str(a.get("role") or "").lower() in ("button", "push button") \
             and DIALOG_BUTTON_RE.match(str(a.get("name") or "").strip()):
         return f"a click on \"{clean(a.get('name'), 30)}\" can open or close a dialog"
+    if tool in ("click", "double_click") and str(a.get("role") or "").lower() in ("button", "push button",
+                                                                                   "toggle button") \
+            and WINDOW_BUTTON_RE.match(str(a.get("name") or "").strip()):
+        return f"a click on \"{clean(a.get('name'), 30)}\" can maximize, minimize or restore a window"
     if tool in ("press_key", "hotkey"):
         keys = key_names(a)
         combo = "+".join(keys)[:40]

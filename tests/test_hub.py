@@ -2041,6 +2041,29 @@ def coord_incomplete_checks():
     clear_claims()
 
 
+def batch3_checks():
+    print("#8: a window's own controls named in a batch; ordinary clicks and Return stay allowed (documented)")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running()
+    h = client(r, "call", session="b3")
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    n0 = len(tool_calls("run_steps"))
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"click": {"role": "button", "name": "Maximize"}}, {"click": {"x": 10, "y": 10}}]})
+    check("pixels after a click on the window's Maximize button by role and name are refused before the batch runs",
+          res.is_error and res.structured.get("code") == "pixels_after_window_change"
+          and len(tool_calls("run_steps")) == n0, res.text[:160])
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"click": {"x": 5, "y": 5}}, {"type_text": {"text": "a\n"}}, {"press_key": {"key": "Return"}},
+        {"click": {"x": 10, "y": 10}}]})
+    check("…while a plain click, typed newlines and Return before pixels still pass (the residual SECURITY.md names)",
+          not res.is_error, res.text[:160])
+    h.close()
+    r.stop()
+    clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -2079,6 +2102,7 @@ def main():
         lease3_checks()
         chrome_batch_checks()
         coord_incomplete_checks()
+        batch3_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
