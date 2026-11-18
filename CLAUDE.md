@@ -4,8 +4,8 @@ This project is a disposable Ubuntu 24.04 ARM64 XFCE desktop (a Lume VM, named
 by `VM_NAME` in `config/local.env`, default `metacomputer`) that you operate
 through **Cua Driver's MCP server running inside the VM**, exposed as the
 `metacomputer` MCP server (`install.sh` registers it for every project →
-`bin/metacomputer mcp-lazy`). Tools appear as
-`mcp__metacomputer__<tool>`. The user-level `metacomputer` skill
+`bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
+`lib/mcp_hub.py`). Tools appear as `mcp__metacomputer__<tool>`. The user-level `metacomputer` skill
 (`skills/metacomputer/`) is the entry point from any project; its
 [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rules.
 
@@ -34,8 +34,8 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   `skills/metacomputer/DESKTOP.md`.
 - Browsers: Firefox is the default; Chrome is installed. Modes and steps
   (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Never
-  send background input or `set_value` to Chrome (the lazy bridge enforces
-  it); `metacomputer input-reset` if Chrome ignores typing.
+  send background input or `set_value` to Chrome (the hub enforces it);
+  `metacomputer input-reset` if Chrome ignores typing.
 - Logins, 2FA codes and API keys: never ask for or type passwords, codes, keys or
   the vault passphrase. Use `metacomputer secrets list` / `fill NAME --field
   password|username|otp` in page-mode Chrome, and `token NAME` (a short-lived token and
@@ -43,6 +43,19 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   (`skills/metacomputer/SECRETS.md`). If it says locked, ask the user to run
   `metacomputer secrets unlock` in their own terminal. Only the user runs `init`,
   `set`, `bind`, `unlock`, `rekey`, `recover` and `audit-sink add|remove`.
+- The hub (`lib/mcp_hub.py`, `MCP_HUB=on`; architecture.md "The hub") is one
+  process per VM holding the one driver connection; Claude Code's bridge,
+  `metacomputer call` and scripts (`lib/mcomp_sdk.py`) all go through it, and it
+  applies every guard to every client: one controller (check and claim under
+  `owners.lock()`), the Chrome guard, bounded mode, the coordinate guard
+  (`COORD_GUARD`), action-log notes, events. A refusal from any of them is the
+  user's control: report it, never route around it (`call`, a script,
+  `MCOMP_DIRECT_BRIDGE=1`, the shell). New guards go in the hub, never in one
+  client. The VM is untrusted: keep the hub's frame limits and per-client
+  backlogs, and escape the VM's text on a terminal (`lib/termsafe.py`).
+  `metacomputer call --session NAME` keeps element tokens and driver state
+  between calls. Tests: `python3 tests/test_hub.py` (no VM) and
+  `tests/test_options.py G` (VM).
 - Don't reset or rebuild the VM without being asked (`metacomputer reset` restores
   the baseline; host recordings/results are kept).
 - Optional hardening (SECURITY.md): `ACTION_LOG`, `SSH_AUTH`, `DRIVER_MODE`.
@@ -79,7 +92,8 @@ metacomputer security [apply] | actions list|show|verify   # optional hardening,
 metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop user (docs/shell.md)
 metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
 metacomputer secrets list | fill NAME --field password | token NAME | status   # logins and API keys without seeing values
-metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --describe TOOL
+metacomputer call [--session NAME] [--json|--raw] TOOL '{json}'   # through the hub; or: python3 lib/mcp_client.py --tools | --describe TOOL
+metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
 ```
 
 ## Working on this repository
@@ -100,9 +114,10 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
-  `python3 tests/test_ssh_options.py`, `python3 tests/test_secrets.py`, `python3 tests/test_vault_ops.py`,
-  `python3 tests/test_secret_fill.py`, and the boundary checks `test_guest_import`, `test_termsafe`,
-  `test_key_pinning`, `test_build_refusals`, `test_owners`, `test_bench_workdir`, `test_vm_runner` (no VM),
+  `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
+  `python3 tests/test_vault_ops.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
+  `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
+  `test_bench_workdir`, `test_vm_runner` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild

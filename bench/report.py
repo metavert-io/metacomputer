@@ -96,6 +96,7 @@ def header(meta):
             f"- model `{sw.get('model')}`, effort {sw.get('effort') or 'default'}; {meta.get('claude_code')}\n"
             f"- skill `{sw.get('skill')}` (hash {sw.get('skill_hash')}); shell {sw.get('shell')}; "
             f"coordinate guard {sw.get('coord_guard')}{'' if sw.get('coord_guard_in_bridge') else ' (the bridge does not read it yet)'}; "
+            f"hub {sw.get('hub') or 'as configured'}; "
             f"screen {sw.get('screen') or 'VM default'}\n"
             f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
             f"spent ${meta.get('spent_usd', 0):.2f}; {meta.get('started')} to {meta.get('finished', '?')}"

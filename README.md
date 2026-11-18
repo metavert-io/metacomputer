@@ -66,13 +66,14 @@ than forty more.
 | Cua Driver, inside the VM | [Cua Driver](https://github.com/trycua/cua) 0.52.1, an MCP server for the desktop: accessibility trees, mouse and keyboard input, screenshots, recordings, and page-level tools for Chrome. It runs only in the VM and is never installed on your Mac. |
 | The shell channel | `metacomputer sh` runs a bash script in the VM as the desktop user and brings back its output and exit code. Claude uses it for files no app holds open, and the desktop for everything an app holds. |
 | The secrets vault | `metacomputer secrets`, a small vault on your Mac for passwords, 2FA seeds, sealed browser logins and API keys. It ships here and depends on no password manager. |
-| The `metacomputer` skill and MCP server | The skill ([skills/metacomputer/](skills/metacomputer/)) tells Claude Code when a task belongs on the virtual computer and how to work it. The MCP server, `metacomputer mcp-lazy`, is registered for every project, so the tools (`mcp__metacomputer__*`) are listed even while the VM is off. |
+| The `metacomputer` skill and MCP server | The skill ([skills/metacomputer/](skills/metacomputer/)) tells Claude Code when a task belongs on the virtual computer and how to work it. The MCP server, `metacomputer mcp-lazy`, is registered for every project, so the tools (`mcp__metacomputer__*`) are listed even while the VM is off. It reaches the VM through the hub, one process per VM that `metacomputer call` and scripts share, and that applies every guard to each of them. |
 | The `metacomputer` command | `bin/metacomputer`, installed as `~/.local/bin/metacomputer` with the short alias `mcomp`. It starts and stops the VM, checks it, runs scripts in it, moves files, records, runs browser checks, keeps snapshots and opens the live view. |
 
 ```text
 Your Mac
 ├── Claude Code + the metacomputer skill
-│     ├── MCP server (metacomputer mcp-lazy) ─────SSH to 127.0.0.1, forced command────┐
+│     ├── MCP server (metacomputer mcp-lazy) ──┐
+│     ├── metacomputer call, scripts ──────────┴▶ hub: one per VM, every guard ─SSH──┐
 │     └── metacomputer sh ─────────────────────────SSH to 127.0.0.1, desktop user──────┤
 ├── secrets vault (unlocked in your terminal) ──fill account / API proxy over SSH─────┤
 ├── network gateway (cua-netgw): the VM reaches the public internet only              │
@@ -981,11 +982,11 @@ alias). `metacomputer help` prints the same list with every option.
 | `events sink add\|remove NAME ...` | Add or remove an event sink (your own terminal) |
 | `events sink list\|show\|test`, `events status\|tail`, `events emit`, `events drain`, `events watcher start\|stop\|status` | The sinks, the stream's state and local log, an event from a script, a retry now, the watcher |
 | `test [A-F]` | The GUI smoke suite, each test recorded |
-| `call TOOL ['JSON']` | One Cua Driver tool call, on a new connection |
 | `ssh [ops\|admin] [CMD...]` | A raw SSH shell in the VM (`ops` is the desktop user); prefer `sh` |
 | `logs [N]` | The last lines of the Lume, gateway and VM logs |
 | `where` | Project, config, skill, docs and results folders; VM names |
-| `mcp` / `mcp-lazy` | The direct MCP bridge (tests, scripts) and the on-demand one Claude Code uses |
+| `mcp-lazy` / `mcp` | The MCP bridge Claude Code uses, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection, used by the GUI tests and `web`) |
+| `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time |
 
 `stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart` and `sh`
 refuse while another session is using the VM; `--override` proceeds anyway.
@@ -1031,6 +1032,14 @@ instead.
 | --- | --- | --- |
 | `BROWSER` | `firefox` | `firefox` or `chrome` |
 | `MODE` | `human` | `human`, `page` or `hybrid` |
+
+**The hub** (one connection per VM, shared by every client; [architecture.md](architecture.md#the-hub)):
+
+| Key | Default | |
+| --- | --- | --- |
+| `MCP_HUB` | `on` | `on`: Claude Code's bridge, `metacomputer call` and scripts share one hub per VM, which applies every guard to each of them; `off`: each connects on its own, with the same guards |
+| `HUB_IDLE` | `10m` | The hub exits after this long with no client and no driver recording |
+| `COORD_GUARD` | `on` | `on`: pixel input is refused when the windows changed since the screenshot it was aimed from; `off`: only Cua Driver's own checks |
 
 **Shell channel** (`metacomputer sh`; [docs/shell.md](docs/shell.md)):
 
@@ -1154,7 +1163,7 @@ plain process that `start` and `stop` manage.
 - Output comes back when the script ends, capped per stream; write big outputs to a file and `get` it.
 - `--read-only` is a promise, not a sandbox: it skips the one-controller check and leaves out the desktop's environment, but doesn't stop a script from changing things.
 - The sizes and hashes in a result are the VM's own report; a compromised VM could report anything that fits the schema.
-- Claude Code's bridge doesn't take the owners lock yet, so a shell run and an acting tool call from two sessions starting in the same moment can both pass the check.
+- One controller at a time is checked and claimed in one step under the owners lock, for tool calls (in the hub) and shell runs alike. It keeps sessions from clashing; it isn't a barrier against a program running as you, which can use the direct connection (`MCOMP_DIRECT_BRIDGE=1`) the tests use.
 - `VM_SHELL=off` turns off this command, not SSH: `metacomputer ssh ops` still works for the Mac's own plumbing. Deny it in Claude Code's permissions if you want a barrier.
 
 **Bounded mode** (`DRIVER_MODE=bounded`, [SECURITY.md](SECURITY.md)):

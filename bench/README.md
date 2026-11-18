@@ -121,7 +121,8 @@ version and the model.
 | `--model` | `BENCH_MODEL` | `claude-opus-5-5` | The model |
 | `--skill DIR` | `BENCH_SKILL` | this checkout's `skills/metacomputer` | The skill the session gets (copied in as a project skill; its hash is recorded) |
 | `--shell allow\|forbid` | `BENCH_SHELL` | `allow` | `forbid` denies `metacomputer ssh` and `metacomputer sh` through the session's permissions and asks in the prompt to work through the desktop. This is the placeholder for comparing with and without the coming `metacomputer sh` |
-| `--coord-guard on\|off` | `BENCH_COORD_GUARD` | `off` | Passed to the bridge as `MCOMP_COORD_GUARD`. The bridge doesn't read it yet; `run.json` records whether it does (`coord_guard_in_bridge`) |
+| `--coord-guard on\|off` | `BENCH_COORD_GUARD` | `off` | Passed to the bridge as `MCOMP_COORD_GUARD`, which overrides the VM config's `COORD_GUARD`: the hub's coordinate guard (pixel input refused when the windows changed since its screenshot). `run.json` records whether this checkout has it (`coord_guard_in_bridge`) |
+| `--hub on\|off` | `BENCH_HUB` | the VM config's `MCP_HUB` | Passed as `MCOMP_MCP_HUB`: `on`, sessions reach the VM through the shared hub; `off`, each bridge has its own connection (the same guards) |
 | `--screen WxH` | `BENCH_SCREEN` | the VM's own (1920x1080) | Set with `xrandr` after each reset, e.g. `1280x800` or `1600x900`; the result records what the VM reports |
 | `--effort` | `BENCH_EFFORT` | the model's default | Claude Code's effort level |
 | `--budget USD` | `BENCH_BUDGET` | `3` | Per-task cap (`--max-budget-usd`); a task file can set `budget_usd` |
@@ -261,3 +262,16 @@ Its numbers are in `results/bench/baseline-2026-11-17/summary.md`. Because every
 task passed, later changes will show up mostly in cost, turns, time and the
 tool-call mix. Make tasks harder (or add some) when you need pass rates to
 separate two variants.
+
+The hub and the coordinate guard (2026-11-18, mcsecrets with native Calc,
+`ACTION_LOG=off`, the same skill, budget $2 a task) changed nothing measurable:
+
+| Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Refused |
+| --- | --- | --- | --- | --- | --- | --- |
+| `hub-baseline-2026-11-18`: `--hub off --coord-guard off` | 20/20 | $11.80 | 20.1 | 0.9 | 25 | 0 |
+| `hub-on-2026-11-18`: `--hub on --coord-guard on` | 20/20 | $11.83 | 20.2 | 0.9 | 25 | 0 |
+
+One hub served all 20 sessions and reconnected after each task's reset, and the
+coordinate guard refused nothing: in these tasks no window changed between a
+screenshot and the pixels aimed from it. Per-task differences are within one
+run's noise.

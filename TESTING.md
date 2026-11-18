@@ -24,7 +24,7 @@ and files read back from the VM's disk.
 
 ## Chrome guard: `python3 tests/test_chrome_guard.py`
 
-This test goes through `metacomputer mcp-lazy`, the bridge Claude Code sessions use. It checks four things:
+This test goes through `metacomputer mcp-lazy`, the bridge Claude Code sessions use, and so through the hub. It checks four things:
 - background input aimed at Chrome is sent in the foreground;
 - `set_value` and `run_script` aimed at Chrome are refused;
 - a `run_steps` batch aimed at Chrome is sent in the foreground;
@@ -106,7 +106,7 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the spool, including invalid and oversized files;
 - a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
 - eight processes emitting at once; debounce; `notify`;
-- the watcher's pieces (blocked connections batched a minute at a time, health changes), `events watcher start|stop`, and the bridge's hooks (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
+- the watcher's pieces (blocked connections batched a minute at a time, health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
 - the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
 - the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds;
 - the review's fixes, one or more checks each:
@@ -167,7 +167,7 @@ replayed copy of its final checkpoint (or an earlier one).
 It also runs the relay against a fake driver and checks that
 messages pass through unchanged.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py [A] [B] [C] [F]` runs against
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py [A] [B] [C] [D] [F] [G]` runs against
 a running **test** VM. It switches the VM's SSH and driver settings through the
 maintenance account, then puts them back to the defaults.
 - **A** (6 checks): a real session is logged in order, typed text is redacted,
@@ -187,6 +187,7 @@ maintenance account, then puts them back to the defaults.
   - Standard mode works again afterwards.
 
 - **F** (26 checks), the shell channel (`metacomputer sh`, below).
+- **G** (16 checks), the hub and the coordinate guard (below).
 
 The GUI suite also runs under the `desktop` profile: put
 `DRIVER_MODE=bounded` in the test VM's config and run
@@ -288,6 +289,89 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run.
+
+## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
+
+`python3 tests/test_hub.py` needs no VM (85 checks, about 45 s). A stand-in
+driver speaks MCP over stdio, keeps element tokens, driver sessions and
+recordings for as long as it runs, and logs every message it gets; the test
+moves its windows around in a file. Hubs run in a thread of the test (so their
+insides can be checked) or as their own process, in a temporary RUN_DIR. It checks:
+- the socket is 0600 in a 0700 folder; the peer's uid and pid come from the
+  kernel; a peer with another uid is refused before anything is read; a second
+  hub for the same VM exits 3; a RUN_DIR too long for a socket gets a short
+  private folder in `/tmp`; stopping removes the socket and frees the lock;
+- multiplexing: two clients with the same request ids each get their own
+  answer over one driver connection, the driver sees distinct rewritten ids,
+  `initialize` and `tools/list` never reach it, `tools/list_changed` reaches the
+  clients, `status` from inside and `hub status` from outside;
+- driver sessions: a Claude Code session gets its own and it ends when the
+  session disconnects; `call --session` carries an element token from one call
+  to the next (and with `MCP_HUB=off` it doesn't); a recording started by a
+  one-shot call keeps running;
+- idle exit after `HUB_IDLE`, but not while a driver recording runs; a client
+  with other settings refused while another client uses the hub, and the hub
+  restarting for it when it's alone; the driver dropping fails the pending
+  request clearly and the next call reconnects;
+- limits: a client message over the limit gets an error and its connection
+  closes while the others carry on; a driver message over the limit, and a driver
+  line that never ends, fail the request and drop the driver connection (memory
+  stays bounded), and the next call reconnects; a driver that stops reading is
+  dropped at the write deadline and its calls fail clearly; a client that sends 60 requests
+  and never reads doesn't hold up another client's calls and is disconnected
+  once its backlog is full;
+- one controller at a time, for Claude Code, `call` and scripts alike: refused
+  while another session acts (nothing reaches the driver; `needs_you.in_use`
+  with the project), reads allowed, a call claims the computer for its holder,
+  an acting call waits for the owners lock and a read doesn't;
+- the Chrome guard for every kind of client: `set_value` and `run_script`
+  aimed at Chrome refused before the driver, input sent in the foreground;
+- bounded mode: `launch_app` by path; when the session ends its clients stay
+  ended and a later client gets a new driver connection;
+- the action log through the hub (the real relay in front of the stand-in): one
+  file, each call naming its client, refusals logged with the client and without
+  the value, none of the hub's notes reaching the driver, a final signature that
+  verifies;
+- the coordinate guard: allowed while nothing changed; refused after a resize
+  (with the code, the hint and the read to make, and no input sent); allowed after
+  a fresh screenshot; refused when a window covers the point and allowed at a point
+  it doesn't cover; allowed when the window only moved; a `run_steps` batch with a
+  pixel step refused before any step runs; non-pixel actions with no extra
+  `list_windows`; one `list_windows` for a batch of pixel steps; drag, scroll and
+  `type_text` x,y checked; `move_cursor` without a target allowed; desktop pixels
+  refused when the top window at the point changed and allowed after a fresh
+  `get_desktop_state`; a screenshot inside a `run_steps` result counts; no
+  screenshot the hub saw leaves it to the driver; `COORD_GUARD=off` passes
+  everything and asks for nothing;
+- `mcp-lazy`: `initialize` and `tools/list` from the cache at once without the hub
+  or the driver; the first call through the hub; the hub going away fails the
+  pending call and the next call starts a new hub; `MCP_HUB=off` on a connection
+  of its own;
+- `metacomputer call` on a terminal escapes the VM's text (no OSC 52, no screen
+  clear, no bidi override), `--raw` and `--json` print it exactly, and the escaping
+  is `metacomputer sh`'s (`lib/termsafe.py`); `metacomputer mcp` is the guarded
+  bridge unless `MCOMP_DIRECT_BRIDGE=1`;
+- `who`: the hub's own SSH connection (directly or through the relay) isn't
+  another controller, another client's is.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (16 checks) runs
+against a running test VM. It opens Mousepad, the calculator and a throwaway
+Chrome profile and closes them again, and changes no VM settings:
+- a one-shot `call` and two scripts at once share one hub and one SSH connection
+  to the driver; with `ACTION_LOG=on` that connection is one log in which each
+  call names its client; `status` and `who` show the hub;
+- `call --session`: an element token from one call works in the next (with
+  `MCP_HUB=off` it doesn't);
+- a Chrome started by a one-shot `call browser_prepare` is still running after the
+  call (with `MCP_HUB=off` it closes as the call ends);
+- `call` is refused while another session acts (the route around the bridge that
+  the session logs showed), reads still work, and the Chrome guard refuses
+  `set_value` and `run_script` from `call`;
+- the coordinate guard passes a click from a current screenshot, refuses it after
+  the window was resized (where Cua Driver alone clicks), allows it after a fresh
+  screenshot, refuses a foreground click under a window that has since covered
+  the point, and passes a point that window doesn't cover;
+- `hub stop` stops it and the next call starts a new one.
 
 ## SSH options: `tests/test_ssh_options.py`
 

@@ -7,7 +7,10 @@
 #   start | stop [--force] | restart | status [--json] | reset [--yes]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
-#   call TOOL ['JSON']             one Cua Driver tool call (new connection each time)
+#   call [--session NAME] TOOL ['JSON']
+#                                  one Cua Driver tool call through the hub; with --session, element
+#                                  tokens and driver state carry over to the next call with that name
+#   hub [status [--json] | start | stop]   the hub: one connection per VM shared by every client
 #   inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
 #                                  read-only snapshot of the VM (no GUI, changes nothing)
 #   browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
@@ -36,8 +39,9 @@
 #   events [status | sink add|list|show|test|remove | tail [N] | emit FAMILY TYPE --message TEXT
 #          | drain | watcher start|stop|status]
 #                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
-#   mcp                            direct stdio MCP bridge (tests, mcp_client.py)
-#   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use)
+#   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use; through the hub)
+#   mcp                            the same as mcp-lazy; with MCOMP_DIRECT_BRIDGE=1 the hub's own SSH
+#                                  connection to the driver (the hub, the GUI tests, web)
 #   build [--replace]              build the VM + baseline from scratch
 #   baseline [--yes]               re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
@@ -195,6 +199,18 @@ EOF
 
 mcp_probe() { "$PY" "$LAB_ROOT/lib/mcp_client.py" --probe; }
 
+# --- the hub (lib/mcp_hub.py): one process per VM holds the connection to the driver -----
+hub_stop() { ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) || true; }
+do_hub() { # [status [--json|--brief] | start | stop | env --json]
+  export_options
+  case "${1:-status}" in
+    env)    "$PY" -c 'import json, os; print(json.dumps({k: v for k, v in os.environ.items() if k.startswith("MCOMP_")}))' ;;
+    status|start|stop) exec "$PY" "$LAB_ROOT/lib/mcp_hub.py" "$@" ;;
+    serve)  exec "$PY" "$LAB_ROOT/lib/mcp_hub.py" serve ;;
+    *) die "usage: metacomputer hub [status [--json|--brief] | start | stop]" ;;
+  esac
+}
+
 do_stop() { # [--force] (immediate power-off) [--override] (even if another session is using it)
   parse_flags "$@"
   local force=""; for a in ${REST[@]+"${REST[@]}"}; do [ "$a" = --force ] && force=--force; done
@@ -202,6 +218,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   if vm_running "$VM_NAME"; then
     owners_check
     events_watcher_stop   # first, so its health probe doesn't report the shutdown as a problem
+    hub_stop
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
     if [ -s "$RUN_DIR/manual-recording" ]; then
       say "finishing the desktop recording first"
@@ -213,6 +230,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   else
     netgw_stop
     events_watcher_stop
+    hub_stop
   fi
   ok "stopped"
 }
@@ -314,10 +332,15 @@ do_status() {
   fi
   export_options
   local ev; ev="$("$PY" "$LAB_ROOT/lib/events.py" status --json 2>/dev/null || echo '{}')"
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" <<'EOF'
+  local hub; hub="$("$PY" "$LAB_ROOT/lib/mcp_hub.py" status --json 2>/dev/null || echo '{}')"
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" "$hub" <<'EOF'
 import json, os, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib = sys.argv[1:]
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib, hub = sys.argv[1:]
 gs = json.loads(gs or "{}"); mcp = json.loads(mcp or "{}")
+try:
+    hub = json.loads(hub or "{}")
+except ValueError:
+    hub = {}
 try:
     ev = json.loads(ev or "{}")
 except ValueError:
@@ -334,7 +357,8 @@ out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.s
        "options": {"action_log": os.environ.get("MCOMP_ACTION_LOG", "off"), "ssh_auth": os.environ.get("MCOMP_SSH_AUTH", "key"),
                    "driver_mode": os.environ.get("MCOMP_DRIVER_MODE", "standard"),
                    "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None},
-       "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None}
+       "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None,
+       "hub": hub or None}
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
@@ -370,6 +394,13 @@ if gs:
           + ("  REBOOT REQUIRED (updates)" if gs.get('reboot_required') else ""))
 if mcp:
     print(f"mcp           {m(mcp.get('ok'))} {mcp.get('server', '')} {mcp.get('protocol', '')}  tools={mcp.get('tools', 0)}  ({mcp.get('ms', '?')} ms)")
+if hub.get("running"):
+    sys.path.insert(0, lib)
+    import mcp_hub
+    print(f"hub           {mcp_hub.describe_status(hub.get('hub'), brief=True)}   (metacomputer hub)")
+elif hub:
+    print("hub           " + ("off (MCP_HUB=off: each client connects on its own)" if hub.get("mode") == "off"
+                             else "not running (it starts with the first call)"))
 if sharing is not None:
     def onoff(k): return ("\033[33mon\033[0m" if sharing[k] else "off")
     runner = os.path.basename(lume) + (", mcomp-vm's former name" if os.path.basename(lume) == "lume-secure" else "")
@@ -1065,8 +1096,9 @@ case "$cmd" in
   _health)    do_health ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
-  call)       [ $# -ge 1 ] || die "usage: metacomputer call TOOL ['JSON']"
-              exec "$PY" "$LAB_ROOT/lib/mcp_client.py" --call "$@" ;;
+  call)       [ $# -ge 1 ] || die "usage: metacomputer call [--session NAME] TOOL ['JSON']"
+              export_options; exec "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" call "$@" ;;
+  hub)        do_hub "$@" ;;
   browser)    do_browser "$@" ;;
   desktop-restart) do_desktop_restart "$@" ;;
   input-reset) do_input_reset "$@" ;;
@@ -1088,7 +1120,12 @@ case "$cmd" in
   sh)         do_sh "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
-  mcp)        vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
+  mcp)        # With the hub on, an MCP client here gets the guarded bridge (through the hub); only the hub itself,
+              # the GUI tests and web (MCOMP_DIRECT_BRIDGE=1) get the raw connection to the driver.
+              if [ "${MCOMP_DIRECT_BRIDGE:-}" != 1 ] && [ "${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" = on ]; then
+                export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py"
+              fi
+              vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
               req="$(driver_request)" || exit 1
               ssh_base mcp
               if [ "$ACTION_LOG" = on ]; then

@@ -15,6 +15,7 @@ baseline before every task). Switches (flag or environment variable):
   --skill / BENCH_SKILL            skill directory (default: this checkout's skills/metacomputer)
   --shell / BENCH_SHELL            allow | forbid  (shell inside the VM: metacomputer ssh / sh)
   --coord-guard / BENCH_COORD_GUARD  off | on     (passed to the bridge as MCOMP_COORD_GUARD)
+  --hub / BENCH_HUB                on | off       (passed as MCOMP_MCP_HUB; default: the VM config's MCP_HUB)
   --screen / BENCH_SCREEN          WxH, set with xrandr after each reset (default: the VM's own)
   --effort / BENCH_EFFORT          Claude Code effort level (default: the model's default)
   --budget / BENCH_BUDGET          per-task cap in USD (default 3; a task file may set its own)
@@ -53,7 +54,7 @@ PREFIX = ("Use your virtual computer (the metacomputer) for this. Leave the virt
 SHELL_FORBID = ("\n\nDon't use a shell inside the virtual computer for this (no `metacomputer ssh` or "
                 "`metacomputer sh`): work through its desktop.")
 DEFAULTS = {"model": "claude-opus-5-5", "skill": os.path.join(LAB, "skills", "metacomputer"), "shell": "allow",
-            "coord_guard": "off", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each"}
+            "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each"}
 
 
 def log(msg):
@@ -245,6 +246,8 @@ def prepare_workdir(run_id, sw):
         os.symlink(CLI, os.path.join(shim, n))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
+    if sw.get("hub"):
+        env["MCOMP_MCP_HUB"] = sw.get("hub")
     json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
               open(cfg, "w"))
     return work, cfg, shim
@@ -276,6 +279,8 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     claude = claude or trusted_claude(env.get("PATH", ""))   # resolved before the shim goes first
     env["PATH"] = shim + os.pathsep + env.get("PATH", "")
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
+    if sw.get("hub"):
+        env["MCOMP_MCP_HUB"] = sw.get("hub")
     timeout = int(t.get("timeout_s", 600))
     events, times = [], []
     t0 = time.time()
@@ -344,8 +349,9 @@ def switches_from(a):
         v = getattr(a, k, None)
         sw[k] = v if v not in (None, "") else os.environ.get("BENCH_" + k.upper(), d)
     sw["skill"] = os.path.abspath(os.path.expanduser(sw["skill"]))
-    if sw["shell"] not in ("allow", "forbid") or sw["coord_guard"] not in ("on", "off") or sw["reset"] not in ("each", "none"):
-        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, reset each|none)")
+    if sw["shell"] not in ("allow", "forbid") or sw["coord_guard"] not in ("on", "off") or sw["reset"] not in ("each", "none") \
+            or sw["hub"] not in ("", "on", "off"):
+        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none)")
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
     return sw
@@ -371,7 +377,8 @@ def cmd_run(a):
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
             "switches": dict(sw, skill_hash=skill_hash(sw["skill"]),
-                             coord_guard_in_bridge="MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_lazy.py")).read()),
+                             coord_guard_in_bridge=os.path.exists(os.path.join(LAB, "lib", "mcp_hub.py"))
+                             and "MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_hub.py")).read()),
             "tasks": [t["id"] for t in tasks],
             "vm_options": status().get("options")}   # the optional hardening (action log, SSH, driver mode)
     # Resuming: keep the first start time, and count what the run has spent already against the cap.
