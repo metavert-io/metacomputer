@@ -43,6 +43,14 @@ show just that one; all three `on` is Lume's own default. The flag parsing
 and device selection have unit tests in
 [mcomp-vm](https://github.com/metavert-io/metacomputer-vm).
 
+## Reset after a wiped home, and repeated web checks: `tests/test_reset_sync.py`
+
+`python3 tests/test_reset_sync.py` (9 checks) needs no VM. It runs `do_recordings` from
+`bin/metacomputer` under `/bin/bash` with `set -Eeuo pipefail` and stand-ins for the VM: a failed copy of
+the guest's recordings warns and returns, so `reset`, `stop` and `checkpoint` go on (a VM whose home was
+wiped could not be reset before). It also checks that every `web` run gives its Chrome session a name of
+its own, so a second run in the same hub isn't refused as an ended session.
+
 ## The VM runner: `tests/test_vm_runner.py`
 
 `python3 tests/test_vm_runner.py` (37 checks) needs no VM: fake runners in a

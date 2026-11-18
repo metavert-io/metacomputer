@@ -216,6 +216,9 @@ class Driver:
 
     # Chrome (driver-owned throwaway profile; page tools) ---------------------
     def open_chrome(self, url, session, width=1920, profile=None):
+        # A name of its own for every run: the hub keeps one driver connection, and Cua Driver keeps an
+        # ended session's name ended for that connection's lifetime, so a fixed name works only once.
+        session = f"{session}-{os.getpid()}-{len(self.sessions) + 1}-{int(time.time() * 1000) % 1000000}"
         r = self.call("browser_prepare", {"session": session, "allow_launch": True,
                                           "profile": profile or {"mode": "isolated_new"}})
         self.sessions.add(session)

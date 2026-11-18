@@ -168,7 +168,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
-  `test_bench_workdir`, `test_vm_runner`, `test_vm_stop`, `test_plugin`, `test_learn`, `test_storage`, `test_install` (no VM),
+  `test_bench_workdir`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`, `test_install` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
   `tests/test_chrome_guard.py` and `tests/test_vault_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
