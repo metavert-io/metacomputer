@@ -91,12 +91,18 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
   stable names inside the VM; don't rename them (existing VMs depend on them).
   VMs built by earlier versions use `/opt/cua-lab` or `/opt/virtual-computer`;
   `status` says to rebuild them.
+- The VM runner is `LUME`: mcomp-vm by default, metacomputer's build of Lume
+  (github.com/metavert-io/metacomputer-vm, pinned by `MCOMP_VM_*`), or Cua's
+  standard Lume. It was called lume-secure; Cua's trademark policy asks a modified
+  version to take a different name, so don't give it a Lume-based name in new text.
+  `scripts/lib.sh` falls back to `~/.local/bin/lume-secure` (with a notice) while
+  `LUME`'s runner isn't installed; keep that until old installs are gone.
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_secrets.py`, `python3 tests/test_vault_ops.py`,
   `python3 tests/test_secret_fill.py`, and the boundary checks `test_guest_import`, `test_termsafe`,
-  `test_key_pinning`, `test_build_refusals`, `test_owners`, `test_bench_workdir` (no VM),
+  `test_key_pinning`, `test_build_refusals`, `test_owners`, `test_bench_workdir`, `test_vm_runner` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild

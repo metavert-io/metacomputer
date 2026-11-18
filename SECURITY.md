@@ -6,7 +6,7 @@ it:
 - the VM reaches only the public internet, not your Mac or your network;
 - nothing listens off your Mac's loopback;
 - the VM has no shared folders;
-- with lume-secure, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
+- with mcomp-vm, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
   adds a sound card inside the VM that plays into nothing; it never reaches the Mac.)
 
 [README.md](README.md#isolation-and-safety) lists all of it, and

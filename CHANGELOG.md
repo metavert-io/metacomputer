@@ -22,7 +22,7 @@ All notable changes to metacomputer are recorded here. The format follows
 ### Changed
 - After a successful build, the VM's private SSH host key is deleted from the Mac; only the public key and `known_hosts` are kept.
 - `metacomputer secrets set` on a name that already exists now refuses unless you add `--replace`.
-- The VM runner lume-secure is now called mcomp-vm (github.com/metavert-io/metacomputer-vm, tag v0.7.2-mcomp.1), because Cua's trademark policy asks forks to take another name. It's the same Lume build with the same flags; metacomputer's installer and `LUME` setting still use the former name for now.
+- The VM runner is now mcomp-vm, formerly lume-secure, built from github.com/metavert-io/metacomputer-vm (tag v0.7.2-mcomp.1, commit pinned), because Cua's trademark policy asks a modified version to take another name. It's the same Lume build with the same flags, made by Metavert, not by Cua. `install.sh` installs it as `~/.local/bin/mcomp-vm` and takes `--lume=mcomp-vm` (`--lume=secure` still works); `LUME` defaults to it, and its pins are `MCOMP_VM_REPO`, `MCOMP_VM_TAG` and `MCOMP_VM_COMMIT` (`LUME_SECURE_*` in a local.env still count). Existing installs keep working: while `LUME`'s runner isn't installed and `~/.local/bin/lume-secure` is, metacomputer uses that one and prints a notice; `./install.sh` installs mcomp-vm beside it, points `LUME` there and leaves lume-secure in place. `install.sh --uninstall` names the runner in use.
 
 ### Security
 - Every SSH connection the Mac makes to the VM now runs with no config file (`-F /dev/null`) and with agent, X11, port and tunnel forwarding and connection sharing turned off, so nothing in your SSH config can forward anything to the VM.
@@ -34,6 +34,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - The benchmark runs in a fresh private folder and runs `claude` by an absolute path found before its shim folder goes on PATH.
 
 ### Fixed
+- `./install.sh --help` shows its whole description again (the last step was cut off).
 - Two VMs side by side: a session on one VM no longer makes the other refuse every tool call ("in use by another controller").
 - A refused `build` (the VM exists, or a bad setting) no longer replaces the host key and `known_hosts`, which broke SSH to the existing VM.
 - `metacomputer sh` outside Claude Code: its claim on the computer lasts the activity window even when the shell that ran it exits.
