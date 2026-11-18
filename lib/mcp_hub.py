@@ -666,6 +666,7 @@ class Hub:
         self.owner_lock = threading.Lock()
         self.chrome_lock = threading.Lock()
         self.leases = {}            # client id -> its acting calls still running after it disconnected (detach)
+        self.jobs = {}              # ("job", n) -> a tool the hub serves itself still at work (site_login.py), by client
         self.lease_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
         self._refreshing = False    # one tools/list refresh at a time (schedule_refresh)
@@ -879,6 +880,9 @@ class Hub:
                 pend["orphan"] = True       # its answer has nowhere to go; the call itself runs on
                 if pend.get("acting"):
                     running.append((key, pend.get("tool")))
+        with self.lease_lock:
+            # A sign-in or session load the hub runs for this client (site_login.py) holds the computer like a call.
+            running += [(key, job["tool"]) for key, job in self.jobs.items() if job["client"] is client]
         if self.server is not None and self.server.stopping:
             return                          # the hub is going away, not the client: its claim stays
         if client.auto_session and client.used_auto and self.connected():
@@ -910,7 +914,7 @@ class Hub:
             with self.lease_lock:                    # the same lock as removing a pending request (on_upstream)
                 keys = set()
                 for key, _tool in running:
-                    pend = self.pending.get(key)
+                    pend = self.pending.get(key) if key in self.pending else self.jobs.get(key)
                     if pend is not None and not self.local:     # in-process: the connection ends with the client
                         pend["lease"] = client.cid
                         keys.add(key)
@@ -987,11 +991,25 @@ class Hub:
                     continue
                 with self.lease_lock:                # what is still running, looked at now (not at the snapshot)
                     gens = {self.pending[k].get("gen") for k in lease["keys"] if k in self.pending}
-                    gone = not gens and self.leases.get(cid) is lease
+                    jobs = [self.jobs[k] for k in lease["keys"] if k in self.jobs]
+                    gone = not gens and not jobs and self.leases.get(cid) is lease
                 if gone:                             # its calls ended meanwhile: nothing to stop
                     lease["keys"].clear()
                     self._end_lease(cid)
                     continue
+                if jobs:
+                    # A sign-in or session load the lease holds (site_login.py): the connections its driver calls went
+                    # on are ended like a call's own, and the job is stopped (its vault call ended, no further driver
+                    # call made). The lease ends when the job does (job_end), not before.
+                    for j in jobs:
+                        gens |= j["gens"]
+                    for j in jobs:
+                        if not j.get("stopping"):
+                            j["stopping"] = True
+                            try:
+                                j["stop"]()
+                            except Exception:
+                                pass
                 for gen in gens - ending:
                     proc = self.gen_procs.get(gen)
                     if proc is None:
@@ -1082,6 +1100,30 @@ class Hub:
             self.progress.pop(pend["ptok"], None)
         with self.lease_lock:
             cid = pend.get("lease")
+            if cid is None:
+                return
+            lease = self.leases.get(cid)
+            if lease is None:
+                return
+            lease["keys"].discard(key)
+            if lease["keys"]:
+                return
+        threading.Thread(target=self._end_lease, args=(cid,), daemon=True, name="hub-lease").start()
+
+    def job_start(self, client, tool, stop):
+        """A tool the hub serves itself (site_login.py) starts work for client that may outlive the call: until
+        job_end, it holds the computer like an acting call, under the client's lease if the client goes. stop() ends
+        the work early (past the lease's life). Returns the job's key."""
+        key = ("job", next(self.ids))
+        with self.lease_lock:
+            self.jobs[key] = {"client": client, "tool": str(tool)[:60], "stop": stop, "lease": None, "gens": set()}
+        return key
+
+    def job_end(self, key):
+        """The work is done: forget it, and end the lease it belonged to once that lease holds nothing else."""
+        with self.lease_lock:
+            job = self.jobs.pop(key, None)
+            cid = job.get("lease") if job else None
             if cid is None:
                 return
             lease = self.leases.get(cid)
@@ -1329,17 +1371,25 @@ class Hub:
         self.internal.pop(iid, None)
         return box[0] if box else None
 
-    def call_for(self, client, tool, args, timeout=60):
+    def call_for(self, client, tool, args, timeout=60, job=None):
         """A driver tool call the hub makes on a client's behalf (site_login.py): the action log names the client,
-        as for the client's own calls. The answer message, or None."""
+        as for the client's own calls, and records it as secret-adjacent. It runs inside a job (job_start), which
+        holds the computer for the client. The answer message, or None."""
         iid = f"mcomp-hub-{next(self.ids)}"
         ev, box = threading.Event(), []
         self.internal[iid] = (ev, box, None, self.up_gen)
         msgs = []
         if self.action_log:
+            # "secret": a call made for a sign-in or a session load; the action log keeps only its tool, argument names,
+            # sizes and whether it failed (the VM may have the value by now, and could put it anywhere in its answer).
             msgs.append({"jsonrpc": "2.0", "method": "notifications/metacomputer/client",
-                         "params": {"id": iid, "client": self.client_info(client)}})
+                         "params": {"id": iid, "client": self.client_info(client), "secret": True}})
         msgs.append({"jsonrpc": "2.0", "id": iid, "method": "tools/call", "params": {"name": tool, "arguments": args}})
+        if job is not None:
+            with self.lease_lock:                    # the connection (generation) this job's calls went on
+                j = self.jobs.get(job)
+                if j is not None:
+                    j["gens"].add(self.up_gen)
         if not self.connected() or not self.send_up(*msgs):
             self.internal.pop(iid, None)
             return None
