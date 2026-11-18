@@ -566,11 +566,12 @@ struct Requester {
         return d
     }
 
+    /// One printable line (a folder or program name can hold a newline or terminal codes).
     var describe: String {
         if let p = claudePID {
-            return "Claude Code in \(tildePath(project ?? "?")) (pid \(p))"
+            return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))", max: 300)
         }
-        return "\(clientExe) (pid \(clientPID)), not from Claude Code"
+        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code", max: 300)
     }
 }
 

@@ -555,6 +555,11 @@ class _Marker(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def listen_addrs(ss_out):
+    """The local address column of `ss -Hltn` lines (the peer column of a listener is always 0.0.0.0:* or [::]:*)."""
+    return [l.split()[3] for l in ss_out.splitlines() if len(l.split()) >= 5]
+
+
 def tunnel(s, key, spec, user="mcproxy"):
     """ssh -N -R SPEC as USER; returns (process, its stderr file) once the forward is up or ssh has ended."""
     err = os.path.join(TMP, f"tunnel-{spec.replace(':', '_')}.err")
@@ -589,8 +594,8 @@ def test_d_proxy():
         r = raw_ssh(s, ops, cmd=f"python3 -c \"import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{pp}/', timeout=10).read().decode())\"")
         check("...and a request inside the VM reaches the Mac's end of it", "mcproxy-forward-ok" in r.stdout, r.stdout + r.stderr)
         r = raw_ssh(s, ops, cmd=f"ss -Hltn 'sport = :{pp}'")
-        check("...listening on the VM's loopback only", f"127.0.0.1:{pp}" in r.stdout and "0.0.0.0" not in r.stdout
-              and "*:" not in r.stdout, r.stdout)
+        local = listen_addrs(r.stdout)
+        check("...listening on the VM's loopback only", local and all(a == f"127.0.0.1:{pp}" for a in local), r.stdout)
     p.terminate()
     p.wait(10)
     other = str(int(pp) + 1)
@@ -604,7 +609,7 @@ def test_d_proxy():
     time.sleep(1)
     r = raw_ssh(s, ops, cmd=f"ss -Hltn 'sport = :{pp}'")
     check("an address other than loopback is refused or bound to loopback only", p.poll() is not None
-          or ("0.0.0.0" not in r.stdout and "*:" not in r.stdout), r.stdout + open(err).read()[-200:])
+          or all(a.startswith("127.0.0.1:") for a in listen_addrs(r.stdout)), r.stdout + open(err).read()[-200:])
     if p.poll() is None:
         p.terminate()
         p.wait(10)

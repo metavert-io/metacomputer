@@ -224,7 +224,7 @@ final class UnlockServer {
                     + " on VM \(vm), asked by \(who.describe)",
                   action: "Type \(name) in the vault's terminal to allow", project: who.project,
                   data: ["op": kind, "name": name, "site": site ?? ""])
-        guard let scope = askApproval(clean(question, max: 500), name: name, timeout: t) else {
+        guard let scope = askApproval(question.components(separatedBy: "\n").prefix(4).map { clean($0, max: 500) }.joined(separator: "\n"), name: name, timeout: t) else {
             return (false, "each:no", "not allowed at the vault's terminal")
         }
         switch scope {

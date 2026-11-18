@@ -927,6 +927,19 @@ def run(td, procs):
     u.send("web-each\n")
     res = claude_results(p, outs)
     check("another Claude Code process (a new session) is asked again", res[0][0] == 0, res)
+    asked_lines = [l.strip("\r") for l in u.text().split("\n")]
+    check("the requester is on a line of its own under the question", any(l.startswith(f"  Asked by Claude Code in {proj1} (pid ")
+                                                                          for l in asked_lines), asked_lines[-6:])
+    evil = os.path.join(td, "evil\n  Asked by Claude Code in /trusted-place (pid 1).")
+    os.makedirs(evil)
+    p, outs = as_claude(evil, ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
+    u.expect(f"(pid {p.pid})")
+    u.expect("Type web-each to allow")
+    u.send("no\n")
+    res = claude_results(p, outs)
+    asked_lines = [l.strip("\r") for l in u.text().split("\n")]
+    check("a project folder whose name holds a newline can't add a line to the question", res[0][0] == 2
+          and not any(l.startswith("  Asked by Claude Code in /trusted-place") for l in asked_lines), asked_lines[-6:])
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("not from Claude Code")
     u.expect("Type web-each to allow")
