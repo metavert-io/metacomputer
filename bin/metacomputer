@@ -126,7 +126,7 @@ events_watcher_pid() {
   return 0
 }
 events_watcher_start() {
-  "$PY" "$LAB_ROOT/lib/events.py" has-sinks 2>/dev/null || return 0
+  "$PY" "$LAB_ROOT/lib/events.py" needs-watcher 2>/dev/null || return 0   # sinks, or announcements to deliver
   [ -n "$(events_watcher_pid)" ] && return 0
   ( umask 077; : >> "$LOG_DIR/events-watcher.log" ); chmod 600 "$LOG_DIR/events-watcher.log" 2>/dev/null
   ( export_options; daemonize "$LOG_DIR/events-watcher.log" "$PY" "$LAB_ROOT/lib/events.py" watch )
@@ -148,7 +148,7 @@ events_watcher_stop() {
 }
 do_events_watcher() { # start|stop|status
   case "${1:-status}" in
-    start)  "$PY" "$LAB_ROOT/lib/events.py" has-sinks || die "no event sinks configured (metacomputer events sink add)"
+    start)  "$PY" "$LAB_ROOT/lib/events.py" needs-watcher || die "no event sinks configured, and no announcement to deliver"
             events_watcher_start ;;
     stop)   events_watcher_stop; ok "event watcher stopped" ;;
     status) local p; p="$(events_watcher_pid)"
@@ -950,8 +950,9 @@ case "$cmd" in
   events)     export_options
               if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
               "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?
-              # A first sink added while the computer runs: start the watcher now rather than at the next start.
-              if [ $rc = 0 ] && [ "${1:-}" = sink ] && [ "${2:-}" = add ] && vm_running "$VM_NAME"; then events_watcher_start; fi
+              # A sink added or removed while the computer runs: make sure the watcher runs now (removing the
+              # last sink leaves its own announcement to deliver), rather than at the next start.
+              if [ $rc = 0 ] && [ "${1:-}" = sink ] && { [ "${2:-}" = add ] || [ "${2:-}" = remove ]; } && vm_running "$VM_NAME"; then events_watcher_start; fi
               exit $rc ;;
   _health)    do_health ;;
   inspect)    do_inspect "$@" ;;

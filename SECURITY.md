@@ -103,6 +103,18 @@ Chrome guard, a failed `actions verify`, what `web open-untrusted` found) and
 the VM's lifecycle and health. [docs/events.md](docs/events.md) has the
 details. Off by default: with no sink, nothing is sent.
 
+**What it protects against, and what it doesn't.** It guards against hostile
+text from the VM and from web pages (everything is cleaned, and text from the VM
+never becomes a message), against floods and accidents in metacomputer's own
+code (limits, debouncing, backlogs that can't grow without bound), and it tells
+you about sink changes made through `metacomputer events sink` or noticed on
+disk. It does **not** guard against a program running as you, an agent
+included: such a program can read `~/.config/metacomputer/events.json` (ntfy
+topics, webhook URLs, headers, signing keys) and post to your destinations
+directly, or edit the configuration and the state folder. Noticing hand edits is
+best effort. The secrets vault's audit sinks are different: their credentials
+live inside the encrypted vault.
+
 **What is sent:** tool names, counts, file paths on the Mac, project folder
 paths, the VM's and the Mac's short names, and origins (scheme, host, port) of
 web pages. **What isn't:** typed text, passwords, tokens, page contents,
@@ -112,37 +124,44 @@ other programs hand in through the spool. Text that comes from inside the VM
 (the driver's refusals, its health report) never goes into a message, only into
 `data`, cleaned.
 
-**Changing where events go: detection, not prevention.** Against a program
-that runs as you (an agent included), nothing in metacomputer can stop it from
-changing where your events go: it can fake a terminal, or edit
-`~/.config/metacomputer/events.json` directly. What metacomputer does:
+**Sink changes are announced:**
 - `events sink add` and `remove` (and `--replace`) work only from a terminal and
-  ask first. That stops a program without one and slows down one that has to
-  fake it.
+  ask first. That guards against mistakes and programs without a terminal, not
+  against one running as you.
 - Every change made that way is announced as `security.sink_added` or
   `sink_removed` to the local log and to every sink that existed before it, the
-  removed or replaced one included, at its old address. Each announcement is
-  kept and retried (up to 20 times, with backoff) until that sink has it, so a
-  sink that's down or being removed still hears about it.
-- An edit to `events.json` made any other way is noticed (metacomputer keeps a
-  hash and a copy of the last configuration it wrote) and announced as
-  `security.sink_config_changed` to the sinks of that last known configuration.
+  removed or replaced one included, at its old address. The announcement is
+  journaled before the configuration is written, so an interruption announces
+  what was written and drops what wasn't, and a change that raced another one
+  is refused. Each announcement is retried (up to 20 times, with backoff) until
+  that sink has it, so a sink that's down or being removed still hears about it.
+- An edit to `events.json` made any other way is noticed when it can be
+  (metacomputer keeps a hash and a copy of the last configuration it wrote),
+  journaled and announced as `security.sink_config_changed` to the sinks of that
+  last known configuration. A file that can't be read stops sending until it's
+  fixed; `events status` and the local log say why. A program that also edits
+  the state folder can hide its change.
 
 **Noise limits:** at most 10 events per family in any 10 minutes reach the
 sinks (a strict sliding window); the rest are in the local log and summed up in
-one `suppressed` event. Each phone (ntfy) sink also gets at most 10 in any 10
-minutes and 30 in any hour, whatever the family, tests and summaries included.
-Only metacomputer's own code paths can put an event outside the family limit;
-`events emit` and spool files can't. Repeated blocked-connection reports slow
-down (up to once an hour), a flapping health condition is announced once per 30
-minutes, and `notify` doesn't repeat itself within 5 minutes.
+one `suppressed` event. Each phone (ntfy) sink gets at most 10 messages in any
+10 minutes and 30 in any hour, whatever they are (tests, summaries, retries and
+sink-change announcements included), checked right before each send; what has
+to wait isn't dropped, it goes as slots free up. Only metacomputer's own code
+paths can put an event outside the family limit; `events emit` and spool files
+can't. Repeated blocked-connection reports slow down (up to once an hour), a
+flapping health condition is announced once per 30 minutes, and `notify`
+doesn't repeat itself within 5 minutes.
 
-**Telling real events from made-up ones:** each event's `origin` (`cli`,
-`bridge`, `watcher`, `spool`, `script`) is set by the code path that made it.
-Anything that runs as you can call `metacomputer events emit`, but those events
-say `script` (and on a phone start with "[sent from the command line]"), and the
-types only metacomputer's own code makes (the watcher's, the bridge's, sink
-changes, summaries) are refused there and in the spool.
+**Telling metacomputer's events apart:** each event's `origin` (`cli`,
+`bridge`, `watcher`, `spool`, `claude`, `script`) is set by the code path that
+made it. `notify` says `claude` and on a phone starts with "[from Claude]";
+`metacomputer events emit` (your scripts, and metacomputer's own shell hooks)
+says `script` and starts with "[sent from the command line]"; spool files say
+`spool`, "[from another program]". The types only metacomputer's own code makes
+(the watcher's, the bridge's, sink changes, summaries) are refused from `emit`
+and the spool. This sorts metacomputer's code paths; it doesn't authenticate
+anyone: anything running as you can call `emit`, or post to a sink directly.
 
 **Where it ends:**
 - The sink configuration (`~/.config/metacomputer/events.json`, 0600) is
@@ -150,16 +169,11 @@ changes, summaries) are refused there and in the spool.
   ingest-only, low-scope tokens, or keep the real credentials in a relay or a
   local OpenTelemetry Collector. `sink list` and `sink show` never print
   header values.
-- The terminal check stops a program that has no terminal. One running as you
-  can fake a terminal (`script`, for example), or edit the configuration file
-  directly; the announcements to your existing sinks are what tell you. A
-  program that also edits the state folder (the known-good copy, the pending
-  announcements) can hide its tracks: detection only works against changes made
-  without that.
 - The live-view password is redacted when it's kept in a file. When it lives in
   your own secret store, the event code never fetches it and keeps nothing
   derived from it; but the VM knows it, so a hostile VM could slip it into a name
-  it controls.
+  it controls. One earlier build of this branch (f615a13) kept a short verifier
+  of it in `events-state/redact.json`; current builds delete that file.
 - Claude doesn't add or remove sinks: when you ask, it gives you the command to
   run in your own terminal, with `--header-env` when a token is involved.
 - Webhook signatures cover the body, not the time of sending: drop repeated

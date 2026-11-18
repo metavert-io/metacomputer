@@ -267,8 +267,9 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
 
 The VMs are not started at login and no LaunchAgent or daemon was added.
-With an event sink configured, `start` also starts the event watcher (a
-detached process, like cua-netgw) and `stop` stops it; see below.
+With an event sink configured (or a sink-change announcement still waiting),
+`start` also starts the event watcher (a detached process, like cua-netgw) and
+`stop` stops it; see below.
 
 ## Event stream (optional)
 
@@ -276,7 +277,10 @@ detached process, like cua-netgw) and `stop` stops it; see below.
 user adds with `metacomputer events sink add`: a CloudEvents webhook signed
 with HMAC-SHA256, OTLP/HTTP JSON logs, RFC 5424 syslog over TLS (RFC 5425
 framing) or ntfy. With no sink, nothing is sent and events only reach the
-local log, `$LOG_DIR/events.jsonl`.
+local log, `$LOG_DIR/events.jsonl`. Its scope: hostile text from the guest
+and the web, floods and mistakes in metacomputer's own code, and telling the
+user about sink changes. It doesn't defend against a program running as the
+user, which can read `events.json` and post to the sinks directly (SECURITY.md).
 
 ```text
 emitters                                  lib/events.py                          sinks
@@ -306,23 +310,40 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
   backlog, under that sink's lock, after checking its generation is still the
   current one. `MCOMP_EVENTS_DIR` moves all of it.
 - **Origin and limits.** Each event records the code path that made it
-  (`cli`, `bridge`, `watcher`, `spool`, `script`); `events emit` and the spool
-  can't use the types only metacomputer's own code makes. A strict sliding
-  window per family lets at most 10 events in any 10 minutes reach the sinks;
-  the rest are logged locally and summed up in one `suppressed` event (only code
-  paths can exempt an event: sink tests, the relay's `actions`). Each phone
-  (ntfy) sink also has its own cap: 10 in any 10 minutes, 30 in any hour.
+  (`cli` for the commands' own Python code, `bridge`, `watcher`, `spool`,
+  `claude` for `notify`, `script` for `events emit`, which the shell hooks in
+  `bin/metacomputer` and `scripts/lib.sh` use too); `events emit` and the spool
+  can't use the types only metacomputer's own code makes. Origins tell code
+  paths apart; they don't authenticate producers. A strict sliding window per
+  family lets at most 10 events in any 10 minutes reach the sinks; the rest are
+  logged locally and summed up in one `suppressed` event (only code paths can
+  exempt an event: sink tests, the relay's `actions`). Each phone (ntfy) sink
+  also has its own cap, 10 in any 10 minutes and 30 in any hour, taken right
+  before each network attempt (retries and sink-change announcements included);
+  a message without a slot waits in order, it isn't dropped.
 - **Sink changes.** `events sink add` and `remove` need a terminal on stdin.
-  Replacing or removing a sink happens under its lock, so nothing is sending it
-  meanwhile, and makes a new generation (the retired one's files go). The change
-  is announced (`security.sink_added`/`sink_removed`) to every sink that existed
-  before it: the announcement is stored with a copy of each target as it was and
-  retried until delivered (or given up after 20 attempts), outside the backlogs.
-  A change to `events.json` made any other way is noticed against the hash of
-  the last configuration `events sink` wrote, and announced the same way
-  (`security.sink_config_changed`) to that configuration's sinks.
+  The change is one transaction under the sink's lock and then the global lock:
+  it re-reads the configuration, refuses if the sink's generation isn't the one
+  the user confirmed, captures the sinks that existed before it, writes the
+  announcement (`security.sink_added`/`sink_removed`) to a journal in
+  `events-state/admin/` as *prepared* with the hash of the configuration it's
+  about to write, writes the configuration, and marks the record *committed*.
+  On the next run, a prepared record whose hash matches the file is committed
+  and one that doesn't is dropped. Replacing or removing a sink makes a new
+  generation (the retired one's files go). Announcements are retried from the
+  journal until delivered (or given up after 20 attempts), outside the backlogs;
+  several waiting for one phone go as one `sink_changes` message. A change to
+  `events.json` made any other way is noticed against the hash of the last
+  configuration `events sink` wrote, journaled before it's accepted, and
+  announced the same way (`security.sink_config_changed`) to that
+  configuration's sinks. An unreadable `events.json` is used as no sinks
+  (events still reach the local log), reported by `events status` and the
+  error log, and announced once. Best effort: a program running as the user
+  can also edit `events-state/`.
 - **The watcher.** `events.py watch`, started by `start` when a sink exists
-  (pid in `$RUN_DIR/events-watcher.pid`). Every 30 s: the spool, due
+  or an announcement is still pending (`events.py needs-watcher`; it exits when
+  neither holds), pid in `$RUN_DIR/events-watcher.pid`. Every 30 s: the
+  configuration check, the spool, pending announcements, due
   backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
   (destination, port, protocol, reason; batched to one event a minute, slowing
   to once an hour for the same destinations). Every 5 min: `metacomputer
@@ -373,7 +394,11 @@ such as the secrets vault ("approval waiting", "vault locked"):
   changes and tests; docs/events.md lists them).
 - **Taking them:** on every emission and every watcher cycle, under the
   global lock, oldest name first (up to 500 per pass, counted after skipping
-  temporary names, folders, links and files that aren't yours). Spool events
+  temporary names, folders, links and files that aren't yours). The folder is
+  pinned as a descriptor and everything is relative to it; each file is opened
+  with `O_NOFOLLOW|O_NONBLOCK`, checked again with `fstat` and read only up to
+  the size limit plus one byte; quarantine moves are relative to the same
+  descriptor. Spool events
   count toward their family's rate limit. A valid file is
   cleaned like any event (so a producer can't leak a URL query or a
   secret-looking key through it), numbered, logged, queued for each matching

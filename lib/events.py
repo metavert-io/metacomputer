@@ -12,13 +12,14 @@ appended to this VM's local log ($LOG_DIR/events.jsonl).
   events.py sink list [--json] | show NAME [--key] [--json] | test NAME | remove NAME [--yes]
   events.py tail [N] [--json]                        the local event log
   events.py emit FAMILY TYPE --message TEXT [--severity S] [--action TEXT] [--data JSON] [--debounce S] [--quiet]
-                                                     (origin script; metacomputer's own types are refused;
-                                                      its hooks use the same options as `_emit`, origin cli)
+                                                     (origin script, also for metacomputer's shell hooks;
+                                                      metacomputer's own types are refused)
   events.py notify TEXT [--why login|captcha|2fa|dialog|approval|other] [--action TEXT]
   events.py status [--json|--line]
   events.py drain [--now]                            the spool, then every sink's backlog
   events.py watch [--once [--health]]                the watcher (`metacomputer start` runs it)
   events.py has-sinks                                exit 0 when a sink is configured
+  events.py needs-watcher                            exit 0 when a watcher is wanted (sinks, or announcements to deliver)
 
 Kinds (the same formats as the secrets vault's audit sinks):
   webhook  CloudEvents 1.0 structured JSON, signed: X-Metacomputer-Signature: sha256=HMAC(body)
@@ -72,7 +73,7 @@ HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 # Which code path made an event, set by that code, never by the caller: a metacomputer command (cli), Claude
 # Code's bridge or the action-log relay (bridge), the watcher, another program through the spool, or
 # `metacomputer events emit` (script: anything that can run a command can call it).
-ORIGINS = ("cli", "bridge", "watcher", "spool", "script")
+ORIGINS = ("cli", "bridge", "watcher", "spool", "script", "claude")
 # Types only their own code path may produce: `events emit` and spool files can't use them (nor the
 # `actions` family, nor `suppressed` in any family), so a made-up event can't look like a real one or claim
 # a real one's place outside the limits.
@@ -159,7 +160,7 @@ def gen_of(sink):
     """A sink's generation: a new one each time it's added or replaced, so files of a retired version are
     never mixed with the current one's."""
     g = (sink or {}).get("generation")
-    return g if isinstance(g, str) and re.match(r"^[a-z0-9]{1,32}$", g) else "g0"
+    return g if isinstance(g, str) and re.fullmatch(r"[a-z0-9]{1,32}", g) else "g0"
 
 
 def sink_file(name, gen, ext):
@@ -296,13 +297,27 @@ def load_config():
     return cfg
 
 
-def save_config(cfg):
+def render_config(cfg):
+    return json.dumps(cfg, indent=2, sort_keys=True) + "\n"
+
+
+def save_config(cfg, text=None):
     """Write the sinks (only `events sink ...` does) and remember them as the known configuration, so a
     change made any other way is noticed (config_guard). Hold the global lock."""
     private_dir(events_dir())
-    text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
+    text = text or render_config(cfg)
     write_private(config_path(), text)
-    remember_config(text)
+    remember_config(text)      # after: a crash in between is recognised as our own change (its journal's hash)
+
+
+def config_safe():
+    """The configuration, or none (nothing is sent) if events.json can't be read: then events still reach
+    the local log, `events status` says why nothing is sent, and the change was announced (config_guard)."""
+    try:
+        return load_config()
+    except Exception as e:
+        note_error(f"events.json can't be read ({e}); events are only logged locally until it's fixed")
+        return {"version": 1, "sinks": {}}
 
 
 def sink_families(sink):
@@ -430,23 +445,22 @@ def clean_token(tok):
         i = end
 
 
-def clean_urls(s, decode=True):
+def decode_words(s):
+    """Every word with %XX escapes decoded once (control characters that produces become spaces)."""
+    return re.sub(r"\S*%[0-9A-Fa-f]{2}\S*", lambda m: CTRL_RE.sub(" ", unquote(m.group(0))), s)
+
+
+def clean_urls(s):
     """Links lose credentials, path parameters, the query and the fragment, up to the next space whatever
-    characters the query holds; every link in a word, also without a scheme. A word with %XX escapes is
-    decoded once first, so an encoded link is cleaned too. Words right after a cut query that look like more
-    of it (a = or &) go as well."""
-    s = USERINFO_RE.sub(_strip_userinfo, s)
+    characters the query holds; every link in a word, also without a scheme. Words with %XX escapes are
+    decoded once first, so every decision below sees what a reader would (an encoded link, an encoded
+    "token=" after a query). Words right after a cut query that look like more of it (a = or &) go as well."""
+    s = USERINFO_RE.sub(_strip_userinfo, decode_words(s))
     out, in_query = [], False
     for tok in re.split(r"(\s+)", s):
         if not tok or tok.isspace():
             out.append(tok)
             continue
-        if decode and PCT_RE.search(tok):
-            dec = CTRL_RE.sub(" ", unquote(tok))
-            if dec != tok:
-                out.append(clean_urls(dec, decode=False))
-                in_query = False
-                continue
         if in_query and ("=" in tok or "&" in tok) and not URL_START_RE.search(tok):
             continue
         tok, in_query = clean_token(tok)
@@ -466,9 +480,16 @@ def clean_str(s, limit):
 
 
 def canon_key(k):
-    """A key name as the secret-key rules see it: invisible characters removed, camelCase split, - . and
-    spaces as _, lowercase (signingKey, signing-key and SIGNING_KEY all read signing_key)."""
-    k = CTRL_RE.sub("", ANSI_RE.sub("", SURROGATE_RE.sub("", str(k))))
+    """A key name as the secret-key rules see it: %XX escapes decoded (up to three times), invisible
+    characters removed, camelCase split, - . and spaces as _, lowercase (signingKey, signing-key, pa%73sword
+    and SIGNING_KEY all read as what they are)."""
+    k = str(k)
+    for _ in range(3):
+        d = unquote(k)
+        if d == k:
+            break
+        k = d
+    k = CTRL_RE.sub("", ANSI_RE.sub("", SURROGATE_RE.sub("", k)))
     k = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", k)
     k = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", k)
     k = re.sub(r"[-.\s]+", "_", k).lower()
@@ -543,7 +564,7 @@ def build_event(family, type_, message, severity=None, action=None, data=None, v
                 origin="cli"):
     if family not in FAMILIES:
         raise EventsError(f"unknown family {family!r} ({', '.join(FAMILIES)})")
-    if not TYPE_RE.match(type_ or ""):
+    if not isinstance(type_, str) or not TYPE_RE.fullmatch(type_):
         raise EventsError(f"event types are lowercase letters, digits and _ (got {type_!r})")
     severity = severity or DEFAULT_SEVERITY[family]
     if severity not in SEVERITIES:
@@ -680,13 +701,11 @@ def phone_window():
     return os.path.join(state_dir(), "phonelimit.json")
 
 
-def suppressed_event(family, count, origin="cli", phone=None):
+def suppressed_event(family, count, origin="cli"):
     label = FAMILY_LABEL.get(family, family)
-    where = f"to {phone}" if phone else "to the sinks"
-    limit = (" and ".join(f"{n} per {s // 60} min" for n, s in PHONE_LIMITS) if phone
-             else f"{RATE_CAP} per {RATE_WINDOW // 60} min")
-    return build_event(family, "suppressed", f"{count} more '{label}' event(s) weren't sent {where} (at most {limit}; "
-                       "all are in the local log)", "info", data={"suppressed": count, "limit": limit, "sink": phone},
+    limit = f"{RATE_CAP} per {RATE_WINDOW // 60} min"
+    return build_event(family, "suppressed", f"{count} more '{label}' event(s) weren't sent to the sinks (at most "
+                       f"{limit}; all are in the local log)", "info", data={"suppressed": count, "limit": limit},
                        origin=origin)
 
 
@@ -698,33 +717,28 @@ def _put(ev, cfg, name, sink):
 
 
 def _queue(ev, cfg, only_sinks):
-    """Queue an event for each sink it matches (or exactly `only_sinks`). Phone (ntfy) sinks have their own
-    cap, whatever the event; what it holds back is summed up before the next one that goes. Hold the
+    """Queue an event for each sink it matches (or exactly `only_sinks`). Phone sinks get everything too:
+    their cap applies when sending (phone_slot), so nothing queued is dropped, it waits its turn. Hold the
     global lock."""
-    now = time.time()
     for name, sink in cfg.get("sinks", {}).items():
         if (only_sinks is not None and name not in only_sinks) or (only_sinks is None and not matches(sink, ev)):
-            continue
-        if sink.get("kind") == "ntfy":
-            ok, held = _window(phone_window(), name, PHONE_LIMITS, now, take=True)
-            if not ok:
-                continue
-            _put(ev, cfg, name, sink)
-            if held:                            # after it (numbers stay in order): what was held back
-                _phone_summary(cfg, name, sink, held, now)
             continue
         _put(ev, cfg, name, sink)
 
 
-def _phone_summary(cfg, name, sink, held, now):
-    """One summary to a phone sink of what its cap held back, if it has room. Hold the global lock."""
-    if _window(phone_window(), name, PHONE_LIMITS, now, take=False)[0]:
-        _window(phone_window(), name, PHONE_LIMITS, now, take=True)
-        _clear_held(phone_window(), name)
-        s_ev = suppressed_event("lifecycle", held, "watcher", phone=name)
-        s_ev["seq"] = next_seq(cfg)
-        append_log(s_ev)
-        _put(s_ev, cfg, name, sink)
+def phone_slot(name, now=None):
+    """Right before a network attempt to a phone (ntfy) sink: is there room under PHONE_LIMITS? If so the
+    attempt takes a slot (retries too). Returns (ok, when the next slot frees). Takes the global lock."""
+    now = now or time.time()
+    with global_lock():
+        ok, _ = _window(phone_window(), name, PHONE_LIMITS, now, take=True)
+        times = sorted((read_json(phone_window(), {}).get(name) or {}).get("times") or [])
+    free_at = now
+    for n, s in PHONE_LIMITS:
+        recent = [t for t in times if now - t < s]
+        if len(recent) >= n:
+            free_at = max(free_at, recent[-n] + s)
+    return ok, free_at
 
 
 def record(ev, cfg, only_sinks=None, exempt=False):
@@ -752,13 +766,7 @@ def record(ev, cfg, only_sinks=None, exempt=False):
 
 
 def flush_suppressed(cfg):
-    """A summary for each family, and each phone sink, that held events back and has room again. Hold the
-    global lock."""
-    pw = read_json(phone_window(), {})
-    for name, sink in cfg.get("sinks", {}).items():
-        b = pw.get(name) if isinstance(pw, dict) else None
-        if sink.get("kind") == "ntfy" and isinstance(b, dict) and int(b.get("held") or 0) > 0:
-            _phone_summary(cfg, name, sink, int(b["held"]), time.time())
+    """A summary for each family that held events back and has room again. Hold the global lock."""
     w = read_json(family_window(), {})
     for family, b in (w.items() if isinstance(w, dict) else []):
         if family in FAMILIES and isinstance(b, dict) and int(b.get("held") or 0) > 0:
@@ -799,7 +807,7 @@ def spool_event(obj, mtime):
     if not isinstance(obj, dict):
         return None
     fam, typ = obj.get("family"), obj.get("type")
-    if fam not in FAMILIES or not isinstance(typ, str) or not TYPE_RE.match(typ) or reserved(fam, typ):
+    if fam not in FAMILIES or not isinstance(typ, str) or not TYPE_RE.fullmatch(typ) or reserved(fam, typ):
         return None
     msg = obj.get("message")
     if not isinstance(msg, str) or not msg.strip():
@@ -812,66 +820,135 @@ def spool_event(obj, mtime):
     return build_event(fam, typ, msg, sev, action, data, vm, project, at=mtime, origin="spool")
 
 
-def quarantine(d, f):
-    """Move a spool file that isn't a valid event aside (spool/.quarantine/, newest QUARANTINE_KEEP kept)."""
-    q = os.path.join(d, ".quarantine")
+def _open_dir(name, dir_fd=None, create=False):
+    """A directory as a file descriptor: never through a link, and only if it's a directory of ours
+    (fixed to 0700). None if it isn't. Everything after works relative to this descriptor, so swapping the
+    path for something else afterwards changes nothing."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
     try:
-        private_dir(q)
-        os.replace(os.path.join(d, f), os.path.join(q, f))
-        old = sorted(os.listdir(q))
-        for x in old[:max(0, len(old) - QUARANTINE_KEEP)]:
-            os.remove(os.path.join(q, x))
-    except (OSError, EventsError):
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        if not create:
+            return None
         try:
-            os.remove(os.path.join(d, f))
+            os.mkdir(name, 0o700, dir_fd=dir_fd)
+        except FileExistsError:
+            pass
+        try:
+            fd = os.open(name, flags, dir_fd=dir_fd)
+        except OSError:
+            return None
+    except OSError:
+        return None                         # a link (ELOOP), not a folder, or unreadable
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        os.close(fd)
+        return None
+    if st.st_mode & 0o077:
+        os.fchmod(fd, 0o700)
+    return fd
+
+
+def _spool_entries(dfd):
+    """Names in the spool that may be events: *.json, not starting with '.', regular files of ours (checked
+    without following links). A second check on the opened file follows (_read_spool_file)."""
+    names = []
+    for f in os.listdir(dfd):
+        if not f.endswith(".json") or f.startswith("."):
+            continue
+        try:
+            st = os.stat(f, dir_fd=dfd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+            names.append(f)
+    return sorted(names)
+
+
+def _read_spool_file(dfd, f):
+    """The file's bytes, or None. Opened without following a link and without blocking (a FIFO swapped in
+    after the listing can't hang us), checked again on the descriptor, and read only up to the size limit
+    plus one byte (a file that grew is refused)."""
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > SPOOL_MAX_BYTES:
+            return None
+        chunks, size = [], 0
+        while size <= SPOOL_MAX_BYTES:
+            b = os.read(fd, SPOOL_MAX_BYTES + 1 - size)
+            if not b:
+                break
+            chunks.append(b)
+            size += len(b)
+        data = b"".join(chunks)
+        return data if len(data) <= SPOOL_MAX_BYTES else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def quarantine(dfd, f):
+    """Move a spool file that isn't a valid event aside (spool/.quarantine/, newest QUARANTINE_KEEP kept),
+    relative to the pinned spool descriptor; if .quarantine isn't a folder of ours, just remove the file."""
+    qfd = _open_dir(".quarantine", dir_fd=dfd, create=True)
+    try:
+        if qfd is None:
+            os.unlink(f, dir_fd=dfd)
+            return
+        os.rename(f, f, src_dir_fd=dfd, dst_dir_fd=qfd)
+        old = sorted(os.listdir(qfd))
+        for x in old[:max(0, len(old) - QUARANTINE_KEEP)]:
+            try:
+                os.unlink(x, dir_fd=qfd)
+            except OSError:
+                pass
+    except OSError:
+        try:
+            os.unlink(f, dir_fd=dfd)
         except OSError:
             pass
+    finally:
+        if qfd is not None:
+            os.close(qfd)
 
 
 def drain_spool(cfg):
     """Turn spool files into events (oldest name first, at most 500 a pass) and delete them. Hold the global
-    lock. A file that isn't a valid event, or can't be recorded, is quarantined and counted; it never stops
-    the others."""
-    d = spool_dir()
-    try:
-        st = os.lstat(d)
-    except FileNotFoundError:
+    lock. Everything happens relative to a pinned descriptor of the spool folder; a file that isn't a valid
+    event, or can't be recorded, is quarantined and counted; it never stops (or blocks) the others."""
+    dfd = _open_dir(spool_dir())
+    if dfd is None:
+        if os.path.lexists(spool_dir()):
+            note_error(f"spool {spool_dir()} is a link, not a folder, or not yours; not reading it")
         return 0, 0
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-        note_error(f"spool {d} is a link or not yours; not reading it")
-        return 0, 0
-    if st.st_mode & 0o077:
-        os.chmod(d, 0o700)
-    eligible = []
-    for f in os.listdir(d):
-        if not f.endswith(".json") or f.startswith("."):
-            continue
-        try:
-            fst = os.lstat(os.path.join(d, f))
-        except OSError:
-            continue
-        if stat.S_ISREG(fst.st_mode) and fst.st_uid == os.getuid():
-            eligible.append((f, fst))
     done = rejected = 0
-    for f, fst in sorted(eligible)[:500]:
-        p = os.path.join(d, f)
-        ev = None
-        if fst.st_size <= SPOOL_MAX_BYTES:
-            try:
-                with open(p, encoding="utf-8") as fh:
-                    ev = spool_event(json.load(fh), fst.st_mtime)
-            except Exception:                   # any parse failure, RecursionError and MemoryError included
-                ev = None
-        if ev:
-            try:
-                record(ev, cfg)
-                os.remove(p)
-                done += 1
-                continue
-            except Exception as e:
-                note_error(f"spool {f}: {e!r}")
-        quarantine(d, f)
-        rejected += 1
+    try:
+        for f in _spool_entries(dfd)[:500]:
+            raw = _read_spool_file(dfd, f)
+            ev = None
+            if raw is not None:
+                try:
+                    st = os.stat(f, dir_fd=dfd, follow_symlinks=False)
+                    ev = spool_event(json.loads(raw.decode("utf-8")), st.st_mtime)
+                except Exception:               # any parse failure, RecursionError and MemoryError included
+                    ev = None
+            if ev:
+                try:
+                    record(ev, cfg)
+                    os.unlink(f, dir_fd=dfd)
+                    done += 1
+                    continue
+                except Exception as e:
+                    note_error(f"spool {f}: {e!r}")
+            quarantine(dfd, f)
+            rejected += 1
+    finally:
+        os.close(dfd)
     if rejected:
         s = os.path.join(state_dir(), "spool.json")
         info = read_json(s, {})
@@ -879,7 +956,7 @@ def drain_spool(cfg):
         info["rejected"] = int(info.get("rejected", 0)) + rejected
         info["last_rejected_at"] = now_iso()
         write_private(s, json.dumps(info))
-        note_error(f"spool: {rejected} file(s) were not valid events; moved to {os.path.join(d, '.quarantine')}")
+        note_error(f"spool: {rejected} file(s) were not valid events; moved to {os.path.join(spool_dir(), '.quarantine')}")
     return done, rejected
 
 
@@ -966,7 +1043,8 @@ NTFY_TAGS = {"needs_you": "raising_hand", "task": "white_check_mark", "security"
              "actions": "memo"}
 
 
-NTFY_PROVENANCE = {"script": "[sent from the command line] ", "spool": "[from another program] "}
+NTFY_PROVENANCE = {"script": "[sent from the command line] ", "spool": "[from another program] ",
+                   "claude": "[from Claude] "}
 
 
 def ntfy_title(ev):
@@ -1195,7 +1273,14 @@ def flush_sink(name, sink, budget=EMIT_BUDGET, force=False, wait_lock=1.0):
             if pending[i]["seq"] <= st.get("single_until", 0):
                 size = 1                              # after a refused batch: one at a time past it
             batch = pending[i:i + size]
+            if sink["kind"] == "ntfy":
+                room, free_at = phone_slot(name)     # every attempt takes a slot, retries included
+                if not room:                         # the phone's cap: wait for a slot (not a failure)
+                    st.update(next_retry=free_at, waiting="phone limit")
+                    save_status(name, gen, st)
+                    break
             ok, err, permanent = deliver(sink, batch, min(TIMEOUT, left))
+            st.pop("waiting", None)
             if ok:
                 st.update(sent_seq=batch[-1]["seq"], delivered=st["delivered"] + len(batch), failures=0,
                           next_retry=0, last_ok_at=time.time(), head_attempts=0)
@@ -1249,6 +1334,9 @@ def flush_all(cfg, budget=EMIT_BUDGET, force=False, names=None):
 
 
 # --- sink changes: announcements that outlive the change; noticing hand edits -----------------
+ADMIN_ACTION = "If you didn't do this, check metacomputer events sink list"
+
+
 def admin_dir():
     return os.path.join(state_dir(), "admin")
 
@@ -1263,36 +1351,96 @@ def admin_log(line):
         pass
 
 
-def admin_announce(type_, message, data, targets, project=None,
-                   action="If you didn't do this, check metacomputer events sink list"):
-    """security.<type_> about a change to the sinks: recorded in the local log, then kept with a copy of
-    each target sink as it was (the old destination) and its own retry state, until each target has it or
-    ADMIN_MAX_ATTEMPTS failed. It never goes through the sinks' backlogs, so retiring or removing a sink
-    can't discard it, and the limits don't apply (these are rare: a terminal is needed, or a hand edit)."""
+def _admin_records():
+    """(path, record) for each journaled announcement, oldest first."""
+    try:
+        files = sorted(f for f in os.listdir(admin_dir()) if f.endswith(".json"))
+    except OSError:
+        return []
+    out = []
+    for f in files:
+        p = os.path.join(admin_dir(), f)
+        rec = read_json(p, None)
+        if not isinstance(rec, dict) or not isinstance(rec.get("targets"), dict) or not isinstance(rec.get("event"), dict):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        out.append((p, rec))
+    return out
+
+
+def journal_announcement(type_, message, data, targets, cfg_for_seq, project=None, action=ADMIN_ACTION,
+                         state="committed", **extra):
+    """Write a security.<type_> announcement to the local log and the journal, with a copy of each target
+    sink as it is now (its old destination) and its own retry state. Hold the global lock. The configuration
+    passed for numbering is the one captured by the caller, never re-read (it may be broken). Returns
+    (event, journal path or None)."""
     ev = build_event("security", type_, message, "warn", action, data, project=project, origin="cli")
+    ev["seq"] = next_seq(cfg_for_seq)
+    append_log(ev)
+    if not targets:
+        admin_log(f"{type_} {ev['seq']}: no sink to tell (local log only)")
+        return ev, None
+    rec = {"event": ev, "created": time.time(), "state": state, **extra,
+           "targets": {n: {"sink": json.loads(json.dumps(s)), "attempts": 0, "next": 0, "state": "pending",
+                           "error": None} for n, s in targets.items() if isinstance(s, dict)}}
+    path = os.path.join(admin_dir(), f"{int(time.time() * 1000):015d}-{ev['id']}.json")
+    write_private(path, json.dumps(rec))
+    return ev, path
+
+
+def _config_file_hash():
+    try:
+        return hashlib.sha256(open(config_path(), "rb").read()).hexdigest()
+    except FileNotFoundError:
+        return "absent"
+
+
+def recover_journal():
+    """Finish what an interrupted sink change left: a 'prepared' announcement whose configuration was
+    written is committed, one whose configuration never was is dropped. Only hashes the file; never loads
+    it (it may be broken). Takes the global lock."""
+    recs = [(p, r) for p, r in _admin_records() if r.get("state") == "prepared"]
+    if not recs:
+        return
     with global_lock():
-        ev["seq"] = next_seq(load_config())
-        append_log(ev)
-        if targets:
-            rec = {"event": ev, "created": time.time(),
-                   "targets": {n: {"sink": json.loads(json.dumps(s)), "attempts": 0, "next": 0, "state": "pending",
-                                   "error": None} for n, s in targets.items()}}
-            write_private(os.path.join(admin_dir(), f"{int(time.time() * 1000):015d}-{ev['id']}.json"),
-                          json.dumps(rec))
-        else:
-            admin_log(f"{type_} {ev['seq']}: no sink to tell (local log only)")
-    flush_admin(EMIT_BUDGET)
+        cur = _config_file_hash()
+        for p, rec in recs:
+            fresh = read_json(p, None)
+            if not isinstance(fresh, dict) or fresh.get("state") != "prepared":
+                continue                        # finished meanwhile
+            ev = fresh.get("event") or {}
+            if fresh.get("intended_hash") == cur:
+                fresh["state"] = "committed"
+                write_private(p, json.dumps(fresh))
+                admin_log(f"{ev.get('type')} {ev.get('seq')}: its change was written; announcing it")
+            else:
+                os.remove(p)
+                admin_log(f"{ev.get('type')} {ev.get('seq')}: its change was never written; dropped")
+
+
+def _coalesced(evs):
+    """One message for several announcements to the same phone."""
+    last = evs[-1]
+    ev = dict(last)
+    ev.update(id=str(uuid.uuid4()), type="sink_changes",
+              message=clean_str(f"{len(evs)} changes to your event sinks: " + "; ".join(e.get("message", "") for e in evs),
+                                MAX["message"]),
+              data={"changes": [{"type": e.get("type"), "seq": e.get("seq"), "id": e.get("id")} for e in evs]})
     return ev
 
 
 def flush_admin(budget=EMIT_BUDGET, force=False):
-    """Deliver pending sink-change announcements to their old destinations, with backoff; give up on a
-    target after ADMIN_MAX_ATTEMPTS (noted in events-state/admin.log and shown by `events status`)."""
+    """Deliver journaled sink-change announcements to their old destinations, with backoff; give up on a
+    target after ADMIN_MAX_ATTEMPTS (noted in events-state/admin.log and shown by `events status`). A phone
+    gets them under its cap like anything else, several waiting at once going as one message."""
     try:
-        files = sorted(f for f in os.listdir(admin_dir()) if f.endswith(".json"))
-    except OSError:
-        return
-    if not files:
+        recover_journal()
+    except Exception as e:
+        note_error(f"journal recovery: {e!r}")
+    if not _admin_records():
         return
     try:
         lock = Lock(os.path.join(state_dir(), "admin.lock"), 0.5)
@@ -1300,38 +1448,56 @@ def flush_admin(budget=EMIT_BUDGET, force=False):
     except Busy:
         return
     try:
-        deadline = time.time() + budget
-        for f in files:
-            p = os.path.join(admin_dir(), f)
-            rec = read_json(p, None)
-            if not isinstance(rec, dict) or not isinstance(rec.get("targets"), dict) or not isinstance(rec.get("event"), dict):
-                os.remove(p)
-                continue
-            ev, changed = rec["event"], False
+        recs = {p: r for p, r in _admin_records() if r.get("state", "committed") == "committed"}
+        now, deadline, changed = time.time(), time.time() + budget, set()
+        groups = {}
+        for p, rec in recs.items():
             for name, t in rec["targets"].items():
-                if t.get("state") != "pending" or (not force and float(t.get("next") or 0) > time.time()):
+                if t.get("state") != "pending" or (not force and float(t.get("next") or 0) > now):
                     continue
+                groups.setdefault((name, dumps(t["sink"])), []).append((p, t))
+        for (name, _), items in groups.items():
+            if deadline - time.time() < 0.3:
+                break
+            sink = items[0][1]["sink"]
+            if sink.get("kind") == "ntfy":
+                room, free_at = phone_slot(name)
+                if not room:                    # wait for the phone's next slot (not an attempt)
+                    for p, t in items:
+                        t["next"] = free_at
+                        changed.add(p)
+                    continue
+                evs = [recs[p]["event"] for p, _ in items]
+                units = [([evs[0]] if len(evs) == 1 else [_coalesced(evs)], items)]
+            else:
+                units = [([recs[p]["event"]], [(p, t)]) for p, t in items]
+            for batch, members in units:
                 left = deadline - time.time()
                 if left < 0.3:
                     break
                 try:
-                    ok, err, permanent = deliver(t["sink"], [ev], min(TIMEOUT, left))
+                    ok, err, permanent = deliver(sink, batch, min(TIMEOUT, left))
                 except Exception as e:
                     ok, err, permanent = False, short_error(e), False
-                changed = True
-                if ok:
-                    t["state"] = "delivered"
-                    admin_log(f"{ev.get('type')} {ev.get('seq')}: delivered to {name}")
-                    continue
-                t["attempts"] = int(t.get("attempts") or 0) + 1
-                t["error"], t["next"] = err, time.time() + backoff(t["attempts"])
-                if t["attempts"] >= ADMIN_MAX_ATTEMPTS or (permanent and t["attempts"] >= 3):
-                    t["state"] = "abandoned"
-                    admin_log(f"{ev.get('type')} {ev.get('seq')}: gave up on {name} after {t['attempts']} attempts ({err})")
-                    note_error(f"sink-change announcement {ev.get('seq')} to {name} abandoned ({err})")
+                for p, t in members:
+                    changed.add(p)
+                    ev = recs[p]["event"]
+                    if ok:
+                        t["state"] = "delivered"
+                        admin_log(f"{ev.get('type')} {ev.get('seq')}: delivered to {name}"
+                                  + (f" (with {len(members) - 1} more in one message)" if len(members) > 1 else ""))
+                        continue
+                    t["attempts"] = int(t.get("attempts") or 0) + 1
+                    t["error"], t["next"] = err, time.time() + backoff(t["attempts"])
+                    if t["attempts"] >= ADMIN_MAX_ATTEMPTS or (permanent and t["attempts"] >= 3):
+                        t["state"] = "abandoned"
+                        admin_log(f"{ev.get('type')} {ev.get('seq')}: gave up on {name} after {t['attempts']} attempts ({err})")
+                        note_error(f"sink-change announcement {ev.get('seq')} to {name} abandoned ({err})")
+        for p in changed:
+            rec = recs[p]
             if all(t.get("state") != "pending" for t in rec["targets"].values()):
                 os.remove(p)
-            elif changed:
+            else:
                 write_private(p, json.dumps(rec))
     finally:
         lock.__exit__()
@@ -1339,16 +1505,11 @@ def flush_admin(budget=EMIT_BUDGET, force=False):
 
 def admin_pending():
     out = []
-    try:
-        files = sorted(f for f in os.listdir(admin_dir()) if f.endswith(".json"))
-    except OSError:
-        return out
-    for f in files:
-        rec = read_json(os.path.join(admin_dir(), f), {})
-        for name, t in (rec.get("targets") or {}).items() if isinstance(rec, dict) else []:
+    for _, rec in _admin_records():
+        for name, t in rec["targets"].items():
             if t.get("state") == "pending":
-                out.append({"type": (rec.get("event") or {}).get("type"), "sink": name, "attempts": t.get("attempts"),
-                            "error": t.get("error")})
+                out.append({"type": rec["event"].get("type"), "sink": name, "attempts": t.get("attempts"),
+                            "error": t.get("error"), "state": rec.get("state", "committed")})
     return out
 
 
@@ -1368,9 +1529,25 @@ def sink_brief(name, s):
             "families": (s or {}).get("families") or ["all"]}
 
 
+def migrate_state():
+    """Remove what earlier builds left that this one must not keep: f615a13 stored a verifier of the
+    live-view password (its length and a 3-byte keyed HMAC) in events-state/redact.json."""
+    p = os.path.join(state_dir(), "redact.json")
+    if os.path.exists(p):
+        try:
+            os.remove(p)
+            note_error("removed events-state/redact.json, a live-view password verifier an earlier build kept "
+                       "(docs/events.md: change that password if it lives in your own secret store)")
+        except OSError:
+            pass
+
+
 def _config_drift():
-    """If events.json isn't what `events sink ...` last wrote: (the last known-good config, what changed),
-    and the new one becomes the known one. Hold the global lock."""
+    """If events.json isn't what `events sink ...` last wrote: journal security.sink_config_changed to the
+    sinks of the last known-good configuration FIRST, then take the new file as known (so a crash in between
+    announces it again rather than never). A broken file is announced too (and its sinks aren't used).
+    Hold the global lock. Returns True when it journaled an announcement."""
+    migrate_state()
     hp, gp = _known_paths()
     try:
         raw = open(config_path(), "rb").read()
@@ -1384,9 +1561,13 @@ def _config_drift():
     if known is None:                       # first run with this version: take what's there as known
         if raw is not None:
             remember_config(raw)
-        return None
+        return False
     if known == cur:
-        return None
+        return False
+    records = _admin_records()
+    if any(r.get("intended_hash") == cur for _, r in records):
+        write_private(hp, cur)              # our own change, written just before a crash: nothing to say
+        return False
     good = read_json(gp, {})
     good_sinks = good.get("sinks") if isinstance(good, dict) and isinstance(good.get("sinks"), dict) else {}
     try:
@@ -1401,39 +1582,37 @@ def _config_drift():
         diff["removed"] = [sink_brief(n, s) for n, s in good_sinks.items() if n not in new_sinks]
         diff["changed"] = [sink_brief(n, new_sinks[n]) for n in good_sinks if n in new_sinks and isinstance(new_sinks[n], dict)
                            and any(good_sinks[n].get(k) != new_sinks[n].get(k) for k in keys)]
-    write_private(hp, cur)                  # this version is the known one now (announced once)
+    quiet = diff["readable"] and not (diff["added"] or diff["removed"] or diff["changed"])
+    journaled = False
+    if not quiet and not any(r.get("config_hash") == cur for _, r in records):
+        parts = ([f"added {', '.join(d['sink'] for d in diff['added'])}"] if diff["added"] else []) + \
+                ([f"removed {', '.join(d['sink'] for d in diff['removed'])}"] if diff["removed"] else []) + \
+                ([f"changed {', '.join(d['sink'] for d in diff['changed'])}"] if diff["changed"] else [])
+        what = "; ".join(parts) if diff["readable"] else "it can't be read, so nothing is sent until it's fixed"
+        journal_announcement("sink_config_changed",
+                             f"The event sinks were changed outside 'metacomputer events sink': {what}", diff,
+                             good_sinks, {"sinks": good_sinks},
+                             action="If you didn't do this, check ~/.config/metacomputer/events.json and "
+                                    "metacomputer events sink list", config_hash=cur)
+        journaled = True
+    write_private(hp, cur)                  # now this version is the known one (announced, or nothing to say)
     if new_sinks is not None and raw is not None:
         write_private(gp, raw.decode("utf-8", "replace"))
-    if diff["readable"] and not (diff["added"] or diff["removed"] or diff["changed"]):
-        return None                         # the same sinks as before (reformatted, or put back): nothing to say
-    return good_sinks, diff
+    return journaled
 
 
 def config_guard():
-    """Notice events.json changed other than through `events sink ...` (an edit by hand, by a script or an
-    agent): tell the sinks of the last configuration it wrote (security.sink_config_changed). Detection,
-    not prevention: anything running as you can edit the file."""
+    """Notice events.json changed other than through `events sink ...`: tell the sinks of the last
+    configuration it wrote (security.sink_config_changed). Best effort: a program running as you can also
+    change what this compares against."""
     try:
         with global_lock():
-            got = _config_drift()
+            journaled = _config_drift()
     except Exception as e:
         note_error(f"config check: {e!r}")
         return
-    if not got:
-        return
-    good_sinks, diff = got
-    parts = ([f"added {', '.join(d['sink'] for d in diff['added'])}"] if diff["added"] else []) + \
-            ([f"removed {', '.join(d['sink'] for d in diff['removed'])}"] if diff["removed"] else []) + \
-            ([f"changed {', '.join(d['sink'] for d in diff['changed'])}"] if diff["changed"] else [])
-    what = "; ".join(parts) if diff["readable"] else "it can't be read any more"
-    try:
-        admin_announce("sink_config_changed",
-                       f"The event sinks were changed outside 'metacomputer events sink': {what or 'edited'}",
-                       diff, {n: s for n, s in good_sinks.items() if isinstance(s, dict)},
-                       action="If you didn't do this, check ~/.config/metacomputer/events.json and "
-                              "metacomputer events sink list")
-    except Exception as e:
-        note_error(f"config change announcement: {e!r}")
+    if journaled:
+        flush_admin(EMIT_BUDGET)
 
 
 # --- emitting -------------------------------------------------------------------------------
@@ -1463,7 +1642,7 @@ def emit_built(ev, debounce=None, debounce_s=DEBOUNCE_S, deliver_now=True, only_
     config_guard()
     key = f"{ev['family']}.{ev['type']}:{debounce}" if debounce else None
     with global_lock():
-        cfg = load_config()                     # read under the lock: never queue to a retired generation
+        cfg = config_safe()                     # read under the lock: never queue to a retired generation
         if key and debounced(key, debounce_s):
             return None
         drain_spool(cfg)
@@ -1523,7 +1702,7 @@ def _worker():
             for it in items:
                 if _claim(it):
                     _record_item(it)
-            flush_all(load_config())
+            flush_all(config_safe())
             flush_admin()
         except Exception as e:
             note_error(f"async emit: {e!r}")
@@ -1580,7 +1759,7 @@ def flush_async(timeout=2.0):
 def drain(force=False, budget=WATCH_BUDGET):
     config_guard()
     with global_lock():
-        cfg = load_config()
+        cfg = config_safe()
         n, bad = drain_spool(cfg)
         flush_suppressed(cfg)
     flush_all(cfg, budget, force)
@@ -1706,12 +1885,12 @@ IP_RE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:.]{2,45})$")
 def safe_host(h):
     """A destination as it may appear in a message: an IP address, else just 'a destination' (the gateway
     writes addresses; anything else stays in data, cleaned)."""
-    return h if isinstance(h, str) and IP_RE.match(h) else "a destination"
+    return h if isinstance(h, str) and IP_RE.fullmatch(h) else "a destination"
 
 
 def safe_word(w):
     """A gateway reason as it may appear in a message: letters, digits and :_- only."""
-    return w if isinstance(w, str) and re.match(r"^[A-Za-z0-9:_-]{1,64}$", w) else "blocked"
+    return w if isinstance(w, str) and re.fullmatch(r"[A-Za-z0-9:_-]{1,64}", w) else "blocked"
 
 
 HEALTH_TEXT = {
@@ -1817,7 +1996,7 @@ def watch_cycle(st, tail, vm, health=False):
 
     def spool():
         with global_lock():
-            cfg = load_config()
+            cfg = config_safe()
             drain_spool(cfg)
             flush_suppressed(cfg)
 
@@ -1836,8 +2015,19 @@ def watch_cycle(st, tail, vm, health=False):
     step("blocked connections", blocked)
     if health:
         step("health", probe)
-    step("delivery", lambda: flush_all(load_config(), WATCH_BUDGET))
+    step("delivery", lambda: flush_all(config_safe(), WATCH_BUDGET))
     step("sink-change announcements", lambda: flush_admin(WATCH_BUDGET))
+
+
+def needs_watcher():
+    """A watcher is wanted while there are sinks, or sink-change announcements still to deliver (removing the
+    last sink mustn't stop its own announcement's retries), or events.json can't be read."""
+    try:
+        if load_config().get("sinks"):
+            return True
+    except Exception:
+        return True
+    return bool(admin_pending())
 
 
 def watcher_pid():
@@ -1892,12 +2082,10 @@ def watch(once=False, health=False):
                 note_error(f"watcher state: {e!r}")
             if once:
                 break
-            try:
-                if not load_config().get("sinks"):
-                    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} no sinks configured; watcher exits", flush=True)
-                    break
-            except Exception as e:
-                note_error(f"watcher config: {e!r}")
+            if not needs_watcher():
+                print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} no sinks and no announcement to deliver; watcher exits",
+                      flush=True)
+                break
             for _ in range(WATCH_INTERVAL):
                 if stop["now"]:
                     break
@@ -1938,7 +2126,7 @@ def action_record_event(rec, path=None):
         msg = f"action log signed through record {rec.get('covers_seq')}"
     else:
         msg = f"action log: {t}"
-    typ = t if TYPE_RE.match(str(t)) else "record"
+    typ = t if TYPE_RE.fullmatch(str(t)) else "record"
     return {"family": "actions", "type": typ, "severity": "warn" if t in ("refused", "sign_failed") else "info",
             "message": msg, "data": data}
 
@@ -2009,7 +2197,7 @@ def check_url(kind, url):
 def parse_header(h):
     name, sep, value = h.partition(":")
     name, value = name.strip(), value.strip()
-    if not sep or not HEADER_NAME_RE.match(name) or not value or any(c in value for c in "\r\n\0"):
+    if not sep or not HEADER_NAME_RE.fullmatch(name) or not value or any(c in value for c in "\r\n\0"):
         raise EventsError("--header takes 'Name: value'")
     return [name, value]
 
@@ -2017,7 +2205,7 @@ def parse_header(h):
 def parse_header_env(h):
     name, sep, tmpl = h.partition("=")
     name = name.strip()
-    if not sep or not HEADER_NAME_RE.match(name) or not tmpl.strip():
+    if not sep or not HEADER_NAME_RE.fullmatch(name) or not tmpl.strip():
         raise EventsError("--header-env takes 'Name=VAR' or 'Name=Prefix $VAR'")
     if "$" not in tmpl:
         tmpl = "$" + tmpl.strip()
@@ -2087,9 +2275,15 @@ def remove_sink_files(name, gen):
             pass
 
 
-def change_sink(name, new_sink):
-    """Put `new_sink` (a new generation) in place of `name`, or remove it (None). Under the sink's own lock,
-    so nothing is sending its backlog meanwhile; the retired generation's files go afterwards."""
+def change_sink(name, new_sink, expect, project=None):
+    """Put `new_sink` (a new generation) in place of `name`, or remove it (None), as one transaction under
+    the sink's own lock (nothing is sending its backlog) and the global lock:
+    - `expect` is the generation the user confirmed (None: the name didn't exist); if the sinks changed
+      since, the change is refused rather than applied to something nobody looked at;
+    - the sinks that exist now are the announcement's targets, captured here;
+    - the announcement is journaled ('prepared') before the file is written and committed after, so an
+      interruption either announces what was written or drops what wasn't (recover_journal).
+    Returns (the announcement event, the names of the sinks it goes to)."""
     try:
         lock = Lock(sink_lock(name), 30)
         lock.__enter__()
@@ -2097,37 +2291,49 @@ def change_sink(name, new_sink):
         raise EventsError(f"sink {name} is busy sending; try again in a moment")
     try:
         with global_lock():
-            cfg = load_config()
+            _config_drift()                     # a hand edit before this gets its own announcement first
+            try:
+                cfg = load_config()
+            except Exception as e:
+                raise EventsError(f"events.json can't be read ({e}); fix it, or move it away, first")
             old = cfg["sinks"].get(name)
+            if (gen_of(old) if isinstance(old, dict) else None) != expect:
+                raise EventsError("the event sinks changed while you were answering; run the command again")
+            prior = {n: s for n, s in cfg["sinks"].items() if isinstance(s, dict)}
+            subject = new_sink if new_sink is not None else old
             if new_sink is None:
                 cfg["sinks"].pop(name, None)
             else:
                 cfg["sinks"][name] = new_sink
-            save_config(cfg)
+            text = render_config(cfg)
+            type_ = "sink_removed" if new_sink is None else "sink_added"
+            data = {**sink_brief(name, subject), "min_severity": subject.get("min_severity") or "info",
+                    "from_terminal": True, "replaced": old is not None and new_sink is not None}
+            verb = "removed" if new_sink is None else ("replaced" if data["replaced"] else "added")
+            ev, path = journal_announcement(
+                type_, f"Event sink '{name}' {verb}: {data['kind']} to {data['url']}, families "
+                       f"{','.join(data['families'])}", data, prior, {"sinks": prior}, project=project,
+                state="prepared", intended_hash=hashlib.sha256(text.encode()).hexdigest())
+            save_config(cfg, text)
+            if path:
+                rec = read_json(path, {})
+                rec["state"] = "committed"
+                write_private(path, json.dumps(rec))
             if new_sink is not None:
                 save_status(name, gen_of(new_sink), dict(STATUS0, sent_seq=current_seq()))
         if old is not None and (new_sink is None or gen_of(old) != gen_of(new_sink)):
             remove_sink_files(name, gen_of(old))
     finally:
         lock.__exit__()
-
-
-def announce_sink_change(type_, name, sink, prior, extra=None):
-    """security.sink_added / sink_removed: to the local log and, kept until delivered, to every sink that
-    existed before the change as it was then (whatever their filters; the removed or replaced one too)."""
-    verb = {"sink_added": "added", "sink_removed": "removed"}[type_]
-    data = {**sink_brief(name, sink), "min_severity": sink.get("min_severity") or "info", "from_terminal": True,
-            **(extra or {})}
-    return admin_announce(type_, f"Event sink '{name}' {verb}: {data['kind']} to {data['url']}, "
-                                 f"families {','.join(data['families'])}", data,
-                          {n: s for n, s in prior.items() if isinstance(s, dict)}, project=caller_project())
+    flush_admin(EMIT_BUDGET)
+    return ev, sorted(prior)
 
 
 def cmd_sink(a):
     cfg = load_config()
     sinks = cfg["sinks"]
     if a.sub == "add":
-        if not NAME_RE.match(a.name):
+        if not NAME_RE.fullmatch(a.name):
             raise EventsError("sink names: lowercase letters, digits, - and _ (max 32)")
         if a.name in sinks and not a.replace:
             raise EventsError(f"a sink named {a.name} exists (--replace to overwrite it)")
@@ -2151,10 +2357,8 @@ def cmd_sink(a):
         dropped = backlog(a.name, gen_of(old)) if replacing else 0
         confirm_change(a, f"{'Replace' if replacing else 'Add'} event sink '{a.name}': {a.kind} to {mask_url(a.url)}, "
                           f"families {','.join(sink['families'])}, from {a.min_severity}?")
-        prior = dict(sinks)
-        change_sink(a.name, sink)
+        _, prior = change_sink(a.name, sink, gen_of(old) if replacing else None, caller_project())
         _known["at"] = 0
-        announce_sink_change("sink_added", a.name, sink, prior, {"replaced": replacing})
         fams = ",".join(sink["families"])
         print(f"{'replaced' if replacing else 'added'} sink {a.name}: {a.kind} to {mask_url(a.url)}; families {fams}, "
               f"from {a.min_severity}" + (f"; headers {', '.join(h[0] for h in headers)} (values hidden)" if headers else ""))
@@ -2162,7 +2366,7 @@ def cmd_sink(a):
             print(f"  the old {a.name}'s signing key no longer works, and {dropped} event(s) still waiting for it "
                   "were dropped")
         if prior:
-            print(f"  told the sinks you had ({', '.join(sorted(prior))}): security.sink_added")
+            print(f"  told the sinks you had ({', '.join(prior)}): security.sink_added")
         if a.kind == "webhook":
             print(f"signing key for {SIGNATURE_HEADER} (HMAC-SHA256 over the body, key = these 32 bytes, base64):")
             print(f"  {sink['hmac_key']}")
@@ -2208,20 +2412,14 @@ def cmd_sink(a):
     if a.sub == "remove":
         confirm_change(a, f"Remove event sink '{a.name}' ({sink['kind']} to {mask_url(sink['url'])})? "
                           f"{backlog(a.name, gen_of(sink))} event(s) waiting for it are dropped.")
-        prior = dict(sinks)
-        change_sink(a.name, None)
-        announce_sink_change("sink_removed", a.name, sink, prior)      # the removed sink is told too
-        print(f"removed sink {a.name}; told the sinks you had ({', '.join(sorted(prior))}): security.sink_removed")
+        _, prior = change_sink(a.name, None, gen_of(sink), caller_project())     # the removed sink is told too
+        print(f"removed sink {a.name}; told the sinks you had ({', '.join(prior)}): security.sink_removed")
         return 0
     if a.sub == "test":
         ev = emit("lifecycle", "test", f"Test event for sink '{a.name}' from metacomputer on {host_name()}",
                   only_sinks={a.name}, deliver_now=False, project=caller_project(), raise_errors=True, exempt=True)
         gen = gen_of(sink)
         end, st = time.time() + 60, load_status(a.name, gen)
-        if ev.get("seq") is not None and not any(e.get("id") == ev["id"] for e in read_queue(a.name, gen, st["sent_seq"])) \
-                and st["sent_seq"] < ev["seq"]:
-            print(f"NOT SENT: {a.name}'s phone limit is reached for now; the test went to the local log only")
-            return 1
         while time.time() < end and st["sent_seq"] < ev["seq"]:
             before = st["sent_seq"]
             st = flush_sink(a.name, sink, budget=10, force=True, wait_lock=5) or load_status(a.name, gen)
@@ -2230,6 +2428,10 @@ def cmd_sink(a):
         if st["sent_seq"] >= ev["seq"]:
             print(f"OK: {a.name} accepted test event {ev['seq']}")
             return 0
+        if st.get("waiting") == "phone limit":
+            print(f"NOT YET: {a.name}'s phone limit is reached; {backlog(a.name, gen, st)} event(s) wait their turn "
+                  f"(the test event among them), the next in {max(0, int(st['next_retry'] - time.time()))} s")
+            return 1
         if st["sent_seq"] > 0 and not st["failures"]:
             print(f"NOT YET: {a.name} is still taking {backlog(a.name, gen, st)} earlier event(s); the test event "
                   "follows them (metacomputer events sink list)")
@@ -2289,8 +2491,8 @@ def content_key(*parts):
 
 
 def cmd_emit(a, family, type_, message, severity, action, data, origin):
-    """`events emit` (origin script: anything that can run a command can call it) and the bash hooks'
-    `_emit` (origin cli). Neither may use a reserved type."""
+    """`events emit`, for scripts and metacomputer's shell hooks alike (origin script: anything that can run
+    a command can call it, so a phone shows it as sent from the command line). No reserved types."""
     if reserved(family, type_):
         raise EventsError(f"{family}.{type_} is reserved for metacomputer's own code paths")
     key = content_key(family, type_, message, action, json.dumps(data, sort_keys=True, default=str))
@@ -2316,7 +2518,7 @@ def cmd_notify(a):
         raise EventsError('usage: metacomputer notify "what you need" [--why WHY] [--action "what to do"]')
     ev = emit("needs_you", a.why, msg, "warn", a.action, {"why": a.why, "declared_by": "claude"},
               project=caller_project(), raise_errors=True, debounce=content_key(a.why, msg, a.action),
-              debounce_s=NOTIFY_DUP_S)
+              debounce_s=NOTIFY_DUP_S, origin="claude")
     if ev is None:
         print(f"Not sent again: the same message went out within {NOTIFY_DUP_S // 60} minutes. Say it in your reply, "
               "and wait for the user.")
@@ -2338,7 +2540,8 @@ def status_info():
     try:
         cfg = load_config()
     except Exception as e:
-        out["errors"].append(str(e))
+        out["config_error"] = f"events.json can't be read ({e}); nothing is sent until it's fixed"
+        out["errors"].append(out["config_error"])
         return out
     out["sinks"] = len(cfg["sinks"])
     out["names"] = sorted(cfg["sinks"])
@@ -2373,6 +2576,9 @@ def status_info():
 
 
 def status_line(s):
+    if s.get("config_error"):
+        return s["config_error"] + (f"; {len(s['announcements_pending'])} sink-change announcement(s) still being "
+                                    "delivered" if s.get("announcements_pending") else "")
     if not s["sinks"]:
         return "off (no sinks; metacomputer events sink add)"
     line = (f"{s['sinks']} sink{'s' if s['sinks'] != 1 else ''}, watcher "
@@ -2430,7 +2636,6 @@ def main(argv):
     p.add_argument("n", nargs="?", type=int, default=20)
     p.add_argument("--json", action="store_true")
     _emit_parser(sub, "emit")
-    _emit_parser(sub, "_emit")                      # metacomputer's own hooks (bin/metacomputer, scripts/lib.sh)
     p = sub.add_parser("notify")
     p.add_argument("text", nargs="+")
     p.add_argument("--why", default="other", choices=WHY)
@@ -2444,6 +2649,7 @@ def main(argv):
     p.add_argument("--once", action="store_true")
     p.add_argument("--health", action="store_true")
     sub.add_parser("has-sinks")
+    sub.add_parser("needs-watcher")
     p = sub.add_parser("_recording")
     p.add_argument("mp4")
     a = ap.parse_args(argv or ["status"])
@@ -2452,7 +2658,7 @@ def main(argv):
             return cmd_sink(a)
         if a.cmd == "tail":
             return cmd_tail(a)
-        if a.cmd in ("emit", "_emit"):
+        if a.cmd == "emit":
             data = None
             if a.data:
                 data = json.loads(a.data)
@@ -2464,8 +2670,7 @@ def main(argv):
                     raise EventsError("--field takes KEY=VALUE")
                 data = data or {}
                 data[k] = int(v) if v.isdecimal() and v.isascii() and len(v) < 16 else v
-            return cmd_emit(a, a.family, a.type, a.message, a.severity, a.action, data,
-                            "script" if a.cmd == "emit" else "cli")
+            return cmd_emit(a, a.family, a.type, a.message, a.severity, a.action, data, "script")
         if a.cmd == "notify":
             return cmd_notify(a)
         if a.cmd == "status":
@@ -2485,6 +2690,8 @@ def main(argv):
             return watch(once=a.once, health=a.health)
         if a.cmd == "has-sinks":
             return 0 if load_config().get("sinks") else 1
+        if a.cmd == "needs-watcher":
+            return 0 if needs_watcher() else 1
         if a.cmd == "_recording":
             emit_dict(recording_event(a.mp4), caller_project())
             flush_all(load_config())

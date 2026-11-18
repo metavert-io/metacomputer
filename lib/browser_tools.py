@@ -250,7 +250,7 @@ CURRENT = []   # the active Run, for cleanup when a command fails
 class Run:
     def __init__(self, kind, a):
         self.a = a
-        if not URL_RE.match(a.url):
+        if not URL_RE.fullmatch(a.url):
             raise Fail("give an http:// or https:// URL")
         busy = [o for o in owners.others(os.getpid()) if o["active"]]
         if busy and not a.override:
@@ -446,7 +446,7 @@ def origin(url):
         return None
     try:
         u = urlsplit(url or "")
-        if u.scheme not in ("http", "https") or not u.hostname or not HOSTNAME_RE.match(u.hostname):
+        if u.scheme not in ("http", "https") or not u.hostname or not HOSTNAME_RE.fullmatch(u.hostname):
             return None
         host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname
         return f"{u.scheme}://{host}" + (f":{u.port}" if u.port else "")
