@@ -447,7 +447,7 @@ def test_f():
 
         # the action log
         before = action_logs(s["logs"])
-        sh(BASE, "-c", "echo not-logged")
+        sh(variant("alogoff", "ACTION_LOG=off"), "-c", "echo not-logged")   # the test VM's own config may log
         sh(variant("slogoff", "ACTION_LOG=on", "SHELL_LOG=off"), "-c", "echo not-logged")
         check("no log file with ACTION_LOG=off, nor with SHELL_LOG=off", action_logs(s["logs"]) == before)
         alog = variant("slog", "ACTION_LOG=on")
