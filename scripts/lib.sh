@@ -302,7 +302,7 @@ vm_stop() { # NAME [--force]
       gssh admin 'sync; sudo -n /usr/local/sbin/metacomputer-admin poweroff' >/dev/null 2>&1 &
       sp=$!
       while vm_running "$name" && [ $i -lt "$deadline" ]; do sleep 1; i=$((i+1)); done
-      kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+      kill "$sp" 2>/dev/null || true; wait "$sp" 2>/dev/null || true   # the helper may be gone or fail (set -E callers)
       vm_running "$name" && warn "guest did not power off within $deadline s; forcing"
     fi
     vm_running "$name" && vm_force_stop "$name"
@@ -315,7 +315,7 @@ vm_force_stop() { # NAME: Lume's immediate power-off, itself bounded (30 s)
   "$LUME" stop "$name" --force >/dev/null 2>&1 &
   sp=$!
   while kill -0 "$sp" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
-  kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  kill "$sp" 2>/dev/null || true; wait "$sp" 2>/dev/null || true
   return 0
 }
 vm_kill() { # NAME: power the VM off from the Mac now, asking the guest nothing (storage-security failures)
