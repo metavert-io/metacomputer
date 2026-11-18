@@ -41,7 +41,10 @@ PW_GH, PW_GH2, PW_EX, PW_LOCAL, PW_NEW = "Dummy-gh-pass-1", "Dummy-gh-pass-2", "
 CSV_PW = ['Dummy,csv "quoted"\npass-6', "Dummy-csv-pass-7", "Dummy-csv-pass-8", "Dummy-csv-pass-9"]
 COOKIE_GH, COOKIE_LOCAL, COOKIE_SID = "dummy-gh-cookie-value", "dummy-local-cookie-value", "dummy-google-sid-value"
 SEED = ts.SEED
-VALUES = [PASS, CHROME_KEY, PW_GH, PW_GH2, PW_EX, PW_LOCAL, PW_NEW, *CSV_PW, COOKIE_GH, COOKIE_LOCAL, COOKIE_SID, SEED]
+SEED2 = "GEZDGNBVGY3TQOJQ"
+PW_TW = "Dummy-tw-pass-10"
+LEAK = "SECRET-FROM-GUEST-7731"
+VALUES = [PASS, CHROME_KEY, PW_GH, PW_GH2, PW_EX, PW_LOCAL, PW_NEW, *CSV_PW, COOKIE_GH, COOKIE_LOCAL, COOKIE_SID, SEED, SEED2, PW_TW, LEAK]
 outputs = []
 OPENSSL = shutil.which("openssl") or "/usr/bin/openssl"
 
@@ -159,6 +162,24 @@ def run(td, procs):
                   (SITE + "/login.html", "local-user", PW_LOCAL, 0)]
     make_login_data(os.path.join(chrome, "Default", "Login Data"), login_rows)
     make_login_data(os.path.join(chrome, "Profile 1", "Login Data"), [("https://second.example/", "p1-user", "Dummy-p1-pass", 0)])
+    # Profile 2: `logins` is a view (a file someone else prepared), not Chrome's table.
+    os.makedirs(os.path.join(chrome, "Profile 2"))
+    vdb = sqlite3.connect(os.path.join(chrome, "Profile 2", "Login Data"))
+    vdb.execute("CREATE TABLE real_logins (origin_url VARCHAR, username_value VARCHAR, password_value BLOB, blacklisted_by_user INTEGER)")
+    vdb.execute("INSERT INTO real_logins VALUES ('https://view.example/', 'view-user', ?, 0)", (chrome_enc(b"Dummy-view-pass", MAC_KEY),))
+    vdb.execute("CREATE VIEW logins AS WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3) "
+                "SELECT origin_url || i AS origin_url, username_value, password_value, blacklisted_by_user FROM real_logins, n")
+    vdb.commit()
+    vdb.close()
+    # Profile 3: a cookie store older than version 24 (no domain inside the values).
+    make_cookies(os.path.join(chrome, "Profile 3", "Network", "Cookies"), [("github.com", "user_session", COOKIE_GH)], version=23)
+    # Profile 4: an identity provider's cookie relabeled as github.com's (its encrypted value still names .google.com).
+    p4 = os.path.join(chrome, "Profile 4", "Network", "Cookies")
+    make_cookies(p4, [(".google.com", "SID", COOKIE_SID), ("github.com", "user_session", COOKIE_GH)])
+    rdb = sqlite3.connect(p4)
+    rdb.execute("UPDATE cookies SET host_key = 'github.com', name = 'stolen' WHERE name = 'SID'")
+    rdb.commit()
+    rdb.close()
     make_cookies(os.path.join(chrome, "Default", "Network", "Cookies"),
                  [("github.com", "user_session", COOKIE_GH), (".github.com", "_gh_sess", COOKIE_GH + "2"),
                   ("localhost", "mc_session", COOKIE_LOCAL), (".google.com", "SID", COOKIE_SID),
@@ -303,6 +324,9 @@ def run(td, procs):
           and s2["github.com"]["approval"] == "each", out)
     rc, out = tty([BIN, "import-passwords", "--browser", "chrome", "--profile", "Profile 1"], [("Vault passphrase", PASS + "\n")])
     check("--profile reads another Chrome profile", rc == 0 and "second.example" in secrets(), out)
+    rc, out = tty([BIN, "import-passwords", "--browser", "chrome", "--profile", "Profile 2", "--dry-run"], [("", None)])
+    check("a Login Data whose logins is a view (here over a recursive query) is refused before any row is read",
+          rc != 0 and "isn't an ordinary table" in out and "view.example" not in out, out)
     rc, out = tty([BIN, "import-passwords", "--browser", "chrome", "--profile", "../x"], [("", None)])
     check("--profile: a folder name only", rc == 64, out)
     rc, out = tty([BIN, "import-passwords", "--browser", "chrome", "--site", "github.com"], [("Vault passphrase", PASS + "\n")],
@@ -364,6 +388,31 @@ def run(td, procs):
     check("a Bitwarden CSV: every URI of a login, its TOTP, notes skipped", rc == 0 and "Bitwarden export" in out
           and s.get("bw.example", {}).get("origins") == ["https://bw.example", "https://www.bw.example"] and "bw.example-otp" in s
           and "not a login" in out, (out, s.get("bw.example")))
+    many = ",".join(f"https://h{i:05d}.many.example/" for i in range(12000))
+    big_csv = csv_file("big.csv", "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n"
+                       f",,login,many,,,0,\"{many}\",many-user,Dummy-many-pass,\n")
+    rc, out = tty([BIN, "import-passwords", "--csv", big_csv], [("Vault passphrase", PASS + "\n")])
+    s = secrets()
+    r = client("audit", "--verify")
+    check("a login with 12,000 sites in one cell comes in with its first 20, says so, and the audit chain still verifies",
+          rc == 0 and len(s.get("h00000.many.example", {}).get("origins", [])) == 20 and "past the first 20" in out
+          and r.returncode == 0, (out[-400:], len(s.get("h00000.many.example", {}).get("origins", [])), r.stdout[-300:] + r.stderr[-300:]))
+    tw1 = csv_file("tw1.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                   f"tw,https://tw.example/,alice-tw,{PW_TW},,\n"
+                   f"tw,https://tw.example/,bob-tw,{PW_TW}b,,otpauth://totp/x:bob?secret={SEED}&issuer=x\n")
+    rc, out = tty([BIN, "import-passwords", "--csv", tw1], [("Vault passphrase", PASS + "\n")])
+    s = secrets()
+    bob_otp = next((n for n in s if s[n]["kind"] == "totp" and n.startswith("tw.example")), "")
+    tw2 = csv_file("tw2.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                   f"tw,https://tw.example/,alice-tw,{PW_TW},,otpauth://totp/x:alice?secret={SEED2}&issuer=x\n")
+    rc2, out2 = tty([BIN, "import-passwords", "--csv", tw2], [("Vault passphrase", PASS + "\n")])
+    s2 = secrets()
+    recs = [json.loads(l) for l in open(alog)]
+    new_otp = [x for x in recs if x.get("op") == "set" and x.get("kind") == "totp" and x.get("totp_for") == "tw.example"]
+    check("a 2FA seed for one account never replaces another account's code on the same site: alice's comes in as her own, "
+          "bob's is untouched, and the new code has its own audit record", rc == 0 and rc2 == 0 and bob_otp == "tw.example-2-otp"
+          and "tw.example-otp" in s2 and not s2.get(bob_otp, {}).get("rotated") and len(new_otp) == 1,
+          (out2[-500:], sorted(n for n in s2 if n.startswith("tw.")), s2.get(bob_otp)))
     bad = csv_file("bad.csv", "a,b\n1,2\n")
     rc, out = tty([BIN, "import-passwords", "--csv", bad], [("Vault passphrase", PASS + "\n")])
     check("a CSV without url and password columns is refused", rc != 0 and "no url and password columns" in out, out)
@@ -388,6 +437,14 @@ def run(td, procs):
     gh = next((x for x in lj.get("sessions", []) if x["name"] == "gh"), {})
     check("list: the session, kind cookies, its sites and source, approval each", gh.get("kind") == "cookies" and gh.get("sites") == ["github.com"]
           and gh.get("source") == "chrome:Default" and gh.get("approval") == "each" and gh.get("profile") == "work", gh)
+    rc, out = tty([BIN, "import-session", "--browser", "chrome", "--profile", "Profile 3", "--site", "github.com", "--name", "old",
+                   "--vm", "ivm", "--to-profile", "work"], [("Vault passphrase", PASS + "\n")])
+    check("a cookie store older than version 24 (values without their domain) is refused, nothing sealed", rc != 0
+          and "version 24" in out and not os.path.exists(os.path.join(vdir, "sessions", "old.sealed")), out)
+    rc, out = tty([BIN, "import-session", "--browser", "chrome", "--profile", "Profile 4", "--site", "github.com", "--name", "relabeled",
+                   "--vm", "ivm", "--to-profile", "work"], [("Vault passphrase", PASS + "\n")])
+    check("a cookie relabeled from .google.com to github.com (its encrypted value names another domain) stops the import, nothing sealed",
+          rc != 0 and "another domain" in out and not os.path.exists(os.path.join(vdir, "sessions", "relabeled.sealed")), out)
     rc, out = tty([BIN, "import-session", "--browser", "chrome", "--site", "google.com", "--name", "g", "--vm", "ivm", "--to-profile", "work"],
                   [("Vault passphrase", PASS + "\n")])
     check("a site whose cookies reach an identity provider (google.com) needs --allow-identity-provider", rc != 0
@@ -429,6 +486,41 @@ def run(td, procs):
     rc, out = tty([BIN, "session", "policy", "local", "--approval", "session"], [("Vault passphrase", PASS + "\n")])
     r = client("session", "load", "local", "--vm", "ivm")
     check("an ordinary imported session with policy 'session' loads into its VM without asking", r.returncode == 0, r.stdout + r.stderr)
+    open(os.path.join(stubdir, "load-leak-next"), "w").close()
+    r = client("session", "load", "local", "--vm", "ivm")
+    last = json.loads(open(alog).read().splitlines()[-1])
+    check("a cookie load that fails after the VM got the cookies reports the vault's own words, never the VM's error output",
+          r.returncode != 0 and LEAK not in r.stdout + r.stderr and "open it once in page-mode Chrome" in r.stdout + r.stderr
+          and LEAK not in open(alog).read() and last.get("op") == "session_load" and last.get("result") != "ok", (r.stdout, r.stderr))
+
+    # --site: only the cookies those sites get, filtered on the Mac
+    rc, out = tty([BIN, "import-session", "--browser", "chrome", "--site", "github.com", "--site", "localhost", "--name", "multi",
+                   "--vm", "ivm", "--to-profile", "work"], [("Vault passphrase", PASS + "\n")])
+    check("import-session for two sites", rc == 0 and "Sealed 3 cookies" in out, out)
+    proc = background("session", "load", "multi", "--vm", "ivm", "--site", "localhost")
+    try:
+        u.expect("only the cookies for localhost", timeout=10)
+        u.expect("Type multi to allow")
+        u.send("multi\n")
+    except AssertionError:
+        pass
+    rc, out, _ = finish(proc)
+    got2 = json.load(open(os.path.join(stubdir, "loaded-cookies.json")))
+    last = json.loads(open(alog).read().splitlines()[-1])
+    check("session load --site localhost: the question names that scope, and only localhost's cookie goes to the VM (and the audit says so)",
+          rc == 0 and [c["host_key"] for c in got2.get("cookies", [])] == ["localhost"] and js(out).get("cookies") == 1
+          and last.get("op") == "session_load" and last.get("sites") == ["localhost"], (out, got2, last))
+    r = client("session", "load", "multi", "--vm", "ivm", "--site", "bank.example")
+    check("--site outside what the session holds is refused before anything is sent", r.returncode == 2 and "only, not bank.example" in r.stdout + r.stderr,
+          r.stdout + r.stderr)
+
+    # replacing keeps an identity provider's mark
+    rc, out = tty([BIN, "import-session", "--browser", "chrome", "--site", "localhost", "--name", "g", "--vm", "ivm", "--to-profile", "work",
+                   "--replace"], [("Vault passphrase", PASS + "\n")])
+    lj = json.loads(client("list", "--json").stdout or "{}")
+    g2 = next((x for x in lj.get("sessions", []) if x["name"] == "g"), {})
+    check("replacing an identity provider's session keeps its mark (and approval each)", rc == 0 and g2.get("identity_provider") is True
+          and g2.get("approval") == "each", (out, g2))
 
     # the loader itself, against a VM-side profile made here
     loader = shlex.split(load_cmd[load_cmd.index("exec python3"):])[4] if "exec python3" in load_cmd else ""

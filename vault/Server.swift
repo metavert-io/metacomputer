@@ -1615,6 +1615,15 @@ final class UnlockServer {
               (req["profile"] as? String).map(validName) ?? (req["profile"] == nil) else {
             return finish("session_load", fields, failed("bad request"), who, approval: "-")
         }
+        // --site: only the cookies those sites get (imported sessions only), filtered here before anything is sent.
+        var only: [String]? = nil
+        if let raw = req["sites"] {
+            guard let list = raw as? [String], !list.isEmpty, list.count <= 20, list.allSatisfy(validSiteHost) else {
+                return finish("session_load", fields, failed("bad request: sites must be 1 to 20 host names"), who, approval: "-")
+            }
+            only = Array(Set(list.map { $0.lowercased() })).sorted()
+            fields["sites"] = only
+        }
         say("\(clockTime())  session load \(name) on VM \(vm), asked by \(who.describe)")
         let p: Payload
         do { p = try load() } catch let e as VaultError { return finish("session_load", fields, failed(e.message), who, approval: "-") } catch {
@@ -1627,6 +1636,15 @@ final class UnlockServer {
         let profile = req["profile"] as? String ?? meta.profile
         fields["profile"] = profile
         if cookies { fields["kind"] = "cookies" }
+        if let o = only {
+            guard cookies else {
+                return finish("session_load", fields, denied("\(name) is a whole browser profile, which loads whole: --site narrows only a session imported with import-session"), who, approval: "-")
+            }
+            let held = meta.sites ?? []
+            if let outside = o.first(where: { s in !held.contains { s == $0 || s.hasSuffix("." + $0) } }) {
+                return finish("session_load", fields, denied("\(name) holds cookies for \(held.joined(separator: ", ")) only, not \(outside)"), who, approval: "-")
+            }
+        }
         // Don't forge or rewrite the driver's own records. (Imported cookies go into a profile's own store, whatever its name.)
         guard profile == meta.profile || cookies else {
             return finish("session_load", fields, denied("\(name) was saved from profile \(meta.profile). The driver records a profile's name inside it (.cua-driver-owned-profile.json), so the session works only under that name: leave out --profile, or use --profile \(meta.profile)"), who, approval: "-")
@@ -1643,7 +1661,9 @@ final class UnlockServer {
         // its policy, and no grant or rule covers it.
         let idp = meta.alwaysAsks
         if confirmEach || meta.approval != "session" || meta.vm != vm || idp {
-            let what = cookies ? "the cookies imported for \((meta.sites ?? []).joined(separator: ", "))" : "the sealed session"
+            let what = !cookies ? "the sealed session"
+                : only.map { "only the cookies for \($0.joined(separator: ", ")) (of those imported for \((meta.sites ?? []).joined(separator: ", ")))" }
+                    ?? "the cookies imported for \((meta.sites ?? []).joined(separator: ", "))"
             let question = cookies
                 ? (meta.vm != vm
                    ? "  Load \(name), \(what) (made for VM \(meta.vm)), into profile \(profile) on a different VM, \(vm)?"
@@ -1651,10 +1671,12 @@ final class UnlockServer {
                 : (meta.vm != vm
                    ? "  Load the sealed session \(name), saved from VM \(meta.vm), into a different VM, \(vm) (profile \(profile); replaces it)?"
                    : "  Load the sealed session \(name) into profile \(profile) on VM \(vm) (replaces that profile)?")
-            // A load into another VM always asks this time, whatever was granted before (and no rule covers it).
-            let kind = meta.vm != vm ? "session_load_elsewhere:\(vm)" : "session_load"
+            // A load into another VM always asks this time, whatever was granted before (and no rule covers it). An
+            // answer given for some of a session's sites is kept for exactly those sites.
+            let kind = (meta.vm != vm ? "session_load_elsewhere:\(vm)" : "session_load") + (only.map { "|sites=" + $0.joined(separator: ",") } ?? "")
             let o = approve(kind, name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil, use: "session_load",
-                            summary: "load the sealed session \(name) into profile \(profile)", identityProvider: idp,
+                            summary: "load the sealed session \(name) into profile \(profile)" + (only.map { " (only the cookies for \($0.joined(separator: ", ")))" } ?? ""),
+                            identityProvider: idp,
                             proposedID: req["request_id"] as? String, ruleUse: (meta.vm == vm && !idp) ? "session_load" : nil)
             approval = o.how
             if !o.yes { return finish("session_load", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
@@ -1667,9 +1689,16 @@ final class UnlockServer {
         }
         defer { wipe(&archive) }
         if cookies {
-            // Imported cookies: each value encrypted with the VM's Chrome key, merged into the profile's own store.
-            guard var input = cookiesForVM(archive) else {
+            // Imported cookies: each value encrypted with the VM's Chrome key, merged into the profile's own store
+            // (with --site, only the cookies those sites get).
+            guard var input = cookiesForVM(archive, only: only) else {
                 return finish("session_load", fields, failed("the sealed cookies can't be read"), who, approval: approval)
+            }
+            let sent = cookieCount(input)
+            fields["cookies"] = sent
+            guard sent != 0 else {
+                wipe(&input)
+                return finish("session_load", fields, failed("\(name) holds no cookies for \((only ?? []).joined(separator: ", "))"), who, approval: approval)
             }
             wipe(&archive)
             archive = input

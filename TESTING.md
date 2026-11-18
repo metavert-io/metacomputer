@@ -976,7 +976,7 @@ person at it, and without it there is none. It covers:
 - **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit
   --verify` and `verify-audit.py` on the log with the new records.
 
-`python3 tests/test_vault_import.py` (45 checks, about a minute) covers the imports with
+`python3 tests/test_vault_import.py` (55 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
 their values encrypted as Chrome on macOS does with a test key. The test build reads them
 through `MCOMP_VAULT_TEST_CHROME_DIR` and takes the key from `MCOMP_VAULT_TEST_CHROME_KEY`;
@@ -984,14 +984,21 @@ it never reads the real Chrome folder or asks the Keychain (both refusals are ch
 release build contains neither switch. It covers:
 - **Chrome's passwords:** a dry run (no passphrase, no values, nothing saved), the import
   (what's skipped and why), the decrypted value reaching a fill, a re-import that changes
-  nothing, a changed password updated as a rotation, `--site`, `--profile`, the wrong key;
+  nothing, a changed password updated as a rotation, `--site`, `--profile`, the wrong key, and
+  a `logins` that is a view over a recursive query (refused before any row is read);
 - **CSV exports** from Chrome (a password with a comma, quotes and a line break), the
   Passwords app (OTPAuth becoming a TOTP secret that fills the current code, an unsupported
-  one skipped), 1Password and Bitwarden (several URIs, its TOTP, notes skipped);
+  one skipped), 1Password and Bitwarden (several URIs, its TOTP, notes skipped); a login with
+  12,000 sites in one cell (cut to 20, and the audit chain still verifies); a 2FA seed for one
+  account never replacing another account's code on the same site, with its own audit record;
 - **`import-session`:** `--site` required, a dry run, only the named site's cookies sealed,
-  `--replace`, an identity provider needing `--allow-identity-provider` and asking at every
-  load whatever its policy, the load sending each value encrypted with the VM's Chrome key
-  (with and without the domain hash) to the cookie loader;
+  `--replace` (which keeps an identity provider's mark), an identity provider needing
+  `--allow-identity-provider` and asking at every load whatever its policy, the load sending
+  each value encrypted with the VM's Chrome key (with and without the domain hash) to the
+  cookie loader; a store older than version 24 and a cookie relabeled from `.google.com` to
+  the site, both refused; `session load --site` sending only that site's cookies, and refusing
+  a site the session doesn't hold; a load that fails after the VM got the cookies reporting the
+  vault's own words, not the VM's error output (a stand-in writes a marker there);
 - **the VM-side cookie loader**, run here against a profile store made here: cookies merged
   and replaced, a profile never opened (exit 6), a keyring-encrypted store and a symbolic
   link refused;

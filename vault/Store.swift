@@ -33,6 +33,7 @@ struct Secret: Codable {
     var api_header: String?         // api: "Name: template with {value}"
     var api_path_prefix: String?    // api: only paths under this
     var gen: String? = nil          // random, new with every set: API tokens are bound to it
+    var totp_for: String? = nil     // totp: the password secret whose account this code belongs to (set by import-passwords)
 }
 
 /// A secret's generation: tokens made for an earlier value or policy don't fit a newer one.
@@ -68,9 +69,10 @@ struct SessionMeta: Codable {
 }
 
 extension SessionMeta {
-    /// Whether every load asks, whatever the policy, grants or rules: a whole Chrome profile saved from a VM may
-    /// hold any sign-in, an identity provider's included, so it's treated as one.
-    var alwaysAsks: Bool { true }
+    /// Whether every load asks, whatever the policy, grants or rules: a session that holds an identity provider's
+    /// sign-in, and a whole Chrome profile saved from a VM, which may hold any sign-in (an identity provider's
+    /// included), so it's treated as one. Only imported cookies, whose sites are known, can be relaxed.
+    var alwaysAsks: Bool { identity_provider == true || kind != "cookies" }
 }
 
 /// Somewhere off this Mac that receives every audit event (Sinks.swift).

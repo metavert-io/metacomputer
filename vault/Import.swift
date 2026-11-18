@@ -142,11 +142,52 @@ func withDatabaseCopy<T>(_ src: String, _ body: (OpaquePointer) throws -> T) thr
         sqlite3_close(db)
         throw VaultError("\(src) isn't a database this program can read")
     }
-    defer { sqlite3_close(h) }
+    defer {
+        sqlite3_progress_handler(h, 0, nil, nil)
+        sqlite3_close(h)
+    }
+    // The file may not be Chrome's: a schema can make a small file produce endless rows or huge values, so no
+    // single value may pass 16 MB, and reading stops after importMaxSeconds.
+    sqlite3_limit(h, SQLITE_LIMIT_LENGTH, 16 << 20)
+    importDeadline = Date().timeIntervalSince1970 + importMaxSeconds
+    sqlite3_progress_handler(h, 10_000, { _ in Date().timeIntervalSince1970 > importDeadline ? 1 : 0 }, nil)
     return try body(h)
 }
 
-/// The rows of a query, each column by name (text, integer or blob).
+/// Limits on what one database copy may yield, whoever prepared it (Chrome's own stay far below them).
+let importMaxRows = 200_000
+let importMaxBytes = 256 << 20
+let importMaxSeconds: TimeInterval = 60
+nonisolated(unsafe) var importDeadline: TimeInterval = 0
+
+/// Refuse unless each name is an ordinary table: a view or a virtual table runs code of the file's choosing
+/// (a recursive query, a join without end) each time it's read, and Chrome's databases have neither there.
+func requireTables(_ db: OpaquePointer, _ names: [String]) throws {
+    for n in names {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT type, sql FROM sqlite_master WHERE name = ?1 COLLATE NOCASE", -1, &stmt, nil) == SQLITE_OK,
+              let s = stmt else { throw VaultError("the database's schema can't be read") }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, n, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        var kinds: [String] = []
+        var virtual = false
+        var rc = sqlite3_step(s)
+        while rc == SQLITE_ROW {
+            kinds.append(sqlite3_column_text(s, 0).map { String(cString: $0) } ?? "")
+            let sql = sqlite3_column_text(s, 1).map { String(cString: $0) } ?? ""
+            if sql.uppercased().replacingOccurrences(of: " ", with: "").hasPrefix("CREATEVIRTUAL") { virtual = true }
+            rc = sqlite3_step(s)
+        }
+        guard rc == SQLITE_DONE else { throw VaultError("the database's schema can't be read") }
+        guard kinds == ["table"], !virtual else {
+            throw VaultError(kinds.isEmpty ? "the database has no \(n) table: not one Chrome wrote"
+                             : "the database's \(n) isn't an ordinary table (\(virtual ? "a virtual table" : kinds.joined(separator: ", "))): not one Chrome wrote, so it isn't read")
+        }
+    }
+}
+
+/// The rows of a query, each column by name (text, integer or blob), at most importMaxRows rows and importMaxBytes
+/// of values; anything that stops the query early (an error, the time limit) is an error, never a shorter list.
 func sqliteRows(_ db: OpaquePointer, _ sql: String) throws -> [[String: Any]] {
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt else {
@@ -154,20 +195,32 @@ func sqliteRows(_ db: OpaquePointer, _ sql: String) throws -> [[String: Any]] {
     }
     defer { sqlite3_finalize(s) }
     var rows: [[String: Any]] = []
-    while sqlite3_step(s) == SQLITE_ROW {
+    var bytes = 0
+    var rc = sqlite3_step(s)
+    while rc == SQLITE_ROW {
+        guard rows.count < importMaxRows else { throw VaultError("the database holds more than \(importMaxRows) rows there: not one this imports") }
         var r: [String: Any] = [:]
         for i in 0..<sqlite3_column_count(s) {
             let name = String(cString: sqlite3_column_name(s, i))
             switch sqlite3_column_type(s, i) {
             case SQLITE_INTEGER: r[name] = Int64(sqlite3_column_int64(s, i))
-            case SQLITE_TEXT: r[name] = String(cString: sqlite3_column_text(s, i))
+            case SQLITE_TEXT:
+                bytes += Int(sqlite3_column_bytes(s, i))
+                r[name] = sqlite3_column_text(s, i).map { String(cString: $0) } ?? ""
             case SQLITE_BLOB:
                 let n = Int(sqlite3_column_bytes(s, i))
+                bytes += n
                 if n > 0, let p = sqlite3_column_blob(s, i) { r[name] = Array(UnsafeRawBufferPointer(start: p, count: n)) } else { r[name] = [UInt8]() }
             default: break
             }
         }
+        guard bytes <= importMaxBytes else { throw VaultError("the database's values there pass \(importMaxBytes >> 20) MB: not one this imports") }
         rows.append(r)
+        rc = sqlite3_step(s)
+    }
+    guard rc == SQLITE_DONE else {
+        throw VaultError(rc == SQLITE_INTERRUPT ? "reading the database took longer than \(Int(importMaxSeconds)) seconds: stopped, nothing imported"
+                         : "reading the database failed part way (\(String(cString: sqlite3_errmsg(db)))): nothing imported")
     }
     return rows
 }
@@ -183,15 +236,29 @@ struct ImportedLogin {
     var title: String?
 }
 
-/// The origins a URL from a saved login stands for (https only; http for localhost or 127.0.0.1 with a port).
+/// The most sites one imported login keeps (the first ones listed): a login for more is cut to these, so one
+/// cell of a file can't make a secret, or the audit record naming its sites, without bound.
+let maxOriginsPerLogin = 20
+
+/// The origins a URL from a saved login stands for (https only; http for localhost or 127.0.0.1 with a port),
+/// at most maxOriginsPerLogin + 1 of them (the caller says when a login had more).
 func originsOf(_ raw: String) -> [String] {
     var out: [String] = []
     for part in raw.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == " " }) {
-        guard let u = URLComponents(string: String(part)), let scheme = u.scheme?.lowercased(), let host = u.host, !host.isEmpty else { continue }
+        guard part.utf8.count <= 2048, let u = URLComponents(string: String(part)), let scheme = u.scheme?.lowercased(),
+              let host = u.host, !host.isEmpty else { continue }
         let o = canonicalOrigin("\(scheme)://\(host)" + (u.port.map { ":\($0)" } ?? ""))
         if let o, !out.contains(o) { out.append(o) }
+        if out.count > maxOriginsPerLogin { break }
     }
     return out
+}
+
+/// A login's origins cut to maxOriginsPerLogin, noting the cut.
+func capOrigins(_ origins: [String], _ s: inout ImportSummary) -> [String] {
+    guard origins.count > maxOriginsPerLogin else { return origins }
+    s.skip("sites past the first \(maxOriginsPerLogin) of one login (the login comes in with its first \(maxOriginsPerLogin))")
+    return Array(origins.prefix(maxOriginsPerLogin))
 }
 
 struct ImportSummary {
@@ -227,12 +294,13 @@ func chromeLogins(profile: String, decrypt: Bool) throws -> ImportSummary {
     }
     var s = ImportSummary()
     try withDatabaseCopy(path) { db in
+        try requireTables(db, ["logins"])
         for r in try sqliteRows(db, "SELECT origin_url, username_value, password_value, blacklisted_by_user FROM logins") {
             s.read += 1
             if (r["blacklisted_by_user"] as? Int64 ?? 0) != 0 { s.skip("a 'never save' entry"); continue }
             let url = r["origin_url"] as? String ?? ""
             if url.hasPrefix("android://") { s.skip("an app's login, not a website's"); continue }
-            let origins = originsOf(url)
+            let origins = capOrigins(originsOf(url), &s)
             guard !origins.isEmpty else { s.skip("not an https site"); continue }
             let user = r["username_value"] as? String ?? ""
             var pass = ""
@@ -314,7 +382,7 @@ func csvLogins(_ path: String) throws -> (ImportSummary, String) {
         func v(_ c: Int?) -> String { c.flatMap { $0 < r.count ? r[$0] : nil } ?? "" }
         s.read += 1
         if let t = typeC, !v(t).isEmpty, v(t).lowercased() != "login" { s.skip("not a login (a note, card or identity)"); continue }
-        let origins = originsOf(v(urlC))
+        let origins = capOrigins(originsOf(v(urlC)), &s)
         guard !origins.isEmpty else { s.skip("not an https site"); continue }
         let pass = v(passC)
         guard !pass.isEmpty, pass.utf8.count <= 4096 else { s.skip(pass.isEmpty ? "an empty password" : "a password over 4096 bytes"); continue }
@@ -334,6 +402,15 @@ func importName(_ origin: String, _ taken: Set<String>, suffix: String = "") -> 
     base = String(base.prefix(60 - suffix.count)) + suffix
     var name = base, n = 2
     while taken.contains(name) || !validName(name) { name = String(base.prefix(58 - suffix.count)) + "-\(n)"; n += 1 }
+    return name
+}
+
+/// A new 2FA code's name: its login's name with -otp (then -otp-2, -otp-3... when taken), so which account it
+/// belongs to reads off the name as well as its totp_for.
+func totpImportName(_ login: String, _ taken: Set<String>) -> String {
+    let base = String(login.prefix(56)) + "-otp"
+    var name = base, n = 2
+    while taken.contains(name) || !validName(name) { name = base + "-\(n)"; n += 1 }
     return name
 }
 
@@ -400,10 +477,14 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if let seed = l.totp, (try? parseTOTPSeed(seed)) == nil {
             summary.skip("a 2FA seed this vault can't use (only SHA1, 6-digit, 30-second codes); the login itself comes in")
         } else if l.totp != nil {
-            if let t = existing?.secrets.first(where: { $0.value.kind == "totp" && $0.value.origins.contains(o) && $0.key.hasPrefix(name) }) {
-                totpName = t.key
+            // Only the code recorded as this login's own (totp_for) is replaced: never another account's on the same site.
+            let mine = (existing?.secrets ?? [:]).filter { $0.value.kind == "totp" && $0.value.totp_for == name }.map(\.key).sorted()
+            if mine.count > 1 {
+                summary.skip("a 2FA seed for a login with more than one 2FA code already recorded as its own (left as they are; the login itself comes in)")
+            } else if let t = mine.first {
+                totpName = t
             } else {
-                totpName = importName(o, taken.union([name]), suffix: "-otp")
+                totpName = totpImportName(name, taken.union([name]))
                 taken.insert(totpName!)
             }
         }
@@ -420,6 +501,7 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     guard let key else { return Exit.failed }
     var counts: [String: Int] = [:], totpBad = 0
+    var totpChanges: [(String, String, String, String)] = []   // (op, totp name, login name, origin)
     let now = isoTime()
     try updateVault(paths, key) { p in
         for (status, name, l, totpName) in planned {
@@ -440,11 +522,13 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                 if p.secrets[tn] == nil {
                     p.secrets[tn] = Secret(kind: "totp", value: b32, username: nil, origins: [l.origins[0]], approval: "each", created: now,
                                            rotated: nil, last_used: nil, uses: 0, projects: nil, api_host: nil, api_header: nil,
-                                           api_path_prefix: nil, gen: randomBytes(8).map { String(format: "%02x", $0) }.joined())
-                } else if p.secrets[tn]?.value != b32 {
+                                           api_path_prefix: nil, gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(), totp_for: name)
+                    totpChanges.append(("set", tn, name, l.origins[0]))
+                } else if p.secrets[tn]?.kind == "totp", p.secrets[tn]?.totp_for == name, p.secrets[tn]?.value != b32 {
                     p.secrets[tn]?.value = b32
                     p.secrets[tn]?.rotated = now
                     p.secrets[tn]?.gen = randomBytes(8).map { String(format: "%02x", $0) }.joined()
+                    totpChanges.append(("rotate", tn, name, l.origins[0]))
                 }
             }
         }
@@ -456,8 +540,13 @@ func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if !l.username.isEmpty { rec["username_hint"] = maskUsername(l.username) }
         audit(paths, rec, macKey: ak)
     }
+    // Every 2FA code made or replaced has its own record, whether or not its login changed.
+    for (op, tn, login, origin) in totpChanges {
+        audit(paths, ["op": op, "result": "ok", "name": tn, "kind": "totp", "approval_mode": "each", "origins": [origin],
+                      "totp_for": login, "imported_from": source], macKey: ak)
+    }
     audit(paths, ["op": "import_passwords", "result": "ok", "source": source, "new": counts["new"] ?? 0, "updated": counts["updated"] ?? 0,
-                  "unchanged": counts["unchanged"] ?? 0, "skipped": summary.skipped.values.reduce(0, +)], macKey: ak)
+                  "unchanged": counts["unchanged"] ?? 0, "totp_changed": totpChanges.count, "skipped": summary.skipped.values.reduce(0, +)], macKey: ak)
     oprint("Imported \(counts["new"] ?? 0) new, updated \(counts["updated"] ?? 0), left \(counts["unchanged"] ?? 0) as they were"
            + (totpBad > 0 ? "; \(totpBad) 2FA seed(s) skipped (only SHA1, 6-digit, 30-second codes are supported)" : "") + ".")
     oprint("Every imported login asks before each use. `metacomputer secrets policy NAME --approval session` relaxes one; `rule add` allows one project for a while.")
@@ -532,8 +621,16 @@ func cmdImportSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     var perSite: [String: Int] = [:]
     var unreadable = 0
     var idpHosts: Set<String> = []
+    var relabeled = 0
     try withDatabaseCopy(cookiePath) { db in
-        let version = Int((try? sqliteRows(db, "SELECT value FROM meta WHERE key='version'"))?.first?["value"] as? String ?? "0") ?? 0
+        try requireTables(db, ["meta", "cookies"])
+        let version = Int(try sqliteRows(db, "SELECT value FROM meta WHERE key='version'").first?["value"] as? String ?? "0") ?? 0
+        // From version 24 (Chrome 130) each encrypted value starts with the SHA-256 of its cookie's domain, which is what
+        // ties a value to its host_key: without it, a cookie for another site could be relabeled as one of these.
+        guard version >= 24 else {
+            throw VaultError("Chrome's cookie store in profile \(profile) says it's version \(version); this import needs version 24 or later "
+                             + "(Chrome 130 and later), where each cookie's value carries its own domain: update Chrome, open it once, then import")
+        }
         for r in try sqliteRows(db, "SELECT * FROM cookies") {
             let hk = r["host_key"] as? String ?? ""
             guard cookieForSites(hk, sites) else { continue }
@@ -542,17 +639,23 @@ func cmdImportSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
             if dry { continue }
             var plain: [UInt8]
             if let enc = r["encrypted_value"] as? [UInt8], !enc.isEmpty {
-                guard let p = chromeDecrypt(enc, key: macKey) else { unreadable += 1; continue }
-                plain = p
-                // From database version 24 Chrome puts the SHA-256 of the cookie's domain before the value.
+                guard var p = chromeDecrypt(enc, key: macKey) else { unreadable += 1; continue }
+                defer { wipe(&p) }
                 let h = hexToBytes(sha256Hex(Array(hk.utf8)))
-                if version >= 24, plain.count >= 32, Array(plain[0..<32]) == h { plain = Array(plain[32...]) }
+                guard p.count >= 32, Array(p[0..<32]) == h else { relabeled += 1; continue }
+                plain = Array(p[32...])
             } else {
+                // A value Chrome didn't encrypt was never secret on this Mac: whatever its label, it reveals nothing new.
                 plain = Array((r["value"] as? String ?? "").utf8)
             }
             cookies.append(cookieRecord(r, value: plain))
             wipe(&plain)
         }
+    }
+    guard relabeled == 0 else {
+        for i in cookies.indices { cookies[i]["value"] = "" }
+        throw VaultError("\(relabeled) cookie\(relabeled == 1 ? "" : "s") in profile \(profile) carr\(relabeled == 1 ? "ies" : "y") another domain inside the encrypted value "
+                         + "than the host it's filed under: the store was changed after Chrome wrote it. Nothing was imported")
     }
     let n = perSite.values.reduce(0, +)
     oprint(clean("Chrome (profile \(profile)): \(n) cookies for \(sites.joined(separator: ", "))", max: 300))
@@ -578,8 +681,10 @@ func cmdImportSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     try updateVault(paths, key) { p in
         guard let d = Data(base64Encoded: p.session_key), d.count == 32 else { throw VaultError("the vault's session key is damaged") }
         try writeFileAtomic(paths.sessions + "/\(name).sealed", try sealGCM(key: Array(d), plaintext: pl, aad: Array("mcomp-session|1|\(name)".utf8)))
+        // A replacement starts at `each` again, and keeps an identity provider's mark from what it replaces.
+        let keepIdp = idp || p.sessions[name]?.identity_provider == true
         p.sessions[name] = SessionMeta(vm: vm, profile: target, saved_at: isoTime(), bytes: bytes, last_loaded: nil, loads: 0, approval: "each",
-                                       identity_provider: idp ? true : nil, kind: "cookies", source: "chrome:\(profile)", sites: sites)
+                                       identity_provider: keepIdp ? true : nil, kind: "cookies", source: "chrome:\(profile)", sites: sites)
     }
     audit(paths, ["op": "import_session", "result": "ok", "name": name, "vm": vm, "profile": target, "source": "chrome:\(profile)",
                   "sites": sites, "cookies": cookies.count, "identity_provider": idp], macKey: vaultAuditKey(paths, key))
@@ -669,11 +774,13 @@ func cookieLoadScript(user: String, profile: String) -> String {
 /// The sealed cookies as the VM's loader takes them: each value encrypted with the VM's Chrome key, with and
 /// without the domain hash that cookie stores from version 24 put before it. Never leaves this process except on
 /// ssh's standard input.
-func cookiesForVM(_ sealedPlain: [UInt8]) -> [UInt8]? {
+/// With `only`, just the cookies a browser sends to those sites (cookieForSites).
+func cookiesForVM(_ sealedPlain: [UInt8], only: [String]? = nil) -> [UInt8]? {
     guard let o = parseJSONObject(sealedPlain), o["kind"] as? String == "cookies", let list = o["cookies"] as? [[String: Any]] else { return nil }
     let key = chromeLinuxKey()
     var out: [[String: Any]] = []
     for c in list {
+        if let only, !cookieForSites(c["host_key"] as? String ?? "", only) { continue }
         guard let b64 = c["value"] as? String, var v = Data(base64Encoded: b64).map(Array.init) else { return nil }
         defer { wipe(&v) }
         var r = c
@@ -684,4 +791,15 @@ func cookiesForVM(_ sealedPlain: [UInt8]) -> [UInt8]? {
         out.append(r)
     }
     return Array(jsonLine(["cookies": out]).utf8)
+}
+
+/// How many cookies a cookiesForVM payload carries.
+func cookieCount(_ payload: [UInt8]) -> Int {
+    (parseJSONObject(payload)?["cookies"] as? [Any])?.count ?? 0
+}
+
+/// A host name as `--site` takes it (github.com, localhost).
+func validSiteHost(_ s: String) -> Bool {
+    let h = s.lowercased()
+    return matches(h, "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$") && (h.contains(".") || h == "localhost")
 }
