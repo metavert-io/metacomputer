@@ -98,7 +98,7 @@ ask() { # QUESTION DEFAULT(Y|N) -> 0 = yes. --yes answers yes; with no terminal,
 
 # git on a checkout never runs its hooks or a file-system monitor (a checkout's own settings could name them).
 git_local() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
-# git that also works while the repository is private: when plain git can't reach it, retry
+# git that also works for a private fork or mirror: when plain git can't reach it, retry
 # with the GitHub CLI's credentials (gh auth login), if gh is installed and logged in.
 git_net() {
   local err rc gh
@@ -452,7 +452,7 @@ pick_ref() {
   if [ -n "$REF" ]; then
     REF_KIND=given
     out="$(git_net ls-remote "$REPO" "refs/tags/$REF" "refs/tags/$REF^{}" "refs/heads/$REF")" \
-      || die "couldn't ask $REPO about $REF (above)." "Check the network (and, while the repository is private, 'gh auth status'), then run this again."
+      || die "couldn't ask $REPO about $REF (above)." "Check the network (and, for a private fork, 'gh auth status'), then run this again."
     REF_COMMIT="$(printf '%s\n' "$out" | awk -v t="refs/tags/$REF^{}" '$2 == t { print $1 }')"
     [ -n "$REF_COMMIT" ] || REF_COMMIT="$(printf '%s\n' "$out" | awk -v t="refs/tags/$REF" '$2 == t { print $1 }')"
     if [ -z "$REF_COMMIT" ]; then
@@ -464,7 +464,7 @@ pick_ref() {
   fi
   out="$(git_net ls-remote --sort=v:refname --tags "$REPO" 'v[0-9]*')" \
     || die "couldn't list $REPO's releases (above), so it can't tell which one to install." \
-           "Check the network (and, while the repository is private, 'gh auth status'), then run this again."
+           "Check the network (and, for a private fork, 'gh auth status'), then run this again."
   REF="$(printf '%s\n' "$out" | awk '{ print $2 }' | sed 's|^refs/tags/||; s|\^{}$||' | grep -E '^v[0-9]+(\.[0-9]+)*$' | uniq | tail -1 || true)"
   if [ -n "$REF" ]; then
     REF_KIND=release
@@ -507,7 +507,7 @@ checkout() {
     fi
     pick_ref
     act git_net -C "$DIR" fetch -q --tags --prune origin || die "couldn't update $DIR from its origin." \
-        "Check the network (and, while the repository is private, that 'gh auth status' is logged in), then run this again."
+        "Check the network (and, for a private fork, that 'gh auth status' is logged in), then run this again."
     if [ "$DRY" = 1 ]; then note "would switch it to $(ref_desc)"; return 0; fi
     switch_ref "$DIR"
     return 0
@@ -517,7 +517,7 @@ checkout() {
   fi
   pick_ref
   act git_net clone -q "$REPO" "$DIR" || die "couldn't download metacomputer from $REPO." \
-      "Check the network. While the repository is private, log in to GitHub first: gh auth login."
+      "Check the network. For a private fork, log in to GitHub first: gh auth login."
   if [ "$DRY" = 1 ]; then note "would check out $(ref_desc)"; return 0; fi
   switch_ref "$DIR"
   ok "downloaded to $DIR ($(ref_desc))"

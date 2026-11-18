@@ -6,6 +6,17 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
+The first public release. Highlights:
+- **One-line install:** `get.sh` sets up everything, VM included, in about 5 minutes on a Mac with Homebrew and Apple's Command Line Tools.
+- **The vault:** approvals by Touch ID, imports from Chrome, the Passwords app, 1Password and Bitwarden, and the same verbs as Cua Spaces' Keyvault.
+- **Storage:** disk volumes, shared Mac folders (visible in Finder), S3-backed folders and reference disks.
+- **Lessons:** `metacomputer learn`, from Claude's own sessions.
+- **The hub:** one connection per VM, with every guard on every path.
+- **The plugin:** the skill and tools as a Claude Code plugin.
+- **Plus:** the shell channel, the event stream and the benchmark.
+
 ### Added
 - `metacomputer learn` (docs/learn.md): the virtual computer learns from your own sessions. `learn report [--since 7d] [--project PATH] [--json]` reads this Mac's Claude Code sessions that used the metacomputer tools (either prefix; Claude Code's session files and saved headless transcripts), plus action logs, the event log and benchmark results, and reports failed driver calls by class (malformed arguments, each hub guard's refusal, element not found, pixel actions without a screenshot frame, and more), `unverifiable` results acted on without a check, failure classes that repeat within a session, runs of changed routes without re-checking the premise, and time per app. It proposes short lessons with their evidence from built-in templates, and with `--draft-with-claude` from one headless Claude Code session that gets only counts. `learn review`, `approve`, `reject`, `list`, `remove`, `edit` and `add` manage them; approved lessons live in a private store outside the checkout (`LESSONS_DIR`, default `~/.local/share/metacomputer/lessons`) and reach every new session through the MCP instructions, after the skill's habits, as advice that no guard reads (`LESSONS=off` stops that). Every change made through `learn` is recorded with hashes in `approvals.jsonl` and its event, and lessons are sent only while the store matches that record and the record's last change has its own event, the latest for that store (kept in a never-rotated `lesson-events.jsonl` as well as the event log): a lessons file written another way, an entry added by hand or a record cut back isn't sent until `learn reseal`, at your terminal, accepts it (best-effort detection; an event sink off the Mac is the copy your account can't rewrite, and lesson events skip the family rate limit so a sink that's down gets them late rather than never). `metacomputer status` and `security` count them and warn about a mismatch, including one with the event log, and the hub's status reports the store's hash. Approving, editing, removing or resealing emits `security.lesson_approved`, `lesson_edited`, `lesson_removed` or `lessons_resealed` (an id, a short title and two hashes, never the text). Approved lessons are model context: they go to the model with each session's instructions. `learn bench --config TEST_ENV` runs the benchmark on a test VM without and with them and compares pass count, invalid calls, turns, time and cost; it asks first, since it spends your Claude usage. Its first run, with two built-in lessons approved, passed 19/20 both ways ($9.67 without, $9.81 with; 16.6 turns against 17.1): no measurable effect, since neither lesson's pattern came up in the benchmark's tasks.
 - The plugin's `/metacomputer:learn` command runs the report in a chat and walks you through the proposals.
@@ -41,6 +52,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - A benchmark (`bench/`, bench/README.md): 20 desktop tasks run in fresh headless Claude Code sessions on a test VM, scored by checks that read the VM's real state, with switches to compare one change at a time. The first baseline passed all 20 for $11.95. `bench/runs/` holds each cited run's per-task results (pass, invalid-argument calls, turns) with its model, driver version and commit.
 
 ### Changed
+- get.sh's and install.sh's notes about GitHub logins now speak of private forks: the repository is public, so a plain clone works.
 - Storage, after a second audit (docs/storage.md, SECURITY.md "Storage"):
   - S3 volumes sync in two stages: rclone works only on a private sync copy in metacomputer's
     state folder, and metacomputer exchanges it with the folder the VM sees through
