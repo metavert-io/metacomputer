@@ -619,9 +619,15 @@ final class UnlockServer {
               site.map({ canonicalOrigin($0) == $0 }) ?? true else { return failed("bad request") }
         let p: Payload
         do { p = try load() } catch { return failed("cannot read the vault") }
-        let (rule, why) = buildRule(p, use: "", secret: secret, site: site, session: session, project: project, seconds: secs, confirmed: "local-auth")
+        // One rule, built now with its absolute expiry; the dialog shows exactly its stored fields, and it's stored as is.
+        let (rule, why) = buildRule(p, use: "", secret: secret, site: site, session: session, project: project,
+                                    expires: Date().addingTimeInterval(TimeInterval(secs)), confirmed: "local-auth")
         guard let rule else { return failed(why ?? "can't make that rule") }
-        let text = "make an unattended rule: allow \(rule.what) without asking, for Claude Code sessions in \(tildePath(project)), until \(rule.expires)"
+        let text = rule.confirmText
+        guard clean(text, max: maxConfirmText) == text else {
+            return denied("this rule can't be shown whole in macOS's dialog (\(text.count) characters, at most \(maxConfirmText)), so it can't be "
+                          + "confirmed there: add --passphrase to confirm it in your own terminal, where it's shown in full")
+        }
         say("\(clockTime())  rule asked for: \(text) (from \(who.describe)); asking macOS for Touch ID or the login password")
         let la = startLocalAuth(text)
         let deadline = Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining()))))

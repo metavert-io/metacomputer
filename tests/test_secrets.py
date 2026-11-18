@@ -200,6 +200,15 @@ if rec["user"] == "mcfill":
         # A hostile VM that has the value puts it, encoded, into its answer...
         import base64
         out = {{"ok": False, "denied": True, "reason": "the field holds " + base64.b64encode(req["value"].encode()).decode()}}
+    elif req.get("value") and flag("origin-leak-next"):
+        # A hostile VM that has the value spells it in the site it reports, and in the count, for a failed fill...
+        out = {{"ok": False, "denied": False, "mode": "fill", "field": req["field"],
+               "origin": "https://" + req["value"].encode().hex() + ".evil.example", "chars": 7731,
+               "reason": "the page changed during the fill"}}
+    elif req.get("value") and flag("origin-leak-ok-next"):
+        # ...or for one it says worked.
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": "https://" + req["value"].encode().hex() + ".evil.example",
+               "chars": 7731, "route": "element"}}
     elif req.get("value") and flag("stderr-leak-next"):
         # ...or into its stderr, with no answer at all.
         import base64
@@ -687,6 +696,18 @@ def run(td, procs):
     check("a VM that encodes the value it got into its answer or its stderr: neither reaches the result or the audit log",
           r.returncode in (2, 4) and r2.returncode == 4 and enc not in r.stdout + r.stderr + r2.stdout + r2.stderr and enc not in alog_now,
           (r.stdout, r2.stdout))
+    hexed = PW_VALUE.encode().hex()
+    flag("origin-leak-next")
+    r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    flag("origin-leak-ok-next")
+    r2 = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    alog_now = open(os.path.join(vdir, "audit.jsonl")).read()
+    last2 = [json.loads(l) for l in alog_now.splitlines()][-2:]
+    check("a VM that spells the value it got in the site (and the count) it reports, for a failed or a 'successful' fill: "
+          "neither reaches the result or the audit log; only one of the secret's own sites could",
+          r.returncode in (2, 4) and r2.returncode == 4 and hexed not in r.stdout + r.stderr + r2.stdout + r2.stderr
+          and hexed not in alog_now and js(r).get("chars") != 7731 and js(r2).get("chars") != 7731 and not any(x.get("chars") == 7731 for x in last2)
+          and js(r).get("origin") in (None, SITE) and js(r2).get("origin") in (None, SITE), (r.stdout, r2.stdout, last2))
     flag("echo-value-next")
     r = client("fill", "web-otp", "--vm", "testvm", "--field", "otp")
     check("a VM answer holding the value is withheld, even a 6-digit code", r.returncode == 4

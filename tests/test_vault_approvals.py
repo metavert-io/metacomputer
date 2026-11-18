@@ -680,7 +680,35 @@ def run(td, procs):
           and lst[0]["confirmed"] == "passphrase", (out, lst))
     shown_first = out.split("Vault passphrase")[0] if "Vault passphrase" in out else ""
     check("N1: the passphrase prompt for a rule comes after the rule itself is shown: what it allows, for whom, and until when",
-          "Make an unattended rule: uses of web-each" in shown_first and "until" in shown_first, out[-400:])
+          "Make an unattended rule: allow uses of the secret web-each" in shown_first and "until" in shown_first, out[-400:])
+    # P2: the rule stored is exactly the rule shown: the expiry is fixed when it's shown, not when the passphrase arrives.
+    pr = ts.Pty([BIN, "rule", "add", "--site", SITE2, "--project", proj1, "--for", "2h", "--passphrase"], env)
+    procs.append(pr)
+    pr.expect("Vault passphrase")
+    time.sleep(2.5)
+    pr.send(PASS + "\n")
+    pr.wait(60)
+    shown_rule = pr.text()
+    pr.close()
+    m = re.search(r"until (\S+)\. Your vault passphrase", shown_rule)
+    lst2 = json.loads(client("rule", "list", "--json").stdout or "{}").get("rules", [])
+    mine = [x for x in lst2 if x.get("site") == SITE2 or x.get("origin") == SITE2]
+    check("P2: a rule confirmed with the passphrase is stored with exactly the expiry shown before the passphrase, however long "
+          "the passphrase took", m and mine and mine[-1].get("expires") == m.group(1), (shown_rule[-300:], mine))
+    for x in mine:
+        client("rule", "remove", x["id"])
+    deep = os.path.join(td, "p" * 120, "q" * 120, "r" * 120)
+    os.makedirs(deep, exist_ok=True)
+    trace_r = os.path.join(td, "rule-trace")
+    lock(u)
+    u = start_unlock(["--for", "20m", *allow], dict(T, MCOMP_VAULT_TEST_LOCAL_AUTH="allow", MCOMP_VAULT_TEST_TRACE=trace_r))
+    r = client("rule", "add", "--secret", "web-each", "--project", deep, "--for", "1h")
+    lst3 = json.loads(client("rule", "list", "--json").stdout or "{}").get("rules", [])
+    shown_dialogs = [l for l in (open(trace_r).read().splitlines() if os.path.exists(trace_r) else []) if l.startswith("local-auth ")]
+    check("P2: a rule too long to show whole in macOS's dialog (the project and the expiry would be cut off) is refused, "
+          "not confirmed with a shortened text", r.returncode == 2 and "can't be shown whole" in r.stdout + r.stderr
+          and not [x for x in lst3 if x.get("project") == deep], (r.stdout, r.stderr, shown_dialogs[-1:]))
+    lst = lst + [x for x in lst3 if x not in lst]
     p, outs = as_claude(proj1, ["fill", "idp-login", "--vm", "avm", "--field", "password"])
     next_request(u)
     u.send("no\n")
@@ -766,6 +794,8 @@ def run(td, procs):
     check("Touch ID that can't be checked right now (a disconnected keyboard, an error) keeps presence mode on, and says why",
           st.get("presence") is True and "can't be checked right now" in st.get("presence_why", "") and "disconnected" in u.text()
           and locked_un.get("presence_default") is True, (st, locked_un))
+    pre_touch = os.path.join(td, "vault-before-touch-id.json")
+    shutil.copy(os.path.join(vdir, "vault.json"), pre_touch)       # a copy from before this vault saw Touch ID enrolled
     P = dict(T, MCOMP_VAULT_TEST_BIOMETRY="available", MCOMP_VAULT_TEST_LOCAL_AUTH="wait")
     u = start_unlock(["--for", "10m", *allow], P)
     u.expect("Presence mode (this Mac has Touch ID)")
@@ -866,6 +896,19 @@ def run(td, procs):
           "later reports no finger, or no sensor (only `presence off` or an unlock flag turns it off)",
           s_seen.get("presence") is True and "seen Touch ID enrolled" in s_seen.get("presence_why", "") and s_seen2.get("presence") is True
           and any(x.get("op") == "presence" and x.get("mode") == "biometry_seen" for x in audit_recs()), (s_seen, s_seen2))
+    # P2: the vault file put back to that older copy (any program of yours could): the audit log still says Touch ID was
+    # seen enrolled, so presence mode stays on, and the unlock says why.
+    cur = os.path.join(td, "vault-current.json")
+    shutil.copy(os.path.join(vdir, "vault.json"), cur)
+    shutil.copy(pre_touch, os.path.join(vdir, "vault.json"))
+    u = start_unlock(["--for", "10m", *allow], dict(T, MCOMP_VAULT_TEST_BIOMETRY="none"))
+    s_rb = json.loads(client("status", "--json").stdout or "{}")
+    rb_text = u.text()
+    lock(u)
+    shutil.copy(cur, os.path.join(vdir, "vault.json"))
+    check("P2: a vault file put back to a copy from before Touch ID was seen enrolled: the audit log still has it, so presence "
+          "mode stays on and the unlock says the file may be an older copy", s_rb.get("presence") is True and "older copy" in rb_text
+          and any(x.get("op") == "presence" and x.get("mode") == "rollback_suspected" for x in audit_recs()), (s_rb, rb_text[-500:]))
     u = start_unlock(["--for", "10m", "--no-require-presence", *allow], P)
     s1 = json.loads(client("status", "--json").stdout or "{}")
     lock(u)

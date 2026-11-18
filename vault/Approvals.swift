@@ -143,6 +143,21 @@ struct UnattendedRule: Codable {
 
 let maxRuleSeconds = 30 * 86400
 
+/// The longest text a confirmation (macOS's dialog) is given: a rule whose text is longer can't be confirmed there.
+let maxConfirmText = 400
+
+/// What confirming a rule allows, from exactly the fields that are stored: the secret, site or session, the project
+/// and the absolute expiry. The dialog and the passphrase prompt show this text, and the rule stored must give it back
+/// byte for byte.
+func ruleConfirmText(secret: String?, site: String?, session: String?, project: String, expires: String) -> String {
+    let what = secret.map { "uses of the secret \($0)" } ?? session.map { "loads of the sealed session \($0)" } ?? "fills into \(site ?? "?")"
+    return "make an unattended rule: allow \(what) without asking, for Claude Code sessions in \(tildePath(project)), until \(expires)"
+}
+
+extension UnattendedRule {
+    var confirmText: String { ruleConfirmText(secret: secret, site: site, session: session, project: project, expires: expires) }
+}
+
 func newRuleID() -> String { randomBytes(4).map { String(format: "%02x", $0) }.joined() }
 
 // MARK: - pending requests
@@ -245,7 +260,7 @@ final class LocalAuthAttempt: @unchecked Sendable {
 func startLocalAuth(_ reason: String, scope: ApprovalScope = .use) -> LocalAuthAttempt {
     let a = LocalAuthAttempt(scope: scope)
     #if MCOMP_VAULT_TESTING
-    testTrace("local-auth " + reason)
+    testTrace("local-auth " + clean(reason, max: maxConfirmText))   // what the dialog would show
     testLocalAuthCount += 1
     let mode = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_LOCAL_AUTH"] ?? ""
     // allow-first-after:N: the first dialog of this process is allowed N seconds after it opens; later ones wait.
@@ -268,7 +283,7 @@ func startLocalAuth(_ reason: String, scope: ApprovalScope = .use) -> LocalAuthA
         a.finish(false, "this Mac can't ask for Touch ID or the login password here (\(localAuthError(err)))")
         return a
     }
-    ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: clean(reason, max: 200)) { ok, error in
+    ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: clean(reason, max: maxConfirmText)) { ok, error in
         let e = error as NSError?
         let no = e.map { $0.domain == LAErrorDomain && ($0.code == LAError.userCancel.rawValue || $0.code == LAError.authenticationFailed.rawValue) } ?? false
         a.finish(ok, ok ? "" : localAuthError(e), refused: no)
@@ -379,6 +394,23 @@ func resolvePresence(flag: Bool?, setting: String?, biometry b: Biometry, detail
         return (false, "this Mac has no Touch ID",
                 "this Mac has no Touch ID, so typed answers approve here; a program that can type into this terminal could approve. \(how) makes every approval need your login password in macOS's dialog")
     }
+}
+
+/// What the audit log says about presence: whether Touch ID was ever seen enrolled, and the last `presence on|off|auto`
+/// setting. A vault file put back to an older copy (any program running as you can do that) loses both from inside the
+/// vault; the log, appended to separately, still has them. Only ever used to make presence mode stricter: a record
+/// added to the log by anyone can only turn it on, never off.
+func auditPresenceHistory(_ paths: Paths) -> (seen: Bool, lastMode: String?) {
+    guard let bytes = try? readFileBytes(paths.audit, max: 1 << 30) else { return (false, nil) }
+    var seen = false
+    var last: String?
+    let marker = Array("\"op\":\"presence\"".utf8)
+    for line in bytes.split(separator: 0x0A) where line.count < 65536 {
+        guard line.count >= marker.count, Array(line).firstRange(of: marker) != nil,
+              let o = parseJSONObject(Array(line)), o["op"] as? String == "presence", let mode = o["mode"] as? String else { continue }
+        if mode == "biometry_seen" { seen = true } else if ["on", "off", "auto"].contains(mode) { last = mode }
+    }
+    return (seen, last)
 }
 
 /// `presence on|off|auto`: the vault's own setting for presence mode (the passphrase, like `policy`).
@@ -510,7 +542,7 @@ func cmdDeny(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 // MARK: - commands: rules
 
 /// The rule a `rule add` command describes, checked against the vault: (rule, error).
-func buildRule(_ p: Payload, use: String, secret: String?, site: String?, session: String?, project: String, seconds: Int,
+func buildRule(_ p: Payload, use: String, secret: String?, site: String?, session: String?, project: String, expires exp: Date,
                confirmed: String) -> (UnattendedRule?, String?) {
     var u = use
     if let s = secret {
@@ -535,7 +567,6 @@ func buildRule(_ p: Payload, use: String, secret: String?, site: String?, sessio
         u = "session_load"
     }
     let now = Date()
-    let exp = now.addingTimeInterval(TimeInterval(seconds))
     return (UnattendedRule(id: newRuleID(), use: u, secret: secret, site: site, session: session, project: project,
                            created: isoTime(now), expires: isoTime(exp), expires_unix: exp.timeIntervalSince1970, confirmed: confirmed), nil)
 }
@@ -570,16 +601,17 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if a.has("passphrase") || !unlocked {
             try requireTTY("rule add")
             installPromptSignalHandlers()
-            // What the passphrase confirms, shown before it's asked for: the rule, for whom, and until when.
-            let what = a.last("secret").map { "uses of \($0)" } ?? a.last("session").map { "loads of the sealed session \($0)" }
-                ?? "fills into \(site ?? "?")"
-            oprint(clean("Make an unattended rule: \(what) without asking, for Claude Code sessions in \(tildePath(project)), "
-                         + "until \(isoTime(Date().addingTimeInterval(TimeInterval(seconds)))). Your vault passphrase confirms it.", max: 500))
+            // What the passphrase confirms, shown before it's asked for: the rule, for whom, and the expiry it will have
+            // (fixed now, so a slow passphrase doesn't stretch it), and the rule stored must say exactly that.
+            let exp = Date().addingTimeInterval(TimeInterval(seconds))
+            let shown = ruleConfirmText(secret: a.last("secret"), site: site, session: a.last("session"), project: project, expires: isoTime(exp))
+            oprint(clean("Make an unattended rule: " + shown.dropFirst("make an unattended rule: ".count) + ". Your vault passphrase confirms it.", max: 4500))
             let (key, existing) = try unlockKey(paths)
             defer { key.wipeKey() }
             let (rule, why) = buildRule(existing, use: "", secret: a.last("secret"), site: site, session: a.last("session"), project: project,
-                                        seconds: seconds, confirmed: "passphrase")
+                                        expires: exp, confirmed: "passphrase")
             guard let rule else { throw VaultError(why ?? "can't make that rule") }
+            guard rule.confirmText == shown else { throw VaultError("the rule to be stored isn't the one shown; nothing was saved") }
             try updateVault(paths, key) { p in p.rules = (p.rules ?? []).filter { $0.live } + [rule] }
             var rec = rule.record
             rec["op"] = "rule_add"

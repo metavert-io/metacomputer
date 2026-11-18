@@ -442,6 +442,37 @@ def run(td, procs):
           "doesn't make another", rc4 == 0 and rc5 == 0 and "tz.example-otp-3" not in s5
           and any(x.get("op") == "rotate" and x.get("name") == "tz.example-otp-2" and x.get("kind") == "totp"
                   and x.get("imported_from") for x in recs), (o5[-400:], sorted(n for n in s5 if n.startswith("tz."))))
+    # P2: `set --replace` that turns a login into another account's unties its 2FA code.
+    tx_a = csv_file("tx-a.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                    f"tx,https://tx.example/,alice-tx,{PW_TW}a,,otpauth://totp/x:alice?secret={SEED}&issuer=x\n")
+    tx_b = csv_file("tx-b.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                    f"tx,https://tx.example/,bob-tx,{PW_TW}b,,otpauth://totp/x:bob?secret={SEED2}&issuer=x\n")
+    rc1, o1 = tty([BIN, "import-passwords", "--csv", tx_a], [("Vault passphrase", PASS + "\n")])
+    rc2, o2 = tty([BIN, "set", "tx.example", "--kind", "password", "--origin", "https://tx.example", "--username", "bob-tx", "--replace"],
+                  [("Vault passphrase", PASS + "\n"), ("Password for tx.example", PW_TW + "b\n"), ("same password again", PW_TW + "b\n")])
+    rc3, o3 = tty([BIN, "import-passwords", "--csv", tx_b], [("Vault passphrase", PASS + "\n")])
+    s3 = secrets()
+    recs = [json.loads(l) for l in open(alog)]
+    check("P2: a login replaced with another account's username (set --replace) unties Alice's 2FA code and says so; Bob's "
+          "import then makes his own code and leaves hers alone", rc1 == rc2 == rc3 == 0 and "No longer tied to a login" in o2
+          and not any(x.get("op") == "rotate" and x.get("name") == "tx.example-otp" for x in recs) and "tx.example-otp-2" in s3
+          and any(x.get("op") == "rotate" and x.get("name") == "tx.example" and x.get("totp_unlinked") == ["tx.example-otp"] for x in recs),
+          (o2[-300:], o3[-300:], sorted(n for n in s3 if n.startswith("tx."))))
+    # P3: a 2FA code an earlier build tied to its login by name is tied by the login's id when the vault opens.
+    ty = csv_file("ty.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                  f"ty,https://ty.example/,alice-ty,{PW_TW}y,,otpauth://totp/x:alice?secret={SEED}&issuer=x\n")
+    ty2 = csv_file("ty2.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                   f"ty,https://ty.example/,alice-ty,{PW_TW}y,,otpauth://totp/x:alice?secret={SEED2}&issuer=x\n")
+    rc1, o1 = tty([BIN, "import-passwords", "--csv", ty], [("Vault passphrase", PASS + "\n")])
+    rc2, o2 = tty([BIN, "test-legacy-totp-link", "ty.example-otp", "ty.example"], [("Vault passphrase", PASS + "\n")])
+    rc3, o3 = tty([BIN, "import-passwords", "--csv", ty2], [("Vault passphrase", PASS + "\n")])
+    s3 = secrets()
+    recs = [json.loads(l) for l in open(alog)]
+    check("P3: a code tied by name (as an earlier build did) is tied by its login's id when the vault opens, and the next "
+          "import replaces that code instead of making another", rc1 == rc2 == rc3 == 0
+          and "ty.example-otp: tied to the login ty.example by its id now" in o3 and "ty.example-otp-2" not in s3
+          and any(x.get("op") == "rotate" and x.get("name") == "ty.example-otp" and x.get("kind") == "totp" for x in recs)
+          and any(x.get("op") == "totp_links" for x in recs), (o2[-200:], o3[-400:], sorted(n for n in s3 if n.startswith("ty."))))
     bad = csv_file("bad.csv", "a,b\n1,2\n")
     rc, out = tty([BIN, "import-passwords", "--csv", bad], [("Vault passphrase", PASS + "\n")])
     check("a CSV without url and password columns is refused", rc != 0 and "no url and password columns" in out, out)
