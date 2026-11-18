@@ -138,7 +138,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `scripts/lib.sh` falls back to `~/.local/bin/lume-secure` (with a notice) while
   `LUME`'s runner isn't installed; keep that until old installs are gone.
 - The Claude Code plugin is `plugin/`: relative links to `skills/metacomputer`,
-  `.claude/skills/cua-driver` and `bin/metacomputer`, laid out like the repository so
+  `.claude/skills/cua-driver`, `bin/metacomputer`, `LICENSE` and `THIRD_PARTY_NOTICES.md`
+  (a GitHub install copies the plugin alone, so it must carry the notices), laid out like the repository so
   the driver pack's `../../../skills/metacomputer/` links resolve in both. A local
   marketplace (`install.sh`) loads it in place; a GitHub install copies it, links
   resolved, and that copy's `bin/metacomputer` hands over to the installed checkout

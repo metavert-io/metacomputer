@@ -1,5 +1,12 @@
 # Cua Driver agent skill
 
+> **metacomputer's copy** of Cua Driver 0.53.0's skill pack, Linux guide only. Here Cua
+> Driver runs only inside metacomputer's VM, which metacomputer's installer builds:
+> see [the 5-minute install](https://github.com/metavert-io/metacomputer#the-5-minute-install).
+> Don't install Cua Driver on your Mac or give it permissions there. The install and
+> update sections below are adapted for this; the rest is Cua's text. Cua's license:
+> [LICENSE](LICENSE).
+
 This cross-agent skill teaches an AI agent to operate native applications on
 macOS, Windows, and Linux with the
 [`cua-driver`](https://github.com/trycua/cua/tree/main/libs/cua-driver/rust)
@@ -14,48 +21,17 @@ failure before a caller escalates to foreground input.
 
 ## Install Cua Driver
 
-macOS or Linux:
-
-```bash
-/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
-```
-
-Windows PowerShell:
-
-```powershell
-irm https://cua.ai/driver/install.ps1 | iex
-```
-
-Then verify the current host:
-
-```bash
-cua-driver doctor
-```
-
-On macOS, the installed `CuaDriver.app` needs Accessibility and Screen
-Recording permission; `MACOS.md` explains how to grant it, including through
-an MDM profile or, when the owner authorizes it, an agent. On Windows, the
-daemon must run in an interactive user desktop rather than Session 0. On
-Linux, the daemon must share the graphical session and AT-SPI session bus.
+In metacomputer, Cua Driver runs only inside the VM. metacomputer's installer
+downloads the pinned release (`CUA_DRIVER_VERSION` in `config/defaults.env`),
+checks its SHA-256 and installs it in the VM when it builds the VM. Don't run
+Cua's installer on your Mac, and don't grant Cua Driver Accessibility or Screen
+Recording permission there. To set up metacomputer, see
+[the 5-minute install](https://github.com/metavert-io/metacomputer#the-5-minute-install).
 
 ## Install the skill
 
-From ClawHub:
-
-```bash
-clawhub install @cua/driver
-```
-
-Or let the installed driver add the version-matched skill to detected agent
-directories:
-
-```bash
-cua-driver skills install
-```
-
-The direct installer keeps only the current host's platform guide by default.
-Use `--all-platforms` when the agent assists users across operating systems.
-`cua-driver skills update` refreshes the pack to match a later driver release.
+This pack comes with metacomputer's Claude Code plugin, as `metacomputer:cua-driver`.
+`clawhub install` and `cua-driver skills install` aren't needed.
 
 ## Reading order
 
@@ -64,14 +40,14 @@ Use `--all-platforms` when the agent assists users across operating systems.
   verification, filesystem and clipboard proof.
 - `RUNTIME.md`: preflight, transport/session ownership, authorization, cursor,
   and cleanup.
-- `MACOS.md`, `WINDOWS.md`, or `LINUX.md`: host-specific launch, capture,
-  accessibility, input delivery, permissions, and refusal boundaries.
+- `LINUX.md`: host-specific launch, capture, accessibility, input delivery,
+  permissions, and refusal boundaries (the macOS and Windows guides aren't in
+  this Linux-only copy).
 - `BROWSER.md`: exact browser-window binding, explicit profile preparation,
   page refs, trust-classified click/type/navigation, and native fallbacks.
 - `VISUAL.md`: frozen (no new work). Load it only when the user explicitly asks for
   visual-region parsing or `jev-use`.
 - `RECORDING.md`: trajectory evidence, MP4 capture, and replay.
-- `EMBEDDING.md`: embedding the driver into another host application.
 
 The agent loads `SKILL.md`, then only the linked guide needed for its next
 step. Every reference ships in the pack; no separate skill installation or
@@ -100,24 +76,16 @@ and optional MP4 video. macOS uses ScreenCaptureKit. Windows uses ffmpeg with
 Availability is reported honestly when a host dependency or portal grant is
 missing. See `RECORDING.md`.
 
-## Updates and source builds
+## Updates
 
-The skill is versioned with Cua Driver releases. Back up personal edits before updating: updates replace the installed pack.
-The pack version does not identify the running daemon; inspect the live tool
-schema when versions differ. For bleeding-edge validation against a matching
-source build (not an arbitrary installed release):
-
-```bash
-cua-driver skills install --from main
-```
-
-From a local checkout, `libs/cua-driver/scripts/install-local.sh` installs the
-source-built macOS driver as `cua-driver-local` and `CuaDriverLocal.app`, without
-replacing the release installation. Keep standalone and embedded identity rules from
-`MACOS.md` and `EMBEDDING.md`; launching a raw binary is not a substitute for
-the stable app identity that owns macOS TCC grants.
+The skill is versioned with Cua Driver releases, and metacomputer pins both: when
+`CUA_DRIVER_VERSION` changes, `scripts/vendor-driver-skill.py` replaces this pack
+with that release's, and a rebuilt VM gets the new driver. Don't run `cua-driver
+skills install`, `skills update` or `update` from a task. The pack version does
+not identify the running daemon; inspect the live tool schema when versions differ.
 
 ## License
 
-Repository source files are MIT licensed. Copies published through ClawHub are
-distributed under MIT-0, as required for ClawHub skills.
+Cua Driver and this skill pack are MIT licensed, copyright Cua AI, Inc.; the full
+notice is in [LICENSE](LICENSE) beside this file. metacomputer's edits are under
+metacomputer's own MIT license.

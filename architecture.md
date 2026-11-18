@@ -224,9 +224,11 @@ socketpair: Claude Code's bridge and `metacomputer call` each have their own
 connection, as before the hub, with the same guards. Both settings are on by default:
 the hub closes the route around the guards that `metacomputer call` was, and lets
 state carry over between calls; the coordinate guard catches pixels the driver
-would misplace. Neither cost anything measurable in the benchmark (bench/README.md,
-"Costs": 20/20 tasks either way, $11.80 against $11.83, 20.1 against 20.2 turns,
-no refusals), and the GUI and option tests pass with both on.
+would misplace after certain window-layout changes (not content changes; "The
+coordinate guard" below). Neither cost anything measurable in the benchmark
+(bench/README.md, "Costs": 20/20 tasks either way, $11.80 against $11.83, 20.1
+against 20.2 turns, no refusals; per-task records in
+[bench/runs/](bench/runs/)), and the GUI and option tests pass with both on.
 
 ### Guards (in the hub, for every client)
 

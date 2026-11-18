@@ -32,7 +32,8 @@ metadata:
 # cua-driver
 
 > **metacomputer's copy of the official Cua Driver 0.53.0 skill pack** (Linux guide only; this
-> file is edited, the others are unchanged). Here the driver runs **inside the lab
+> file, README.md and RUNTIME.md are edited, the other guides are unchanged; Cua's license is
+> in [LICENSE](LICENSE)). Here the driver runs **inside the lab
 > VM** and is reached only through the `metacomputer` MCP tools (`mcp__metacomputer__*`, or
 > `mcp__plugin_metacomputer_metacomputer__*` from the plugin);
 > `cua-driver` CLI examples apply inside the guest only. Read the lab's desktop
