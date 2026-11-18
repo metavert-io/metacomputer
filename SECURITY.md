@@ -300,12 +300,19 @@ the hub, and the hub applies, to each one:
   through). `web` and the GUI tests claim that way before they start; a client
   that disconnects while one of its acting calls still runs in the driver (a
   script that timed out, a session that closed mid-call) leaves the hub holding
-  the computer for that call, in a claim of its own (a "lease"), until the call
-  ends or the driver connection closes, at most the activity window;
+  the computer for that call, in a claim of its own (a "lease", for every kind of
+  client), kept fresh until the call ends or the driver connection closes; past
+  the activity window the hub closes the driver connection first (the call fails)
+  and only then lets go. The client's own claim stays until the lease is written.
+  An acting call another controller still has running counts as busy even when
+  its claim file is gone. A status connection only reads: it can't claim;
 - the Chrome guard, which also knows which app an element token came from (the
   hub remembers which window each read's tokens belong to), so a token alone
-  can't slip background input or `set_value` past it; a token from a read the hub
-  never saw is refused when it's all the call names;
+  can't slip background input or `set_value` past it. A token from a read the
+  hub doesn't have is refused whatever else the call names (a non-Chrome window or
+  app name next to it proves nothing about the token), and so are a window id the
+  driver doesn't list (`window_unknown`) and a token whose app isn't the pid or
+  window the call also names (`target_conflict`);
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
@@ -334,7 +341,13 @@ closes the connection, and the calls in flight fail with a plain message; so
 does a VM that stops reading what the hub sends for 30 s. The largest real
 results measured were under 1 MB. JSON nested more than 100 levels deep is
 dropped like any other bad line (Python's parser would otherwise fail in a way
-that leaves a reader dead and the connection silently open). A client's message
+that leaves a reader dead and the connection silently open), and so is a line
+with more than a million values, before it's parsed (the depth check's memory
+follows the depth, not the width). A driver that keeps sending messages the hub
+can't use (not JSON, or ids, methods and params of the wrong type) is hung up on
+after 50 in a minute, like an oversized line; `hub.log` is rotated at 5 MB
+while the hub runs (one old copy), and the same kind of note is written at most
+five times a minute. A client's message
 is limited to 8 MB, and at most 128 MB or 256 messages may wait for a client;
 one that stops reading is disconnected without holding up the others. What the
 driver can make the hub keep or do is capped whatever the messages' size: a
@@ -342,14 +355,17 @@ driver can make the hub keep or do is capped whatever the messages' size: a
 into it, and clients hear of it once per refresh); a refresh stops after 50
 pages, 2,000 tools, 16 MB, 60 s or a repeated cursor and keeps the earlier
 list; what the hub learns from results (apps, windows, element-token snapshots,
-screenshot layouts) is kept to a few thousand entries. The driver connection's
+screenshot layouts) is kept to a few thousand entries, and a screenshot layout
+keeps only checked window geometry (finite numbers), at most 256 windows each and
+32,768 in all. The driver connection's
 stderr (SSH carries the VM's) is drained with a 64 KB memory tail and at most
 1 MB per connection in its log file. The relay (`ACTION_LOG=on`) reads with the
 same limits. `metacomputer call` escapes control characters, C1 controls and
 bidirectional overrides when it prints to a terminal (`lib/termsafe.py`, shared
 with `metacomputer sh`); `--raw` and `--json` print the result exactly. Other
-commands that show the VM's words on a terminal (`inspect`, `record status`,
-`logs`, `who`, `input-reset`, and the stderr of every SSH command they run)
+commands that show the VM's words on a terminal (`inspect`, `record start`,
+`record status`, `status`, `logs`, `who`, `input-reset`, and the stderr of every
+SSH command they run)
 escape them the same way; `inspect --json` is written again by the Mac as
 ASCII-only JSON. `metacomputer ssh` stays raw: it's the plumbing.
 
@@ -366,9 +382,11 @@ your screenshot; take a fresh one" (code `windows_changed_since_screenshot`).
 Inside one `run_steps` batch the hub can't look between steps, so a pixel step
 that comes after a step able to move, resize, open, close or raise a window is
 refused before the batch runs (code `pixels_after_window_change`): after a
-double click, a drag, a press on the desktop frame (a title bar or a window
-edge), or keys with Super, Alt or Meta, a function key (F11 is full screen) or
-Ctrl+N/W/Q/O/S/P. Run the steps up to that one, take a fresh screenshot, and
+double click (or a click with count 2), a click with Super, Alt or Meta held, a
+middle click, a drag, a press on the desktop frame (a title bar or a window
+edge), a click on a dialog's button named by role and name (OK, Cancel, Save,
+…), Escape, or keys with Super, Alt or Meta, a function key (F11 is full screen)
+or Ctrl+N/W/Q/O/S/P. Run the steps up to that one, take a fresh screenshot, and
 send the pixel steps in a new batch. `COORD_GUARD=off` leaves only the driver's
 own checks.
 
@@ -383,9 +401,10 @@ own checks.
   calls aren't guarded. The skill tells Claude never to route around a refusal;
   that's an instruction, not a barrier.
 - A lease (above) holds the computer for a call the driver hasn't answered; it
-  ends when the answer comes, when the driver connection closes, or after the
-  activity window (10 min) even if the call is still running. `metacomputer
-  release` drops it, as any other claim.
+  ends when the answer comes or the driver connection closes. Past the activity
+  window (10 min, `MCOMP_ACTIVE_S`) the hub closes the driver connection, so the
+  call can't go on acting after the computer is let go. `metacomputer release`
+  drops it, as any other claim.
 - Clients share one driver runtime. Only one acts at a time, but another
   session's screenshot of the same window can replace the controller's
   screenshot frame (the driver then refuses its pixels until it reads again) and
@@ -396,10 +415,12 @@ own checks.
   `run_script`'s `[x, y]` targets and `parallel_mouse_drag`'s paths aren't checked. When the hub saw no screenshot
   for that driver session and window, or `list_windows` fails, the action is
   passed on to the driver's own checks (fail open, and logged in `hub.log`).
-  In a batch, a single click inside a window, Return, Escape or Tab before a
-  pixel step isn't refused, although such a step can open or close a dialog:
-  refusing them would refuse ordinary batches (click a field, type, press
-  Return, click the next field).
+  In a batch, a single plain click inside a window (unless it names a dialog's
+  button by role and name), Return, a typed newline or Tab before a pixel step
+  isn't refused, although such a step can open or close a dialog: refusing them
+  would refuse ordinary batches (click a field, type, press Return, click the
+  next field; three of the 373 recorded benchmark batches do that after
+  Return).
 - `metacomputer call`'s claim belongs to its Claude Code process. Outside Claude
   Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
   kept for the activity window after the last call even when that shell exits,

@@ -138,8 +138,9 @@ server, the CLI and an SDK share, so references and state carry over.
   `web`, a test), folder, optional driver session and settings.
 - **One per VM.** `RUN_DIR/hub/hub.pid` is held under `flock` while the hub runs;
   a second hub for the same VM exits (code 3). A client that finds no socket
-  starts one (`mcp_hub.py serve`, detached, logging to `LOG_DIR/hub.log`) and
-  waits for its socket. A client whose settings differ (another `ACTION_LOG`,
+  starts one (`mcp_hub.py serve`, detached, logging to `LOG_DIR/hub.log`,
+  rotated at 5 MB while it runs, with one old copy and repeated notes of one kind
+  summarized past five a minute) and waits for its socket. A client whose settings differ (another `ACTION_LOG`,
   `DRIVER_MODE`, `COORD_GUARD`, …) is refused while others use the hub; when
   it's alone the hub restarts with that client's settings.
 - **When it ends.** After `HUB_IDLE` (10 minutes) with no client, no call in
@@ -178,12 +179,17 @@ server, the CLI and an SDK share, so references and state carry over.
   connection with a plain error: a client's own, or, for the VM, the driver
   connection, failing every call in flight. A driver that doesn't take a message
   within 30 s is dropped the same way, so a stuck VM can't hold every client's
-  call forever. JSON nested more than 100 levels deep is a bad line, skipped
-  (`lib/wirelimits.py`; the readers' cleanup runs whatever stops them). What
+  call forever. JSON nested more than 100 levels deep, or with more than a
+  million values (counted before parsing), is a bad line, skipped
+  (`lib/wirelimits.py`, whose depth check keeps one iterator per level; the
+  readers' cleanup runs whatever stops them). So is a message of the wrong
+  shape (an id, method or params of the wrong type); past 50 bad lines in a
+  minute the hub closes the driver connection like an oversized one. What
   the driver can make the hub keep is capped regardless of message size: a tool
   list refresh stops after 50 pages, 2,000 tools, 16 MB, 60 s or a repeated
   cursor (the earlier list stays); pid, window and snapshot maps and screenshot
-  layouts keep the newest few thousand entries. The driver connection's stderr
+  layouts keep the newest few thousand entries, and a layout keeps only checked
+  geometry, at most 256 windows each and 32,768 in all. The driver connection's stderr
   is drained on a thread into a 64 KB tail (what error messages quote) and at
   most 1 MB per connection in `RUN_DIR/hub/upstream.stderr`.
 - **Reconnecting.** When the driver connection drops (the VM stopped or
@@ -211,13 +217,20 @@ no refusals), and the GUI and option tests pass with both on.
   the same controller from the same terminal session). `metacomputer web` and
   the GUI tests are clients too and claim before they start (`metacomputer/claim`;
   `web --override` first releases other sessions' claims, as `metacomputer
-  release` does). When a client disconnects while acting calls it made are still
-  running in the driver, the hub holds the computer for them in a claim of its
-  own (kind `lease`, `.run/owners/<hub pid>.json`), written before the client's
-  claim is dropped, both under the owners lock, and dropped when the last of
-  those calls is answered or the driver connection closes (at most the
-  activity window). A lease isn't another controller to the same client
-  process or its Claude Code session. `metacomputer stop/reset/restore/test`
+  release` does); a status connection can't claim. When a client of any kind
+  disconnects while acting calls it made are still running in the driver, the
+  hub holds the computer for them in a claim of its own (kind `lease`,
+  `.run/owners/<hub pid>.json`), written before the client's claim is dropped,
+  both under the owners lock (if it can't be written, the client's claim stays
+  until a later write works). A keeper thread rewrites it while those calls run,
+  so it stays active; it's dropped when the last of them is answered or the
+  driver connection closes, and past the activity window (`MCOMP_ACTIVE_S`) the
+  keeper closes the driver connection first, so nothing keeps acting after the
+  computer is let go. Removing a request, assigning it to a lease and finishing
+  it happen under one lock. An acting call another controller still has running
+  counts as busy even without its claim file (`who` and the refusal describe
+  it). A lease isn't another controller to the same client process or its Claude
+  Code session. `metacomputer stop/reset/restore/test`
   refuse too unless given `--override`. The hub's own SSH connection isn't
   counted as a controller; any other direct connection is.
 - **Chrome** (docs/chrome-investigation.md). When the driver delivers
@@ -229,9 +242,15 @@ no refusals), and the GUI and option tests pass with both on.
     `list_windows` when needed, and which window and app each read's snapshot
     belongs to, so a call that names its target only by an element token
     (`<snapshot_id>:<row>`, which carries the pid to the driver but not to the
-    hub) is resolved too; a token from a read the hub never saw, with nothing
-    else naming the target, is refused (`element_token_unknown`: read the window
-    again);
+    hub) is resolved too. Every hint a call gives (pid, window id through the
+    hub's window list or one `list_windows`, app or window name, token) is
+    resolved: any that's Chrome makes the call Chrome's; a token from a read the
+    hub doesn't have is refused whatever else the call names
+    (`element_token_unknown`: read the window again), a window id the driver
+    doesn't list is refused (`window_unknown`), and a token whose app differs from
+    the pid or window the call names is refused (`target_conflict`). A
+    `run_steps` step is judged on its own target when it names one, else on its
+    batch's;
   - rewrites input tools and `run_steps` aimed at Chrome to
     `delivery_mode: "foreground"`;
   - refuses `set_value` and `run_script` aimed at Chrome;
@@ -302,18 +321,26 @@ Inside a `run_steps` batch the comparison happens once, before the batch, and
 the hub can't look between steps. So a pixel step that comes after a step able
 to move, resize, open, close or raise a window is refused before anything runs
 (code `pixels_after_window_change`, with `failed_step` and `window_step`):
-- a `double_click` (a title bar maximizes) or a drag (`drag`, `mouse_*`);
+- a `double_click` or a `click` with `count` 2 or more (a title bar
+  maximizes), or a drag (`drag`, `mouse_*`);
+- a click with Super, Meta, Alt or Hyper held (window-manager move and
+  resize), or a middle click (raises or lowers a window);
 - a press on the desktop frame (`scope: "desktop"`: a title bar, its buttons,
   a window edge);
+- a click on a dialog's button named by role and name (OK, Cancel, Close,
+  Save, Open, Apply, Yes, No, Don't Save, …);
 - `press_key` / `hotkey` with Super, Meta, Alt or Hyper (window-manager
-  shortcuts), a function key (F11 is full screen), or Ctrl with N, W, Q, O, S
-  or P (new, close, quit; the open, save and print dialogs).
+  shortcuts), a function key (F11 is full screen), Ctrl with N, W, Q, O, S
+  or P (new, close, quit; the open, save and print dialogs), or Escape (closes
+  a dialog or menu).
 
-The rule is narrow on purpose: a single click inside a window, typing,
-`set_value`, scroll and keys such as Return, Escape, Tab or Ctrl+A don't count,
-although a click, Return or Escape can open or close a dialog, because the
-benchmark's own batches put pixel clicks after them (click a field, Ctrl+A,
-type, Return, click the next field). The refusal says to send the steps up to
+The rule is narrow on purpose: a single plain click inside a window, typing
+(newlines too), `set_value`, scroll and keys such as Return, Tab or Ctrl+A
+don't count, although a click or Return can open or close a dialog, because
+the benchmark's own batches put pixel clicks after them (click a field,
+Ctrl+A, type, Return, click the next field). Checked against the 373 recorded
+benchmark batches: the rule refuses none of them; counting Return would refuse
+three. The refusal says to send the steps up to
 that one on their own, take a fresh screenshot and aim from it.
 
 The direct bridge, `bin/metacomputer mcp` with `MCOMP_DIRECT_BRIDGE=1`, is

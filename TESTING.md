@@ -298,7 +298,7 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 
 Each of these needs no VM and takes seconds.
 
-- `python3 tests/test_guest_import.py` (45 checks; needs ffmpeg): files copied from the
+- `python3 tests/test_guest_import.py` (52 checks; needs ffmpeg): files copied from the
   VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
   stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
   a device, a folder link with a file behind it, absolute and `..` names and names with
@@ -310,16 +310,21 @@ Each of these needs no VM and takes seconds.
   Limits against a hostile stream: the size, free-space and entry limits; a GNU
   long-name or pax header claiming 100 MB is refused before its payload is read; a
   chain of extension headers, global pax headers past their cap and GNU sparse
-  entries are refused; folders a path implies count toward the object limit; a
+  entries are refused, pax-marked sparse entries (formats 0.1 and 1.0) before their
+  map is read; members aren't kept as the stream goes by, and every extension
+  header counts against one metadata budget; folders a path implies count toward the object limit; a
   stream of folders only meets the free-space floor; the whole stream is capped
   (left-out entries' data counts); a compressed stream isn't decompressed. Copying
   from a command (the GUI test harness): streamed, stopped at the limit with the
   command killed (also for an entry that never ends), its stderr kept to a short
-  tail, and the limits taken from the settings.
-- `python3 tests/test_termsafe.py` (18 checks): text from the VM and from pages reaches
+  tail, and the limits taken from the settings; a command that exits nonzero or a
+  copy cut short is reported (exit code, escaped stderr) and the evidence marked
+  incomplete, keeping what arrived whole.
+- `python3 tests/test_termsafe.py` (20 checks): text from the VM and from pages reaches
   the terminal escaped in `inspect`, `browser`'s profile list, `web` (its report, its
   messages and errors) and `record moments`; `web --json` stays exact. With a fake
-  `ssh` writing escape sequences on stdout and stderr: `record status`, `inspect --json`
+  `ssh` writing escape sequences on stdout and stderr: `record start`, `record status`,
+  `status` (the guest's report and the probes), `inspect --json`
   (written again as ASCII-only JSON) and `input-reset` on a terminal show them
   escaped, SSH's stderr included, and `input-reset` in a pipe stays exact; the
   `termsafe.py` filter escapes line by line and caps what it passes.
@@ -342,7 +347,7 @@ Each of these needs no VM and takes seconds.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (127 checks, about 60 s). A stand-in
+`python3 tests/test_hub.py` needs no VM (148 checks, about 90 s). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -417,22 +422,36 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   action-log relay and the direct client, whose readers carry on, and a client
   sending one gets a parse error; the direct client won't open the raw driver
   connection unless a transport test asks, and drops a connection past its byte
-  budget;
+  budget; the depth check's memory follows the depth, not the width, and a frame
+  with millions of values is refused before parsing; screenshot layouts keep only
+  checked geometry within their window caps; 200 messages of the wrong shape write a
+  handful of log lines and make the hub hang up on the driver (the next call
+  reconnects); hub.log rotates while the hub runs;
 - `web` and the GUI tests: `web` is a hub client whose claim is refused while
   another session acts, `--override` releases that claim and claims, closing lets
   go, and of two runs started together exactly one gets the computer;
 - a lease: a client that times out and closes leaves its call running and the hub
   holding the computer (another controller refused, the same process not) until
   the call ends; the hand-over waits for the owners lock with no moment without a
-  claim;
+  claim; the lease stays active past the activity window while its call runs, and
+  past its longest life the driver runtime ends before the computer is let go; a
+  one-shot `call` gets one too; a lease that can't be written keeps the client's
+  claim until it can; a call finishing during a hand-over leaves no lease behind;
+  another controller's running acting call counts as busy without its claim file;
+  a status connection can't claim, and one holding a claim drops it on disconnect;
 - element tokens: `set_value` by a Chrome token alone refused (alone and as a
   step), input by a Chrome token sent in the foreground, another app's token passed
-  as it was, a token from a read the hub never saw refused (`element_token_unknown`);
+  as it was, a token from a read the hub never saw refused (`element_token_unknown`),
+  also when the call names a non-Chrome window or app, a token with another app's
+  pid refused (`target_conflict`), a window the driver doesn't list refused
+  (`window_unknown`);
   what the hub remembers from results is capped; progress tokens are forgotten;
 - the coordinate guard in a batch: a pixel step after Super+Up, F11, Ctrl+S, a
-  double click, a drag, a desktop press or Alt+Tab is refused before the batch runs
-  (`pixels_after_window_change`), while clicks, typing, Return and Ctrl+A between
-  pixel steps, pixels before such a step and role/name targets after it pass.
+  double click (also a click with count 2), a click with Alt held, Escape, a click on
+  a dialog's OK button, a drag, a desktop press or Alt+Tab is refused before the
+  batch runs (`pixels_after_window_change`), while clicks (a shift-click, a Bold
+  button), typing, Return and Ctrl+A between pixel steps, pixels before such a step
+  and role/name targets after it pass.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (19 checks) runs
 against a running test VM. It opens Mousepad, the calculator and a throwaway
