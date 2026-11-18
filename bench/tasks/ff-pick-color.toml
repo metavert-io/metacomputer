@@ -1,0 +1,13 @@
+id = "ff-pick-color"
+title = "Firefox: click the green tile (unlabeled; only the picture tells)"
+apps = ["firefox"]
+route = "visual"
+serve = true
+prompt = """
+In Firefox, open http://localhost:8000/pick.html and click the green tile.
+"""
+check = """
+picks = [field(r, "tile") for r in requests_log() if r["path"] == "/pick"]
+C.add("green picked", 0.8, "t7" in picks, picks)
+C.add("no other tile picked", 0.2, bool(picks) and set(picks) == {"t7"}, picks)
+"""

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pick a tile</title>
+<style>body{font-family:sans-serif;margin:2em} .t{display:inline-block;width:140px;height:140px;margin:12px;cursor:pointer;border-radius:8px}</style></head>
+<body>
+<h1>Pick a tile</h1>
+<p>Click one tile.</p>
+<div id="tiles"></div>
+<script>
+(function () {
+  var tiles = [["t7", "#2e7d32"], ["t2", "#c62828"], ["t9", "#1565c0"]];
+  var order = [1, 2, 0];
+  var box = document.getElementById("tiles");
+  order.forEach(function (i) {
+    var d = document.createElement("div");
+    d.className = "t"; d.style.background = tiles[i][1];
+    d.addEventListener("click", function () { location.href = "/pick?tile=" + tiles[i][0]; });
+    box.appendChild(d);
+  });
+})();
+</script>
+</body></html>

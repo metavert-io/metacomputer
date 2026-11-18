@@ -1,0 +1,17 @@
+id = "mousepad-new"
+title = "Mousepad: new file, three lines, Save As"
+apps = ["mousepad"]
+route = "ax"
+prompt = """
+In Mousepad, create a new document with exactly these three lines:
+tent
+headlamp
+water filter
+and save it as ~/bench/out/packing-list.txt.
+"""
+check = """
+t = read("~/bench/out/packing-list.txt")
+C.add("file saved", 0.3, t is not None)
+lines = [l.strip() for l in (t or "").strip().split("\\n")]
+C.add("exactly the three lines", 0.7, lines == ["tent", "headlamp", "water filter"], repr((t or "")[:80]))
+"""

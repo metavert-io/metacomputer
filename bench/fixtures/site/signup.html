@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Create your Fernwood Notes account</title>
+<style>body{font-family:sans-serif;margin:2em;max-width:36em} label{display:block;margin:.8em 0 .2em} input,select{font-size:1em;padding:.3em;width:20em} .row{margin:.8em 0} .row input{width:auto}</style></head>
+<body>
+<h1>Create your Fernwood Notes account</h1>
+<form method="post" action="/submit">
+  <label for="name">Full name</label><input id="name" name="name" type="text" autocomplete="off">
+  <label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="off">
+  <label for="plan">Plan</label>
+  <select id="plan" name="plan">
+    <option value="">Choose a plan</option>
+    <option value="starter">Starter</option>
+    <option value="team">Team</option>
+    <option value="enterprise">Enterprise</option>
+  </select>
+  <div class="row"><input id="newsletter" name="newsletter" type="checkbox"><label for="newsletter" style="display:inline">Send me the newsletter</label></div>
+  <div class="row"><input id="updates" name="updates" type="checkbox"><label for="updates" style="display:inline">Send me product updates by text message</label></div>
+  <button type="submit">Create account</button>
+</form>
+</body></html>

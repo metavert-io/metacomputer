@@ -1,0 +1,194 @@
+"""Markdown reports for benchmark runs: one run's summary, and two runs compared
+per task and in total (HCU-style tables). Reads results/bench/<run>/results.jsonl."""
+import json
+import os
+import re
+
+API_FAIL = re.compile(r"hit your (weekly |daily |session )?limit|usage limit|rate limit|overloaded|credit balance|"
+                      r"API Error|authentication", re.I)
+
+
+def infra_reason(rec):
+    """Why a task's record isn't a real attempt (the runner retries it on resume), or None."""
+    if rec.get("infra_failure"):
+        return rec["infra_failure"] if isinstance(rec["infra_failure"], str) else "setup failed"
+    m = rec.get("metrics") or {}
+    if m.get("is_error") and not (m.get("cost_usd") or 0) and (
+            m.get("api_error_status") or API_FAIL.search(m.get("final_text") or "")):
+        return f"api error {m.get('api_error_status') or ''}: {(m.get('final_text') or '')[:120]}".replace("  ", " ")
+    return None
+
+
+def load_all(rdir):
+    """Every record in results.jsonl, retried tasks included."""
+    p = os.path.join(rdir, "results.jsonl")
+    return [json.loads(l) for l in open(p) if l.strip()] if os.path.exists(p) else []
+
+
+def latest(recs):
+    """The last record of each task (a resumed run appends retries), in first-seen order;
+    each carries `earlier_attempts`: the infrastructure failures it replaced."""
+    by, order = {}, []
+    for r in recs:
+        if r["task"] not in by:
+            order.append(r["task"])
+            by[r["task"]] = []
+        by[r["task"]].append(r)
+    out = []
+    for t in order:
+        r = dict(by[t][-1])
+        r["earlier_attempts"] = [infra_reason(x) or "earlier attempt" for x in by[t][:-1]]
+        out.append(r)
+    return out
+
+
+def load(rdir):
+    meta = json.load(open(os.path.join(rdir, "run.json")))
+    recs = latest(load_all(rdir))
+    order = {t: i for i, t in enumerate(meta.get("tasks") or [])}
+    recs.sort(key=lambda r: order.get(r["task"], len(order)))
+    return meta, recs
+
+
+def _m(r, k, default=0):
+    v = (r.get("metrics") or {}).get(k)
+    return default if v is None else v
+
+
+def row(r):
+    m = r.get("metrics") or {}
+    a = m.get("actions") or {}
+    return {
+        "task": r["task"], "route": r.get("route") or "",
+        "pass": bool((r.get("check") or {}).get("pass")), "score": float((r.get("check") or {}).get("score") or 0),
+        "cost": float(m.get("cost_usd") or 0), "turns": int(m.get("turns") or 0),
+        "min": float((r.get("session") or {}).get("wall_s") or 0) / 60,
+        "shots": int(m.get("screenshots") or 0), "tree": int(m.get("tree_reads") or 0),
+        "ax": int(a.get("ax", 0)), "pixel": int(a.get("pixel", 0)), "kbd": int(a.get("keyboard", 0)),
+        "page": int(a.get("page", 0)), "steps": int(m.get("run_steps") or 0),
+        "shell": int(m.get("shell_calls") or 0), "cli": sum((m.get("cli_calls") or {}).values()),
+        "refused": int(m.get("refused_bridge") or 0) + int(m.get("refused_driver") or 0) + int(m.get("denied_permission") or 0),
+        "invalid": int(m.get("invalid_args") or 0), "errors": int(m.get("errors_other") or 0),
+        "tool_calls": int(m.get("tool_calls") or 0),
+        "in_tok": int(m.get("input_tokens") or 0), "out_tok": int(m.get("output_tokens") or 0),
+        "timeout": bool((r.get("session") or {}).get("timed_out")), "end": m.get("result_subtype") or "",
+        "infra": bool(r.get("infra_failure")),
+    }
+
+
+def totals(rows):
+    n = len(rows) or 1
+    s = lambda k: sum(r[k] for r in rows)  # noqa: E731
+    return {"n": len(rows), "passed": sum(1 for r in rows if r["pass"]), "pass_rate": sum(1 for r in rows if r["pass"]) / n,
+            "score": s("score") / n, "cost": s("cost"), "cost_mean": s("cost") / n, "turns_mean": s("turns") / n,
+            "min_total": s("min"), "min_mean": s("min") / n, "shots": s("shots"), "tree": s("tree"), "ax": s("ax"),
+            "pixel": s("pixel"), "kbd": s("kbd"), "page": s("page"), "steps": s("steps"), "shell": s("shell"),
+            "cli": s("cli"), "refused": s("refused"), "invalid": s("invalid"), "errors": s("errors"),
+            "tool_calls": s("tool_calls"), "in_tok": s("in_tok"), "out_tok": s("out_tok"),
+            "invalid_share": s("invalid") / max(1, s("tool_calls")), "refused_share": s("refused") / max(1, s("tool_calls"))}
+
+
+def header(meta):
+    sw = meta.get("switches") or {}
+    g = meta.get("metacomputer") or {}
+    return (f"- metacomputer `{(g.get('sha') or '')[:10]}` ({g.get('branch')}{', uncommitted changes' if g.get('dirty') else ''}); "
+            f"VM `{meta.get('vm')}` (reset to `{meta.get('baseline')}` before each task: {sw.get('reset')})\n"
+            f"- model `{sw.get('model')}`, effort {sw.get('effort') or 'default'}; {meta.get('claude_code')}\n"
+            f"- skill `{sw.get('skill')}` (hash {sw.get('skill_hash')}); shell {sw.get('shell')}; "
+            f"coordinate guard {sw.get('coord_guard')}{'' if sw.get('coord_guard_in_bridge') else ' (the bridge does not read it yet)'}; "
+            f"screen {sw.get('screen') or 'VM default'}\n"
+            f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
+            f"spent ${meta.get('spent_usd', 0):.2f}; {meta.get('started')} to {meta.get('finished', '?')}"
+            + (f" (resumed {', '.join(meta['resumed'])})" if meta.get("resumed") else "")
+            + (f"\n- resumed on metacomputer `{((meta['resume_note'].get('earlier_metacomputer') or {}).get('sha') or '')[:10]}` before; "
+               "check that the code under test didn't change between the two" if meta.get("resume_note") else "")
+            + (f"\n- stopped early: {meta['stopped']}" if meta.get("stopped") else ""))
+
+
+def write_summary(rdir):
+    meta, recs = load(rdir)
+    rows = [row(r) for r in recs]
+    env = (recs[0].get("env") or {}) if recs else {}
+    calcs = sorted({str((r.get("env") or {}).get("calc")) for r in recs if (r.get("env") or {}).get("calc")})
+    out = [f"# Benchmark run {meta['run_id']}", "", header(meta),
+           f"- driver {env.get('driver_version')}, screen {env.get('resolution')}, Calc: {', '.join(calcs) or 'n/a'}"
+           if recs else "", "",
+           "| Task | Route | Pass | Partial | Cost $ | Turns | Min | Screenshots | Tree reads | AX acts | Pixel acts | Keys | Page acts | run_steps | Shell | Refused | Invalid | Other errors |",
+           "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for r in rows:
+        flag = " (timeout)" if r["timeout"] else (" (infra)" if r["infra"] else (f" ({r['end']})" if r["end"] not in ("success", "") else ""))
+        out.append(f"| {r['task']} | {r['route']} | {'yes' if r['pass'] else 'no'}{flag} | {r['score']:.2f} | {r['cost']:.2f} | "
+                   f"{r['turns']} | {r['min']:.1f} | {r['shots']} | {r['tree']} | {r['ax']} | {r['pixel']} | {r['kbd']} | "
+                   f"{r['page']} | {r['steps']} | {r['shell']} | {r['refused']} | {r['invalid']} | {r['errors']} |")
+    if rows:
+        t = totals(rows)
+        out.append(f"| **total** | | **{t['passed']}/{t['n']}** | **{t['score']:.2f}** | **{t['cost']:.2f}** | "
+                   f"{t['turns_mean']:.1f} avg | {t['min_total']:.1f} | {t['shots']} | {t['tree']} | {t['ax']} | {t['pixel']} | "
+                   f"{t['kbd']} | {t['page']} | {t['steps']} | {t['shell']} | {t['refused']} | {t['invalid']} | {t['errors']} |")
+        out += ["", f"Means per task: cost ${t['cost_mean']:.2f}, {t['turns_mean']:.1f} turns, {t['min_mean']:.1f} min, "
+                f"{t['shots'] / t['n']:.1f} screenshots, {t['tree'] / t['n']:.1f} tree reads, {t['tool_calls'] / t['n']:.1f} tool calls. "
+                f"Tokens: {t['in_tok']:,} input (incl. cache), {t['out_tok']:,} output. "
+                f"Refused {t['refused_share']:.1%} and invalid-argument {t['invalid_share']:.1%} of {t['tool_calls']} tool calls.", ""]
+        by = {}
+        for r in rows:
+            by.setdefault(r["route"], []).append(r)
+        out += ["| Expected best route | Tasks | Passed | Mean partial | Mean cost $ | Mean turns | Screenshots | Shell calls |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+        for k in sorted(by):
+            t = totals(by[k])
+            out.append(f"| {k} | {t['n']} | {t['passed']} | {t['score']:.2f} | {t['cost_mean']:.2f} | {t['turns_mean']:.1f} | {t['shots']} | {t['shell']} |")
+        retried = [(r["task"], r["earlier_attempts"]) for r in recs if r.get("earlier_attempts")]
+        if retried:
+            out += ["", "Retried after infrastructure failures (the table shows the retry):", ""]
+            out += [f"- {task}: {'; '.join(str(x)[:140] for x in why)}" for task, why in retried]
+        samples = [(r["task"], s) for r in recs for s in (r.get("metrics") or {}).get("error_samples", [])]
+        if samples:
+            out += ["", "Error samples (first 160 characters):", ""]
+            out += [f"- {task}: {s['tool']} [{s['kind']}] {s['text'].replace('|', '/').replace(chr(10), ' ')}" for task, s in samples[:25]]
+    path = os.path.join(rdir, "summary.md")
+    open(path, "w").write("\n".join(out) + "\n")
+    return path
+
+
+def _d(a, b, fmt="{:+.2f}"):
+    return fmt.format(b - a)
+
+
+def write_compare(ra, rb):
+    ma, xa = load(ra)
+    mb, xb = load(rb)
+    A = {r["task"]: row(r) for r in xa}
+    B = {r["task"]: row(r) for r in xb}
+    sa, sb = ma.get("switches") or {}, mb.get("switches") or {}
+    diffs = [f"`{k}`: {sa.get(k)} → {sb.get(k)}" for k in sorted(set(sa) | set(sb)) if sa.get(k) != sb.get(k)]
+    ga, gb = (ma.get("metacomputer") or {}).get("sha", "")[:10], (mb.get("metacomputer") or {}).get("sha", "")[:10]
+    if ga != gb:
+        diffs.append(f"metacomputer `{ga}` → `{gb}`")
+    out = [f"# {ma['run_id']} (A) vs {mb['run_id']} (B)", "",
+           "What changed: " + ("; ".join(diffs) if diffs else "nothing recorded (same switches and code)"), "",
+           "| Task | Pass A→B | Partial A / B | Cost $ A / B | Turns A / B | Min A / B | Screenshots A / B | Tree reads A / B | Shell A / B | Refused+invalid A / B |",
+           "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    yn = lambda r: ("yes" if r["pass"] else "no") if r else "-"  # noqa: E731
+    for k in [t for t in A if t in B] + [t for t in A if t not in B] + [t for t in B if t not in A]:
+        a, b = A.get(k), B.get(k)
+        f = lambda key, fmt="{}": f"{fmt.format(a[key]) if a else '-'} / {fmt.format(b[key]) if b else '-'}"  # noqa: E731
+        ri = f"{(a['refused'] + a['invalid']) if a else '-'} / {(b['refused'] + b['invalid']) if b else '-'}"
+        out.append(f"| {k} | {yn(a)} → {yn(b)} | {f('score', '{:.2f}')} | {f('cost', '{:.2f}')} | {f('turns')} | "
+                   f"{f('min', '{:.1f}')} | {f('shots')} | {f('tree')} | {f('shell')} | {ri} |")
+    common = [k for k in A if k in B]
+    ta, tb = totals([A[k] for k in common]), totals([B[k] for k in common])
+    out += ["", f"Totals over the {len(common)} tasks both runs have:", "",
+            "| Metric | A | B | B − A |", "| --- | --- | --- | --- |"]
+    for label, key, fmt in [("passed", "passed", "{}"), ("pass rate", "pass_rate", "{:.0%}"), ("mean partial score", "score", "{:.2f}"),
+                            ("total cost $", "cost", "{:.2f}"), ("mean cost $", "cost_mean", "{:.2f}"),
+                            ("mean turns", "turns_mean", "{:.1f}"), ("mean minutes", "min_mean", "{:.1f}"),
+                            ("screenshots", "shots", "{}"), ("tree reads", "tree", "{}"), ("AX actions", "ax", "{}"),
+                            ("pixel actions", "pixel", "{}"), ("shell calls", "shell", "{}"), ("tool calls", "tool_calls", "{}"),
+                            ("refused calls", "refused", "{}"), ("invalid-argument calls", "invalid", "{}"),
+                            ("input tokens", "in_tok", "{:,}"), ("output tokens", "out_tok", "{:,}")]:
+        va, vb = ta[key], tb[key]
+        delta = ("{:+.0%}" if key == "pass_rate" else "{:+,.2f}" if isinstance(va, float) else "{:+,}").format(vb - va)
+        out.append(f"| {label} | {fmt.format(va)} | {fmt.format(vb)} | {delta} |")
+    path = os.path.join(os.path.dirname(ra), f"compare-{os.path.basename(ra)}-vs-{os.path.basename(rb)}.md")
+    open(path, "w").write("\n".join(out) + "\n")
+    return path

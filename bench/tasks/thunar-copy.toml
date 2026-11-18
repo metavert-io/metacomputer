@@ -1,0 +1,18 @@
+id = "thunar-copy"
+title = "Thunar: copy a folder elsewhere, delete another folder"
+apps = ["thunar"]
+route = "ax"
+files = ["projects"]
+prompt = """
+In the Thunar file manager, copy the folder ~/bench/projects/alpha into a new folder
+~/bench/archive (so it becomes ~/bench/archive/alpha), and delete the folder
+~/bench/projects/scratch (moving it to the Trash is fine).
+"""
+check = """
+import os
+a = path("~/bench/archive/alpha")
+copied = read(a + "/plan.txt", "").startswith("Plan for project Alpha") and read(a + "/data/points.csv") == "x,y\\n1,4\\n2,9\\n3,16\\n"
+C.add("alpha copied with its contents", 0.5, copied, sorted(os.listdir(path("~/bench/archive"))) if os.path.isdir(path("~/bench/archive")) else "no archive")
+C.add("original alpha kept", 0.2, os.path.isfile(path("~/bench/projects/alpha/plan.txt")))
+C.add("scratch deleted", 0.3, not os.path.exists(path("~/bench/projects/scratch")))
+"""

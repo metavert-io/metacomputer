@@ -1,0 +1,15 @@
+id = "ff-canvas-code"
+title = "Firefox: read a code drawn on a canvas (screenshot needed)"
+apps = ["firefox"]
+route = "visual"
+serve = true
+prompt = """
+In Firefox, open http://localhost:8000/badge.html. The page shows a visitor badge with a code
+printed on it. Type that code into the page's "Visitor code" box and press "Check in".
+"""
+check = """
+import re
+codes = [field(r, "code") or "" for r in requests_log() if r["path"] == "/code"]
+C.add("checked in", 0.2, bool(codes), len(codes))
+C.add("code QX47RT", 0.8, bool(codes) and re.sub(r"[^A-Z0-9]", "", codes[-1].upper()) == "QX47RT", codes[-1:] )
+"""

@@ -1,0 +1,26 @@
+id = "calc-formula"
+title = "Calc: row formulas and a SUM, save as .ods"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "ax"
+timeout_s = 720
+files = ["sheets/sales.csv"]
+setup = """
+to_odf ods ~/bench/sales.csv ~/bench/sheets && rm ~/bench/sales.csv
+"""
+prompt = """
+Open ~/bench/sheets/sales.ods in LibreOffice Calc. Put the heading "Total" in D1. In D2 to D6, put
+formulas that multiply each row's Quantity by its Unit price, and in D7 a formula that adds up
+D2:D6. Save the file, keeping the .ods format.
+"""
+check = """
+rows = ods_rows("~/bench/sheets/sales.ods")[0]
+C.add("D1 is Total", 0.1, cell(rows, "D1")["text"].strip() == "Total", cell(rows, "D1")["text"])
+want = [102, 71.25, 154, 95.7, 95]
+vals = [cval(cell(rows, f"D{r}")) for r in range(2, 7)]
+C.add("D2:D6 values", 0.3, all(isinstance(v, float) and abs(v - w) < 0.005 for v, w in zip(vals, want)), vals)
+C.add("D2:D6 are formulas", 0.2, all(cell(rows, f"D{r}")["formula"] for r in range(2, 7)))
+d7 = cell(rows, "D7")
+C.add("D7 = 517.95", 0.2, isinstance(cval(d7), float) and abs(cval(d7) - 517.95) < 0.005, cval(d7))
+C.add("D7 is a formula", 0.2, bool(d7["formula"]), d7["formula"])
+"""

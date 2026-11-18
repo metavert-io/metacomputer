@@ -1,0 +1,15 @@
+id = "calc-arith"
+title = "GNOME Calculator: a two-step sum with its own buttons"
+apps = ["gnome-calculator"]
+route = "ax"
+timeout_s = 420
+prompt = """
+Use GNOME Calculator to work out 4817 × 263 − 1094 by pressing the calculator's own buttons.
+Leave the calculator open with the answer showing on its display.
+"""
+check = """
+wins = windows("gnome-calculator")
+C.add("calculator window open", 0.3, bool(wins), f"{len(wins)} window(s)")
+shown = copy_from_window(wins[0]) if wins else ""
+C.add("display shows 1265777", 0.7, num(shown) == 1265777, f"display copy: {shown!r}")
+"""

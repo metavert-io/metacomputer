@@ -1,0 +1,23 @@
+id = "calc-chart"
+title = "Calc: insert a column chart of a data range"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "mixed"
+timeout_s = 720
+files = ["sheets/visitors.csv"]
+setup = """
+to_odf ods ~/bench/visitors.csv ~/bench/sheets && rm ~/bench/visitors.csv
+"""
+prompt = """
+Open ~/bench/sheets/visitors.ods in LibreOffice Calc and insert a column chart of the monthly
+visitor numbers, with the months as the categories. Save the file, keeping the .ods format.
+"""
+check = """
+p = "~/bench/sheets/visitors.ods"
+charts = ods_charts(p)
+C.add("a chart is embedded", 0.5, bool(charts), charts)
+C.add("column (bar) chart", 0.2, any(c[1] == "chart:bar" for c in charts), [c[1] for c in charts])
+C.add("uses the Visitors column", 0.3, any("B" in c[2] and ("A" in c[2] or "B1" in c[2] or "B2" in c[2]) for c in charts), [c[2] for c in charts])
+rows = ods_rows(p)[0]
+C.add("data unchanged", 0.0, [cval(cell(rows, f"B{r}")) for r in range(2, 8)] == [1240, 1385, 1710, 2045, 2390, 2810])
+"""

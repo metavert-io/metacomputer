@@ -1,0 +1,20 @@
+id = "writer-format"
+title = "Writer: heading style, a bold word, save as .odt"
+apps = ["libreoffice-writer"]
+route = "ax"
+timeout_s = 720
+prompt = """
+In LibreOffice Writer, make a new document with the heading "Quarterly Garden Report" in the
+Heading 1 style, followed by the paragraph "Tomatoes did well this season." in which only the
+word "Tomatoes" is bold. Save it as ~/bench/out/garden-report.odt (ODF format).
+"""
+check = """
+p = "~/bench/out/garden-report.odt"
+ok = C.add("saved as .odt", 0.2, is_zip(p))
+blocks = odt_blocks(p)[0] if ok else []
+h = [b for b in blocks if b[0] == "h" and b[3].strip() == "Quarterly Garden Report"]
+C.add("Heading 1", 0.3, any(b[1] == "1" for b in h), [(b[1], b[2]) for b in h])
+C.add("paragraph text", 0.2, any(b[0] == "p" and b[3].strip() == "Tomatoes did well this season." for b in blocks))
+bold = [t.strip() for t in bold_runs(p)] if ok else []
+C.add("only Tomatoes bold", 0.3, bold == ["Tomatoes"], bold[:4])
+"""

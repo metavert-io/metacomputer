@@ -1,0 +1,24 @@
+id = "calc-csv"
+title = "Calc: export a sheet as CSV"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "ax"
+timeout_s = 720
+files = ["sheets/inventory.csv"]
+setup = """
+to_odf ods ~/bench/inventory.csv ~/bench/sheets && rm ~/bench/inventory.csv
+"""
+prompt = """
+Using LibreOffice Calc, export the sheet in ~/bench/sheets/inventory.ods as a comma-separated
+CSV file (UTF-8) at ~/bench/out/inventory.csv.
+"""
+check = """
+rows = csv_rows("~/bench/out/inventory.csv")
+C.add("CSV saved", 0.2, rows is not None)
+rows = [r for r in (rows or []) if any(x.strip() for x in r)]
+C.add("header", 0.2, bool(rows) and [x.strip() for x in rows[0]] == ["SKU", "Product", "Stock", "Reorder level"], rows[:1])
+want = [["TL-100", "Trail lamp", 42, 10], ["TL-220", "Folding chair", 8, 12], ["TL-305", "Camp kettle", 15, 5],
+        ["TL-410", "Sleeping mat", 3, 6], ["TL-512", "Dry bag", 27, 8]]
+got = [[r[0].strip(), r[1].strip(), num(r[2]), num(r[3])] for r in rows[1:] if len(r) >= 4]
+C.add("rows", 0.6, got == want, got[:2])
+"""

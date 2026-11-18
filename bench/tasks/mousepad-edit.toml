@@ -1,0 +1,19 @@
+id = "mousepad-edit"
+title = "Mousepad: change a line, add a line, save"
+apps = ["mousepad"]
+route = "ax"
+files = ["notes"]
+prompt = """
+Open ~/bench/notes/todo.txt in Mousepad. Change the line "Status: draft" to "Status: final",
+add a new last line "Reviewed by Ada Quill", and save the file.
+"""
+check = """
+orig = ["Project: Lantern Street mural", "Owner: Bo Carver", "Status: draft", "Due: 2027-03-01", "",
+        "Tasks", "- Sketch final design", "- Order paint samples", "- Book scaffold for two days"]
+t = read("~/bench/notes/todo.txt", "")
+lines = t.rstrip("\\n").split("\\n")
+C.add("Status: final", 0.4, "Status: final" in lines and "Status: draft" not in lines)
+C.add("last line added", 0.3, lines[-1].strip() == "Reviewed by Ada Quill", lines[-1][:60])
+want = [l if l != "Status: draft" else "Status: final" for l in orig] + ["Reviewed by Ada Quill"]
+C.add("other lines unchanged", 0.3, [l.rstrip() for l in lines] == want, f"{len(lines)} lines")
+"""
