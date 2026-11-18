@@ -342,7 +342,7 @@ Each of these needs no VM and takes seconds.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (126 checks, about 60 s). A stand-in
+`python3 tests/test_hub.py` needs no VM (127 checks, about 60 s). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -353,7 +353,8 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   folder in this user's own temporary folder (not `/tmp`); stopping removes the
   socket and frees the lock; a client refuses a socket folder that isn't private
   to it and a socket served by another uid before it sends a byte, and doesn't
-  start a hub behind such a folder;
+  start a hub behind such a folder; a hub listening where its own record says
+  (an earlier version's folder) is still found;
 - multiplexing: two clients with the same request ids each get their own
   answer over one driver connection, the driver sees distinct rewritten ids,
   `initialize` and `tools/list` never reach it, `tools/list_changed` reaches the

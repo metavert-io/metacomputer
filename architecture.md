@@ -131,7 +131,9 @@ server, the CLI and an SDK share, so references and state carry over.
   and anything that isn't this user is closed before a byte is read. Clients
   check the other way before they send anything: the socket's folder must be
   theirs and private, and the listening process must run as them (the same
-  kernel call on the client's end). The first message must be a
+  kernel call on the client's end). Clients look first where the running hub's
+  record (`RUN_DIR/hub/hub.pid`) says it listens, so a hub started by an earlier
+  version, with its socket elsewhere, is still found. The first message must be a
   `metacomputer/hello` naming the client's kind (Claude Code, `call`, a script,
   `web`, a test), folder, optional driver session and settings.
 - **One per VM.** `RUN_DIR/hub/hub.pid` is held under `flock` while the hub runs;

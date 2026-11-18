@@ -2187,8 +2187,9 @@ class HubError(RuntimeError):
     pass
 
 
-def hub_pid(env=None):
-    """The running hub's pid for this VM, or None (nobody holds the lock)."""
+def _hub_record(env=None):
+    """What the running hub wrote in RUN_DIR/hub/hub.pid ({"pid", "socket", ...}), or None when nobody holds its
+    lock. The folder is private to this user, so the record is the hub's own word."""
     p = paths(env)
     try:
         fd = os.open(p["pid"], os.O_RDONLY)
@@ -2202,11 +2203,40 @@ def hub_pid(env=None):
         except BlockingIOError:
             pass
         try:
-            return int(json.loads(os.read(fd, 4096) or b"{}").get("pid") or 0) or None
+            rec = json.loads(os.read(fd, 4096) or b"{}")
         except ValueError:
             return None
+        return rec if isinstance(rec, dict) else None
     finally:
         os.close(fd)
+
+
+def hub_pid(env=None):
+    """The running hub's pid for this VM, or None (nobody holds the lock)."""
+    rec = _hub_record(env) or {}
+    try:
+        return int(rec.get("pid") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def hub_sockets(env=None):
+    """Where to find this VM's hub: where the running hub says it listens (a hub started by another version of
+    this code may use another folder), then where this version puts it. Each is checked like any other."""
+    mine = paths(env)["sock"]
+    said = (_hub_record(env) or {}).get("socket")
+    return ([said] if isinstance(said, str) and said and said != mine else []) + [mine]
+
+
+def _connect_any(socks):
+    """_connect to the first of socks that answers; OSError (the last one's) when none does."""
+    err = None
+    for path in socks:
+        try:
+            return _connect(path)
+        except OSError as e:
+            err = e
+    raise err or FileNotFoundError("no hub socket")
 
 
 def _connect(path):
@@ -2238,7 +2268,7 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     env = dict(os.environ if env is None else env)
     p = paths(env)
     try:
-        return _connect(p["sock"])
+        return _connect_any(hub_sockets(env))
     except OSError:
         if not start:
             raise HubError("the metacomputer hub isn't running")
@@ -2255,7 +2285,7 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         try:
-            return _connect(p["sock"])
+            return _connect_any(hub_sockets(env))
         except OSError:
             pass
         rc = proc.poll()
@@ -2299,7 +2329,7 @@ def query_status(env=None, timeout=5.0):
     if not hub_pid(env):
         return None
     try:
-        s = _connect(paths(env)["sock"])
+        s = _connect_any(hub_sockets(env))
     except (OSError, HubError):
         return None
     s.settimeout(timeout)

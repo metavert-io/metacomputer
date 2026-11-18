@@ -1072,6 +1072,34 @@ def client_socket_checks():
           and mcp_hub.hub_pid(e) is None, started)
     if not sd.startswith(TD):
         shutil.rmtree(sd, ignore_errors=True)
+    # A hub started by an earlier version listens where that version put its socket; its hub.pid says where.
+    r = Running()
+    p = mcp_hub.paths(r.env)
+    alt_dir = os.path.join(TD, "older-hub")
+    os.makedirs(alt_dir)
+    os.chmod(alt_dir, 0o700)
+    alt = os.path.join(alt_dir, "sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(alt)
+    srv.listen(2)
+    srv.settimeout(2)
+    rec = json.load(open(p["pid"]))
+    with open(p["pid"], "w") as f:
+        json.dump(dict(rec, socket=alt), f)
+    try:
+        s = mcp_hub.connect_or_start(r.env, start=False)
+        srv.accept()[0].close()
+        s.close()
+        reached = True
+    except (OSError, mcp_hub.HubError) as ex:
+        reached = repr(ex)
+    finally:
+        with open(p["pid"], "w") as f:
+            json.dump(rec, f)
+        srv.close()
+    check("a hub listening where its own record says (an earlier version's folder) is found, with the same checks",
+          reached is True and mcp_hub.hub_sockets(r.env) == [p["sock"]], reached)
+    r.stop()
 
 
 def refresh_checks():
