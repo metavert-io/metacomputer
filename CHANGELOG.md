@@ -103,6 +103,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - `./install.sh` uses an already registered marketplace named `metacomputer` only when it's this checkout or github.com/metavert-io/metacomputer; from any other source its plugin isn't installed (it would run that source's code on your Mac), the installer says how to remove it, and it sets up the skill link and MCP server instead.
 
 ### Fixed
+- VM builds no longer stop at their last step ("stopping and cloning the clean baseline"): `vm_stop` and `vm_force_stop` in `scripts/lib.sh` guard the `kill`/`wait` of their background helper, which tripped `set -E` and the build's ERR trap whenever the helper had already exited (`tests/test_vm_stop.py`).
 - Benchmark: `bold_runs` reports what Writer shows in bold. A bold paragraph style with the rest of its text in a not-bold span no longer counts as the whole paragraph bold, which failed `writer-format` runs whose documents were right (`tests/test_bench_checks.py`).
 - `metacomputer who` failed with a traceback when a `metacomputer sh` claim from outside Claude Code was listed.
 - `metacomputer status` failed with a JSON error when the MCP probe failed part-way.
