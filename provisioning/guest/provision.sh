@@ -86,16 +86,40 @@ purge_unwanted
 firefox --version || true
 dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core libreoffice-calc gnome-calculator xserver-xorg-core xfce4-session lightdm ffmpeg python3-openpyxl | tee "$STATE/package-versions.txt"
 
+# After Chrome's install, and after a run of its daily job (the same code), APT may
+# reach Google's repo only through our entry and the pinned key.
+chrome_sources_pinned() {
+  if [ -x /etc/cron.daily/google-chrome ]; then /etc/cron.daily/google-chrome || echo "(Chrome's daily job failed; checking anyway)"; fi
+  local bad=0 f
+  for f in /etc/apt/sources.list.d/google-chrome.sources /etc/apt/sources.list.d/google-chrome.list; do
+    if [ -e "$f" ]; then echo "Chrome's package created $f"; bad=1; fi
+  done
+  for f in $(grep -l -r -s 'dl\.google\.com' /etc/apt/sources.list /etc/apt/sources.list.d || true); do
+    if [ "$f" != /etc/apt/sources.list.d/metacomputer-google-chrome.sources ]; then
+      echo "unexpected APT source for Google's repo: $f"; bad=1
+    fi
+  done
+  grep -qx 'Signed-By: /etc/apt/keyrings/google-chrome.asc' /etc/apt/sources.list.d/metacomputer-google-chrome.sources || bad=1
+  if [ "$bad" -ne 0 ]; then echo "Google's APT repo is not limited to the pinned key"; return 1; fi
+  echo "Google's APT repo: only metacomputer-google-chrome.sources, Signed-By the pinned key"
+}
+
 case " ${MCOMP_BROWSERS:-firefox} " in *" chrome "*)
   step "Google Chrome (optional; Firefox stays the default browser)"
   # Google's official arm64 .deb from its APT repo; the host verified the
   # pinned signing key (config/defaults.env) and kept only that key from Google's
   # download (scripts/pin-gpg-key.sh); Signed-By limits the repo to it.
   install -m 0644 "$PAYLOAD/google-linux-signing-key.pub" /etc/apt/keyrings/google-chrome.asc
-  # Keep the repo definition ours: otherwise the package's cron job adds and
-  # re-enables its own sources entry with its own key handling.
+  # Keep the repo definition ours. The package's postinst rewrites
+  # sources.list.d/google-chrome.sources whenever that file exists (pointing it at
+  # /usr/share/keyrings/google-chrome.gpg, a keyring the package's scripts write
+  # from their own copy), and its daily cron job adds one when repo_add_once is
+  # true. So our entry has a name the package never touches, google-chrome.sources
+  # must not exist, and both settings stay false. The keyring the scripts write
+  # is then referenced by nothing, so APT never trusts it.
   printf 'repo_add_once="false"\nrepo_reenable_on_distupgrade="false"\n' > /etc/default/google-chrome
-  cat > /etc/apt/sources.list.d/google-chrome.sources <<'SRC'
+  rm -f /etc/apt/sources.list.d/google-chrome.sources /etc/apt/sources.list.d/google-chrome.list
+  cat > /etc/apt/sources.list.d/metacomputer-google-chrome.sources <<'SRC'
 Types: deb
 URIs: https://dl.google.com/linux/chrome/deb/
 Suites: stable
@@ -105,6 +129,7 @@ Signed-By: /etc/apt/keyrings/google-chrome.asc
 SRC
   "${APT[@]}" update
   "${APT[@]}" install --no-install-recommends google-chrome-stable
+  chrome_sources_pinned
   # Policies (rootfs: /etc/opt/chrome/policies/managed/metacomputer.json) turn off
   # sign-in, sync, metrics, password saving and default-browser prompts.
   for alt in x-www-browser gnome-www-browser; do

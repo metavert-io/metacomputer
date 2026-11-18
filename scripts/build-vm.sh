@@ -109,7 +109,7 @@ ssh_keys:
 """ + "".join(f"    {l}\n" for l in priv.splitlines()) + f"""  ed25519_public: {q(k('hostkey.pub'))}
 users:
   - name: {guser}
-    gecos: Cua automation
+    gecos: metacomputer
     shell: /bin/bash
     lock_passwd: true
     ssh_authorized_keys:

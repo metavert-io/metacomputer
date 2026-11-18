@@ -21,9 +21,13 @@ confirm() button, download link and a second page).
   `EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796` matches the one Google publishes
   at https://www.google.com/linuxrepositories/; it's pinned in `config/defaults.env`.
 - Provisioning (`chrome` in `BROWSERS`): the key goes to
-  `/etc/apt/keyrings`, our own `google-chrome.sources`, and
-  `/etc/default/google-chrome` stops the package's cron job from adding its
-  own repo entry (verified: only our entry exists).
+  `/etc/apt/keyrings`, the repo entry is our own
+  `metacomputer-google-chrome.sources`, and `/etc/default/google-chrome` stops the
+  package's cron job from adding its own entry. The entry can't be named
+  `google-chrome.sources`: the package's postinst rewrites that file whenever it
+  exists, pointing it at a keyring the package's scripts write themselves
+  (found 2026-11-18; VMs built before then have the rewritten entry). The build
+  runs the daily job once and fails if any other entry for Google's repo exists.
 - Policies in `/etc/opt/chrome/policies/managed/metacomputer.json` turn off
   sign-in, sync, metrics, password saving, autofill, Privacy Sandbox prompts,
   generative-AI features and default-browser prompts.
