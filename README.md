@@ -12,16 +12,39 @@ network, and what Claude does there can be logged, limited and approved.
 
 ## The 5-minute install
 
-Paste this into Terminal on a Mac with Apple silicon:
+Paste this into Terminal on a Mac with Apple silicon (macOS 14 or later, about
+15 GB free):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash
 ```
 
-There's no VM for you to set up. The script builds it, with everything around
-it, and checks that it works. Then, in any Claude Code session:
+That's the whole install. There's no VM for you to set up: the script builds
+it, installs the Claude Code plugin, and checks that everything works. On a Mac
+that already has Homebrew and Apple's Command Line Tools it takes about 5 minutes
+and asks you nothing; on a new Mac it offers to install those first.
+
+## Try it
+
+Start a new Claude Code session (or restart the ones you have open, so they load
+the plugin), then ask:
 
 > Get yourself a virtual computer and tell me what's on its screen.
+
+> Make a LibreOffice Calc spreadsheet of the planets' diameters, add a column
+> chart, and save it as planets.xlsx.
+
+> Does wikipedia.org look the same in Firefox and Chrome? Show me the differences.
+
+> Someone sent me this link: https://example.com. What does it do, and is it safe to open?
+
+Claude says which computer it's using before it acts, starts the VM if it isn't
+running, checks its own results and tells you where the evidence is. To watch it
+work, `metacomputer view` shows how to open the live desktop. More ideas:
+[Prompt a computer into existence](#prompt-a-computer-into-existence).
+
+<details>
+<summary><b>What the install does, what you click, and how long it takes</b></summary>
 
 **What happens:**
 1. It checks the Mac: Apple silicon, macOS 14 or later, free disk, memory, the network.
@@ -60,6 +83,8 @@ unattended. Estimates, not yet measured, for when it takes longer:
 It needs about 15 GB of free disk and refuses to start with less (it checks each
 disk it writes to). The install itself uses about 6 GB. Running it again is safe:
 finished steps are skipped, and it never deletes a VM.
+
+</details>
 
 **From Claude Code first.** If you'd rather start in Claude Code, add the plugin:
 
@@ -110,6 +135,7 @@ than forty more.
 
 **Contents:**
 [The 5-minute install](#the-5-minute-install) ·
+[Try it](#try-it) ·
 [What it is](#what-it-is) ·
 [Why I made it](#why-i-made-it) ·
 [Security](#security) ·
