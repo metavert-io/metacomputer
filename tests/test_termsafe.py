@@ -166,6 +166,7 @@ def on_pty(argv, env, timeout=60):
 FAKE_SSH = r'''#!/bin/sh
 printf 'ssh says \033]52;c;SGk=\007\033[2J\n' >&2
 case "$*" in
+  *guest-status*) printf '%s\n' '{"ready": true, "resolution": "1920x1080\u001b]52;c;SGk=\u0007", "driver_version": "0.53\u001b[2J", "active_window_title": "t", "loadavg": ["0.1"], "uptime_s": 5}' ;;
   *desktop-record*) printf 'recording stream:x \033]52;c;SGk=\007\033[2J\n' ;;
   *python3*) cat >/dev/null; printf '{"note": "n\\u001b]52;c;SGk=\\u0007 \342\200\256"}\n' ;;
   *input-reset*) printf '0\033[2J\n' ;;
@@ -183,7 +184,8 @@ def cli_checks():
         with open(os.path.join(bindir, "ssh"), "w") as f:
             f.write(FAKE_SSH)
         with open(os.path.join(bindir, "lume"), "w") as f:
-            f.write("#!/bin/sh\ncase \"$1\" in get) echo '{\"status\": \"running\"}' ;; ls) echo '[]' ;; esac\n")
+            f.write("#!/bin/sh\ncase \"$1\" in get) echo '{\"status\": \"running\"}' ;; "
+                    "ls) echo '[{\"name\": \"fake-termsafe-vm\", \"status\": \"running\"}]' ;; esac\n")
         for n in ("ssh", "lume"):
             os.chmod(os.path.join(bindir, n), 0o755)
         cfg = os.path.join(td, "test.env")
@@ -205,6 +207,24 @@ def cli_checks():
               out[-200:])
         r = subprocess.run([cli, "input-reset"], env=env, capture_output=True, text=True, timeout=60)
         check("…and exactly in a pipe (the hub reads it)", r.stdout == "0\x1b[2J\n", repr(r.stdout))
+        rc, out = on_pty([cli, "record", "start", "clip1"], dict(env, RECORD_DIR=os.path.join(td, "rec")))
+        check("record start on a terminal: the recorder's answer is escaped", "\x1b]52" not in out and "\x1b[2J" not in out
+              and "\\x1b]52" in out and "recording the guest desktop" in out, (rc, out[-300:]))
+        # status: a gateway that looks alive, so the guest's own report is read and shown
+        gw = subprocess.Popen(["sleep", "60"])
+        try:
+            os.makedirs(os.path.join(td, "run"), exist_ok=True)
+            with open(os.path.join(td, "run", "netgw.pid"), "w") as f:
+                f.write(str(gw.pid))
+            with open(cfg, "a") as f:
+                f.write("MCP_HUB=off\n")
+            rc, out = on_pty([cli, "status"], env, timeout=120)
+        finally:
+            gw.kill()
+            gw.wait()
+        check("status on a terminal: the guest's own report (resolution, driver version) is escaped",
+              "\x1b]52" not in out and "\x1b[2J" not in out and "resolution 1920x1080\\x1b]52" in out
+              and "0.53\\x1b[2J" in out, out[-500:])
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
