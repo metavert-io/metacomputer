@@ -48,7 +48,7 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 
 | Component | Version / pin | Where | Role |
 | --- | --- | --- | --- |
-| lume-secure (default) | Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/lume-secure/`, wrapper `~/.local/bin/lume-secure` | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
+| mcomp-vm (default; formerly lume-secure) | metacomputer's build of Lume (made by Metavert, not by Cua): Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/mcomp-vm/`, wrapper `~/.local/bin/mcomp-vm`, from github.com/metavert-io/metacomputer-vm (`MCOMP_VM_TAG`, `MCOMP_VM_COMMIT`). While `LUME`'s runner isn't installed and `~/.local/bin/lume-secure` is, `scripts/lib.sh` uses that one and prints a notice | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
 | Lume (alternative) | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | the same, with clipboard, audio and Rosetta always attached |
 | cua-netgw | built from trycua/cua `ca6a643` (`libs/cua/netgw`) | `vendor/bin/cua-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
 | Cua Driver | 0.52.1 linux-arm64 (sha256 `ea8229f4…`) | guest `/opt/cua-driver/0.52.1` | desktop observation/control, MCP server, recording |
@@ -494,7 +494,7 @@ such as the secrets vault ("approval waiting", "vault locked"):
 - **Host-sharing devices.** Lume attaches a SPICE clipboard channel
   (`VZSpiceAgentPortAttachment`, shares the Mac's clipboard), a virtio sound
   device wired to the host's speakers and microphone, and a Rosetta share to
-  every VM. With lume-secure (the default), `metacomputer start` leaves each out
+  every VM. With mcomp-vm (the default), `metacomputer start` leaves each out
   unless its `SHARE_*` setting is `on`; `metacomputer status` reports what the
   guest actually has (virtio console ports, a 0x0019 sound device, a virtiofs
   Rosetta tag). With standard Lume they are always attached: the guest has no

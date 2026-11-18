@@ -372,8 +372,9 @@ if mcp:
     print(f"mcp           {m(mcp.get('ok'))} {mcp.get('server', '')} {mcp.get('protocol', '')}  tools={mcp.get('tools', 0)}  ({mcp.get('ms', '?')} ms)")
 if sharing is not None:
     def onoff(k): return ("\033[33mon\033[0m" if sharing[k] else "off")
+    runner = os.path.basename(lume) + (", mcomp-vm's former name" if os.path.basename(lume) == "lume-secure" else "")
     print(f"host sharing  clipboard {onoff('clipboard')}  audio {onoff('audio')}  rosetta {onoff('rosetta')}"
-          f"   (seen from inside the VM; Lume: {os.path.basename(lume)})")
+          f"   (seen from inside the VM; Lume: {runner})")
 o = out["options"]
 if o["action_log"] == "on" or o["ssh_auth"] == "cert" or o["driver_mode"] == "bounded":
     parts = (["action log on"] if o["action_log"] == "on" else []) + (["SSH certificates"] if o["ssh_auth"] == "cert" else []) \

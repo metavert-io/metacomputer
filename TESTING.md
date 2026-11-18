@@ -35,13 +35,36 @@ Background is in
 
 ## Host sharing: `metacomputer status`
 
-With lume-secure and the default settings, the `host sharing` line must read
+With mcomp-vm and the default settings, the `host sharing` line must read
 `clipboard off  audio off  rosetta off`. It's read from inside the VM: virtio
 console port names, virtio device ids and virtiofs tags. Turning one setting
 `on` (e.g. `SHARE_CLIPBOARD=on` in `config/local.env`) and restarting must
 show just that one; all three `on` is Lume's own default. The flag parsing
 and device selection have unit tests in
-[lume-secure](https://github.com/metavert-io/lume-secure).
+[mcomp-vm](https://github.com/metavert-io/metacomputer-vm).
+
+## The VM runner: `tests/test_vm_runner.py`
+
+`python3 tests/test_vm_runner.py` (37 checks) needs no VM: fake runners in a
+temporary home, and `install.sh` run from a temporary copy of the checkout with
+a fake `git`.
+- `scripts/lib.sh` picks `~/.local/bin/mcomp-vm` by default. While the configured
+  runner isn't installed and `~/.local/bin/lume-secure` (mcomp-vm's former name)
+  is, it uses that and prints one notice line on stderr, once per command, even
+  when the command runs other scripts. A `LUME` that's installed is used as set,
+  with no notice; with neither runner, `LUME` stays as set and `build` stops with
+  its usual "lume not found".
+- `install.sh` clones `MCOMP_VM_REPO` at `MCOMP_VM_TAG`, refuses a clone that isn't
+  `MCOMP_VM_COMMIT` (installing nothing and leaving `local.env` alone), and points
+  `LUME` at `~/.local/bin/mcomp-vm`. `--lume=secure` still means mcomp-vm, and so
+  does a `local.env` whose `LUME` is lume-secure. `LUME_SECURE_REPO`, `_TAG` and
+  `_COMMIT` in `local.env` still count, the new names win over them, and a tag from
+  before the rename (which installs lume-secure) leaves `LUME` on lume-secure. An
+  existing lume-secure is left byte for byte as it was, and an installed mcomp-vm
+  isn't built again.
+- `install.sh --uninstall` names the runner in use (mcomp-vm, lume-secure when
+  that's the one installed, or standard Lume) and how to remove it, and mentions a
+  lume-secure left beside mcomp-vm.
 
 ## Recordings: `tests/test_recording.py`
 

@@ -12,7 +12,7 @@ network, and what Claude does there can be logged, limited and approved.
 
 | Control | What it gives you |
 | --- | --- |
-| **Isolation, always on** | No clipboard, audio or Rosetta sharing with your Mac ([mcomp-vm](https://github.com/metavert-io/metacomputer-vm), formerly lume-secure). A network gateway on the Mac lets the VM reach the public internet and nothing else. A firewall in the VM, SSH by role with a pinned host key, and every download checked against a pinned checksum or signing key. |
+| **Isolation, always on** | No clipboard, audio or Rosetta sharing with your Mac ([mcomp-vm](https://github.com/metavert-io/metacomputer-vm), metacomputer's build of Lume). A network gateway on the Mac lets the VM reach the public internet and nothing else. A firewall in the VM, SSH by role with a pinned host key, and every download checked against a pinned checksum or signing key. |
 | **A secrets vault** | Passwords, 2FA codes, browser logins and API keys that Claude uses without the values passing through the chat. You approve a use by typing the secret's name in your own terminal. The vault is bound to your Mac's Secure Enclave. API keys never enter the VM: a proxy on the Mac adds them. Every use goes into a hash-chained audit log you can send off the Mac. |
 | **A signed record (opt-in)** | Every tool call and shell run in a hash-chained log, signed with an SSH key. `metacomputer actions verify` finds any edit. |
 | **Restricted mode (opt-in)** | Cua Driver's bounded mode: every call must fit a manifest of apps, folders and sites. The shell channel turns itself off. |
@@ -135,7 +135,7 @@ the following. These are **always on**:
 
 | Protection | What it does |
 | --- | --- |
-| **mcomp-vm** (formerly lume-secure; the installer's default) | Lume attaches your Mac's clipboard, its speakers and microphone, and Rosetta to every VM. [mcomp-vm](https://github.com/metavert-io/metacomputer-vm) is Lume 0.7.2 plus `--no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta` and `--no-host-sharing`, and metacomputer starts the VM without all three unless you turn one on. `metacomputer status` reports what the VM actually has, read from inside it. |
+| **mcomp-vm** (the installer's default) | Lume attaches your Mac's clipboard, its speakers and microphone, and Rosetta to every VM. [mcomp-vm](https://github.com/metavert-io/metacomputer-vm), formerly lume-secure, is metacomputer's build of Lume, made by Metavert, not by Cua and not endorsed by them. It's Lume 0.7.2 plus `--no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta` and `--no-host-sharing`, and metacomputer starts the VM without all three unless you turn one on. `metacomputer status` reports what the VM actually has, read from inside it. |
 | **Public internet only** | The VM's network is a user-mode gateway on the Mac (Cua's `cua-netgw`) that checks every connection the VM opens. It refuses your Mac, your LAN and router, Tailscale and CGNAT addresses, link-local and cloud-metadata addresses, and outbound mail ports. Blocked attempts are logged. |
 | **Nothing listens off loopback** | SSH and the live view are forwarded only to `127.0.0.1` on your Mac. Lume's own VNC server, which listens on every interface, is never started. The live view is a password-protected VNC server inside the VM, and the VM's firewall admits it, and SSH, only from the gateway. |
 | **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, `fill` can only run the vault's fill program, and `proxy` can only open one port on the VM's loopback for the vault's API proxy. The Mac's ssh ignores your SSH config and forwards nothing to the VM: no agent, no X11, no ports. |
@@ -247,7 +247,7 @@ The installer asks at most four questions:
 | --- | --- |
 | `--yes` | Take the defaults: mcomp-vm, Chrome included, build now |
 | `--no-chrome` | Firefox only in the VM |
-| `--lume=secure` / `--lume=standard` | Choose mcomp-vm or Cua's standard Lume without being asked |
+| `--lume=mcomp-vm` / `--lume=standard` | Choose mcomp-vm or Cua's standard Lume without being asked (`--lume=secure`, from before the rename, still means mcomp-vm) |
 | `--no-build` | Set everything up but don't build the VM yet |
 | `--no-claude` | Don't touch Claude Code (no command links, skill or MCP server) |
 | `--uninstall` | Remove the command, the skill, the MCP registration and the vault program (the VM and your vault file stay) |
@@ -261,10 +261,13 @@ running `./install.sh` again is safe.
 - **The MCP server** `metacomputer`, registered at user scope (`claude mcp add -s user metacomputer …/bin/metacomputer mcp-lazy`).
 - **The secrets vault program**, `~/.local/share/metacomputer/bin/mcomp-vault`, built from `vault/` by `scripts/build-vault.sh` (skipped, with a note, before macOS 15 or without `swiftc`).
 
-metacomputer's installer and settings still use mcomp-vm's former name: the
-option is `--lume=secure`, it installs the runner as
-`~/.local/bin/lume-secure`, and `LUME` points there. Standard Lume goes to
-`~/.local/bin/lume`.
+mcomp-vm goes to `~/.local/bin/mcomp-vm` (its files in
+`~/.local/share/mcomp-vm`) and standard Lume to `~/.local/bin/lume`. A Mac set
+up before the rename has the same build as `~/.local/bin/lume-secure`, and
+metacomputer keeps using it until you run `./install.sh` again (when `LUME`
+names a runner that isn't installed, it uses lume-secure and prints a notice).
+The installer then builds mcomp-vm beside it and points `LUME` there. Both see
+the same VMs, and lume-secure stays until you remove it.
 
 The build then runs unattended for about 10 minutes, sometimes longer. It
 downloads Ubuntu's cloud image and the Cua Driver release, checks their
@@ -1010,7 +1013,7 @@ instead.
 
 | Key | Default | |
 | --- | --- | --- |
-| `LUME` | `~/.local/bin/lume-secure` | The Lume that runs the VM: mcomp-vm under its former name, or `~/.local/bin/lume` for Cua's release (`install.sh --lume=standard`) |
+| `LUME` | `~/.local/bin/mcomp-vm` | The Lume that runs the VM: mcomp-vm, or `~/.local/bin/lume` for Cua's release (`install.sh --lume=standard`). If it isn't installed and `~/.local/bin/lume-secure`, mcomp-vm's former name, is, metacomputer uses that and says so |
 | `SHARE_CLIPBOARD`, `SHARE_AUDIO`, `SHARE_ROSETTA` | `off` | `on` connects the VM to your Mac's clipboard, audio or Rosetta (mcomp-vm only; standard Lume always shares) |
 
 **Mac side:**
@@ -1267,17 +1270,19 @@ event sinks in `~/.config/metacomputer/`. Delete those folders only if you no
 longer need anything in them.
 
 The VM, its keys and Lume stay in place too. To remove them (with standard
-Lume, use `lume` in place of `lume-secure`, and remove `~/.local/share/lume`
-and `~/.local/bin/lume` instead):
+Lume, use `lume` in place of `mcomp-vm`, and remove `~/.local/share/lume`
+and `~/.local/bin/lume` instead; `./install.sh --uninstall` prints these for
+the runner you use):
 
 ```bash
-lume-secure ls                                  # also shows checkpoints (metacomputer-ckpt-*) and metacomputer-baseline-prev
-lume-secure delete metacomputer
-lume-secure delete metacomputer-baseline
-lume-secure delete metacomputer-baseline-prev  # if ls showed it
-lume-secure delete metacomputer-ckpt-NAME      # each checkpoint ls showed
+mcomp-vm ls                                  # also shows checkpoints (metacomputer-ckpt-*) and metacomputer-baseline-prev
+mcomp-vm delete metacomputer
+mcomp-vm delete metacomputer-baseline
+mcomp-vm delete metacomputer-baseline-prev  # if ls showed it
+mcomp-vm delete metacomputer-ckpt-NAME      # each checkpoint ls showed
 rm -r ~/.ssh/metacomputer
-rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure   # last: the VMs above need it to be deleted
+rm -rf ~/.local/share/mcomp-vm ~/.local/bin/mcomp-vm         # last: the VMs above need it to be deleted
+rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure   # if an install from before the rename left it
 ```
 
 Recordings and results stay in the checkout until you delete it.
@@ -1311,8 +1316,8 @@ describes. Bugs in Cua Driver or Lume themselves belong upstream at
 metacomputer is built on [Cua](https://github.com/trycua/cua) by Cua AI, Inc.
 (MIT): Cua Driver runs the desktop, Lume runs the VM, and `cua-netgw`, built
 from Cua's source, is the network gateway (it uses gvisor-tap-vsock,
-Apache-2.0). [mcomp-vm](https://github.com/metavert-io/metacomputer-vm)
-(formerly lume-secure) adds the host-sharing flags to Lume; it's made by
+Apache-2.0). [mcomp-vm](https://github.com/metavert-io/metacomputer-vm),
+metacomputer's build of Lume, adds the host-sharing flags; it's made by
 Metavert, not by Cua, and isn't endorsed by them. The shell channel's routing
 and the benchmark's method come from Microsoft Research's
 [Hybrid Computer Use](https://github.com/microsoft/Hybrid-Computer-Use) work.
