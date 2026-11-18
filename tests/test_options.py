@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks for the optional hardening (SECURITY.md) against a running VM.
 
-    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [D] [F]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [D] [F] [G]
 
 Use a test VM: this switches the VM's SSH and driver settings (through the
 maintenance account) and puts them back to the defaults at the end. Variants
@@ -31,6 +31,13 @@ F  metacomputer sh: runs in the VM as the desktop user with the desktop's
    session's claim refuses (--read-only and --override still run); the
    action log records runs (SHELL_LOG), redacted unless ACTION_LOG_TEXT=keep,
    and verifies.
+G  The hub (MCP_HUB=on): a one-shot call and two scripts share one hub and one
+   driver connection, logged as one connection with each call's client; `status`
+   and `who` show it; `call --session` carries element tokens over; a Chrome from
+   browser_prepare outlives the call that started it; `call` is refused while
+   another session acts and the Chrome guard applies to it; the coordinate guard
+   refuses pixels after a resize and under a new window and allows them after a
+   fresh screenshot; `hub stop`. Changes no VM settings.
 """
 import hashlib
 import http.server
@@ -639,11 +646,212 @@ def test_d_proxy():
           and f'restrict,port-forwarding,permitlisten="127.0.0.1:{pp}"' in out and out.strip().splitlines()[-1].strip() == "0", out)
 
 
+# --- G ---------------------------------------------------------------------------
+def call_json(cfg, *args, timeout=120):
+    """`metacomputer call --json ...`: (exit code, the MCP result, stdout)."""
+    r = mcomp(cfg, "call", "--json", *args, timeout=timeout)
+    try:
+        return r.returncode, json.loads(r.stdout), r.stdout
+    except ValueError:
+        return r.returncode, {}, r.stdout + r.stderr
+
+
+def text_of_result(res):
+    return "\n".join(c.get("text", "") for c in (res or {}).get("content") or [] if c.get("type") == "text")
+
+
+def hub_ssh(hub_pid, port):
+    """The SSH connections to this VM's driver under the hub (directly, or through the action-log relay)."""
+    import owners
+    table = owners.ps_table()
+    out = []
+    for pid, (_, comm) in table.items():
+        if os.path.basename(comm) != "ssh":
+            continue
+        cmd = owners.full_command(pid)
+        if "/mcp" in cmd and f"-p {port}" in cmd and hub_pid in owners.ancestors(pid, table):
+            out.append(pid)
+    return out
+
+
+def guest_ok(cfg, cmd):
+    return mcomp(cfg, "ssh", "ops", cmd, timeout=60).returncode == 0
+
+
+def test_g():
+    """G: the hub (MCP_HUB=on) and the coordinate guard. Uses the test VM's desktop (Mousepad, the calculator,
+    a throwaway Chrome profile), closes what it opened, and changes no VM settings."""
+    print("G  the hub: one connection per VM, every guard for every client; the coordinate guard")
+    import mcomp_sdk
+    cfg = variant("hub", "MCP_HUB=on", "COORD_GUARD=on")
+    off = variant("nohub", "MCP_HUB=off", "COORD_GUARD=on")
+    s = settings(cfg)
+    rd = run_dir(cfg)
+    mcomp(cfg, "hub", "stop")
+    guest_ok(cfg, "pkill -x mousepad; pkill -f '[g]nome-calculator'; pkill -f '[b]rowser-profiles'; true")
+    other = None
+    try:
+        # 1. one hub, one driver connection, for a one-shot call and two scripts at once
+        rc, res, out = call_json(cfg, "list_windows", "{}")
+        st = json.loads(mcomp(cfg, "hub", "status", "--json").stdout or "{}")
+        hub_pid = (st.get("hub") or {}).get("pid")
+        a, b = mcomp_sdk.Hub(cfg).connect(), mcomp_sdk.Hub(cfg).connect()
+        box = {}
+        ts = [threading.Thread(target=lambda: box.setdefault("a", a.call("list_windows", {}))),
+              threading.Thread(target=lambda: box.setdefault("b", b.call("get_screen_size", {})))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(60)
+        st2 = a.status()
+        conns = hub_ssh(hub_pid, s["port"])
+        check("a one-shot call and two scripts at once share one hub and one driver connection",
+              rc == 0 and hub_pid and not box["a"].is_error and not box["b"].is_error and st2["pid"] == hub_pid
+              and len(st2["clients"]) == 2 and len(conns) == 1, (rc, hub_pid, len(st2["clients"]), conns))
+        a.close()
+        b.close()
+        logs = sorted(action_logs(s["logs"]), key=os.path.getmtime)
+        hub_log = next((p for p in reversed(logs) if '"via":"hub"' in open(p).readline()), None)
+        kinds = {(json.loads(x).get("client") or {}).get("kind") for x in open(hub_log)} if hub_log else set()
+        check("with ACTION_LOG=on, the hub's connection is one log, and each call names its client",
+              {"call", "sdk"} <= kinds, (hub_log, kinds))
+        st3 = mcomp(cfg, "status")
+        who = mcomp(cfg, "who")
+        check("`status` and `who` show the hub", "hub           pid" in st3.stdout and "hub: pid" in who.stdout,
+              (st3.stdout[-300:], who.stdout[-300:]))
+
+        # 2. element tokens and driver sessions carry over between calls with --session
+        mcomp(cfg, "call", "launch_app", '{"name": "mousepad"}')
+        time.sleep(2)
+        rc, res, _ = call_json(cfg, "list_windows", '{"app": "mousepad"}')
+        win = max(((res.get("structuredContent") or {}).get("windows") or [{}]), key=lambda w: w.get("z_index") or 0)
+        pid, wid = win.get("pid"), win.get("window_id")
+        mcomp(cfg, "call", "set_window_frame", json.dumps({"pid": pid, "window_id": wid, "x": 100, "y": 100,
+                                                           "width": 800, "height": 600}))
+        time.sleep(1)
+
+        def new_button_token(c, session=None):
+            extra = ["--session", session] if session else []
+            rc, res, _ = call_json(c, *extra, "get_window_state", json.dumps({"pid": pid, "window_id": wid,
+                                                                              "include_screenshot": False}))
+            sc = res.get("structuredContent") or {}
+            import re as _re
+            m = _re.search(r'\[(\d+)\] push button "New"', sc.get("tree_markdown") or text_of_result(res))
+            return f"{sc.get('snapshot_id')}:{m.group(1)}" if m else None
+        tok = new_button_token(cfg, "g1")
+        rc, res, out = call_json(cfg, "--session", "g1", "click", json.dumps({"pid": pid, "element_token": tok}))
+        check("`call --session`: an element token from one call works in the next", tok and rc == 0
+              and not res.get("isError"), (tok, text_of_result(res)[:200]))
+        tok2 = new_button_token(off)
+        rc2, res2, _ = call_json(off, "click", json.dumps({"pid": pid, "element_token": tok2}))
+        check("(with MCP_HUB=off each call has its own driver, and the token from the last one is unknown)",
+              tok2 and (rc2 != 0 or res2.get("isError")), text_of_result(res2)[:200])
+        mcomp(cfg, "call", "hotkey", json.dumps({"pid": pid, "window_id": wid, "keys": ["ctrl", "w"]}))
+
+        # 3. a Chrome from browser_prepare outlives the call that started it
+        rc, res, _ = call_json(cfg, "browser_prepare", '{"allow_launch": true, "profile": {"mode": "isolated_new"}}',
+                               timeout=180)
+        cpid = (res.get("structuredContent") or {}).get("prepared_pid")
+        time.sleep(3)
+        alive = cpid and guest_ok(cfg, f"kill -0 {int(cpid)}")
+        rc, res, _ = call_json(cfg, "list_windows", json.dumps({"pid": cpid}) if cpid else "{}")
+        cwins = (res.get("structuredContent") or {}).get("windows") or []
+        check("a one-shot call no longer closes the driver's Chrome: it's still running after the call",
+              alive and cwins, (cpid, len(cwins)))
+        rc_o, res_o, _ = call_json(off, "browser_prepare", '{"allow_launch": true, "profile": {"mode": "isolated_new"}}',
+                                   timeout=180)
+        opid = (res_o.get("structuredContent") or {}).get("prepared_pid")
+        time.sleep(3)
+        check("(with MCP_HUB=off, the call's own connection closes it as it ends)",
+              opid and not guest_ok(cfg, f"kill -0 {int(opid)}"), opid)
+
+        # 4. every guard for `call` too: the bypass found in the session logs
+        other = subprocess.Popen(["sleep", "300"])
+        now = time.time()
+        os.makedirs(os.path.join(rd, "owners"), exist_ok=True)
+        json.dump({"bridge_pid": other.pid, "claude_pid": 999999, "cwd": "/another/project", "started": now,
+                   "last_call": now, "last_tool": "click"}, open(os.path.join(rd, "owners", f"{other.pid}.json"), "w"))
+        rc, res, out = call_json(cfg, "press_key", json.dumps({"pid": pid, "window_id": wid, "key": "End"}))
+        check("`call` is refused while another session acts (it used to skip the one-controller rule)",
+              rc == 1 and "in use by another controller" in text_of_result(res), text_of_result(res)[:200])
+        rc, res, out = call_json(cfg, "list_windows", "{}")
+        check("…read-only calls still work", rc == 0 and not res.get("isError"))
+        os.remove(os.path.join(rd, "owners", f"{other.pid}.json"))
+        other.kill()
+        other.wait()
+        other = None
+        if cwins:
+            cw = cwins[0]
+            rc, res, _ = call_json(cfg, "set_value", json.dumps({"pid": cpid, "window_id": cw["window_id"],
+                                                                 "element_token": "s1:1", "value": "x"}))
+            rc2, res2, _ = call_json(cfg, "run_script", json.dumps({"script": f"const a = await cua.getApp({{pid: {cpid}}}); return 1;"}))
+            check("the Chrome guard applies to `call`: set_value and run_script aimed at Chrome are refused",
+                  rc == 1 and "browser_type" in text_of_result(res) and rc2 == 1 and "run_steps" in text_of_result(res2),
+                  (text_of_result(res)[:120], text_of_result(res2)[:120]))
+        guest_ok(cfg, "pkill -f '[b]rowser-profiles'; true")
+
+        # 5. the coordinate guard
+        def shot():
+            return call_json(cfg, "--session", "cg", "get_window_state", json.dumps(
+                {"pid": pid, "window_id": wid, "include_accessibility_tree": False}))
+
+        def click(x, y):
+            return call_json(cfg, "--session", "cg", "click", json.dumps({"pid": pid, "window_id": wid, "x": x, "y": y}))
+        shot()
+        rc, res, _ = click(300, 300)
+        check("coordinate guard: a pixel click from a current screenshot is passed on", rc == 0
+              and "coordinate guard" not in text_of_result(res), text_of_result(res)[:200])
+        mcomp(cfg, "call", "set_window_frame", json.dumps({"pid": pid, "window_id": wid, "x": 100, "y": 100,
+                                                           "width": 600, "height": 450}))
+        time.sleep(1)
+        rc, res, _ = click(300, 300)
+        sc = res.get("structuredContent") or {}
+        check("coordinate guard: refused after the window was resized (Cua Driver alone would click)",
+              rc == 1 and sc.get("code") == "windows_changed_since_screenshot" and "800x600" in text_of_result(res),
+              text_of_result(res)[:240])
+        shot()
+        rc, res, _ = click(300, 300)
+        check("coordinate guard: allowed again after a fresh screenshot", rc == 0 and "coordinate guard" not in text_of_result(res),
+              text_of_result(res)[:200])
+        mcomp(cfg, "call", "launch_app", '{"name": "gnome-calculator"}')
+        time.sleep(2)
+        rc, cres, _ = call_json(cfg, "list_windows", '{"app": "calculator"}')
+        cw = max(((cres.get("structuredContent") or {}).get("windows") or [{}]), key=lambda w: w.get("z_index") or 0)
+        mcomp(cfg, "call", "set_window_frame", json.dumps({"pid": cw.get("pid"), "window_id": cw.get("window_id"),
+                                                           "x": 300, "y": 250, "width": 400, "height": 500}))
+        time.sleep(1)
+        rc, res, _ = call_json(cfg, "--session", "cg", "click", json.dumps({"pid": pid, "window_id": wid, "x": 300,
+                                                                           "y": 300, "delivery_mode": "foreground"}))
+        check("coordinate guard: refused when a window now covers the point (a foreground click would hit it)",
+              rc == 1 and "now covers" in text_of_result(res), text_of_result(res)[:240])
+        rc, res, _ = click(100, 400)
+        check("coordinate guard: a point the new window doesn't cover is passed on", "coordinate guard" not in text_of_result(res),
+              text_of_result(res)[:200])
+
+        # 6. the hub goes and comes back
+        r = mcomp(cfg, "hub", "stop")
+        st = json.loads(mcomp(cfg, "hub", "status", "--json").stdout or "{}")
+        rc, res, _ = call_json(cfg, "list_windows", "{}")
+        st2 = json.loads(mcomp(cfg, "hub", "status", "--json").stdout or "{}")
+        check("`hub stop` stops it; the next call starts it again", not st.get("running") and rc == 0
+              and st2.get("running") and st2["hub"]["pid"] != hub_pid, (st, st2.get("hub", {}).get("pid")))
+    finally:
+        if other is not None:
+            other.kill()
+            other.wait()
+            try:
+                os.remove(os.path.join(rd, "owners", f"{other.pid}.json"))
+            except OSError:
+                pass
+        guest_ok(cfg, "pkill -x mousepad; pkill -f '[g]nome-calculator'; pkill -f '[b]rowser-profiles'; true")
+        mcomp(cfg, "hub", "stop")
+
+
 def main(argv):
-    which = [a.upper() for a in argv] or ["A", "B", "C", "D", "F"]
+    which = [a.upper() for a in argv] or ["A", "B", "C", "D", "F", "G"]
     try:
         for k in which:
-            {"A": test_a, "B": test_b, "C": test_c, "D": test_d, "E": test_e, "F": test_f}[k]()
+            {"A": test_a, "B": test_b, "C": test_c, "D": test_d, "E": test_e, "F": test_f, "G": test_g}[k]()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} checks passed")
