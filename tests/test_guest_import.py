@@ -318,9 +318,171 @@ def run(td):
           (r.returncode, r.stderr[-400:], os.listdir(gdest2) if os.path.isdir(gdest2) else None))
 
     check("the Mac file is still untouched at the end", open(victim, "rb").read() == before)
+    hostile_metadata_checks(td)
+    command_checks(td)
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0
+
+
+class Counting:
+    """A stream that counts what was read from it."""
+
+    def __init__(self, data):
+        self.b, self.n = io.BytesIO(data), 0
+
+    def read(self, n=-1):
+        d = self.b.read(n)
+        self.n += len(d)
+        return d
+
+
+def one_member(name="ok.txt", data=b"ok\n"):
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+        add_file(tf, name, data)
+    return b.getvalue()
+
+
+def ext_header(kind, size, name="././@LongLink"):
+    ti = tarfile.TarInfo(name)
+    ti.type = kind
+    ti.size = size
+    return ti.tobuf(tarfile.GNU_FORMAT)
+
+
+def objects_under(root):
+    return sum(len(ds) + len(fs) for _, ds, fs in os.walk(root))
+
+
+def hostile_metadata_checks(td):
+    # 9. what a VM can send besides file data: tar extension headers, folder floods, the stream itself
+    gi = guest_import
+    n = 0
+
+    def dest():
+        nonlocal n
+        n += 1
+        return os.path.join(td, f"meta{n}")
+    for kind, label in ((tarfile.GNUTYPE_LONGNAME, "a GNU long-name header"), (tarfile.XHDTYPE, "a pax header")):
+        s = Counting(ext_header(kind, 100 << 20) + b"a" * (2 << 20))
+        rep = gi.import_tar(s, dest())
+        check(f"{label} that claims 100 MB is refused before its payload is read (memory stays bounded)",
+              isinstance(rep.failure, gi.ImportLimit) and "extension header" in str(rep.failure) and s.n < 100_000,
+              (rep.failure, s.n))
+    ln = tarfile.TarInfo._create_gnu_long_header("x" * 200, tarfile.GNUTYPE_LONGNAME, "utf-8", "surrogateescape")
+    rep = gi.import_tar(io.BytesIO(ln * (gi.MAX_EXT_CHAIN + 1) + one_member()), dest())
+    check("a chain of extension headers longer than MAX_EXT_CHAIN is refused (no recursion through them)",
+          isinstance(rep.failure, gi.ImportLimit) and "in a row" in str(rep.failure), rep.failure)
+    d = dest()
+    rep = gi.import_tar(io.BytesIO(ln + one_member()), d)
+    check("…while one long name is fine (and the name it gives is checked like any other)",
+          rep.failure is None and rep.files == 1 and len(os.listdir(d)) == 1, (rep.failure, os.listdir(d)))
+    gh = tarfile.TarInfo.create_pax_global_header({"comment": "x" * 40000})
+    rep = gi.import_tar(io.BytesIO(gh + gh + one_member()), dest())
+    check("global pax headers (they stay for the whole stream) are capped in all",
+          isinstance(rep.failure, gi.ImportLimit) and "global pax" in str(rep.failure), rep.failure)
+    rep = gi.import_tar(io.BytesIO(ext_header(tarfile.GNUTYPE_SPARSE, 1000, "sparse.bin") + b"\0" * 1024), dest())
+    check("a GNU sparse entry (its extra headers can go on and on) is refused",
+          isinstance(rep.failure, gi.ImportLimit) and "sparse" in str(rep.failure), rep.failure)
+    deep = io.BytesIO()
+    with tarfile.open(fileobj=deep, mode="w", format=tarfile.GNU_FORMAT) as tf:
+        for i in range(5):
+            add_file(tf, "/".join(f"d{i}-{j}" for j in range(30)) + "/f.txt", b"x")
+    saved = gi.MAX_OBJECTS
+    gi.MAX_OBJECTS = 50
+    try:
+        d = dest()
+        rep = gi.import_tar(io.BytesIO(deep.getvalue()), d)
+    finally:
+        gi.MAX_OBJECTS = saved
+    check("folders a path implies count: 5 entries can't make 150 folders past the object limit (50)",
+          isinstance(rep.failure, gi.ImportLimit) and "files and folders" in str(rep.failure) and objects_under(d) <= 50,
+          (rep.failure, objects_under(d)))
+    dirs = io.BytesIO()
+    with tarfile.open(fileobj=dirs, mode="w") as tf:
+        for i in range(3):
+            add_dir(tf, f"only-dir-{i}")
+    d = dest()
+    rep = gi.import_tar(io.BytesIO(dirs.getvalue()), d, min_free=1 << 62)
+    check("a stream of folders only meets the free-space floor too (nothing made)",
+          isinstance(rep.failure, gi.ImportLimit) and "free" in str(rep.failure) and os.listdir(d) == [],
+          (rep.failure, os.listdir(d)))
+    skipped = io.BytesIO()
+    with tarfile.open(fileobj=skipped, mode="w") as tf:
+        add_file(tf, "/abs-left-out.bin", b"s" * (5 << 20))      # left out, but tar reads past its data
+    saved = gi.MAX_MEMBERS, gi.STREAM_SLACK
+    gi.MAX_MEMBERS, gi.STREAM_SLACK = 10, 0
+    try:
+        s = Counting(skipped.getvalue())
+        rep = gi.import_tar(s, dest(), max_bytes=1000)
+    finally:
+        gi.MAX_MEMBERS, gi.STREAM_SLACK = saved
+    check("the whole stream is capped too (data of left-out entries counts): it stops near the cap",
+          isinstance(rep.failure, gi.ImportLimit) and "stream passed" in str(rep.failure) and s.n < 100_000,
+          (rep.failure, s.n))
+    import gzip
+    d = dest()
+    rep = gi.import_tar(io.BytesIO(gzip.compress(one_member())), d)
+    check("a compressed stream isn't decompressed (`tar -cf` never compresses): refused, nothing made",
+          isinstance(rep.failure, tarfile.ReadError) and os.listdir(d) == [], (rep.failure, os.listdir(d)))
+
+
+PRODUCER = r'''
+import io, sys, tarfile, time
+mode = sys.argv[1]
+out = sys.stdout.buffer
+if mode == "endless":                        # one entry that never ends
+    ti = tarfile.TarInfo("endless.bin"); ti.size = 10 << 30
+    out.write(ti.tobuf(tarfile.GNU_FORMAT))
+    while True:
+        out.write(b"e" * (1 << 20))
+if mode == "noisy":                          # 2 MB on stderr first
+    for _ in range(32):
+        sys.stderr.write("\x1b]52;c;SGk=\x07" + "n" * 65000 + "\n")
+    sys.stderr.flush()
+with tarfile.open(fileobj=out, mode="w|") as tf:
+    for n in ("a", "b", "c"):
+        data = n.encode() * 300_000
+        ti = tarfile.TarInfo(n + ".bin"); ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+out.flush()
+if mode == "noisy":
+    time.sleep(30)                           # keeps the connection open, as a VM could
+'''
+
+
+def command_checks(td):
+    # 10. the GUI test harness's copy: streamed into the importer, with the same limits, the command reaped
+    gi = guest_import
+    prod = os.path.join(td, "producer.py")
+    with open(prod, "w") as f:
+        f.write(PRODUCER)
+    d = os.path.join(td, "cmd1")
+    t0 = time.time()
+    rep, rc, err = gi.import_from_command([sys.executable, prod, "noisy"], d, max_bytes=700_000)
+    took = time.time() - t0
+    check("from a command: stops at the size limit, keeps the whole files, stops the command at once",
+          isinstance(rep.failure, gi.ImportLimit) and sorted(os.listdir(d)) == ["a.bin", "b.bin"] and rc != 0
+          and took < 10, (rep.failure, os.listdir(d), rc, took))
+    import wirelimits
+    check("…and of its 2 MB of stderr only a short tail is kept", 0 < len(err) <= wirelimits.STDERR_KEEP, len(err))
+    d = os.path.join(td, "cmd2")
+    t0 = time.time()
+    rep, rc, err = gi.import_from_command([sys.executable, prod, "endless"], d, max_bytes=1_000_000)
+    check("an entry that never ends: cut off at the limit, the command killed, nothing half-written kept",
+          isinstance(rep.failure, gi.ImportLimit) and os.listdir(d) == [] and rc != 0 and time.time() - t0 < 10,
+          (rep.failure, os.listdir(d), rc))
+    d = os.path.join(td, "cmd3")
+    rep, rc, err = gi.import_from_command([sys.executable, prod, "quiet"], d, max_bytes=10_000_000)
+    check("a stream that arrives whole: every file, the command's own exit code",
+          rep.failure is None and sorted(os.listdir(d)) == ["a.bin", "b.bin", "c.bin"] and rc == 0, (rep.failure, rc))
+    check("limits for Python callers come from the settings (VM_DISK_BYTES, IMPORT_MIN_FREE_GB)",
+          gi.limits_from_config({"VM_DISK_BYTES": "1000", "IMPORT_MIN_FREE_GB": "2"}) == (1000, 2 << 30)
+          or bool(os.environ.get("MCOMP_IMPORT_MAX_BYTES")))
+    src = open(os.path.join(LAB, "lib", "harness.py")).read()
+    check("the harness copies through import_from_command with those limits (no capture_output of the stream)",
+          "import_from_command" in src and "limits_from_config" in src and "capture_output=True, timeout=600" not in src)
 
 
 if __name__ == "__main__":
