@@ -9,7 +9,7 @@ These rules were verified on Cua Driver 0.52.1, Ubuntu 24.04 XFCE on Xorg, on 20
 - **The dock ignores accessibility presses.** A real pointer click on a dock button works. `launch_app` is better anyway.
 - **Apps** (`launch_app {name, additional_arguments?}`):
   - `firefox`
-  - `libreoffice` with `["--writer","--norestore"]`
+  - `libreoffice` with `["--writer","--norestore"]` (Writer) or `["--calc","--norestore"]` (Calc)
   - `gnome-calculator`
   - `thunar` (give it a folder)
   - `mousepad`

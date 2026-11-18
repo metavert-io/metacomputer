@@ -28,7 +28,7 @@ APPS = [
     (("mousepad", "text editor"), "/usr/bin/mousepad", ["/usr/bin/mousepad"], None),
     (("gnome-calculator", "calculator", "org.gnome.calculator"), "/usr/bin/gnome-calculator",
      ["/usr/bin/gnome-calculator"], None),
-    (("libreoffice", "soffice", "libreoffice writer", "writer"), "/usr/lib/libreoffice/program/soffice",
+    (("libreoffice", "soffice", "libreoffice writer", "writer", "libreoffice calc", "calc"), "/usr/lib/libreoffice/program/soffice",
      ["/usr/lib/libreoffice/program/soffice.bin"], None),
     (("thunar", "file manager"), "/usr/bin/thunar", ["/usr/bin/thunar"], None),
 ]
