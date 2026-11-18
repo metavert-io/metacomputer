@@ -412,16 +412,20 @@ def site_login(hub, client, args):
                 submitted, held = False, None
                 if args.get("submit", True) is not False:
                     try:
-                        # The tab must still be on the checked site: a page that moved it elsewhere gets no submit.
-                        here = canonical_origin((driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url"))
-                        if here != origin:
+                        # The tab must still be on the checked site: a page that moved it elsewhere gets no submit. The
+                        # refs come from this fresh snapshot (a new snapshot retires the earlier one's refs).
+                        snap2 = driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}
+                        pw2, user2, submit2 = find_fields(snap2.get("refs"))
+                        if canonical_origin(snap2.get("url")) != origin:
                             held = "the tab left " + origin + " after the fill, so the form wasn't submitted"
-                        elif submit and submit[1]:
-                            driver(hub, client, "browser_click", dict(tgt, ref=submit[1], delivery_mode="foreground"))
+                        elif submit2 and submit2[1]:
+                            driver(hub, client, "browser_click", dict(tgt, ref=submit2[1], delivery_mode="foreground"))
+                            submitted = True
+                        elif (pw2 or user2) and (pw2 or user2)[1]:
+                            driver(hub, client, "browser_type", dict(tgt, ref=(pw2 or user2)[1], text="\n"))
                             submitted = True
                         else:
-                            driver(hub, client, "browser_type", dict(tgt, ref=(pw or user)[1], text="\n"))
-                            submitted = True
+                            held = "the form's fields weren't found again after the fill, so it wasn't submitted"
                     except ToolError:
                         submitted = False
                 time.sleep(1.0 if submitted else 0)
