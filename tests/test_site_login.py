@@ -91,7 +91,11 @@ for line in sys.stdin:
         url = s.get("force_url") or s.get("url", "about:blank")
         if s.get("move_on_snap") and s["snaps"] >= s["move_on_snap"]:
             url = s["move_url"]
-        ok(mid, {"status": "ok", "refs": REFS, "url": url, "snapshot_id": "p1"})
+        # As Cua Driver does, each snapshot has its own id and refs, and a new snapshot retires the earlier refs.
+        sid = "p%d" % s["snaps"]
+        ok(mid, {"status": "ok", "refs": [dict(r, ref=sid + ":" + r["ref"].split(":")[1]) for r in REFS], "url": url, "snapshot_id": sid})
+    elif name in ("browser_click", "browser_type") and a.get("ref") and not a["ref"].startswith("p%d:" % s.get("snaps", 0)):
+        ok(mid, {"error": "stale_ref", "message": "that ref is from an earlier snapshot"}, err=True)
     elif name == "get_browser_state":
         ok(mid, {"target_id": "bt-1", "tabs": [{"tab_id": "tab-1", "url": s.get("url", "about:blank")}], "binding_quality": "exact"})
     elif name == "browser_navigate":
@@ -287,7 +291,7 @@ def run(td, procs):
           and sent[2].get("value") == USER and sent[3].get("value") == PW and all(s["origins"] == [SITE] for s in sent[1:]), sent)
     check("the hub opened page-mode Chrome on the url through the driver, read the page, then clicked the submit button",
           dc[:5] == ["browser_prepare", "list_windows", "get_browser_state", "browser_navigate", "get_browser_state"]
-          and any(c["tool"] == "browser_click" and c["args"].get("ref") == "p1:6" for c in driver_calls())
+          and any(c["tool"] == "browser_click" and str(c["args"].get("ref")).endswith(":6") for c in driver_calls())
           and any(c["tool"] == "browser_navigate" and c["args"].get("url") == SITE + "/login.html" for c in driver_calls()), dc)
     rec = [json.loads(l) for l in open(os.path.join(vdir, "audit.jsonl"))]
     lg = [x for x in rec if x.get("op") == "login" and x.get("request_id") == rid]
