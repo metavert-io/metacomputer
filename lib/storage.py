@@ -39,7 +39,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
+from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import labconfig  # noqa: E402
@@ -256,60 +258,114 @@ def _real(p):
         return os.path.abspath(p)
 
 
+def fold(p):
+    """How APFS compares names by default: case-insensitive, normalization-insensitive. Comparing folded
+    spellings refuses a little more on a case-sensitive volume, never less."""
+    return unicodedata.normalize("NFD", p).casefold()
+
+
 def inside(child, parent):
-    return child == parent or child.startswith(parent.rstrip("/") + "/")
+    """child is parent or below it, compared as the filesystem compares names."""
+    c, p = fold(child), fold(parent).rstrip("/")
+    return c == p or c.startswith(p + "/")
+
+
+F_GETPATH = 50                     # fcntl: the path the kernel knows an open file by
+
+
+def canon(path, directory=False):
+    """(canonical spelling, (device, inode)) of an existing file or folder, links resolved. The spelling is
+    the one the kernel gives the opened file (F_GETPATH): its real case, firmlinks into the data volume
+    mapped back (/system/volumes/data/Users/x/LIBRARY is /Users/x/Library). OSError if it can't be opened."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | (os.O_DIRECTORY if directory else 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if sys.platform == "darwin":
+            raw = fcntl.fcntl(fd, F_GETPATH, b"\0" * 1025)
+            spelled = raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+        else:
+            spelled = os.path.realpath(path)
+        return spelled, (st.st_dev, st.st_ino)
+    finally:
+        os.close(fd)
+
+
+def canon_or_abs(path):
+    try:
+        return canon(path)[0]
+    except OSError:
+        return os.path.abspath(path)
 
 
 def protected_paths(home=None, lab=None, ssh_dir=None, data=None, state=None):
-    """(exact, trees): folders that may not be shared, and folders nothing inside may be shared from.
-    Their parents are refused as well (sharing a parent shares them)."""
-    home = _real(home or HOME)
-    lab = _real(lab or lab_root())
-    ssh_dir = _real(ssh_dir or env("SSH_DIR") or os.path.join(HOME, ".ssh", "metacomputer"))
-    data = _real(data or data_dir())
-    state = _real(state or state_home())
+    """(home, data, exact, trees): folders that may not be shared, and folders nothing inside may be shared
+    from, each as (canonical spelling, identity or None). Their parents are refused as well (sharing a
+    parent shares them)."""
+    def c(p):
+        try:
+            return canon(p, directory=True)
+        except OSError:
+            return (os.path.abspath(p), None)
+    home = c(home or HOME)[0]
+    lab = lab or lab_root()
+    ssh_dir = ssh_dir or env("SSH_DIR") or os.path.join(HOME, ".ssh", "metacomputer")
+    data = c(data or data_dir())[0]
+    state = state or state_home()
     j = os.path.join
-    exact = [home, j(home, "Documents"), j(home, "Desktop"), j(home, "Downloads"), j(home, "Pictures"),
-             j(home, "Movies"), j(home, "Music"), j(home, "Public"), "/", "/Users", "/Volumes", _real("/tmp"),
-             data, j(data, "volumes"), j(data, "refdisks")]
-    trees = [j(home, "Library"), j(home, ".ssh"), ssh_dir, lab, j(home, ".lume"), state, "/System", "/Library",
-             "/Applications", "/usr", "/bin", "/sbin", "/etc", _real("/etc"), "/var", _real("/var"), "/dev",
-             "/cores", "/opt/homebrew"]
+    exact = [c(p) for p in (home, j(home, "Documents"), j(home, "Desktop"), j(home, "Downloads"), j(home, "Pictures"),
+                            j(home, "Movies"), j(home, "Music"), j(home, "Public"), "/", "/Users", "/Volumes", "/tmp",
+                            data, j(data, "volumes"), j(data, "refdisks"))]
+    trees = [c(p) for p in (j(home, "Library"), j(home, ".ssh"), ssh_dir, lab, j(home, ".lume"), state, "/System",
+                            "/Library", "/Applications", "/usr", "/bin", "/sbin", "/etc", "/private/etc", "/var",
+                            "/private/var", "/dev", "/cores", "/opt/homebrew")]
     return home, data, exact, trees
 
 
 def check_shareable(path, **where):
-    """The real path of a Mac folder that may go into the VM (shared or packed into a reference
-    disk), or StorageError. Links are resolved first, so a link to a refused folder is refused."""
+    """The canonical path of a Mac folder that may go into the VM (shared or packed into a reference
+    disk), or StorageError."""
+    return check_shareable_id(path, **where)[0]
+
+
+def check_shareable_id(path, **where):
+    """(canonical path, (device, inode)) of a folder that may go into the VM, or StorageError. The folder is
+    opened, links resolved, and judged by the spelling the kernel gives it and by its identity, so another
+    spelling (case, Unicode normalization, the data volume's firmlinks) or a link to a refused folder is
+    refused like the folder itself."""
     check_host_path(path, "folder")
     if not os.path.isdir(path):
         raise StorageError(f"{path}: no such folder")
-    real = _real(path)
+    try:
+        real, ident = canon(path, directory=True)
+    except OSError as e:
+        raise StorageError(f"{path}: can't open it ({e.strerror})")
     home, data, exact, trees = protected_paths(**where)
     why = None
-    for p in exact + trees:
-        if inside(p, real):              # the folder itself, or one of its parents
+    for p, pid in exact + trees:
+        if pid == ident or inside(p, real):      # the folder itself, or one of its parents
             why = p
             break
     if why is None:
-        for t in trees:
+        for t, _ in trees:
             if inside(real, t):
                 why = t
                 break
-    if why is None and inside(real, home) and real != home:
-        first = os.path.relpath(real, home).split(os.sep)[0]
+    if why is None and inside(real, home) and fold(real) != fold(home):
+        first = real[len(home.rstrip("/")) + 1:].split("/")[0]
         if first.startswith(".") and not inside(real, os.path.join(data, "volumes")) \
                 and not inside(real, os.path.join(data, "refdisks")):
             why = os.path.join(home, first)
-    if why is None and inside(real, _real("/tmp")) and real != _real("/tmp"):
-        first = os.path.relpath(real, _real("/tmp")).split(os.sep)[0]
-        if first.startswith("mcomp-"):
-            why = os.path.join(_real("/tmp"), first)     # the gateway's and the hub's sockets
+    tmp = canon_or_abs("/tmp")
+    if why is None and inside(real, tmp) and fold(real) != fold(tmp):
+        first = real[len(tmp.rstrip("/")) + 1:].split("/")[0]
+        if fold(first).startswith("mcomp-"):
+            why = os.path.join(tmp, first)     # the gateway's and the hub's sockets
     if why is not None:
         shown = path if real == path else f"{path} (that is {real})"
         raise StorageError(f"{shown} can't go into the VM: it is or holds {why}, which stays private "
                            "(personal folders, Library, keys, this checkout, system folders). Use a folder of its own.")
-    return real
+    return real, ident
 
 
 # --- mount points in the VM, and the VOLUMES / REFDISKS settings ----------------------
@@ -365,7 +421,13 @@ def parse_list(text, kind, home=None):
 
 
 def overlapping(a, b):
+    """Two mount points in the VM (Linux paths: compared as they are)."""
     return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def host_overlapping(a, b):
+    """Two folders on the Mac, compared as the filesystem compares names."""
+    return inside(a, b) or inside(b, a)
 
 
 # --- locks ------------------------------------------------------------------------------
@@ -402,8 +464,10 @@ def proc_start(pid):
 
 
 def lock_key(kind, path):
+    """A lock's file name: the item's canonical spelling, folded, so every spelling of one file or folder
+    (case, firmlinks, links) is one lock."""
     import hashlib
-    return f"{kind}-" + hashlib.sha256(_real(path).encode()).hexdigest()[:24]
+    return f"{kind}-" + hashlib.sha256(fold(canon_or_abs(path)).encode()).hexdigest()[:24]
 
 
 def holder_alive(rec):
@@ -429,8 +493,13 @@ def all_locks():
     return out
 
 
+OPERATION = "operation:"
+
+
 def describe_holder(rec):
     vm = rec.get("vm", "?")
+    if vm.startswith(OPERATION):
+        return f"a metacomputer command still working on it ({vm[len(OPERATION):]}, pid {rec.get('pid')})"
     where = "" if rec.get("lab") == lab_root() else f" (from {rec.get('lab')})"
     return f"VM '{vm}'{where}, since {rec.get('since', '?')}"
 
@@ -456,7 +525,7 @@ def acquire(items, vm, lab, pid):
                 if same_holder(rec, vm, lab) or not holder_alive(rec):
                     continue
                 if rec["_file"] == key + ".json" or (
-                        it.get("lock_overlap") and rec.get("overlap") and overlapping(rec.get("path", ""), it["path"])):
+                        it.get("lock_overlap") and rec.get("overlap") and host_overlapping(rec.get("path", ""), it["path"])):
                     conflicts.append(f"{it['kind']} '{it['name']}' is in use by {describe_holder(rec)}")
             if it["kind"] == "disk":
                 side = read_json(sidecar_path(it))
@@ -517,6 +586,20 @@ def release_locks(vm, lab):
     return n
 
 
+@contextmanager
+def reserved(recs, op):
+    """Hold disk volumes for the length of an operation (checkpoint, restore, resize, delete): taken before
+    anything is checked or changed, through the same locks a VM's start takes, so no VM can attach one
+    meanwhile, and refused while a VM (or another operation) holds one."""
+    items = [{"kind": "disk", "name": r["name"], "path": r["path"], "lock": lock_key("disk", r["path"])} for r in recs]
+    holder = f"{OPERATION}{op}:{os.getpid()}"
+    acquire(items, holder, lab_root(), os.getpid())
+    try:
+        yield
+    finally:
+        release_locks(holder, lab_root())
+
+
 def holder_of(path, kind):
     """The live lock on an item, or None."""
     rec = read_json(os.path.join(locks_dir(), lock_key(kind, path) + ".json"))
@@ -572,7 +655,13 @@ def build_plan(no_volumes=False):
         if not os.path.isfile(path):
             problems.append(f"reference disk '{r['name']}': {path} is missing (is its drive connected?)")
             continue
-        items.append({"kind": "refdisk", "name": r["name"], "path": path, "mount": r["mount"], "rw": False,
+        try:
+            path, ident = canon(path)
+        except OSError as e:
+            problems.append(f"reference disk '{r['name']}': can't open {path} ({e.strerror})")
+            continue
+        items.append({"kind": "refdisk", "name": r["name"], "path": path, "ident": list(ident), "mount": r["mount"],
+                      "rw": False,
                       "label": label_for(rec)})
     mounts = []
     for it in items:
@@ -599,16 +688,21 @@ def plan_volume(rec, v, problems, notes):
         if not os.path.isfile(path):
             problems.append(f"volume '{name}': {path} is missing (is its drive connected?)")
             return None
+        try:
+            path, ident = canon(path)
+        except OSError as e:
+            problems.append(f"volume '{name}': can't open {path} ({e.strerror})")
+            return None
         size = os.stat(path).st_size
-        if size % 512 or size < MIN_SIZE:
+        if size % 512 or size < MIN_SIZE or not stat.S_ISREG(os.stat(path).st_mode):
             problems.append(f"volume '{name}': {path} isn't a disk image metacomputer made")
             return None
         net = network_fs(path)
         if net:
             notes.append(f"volume '{name}' is on a network filesystem ({net[0]} at {net[1]}): if the connection drops "
                          "while the VM writes, the volume can be damaged, and locks don't hold across computers")
-        return {"kind": "disk", "name": name, "path": path, "mount": v["mount"], "rw": True, "size": size,
-                "uuid": rec["uuid"], "lock": lock_key("disk", path)}
+        return {"kind": "disk", "name": name, "path": path, "ident": list(ident), "mount": v["mount"], "rw": True,
+                "size": size, "uuid": rec["uuid"], "lock": lock_key("disk", path)}
     problems.append(f"volume '{name}': unknown kind {kind!r}")
     return None
 
@@ -620,7 +714,7 @@ def bounded_filter(items):
     try:
         import driver_profiles
         read, write = manifest_dirs(driver_profiles.render())
-    except Exception:  # noqa: BLE001 - an unreadable manifest lists nothing
+    except Exception:  # noqa: BLE001 - a manifest that can't be read exactly grants nothing
         read, write = [], []
     keep, skipped = [], []
     for it in items:
@@ -636,32 +730,260 @@ def covered(mount, d, recursive):
     return mount == d or (recursive and mount.startswith(d.rstrip("/") + "/"))
 
 
+class ManifestError(ValueError):
+    pass
+
+
+def yaml_subset(text):
+    """Parse the YAML subset capability manifests use: block mappings and sequences by indentation, flow
+    mappings {k: v} and sequences [a, b], plain and quoted scalars, comments. Anything else (anchors,
+    aliases, tags, block scalars, several documents, tabs, duplicate keys) is a ManifestError: storage
+    permissions are derived only from a manifest read exactly."""
+    lines = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        if "\t" in raw[:len(raw) - len(raw.lstrip())]:
+            raise ManifestError(f"line {n}: a tab in the indentation")
+        body = _strip_comment(raw, n).rstrip()
+        if not body.strip():
+            continue
+        if body.strip() in ("---", "..."):
+            if lines:
+                raise ManifestError(f"line {n}: more than one document")
+            continue
+        lines.append((len(body) - len(body.lstrip()), body.strip(), n))
+    if not lines:
+        return None
+    val, i = _block(lines, 0, lines[0][0])
+    if i != len(lines):
+        raise ManifestError(f"line {lines[i][2]}: unexpected indentation")
+    return val
+
+
+def _strip_comment(line, n):
+    out, q = [], None
+    for k, ch in enumerate(line):
+        if q:
+            out.append(ch)
+            if ch == q:
+                q = None
+            continue
+        if ch in "'\"":
+            q = ch
+        elif ch == "#" and (k == 0 or line[k - 1] in " \t"):
+            break
+        out.append(ch)
+    if q:
+        raise ManifestError(f"line {n}: an unterminated quote")
+    return "".join(out)
+
+
+def _block(lines, i, indent):
+    if lines[i][1].startswith("- ") or lines[i][1] == "-":
+        out = []
+        while i < len(lines) and lines[i][0] == indent and (lines[i][1].startswith("- ") or lines[i][1] == "-"):
+            rest, n = lines[i][1][1:].lstrip(), lines[i][2]
+            if not rest:
+                if i + 1 >= len(lines) or lines[i + 1][0] <= indent:
+                    raise ManifestError(f"line {n}: an empty list item")
+                v, i = _block(lines, i + 1, lines[i + 1][0])
+                out.append(v)
+                continue
+            if _is_key(rest):
+                # "- key: value" starts a mapping whose other keys sit under the key
+                sub = [(indent + 2 + (len(lines[i][1]) - len(lines[i][1][1:].lstrip()) - 1), rest, n)]
+                j = i + 1
+                while j < len(lines) and lines[j][0] > indent:
+                    sub.append(lines[j])
+                    j += 1
+                v, k = _block(sub, 0, sub[0][0])
+                if k != len(sub):
+                    raise ManifestError(f"line {sub[k][2]}: unexpected indentation")
+                out.append(v)
+                i = j
+                continue
+            out.append(_scalar_or_flow(rest, n))
+            i += 1
+        return out, i
+    out = {}
+    while i < len(lines) and lines[i][0] == indent:
+        body, n = lines[i][1], lines[i][2]
+        if body.startswith("- "):
+            raise ManifestError(f"line {n}: a list item where a key was expected")
+        key, rest = _split_key(body, n)
+        if key in out:
+            raise ManifestError(f"line {n}: the key {key!r} twice")
+        if rest:
+            out[key] = _scalar_or_flow(rest, n)
+            i += 1
+        elif i + 1 < len(lines) and lines[i + 1][0] > indent:
+            out[key], i = _block(lines, i + 1, lines[i + 1][0])
+        elif i + 1 < len(lines) and lines[i + 1][0] == indent and lines[i + 1][1].startswith("- "):
+            out[key], i = _block(lines, i + 1, indent)
+        else:
+            out[key] = None
+            i += 1
+    if i < len(lines) and lines[i][0] > indent:
+        raise ManifestError(f"line {lines[i][2]}: unexpected indentation")
+    return out, i
+
+
+def _is_key(text):
+    try:
+        _split_key(text, 0)
+        return True
+    except ManifestError:
+        return False
+
+
+def _split_key(text, n):
+    if text[:1] in "'\"":
+        q = text[0]
+        end = text.find(q, 1)
+        if end < 0 or text[end + 1:end + 2] != ":":
+            raise ManifestError(f"line {n}: not a key")
+        key, rest = text[1:end], text[end + 2:]
+    else:
+        k = text.find(": ")
+        if text.endswith(":") and (k < 0 or k > len(text) - 2):
+            k = len(text) - 1
+        if k <= 0:
+            raise ManifestError(f"line {n}: not a key: value")
+        key, rest = text[:k], text[k + 1:]
+        if any(c in key for c in "{}[],&*!|>%@`"):
+            raise ManifestError(f"line {n}: an unsupported key {key!r}")
+    if rest and not rest.startswith(" "):
+        raise ManifestError(f"line {n}: not a key: value")
+    return key.strip(), rest.strip()
+
+
+def _scalar_or_flow(text, n):
+    if text[0] in "{[":
+        v, k = _flow(text, 0, n)
+        if text[k:].strip():
+            raise ManifestError(f"line {n}: text after a closing bracket")
+        return v
+    return _scalar(text, n)
+
+
+def _scalar(text, n):
+    text = text.strip()
+    if not text:
+        raise ManifestError(f"line {n}: an empty value")
+    if text[0] in "&*!|>%@`":
+        raise ManifestError(f"line {n}: unsupported YAML ({text[0]})")
+    if text[0] in "'\"":
+        q = text[0]
+        if len(text) < 2 or text[-1] != q or q in text[1:-1].replace("\\\\", "").replace('\\"', ""):
+            raise ManifestError(f"line {n}: a bad quoted string")
+        inner = text[1:-1]
+        if q == '"':
+            if "\\" in inner.replace("\\\\", "").replace('\\"', ""):
+                raise ManifestError(f"line {n}: an unsupported escape")
+            inner = inner.replace('\\"', '"').replace("\\\\", "\\")
+        else:
+            inner = inner.replace("''", "'")
+        return inner
+    if text in ("true", "True", "TRUE"):
+        return True
+    if text in ("false", "False", "FALSE"):
+        return False
+    if text in ("null", "Null", "NULL", "~"):
+        return None
+    if ": " in text or text.endswith(":"):
+        raise ManifestError(f"line {n}: a mapping where a value was expected")
+    return text
+
+
+def _flow(text, k, n):
+    """A flow mapping or sequence starting at text[k]; returns (value, index after it)."""
+    opener = text[k]
+    closer = "}" if opener == "{" else "]"
+    k += 1
+    out = {} if opener == "{" else []
+    while True:
+        while k < len(text) and text[k] == " ":
+            k += 1
+        if k >= len(text):
+            raise ManifestError(f"line {n}: an unclosed {opener}")
+        if text[k] == closer:
+            return out, k + 1
+        if text[k] in "{[":
+            if opener == "{":
+                raise ManifestError(f"line {n}: a nested key in a flow mapping")
+            v, k = _flow(text, k, n)
+            out.append(v)
+        else:
+            depth, q, j = 0, None, k
+            while j < len(text):
+                c = text[j]
+                if q:
+                    if c == q:
+                        q = None
+                elif c in "'\"":
+                    q = c
+                elif c in "{[":
+                    depth += 1
+                elif c in "}]":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif c == "," and depth == 0:
+                    break
+                j += 1
+            item = text[k:j].strip()
+            if opener == "{":
+                key, rest = _split_key(item, n) if ": " in item else (None, None)
+                if key is None:
+                    raise ManifestError(f"line {n}: {item!r} isn't key: value")
+                if key in out:
+                    raise ManifestError(f"line {n}: the key {key!r} twice")
+                out[key] = _scalar_or_flow(rest, n) if rest else None
+            else:
+                out.append(_scalar_or_flow(item, n))
+            k = j
+        while k < len(text) and text[k] == " ":
+            k += 1
+        if k < len(text) and text[k] == ",":
+            k += 1
+        elif k < len(text) and text[k] != closer:
+            raise ManifestError(f"line {n}: expected , or {closer}")
+
+
 def manifest_dirs(text):
-    """The read and write folders of a Cua capability manifest's resources.files, as (dir, recursive)."""
-    read, write = [], []
-    files_indent, section = None, None
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        ind = len(line) - len(line.lstrip())
-        s = line.strip()
-        if s == "files:":
-            files_indent, section = ind, None
-            continue
-        if files_indent is None:
-            continue
-        if ind <= files_indent:
-            files_indent, section = None, None
-            continue
-        m = re.match(r"^(read|write):\s*$", s)
-        if m:
-            section = m.group(1)
-            continue
-        m = re.search(r"\bdir:\s*['\"]?([^,'\"}\s]+)", s)
-        if m and section:
-            rec = bool(re.search(r"\brecursive:\s*true\b", s))
-            (read if section == "read" else write).append((m.group(1).rstrip("/") or "/", rec))
-    return read, write
+    """The read and write folders of a Cua capability manifest, exactly from resources.files.read and
+    .write: lists of {dir: ABSOLUTE PATH, recursive: true|false}. A manifest that isn't in that form grants
+    nothing (ManifestError)."""
+    doc = yaml_subset(text)
+    if not isinstance(doc, dict):
+        raise ManifestError("the manifest isn't a mapping")
+    res = doc.get("resources")
+    if res is None:
+        return [], []
+    if not isinstance(res, dict):
+        raise ManifestError("resources isn't a mapping")
+    files = res.get("files")
+    if files is None:
+        return [], []
+    if not isinstance(files, dict) or set(files) - {"read", "write"}:
+        raise ManifestError("resources.files has keys other than read and write")
+    out = []
+    for section in ("read", "write"):
+        entries = files.get(section) or []
+        if not isinstance(entries, list):
+            raise ManifestError(f"resources.files.{section} isn't a list")
+        got = []
+        for e in entries:
+            if not isinstance(e, dict) or set(e) - {"dir", "recursive"} or not isinstance(e.get("dir"), str):
+                raise ManifestError(f"resources.files.{section}: an entry that isn't {{dir: PATH, recursive: BOOL}}")
+            rec = e.get("recursive", False)
+            if not isinstance(rec, bool):
+                raise ManifestError(f"resources.files.{section}: recursive must be true or false")
+            d = e["dir"]
+            if not d.startswith("/") or os.path.normpath(d) != d.rstrip("/") and d != "/":
+                raise ManifestError(f"resources.files.{section}: {d!r} isn't an absolute, normal path")
+            got.append((d.rstrip("/") or "/", rec))
+        out.append(got)
+    return out[0], out[1]
 
 
 def lume_args(items):
@@ -721,9 +1043,33 @@ def cmd_prepare(a):
 
 
 def cmd_started(a):
-    if os.path.exists(state_files()["state"]):
-        update_holder(vm_name(), lab_root(), a.pid)
+    st = load_state()
+    if not st:
+        return 0
+    update_holder(vm_name(), lab_root(), a.pid)
+    changed = changed_items(st.get("items", []))
+    if changed:
+        print("metacomputer: the VM was started, but " + "; ".join(changed) + ": it's no longer what was checked. "
+              "Stopping it.", file=sys.stderr)
+        return 1
     return 0
+
+
+def changed_items(items):
+    """Items whose path no longer leads to the file or folder that was checked (same device and inode)."""
+    out = []
+    for it in items:
+        want = it.get("ident")
+        if not want:
+            continue
+        try:
+            st = os.stat(it["path"])
+            got = [st.st_dev, st.st_ino]
+        except OSError:
+            got = None
+        if got != list(want):
+            out.append(f"{it['kind']} '{it['name']}' at {it['path']} changed after it was checked")
+    return out
 
 
 def load_state():
@@ -731,10 +1077,54 @@ def load_state():
     return st if isinstance(st, dict) else None
 
 
+GUEST_REPLY_MAX = 64 * 1024
+ADMIN = "sudo -n /usr/local/sbin/metacomputer-admin storage "
+
+
+def guest_call(ssh, verb, stdin=b"", timeout=900, max_out=GUEST_REPLY_MAX):
+    """Run `metacomputer-admin storage VERB` in the VM over the given ssh command. Its answer is untrusted:
+    read as it comes, at most max_out bytes, within timeout seconds; past either the ssh is ended.
+    Returns (exit code, stdout text, why it was cut short or "")."""
+    import boundedrun
+    try:
+        rc, out, err = boundedrun.run(list(ssh) + [ADMIN + verb], stdin=stdin, max_out=max_out, max_err=16384,
+                                      timeout=timeout)
+    except boundedrun.Overflow:
+        return 1, "", f"the VM's answer was over {max_out} bytes"
+    except boundedrun.Timeout:
+        return 1, "", f"the VM didn't answer within {timeout} s"
+    return rc, out.decode("utf-8", "replace"), ""
+
+
+def cmd_attach(a):
+    """Mount this start's storage in the VM (bin/metacomputer gives the admin ssh command). Exit 3 when the VM
+    can't (built before storage support), 1 when it didn't mount it all."""
+    plan = state_files()["plan"]
+    if not os.path.exists(plan):
+        return 0
+    n = a.transport
+    ssh = a.rest[:n]
+    rc, out, why = guest_call(ssh, "version", timeout=60, max_out=4096)
+    if rc != 0 or out.strip().splitlines()[-1:] != [str(PROTOCOL)]:
+        if why:
+            print(f"metacomputer: {why}", file=sys.stderr)
+        return 3
+    rc, out, why = guest_call(ssh, "attach", stdin=open(plan, "rb").read())
+    if why:
+        print(f"metacomputer: the VM didn't mount its storage: {why}", file=sys.stderr)
+        return 1
+    return attached(out)
+
+
 def cmd_attached(a):
+    """The guest's answer to `storage attach`, on stdin (as cmd_attach reads it)."""
+    return attached(sys.stdin.read(GUEST_REPLY_MAX + 1))
+
+
+def attached(data):
     """The guest's answer to `storage attach` (untrusted: checked, bounded, escaped)."""
     st = load_state()
-    data = sys.stdin.read(65537)
+    data = data[:GUEST_REPLY_MAX + 1]
     try:
         res = json.loads(data.strip().splitlines()[-1]) if data.strip() else None
     except (ValueError, IndexError):
@@ -903,31 +1293,34 @@ def cmd_volume_delete(a):
     if not rec:
         raise StorageError(f"no volume named {a.name} (metacomputer volume list)")
     if rec.get("kind") == "disk":
-        h = holder_of(rec["path"], "disk")
-        if h:
-            raise StorageError(f"volume '{a.name}' is in use by {describe_holder(h)}; stop that VM first")
-        snaps = snapshots_of(a.name)
-        extra = f" and its {len(snaps)} checkpoint snapshot(s)" if snaps else ""
-        confirm(f"Delete volume '{a.name}' ({rec['path']}){extra}? Its files are gone for good", a.yes)
-        for m, snap in snaps:
-            if snap:
-                try:
-                    os.unlink(snap)
-                except FileNotFoundError:
-                    pass
-            man = read_json(m) or {}
-            man["volumes"] = [v for v in man.get("volumes", []) if v.get("name") != a.name]
-            atomic_json(m, man)
-        for p in (rec["path"], rec["path"] + ".lock"):
-            try:
-                os.unlink(p)
-            except FileNotFoundError:
-                pass
+        with reserved([rec], "delete"):
+            delete_disk(a, rec)
     reg_delete("volume", a.name)
     print(f"volume '{a.name}' deleted")
     if a.name in {e["name"] for e in safe_parse(env("VOLUMES"), "volume")}:
         print(f"  ! VOLUMES in your config still lists {a.name}: remove it, or start refuses")
     return 0
+
+
+def delete_disk(a, rec):
+    """With the volume held (reserved)."""
+    snaps = snapshots_of(a.name)
+    extra = f" and its {len(snaps)} checkpoint snapshot(s)" if snaps else ""
+    confirm(f"Delete volume '{a.name}' ({rec['path']}){extra}? Its files are gone for good", a.yes)
+    for m, snap in snaps:
+        if snap:
+            try:
+                os.unlink(snap)
+            except FileNotFoundError:
+                pass
+        man = read_json(m) or {}
+        man["volumes"] = [v for v in man.get("volumes", []) if v.get("name") != a.name]
+        atomic_json(m, man)
+    for path in (rec["path"], rec["path"] + ".lock"):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 def cmd_volume_resize(a):
@@ -942,9 +1335,13 @@ def cmd_volume_resize(a):
     path = rec["path"]
     if not os.path.isfile(path):
         raise StorageError(f"{path} is missing (is its drive connected?)")
-    h = holder_of(path, "disk")
-    if h:
-        raise StorageError(f"volume '{a.name}' is in use by {describe_holder(h)}; stop that VM first")
+    with reserved([rec], "resize"):
+        return resize_volume(a, rec, size)
+
+
+def resize_volume(a, rec, size):
+    """With the volume held (reserved)."""
+    path = rec["path"]
     cur = os.stat(path).st_size
     if size < cur:
         raise StorageError(f"volume '{a.name}' is {human(cur)}; volumes only grow (shrinking could lose files)")
@@ -1008,36 +1405,103 @@ def sparse_copy(src, dst):
     shutil.copystat(src, dst)
 
 
-def stage_tree(src, dst):
-    """Copy a folder's plain files and folders into dst (cloned on APFS), leaving out links and special
-    files; returns (files, bytes, left_out)."""
+DIR_NOFOLLOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE_NOFOLLOW = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+STAGE_MAX_DEPTH = 64
+
+
+def copy_from_fd(sfd, dfd, name, st):
+    """Copy the open file sfd to name in the folder dfd: an APFS clone of the descriptor when it can
+    (fclonefileat), else its bytes. The source is never looked up by path again."""
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        if libc.fclonefileat(sfd, dfd, name.encode("utf-8", "surrogateescape"), 0) == 0:
+            return
+    out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+    try:
+        os.lseek(sfd, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(sfd, 8 * MIB)
+            if not chunk:
+                break
+            os.write(out, chunk)
+    finally:
+        os.close(out)
+
+
+def stage_tree(src, dst, ident=None):
+    """Copy a folder's plain files and folders into dst, leaving out links and special files; returns
+    (files, bytes, left_out). Everything is reached through descriptors, from the folder's own (checked
+    against ident when given) down: each entry is opened without following links and must still be the
+    file or folder that was listed, so a file swapped for a link mid-copy is left out, not followed."""
     files = size = 0
     left = []
-    for d, dirs, fs in os.walk(src):
-        rel = os.path.relpath(d, src)
-        out = dst if rel == "." else os.path.join(dst, rel)
-        keep = []
-        for n in dirs:
-            p = os.path.join(d, n)
-            if os.path.islink(p):
-                left.append(os.path.relpath(p, src))
-            else:
-                keep.append(n)
-                os.mkdir(os.path.join(out, n), 0o755)
-        dirs[:] = keep
-        for n in fs:
-            p = os.path.join(d, n)
-            st = os.lstat(p)
+    sroot = os.open(src, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    droot = os.open(dst, DIR_NOFOLLOW)
+
+    def walk(sfd, dfd, rel, depth):
+        nonlocal files, size
+        if depth > STAGE_MAX_DEPTH:
+            left.append(rel)
+            return
+        with os.scandir(sfd) as it:
+            names = [e.name for e in it]
+        for n in names:
+            r = f"{rel}/{n}" if rel else n
             if n == ".DS_Store":
                 continue
-            if not stat.S_ISREG(st.st_mode):
-                left.append(os.path.relpath(p, src))
+            try:
+                st = os.stat(n, dir_fd=sfd, follow_symlinks=False)
+            except OSError:
+                left.append(r)
                 continue
-            clone_or_copy(p, os.path.join(out, n))
-            os.chmod(os.path.join(out, n), stat.S_IMODE(st.st_mode) & 0o777)
-            files += 1
-            size += st.st_size
-        shutil.copystat(d, out)
+            if stat.S_ISDIR(st.st_mode):
+                try:
+                    cfd = os.open(n, DIR_NOFOLLOW, dir_fd=sfd)
+                except OSError:                       # replaced by a link (ELOOP), or gone
+                    left.append(r)
+                    continue
+                try:
+                    cst = os.fstat(cfd)
+                    if (cst.st_dev, cst.st_ino) != (st.st_dev, st.st_ino):
+                        left.append(r)
+                        continue
+                    os.mkdir(n, 0o755, dir_fd=dfd)
+                    nfd = os.open(n, DIR_NOFOLLOW, dir_fd=dfd)
+                    try:
+                        walk(cfd, nfd, r, depth + 1)
+                    finally:
+                        os.close(nfd)
+                finally:
+                    os.close(cfd)
+            elif stat.S_ISREG(st.st_mode):
+                try:
+                    ffd = os.open(n, FILE_NOFOLLOW, dir_fd=sfd)
+                except OSError:
+                    left.append(r)
+                    continue
+                try:
+                    fst = os.fstat(ffd)
+                    if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+                        left.append(r)
+                        continue
+                    copy_from_fd(ffd, dfd, n, fst)
+                    os.chmod(n, stat.S_IMODE(fst.st_mode) & 0o777, dir_fd=dfd, follow_symlinks=False)
+                    files += 1
+                    size += fst.st_size
+                finally:
+                    os.close(ffd)
+            else:
+                left.append(r)
+    try:
+        if ident is not None:
+            rst = os.fstat(sroot)
+            if (rst.st_dev, rst.st_ino) != tuple(ident):
+                raise StorageError(f"{src} changed after it was checked; nothing was packed")
+        walk(sroot, droot, "", 0)
+    finally:
+        os.close(sroot)
+        os.close(droot)
     return files, size, left
 
 
@@ -1047,7 +1511,7 @@ def cmd_refdisk_create(a):
         raise StorageError(f"there's already a reference disk named {a.name} (metacomputer refdisk list)")
     if not a.src:
         raise StorageError("usage: metacomputer refdisk create NAME --from FOLDER [--dir PATH]")
-    src = check_shareable(os.path.abspath(os.path.expanduser(a.src)))
+    src, src_ident = check_shareable_id(os.path.abspath(os.path.expanduser(a.src)))
     d = target_dir("refdisks", a.dir)
     out = os.path.join(d, a.name + ".iso")
     if os.path.lexists(out):
@@ -1058,7 +1522,7 @@ def cmd_refdisk_create(a):
     stage = tempfile.mkdtemp(dir=d, prefix=f".{a.name}.staging-")
     tmp = os.path.join(d, f".{a.name}.{uuid.uuid4().hex[:8]}.iso")
     try:
-        files, size, left = stage_tree(src, stage)
+        files, size, left = stage_tree(src, stage, src_ident)
         r = subprocess.run(["hdiutil", "makehybrid", "-quiet", "-o", tmp, stage, "-iso", "-joliet", "-udf",
                             "-udf-version", "1.50", "-default-volume-name", label, "-iso-volume-name", label,
                             "-joliet-volume-name", label, "-udf-volume-name", label],
@@ -1157,53 +1621,56 @@ def cmd_checkpoint(a):
                       file=sys.stderr)
         if not vols:
             raise StorageError("--with-volumes: VOLUMES lists no disk volumes for this VM")
-        for rec in vols:
-            if not os.path.isfile(rec["path"]):
-                raise StorageError(f"volume '{rec['name']}': {rec['path']} is missing (is its drive connected?)")
-            h = holder_of(rec["path"], "disk")
-            if h and not same_holder(h, vm, lab_root()):
-                raise StorageError(f"volume '{rec['name']}' is in use by {describe_holder(h)}; stop that VM first")
-        old = read_json(man_path) or {}
-        for v in old.get("volumes", []):
-            try:
-                os.unlink(v["snapshot"])
-            except (FileNotFoundError, KeyError):
-                pass
-        out = []
-        for rec in vols:
-            snap = snapshot_path(rec["path"], vm, a.name)
-            if os.path.lexists(snap):
-                os.unlink(snap)
-            how = clone_or_copy(rec["path"], snap)
-            out.append({"name": rec["name"], "uuid": rec["uuid"], "path": rec["path"], "snapshot": snap, "how": how})
-            print(f"  ✓ volume '{rec['name']}' {'cloned' if how == 'clone' else 'copied'} with the checkpoint")
-        atomic_json(man_path, {"vm": vm, "checkpoint": a.name, "saved": now(), "volumes": out})
-        return 0
+        with reserved(vols, "checkpoint"):
+            return save_checkpoint(vols, vm, a.name, man_path)
     if a.op == "restore":
         man = read_json(man_path)
         if not man:
             return 0
-        for v in man.get("volumes", []):
-            h = holder_of(v["path"], "disk")
-            if h and not same_holder(h, vm, lab_root()):
-                raise StorageError(f"volume '{v['name']}' is in use by {describe_holder(h)}; stop that VM first")
-            if not os.path.isfile(v.get("snapshot", "")):
-                raise StorageError(f"volume '{v['name']}': its snapshot {v.get('snapshot')} is missing")
-        for v in man.get("volumes", []):
-            tmp = v["path"] + ".restoring"
-            if os.path.lexists(tmp):
-                os.unlink(tmp)
-            clone_or_copy(v["snapshot"], tmp)
-            os.replace(tmp, v["path"])
-            if not reg_load("volume", v["name"]):
-                reg_save("volume", {"name": v["name"], "kind": "disk", "path": v["path"], "uuid": v["uuid"],
-                                    "created": now()})
-            print(f"  ✓ volume '{v['name']}' rolled back with the checkpoint")
-        return 0
+        with reserved(man.get("volumes", []), "restore"):
+            return restore_checkpoint(man)
     raise StorageError("usage: storage.py checkpoint save|restore|delete|list NAME")
 
 
-# --- status ----------------------------------------------------------------------------------
+def save_checkpoint(vols, vm, name, man_path):
+    """With the volumes held (reserved): no VM can attach one until it's done."""
+    for rec in vols:
+        if not os.path.isfile(rec["path"]):
+            raise StorageError(f"volume '{rec['name']}': {rec['path']} is missing (is its drive connected?)")
+    old = read_json(man_path) or {}
+    for v in old.get("volumes", []):
+        try:
+            os.unlink(v["snapshot"])
+        except (FileNotFoundError, KeyError):
+            pass
+    out = []
+    for rec in vols:
+        snap = snapshot_path(rec["path"], vm, name)
+        if os.path.lexists(snap):
+            os.unlink(snap)
+        how = clone_or_copy(rec["path"], snap)
+        out.append({"name": rec["name"], "uuid": rec["uuid"], "path": rec["path"], "snapshot": snap, "how": how})
+        print(f"  ✓ volume '{rec['name']}' {'cloned' if how == 'clone' else 'copied'} with the checkpoint")
+    atomic_json(man_path, {"vm": vm, "checkpoint": name, "saved": now(), "volumes": out})
+    return 0
+
+
+def restore_checkpoint(man):
+    """With the volumes held (reserved)."""
+    for v in man.get("volumes", []):
+        if not os.path.isfile(v.get("snapshot", "")):
+            raise StorageError(f"volume '{v['name']}': its snapshot {v.get('snapshot')} is missing")
+    for v in man.get("volumes", []):
+        tmp = v["path"] + ".restoring"
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        clone_or_copy(v["snapshot"], tmp)
+        os.replace(tmp, v["path"])
+        if not reg_load("volume", v["name"]):
+            reg_save("volume", {"name": v["name"], "kind": "disk", "path": v["path"], "uuid": v["uuid"],
+                                "created": now()})
+        print(f"  ✓ volume '{v['name']}' rolled back with the checkpoint")
+    return 0
 def status():
     st = load_state() or {}
     configured = bool((env("VOLUMES") or "").strip() or (env("REFDISKS") or "").strip())
@@ -1312,6 +1779,10 @@ def main(argv):
     p.add_argument("--pid", type=int, required=True)
     p.set_defaults(fn=cmd_started)
     sub.add_parser("attached").set_defaults(fn=cmd_attached)
+    p = sub.add_parser("attach")
+    p.add_argument("--transport", type=int, required=True)
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_attach)
     p = sub.add_parser("release")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(fn=cmd_release)

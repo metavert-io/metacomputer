@@ -180,7 +180,12 @@ storage_prepare() { # NOVOL(0|1): sets STORAGE_RUN_ARGS, or dies
   if [ "${1:-0}" = 1 ] && [ -n "${VOLUMES:-}${REFDISKS:-}" ]; then ok "--no-volumes: nothing of VOLUMES or REFDISKS is attached"; fi
   return 0
 }
-storage_started() { [ -s "$RUN_DIR/storage-state.json" ] && [ -s "$RUN_DIR/lume.pid" ] && storage_py started --pid "$(cat "$RUN_DIR/lume.pid")"; return 0; }
+storage_started() { # the VM's process holds the locks; every attached path must still be what was checked
+  [ -s "$RUN_DIR/storage-state.json" ] && [ -s "$RUN_DIR/lume.pid" ] || return 0
+  storage_py started --pid "$(cat "$RUN_DIR/lume.pid")" && return 0
+  storage_abort
+  die "not started: its storage changed between the checks and the VM's start (above)"
+}
 storage_release() { storage_py release "$@" || true; }
 storage_abort() { # the VM started but its storage can't be mounted: stop it, release everything
   [ -s "$RUN_DIR/storage-state.json" ] || return 0
@@ -188,19 +193,17 @@ storage_abort() { # the VM started but its storage can't be mounted: stop it, re
   vm_stop "$VM_NAME"
   storage_release --quiet
 }
-storage_attach() {
+storage_attach() { # the VM's answers are read with a size cap and a deadline (lib/storage.py guest_call)
   [ -s "$RUN_DIR/storage-plan.json" ] || return 0
-  local v res
-  v="$(gssh admin 'sudo -n /usr/local/sbin/metacomputer-admin storage version' 2>/dev/null | tail -1)"
-  if [ "$v" != 1 ]; then
-    storage_abort
-    die "this VM can't mount storage: it was built before storage support. Rebuild it (metacomputer build --replace; volumes are kept), or start it with --no-volumes"
-  fi
-  res="$(gssh admin 'sudo -n /usr/local/sbin/metacomputer-admin storage attach' < "$RUN_DIR/storage-plan.json" 2>/dev/null)"
-  if ! printf '%s\n' "$res" | storage_py attached; then
-    storage_abort
-    die "not started: the VM couldn't mount its storage (above). Fix it, or start with --no-volumes"
-  fi
+  ssh_base admin
+  storage_py attach --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}"
+  case $? in
+    0) ;;
+    3) storage_abort
+       die "this VM can't mount storage: it was built before storage support. Rebuild it (metacomputer build --replace; volumes are kept), or start it with --no-volumes" ;;
+    *) storage_abort
+       die "not started: the VM couldn't mount its storage (above). Fix it, or start with --no-volumes" ;;
+  esac
 }
 
 # --- the event watcher (docs/events.md): only while a sink is configured --------

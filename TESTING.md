@@ -338,7 +338,12 @@ classifier and the warning; the plan for a start (missing images, read-only disk
 a VM without storage support, bounded mode, the order of the run arguments, the helper
 accepting the plan); sizes and names; sparse copies, APFS clones and checkpoints of
 volumes; reference disks leaving links out; and `put`'s SHA-256 comparison and collision
-names.
+names. From the storage audit: other spellings of refused folders (case, the data volume's
+firmlinks) refused and one image under two spellings one lock; a file swapped for a link to a
+private file while a reference disk is packed isn't packed; `put` and the attach cutting off a VM
+that floods or stalls; checkpoint, restore and resize holding the volume so no VM can attach it
+meanwhile; and the bounded manifest read as YAML (an inline comment isn't policy, a `files:` block
+outside `resources` grants nothing, unsupported forms grant nothing, the shipped profiles parse).
 
 `MCOMP_CONFIG=... python3 tests/test_storage_vm.py [V] [R] [P]` needs a test VM built
 from this version (it stops, starts and resets it, and leaves it stopped; its volumes and

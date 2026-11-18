@@ -30,10 +30,12 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import boundedrun  # noqa: E402
 from termsafe import escape_for_terminal as esc  # noqa: E402
 
 GUEST_PATH_RE = re.compile(r"^[A-Za-z0-9._/@+,:= -]+$")
-MAX_REPLY = 64 << 20
+MAX_REPLY = 32 << 20             # the hashes of a large folder fit; a VM can't make the Mac hold more
+MAX_ERR = 64 << 10
 
 # Runs in the VM (python3 -I -c): SHA-256 of every regular file under a folder, as JSON.
 HASH_SCRIPT = r'''
@@ -166,8 +168,15 @@ def guest_dir(p, user):
 
 
 def remote(ssh, cmd, stdin=None, timeout=600):
-    r = subprocess.run(ssh + [cmd], stdin=stdin, capture_output=True, timeout=timeout)
-    return r.returncode, r.stdout[:MAX_REPLY].decode("utf-8", "replace"), r.stderr[:4096].decode("utf-8", "replace")
+    """One command in the VM. Its answer is untrusted: read as it comes, at most MAX_REPLY bytes (MAX_ERR of
+    stderr), within timeout seconds; past either the connection is ended and PutError raised."""
+    try:
+        rc, out, err = boundedrun.run(ssh + [cmd], stdin=stdin, max_out=MAX_REPLY, max_err=MAX_ERR, timeout=timeout)
+    except boundedrun.Overflow:
+        raise PutError(f"the VM sent more than {MAX_REPLY >> 20} MB in answer; the copy was stopped")
+    except boundedrun.Timeout:
+        raise PutError(f"the VM didn't answer within {timeout} s; the copy was stopped")
+    return rc, out.decode("utf-8", "replace"), err[:4096].decode("utf-8", "replace")
 
 
 def last_json(text):
@@ -222,7 +231,10 @@ def put(ssh, files, to, overwrite, user):
         return res["items"], len(hashes)
     finally:
         if not done:
-            remote(ssh, f"rm -rf -- {shlex.quote(tmp)}")
+            try:
+                remote(ssh, f"rm -rf -- {shlex.quote(tmp)}", timeout=60)
+            except PutError:
+                pass
 
 
 def main(argv):

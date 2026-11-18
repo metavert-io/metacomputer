@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
@@ -397,6 +398,190 @@ def test_put():
     check("put refuses shell characters in the guest folder", ok)
 
 
+# --- fixes from the storage audit (local/audits/storage-2026-11-18) ---------------------------------
+def test_case_aliases():
+    """Audit F3: another spelling of a refused folder (case, the data volume's firmlinks) is the same folder."""
+    home = os.path.expanduser("~")
+    aliases = {"~/library (case)": home + "/library",
+               "/USERS/<you>/LIBRARY (case)": "/USERS" + home[len("/Users"):] + "/LIBRARY",
+               "/system/volumes/data/... /Documents (firmlink)": "/system/volumes/data" + home + "/Documents",
+               "~/DOCUMENTS (case)": home + "/DOCUMENTS"}
+    if os.path.isdir(home + "/.ssh"):
+        aliases["~/.SSH (case)"] = home + "/.SSH"
+    for what, p in aliases.items():
+        if os.path.isdir(p):
+            check(f"refused under another spelling: {what}", raises(storage.check_shareable, p) is not None)
+    fh = os.path.join(TMP, "fs", "Users", "u")
+    where = dict(home=fh, lab=os.path.join(fh, "lab"), ssh_dir=os.path.join(fh, "keys"),
+                 data=os.path.join(fh, ".local", "share", "metacomputer"), state=os.path.join(TMP, "state"))
+    if os.path.isdir(os.path.join(fh, "LIBRARY")):          # a case-insensitive volume
+        check("refused (made-up home): LIBRARY", raises(storage.check_shareable, os.path.join(fh, "LIBRARY"), **where))
+        check("refused (made-up home): PROJECT/SNEAKY (a link to .ssh, spelled in capitals)",
+              raises(storage.check_shareable, os.path.join(fh, "PROJECT", "SNEAKY"), **where))
+        real = storage.check_shareable(os.path.join(fh, "PROJECT"), **where)
+        check("an allowed folder comes back in its real spelling", real.endswith("/project"), real)
+        a = os.path.join(TMP, "lockcase.img")
+        open(a, "w").close()
+        it1 = {"kind": "disk", "name": "a", "path": a, "lock": storage.lock_key("disk", a)}
+        it2 = {"kind": "disk", "name": "b", "path": a.upper(), "lock": storage.lock_key("disk", a.upper())}
+        storage.acquire([it1], "vm-a", "/lab", os.getpid())
+        e = raises(storage.acquire, [it2], "vm-b", "/lab", os.getpid())
+        storage.release_locks("vm-a", "/lab")
+        check("one image under two spellings is one lock", e is not None, e)
+
+
+def test_refdisk_swap():
+    """Audit F4: a file swapped for a link to a private file while the folder is being packed isn't packed."""
+    src = os.path.join(TMP, "swapsrc")
+    os.makedirs(src)
+    secret = os.path.join(TMP, "private-secret.txt")
+    open(secret, "w").write("SECRET-DO-NOT-PACK\n")
+    open(os.path.join(src, "victim.txt"), "w").write("harmless\n")
+    open(os.path.join(src, "other.txt"), "w").write("other\n")
+    dst = os.path.join(TMP, "swapdst")
+    os.makedirs(dst)
+    real_lstat, real_stat = os.lstat, os.stat
+    done = {"x": False}
+
+    def swap_after(fn):
+        def inner(path, *a, **k):
+            r = fn(path, *a, **k)
+            name = path if isinstance(path, str) else ""
+            if not done["x"] and os.path.basename(name) == "victim.txt":
+                done["x"] = True
+                os.unlink(os.path.join(src, "victim.txt"))
+                os.symlink(secret, os.path.join(src, "victim.txt"))
+            return r
+        return inner
+    os.lstat, os.stat = swap_after(real_lstat), swap_after(real_stat)
+    try:
+        try:
+            storage.stage_tree(src, dst)
+        except Exception as e:  # noqa: BLE001
+            print(f"  (stage_tree raised {e!r})")
+    finally:
+        os.lstat, os.stat = real_lstat, real_stat
+    leaked = []
+    for d, _, fs in os.walk(dst):
+        for f in fs:
+            if "SECRET-DO-NOT-PACK" in open(os.path.join(d, f), errors="replace").read():
+                leaked.append(f)
+    check("a file swapped for a link to a private file mid-pack isn't packed (the swap happened)",
+          done["x"] and not leaked, leaked)
+
+
+def test_bounded_replies():
+    """Audit F6: what the VM sends back is read with a size cap and a deadline, not collected first."""
+    big = [sys.executable, "-c", "import sys; sys.stdout.write('x' * (80 << 20))"]
+    t0 = time.time()
+    try:
+        guest_put.remote(big, "true", timeout=30)
+        ok = False
+    except guest_put.PutError:
+        ok = True
+    except Exception as e:  # noqa: BLE001
+        ok = f"raised {e!r}"
+    check("put: a VM that floods its answer is cut off (not read in full)", ok is True, ok)
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    t0 = time.time()
+    try:
+        guest_put.remote(hang, "true", timeout=2)
+        ok = False
+    except guest_put.PutError:
+        ok = time.time() - t0 < 10
+    except Exception as e:  # noqa: BLE001
+        ok = f"raised {e!r}"
+    check("put: a VM that never answers is given up on at the deadline", ok is True, ok)
+    if not hasattr(storage, "guest_call"):
+        check("storage attach reads the VM's answer bounded (guest_call)", False, "no guest_call")
+        return
+    fake = os.path.join(TMP, "fake-admin-ssh")
+    for mode, body in (("flood", "import sys; sys.stdout.write('{' * (8 << 20))"),
+                       ("hang", "import time; time.sleep(60)"),
+                       ("ok", "import sys; print('1') if sys.argv[-1].endswith('version') else print('{\"ok\": true, \"items\": []}')")):
+        open(fake, "w").write(f"#!{sys.executable}\n{body}\n")
+        os.chmod(fake, 0o755)
+        t0 = time.time()
+        rc, out, why = storage.guest_call([fake], "version" if mode == "ok" else "attach", b"{}", timeout=3)
+        if mode == "ok":
+            check("storage attach: a normal answer comes through", rc == 0 and out.strip() == "1", (rc, out, why))
+        else:
+            check(f"storage attach: a VM that {'floods' if mode == 'flood' else 'stalls'} is refused, quickly",
+                  rc != 0 and why and time.time() - t0 < 15, (rc, len(out), why))
+
+
+def test_reservations():
+    """Audit F12: checkpoint, restore, resize and delete hold the volume while they work."""
+    os.environ["MCOMP_VOLUMES"] = "rv"
+    rec = make_volume("rv")
+    img = rec["path"]
+    other = {"kind": "disk", "name": "rv", "path": img, "lock": storage.lock_key("disk", img)}
+    seen = {}
+    real = storage.clone_or_copy
+
+    def probe(src, dst):
+        e = raises(storage.acquire, [other], "intruder-vm", "/elsewhere", os.getpid())
+        seen.setdefault("during", []).append(e)
+        if e is None:
+            storage.release_locks("intruder-vm", "/elsewhere")
+        return real(src, dst)
+    storage.clone_or_copy = probe
+    try:
+        quiet(storage.cmd_checkpoint, Args(op="save", name="rc1"))
+        quiet(storage.cmd_checkpoint, Args(op="restore", name="rc1"))
+    finally:
+        storage.clone_or_copy = real
+    check("while a checkpoint is saved or restored, no VM can attach the volume",
+          len(seen.get("during", [])) == 2 and all(seen["during"]), seen)
+    real_trunc = storage.os.ftruncate
+    during = []
+
+    def trunc(fd, n):
+        during.append(raises(storage.acquire, [other], "intruder-vm", "/elsewhere", os.getpid()))
+        storage.release_locks("intruder-vm", "/elsewhere")
+        return real_trunc(fd, n)
+    storage.os.ftruncate = trunc
+    try:
+        quiet(storage.cmd_volume_resize, Args(name="rv", size="32M"))
+    finally:
+        storage.os.ftruncate = real_trunc
+    check("...nor while it's resized", during and all(during), during)
+    check("...and the volume is free again afterwards", storage.holder_of(img, "disk") is None
+          and raises(storage.acquire, [other], "next-vm", "/lab", os.getpid()) is None)
+    storage.release_locks("next-vm", "/lab")
+    storage.cmd_checkpoint(Args(op="delete", name="rc1"))
+    os.environ["MCOMP_VOLUMES"] = ""
+
+
+def test_manifest_parsing():
+    """Audit F13: the bounded manifest is read as YAML, not with patterns."""
+    tricky = ("version: 3\nallow:\n  tools: [list_windows]\nresources:\n  files:\n    write:\n"
+              "      - {dir: /data, recursive: false} # previously recursive: true\n  desktop:\n    display: true\n")
+    read, write = storage.manifest_dirs(tricky)
+    check("an inline comment isn't policy: recursive: false stays false", write == [("/data", False)], (read, write))
+    elsewhere = ("version: 3\nnotes:\n  files:\n    write:\n      - {dir: /data, recursive: true}\nresources:\n"
+                 "  desktop:\n    display: true\n")
+    read, write = storage.manifest_dirs(elsewhere)
+    check("a files: block outside resources grants nothing", read == [] and write == [], (read, write))
+    for bad in ("resources:\n  files:\n    write:\n      - {dir: /data, recursive: yes}\n",
+                "resources:\n  files:\n    write:\n      - &a {dir: /data, recursive: true}\n",
+                "resources:\n  files:\n    write:\n      - {dir: /data, recursive: true}\n      - {dir: /data, recursive: true, dir: /x}\n"):
+        try:
+            r = storage.manifest_dirs(bad)
+            ok = r == ([], [])
+        except Exception:  # noqa: BLE001
+            ok = True
+        check(f"an unsupported or ambiguous manifest grants nothing: {bad.splitlines()[-1].strip()[:50]}", ok)
+    import driver_profiles
+    for prof in ("readonly", "desktop", "browser"):
+        os.environ.update(MCOMP_DRIVER_PROFILE=prof, MCOMP_DRIVER_ORIGINS="https://example.com", MCOMP_BROWSERS="firefox chrome")
+        read, write = storage.manifest_dirs(driver_profiles.render())
+        want = (prof == "readonly" and read == [] and write == []) or \
+            (prof != "readonly" and (H + "/metacomputer-runs", True) in read and (H + "/metacomputer-runs", True) in write)
+        check(f"the shipped '{prof}' profile parses exactly (its task folders, or none)", want, (read, write))
+    os.environ.update(MCOMP_DRIVER_PROFILE="desktop", MCOMP_DRIVER_ORIGINS="")
+
+
 def main():
     try:
         test_parsing()
@@ -407,6 +592,11 @@ def main():
         test_sizes_names()
         test_copies_and_checkpoints()
         test_put()
+        test_case_aliases()
+        test_refdisk_swap()
+        test_bounded_replies()
+        test_reservations()
+        test_manifest_parsing()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")

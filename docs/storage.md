@@ -69,8 +69,11 @@ metacomputer refdisk list [--json]
 metacomputer refdisk delete NAME [--yes]
 ```
 
-`create` packs a copy of the folder into a hybrid UDF and ISO 9660 image
-(`hdiutil makehybrid`) and makes the file read-only. In the VM it mounts as UDF:
+`create` packs a copy of the folder into a hybrid UDF and ISO 9660 image. Every file
+and folder is reached through descriptors from the checked folder down, each opened without
+following links and checked to be the entry that was listed, so a file replaced by a link
+while it's packed is left out rather than followed. The image
+is made with `hdiutil makehybrid`, and the file is read-only. In the VM it mounts as UDF:
 long names (tested with 150 characters), non-ASCII names and the permission bits,
 including the executable bit, come through. Links and special files are left out (it
 says how many): macOS writes UDF links that Linux can't read, and a link could point
@@ -132,7 +135,10 @@ of them or none; if anything fails, `start` stops the VM again and says why.
 ## What may not go into the VM
 
 A folder packed into a reference disk is refused when it is, holds, or is inside one
-of these (links are resolved first, so a link to one is refused too):
+of these. The folder is opened first (so a link to one is refused too) and judged by the
+spelling the kernel gives the opened folder and by its identity (device and inode), compared
+the way APFS compares names: so `~/library`, `/USERS/you/.SSH` or
+`/System/Volumes/Data/Users/you/Documents` are the folders they name:
 - your home folder itself, and Documents, Desktop, Downloads, Pictures, Movies, Music
   and Public themselves (a folder inside Documents is allowed), or any parent of them;
 - anything in `~/Library` (iCloud Drive is `~/Library/Mobile Documents`, other cloud
@@ -221,7 +227,18 @@ What isn't offered:
   through descriptors opened without following links, undoes everything if one item
   fails, and records what it mounted in `/run/metacomputer/storage.json`, which
   `guest-status` reports.
+- `checkpoint --with-volumes`, `restore`, `volume resize` and `volume delete` hold each disk
+  volume they work on through the same locks, from before they check it to when they finish,
+  so no VM can attach it in between (and they're refused while a VM holds it).
+- What the VM's helper answers is read with a size cap (64 KiB) and a deadline, and so is
+  everything `put` reads back; a VM that floods or stalls is cut off.
+- After `lume run` starts, every attached path must still lead to the file or folder that
+  was checked (same device and inode), or `start` stops the VM again.
+- In bounded mode the manifest is parsed as YAML (the subset manifests use; anything else,
+  such as anchors, tags or duplicate keys, grants nothing), and permissions come only from
+  `resources.files.read` and `.write`.
 - The lock files are in `~/.local/share/metacomputer/storage/locks/`; each names the VM,
   its checkout and its process (with the process's start time, so a reused pid doesn't
-  count). `start` takes them before the VM boots, and `stop` (also `reset`, `restore`
+  count), keyed by the item's canonical spelling, so two spellings of one image are one lock.
+  `start` takes them before the VM boots, and `stop` (also `reset`, `restore`
   and `baseline`) lets go of them after it's off.

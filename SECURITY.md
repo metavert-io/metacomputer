@@ -474,8 +474,16 @@ Common to every kind:
   (`sudo metacomputer-admin storage attach`).
 - **Nothing half-attached:** problems found before boot refuse the start; a mount that
   fails after boot stops the VM again.
-- **The VM's answers are data.** What the helper reports back is size-limited, checked
-  and escaped before it reaches your terminal; it decides nothing on the Mac.
+- **The VM's answers are data.** What the helper reports back is read with a size cap and a
+  deadline (a VM that floods or stalls is cut off, and the VM is stopped), checked and escaped
+  before it reaches your terminal; it decides nothing on the Mac. `put` reads the VM's answers
+  the same way.
+- **Checked means bound.** Refusals compare the opened folder's canonical spelling,
+  case- and normalization-insensitively, and its identity, so another spelling of a refused
+  folder is refused. Reference disks are packed through descriptors that never follow a link,
+  and after the VM starts every attached path must still be the file or folder that was
+  checked. Operations on a volume (checkpoint, restore, resize, delete) hold it, so no VM can
+  attach it halfway through.
 - **Bounded mode** attaches only what the driver's manifest lists.
 
 **Where it ends:**
