@@ -2058,6 +2058,8 @@ class Hub:
                 if live is None:
                     self.note("coordinate guard: list_windows failed; passing the call on unchecked")
                     return None
+            if not getattr(rec["windows"], "complete", True) or not getattr(live, "complete", True):
+                return incomplete_refusal(wid, i, t)  # a window left out could be the target or what covers it
             if frame == "desktop":
                 change = desktop_change(rec, live, pts)
             else:
@@ -2295,13 +2297,19 @@ def shot_size(w, h):
     return (w if _num(w) else None, h if _num(h) else None)
 
 
+class WindowList(list):
+    """A compacted window list; complete is False when it had more windows than a layout keeps, and then the
+    coordinate guard refuses the pixels it would check against it (it can't tell what it left out)."""
+    complete = True
+
+
 def compact_windows(ws):
     """The part of a window list the coordinate guard compares (id, stacking, frame, visibility, a short app name),
-    for at most MAX_LAYOUT_WINDOWS windows with a valid frame. Anything else a result carried isn't kept. None when
-    there's no list."""
+    for at most MAX_LAYOUT_WINDOWS windows with a valid frame (more: complete is False). Anything else a result
+    carried isn't kept. None when there's no list."""
     if not isinstance(ws, list):
         return None
-    out = []
+    out = WindowList()
     for w in ws:
         if not isinstance(w, dict):
             continue
@@ -2311,12 +2319,13 @@ def compact_windows(ws):
         g = geometry(w.get("bounds") if isinstance(w.get("bounds"), dict) else w)
         if g is None:
             continue
+        if len(out) >= MAX_LAYOUT_WINDOWS:
+            out.complete = False                 # one more than a layout keeps: comparisons against it would miss it
+            break
         z = w.get("z_index")
         out.append({"window_id": wid, "z_index": z if _num(z) else None, "bounds": g,
                     "is_on_screen": w.get("is_on_screen") is not False, "minimized": bool(w.get("minimized")),
                     "app_name": clean(w.get("app_name"), 40)})
-        if len(out) >= MAX_LAYOUT_WINDOWS:
-            break
     return out
 
 
@@ -2544,6 +2553,21 @@ def coord_refusal(change, wid, step, tool, args, sess):
             f"was sent. {how}")
     sc = {"code": COORD_CODE, "effect": "refused", "hint": "the windows changed since your screenshot; take a fresh one",
           "change": {k: v for k, v in change.items() if k != "detail"}, "next_call": nxt}
+    if step is not None:
+        sc["failed_step"] = step
+    return text, sc
+
+
+def incomplete_refusal(wid, step, tool):
+    """(text, structured) for pixel input the guard can't check: more windows were open than a layout keeps."""
+    where = f"window {wid}" if wid is not None else "the desktop"
+    in_step = f" (step {step + 1}, {tool})" if step is not None else ""
+    text = (f"Refused by the metacomputer bridge (coordinate guard){in_step}: more than {MAX_LAYOUT_WINDOWS} windows "
+            f"are open, so it can't check that pixels aimed at {where} still land where you aimed, and no input was "
+            "sent. Target by role and name or element token instead (those aren't affected), or close windows you "
+            "don't need and take a fresh screenshot.")
+    sc = {"code": "too_many_windows", "effect": "refused", "max_windows": MAX_LAYOUT_WINDOWS,
+          "hint": "use role/name or element-token targets, or close windows"}
     if step is not None:
         sc["failed_step"] = step
     return text, sc

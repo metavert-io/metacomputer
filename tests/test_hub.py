@@ -2016,6 +2016,31 @@ def chrome_batch_checks():
     clear_claims()
 
 
+def coord_incomplete_checks():
+    print("#7: a layout cut at its window cap can't vouch for pixels")
+    clear_claims()
+    many = [win(1000 + i, 900 + i, "Xterm", 5 * (i % 50), 400 + 5 * (i // 50), 40, 40) for i in range(300)]
+    set_windows(many + BASE_WINDOWS)                 # the target comes after the cap
+    r = Running()
+    h = client(r, "call", session="ci")
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    n0 = len(tool_calls("click"))
+    res = h.call("click", {"pid": 50, "window_id": W, "x": 10, "y": 10})
+    check("with more windows open than a layout keeps, pixel input is refused (too_many_windows), not passed unchecked",
+          res.is_error and res.structured.get("code") == "too_many_windows" and len(tool_calls("click")) == n0,
+          res.text[:160])
+    ok = h.call("click", {"pid": 50, "window_id": W, "role": "button", "name": "Bold"})
+    check("…while targets by role and name go on as before", not ok.is_error, ok.text[:120])
+    set_windows(BASE_WINDOWS)
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    res = h.call("click", {"pid": 50, "window_id": W, "x": 10, "y": 10})
+    check("…and with the windows back under the cap, pixels from a fresh screenshot pass", not res.is_error,
+          res.text[:120])
+    h.close()
+    r.stop()
+    clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -2053,6 +2078,7 @@ def main():
         answer_limit_checks()
         lease3_checks()
         chrome_batch_checks()
+        coord_incomplete_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
