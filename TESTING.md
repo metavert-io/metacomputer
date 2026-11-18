@@ -126,7 +126,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (176 checks, about a minute and a half). It keeps
+`python3 tests/test_events.py` needs no VM (178 checks, about a minute and a half). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -173,7 +173,8 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the 2026-11-18 review's fixes:
   - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`;
   - a server that sends one byte a second: `deliver`, `sink remove`, `flush_admin` and an ordinary emit all end on time;
-  - 50 action-log records with `events.json` unchanged parse it zero times.
+  - 50 action-log records with `events.json` unchanged parse it zero times;
+  - the state lock: a second holder gets `Busy` after its wait, with no file left open; leaving unlocks it.
 
 Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
 
@@ -313,10 +314,12 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_owners.py` (9 checks): a `metacomputer sh` claim made outside
+- `python3 tests/test_owners.py` (14 checks): a `metacomputer sh` claim made outside
   Claude Code outlives its short-lived shell for the activity window, counts as the same
   controller from the same terminal session and as another one from a different
-  session, then expires; Claude Code and bridge claims still go with their process.
+  session, then expires; Claude Code and bridge claims still go with their process;
+  the owners lock times out with `TimeoutError` while another process holds it, leaves
+  no file open, and is free again once the holder leaves.
 - `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run.

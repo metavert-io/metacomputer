@@ -11,6 +11,8 @@ runner). It checks that such a claim:
   and as another, active controller for a different session;
 - is gone once the window has passed;
 while a Claude Code session's claim and a bridge's claim still go with their process.
+It also checks the owners lock: TimeoutError when another process holds it past the
+timeout, with no file left open, and free again once the holder leaves.
 """
 import json
 import os
@@ -100,6 +102,30 @@ def main():
     finally:
         p.kill()
         p.wait()
+
+    # The owners lock (the hub and metacomputer sh check and claim under it): while another process holds it,
+    # TimeoutError after the timeout with its file closed; free again as soon as the holder leaves.
+    lib = os.path.join(LAB, "lib")
+    probe = ("import json, os, sys, time; sys.path.insert(0, sys.argv[1]); import owners\n"
+             "n, t = len(os.listdir('/dev/fd')), time.monotonic()\n"
+             "try:\n    with owners.lock(timeout=0.3):\n        print(json.dumps(['acquired']))\n"
+             "except Exception as e:\n"
+             "    print(json.dumps([type(e).__name__, str(e), time.monotonic() - t, len(os.listdir('/dev/fd')) - n]))\n")
+    hold = subprocess.Popen([sys.executable, "-c", "import sys, time; sys.path.insert(0, sys.argv[1]); import owners\n"
+                             "with owners.lock():\n    print('held', flush=True); time.sleep(2.0)\n", lib],
+                            env=env, stdout=subprocess.PIPE, text=True)
+    try:
+        held = hold.stdout.readline().strip() == "held"
+        r = subprocess.run([sys.executable, "-c", probe, lib], env=env, capture_output=True, text=True, timeout=60)
+        got = json.loads(r.stdout or "[]")
+        check("while another process holds the owners lock: TimeoutError after the timeout, its file closed",
+              held and len(got) == 4 and got[0] == "TimeoutError" and got[1] == "another process holds the owners lock"
+              and 0.3 <= got[2] < 1.5 and got[3] == 0, (got, r.stderr[-300:]))
+    finally:
+        hold.wait(timeout=30)
+        hold.stdout.close()
+    r = subprocess.run([sys.executable, "-c", probe, lib], env=env, capture_output=True, text=True, timeout=60)
+    check("...and free again once its holder has left", json.loads(r.stdout or "[]") == ["acquired"], (r.stdout, r.stderr[-300:]))
 
     # Which process is Claude Code: every way it's installed, from a synthetic process table.
     sys.path.insert(0, os.path.join(LAB, "lib"))

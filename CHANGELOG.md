@@ -51,6 +51,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - The API proxy: a same-host redirect keeps the API's path encoding and trailing slash; after an answer times out, nothing more is written to that connection.
 - Sealed browser sessions refuse at once, with a clear message, under `SSH_AUTH=cert` (they need `SSH_AUTH=key` for now).
 - The event stream: an OTLP collector's partial success counts the rejected events as dropped; every delivery attempt has a wall-clock deadline, so a sink that trickles bytes can't hold `start`, `stop` or `sink add`; the relay reads `events.json` only when it changes.
+- The README now says that `checkpoint --delete` asks first, like `reset`, `restore` and `baseline`, and that with no terminal to ask on it needs `--yes`.
 
 ## [0.1.0] - 2026-11-17
 

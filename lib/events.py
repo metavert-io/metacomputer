@@ -57,6 +57,9 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import unquote, urlsplit
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import flockwait  # noqa: E402
+
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FAMILIES = ("needs_you", "task", "security", "lifecycle", "actions")
@@ -242,17 +245,13 @@ class Lock:
     def __enter__(self):
         private_dir(os.path.dirname(self.path))
         self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        end = time.monotonic() + self.wait
-        while True:
-            try:
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
-            except BlockingIOError:
-                if time.monotonic() >= end:
-                    os.close(self.fd)
-                    self.fd = None
-                    raise Busy(self.path)
-                time.sleep(0.02)
+        try:
+            flockwait.exclusive(self.fd, self.wait, 0.02)
+        except BlockingIOError:
+            os.close(self.fd)
+            self.fd = None
+            raise Busy(self.path)
+        return self
 
     def __exit__(self, *_):
         if self.fd is not None:

@@ -873,7 +873,7 @@ relay, a Collector configuration and an OCSF mapping.
 - `reset` replaces the working VM with a fresh copy of the baseline. It copies the VM's task runs to the Mac first; recordings and results on the Mac are kept.
 - Checkpoints are taken while the VM is stopped. `metacomputer checkpoints` lists them; `checkpoint NAME --replace` overwrites one; `checkpoint --delete NAME` deletes one.
 - `baseline` keeps the previous baseline as `<BASELINE_NAME>-prev`.
-- `reset`, `restore` and `baseline` ask first (`--yes` skips the question). Claude never resets, restores, rebuilds or re-baselines the VM without your explicit OK.
+- `reset`, `restore`, `baseline` and `checkpoint --delete` ask first (`--yes` skips the question). From a script or another program, with no terminal to ask on, they refuse unless given `--yes`. Claude never resets, restores, rebuilds or re-baselines the VM without your explicit OK.
 
 ### Add apps
 
@@ -993,7 +993,7 @@ alias). `metacomputer help` prints the same list with every option.
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
 | `who` / `release` | Who is using the VM; hand it over (one controller at a time) |
 | `reset [--yes]` | Restore the clean baseline (asks first; evidence on the Mac is kept) |
-| `checkpoint NAME [--replace]` / `checkpoint --delete NAME` / `checkpoints` / `restore NAME` | Saved states of the stopped VM |
+| `checkpoint NAME [--replace]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes]` | Saved states of the stopped VM (deleting and restoring ask first) |
 | `baseline [--yes]` | Make the current VM the new baseline (the old one is kept as `-prev`) |
 | `build [--replace]` | Build the VM and its baseline from scratch |
 | `sh -c CMD \| --file SCRIPT \| - [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]` | Run bash in the VM as the desktop user, with the desktop's environment |

@@ -28,7 +28,7 @@
 #   record start [NAME] [FPS] | stop | status | moments FILE
 #                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR)
 #   recordings [--sync] [N]
-#   checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
+#   checkpoint NAME [--replace] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes]
 #   view                           how to watch / take over the desktop (VNC)
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;

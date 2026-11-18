@@ -1311,6 +1311,25 @@ def main():
         orx.close()
         nrx.close()
 
+        # LK: the state lock: a second holder waits its time, then gets Busy with its file closed; leaving unlocks
+        lkp = os.path.join(events.state_dir(), "lktest.lock")
+        held = events.Lock(lkp, 1)
+        held.__enter__()
+        n_fd, t0 = len(os.listdir("/dev/fd")), time.monotonic()
+        try:
+            with events.Lock(lkp, 0.3):
+                got = "acquired"
+        except events.Busy as e:
+            got = e
+        waited, fd_delta = time.monotonic() - t0, len(os.listdir("/dev/fd")) - n_fd
+        check("LK a second holder waits its time, then gets Busy naming the lock, with its file closed",
+              type(got) is events.Busy and str(got) == lkp and 0.3 <= waited < 1.5 and fd_delta == 0, (got, waited, fd_delta))
+        held.__exit__()
+        with events.Lock(lkp, 0.3) as lk2:
+            took = lk2.fd is not None
+        check("LK leaving the lock unlocks it: the next holder gets it at once, and leaving closes its file",
+              held.fd is None and took and lk2.fd is None, (held.fd, took, lk2.fd))
+
         # R5: text from inside the VM stays out of messages
         src = open(os.path.join(LAB, "bin", "metacomputer")).read()
         fn = re.search(r"^      rec_fail\(\) \{.*?^      \}$", src, re.M | re.S).group(0)
