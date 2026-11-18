@@ -64,8 +64,12 @@ PKGS=(
   # session bus + AT-SPI accessibility (GTK2/3 bridge, registry, dconf)
   dbus-x11 dbus-user-session at-spi2-core libatk-adaptor libatk-bridge2.0-0 dconf-cli
   # applications
-  firefox gnome-calculator libreoffice-writer libreoffice-gtk3 libreoffice-style-colibre
+  firefox gnome-calculator libreoffice-writer libreoffice-calc libreoffice-gtk3 libreoffice-style-colibre
   mousepad
+  # files a script can work with (metacomputer sh): spreadsheets, office documents, images, PDFs,
+  # archives, SQLite, and a venv/pip for one-off Python tools
+  python3-openpyxl python3-docx python3-odf python3-pil poppler-utils sqlite3 zip unzip
+  python3-venv python3-pip
   # capture / diagnostics / clipboard / live view
   ffmpeg x11vnc xdotool wmctrl xclip imagemagick xinput
   # maintenance + containment
@@ -79,7 +83,7 @@ purge_unwanted() {
 }
 purge_unwanted
 firefox --version || true
-dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core gnome-calculator xserver-xorg-core xfce4-session lightdm ffmpeg | tee "$STATE/package-versions.txt"
+dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core libreoffice-calc gnome-calculator xserver-xorg-core xfce4-session lightdm ffmpeg python3-openpyxl | tee "$STATE/package-versions.txt"
 
 case " ${MCOMP_BROWSERS:-firefox} " in *" chrome "*)
   step "Google Chrome (optional; Firefox stays the default browser)"

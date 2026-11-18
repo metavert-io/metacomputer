@@ -25,8 +25,10 @@ Your Mac (Apple silicon, macOS 14+) - trusted controller
             │     └── cua-driver 0.52.1 mcp (stdio; X11/EWMH, XTest, uinput,
             │         AT-SPI over the session D-Bus, ffmpeg x11grab recording)
             ├── AT-SPI2 registry on the session bus (toolkit-accessibility on)
-            ├── Firefox (Mozilla .deb), LibreOffice Writer (gtk3 VCL),
+            ├── Firefox (Mozilla .deb), LibreOffice Writer + Calc (gtk3 VCL),
             │   GNOME Calculator, Thunar, Mousepad, XFCE Terminal
+            ├── tools for scripts: python3 openpyxl, docx, odf, PIL; poppler-utils,
+            │   sqlite3, zip/unzip, venv/pip, jq, ImageMagick, ffmpeg
             └── x11vnc :5900 (password) for the live view / takeover
 ```
 
