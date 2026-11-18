@@ -84,6 +84,8 @@ LEASE_TICK_S = 1.0                  # how often the lease keeper looks
 LEASE_REFRESH_S = 60.0              # a lease's claim is rewritten this often while its calls run (it stays active)
 LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub ends the driver runtime, and only then
                                                                # lets the computer go
+TRANSPORT_GRACE_S = 3.0             # ending a driver connection: SIGTERM to its process group (the relay signs its log),
+                                    # this long to exit, then SIGKILL to whatever of the group is left
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
 LIVE_WINDOWS_TTL_S = 1.0            # list_windows reused within one batch, never across an action
 DIRECT_TTL_S = 3.0                  # direct SSH connections (owners.py) are looked up at most this often
@@ -665,6 +667,8 @@ class Hub:
         self._refresh_again = False
         self._refresh_last = 0.0
         self._lease_keeper = None   # the thread that refreshes leases and ends a runtime past LEASE_MAX_S
+        self.gen_procs = {}         # driver connection generation -> its process, until that connection's reader is done
+                                    # (a lease's calls run in their own generation, which may no longer be self.up)
         self._bad_upstream = collections.deque()   # times of unusable messages from the driver (BAD_UPSTREAM_*)
         self.log_lock = threading.Lock()
         self._note_kinds = {}       # kind -> [window start, notes written, notes left out] (NOTE_REPEAT_MAX)
@@ -910,34 +914,81 @@ class Hub:
 
     def _lease_keeper_run(self):
         """While leases exist: keep their claim fresh (and retry a failed write); past LEASE_MAX_S, end the driver
-        runtime the calls run in. The lease itself ends only when those calls are gone (_pend_finished)."""
-        ended = None
+        connection each lease's remaining calls were sent on (their own generation, which may no longer be the
+        current one), its whole process tree, before anything is let go. The lease itself ends only when those
+        calls are gone (_pend_finished, after _upstream_closed has ended the tree)."""
+        ending = set()                               # generations being ended (each once)
         while True:
             time.sleep(LEASE_TICK_S)
             with self.lease_lock:
                 if not self.leases:
                     self._lease_keeper = None
                     return
-                leases = list(self.leases.values())
+                leases = list(self.leases.items())
             now = time.monotonic()
             every = min(LEASE_REFRESH_S, max(1.0, owners.ACTIVE_S / 3))    # well inside the activity window
-            if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for l in leases):
+            if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for _c, l in leases):
                 with self.owner_lock:
                     try:
                         with owners.lock():
                             self._refresh_leases()
                     except (OSError, TimeoutError):
                         self._refresh_leases()
-            oldest = min(l["t0"] for l in leases)
-            proc = self.up
-            if now - oldest > LEASE_MAX_S and proc is not None and proc is not ended:
-                ended = proc
-                self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending the driver "
-                          "runtime before letting the computer go")
+            for cid, lease in leases:
+                if now - lease["t0"] <= LEASE_MAX_S:
+                    continue
+                with self.lease_lock:                # what is still running, looked at now (not at the snapshot)
+                    gens = {self.pending[k].get("gen") for k in lease["keys"] if k in self.pending}
+                    gone = not gens and self.leases.get(cid) is lease
+                if gone:                             # its calls ended meanwhile: nothing to stop
+                    lease["keys"].clear()
+                    self._end_lease(cid)
+                    continue
+                for gen in gens - ending:
+                    proc = self.gen_procs.get(gen)
+                    if proc is None:
+                        continue
+                    ending.add(gen)
+                    self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending driver "
+                              f"connection {gen} (its whole process tree) before letting the computer go")
+                    threading.Thread(target=self._end_transport, args=(proc, True), daemon=True,
+                                     name=f"hub-end-{gen}").start()
+            ending &= set(self.gen_procs)
+
+    def _end_transport(self, proc, term):
+        """End a driver connection's process tree, bounded: with term, SIGTERM to its process group first (the action
+        log's relay fails its pending records and signs its log; SSH ends), then TRANSPORT_GRACE_S to exit; then
+        SIGKILL to whatever of the group is left (a child that ignored SIGTERM, an SSH the relay didn't end), and the
+        process reaped. The group is the connection's own (start_new_session in _spawn_bridge)."""
+        pgid = getattr(proc, "mcomp_pgid", None)
+
+        def signal_all(sig):
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, sig)
+                else:
+                    os.kill(proc.pid, sig)
+            except (OSError, ProcessLookupError):
+                pass
+        if term:
+            signal_all(signal.SIGTERM)
+        try:
+            proc.wait(timeout=TRANSPORT_GRACE_S)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        signal_all(signal.SIGKILL)
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        if pgid is not None:                         # nothing of the group outlives this (bounded)
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
                 try:
-                    proc.kill()                      # the reader sees the end: those calls fail, the lease ends
-                except OSError:
-                    pass
+                    os.killpg(pgid, 0)
+                except (OSError, ProcessLookupError):
+                    break
+                time.sleep(0.02)
 
     def _refresh_leases(self):
         with self.lease_lock:
@@ -1005,8 +1056,10 @@ class Hub:
         env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
+        # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                env=env, close_fds=True)
+                                env=env, close_fds=True, start_new_session=True)
+        proc.mcomp_pgid = proc.pid
         # SSH carries the VM's stderr: drained with a fixed memory tail and a capped log file, so a VM that writes
         # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail).
         self.stderr_tail = wirelimits.StderrTail(proc.stderr, self._stderr_path())
@@ -1084,6 +1137,7 @@ class Hub:
                 pass
             self.up_gen += 1
             gen = self.up_gen
+            self.gen_procs[gen] = proc               # until its reader is done (_upstream_closed)
             self.up, self.ready = proc, False
             self._reset_runtime()
             threading.Thread(target=self._reader, args=(proc, gen), daemon=True, name=f"hub-upstream-{gen}").start()
@@ -1316,14 +1370,13 @@ class Hub:
         return False
 
     def _upstream_closed(self, proc, gen, why=None):
-        if why in ("oversize", "protocol"):
-            try:
-                proc.kill()
-            except OSError:
-                pass
         # No connect_lock here: connect() holds it while it waits for the handshake this closing may answer.
         if self.up is proc:
             self.up, self.ready = None, False
+        # The connection's whole process tree ends before its calls fail and their leases let go, so nothing it ran
+        # can still act once the computer is free. After a hostile message: SIGTERM first (the relay signs its log);
+        # after an ordinary end the relay is finishing anyway and gets TRANSPORT_GRACE_S to exit. Then SIGKILL.
+        self._end_transport(proc, why in ("oversize", "protocol"))
         text = OVERSIZE_MSG if why == "oversize" else PROTOCOL_MSG if why == "protocol" else DROPPED_MSG
         for key, pend in list(self.pending.items()):
             if pend.get("gen") == gen:
@@ -1346,13 +1399,8 @@ class Hub:
         if gen == self.up_gen:
             self._reset_runtime()
         self.last_activity = time.time()
+        self.gen_procs.pop(gen, None)
         self.note(f"driver connection closed (generation {gen}{', ' + why if why else ''})")
-        try:
-            proc.wait(timeout=3)                     # the relay signs its log's end first
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        except OSError:
-            pass
 
     def on_upstream(self, msg):
         """Handle one message from the driver. False when its shape is wrong (counted by the reader)."""
@@ -1663,6 +1711,18 @@ class Hub:
             busy.append({"kind": "session", "claim": "pending", "active": True, "bridge_pid": c.holder,
                          "claude_pid": c.claude, "cwd": c.cwd, "last_tool": pend.get("tool"),
                          "idle_s": int(time.time() - pend.get("t0", time.time()))})
+        # A lease whose claim couldn't be written isn't in any file, and the client's own claim may be gone with its
+        # process: the hub's own record of it counts. (A written lease is its file, which `release` may drop.)
+        with self.lease_lock:
+            unwritten = [l for l in self.leases.values() if not l["written"] and l["keys"]]
+        if any(o.get("claim") == "lease" and o.get("bridge_pid") == self.pid for o in others):
+            unwritten = []                           # an earlier write is still on file (a refresh failed)
+        for l in unwritten:
+            if l["client_pid"] in mine or (client.claude and l["claude"] == client.claude):
+                continue
+            busy.append({"kind": "session", "claim": "lease", "active": True, "bridge_pid": self.pid,
+                         "client_pid": l["client_pid"], "claude_pid": l["claude"], "cwd": l["cwd"],
+                         "last_tool": l["tool"], "idle_s": int(time.monotonic() - l["t0"])})
         return busy
 
     def check_and_claim(self, client, tool):
@@ -2141,15 +2201,15 @@ class Hub:
     def shutdown(self):
         """End the core: close the driver connection (the VM's driver runtime ends with it)."""
         proc, self.up, self.ready = self.up, None, False
-        if proc and proc.poll() is None:
+        if proc:
             try:
-                proc.stdin.close()
-                proc.wait(timeout=3)
+                proc.stdin.close()                   # the relay signs its log and SSH ends...
             except Exception:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                pass
+            self._end_transport(proc, False)         # ...within TRANSPORT_GRACE_S, else the group is killed
+        for old in list(self.gen_procs.values()):    # earlier connections still finishing (a bounded session's end)
+            if old is not proc:
+                self._end_transport(old, True)
         with self.lease_lock:
             had_lease, self.leases = bool(self.leases), {}
         if had_lease and not self.local:

@@ -67,8 +67,10 @@ results = []
 # A stand-in for Cua Driver's MCP server. Windows come from STATE/windows.json (the test moves them);
 # snapshots, sessions and recordings live as long as the process; every message is logged.
 FAKE_DRIVER = r'''
-import json, os, sys, time
+import json, os, signal, sys, time
 STATE = sys.argv[1]
+if os.environ.get("FAKE_IGNORE_TERM"):     # a driver (or the SSH under a relay) that ignores SIGTERM
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 TOOLS = json.load(open(os.path.join(STATE, "tools.json")))
 PNG = "iVBORw0KGgo="
 snaps, sessions, recording = {}, set(), {}
@@ -1874,6 +1876,113 @@ def answer_limit_checks():
     clear_claims()
 
 
+def wait_until(cond, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return cond()
+
+
+def lease_files():
+    return [c for c in owners.claims() if c.get("kind") == "lease"]
+
+
+# A stand-in for the action log's relay: the driver runs as its child (here it shares the relay's stdout, as an
+# SSH that outlives its relay would keep the connection open) and ignores SIGTERM; the relay notes its SIGTERM.
+TREE_RELAY = r'''
+import os, signal, subprocess, sys
+mark = sys.argv[1]
+child = subprocess.Popen(sys.argv[2:], env=dict(os.environ, FAKE_IGNORE_TERM="1"))
+open(os.path.join(mark, "child.pid"), "w").write(str(child.pid))
+def term(*_):
+    open(os.path.join(mark, "finalized"), "w").write("1")
+    os._exit(0)
+signal.signal(signal.SIGTERM, term)
+child.wait()
+'''
+
+
+def lease3_checks():
+    print("#2-#4: a lease ends its own connection's whole process tree, and counts even when it couldn't be written")
+    clear_claims()
+    saved = (mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, getattr(mcp_hub, "TRANSPORT_GRACE_S", None))
+    mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S = 0.2, 3, 1.0
+    real = owners.write_claim
+    try:
+        # #2: the bounded session ended (the hub dropped that connection as current) while a leased call still runs
+        # on it; a new connection serves the next call. At the lease's end, the old one is ended, never the new one.
+        r = Running()
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        old = h.call("whoami", {}).structured["driver_pid"]
+        h.call("slow", {"s": 60})
+        h.close()
+        wait_until(lambda: r.hub.leases, 5)
+        r.hub.bounded_ended()
+        h2 = client(r)
+        new = h2.call("whoami", {}).structured.get("driver_pid")
+        gone = wait_until(lambda: not r.hub.leases and not lease_files(), 15)
+        check("past its longest life a lease ends the connection its calls run on (an earlier one), not the current one",
+              gone and old != new and not owners.alive(old) and owners.alive(new), (gone, old, new, owners.alive(old),
+                                                                                     owners.alive(new)))
+        h2.close()
+        r.stop()
+        clear_claims()
+        # #3: the lease can't be written and the client exits (its own claim goes with its process): the hub's
+        # record of the running call still holds the computer for everyone else
+        r = Running()
+        owners.write_claim = lambda pid, *a, **k: (_ for _ in ()).throw(OSError("disk full")) \
+            if k.get("kind") == "lease" else real(pid, *a, **k)
+        sub = subprocess.Popen([PY, "-c", (
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import mcomp_sdk\n"
+            "h = mcomp_sdk.Hub(env=json.loads(sys.argv[2]), kind='sdk', timeout=1).connect()\n"
+            "h.call('slow', {'s': 30}); h.close()\n"), os.path.join(LAB, "lib"), json.dumps(r.env)])
+        sub.wait(30)
+        wait_until(lambda: r.hub.leases, 5)
+        owners.claims()                              # (drops the claims of processes that are gone)
+        stranger = mcp_hub.Client(r.hub, None, 99999)
+        stranger.mine, stranger.claude, stranger.holder = set(), None, 99999
+        busy = r.hub.busy_others(stranger)
+        check("a lease that couldn't be written still holds the computer after its client exited (the hub's record "
+              "counts, not only the files)", any(o.get("claim") == "lease" for o in busy)
+              and not os.path.exists(owners.claim_path(sub.pid)) and not lease_files(), busy)
+        owners.write_claim = real
+        r.stop()
+        clear_claims()
+        # #4: the transport is a tree (a relay with the driver under it). Past the lease's life the hub ends all of
+        # it, letting the relay finish first, and lets go only after nothing of it runs.
+        mark = os.path.join(TD, "tree-mark")
+        os.makedirs(mark, exist_ok=True)
+        relay = os.path.join(TD, "tree_relay.py")
+        open(relay, "w").write(TREE_RELAY)
+        r = Running(MCOMP_HUB_DRIVER_CMD=json.dumps([PY, relay, mark, PY, FAKE, STATE]))
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        h.call("slow", {"s": 60})
+        h.close()
+        wait_until(lambda: r.hub.leases, 5)
+        child = int(open(os.path.join(mark, "child.pid")).read())
+        seen = {}
+
+        def released():
+            if not r.hub.leases and not lease_files():
+                seen.setdefault("child_alive", owners.alive(child))
+                return True
+            return False
+        gone = wait_until(released, 15)
+        check("past its life a lease ends the whole transport (the relay may finish, then SIGKILL for what ignored "
+              "SIGTERM), and lets go only after it's all gone", gone and seen.get("child_alive") is False
+              and os.path.exists(os.path.join(mark, "finalized")) and not owners.alive(child),
+              (gone, seen, os.path.exists(os.path.join(mark, "finalized")), owners.alive(child)))
+        r.stop()
+    finally:
+        owners.write_claim = real
+        mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S = saved[0], saved[1]
+        if saved[2] is not None:
+            mcp_hub.TRANSPORT_GRACE_S = saved[2]
+        clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -1909,6 +2018,7 @@ def main():
         batch2_checks()
         status_claim_checks()
         answer_limit_checks()
+        lease3_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
