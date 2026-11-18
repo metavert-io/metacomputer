@@ -553,8 +553,16 @@ install() {
     note "writes config/local.env, adds the Claude Code plugin, and builds the VM (about 1.5 GB of downloads)"
     return 0
   fi
+  # install.sh writes vm_built=1 to MCOMP_INSTALL_REPORT when it built the VM in this run: only then does
+  # the health check below run its self-test, which opens and closes windows (a VM it kept may hold work).
+  # An install.sh from before this handoff writes nothing, so its VM counts as kept.
+  local report rc=0
+  report="$(mktemp -t mcomp-install)" || die "couldn't make a temporary file"
   # stdin: when this script is piped into bash, the rest of the pipe is this script, not answers.
-  "$DIR/install.sh" "${args[@]}" </dev/null \
+  MCOMP_INSTALL_REPORT="$report" "$DIR/install.sh" "${args[@]}" </dev/null || rc=$?
+  grep -qx 'vm_built=1' "$report" 2>/dev/null && VM_NEW=1
+  rm -f "$report"
+  [ "$rc" = 0 ] \
     || die "install.sh stopped; its messages above say why and what to do." \
            "Fix that and run this again: everything that's finished is skipped."
 }
@@ -567,14 +575,40 @@ health() {
     note "build the VM when you're ready: $mc build  (about 1.5 GB of downloads, then a few minutes)"
     return 0
   fi
-  step "Checking it: start the VM, metacomputer status, a quick self-test" "under half a minute"
-  if [ "$DRY" = 1 ]; then act "$mc" start; act "$mc" status; act "$mc" test A; return 0; fi
+  if [ "$DRY" = 1 ]; then
+    step "Checking it" "under half a minute"
+    note "on a VM this run builds: start it, metacomputer status, and a quick self-test (test A opens and closes a window)"
+    act "$mc" start; act "$mc" status; act "$mc" test A
+    note "on a VM it keeps: only reads (start only if it's stopped), so nothing in it is closed or typed into"
+    act "$mc" status; act "$mc" call list_windows '{}'
+    return 0
+  fi
   HEALTH=ok
-  "$mc" start || { HEALTH=failed; warn "the VM didn't start (above); try: $mc start, then $mc status"; return 0; }
+  if [ "$VM_NEW" = 1 ]; then
+    # A VM this run built holds nothing of the user's yet: the self-test may open and close windows in it.
+    step "Checking it: start the VM, metacomputer status, a quick self-test" "under half a minute"
+    "$mc" start || { HEALTH=failed; warn "the VM didn't start (above); try: $mc start, then $mc status"; return 0; }
+    if "$mc" status; then ok "metacomputer status: ready"
+    else HEALTH=failed; warn "metacomputer status says it isn't ready (above); docs/install.md, Troubleshooting"; return 0; fi
+    if "$mc" test A >/dev/null 2>&1; then ok "self-test passed: Claude's tools read the VM's desktop (test A)"
+    else HEALTH=partial; warn "the self-test (metacomputer test A) didn't pass; run it again to see why"; fi
+    return 0
+  fi
+  # A VM this run kept may hold the user's work: only reads. No self-test (test A closes an editor and
+  # answers No to its recovery prompt), and start only for a stopped VM: on a running one it can restart
+  # the VM (when its network gateway is gone), which would lose what's open in it.
+  step "Checking it: metacomputer status and a read-only look at the desktop" "under half a minute"
+  note "this run kept your VM, so nothing in it is closed, restarted or typed into"
+  local st
+  st="$("$mc" status --json 2>/dev/null)"
+  if grep -qx '  "vm": "stopped",' <<<"$st"; then
+    "$mc" start || { HEALTH=failed; warn "the VM didn't start (above); try: $mc start, then $mc status"; return 0; }
+  fi
   if "$mc" status; then ok "metacomputer status: ready"
   else HEALTH=failed; warn "metacomputer status says it isn't ready (above); docs/install.md, Troubleshooting"; return 0; fi
-  if "$mc" test A >/dev/null 2>&1; then ok "self-test passed: Claude's tools read the VM's desktop (test A)"
-  else HEALTH=partial; warn "the self-test (metacomputer test A) didn't pass; run it again to see why"; fi
+  # list_windows is one of the hub's read-only tools: it claims nothing, and its answer (the VM's text) isn't shown.
+  if "$mc" call list_windows '{}' >/dev/null 2>&1; then ok "Claude's tools read the VM's desktop (a read-only check)"
+  else HEALTH=partial; warn "the read-only check (metacomputer call list_windows) didn't answer; run it again to see why"; fi
 }
 
 finish() {
@@ -618,7 +652,8 @@ ${b}metacomputer setup${o} will:
   4. run its ./install.sh: Go, GnuPG and ffmpeg from Homebrew if missing, mcomp-vm (the VM runner)
      and the secrets vault built from source, this Mac's settings, the Claude Code plugin, and
      $([ "$NO_BUILD" = 1 ] && echo "NOT the VM (--no-build)" || echo "the VM: an Ubuntu desktop with Firefox$([ "$NO_CHROME" = 1 ] || echo " and Google Chrome"), about 1.5 GB of downloads");
-  5. start the VM and check it.
+  5. check it: a VM it built gets started and a quick self-test; a VM you already had gets only
+     read-only checks (started only if it's stopped), so nothing open in it is touched.
 Nothing outside $DIR, ~/.local, ~/.ssh/metacomputer and Claude Code's plugin settings changes,
 apart from Homebrew packages and the VM itself (Lume keeps it in ~/.lume). Expect a minute or two
 of your time; about 5 minutes in all on a fast connection with the prerequisites in place, 15-30 on a
@@ -628,7 +663,7 @@ EOF
 
 main() {
   DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; REPLACE_VM=0
-  DRY=0; YES=0; CONFIRM=0; HEALTH=""
+  DRY=0; YES=0; CONFIRM=0; HEALTH=""; VM_NEW=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --dir) [ $# -ge 2 ] && [ -n "$2" ] || { echo "get.sh: --dir needs a folder" >&2; exit 2; }; DIR="$2"; shift ;;

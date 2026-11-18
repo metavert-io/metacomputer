@@ -43,7 +43,7 @@ stores your password, and it never runs `sudo` itself.
 | 2. Prerequisites | Homebrew and Apple's Command Line Tools, only if they're missing (see below) | answer one question, then Homebrew asks for your password | none if you have them; 5-15 minutes on a new Mac |
 | 3. Download | `git clone` into `~/metacomputer` (about 3 MB), at the latest release, or `main` before the first release | nothing | seconds |
 | 4. Install | `./install.sh --yes`: Go, GnuPG and ffmpeg from Homebrew if they're missing, the VM runner (mcomp-vm) and the secrets vault built from source, this Mac's settings, the Claude Code plugin, then the VM | nothing | about 5 minutes on a fast connection |
-| 5. Check | starts the VM, runs `metacomputer status` and a short self-test | nothing | under half a minute |
+| 5. Check | a VM it just built: starts it, runs `metacomputer status` and a short self-test. A VM you already had: only reads (`metacomputer status` and a read-only look at its windows; started only if it's stopped), so nothing open in it is closed or typed into | nothing | under half a minute |
 
 Then it prints three prompts to try in Claude Code. The VM is left running;
 `metacomputer stop` stops it, and Claude starts it again when it needs it.
@@ -295,9 +295,11 @@ cd ~/metacomputer && git pull && ./install.sh
 
 Or run get.sh again: it updates the checkout to the latest release, then runs
 `./install.sh`, which rebuilds only what changed (a new mcomp-vm pin, a changed
-vault). An update doesn't rebuild the VM. When the CHANGELOG says a change takes
-effect on the next build, rebuild with `metacomputer build --replace` when you're
-ready (it replaces the VM and its clean snapshot). get.sh leaves a checkout
+vault). An update doesn't rebuild the VM, and its check only reads from the VM
+(no self-test), so windows and unsaved work in it are left alone. When the
+CHANGELOG says a change takes effect on the next build, rebuild with
+`metacomputer build --replace` when you're ready (it replaces the VM and its
+clean snapshot). get.sh leaves a checkout
 alone if it has local changes or is on a branch of your own. A plugin installed
 from GitHub updates with `claude plugin update metacomputer@metacomputer`.
 

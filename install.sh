@@ -387,6 +387,14 @@ fs_of() {
   while [ ! -e "$p" ] && [ "$p" != / ]; do p="$(dirname "$p")"; done
   df -k "$p" 2>/dev/null | awk 'NR==2 { print $1, int($4 / 1048576) }'
 }
+# This run built the VM: say so to get.sh, in the file it named in MCOMP_INSTALL_REPORT (a regular file of this
+# user's, not a link). get.sh runs its self-test, which opens and closes windows, only on a VM built this run;
+# a VM an install kept may hold the user's work and gets read-only checks.
+report_vm_built() {
+  local f="${MCOMP_INSTALL_REPORT:-}"
+  [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] && [ -O "$f" ] || return 0
+  printf 'vm_built=1\n' >> "$f" 2>/dev/null || true
+}
 account_home() { # Lume's ~: the account's home folder, whatever $HOME says; status 1 if it can't be told
   local h; h="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
   case "$h" in /*) printf '%s' "$h" ;; *) return 1 ;; esac
@@ -715,8 +723,9 @@ else
     built:0:*) ok "already built (and its clean snapshot $BASELINE_NAME)" ;;
     *:1:1)
       warn "--replace-vm: deleting $VM_NAME and $BASELINE_NAME, then building them again"
-      "$ROOT/bin/metacomputer" build --replace ;;
-    none:1:0) "$ROOT/bin/metacomputer" build ;;
+      "$ROOT/bin/metacomputer" build --replace
+      report_vm_built ;;
+    none:1:0) "$ROOT/bin/metacomputer" build; report_vm_built ;;
     interrupted:*)
       die "an earlier build of $VM_NAME didn't finish ($(sed -n 's/^started=/started /p' "$VM_MARKER" 2>/dev/null | head -1)), so it was left as it is." \
           "To delete it and build it again: ./install.sh --replace-vm (or metacomputer build --replace)." \

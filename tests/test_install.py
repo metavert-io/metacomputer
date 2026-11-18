@@ -14,7 +14,9 @@ exists only inside a temporary HOME.
   disk; the dry run (changes nothing, runs nothing); the release it picks (newest vX.Y.Z, annotated or not,
   else the default branch) and a failed lookup that stops instead of falling back; a full offline run that
   clones, checks out and verifies the commit before running install.sh, and one that refuses when the
-  checkout isn't the commit the repository named; existing checkouts (local changes, a branch of its own, a
+  checkout isn't the commit the repository named; the health check's self-test only on a VM install.sh
+  reports it built this run, and on a kept VM only reads (status, the hub's read-only list_windows, start
+  only when it's stopped); existing checkouts (local changes, a branch of its own, a
   folder that isn't a checkout); with --confirm (the plugin's setup) only a clean checkout of the project's
   own repository runs; Homebrew's installer is downloaded whole and run only then (on a terminal, through a
   pty), and never without a terminal. No sudo, no password reading of its own.
@@ -183,8 +185,16 @@ def make_repo(path, tags=(), branch="main"):
     """A small git repository that looks like a metacomputer checkout, with the given tags
     (a name, or (name, "annotated"))."""
     os.makedirs(path)
-    write(os.path.join(path, "install.sh"), "#!/bin/bash\necho \"INSTALL-RAN $*\"\n", 0o755)
-    write(os.path.join(path, "bin", "metacomputer"), "#!/bin/bash\n", 0o755)
+    # install.sh: says it ran; with STUB_BUILT it reports a VM built this run, as the real one does after a build.
+    write(os.path.join(path, "install.sh"),
+          '#!/bin/bash\necho "INSTALL-RAN $*"\n'
+          '[ -z "${STUB_BUILT:-}" ] || [ -z "${MCOMP_INSTALL_REPORT:-}" ] || echo vm_built=1 >> "$MCOMP_INSTALL_REPORT"\n', 0o755)
+    # bin/metacomputer: logs each call to STUB_MC_LOG; `status --json` names the VM's state (STUB_VM_STATE).
+    write(os.path.join(path, "bin", "metacomputer"),
+          '#!/bin/bash\n[ -z "${STUB_MC_LOG:-}" ] || echo "$*" >> "$STUB_MC_LOG"\n'
+          'if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then\n'
+          '  printf \'{\\n  "vm": "%s",\\n  "ready": false\\n}\\n\' "${STUB_VM_STATE:-running}"; exit 1\nfi\n'
+          '[ "${1:-}" = call ] && [ -n "${STUB_CALL_FAIL:-}" ] && exit 1\nexit 0\n', 0o755)
     write(os.path.join(path, ".claude-plugin", "marketplace.json"), '{"name": "metacomputer"}\n')
     shutil.copy(os.path.join(LAB, ".gitignore"), os.path.join(path, ".gitignore"))   # what a real checkout ignores
     git("-C", path, "init", "-q", "-b", branch)
@@ -371,6 +381,8 @@ def test_get_dry_run():
         check("dry run: would clone into ~/metacomputer and run install.sh --yes, then start, status and test A",
               f"git clone -q {repo} {b.home}/metacomputer" in out and f"{b.home}/metacomputer/install.sh --yes" in out
               and "metacomputer start" in out and "metacomputer status" in out and "metacomputer test A" in out, out)
+        check("dry run: on a VM it keeps, only reads (status and the read-only list_windows), no self-test",
+              "on a VM it keeps: only reads" in out and "metacomputer call list_windows" in out, out)
         check("dry run: the VM gets Chrome unless --no-chrome, and it says Google's terms apply", "Google's terms" in out, out)
         check("dry run: numbered steps with time estimates", "[1/5] Checking this Mac" in out and "[5/5]" in out and "minute" in out, out)
         check("dry run: changes nothing in HOME", b.listing() == before, b.listing())
@@ -430,6 +442,54 @@ def test_get_full_offline():
         dest4 = os.path.join(b.t, "inst4")
         p, _ = b.get("--repo", repo, "--dir", dest4, STUB_GIT_FAIL_LSREMOTE="1")
         check("full run, the release lookup fails: stops before cloning", p.returncode == 1 and not os.path.exists(dest4), p.stderr)
+    finally:
+        b.close()
+
+
+def test_get_health_kept_vm():
+    """P1: get.sh's health check runs its self-test (test A closes an editor and answers No to its recovery
+    prompt) only on a VM this run built, as install.sh reports in MCOMP_INSTALL_REPORT. A VM the run kept may
+    hold the user's work: only metacomputer status, the hub's read-only list_windows, and start only when the
+    VM is stopped (on a running one start can restart it)."""
+    b = Box()
+    try:
+        ro = json.loads(subprocess.run([PY, "-c", "import json, sys; sys.path.insert(0, sys.argv[1]); import mcp_hub; "
+                                        "print(json.dumps(sorted(mcp_hub.READ_ONLY)))", os.path.join(LAB, "lib")],
+                                       env=b.environ({}), capture_output=True, text=True, check=True).stdout)
+        repo = b.repo()
+        mc_log = os.path.join(b.t, "mc-calls.log")
+
+        def go(n, **env):
+            if os.path.exists(mc_log):
+                os.remove(mc_log)
+            p, _ = b.get("--repo", repo, "--dir", os.path.join(b.t, f"inst{n}"), STUB_MC_LOG=mc_log, **env)
+            return p, (open(mc_log).read().splitlines() if os.path.exists(mc_log) else [])
+
+        def reads_only(log):   # what a kept VM may get: status, a stopped VM's start, and the hub's read-only tools
+            return all(c in ("status", "status --json", "start")
+                       or (len(c.split()) > 1 and c.split()[0] == "call" and c.split()[1] in ro) for c in log)
+        p, log = go(1)
+        check("kept VM, running: status and the read-only list_windows only; no test A, no start; exit 0",
+              p.returncode == 0 and log == ["status --json", "status", "call list_windows {}"] and "list_windows" in ro
+              and reads_only(log) and "kept your VM" in p.stdout, (log, p.stdout[-600:], p.stderr[-300:]))
+        p, log = go(2, STUB_VM_STATE="stopped")
+        check("kept VM, stopped: started (nothing is open in a stopped VM), then status and the read-only check; no test A",
+              p.returncode == 0 and log == ["status --json", "start", "status", "call list_windows {}"] and reads_only(log),
+              (log, p.stderr[-300:]))
+        p, log = go(3, STUB_CALL_FAIL="1")
+        check("kept VM, the read-only check fails: says so, exit 0, and still no test A (no fallback to a mutating test)",
+              p.returncode == 0 and "didn't answer" in p.stderr + p.stdout and reads_only(log)
+              and not any(c.startswith("test") for c in log), (log, p.stderr[-300:]))
+        seeded = os.path.join(b.t, "seeded-report")
+        write(seeded, "vm_built=1\n")
+        p, log = go(4, MCOMP_INSTALL_REPORT=seeded)
+        check("an MCOMP_INSTALL_REPORT from the environment is ignored (get.sh makes its own): the VM counts as kept",
+              p.returncode == 0 and log and reads_only(log), log)
+        p, log = go(5, STUB_BUILT="1")
+        check("VM built this run (install.sh reported it): start, status, then the self-test test A",
+              p.returncode == 0 and log == ["start", "status", "test A"], (log, p.stderr[-300:]))
+        left = [n for n in os.listdir(b.t) if n.startswith("mcomp-install")]
+        check("the report file get.sh made is removed afterwards", not left, left)
     finally:
         b.close()
 
@@ -1012,7 +1072,7 @@ def install_root(b):
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
     write(os.path.join(root, "scripts", "build-tools.sh"),
           f'#!/bin/bash\nif [ "$1" = --check ]; then [ -z "${{STUB_TOOLS_STALE:-}}" ]; exit; fi\necho "tools${{*:+ $*}}" >> "{b.t}/tools.log"\n', 0o755)
-    write(os.path.join(root, "bin", "metacomputer"), f'#!/bin/bash\necho "$*" >> "{b.t}/mc.log"\n', 0o755)
+    write(os.path.join(root, "bin", "metacomputer"), f'#!/bin/bash\necho "$*" >> "{b.t}/mc.log"\n[ -z "${{STUB_MC_FAIL:-}}" ]\n', 0o755)
     return root
 
 
@@ -1040,20 +1100,37 @@ def vm_box(vms="", marker=False, ls="ok"):
 
 def test_install_vm_decisions():
     """P1: a rerun never deletes a VM on its own. Only --replace-vm replaces, and --yes doesn't imply it."""
-    def go(vms="", marker=False, ls="ok", extra=()):
+    seen = {}
+
+    def go(vms="", marker=False, ls="ok", extra=(), link=False, **env):
         b, root = vm_box(vms, marker, ls)
         try:
-            p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude", *extra])
+            # get.sh's report file: install.sh writes vm_built=1 there only after building the VM.
+            report = os.path.join(b.t, "report")
+            write(report, "")
+            if link:   # a link in its place: never written through
+                os.rename(report, report + ".target")
+                os.symlink(report + ".target", report)
+            p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude", *extra], MCOMP_INSTALL_REPORT=report, **env)
             log = open(os.path.join(b.t, "mc.log")).read().splitlines() if os.path.exists(os.path.join(b.t, "mc.log")) else []
             conf_written = os.path.exists(os.path.join(b.t, "local.env"))
+            seen["report"] = open(report + (".target" if link else "")).read()
             return p, log, conf_written
         finally:
             b.close()
     p, log, _ = go("mctest,mctest-baseline")
     check("VM and its clean snapshot there: 'already built', nothing built or replaced", p.returncode == 0 and not log
           and "already built" in p.stdout, (p.stdout[-300:], p.stderr[-300:], log))
+    check("a kept VM isn't reported as built (get.sh then runs only read-only checks on it)", seen["report"] == "", seen)
     p, log, _ = go("")
     check("no VM: built (metacomputer build, without --replace)", p.returncode == 0 and log == ["build"], (log, p.stderr[-300:]))
+    check("a VM built this run is reported to get.sh (vm_built=1)", seen["report"] == "vm_built=1\n", seen)
+    p, log, _ = go("", STUB_MC_FAIL="1")
+    check("a build that fails: install.sh stops, and nothing is reported as built", p.returncode != 0 and log == ["build"]
+          and seen["report"] == "", (p.returncode, log, seen))
+    p, log, _ = go("", link=True)
+    check("MCOMP_INSTALL_REPORT that's a link: built, but nothing is written through the link", p.returncode == 0
+          and log == ["build"] and seen["report"] == "", (log, seen))
     p, log, _ = go("mctest")
     check("VM without its snapshot and no build marker (it may hold work), --yes: left alone, exit 1, says how to keep or replace it",
           p.returncode == 1 and not log and "may hold your work" in p.stderr and "metacomputer baseline" in p.stderr
@@ -1066,6 +1143,7 @@ def test_install_vm_decisions():
           (log, p.stderr[-300:]))
     p, log, _ = go("mctest", extra=("--replace-vm",))
     check("a VM without its snapshot, with --replace-vm: replaced, as asked", p.returncode == 0 and log == ["build --replace"], log)
+    check("a VM replaced this run is reported to get.sh (vm_built=1)", seen["report"] == "vm_built=1\n", seen)
     p, log, _ = go("mctest-baseline")
     check("the snapshot without its VM: left alone, exit 1, says metacomputer reset restores it",
           p.returncode == 1 and not log and "metacomputer reset" in p.stderr, (log, p.stderr[-400:]))
@@ -1510,6 +1588,7 @@ test_get_refusals()
 test_get_space()
 test_get_dry_run()
 test_get_full_offline()
+test_get_health_kept_vm()
 test_get_homebrew_and_confirm()
 test_get_existing()
 test_get_confirm_provenance()
