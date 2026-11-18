@@ -262,3 +262,16 @@ Its numbers are in `results/bench/baseline-2026-11-17/summary.md`. Because every
 task passed, later changes will show up mostly in cost, turns, time and the
 tool-call mix. Make tasks harder (or add some) when you need pass rates to
 separate two variants.
+
+The hub and the coordinate guard (2026-11-18, mcsecrets with native Calc,
+`ACTION_LOG=off`, the same skill, budget $2 a task) changed nothing measurable:
+
+| Run | Passed | Cost | Mean turns | Mean minutes | Screenshots | Refused |
+| --- | --- | --- | --- | --- | --- | --- |
+| `hub-baseline-2026-11-18`: `--hub off --coord-guard off` | 20/20 | $11.80 | 20.1 | 0.9 | 25 | 0 |
+| `hub-on-2026-11-18`: `--hub on --coord-guard on` | 20/20 | $11.83 | 20.2 | 0.9 | 25 | 0 |
+
+One hub served all 20 sessions and reconnected after each task's reset, and the
+coordinate guard refused nothing: in these tasks no window changed between a
+screenshot and the pixels aimed from it. Per-task differences are within one
+run's noise.
