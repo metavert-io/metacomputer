@@ -527,7 +527,9 @@ prefix and region checks; with stand-ins for `security` and rclone that record w
 given, the keys never reach either program's arguments, the registry, `rclone.conf`, logs or
 events, only rclone's environment (which holds nothing else of ours); `volume keys` refuses
 without a terminal and takes no value; a sync's conflict is reported; and the pinned rclone:
-a changed binary or another version is refused, and `scripts/fetch-artifacts.sh rclone`,
+a changed binary or another version is refused (against the program's pinned digest), a planted program with
+a matching `rclone.sha256` beside it is refused, never run, and unpacked again from the pinned zip, and
+`scripts/fetch-artifacts.sh rclone` (which refuses a zip whose program isn't the pinned one),
 against a local server and a throwaway signing key, installs a correctly signed and pinned
 release but refuses a wrong pinned digest, a `SHA256SUMS` signed by another key and a
 tampered zip. From the storage audit, with the pinned rclone: unconfined, it copies a private

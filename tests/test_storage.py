@@ -1149,6 +1149,7 @@ def test_rclone_pin():
                    check=True)
     import hashlib
     digest = hashlib.sha256(open(os.path.join(d, "srv", zipname), "rb").read()).hexdigest()
+    bin_digest = hashlib.sha256(open(fake, "rb").read()).hexdigest()       # the program inside, pinned too
     gh = tempfile.mkdtemp(prefix="mcst-g", dir="/tmp")
     try:
         def gpg(*a, **k):
@@ -1178,10 +1179,11 @@ def test_rclone_pin():
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{srv.server_address[1]}"
 
-        def fetch(pinned_digest=digest, fpr=good):
+        def fetch(pinned_digest=digest, fpr=good, bin_pin=bin_digest):
             cfg = os.path.join(d, "pins.env")
             open(cfg, "w").write(f"RCLONE_VERSION={ver}\nRCLONE_BASE_URL={url}\nRCLONE_ZIP={zipname}\n"
-                                 f"RCLONE_SHA256={pinned_digest}\nRCLONE_KEYS_URL={url}/KEYS\nRCLONE_SIGNING_KEY_FPR={fpr}\n"
+                                 f"RCLONE_SHA256={pinned_digest}\nRCLONE_BIN_SHA256={bin_pin}\n"
+                                 f"RCLONE_KEYS_URL={url}/KEYS\nRCLONE_SIGNING_KEY_FPR={fpr}\n"
                                  f"RUN_DIR={d}/run\nLOG_DIR={d}/logs\n")
             shutil.rmtree(cache, ignore_errors=True)
             return subprocess.run([os.path.join(LAB, "scripts", "fetch-artifacts.sh"), "rclone"], capture_output=True,
@@ -1191,14 +1193,20 @@ def test_rclone_pin():
         keys(good, os.path.join(d, "srv", "KEYS"))
         r = fetch()
         b = os.path.join(cache, "rclone")
-        check("fetch-artifacts.sh rclone installs a release signed by the pinned key with the pinned digest",
-              r.returncode == 0 and os.path.isfile(b) and os.path.isfile(b + ".sha256"), r.stdout[-300:] + r.stderr[-300:])
+        check("fetch-artifacts.sh rclone installs a release signed by the pinned key with the pinned digests (zip "
+              "and program), and writes no digest file beside the program", r.returncode == 0 and os.path.isfile(b)
+              and not os.path.exists(b + ".sha256"), r.stdout[-300:] + r.stderr[-300:])
         if os.path.isfile(b):
-            check("...and storage accepts it", storage.verify_rclone(b, ver) == b)
+            check("...and storage accepts it (against the pinned program digest)",
+                  storage.verify_rclone(b, ver, bin_digest) == b)
             open(b, "a").write("# changed\n")
-            check("a changed rclone binary is refused (its digest no longer matches)",
-                  raises(storage.verify_rclone, b, ver) is not None)
+            check("a changed rclone binary is refused (its digest isn't the pinned one)",
+                  raises(storage.verify_rclone, b, ver, bin_digest) is not None)
             check("so is one that reports another version", raises(storage.verify_rclone, b, "1.0.0") is not None)
+        r = fetch(bin_pin="2" * 64)
+        check("a zip whose program isn't the pinned one (RCLONE_BIN_SHA256) is refused, and nothing is installed",
+              r.returncode != 0 and "RCLONE_BIN_SHA256" in (r.stdout + r.stderr) and not os.path.exists(b),
+              r.stderr[-300:])
         r = fetch(pinned_digest="1" * 64)
         check("a pinned digest that differs from the signed SHA256SUMS is refused", r.returncode != 0
               and "differs" in (r.stdout + r.stderr) and not os.path.exists(b), r.stderr[-300:])
@@ -2016,6 +2024,40 @@ def test_s3_space_claims():
           (r.get("summary"), round(took)))
 
 
+def test_rclone_planted():
+    """A planted rclone with a matching rclone.sha256 beside it is refused, never run, and the program is unpacked
+    again from the pinned zip (the one in this checkout's download, copied to a test folder)."""
+    import hashlib
+    ver = storage.env("RCLONE_VERSION", "")
+    zipname = storage.env("RCLONE_ZIP", "")
+    z = os.path.join(LAB, ".cache", f"rclone-v{ver}", zipname)
+    if not os.path.isfile(z):
+        print("SKIP the planted-rclone check (needs the pinned rclone's zip: scripts/fetch-artifacts.sh rclone)")
+        return
+    cache = os.path.join(TMP, "rcache")
+    d = os.path.join(cache, f"rclone-v{ver}")
+    os.makedirs(d)
+    shutil.copy(z, d)
+    marker = os.path.join(TMP, "planted-rclone-ran")
+    planted = os.path.join(d, "rclone")
+    open(planted, "w").write(f"#!/bin/sh\ntouch '{marker}'\necho 'rclone v{ver}'\n")
+    os.chmod(planted, 0o755)
+    open(os.path.join(d, "rclone.sha256"), "w").write(hashlib.sha256(open(planted, "rb").read()).hexdigest() + "\n")
+    try:
+        got = storage.rclone_bin(fetch=False, cache=cache)
+    except TypeError:                                   # before the pin: the program and the file beside it
+        got = storage.verify_rclone(planted, ver)
+    except storage.StorageError as e:
+        got = None
+        print(f"  (refused: {e})")
+    pin = storage.env("RCLONE_BIN_SHA256", "")
+    check("a planted rclone with a matching rclone.sha256 beside it is refused, never run", not os.path.exists(marker))
+    check("...and the program is unpacked again from the pinned zip (the pinned program digest)",
+          got == planted and pin and storage.file_sha256(planted) == pin
+          if hasattr(storage, "file_sha256") else False, got)
+    check("(no digest file is left beside it to trust)", not os.path.exists(os.path.join(d, "rclone.sha256")))
+
+
 def test_s3_real_rclone():
     """With the pinned rclone itself, sandboxed as every sync runs it, and a folder in the volume's state folder
     standing in for the bucket: every option a sync passes is accepted, and files go both ways through the two
@@ -2034,7 +2076,8 @@ def test_s3_real_rclone():
     real_remote = storage.s3_remote
     storage.s3_remote = lambda b: bucket
     try:
-        r = storage.s3_sync(rec, reason="manual", rclone=rclone, security=FAKE_SEC_PATH[0], resync=True)
+        # rclone=None: the sync finds the program itself (rclone_bin: checked against its pinned digest)
+        r = storage.s3_sync(rec, reason="manual", rclone=None, security=FAKE_SEC_PATH[0], resync=True)
         got = os.path.join(shared, "from-bucket.txt")
         v = storage.get_xattr(got, storage.QUARANTINE) if os.path.exists(got) else None
         check("the real rclone accepts a first sync's options and both files cross (the bucket's one quarantined)",
@@ -2533,6 +2576,7 @@ def main():
         test_s3_two_stages()
         test_s3_exchange()
         test_s3_space_claims()
+        test_rclone_planted()
         test_s3_real_rclone()
         test_image_paths()
         test_s3_staging()
