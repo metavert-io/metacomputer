@@ -10,7 +10,7 @@ way a programmer would, with a shell, Python, LibreOffice, ImageMagick and
 ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what Claude does there can be logged, limited and approved.
 
-https://github.com/user-attachments/assets/1ecedf96-af1e-4610-aad4-0c334ce7a265
+https://github.com/user-attachments/assets/25aac737-bad8-45fc-b297-b678e627a323
 
 ## The 5-minute install
 
