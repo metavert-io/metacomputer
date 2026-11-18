@@ -102,6 +102,30 @@ def proxy_account():
 
 
 out["secrets_proxy"] = proxy_account()
+# Storage (metacomputer volumes, Mac folders, reference disks): whether this VM can mount them
+# (VMs built before storage support can't: `metacomputer build --replace`), and what this boot
+# attached, as storage-helper recorded it, checked against the live mount table.
+def storage():
+    st = {"supported": os.path.exists("/opt/metacomputer/bin/storage-helper"), "items": []}
+    try:
+        with open("/run/metacomputer/storage.json") as f:
+            items = json.load(f).get("items", [])
+        mounts = set()
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 4:
+                    mounts.add(parts[4])
+        for it in items if isinstance(items, list) else []:
+            if isinstance(it, dict):
+                st["items"].append({k: it.get(k) for k in ("kind", "name", "mount", "rw", "fstype")}
+                                   | {"mounted": it.get("mount") in mounts})
+    except (OSError, ValueError):
+        pass
+    return st
+
+
+out["storage"] = storage()
 rc, so, _ = sh(["/usr/local/bin/cua-driver", "--version"])
 out["driver_version"] = so.splitlines()[0] if so else None
 out["x11vnc_running"] = sh(["pgrep", "-u", str(UID), "-x", "x11vnc"])[0] == 0

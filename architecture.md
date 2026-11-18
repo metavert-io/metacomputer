@@ -57,6 +57,7 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 | mcomp-vm (default; formerly lume-secure) | metacomputer's build of Lume (made by Metavert, not by Cua): Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/mcomp-vm/`, wrapper `~/.local/bin/mcomp-vm`, from github.com/metavert-io/metacomputer-vm (`MCOMP_VM_TAG`, `MCOMP_VM_COMMIT`). While `LUME`'s runner isn't installed and `~/.local/bin/lume-secure` is, `scripts/lib.sh` uses that one and prints a notice | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
 | Lume (alternative) | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | the same, with clipboard, audio and Rosetta always attached |
 | cua-netgw | built from trycua/cua `ca6a643` (`libs/cua/netgw`) | `vendor/bin/cua-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
+| rclone (only for S3 volumes) | 1.75.2 osx-arm64 (sha256 `610ab7d4…`; `SHA256SUMS` signed by `FBF737EC…54FA`) | `.cache/rclone-v1.75.2/rclone`, fetched on first use | two-way sync of S3 volumes' local copies with their buckets, on the Mac |
 | Cua Driver | 0.53.0 linux-arm64 (sha256 `fd5e6a9d…`) | guest `/opt/cua-driver/0.53.0` | desktop observation/control, MCP server, recording |
 | Ubuntu | 24.04 LTS arm64 cloud image, release 20261017 (sha256 `50e24e1f…`, SHA256SUMS signed by `D2EB4462…7C81`) | VM disk | guest OS |
 | qcow2raw | `tools/qcow2raw` (Lima's go-qcow2reader v0.8.0) | `vendor/bin/qcow2raw` | converts the qcow2 cloud image to the raw disk Lume boots |
@@ -535,6 +536,112 @@ The rest of the vault, briefly (details in SECURITY.md):
 
 Threat model and limits: [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
+## Storage
+
+[docs/storage.md](docs/storage.md). Disks the VM keeps across `reset`, attached when it
+starts (Lume has no hot-plug), all of it outside the VM:
+
+```text
+Mac                                                         VM
+registry + locks  ~/.local/share/metacomputer/storage/      storage-helper (root; only via
+images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-admin storage attach)
+                  STORAGE_DIR/refdisks/NAME.iso --mount ─▶   ext4 nodev,nosuid at ~/data/NAME
+                                         (more: --usb-storage)  UDF read-only at ~/ref/NAME
+```
+
+- **`start`** runs `storage.py prepare` before `lume run`: it reads `VOLUMES` and
+  `REFDISKS`, refuses missing images, unknown names, disallowed or overlapping mount
+  points and a VM without storage support (`SSH_DIR/guest-features`, written by a
+  finished build), leaves out what a bounded manifest doesn't list, takes a lock per
+  read-write volume (held by the start command, then by the `lume run` process), and
+  writes the extra `lume run` arguments and the VM's plan to `RUN_DIR`.
+- Once SSH is up, the plan goes to `sudo metacomputer-admin storage attach`. The
+  helper finds each volume among the extra read-write virtio disks in order and checks
+  its size, formats only a blank disk (ext4 with the volume's UUID), runs `e2fsck -p`,
+  grows the filesystem after `volume resize`, finds reference disks by volume label,
+  and mounts through descriptors opened without following links. It mounts all of it
+  or nothing; on failure, `start` stops the VM again.
+- **Folder volumes** go to `lume run --shared-dir PATH:ro|rw`. Lume puts every shared
+  folder in one virtiofs device (tag `com.apple.virtio-fs.automount`), a subfolder each,
+  named after its last path component; the helper mounts it at `/run/metacomputer/vfs`
+  (0700), proves each read-only one is read-only at the Mac (it tries to create a file as
+  root), and bind-mounts each at its mount point. For a read-write folder, `start` records
+  its contents before the VM boots, and a watcher process (`storage.py watch`, detached,
+  pid in `RUN_DIR/storage-watcher.pid`) compares the folder with that every 2 s or more:
+  quarantine on what's new or changed (exact value enforced), links whose text could lead
+  out of the folder replaced by a note (only relative targets with their `..` steps first,
+  within the link's depth, are kept), FIFOs, sockets and devices removed, set-id bits
+  dropped, `security` events. Entries are counted as each folder is listed and a pass has a
+  time limit; past either, or on any failure, it ends the VM's process first (SIGTERM, then
+  SIGKILL) and reports after. It forks a supervisor before its first pass, holding the other
+  end of a pipe the watcher writes a byte to as it makes progress: the supervisor ends the
+  VM's process when the pipe closes without the watcher's "finished" byte, when no byte comes
+  for 60 s, or when a read-write folder's disk drops below the reserve (it checks twice a
+  second). The watcher does a last pass and exits when `stop` signals it or the VM's
+  process is gone.
+- **S3 volumes** are folder volumes over a local copy (the shared copy). `start` takes a
+  per-volume sync lock (one VM syncs a volume), syncs once before the VM boots, and the
+  watcher syncs every `S3_SYNC_INTERVAL` on a thread of its own; `stop` syncs once more after
+  the VM is off. A sync (`s3_sync`), serialized per volume by an flock: reserve the shared copy
+  (a lock record, so no read-write folder around it can be attached meanwhile), open it after
+  checking it's still shareable and still the folder recorded at creation (path, device,
+  inode), open the private sync copy `storage/s3/NAME/sync/`, claim free space on both disks
+  (`storage/space/`, one record per claim, dropped with its holder), then: exchange (shared to
+  sync), `rclone bisync` between the sync copy and the bucket, exchange (sync to shared). The
+  exchange (`Exchange`) works against `storage/s3/NAME/stage.json`, both copies' file
+  signatures after the last exchange, through descriptors from the two roots: plain files
+  only, each copied from the descriptor that was checked (`fclonefileat` on one disk, a
+  sparse copy bounded to the checked size and the claim, re-checking free space every 64 MiB,
+  otherwise), written as `.metacomputer-tmp-*`; for the shared copy that's in its staging
+  folder `.NAME.mcstage.noindex` beside it (same filesystem, refused as a share), quarantined
+  through the held descriptor, then moved in with a cross-folder `renameatx_np`
+  (`RENAME_EXCL` for a new name); folders it makes there are made, marked and renamed the
+  same way. A file changed on both sides with the same size and time is compared by SHA-256
+  before it's recorded as in step; a conflict renames the older copy `NAME.conflictN.EXT` in
+  place. Free-space claims are keyed by allocation pool (`space_pool`: an APFS volume's
+  container from `diskutil info`, else the filesystem). Each rclone run reads the keys from the login Keychain
+  (`security find-generic-password -w`, output captured) into rclone's environment as an
+  env-defined remote (`RCLONE_CONFIG_MCS3_*`), with an empty `rclone.conf`, its output
+  (written to a file in its state folder, the tail kept) scrubbed of the keys before it reaches
+  `storage/s3/NAME/rclone.log`; bisync's state lives in `storage/s3/NAME/bisync/`. It runs
+  through `/usr/bin/sandbox-exec -p` with a profile that denies every write outside
+  `storage/s3/NAME/` and reads of the home folders, `/Volumes` and the shared temporary
+  folders except that folder, its config and itself (rclone's HOME and TMPDIR are in there
+  too), capped with `--max-transfer` to its claim and killed if the disk falls below the
+  reserve while it runs. Backups are pruned to `S3_BACKUP_MAX_GB` before and after. A resync
+  runs only on `volume sync NAME --resync` (or for the first sync of an empty copy). rclone
+  itself is `.cache/rclone-vVERSION/rclone`, from `scripts/fetch-artifacts.sh rclone` (signed
+  `SHA256SUMS`, pinned key and digest), its digest checked before each run.
+- **Registered paths are walked** (`walk_dir`, `walk_file`): from `/`, one component at a time,
+  each `openat(..., O_NOFOLLOW | O_DIRECTORY)` relative to the last, so no link anywhere in a
+  path is followed. Paths are registered as the kernel spells them (`fd_path` of the checked
+  descriptor), and a record in any other spelling is refused. Images (disk volumes, reference
+  disks), S3 local copies and their staging folders record their device and inode when made
+  (there's no re-binding: an item without one is deleted and created again), and
+  `open_image` checks them at every start, checkpoint, restore, resize and delete. A staging
+  folder is a `stage` item for the lock rules: no folder record of any VM may overlap it, while
+  a create or a sync holds it. Its temporary names carry a session prefix recorded in
+  `storage/s3/NAME/stage-sessions.json` before use; cleanup removes only those. A new
+  item's folder (`destination`: `--dir` or `STORAGE_DIR`, resolved once, then walked) is
+  reserved before anything is made in it.
+- **Locks between items** follow one symmetric rule (`pair_conflict`), checked against other
+  holders' live records and between a plan's own items: one exclusive lock per disk volume and
+  read-write folder; a read-write folder may not overlap another, hold a folder someone else
+  has, or hold an image anything uses (reference disks take shared records). Operations
+  (checkpoint save, restore and delete, resize, delete, S3 sync) take records too, held until
+  their last change. The folders holding images are refused as shares outright.
+- **A storage failure after `lume run`** (a changed path, no watcher, a failed mount) ends
+  the VM from the Mac: `vm_kill` runs `storage.py kill-vm` (the `lume run` pid from
+  `RUN_DIR/lume.pid`, checked by its command line; SIGTERM, then SIGKILL) and then Lume's
+  stop, each with a host deadline; the guest is never asked. An ordinary `vm_stop` sends the
+  guest's poweroff in the background, so its 90 s deadline holds.
+- **`stop`**, `reset`, `restore` and `baseline` stop the watcher, sync S3 volumes a last
+  time and release the locks once the VM is off.
+  `restore NAME` of a checkpoint taken `--with-volumes` first puts back each volume
+  from its snapshot (an APFS clone beside the image, or a sparse copy).
+- `guest-status` reports what the helper mounted (`/run/metacomputer/storage.json`,
+  checked against the live mount table); `status` and `security` show it.
+
 ## Network
 
 Lume runs the VM in `gateway:` mode: its network device is a datagram socket
@@ -586,8 +693,8 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 
 | Command | Implementation |
 | --- | --- |
-| `start` | start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags), wait for SSH, the XFCE session and an MCP handshake |
-| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw |
+| `start` | check and lock the storage (`VOLUMES`, `REFDISKS`; none with `--no-volumes`), start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags) and the storage's `--disk`/`--mount`/`--usb-storage`, wait for SSH, mount the storage, wait for the XFCE session and an MCP handshake |
+| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw, release the storage locks |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe (through the hub, as a status client), the hub (pid, clients, idle time) |
 | `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
 | `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |

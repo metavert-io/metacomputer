@@ -78,5 +78,12 @@ EOF
       standard) rm -f "$POLICY"; echo standard ;;
       *) echo "usage: metacomputer-admin driver-policy status|bounded|standard" >&2; exit 2 ;;
     esac ;;
-  *) echo "usage: metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall|ssh-auth status|cert|key|driver-policy status|bounded|standard" >&2; exit 2 ;;
+  storage)
+    # Volumes, Mac folders and reference disks the host attached to this boot (storage-helper:
+    # a plan on stdin for attach; it mounts all of it or nothing).
+    case "${2:-}" in
+      version|attach|status) exec /usr/bin/python3 -I /opt/metacomputer/bin/storage-helper "$2" ;;
+      *) echo "usage: metacomputer-admin storage version|attach|status" >&2; exit 2 ;;
+    esac ;;
+  *) echo "usage: metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|provision-log|updates|firewall|ssh-auth status|cert|key|driver-policy status|bounded|standard|storage version|attach|status" >&2; exit 2 ;;
 esac

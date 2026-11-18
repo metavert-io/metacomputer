@@ -4,7 +4,7 @@
 #
 # Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
 #
-#   start | stop [--force] | restart | status [--json] | reset [--yes]
+#   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
 #   call [--session NAME] TOOL ['JSON']
@@ -21,14 +21,25 @@
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
 #   task start SLUG | finish NAME  one folder per task (guest + host), artifacts listed
-#   put HOST_PATH... [--to GUEST_DIR]          copy files into the VM (default ~/Inbox)
+#   put HOST_PATH... [--to GUEST_DIR] [--overwrite]
+#                                  copy files into the VM (default ~/Inbox), each checked by SHA-256; a
+#                                  name that's taken lands as "name (1).ext" unless --overwrite
 #   get GUEST_PATH [HOST_DIR] [--task NAME]    copy files out of the VM
 #   shot [HOST_PATH] [--task NAME] screenshot of the whole VM desktop to the Mac
 #   contact-sheet MP4 [OUT.png]    12 frames of a recording in one image
 #   record start [NAME] [FPS] | stop | status | moments FILE
 #                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR)
 #   recordings [--sync] [N]
-#   checkpoint NAME [--replace] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes]
+#   checkpoint NAME [--replace] [--with-volumes] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes]
+#   volume create NAME --size 20G [--dir PATH] | create NAME --folder PATH | list [--json] | delete NAME [--yes]
+#          | resize NAME --size 40G
+#                                  disk volumes (kept outside the VM) and Mac folders (shared, read-only unless
+#                                  :rw), attached with VOLUMES=name[:mountpoint][:rw]
+#   volume create NAME --s3 --bucket B --endpoint URL [--region R] [--prefix P] [--dir PATH]
+#          | keys NAME (your own terminal) | test NAME | sync NAME [--force] [--resync]
+#                                  S3 volumes: a folder kept in step with a bucket (rclone bisync, on the Mac)
+#   refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
+#                                  read-only reference disks, attached with REFDISKS=name[:mountpoint]
 #   view                           how to watch / take over the desktop (VNC)
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
@@ -140,23 +151,76 @@ guest_import() { # DEST [--quiet]
 
 need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
 
-do_start() {
+do_start() { # [--no-volumes]
+  local novol=0 a
+  for a in "$@"; do case "$a" in --no-volumes) novol=1 ;; *) die "usage: metacomputer start [--no-volumes]" ;; esac; done
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
-    warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force
+    warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force; storage_release --quiet
+  fi
+  if vm_running "$VM_NAME"; then
+    [ "$novol" = 1 ] && warn "already running: --no-volumes applies at the next start"
+  else
+    storage_prepare "$novol"
   fi
   vm_start "$VM_NAME"
+  storage_started
   ok "VM running (gateway policy: config/netgw-rules.json)"
-  wait_ssh ops 240 || die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"
+  wait_ssh ops 240 || { storage_abort; die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"; }
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
   sync_guest_options
+  storage_attach
   wait_session 240 || die "XFCE session not ready (metacomputer ssh admin; sudo metacomputer-admin logs)"
   ok "XFCE session ready"
   mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (metacomputer status)"
   emit_event lifecycle started info "The virtual computer $VM_NAME started" ""
   events_watcher_start
   say "ready. Live view: metacomputer view"
+}
+
+# --- storage (lib/storage.py, docs/storage.md): volumes and reference disks ------------
+# Attached at `lume run` (no hot-plug), so: check and lock before the VM starts, mount once SSH
+# is up, release after it stops. A problem before the VM starts refuses the start; one after it
+# started stops it again, so the VM never runs with half its storage.
+storage_py() { ( export_options; MCOMP_LAB_ROOT="$LAB_ROOT" "$PY" "$LAB_ROOT/lib/storage.py" "$@" ); }
+storage_prepare() { # NOVOL(0|1): sets STORAGE_RUN_ARGS, or dies
+  STORAGE_RUN_ARGS=()
+  if [ "${1:-0}" = 1 ]; then storage_py prepare --pid $$ --no-volumes || exit 1
+  else storage_py prepare --pid $$ || exit 1; fi
+  local f="$RUN_DIR/storage-args" line
+  if [ -s "$f" ]; then
+    while IFS= read -r line; do STORAGE_RUN_ARGS+=("$line"); done < "$f"
+  fi
+  if [ "${1:-0}" = 1 ] && [ -n "${VOLUMES:-}${REFDISKS:-}" ]; then ok "--no-volumes: nothing of VOLUMES or REFDISKS is attached"; fi
+  return 0
+}
+storage_started() { # the VM's process holds the locks; every attached path must still be what was checked
+  [ -s "$RUN_DIR/storage-state.json" ] && [ -s "$RUN_DIR/lume.pid" ] || return 0
+  storage_py started --pid "$(cat "$RUN_DIR/lume.pid")" && return 0
+  storage_abort
+  die "not started: its storage changed between the checks and the VM's start (above)"
+}
+storage_release() { storage_py release "$@" || true; }
+storage_abort() { # the VM started but its storage can't be mounted or protected: stop it, release everything
+  # Powered off from the Mac (vm_kill), never by asking the guest: a guest that stalls a shutdown request
+  # would otherwise keep running with storage that isn't protected.
+  [ -s "$RUN_DIR/storage-state.json" ] || return 0
+  warn "stopping $VM_NAME again (powered off from the Mac), so it doesn't run without its storage"
+  vm_kill "$VM_NAME"
+  storage_release --quiet
+}
+storage_attach() { # the VM's answers are read with a size cap and a deadline (lib/storage.py guest_call)
+  [ -s "$RUN_DIR/storage-plan.json" ] || return 0
+  ssh_base admin
+  storage_py attach --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}"
+  case $? in
+    0) ;;
+    3) storage_abort
+       die "this VM can't mount storage: it was built before storage support. Rebuild it (metacomputer build --replace; volumes are kept), or start it with --no-volumes" ;;
+    *) storage_abort
+       die "not started: the VM couldn't mount its storage (above). Fix it, or start with --no-volumes" ;;
+  esac
 }
 
 # --- the event watcher (docs/events.md): only while a sink is configured --------
@@ -262,11 +326,13 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
     fi
     gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
+    storage_release
     emit_event lifecycle stopped info "The virtual computer $VM_NAME stopped" "" "forced=$([ -n "$force" ] && echo yes || echo no)"
   else
     netgw_stop
     events_watcher_stop
     hub_stop
+    storage_release --quiet
   fi
   ok "stopped"
 }
@@ -285,11 +351,17 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
     req_err="$(export_options; "$PY" "$LAB_ROOT/lib/driver_profiles.py" render 2>&1 >/dev/null)" || true
   fi
   export_options
-  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" <<'EOF'
+  local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
+  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" "$stg" <<'EOF'
 import json, os, subprocess, sys
-js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir = sys.argv[1:]
+js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir, stg = sys.argv[1:]
 sys.path.insert(0, libdir)
+import storage
 import vm_shell
+try:
+    stg = json.loads(stg or "{}")
+except ValueError:
+    stg = {}
 e = os.environ.get
 log_on = e("MCOMP_ACTION_LOG") == "on"
 key = e("MCOMP_ACTION_LOG_KEY", "")
@@ -307,6 +379,7 @@ out = {
              "origins": e("MCOMP_DRIVER_ORIGINS", "").split(), "expires": e("MCOMP_DRIVER_EXPIRES"), "idle": e("MCOMP_DRIVER_IDLE"),
              "vm_policy": vm_drv or None, "problem": req_err.strip() or None},
   "shell": vm_shell.describe_settings(),
+  "storage": storage.security_summary(stg),
 }
 try:
     import learn_store
@@ -356,6 +429,8 @@ if out["lessons"] is not None:
     for pr in (lo.get("problem"), lo.get("warning")):
         if pr:
             print(f"  ! {_esc(pr)}")
+for line in storage.describe_security(out["storage"]):
+    print(line)
 EOF
 }
 
@@ -385,16 +460,17 @@ do_status() {
   export_options
   local ev; ev="$("$PY" "$LAB_ROOT/lib/events.py" status --json 2>/dev/null || echo '{}')"
   local hub; hub="$("$PY" "$LAB_ROOT/lib/mcp_hub.py" status --json 2>/dev/null || echo '{}')"
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" "$hub" <<'EOF'
+  local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" "$hub" "$stg" <<'EOF'
 import json, math, os, re, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib, hub = sys.argv[1:]
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib, hub, stg = sys.argv[1:]
 def parsed(text):   # the VM side's JSON: anything that isn't an object is no report
     try:
         v = json.loads(text or "{}")
     except (ValueError, RecursionError):
         return {}
     return v if isinstance(v, dict) else {}
-gs = parsed(gs); mcp = parsed(mcp)
+gs = parsed(gs); mcp = parsed(mcp); stg = parsed(stg)
 try:
     hub = json.loads(hub or "{}")
 except ValueError:
@@ -407,8 +483,10 @@ sharing = None
 if hs:
     parts = (hs.split("---") + ["", "", ""])[:3]
     ports, devices, tags = (p.split() for p in parts)
+    # Rosetta is a virtiofs device (0x001a); so is the share for folder volumes, when there is one.
+    shares = 1 if any(i.get("kind") in ("folder", "s3") for i in (stg or {}).get("items", [])) else 0
     sharing = {"clipboard": "com.redhat.spice.0" in ports, "audio": "0x0019" in devices,
-               "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
+               "rosetta": "rosetta" in tags or (devices.count("0x001a") > shares and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
        "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
        "host_sharing": sharing, "lume": lume, "guest_layout": layout,
@@ -416,7 +494,8 @@ out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.s
                    "driver_mode": os.environ.get("MCOMP_DRIVER_MODE", "standard"),
                    "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None},
        "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None,
-       "hub": hub or None}
+       "hub": hub or None,
+       "storage": dict(stg, guest=gs.get("storage") if isinstance(gs.get("storage"), dict) else None) if stg else None}
 sys.path.insert(0, lib)
 try:
     import learn_store
@@ -503,6 +582,11 @@ if ev.get("sinks"):
     print(f"events        {events.status_line(ev)}   (metacomputer events)")
 if out["lessons"] is not None:
     print(f"lessons       {_esc(learn_store.status_line(out['lessons']))}   (metacomputer learn list)")
+if stg:
+    sys.path.insert(0, lib)
+    import storage
+    for line in storage.describe_status(stg, gs.get("storage") if isinstance(gs.get("storage"), dict) else None, vm == "running"):
+        print(line)
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -532,6 +616,10 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
     say "saving guest recordings to the host first"
     do_recordings --sync >/dev/null || warn "could not sync guest recordings"
     vm_stop "$VM_NAME"
+    storage_release --quiet
+  fi
+  if [ -n "${RESTORE_VOLUMES:-}" ]; then
+    storage_py checkpoint restore "$RESTORE_VOLUMES" || die "the volumes couldn't be rolled back; the VM wasn't replaced"
   fi
   expect_guard   # again, right before the working VM is deleted and replaced
   if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force >/dev/null || die "lume delete failed"; fi
@@ -554,33 +642,48 @@ do_reset() {
 CKPT_PREFIX="$VM_NAME-ckpt-"
 ckpt_name() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "checkpoint names: lowercase letters, digits and dashes (max 40)"; }
 
-do_checkpoint() { # NAME [--replace] | --delete NAME [--yes]
+do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
   if [ "${1:-}" = "--delete" ]; then
     ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
-    confirm "Delete checkpoint '$2'?"
+    local vols; vols="$(storage_py checkpoint list "$2" 2>/dev/null)"
+    confirm "Delete checkpoint '$2'${vols:+ (and its snapshot of volumes: $vols)}?"
     "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
+    storage_py checkpoint delete "$2" || warn "could not delete the volume snapshots of checkpoint '$2'"
     emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
     ok "checkpoint '$2' deleted"; return 0
   fi
-  local name="${1:-}" replace=0; [ "${2:-}" = "--replace" ] && replace=1
+  local name="" replace=0 withvol=0 a
+  for a in "$@"; do
+    case "$a" in --replace) replace=1 ;; --with-volumes) withvol=1 ;; -*) die "usage: metacomputer checkpoint NAME [--replace] [--with-volumes]" ;; *) name="$a" ;; esac
+  done
   ckpt_name "$name"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
+    storage_py checkpoint delete "$name" || true
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
+  if [ $withvol = 1 ] && ! storage_py checkpoint save "$name"; then
+    "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null 2>&1
+    die "checkpoint '$name' not saved: its volumes couldn't be snapshotted (above)"
+  fi
   emit_event lifecycle checkpoint info "Checkpoint '$name' of $VM_NAME saved" "" "name=$name" "change=saved"
-  ok "checkpoint '$name' saved (restore with: metacomputer restore $name)"
+  ok "checkpoint '$name' saved$([ $withvol = 1 ] && echo ' with its volumes') (restore with: metacomputer restore $name)"
 }
 
 do_checkpoints() {
-  "$LUME" ls --format json 2>/dev/null | "$PY" -c 'import json, sys
-pre = sys.argv[1]; names = [v["name"][len(pre):] for v in json.load(sys.stdin) if v["name"].startswith(pre)]
-print("\n".join(sorted(names)) if names else "no checkpoints (metacomputer checkpoint NAME, with the computer stopped)")' "$CKPT_PREFIX"
+  local names n vols
+  names="$("$LUME" ls --format json 2>/dev/null | "$PY" -c 'import json, sys
+pre = sys.argv[1]; print("\n".join(sorted(v["name"][len(pre):] for v in json.load(sys.stdin) if v["name"].startswith(pre))))' "$CKPT_PREFIX")"
+  [ -n "$names" ] || { echo "no checkpoints (metacomputer checkpoint NAME, with the computer stopped)"; return 0; }
+  while IFS= read -r n; do
+    vols="$(storage_py checkpoint list "$n" 2>/dev/null)"
+    echo "$n${vols:+   (with volumes: $vols)}"
+  done <<< "$names"
 }
 
 do_restore() { # NAME [--yes] [--override]
@@ -588,8 +691,9 @@ do_restore() { # NAME [--yes] [--override]
   local name="${REST[0]:-}"; ckpt_name "$name"
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
-  confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded (host recordings and results are kept)"
-  restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
+  local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
+  confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept)"
+  RESTORE_VOLUMES="${vols:+$name}" restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
 }
 
 do_baseline() {
@@ -597,7 +701,7 @@ do_baseline() {
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   local was_running=0; vm_running "$VM_NAME" && was_running=1
-  [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; }
+  [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
@@ -883,21 +987,11 @@ do_who() {
   "$PY" "$LAB_ROOT/lib/owners.py" who
 }
 
-do_put() { # HOST_PATH... [--to GUEST_DIR]
-  local to="~/Inbox" files=() f
-  while [ $# -gt 0 ]; do
-    case "$1" in --to) to="${2:-}"; shift 2 ;; *) files+=("$1"); shift ;; esac
-  done
-  [ ${#files[@]} -gt 0 ] || die "usage: metacomputer put HOST_PATH... [--to GUEST_DIR]"
+do_put() { # HOST_PATH... [--to GUEST_DIR] [--overwrite]   (lib/guest_put.py: SHA-256 checked, never overwrites unless asked)
+  [ $# -gt 0 ] || die "usage: metacomputer put HOST_PATH... [--to GUEST_DIR] [--overwrite]"
   need_running
-  to="$(guest_path "$to")" || exit 1
-  gssh ops "mkdir -p $(printf %q "$to")" >/dev/null || die "cannot create $to in the guest"
-  for f in "${files[@]}"; do
-    [ -e "$f" ] || die "no such file: $f"
-    COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$(dirname "$f")" -cf - "$(basename "$f")" \
-      | gssh ops "tar -C $(printf %q "$to") --no-same-owner -xf -" >/dev/null || die "copy failed: $f"
-    echo "$to/$(basename "$f")"
-  done
+  ssh_base ops
+  MCOMP_GUEST_USER="$GUEST_USER" exec "$PY" "$LAB_ROOT/lib/guest_put.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
 }
 
 do_get() { # GUEST_PATH [HOST_DIR] [--task NAME]
@@ -1190,9 +1284,10 @@ for line in sys.stdin:
 }
 
 case "$cmd" in
-  start)      do_start ;;
+  start)      do_start "$@" ;;
   stop)       do_stop "$@" ;;
-  restart)    do_stop "$@"; do_start ;;
+  restart)    nv=(); for a in "$@"; do [ "$a" = --no-volumes ] && nv=(--no-volumes); done
+              do_stop "$@"; do_start ${nv[@]+"${nv[@]}"} ;;
   status)     do_status "$@" ;;
   reset)      do_reset "$@" ;;
   baseline)   do_baseline "$@" ;;
@@ -1226,6 +1321,7 @@ case "$cmd" in
   task)       do_task "$@" ;;
   checkpoint) do_checkpoint "$@" ;;
   checkpoints) do_checkpoints ;;
+  volume|refdisk) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/storage.py" "$cmd" "$@" ;;
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;
   _record-pipe) do_record_pipe "$@" ;;

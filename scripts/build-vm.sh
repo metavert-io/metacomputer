@@ -47,6 +47,9 @@ for k in admin ops mcp fill proxy hostkey; do   # fill, proxy: the secrets accou
   [ -f "$SSH_DIR/$k" ] || { mkdir -p -m 700 "$SSH_DIR"; rm -f "$SSH_DIR/$k.pub"; ssh-keygen -q -t ed25519 -N '' -C "mcomp-$k" -f "$SSH_DIR/$k"; }
 done
 echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
+# What the VM being built can do that older builds can't (bin/metacomputer checks it before attaching
+# storage). Gone until this build finishes, so a failed build never claims support.
+rm -f "$SSH_DIR/guest-features"
 
 # --- 1. VM shell --------------------------------------------------------------
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
@@ -56,6 +59,9 @@ for vm in "$VM_NAME" "$BASELINE_NAME"; do
     "$LUME" delete "$vm" --force
   fi
 done
+# Storage the old VM had attached (docs/storage.md): stop its watcher, sync S3 volumes once more, let go of
+# the locks. Volumes and their files stay; the new VM attaches them at its first start.
+( export_options; "$PY" "$LAB_ROOT/lib/storage.py" release --quiet ) || true
 say "creating $VM_NAME ($VM_CPU vCPU, $VM_MEMORY, $VM_DISPLAY)"
 "$LUME" create "$VM_NAME" --os linux --cpu "$VM_CPU" --memory "$VM_MEMORY" \
   --disk-size "$((VM_DISK_BYTES / 1024 / 1024 / 1024))GB" --display "$VM_DISPLAY" --network nat
@@ -210,5 +216,7 @@ ok "baseline $BASELINE_NAME created"
 # it from there). On the Mac only the public half is needed (known_hosts, the secrets
 # vault's pin); anything able to read the private half could pose as the VM.
 rm -f "$SSH_DIR/hostkey"
+# storage=1: storage-helper and `metacomputer-admin storage` (volumes, Mac folders, reference disks).
+printf 'storage=1\nbuild=%s\n' "$TS" > "$SSH_DIR/guest-features"
 ok "removed the VM's private host key from $SSH_DIR (the VM keeps it; a rebuild makes a new one)"
 say "build complete. Start it with: metacomputer start"

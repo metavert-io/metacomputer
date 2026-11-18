@@ -1,0 +1,6 @@
+# metacomputer storage: the desktop's automounter leaves the disks metacomputer attaches alone
+# (volumes are extra virtio disks; reference disks are read-only virtio or USB disks).
+# Only `metacomputer-admin storage attach` mounts them, where the host's plan says.
+SUBSYSTEM=="block", KERNEL=="vd[b-z]*", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", KERNEL=="sr[0-9]*", ENV{UDISKS_IGNORE}="1"

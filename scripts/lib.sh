@@ -147,6 +147,7 @@ host_sharing_args() {
   fi
 }
 
+STORAGE_RUN_ARGS=()   # extra `lume run` arguments for this VM's storage (bin/metacomputer storage_prepare)
 vm_start() { # NAME [seed.iso]
   local name="$1" seed="${2:-}" mac
   vm_running "$name" && { ok "$name already running"; return 0; }
@@ -156,7 +157,9 @@ vm_start() { # NAME [seed.iso]
   [ -n "$seed" ] && args="$args --mount $seed"
   args="$args$(host_sharing_args)"
   # shellcheck disable=SC2086
-  daemonize "$LOG_DIR/lume-$name.log" "$LUME" $args
+  daemonize "$LOG_DIR/lume-$name.log" "$LUME" $args ${STORAGE_RUN_ARGS[@]+"${STORAGE_RUN_ARGS[@]}"}
+  # The run process is the VM (Virtualization.framework runs in it): storage locks name it as their holder.
+  echo "$!" > "$RUN_DIR/lume.pid"
   local i=0; while ! vm_running "$name" && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done
   vm_running "$name" || { tail -5 "$LOG_DIR/lume-$name.log" >&2; netgw_stop; die "VM $name did not start"; }
 }
@@ -165,16 +168,38 @@ vm_stop() { # NAME [--force]
   # run process, which calls VZVirtualMachine.stop): recent writes in the guest
   # are lost. So shut the guest down from inside first (sync + systemd
   # poweroff via the admin verb) and only fall back to Lume's stop after 90 s.
-  local name="$1" i=0
+  # The 90 s run from the start, whatever the guest does with the request: the
+  # SSH command runs in the background, so a guest that keeps it open without
+  # ever powering off can't hold the Mac's side up.
+  local name="$1" i=0 sp deadline="${MCOMP_STOP_DEADLINE:-90}"
   if vm_running "$name"; then
     if [ "${2:-}" != "--force" ]; then
-      gssh admin 'sync; sudo -n /usr/local/sbin/metacomputer-admin poweroff' >/dev/null 2>&1 || true
-      while vm_running "$name" && [ $i -lt 90 ]; do sleep 1; i=$((i+1)); done
-      vm_running "$name" && warn "guest did not power off within 90 s; forcing"
+      gssh admin 'sync; sudo -n /usr/local/sbin/metacomputer-admin poweroff' >/dev/null 2>&1 &
+      sp=$!
+      while vm_running "$name" && [ $i -lt "$deadline" ]; do sleep 1; i=$((i+1)); done
+      kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+      vm_running "$name" && warn "guest did not power off within $deadline s; forcing"
     fi
-    vm_running "$name" && "$LUME" stop "$name" --force >/dev/null 2>&1
+    vm_running "$name" && vm_force_stop "$name"
   fi
   i=0; while vm_running "$name" && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+  netgw_stop
+}
+vm_force_stop() { # NAME: Lume's immediate power-off, itself bounded (30 s)
+  local name="$1" i=0 sp
+  "$LUME" stop "$name" --force >/dev/null 2>&1 &
+  sp=$!
+  while kill -0 "$sp" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+  kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  return 0
+}
+vm_kill() { # NAME: power the VM off from the Mac now, asking the guest nothing (storage-security failures)
+  # The VM's own `lume run` process (checked to be this VM's) gets SIGTERM, then SIGKILL after 10 s
+  # (lib/storage.py kill-vm); then Lume's stop as a fallback. Every step has a host deadline.
+  local name="$1" i=0
+  ( export_options; MCOMP_LAB_ROOT="$LAB_ROOT" "$PY" "$LAB_ROOT/lib/storage.py" kill-vm --grace 10 ) >/dev/null 2>&1 || true
+  vm_running "$name" && vm_force_stop "$name"
+  while vm_running "$name" && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
   netgw_stop
 }
 
@@ -186,7 +211,8 @@ export_options() {
          MCOMP_SSH_AUTH="$SSH_AUTH" MCOMP_SSH_CERT_TTL="$SSH_CERT_TTL" MCOMP_DRIVER_MODE="$DRIVER_MODE" MCOMP_DRIVER_PROFILE="$DRIVER_PROFILE" \
          MCOMP_DRIVER_MANIFEST="$DRIVER_MANIFEST" MCOMP_DRIVER_ORIGINS="$DRIVER_ORIGINS" MCOMP_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
          MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
-         MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}"
+         MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
+         MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}"
   # The hub (lib/mcp_hub.py) and its coordinate guard. MCOMP_MCP_HUB / MCOMP_COORD_GUARD already in the
   # environment win over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \

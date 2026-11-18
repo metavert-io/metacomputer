@@ -999,7 +999,7 @@ def test_e():
               any(x.get("host") == "10.255.255.254" and x.get("port") == 9 for x in dests), ev)
 
         # open-untrusted on a local page with a password field -> security event
-        mcomp(BASE, "put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", "/tmp/mcomp-events-site")
+        mcomp(BASE, "put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", "/tmp/mcomp-events-site", "--overwrite")
         mcomp(BASE, "ssh", "ops", "cd /tmp/mcomp-events-site/site && (nohup python3 -m http.server 8793 --bind 127.0.0.1 "
                                   ">/dev/null 2>&1 &)")
         time.sleep(1)

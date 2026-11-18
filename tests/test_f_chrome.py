@@ -30,7 +30,7 @@ BASE = f"http://127.0.0.1:{PORT}"
 
 def serve():
     subprocess.run([os.path.join(LAB, "bin", "metacomputer"), "put", os.path.join(LAB, "tests", "fixtures", "site"),
-                    "--to", GUEST_RUNS], check=True, capture_output=True)
+                    "--to", GUEST_RUNS, "--overwrite"], check=True, capture_output=True)
     guest(f"cd {GUEST_RUNS}/site && (nohup python3 -m http.server {PORT} --bind 127.0.0.1 "
           f">/dev/null 2>&1 & echo $! > /tmp/cua-test-http.pid); sleep 1", check=True)
 
