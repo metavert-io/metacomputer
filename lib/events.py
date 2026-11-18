@@ -297,6 +297,25 @@ def load_config():
     return cfg
 
 
+_config_cache = {"key": None, "cfg": None}
+
+
+def config_for_reading():
+    """load_config() for a caller that only reads it, on a hot path (the relay's `actions` check runs once
+    per action-log record): parsed again only when events.json's inode, size or mtime changes. The same
+    object is returned each time: don't change it."""
+    p = config_path()
+    try:
+        st = os.lstat(p)
+        key = (p, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode, st.st_uid)
+    except FileNotFoundError:
+        key = (p, None)
+    if key != _config_cache["key"]:
+        cfg = load_config()                  # its checks (link, owner, mode) run whenever the file changes
+        _config_cache.update(key=key, cfg=cfg)
+    return _config_cache["cfg"]
+
+
 def render_config(cfg):
     return json.dumps(cfg, indent=2, sort_keys=True) + "\n"
 
@@ -1088,25 +1107,56 @@ def short_error(e):
     return (type(e).__name__ + ": " + str(e))[:200]
 
 
-def http_post(url, body, headers, ca_pem, timeout):
-    """POST without redirects or proxies. Returns (status, error)."""
+def http_post(url, body, headers, ca_pem, timeout, track=None):
+    """POST without redirects or proxies. Returns (status, error, the first 64 KB of the answer's body).
+    `track` (a list) gets a second descriptor of the socket, so deliver() can cut it off at its deadline."""
     u = urlsplit(url)
     conn = None
     try:
+        # The socket is made here, so `track` can hold a second descriptor for it from the start:
+        # shutting that down cuts the connection even in the middle of the TLS handshake.
+        raw = socket.create_connection((u.hostname, u.port or (443 if u.scheme == "https" else 80)), timeout=timeout)
+        if track is not None:
+            track.append(raw.dup())
         if u.scheme == "https":
             conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=timeout, context=tls_context(ca_pem))
+            try:
+                conn.sock = tls_context(ca_pem).wrap_socket(raw, server_hostname=u.hostname)
+            except BaseException:
+                raw.close()
+                raise
         else:
             conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
+            conn.sock = raw
         path = (u.path or "/") + (f"?{u.query}" if u.query else "")
         conn.request("POST", path, body=body, headers=headers)
         r = conn.getresponse()
-        r.read(65536)
-        return r.status, None
+        data = r.read(65536)
+        return r.status, None, data
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError) as e:
-        return None, short_error(e)
+        return None, short_error(e), b""
     finally:
         if conn is not None:
             conn.close()
+
+
+def otlp_rejected(body, sent):
+    """(records the collector rejected, its message) from an OTLP/HTTP JSON answer: a 2xx with
+    partialSuccess.rejectedLogRecords > 0 stored only part of the batch. OTLP says not to retry those."""
+    try:
+        d = json.loads(body or b"{}")
+    except ValueError:
+        return 0, ""
+    ps = (d.get("partialSuccess") or d.get("partial_success")) if isinstance(d, dict) else None
+    if not isinstance(ps, dict):
+        return 0, ""
+    raw = ps.get("rejectedLogRecords", ps.get("rejected_log_records", 0))   # an int64: a number or a string in JSON
+    try:
+        n = int(raw) if isinstance(raw, (int, str)) and not isinstance(raw, bool) else 0
+    except ValueError:
+        n = 0
+    msg = ps.get("errorMessage") or ps.get("error_message") or ""
+    return max(0, min(n, sent)), clean_str(msg, 160) if isinstance(msg, str) else ""
 
 
 def otlp_url(url):
@@ -1118,12 +1168,43 @@ def otlp_url(url):
 
 
 def deliver(sink, batch, timeout):
-    """Send events to one sink. Returns (ok, error, permanent): permanent = this batch will never be accepted."""
+    """Send events to one sink within `timeout` seconds of wall-clock time. Returns (ok, error, permanent,
+    rejected): permanent = this batch will never be accepted; rejected = how many of its events an OTLP
+    collector refused in a 2xx answer (partial success: delivered, but those are dropped, not retried).
+
+    Socket timeouts apply to each read, so a server that sends a byte every second could hold a
+    connection for ever. The exchange runs in a daemon thread: past the deadline its sockets are shut
+    down and this returns "timed out", so the command waiting on it (start, stop, sink add) ends on time."""
+    track, box = [], {}
+
+    def run():
+        try:
+            box["r"] = _deliver(sink, batch, timeout, track)
+        except Exception as e:                  # never let a sender's thread die silently
+            box["r"] = (False, short_error(e), False, 0)
+        finally:
+            for s in list(track):               # a late finish still closes what it made
+                s.close()
+    t = threading.Thread(target=run, daemon=True, name="events-deliver")
+    t.start()
+    t.join(max(0.1, timeout) + 0.5)
+    done = "r" in box
+    for s in list(track):                       # second descriptors of the connection (see http_post)
+        if not done:
+            try:
+                s.shutdown(socket.SHUT_RDWR)    # cut it off: the thread then ends with an error
+            except OSError:
+                pass
+        s.close()
+    return box["r"] if done else (False, "timed out", False, 0)
+
+
+def _deliver(sink, batch, timeout, track):
     kind, url = sink["kind"], sink["url"]
     try:
         check_url(kind, url)                 # events.json may have been edited by hand
     except EventsError as e:
-        return False, f"the URL isn't allowed: {e}", False
+        return False, f"the URL isn't allowed: {e}", False, 0
     extra = {k: v for k, v in sink.get("headers") or []}
     if kind == "syslog":
         # Syslog over TCP has no acknowledgement: success means TLS took every byte and the connection
@@ -1132,6 +1213,7 @@ def deliver(sink, batch, timeout):
         u = urlsplit(url)
         try:
             raw = socket.create_connection((u.hostname, u.port or 6514), timeout=timeout)
+            track.append(raw.dup())              # a second descriptor: shutting it down cuts the connection, TLS or not
             try:
                 tls = tls_context(sink.get("ca_pem")).wrap_socket(raw, server_hostname=u.hostname)
                 tls.sendall(b"".join(syslog_frame(ev) for ev in batch))
@@ -1141,13 +1223,13 @@ def deliver(sink, batch, timeout):
                 except (socket.timeout, ssl.SSLZeroReturnError, ssl.SSLEOFError):
                     pass
                 except (OSError, ssl.SSLError) as e:    # a reset or a TLS alert: it wasn't taken cleanly
-                    return False, short_error(e), False
+                    return False, short_error(e), False, 0
                 tls.close()
             finally:
                 raw.close()
-            return True, None, False
+            return True, None, False, 0
         except (OSError, ssl.SSLError, ValueError) as e:
-            return False, short_error(e), False
+            return False, short_error(e), False, 0
     if kind == "webhook":
         ev = batch[0]
         body = dumps(cloudevent(ev)).encode()
@@ -1163,13 +1245,18 @@ def deliver(sink, batch, timeout):
         body = dumps(payload).encode()
         headers = {**extra, "Content-Type": "application/json", "User-Agent": USER_AGENT}
     else:
-        return False, f"unknown kind {kind}", False
-    status, err = http_post(target, body, headers, sink.get("ca_pem"), timeout)
+        return False, f"unknown kind {kind}", False, 0
+    status, err, answer = http_post(target, body, headers, sink.get("ca_pem"), timeout, track)
     if err:
-        return False, err, False
+        return False, err, False, 0
     if 200 <= status < 300:
-        return True, None, False
-    return False, f"HTTP {status}", status in (400, 413, 415, 422)
+        if kind == "otlp":
+            n, msg = otlp_rejected(answer, len(batch))
+            if n:
+                return (True, f"the collector rejected {n} of {len(batch)} event(s) (OTLP partial success"
+                        + (f": {msg}" if msg else "") + "); not retried", False, n)
+        return True, None, False, 0
+    return False, f"HTTP {status}", status in (400, 413, 415, 422), 0
 
 
 def backoff(failures):
@@ -1194,7 +1281,8 @@ def read_queue(name, gen, after):
 
 
 STATUS0 = {"sent_seq": 0, "delivered": 0, "failures": 0, "last_error": None, "last_error_at": None,
-           "last_ok_at": None, "next_retry": 0, "dropped": 0, "head_attempts": 0, "single_until": 0}
+           "last_ok_at": None, "next_retry": 0, "dropped": 0, "head_attempts": 0, "single_until": 0,
+           "rejected": 0, "last_rejection_at": None}
 
 
 def load_status(name, gen):
@@ -1279,11 +1367,14 @@ def flush_sink(name, sink, budget=EMIT_BUDGET, force=False, wait_lock=1.0):
                     st.update(next_retry=free_at, waiting="phone limit")
                     save_status(name, gen, st)
                     break
-            ok, err, permanent = deliver(sink, batch, min(TIMEOUT, left))
+            ok, err, permanent, rejected = deliver(sink, batch, min(TIMEOUT, left))
             st.pop("waiting", None)
             if ok:
-                st.update(sent_seq=batch[-1]["seq"], delivered=st["delivered"] + len(batch), failures=0,
+                st.update(sent_seq=batch[-1]["seq"], delivered=st["delivered"] + len(batch) - rejected, failures=0,
                           next_retry=0, last_ok_at=time.time(), head_attempts=0)
+                if rejected:      # OTLP partial success: those events weren't stored, and aren't retried
+                    st.update(dropped=st["dropped"] + rejected, rejected=int(st.get("rejected") or 0) + rejected,
+                              last_error=err, last_error_at=time.time(), last_rejection_at=time.time())
                 i += len(batch)
             else:
                 st.update(failures=st["failures"] + 1, last_error=err, last_error_at=time.time(),
@@ -1476,12 +1567,19 @@ def flush_admin(budget=EMIT_BUDGET, force=False):
                 if left < 0.3:
                     break
                 try:
-                    ok, err, permanent = deliver(sink, batch, min(TIMEOUT, left))
+                    ok, err, permanent, rejected = deliver(sink, batch, min(TIMEOUT, left))
                 except Exception as e:
-                    ok, err, permanent = False, short_error(e), False
+                    ok, err, permanent, rejected = False, short_error(e), False, 0
                 for p, t in members:
                     changed.add(p)
                     ev = recs[p]["event"]
+                    if ok and rejected:
+                        # An OTLP collector took the request but refused the announcement (partial success):
+                        # it isn't stored there, and OTLP says not to retry it.
+                        t["state"], t["error"] = "abandoned", err
+                        admin_log(f"{ev.get('type')} {ev.get('seq')}: refused by {name} ({err})")
+                        note_error(f"sink-change announcement {ev.get('seq')} to {name} refused ({err})")
+                        continue
                     if ok:
                         t["state"] = "delivered"
                         admin_log(f"{ev.get('type')} {ev.get('seq')}: delivered to {name}"
@@ -1717,7 +1815,7 @@ def emit_async(family, type_, message, severity=None, action=None, data=None, vm
     it has its id), and recorded and sent on a background thread. flush_async() before exiting records
     whatever that thread didn't get to."""
     try:
-        if family == "actions" and not wants(load_config(), "actions"):
+        if family == "actions" and not wants(config_for_reading(), "actions"):
             return None
         ev = build_event(family, type_, message, severity, action, data, vm,
                          project if project is not None else _default_project(), origin=origin)
@@ -2248,7 +2346,10 @@ def sink_summary(name, sink):
             "headers": [h[0] for h in sink.get("headers") or []], "ca": bool(sink.get("ca_pem")),
             "signed": sink["kind"] == "webhook", "created": sink.get("created"), "backlog": waiting,
             "delivered": st["delivered"], "dropped": st["dropped"], "last_ok_at": st["last_ok_at"],
-            "last_error": st["last_error"] if st["failures"] or waiting else None,
+            "rejected": int(st.get("rejected") or 0),
+            # a failure, a backlog, or a receiver's refusal (OTLP partial success) since its last full success
+            "last_error": st["last_error"] if st["failures"] or waiting or (
+                st.get("last_rejection_at") and (st["last_error_at"] or 0) >= (st["last_ok_at"] or 0)) else None,
             "last_error_at": st["last_error_at"], "next_retry_in": max(0, int(st["next_retry"] - time.time()))}
 
 
@@ -2391,6 +2492,9 @@ def cmd_sink(a):
                   f"from {r['min_severity']:<5} backlog {r['backlog']:<5} {state}")
             if r["headers"]:
                 print(f"{'':14} headers: " + ", ".join(f"{h}: (hidden)" for h in r["headers"]))
+            if r["rejected"]:
+                print(f"{'':14} refused by the receiver in accepted requests (OTLP partial success; dropped, "
+                      f"not retried): {r['rejected']} event(s)")
         return 0
     if a.name not in sinks:
         raise EventsError(f"no sink named {a.name} (metacomputer events sink list)")
@@ -2551,6 +2655,9 @@ def status_info():
         out["backlog"] += b
         if b and st["last_error"]:
             out["failing"].append({"sink": n, "error": st["last_error"], "backlog": b})
+        elif st.get("last_rejection_at") and time.time() - float(st["last_rejection_at"]) < 86400:
+            # Delivered, but the receiver refused some of it (OTLP partial success): those were dropped.
+            out.setdefault("rejected", []).append({"sink": n, "error": st["last_error"], "count": int(st.get("rejected") or 0)})
     pid = watcher_pid()
     out["watcher"] = {"running": bool(pid), "pid": pid}
     try:
@@ -2585,6 +2692,9 @@ def status_line(s):
             f"{'running' if s['watcher']['running'] else 'not running'}, backlog {s['backlog']}")
     if s["failing"]:
         line += "; failing: " + ", ".join(f"{f['sink']} ({f['error']})" for f in s["failing"])
+    if s.get("rejected"):
+        line += "; refused by the receiver in the last day (dropped): " + ", ".join(
+            f"{f['sink']} ({f['count']}: {f['error']})" for f in s["rejected"])
     if s.get("rate_limited"):
         line += "; held back by the limits: " + ", ".join(f"{f} {n}" for f, n in s["rate_limited"].items())
     if s.get("announcements_pending"):
