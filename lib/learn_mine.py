@@ -440,9 +440,10 @@ def _under(path, root):
 
 
 def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects=True):
-    """(path, source) for every transcript file modified since `cutoff` that called a metacomputer tool.
-    Files that don't are opened only to look for that marker; nothing else is read from them."""
-    out, scanned = [], 0
+    """([(path, source)], scanned, unreadable): every transcript file modified since `cutoff` that called a
+    metacomputer tool. Files that don't are opened only to look for that marker; nothing else is read from them.
+    A file that can't be read (corrupt gzip, ...) is counted, and the others go on."""
+    out, scanned, bad = [], 0, 0
     roots = []
     if projects:
         roots.append((transcripts.claude_projects_dir(env), "project"))
@@ -463,7 +464,10 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                 if not stat.S_ISREG(st.st_mode) or st.st_mtime < cutoff:   # no links, FIFOs or devices
                     continue
                 scanned += 1
-                if transcripts.uses_tools(p):
+                hit = _probe(p)
+                if hit is None:
+                    bad += 1
+                elif hit:
                     out.append((p, source))
     for b in bench_dirs:
         b = os.path.abspath(os.path.expanduser(b))
@@ -482,17 +486,28 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                 if not stat.S_ISREG(st.st_mode) or st.st_mtime < cutoff:
                     continue
                 scanned += 1
-                if transcripts.uses_tools(p):
+                hit = _probe(p)
+                if hit is None:
+                    bad += 1
+                elif hit:
                     out.append((p, "bench"))
-    return out, scanned
+    return out, scanned, bad
+
+
+def _probe(path):
+    """uses_tools(), with anything it raises counted as an unreadable file (None) instead of ending the report."""
+    try:
+        return transcripts.uses_tools(path)
+    except Exception:
+        return None
 
 
 def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects=True):
     """Each session mined once (a headless copy wins over Claude Code's own file of the same session),
     filtered by time and project; a transcript is parsed, mined and dropped before the next one is read.
     Returns (mined sessions in time order, stats)."""
-    found, scanned = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects)
-    items, unreadable, cut = [], 0, 0
+    found, scanned, unreadable = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects)
+    items, cut = [], 0
     for path, source in found:
         try:
             item = _mine_one(path, source, cutoff, project)

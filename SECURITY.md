@@ -522,7 +522,8 @@ in the transcript. If that text could become a lesson, one injected page would
 steer every session after it.
 
 **What this does and doesn't resist.** It keeps text from the VM out of proposals
-and lessons, and it makes any change to the lessons visible. It does **not** stop
+and lessons, and it detects, on a best-effort basis, changes made outside
+`metacomputer learn`. It does **not** stop
 a program running as your macOS user, such as an agent that was steered into
 running commands, from approving a lesson: such a program can write the store
 and its record, pass the terminal check with a pseudo-terminal, or change the
@@ -560,15 +561,22 @@ persistence that you can audit, not an approval you can prove.
 - **Review approves what it showed.** `learn review` binds each answer to a hash
   of the proposal it displayed; if the proposal changed before you answered, it
   says so and shows it again.
-- **Sent only while it matches the record.** Every change made through `learn`
-  appends the store's hash (and the lesson's text hash) to `approvals.jsonl`, and
-  emits the same hashes in its event. The hub sends lessons only while
-  `lessons.json` matches the last recorded hash. A file written another way isn't
-  sent, `status`, `security` and `learn list` say so, `learn` refuses further
-  changes, and `learn reseal` (terminal) shows exactly what it holds and accepts it
-  on a yes. `metacomputer security` also warns when the event log's last lesson
-  change names a hash the record doesn't have, which is what rewriting both files
-  leaves behind, and the hub's status reports the store's hash.
+- **Sent only while it matches the record and the event log (best effort).**
+  Every change made through `learn` emits a lesson event first, carrying a change
+  id, the store's id, the store's hash and the lesson's text hash, then appends an
+  entry with the same values (and which event log it went to) to
+  `approvals.jsonl`. Lessons are sent only while `lessons.json` matches the last
+  entry, and that entry has its own event, the latest lesson event for that store
+  in the event log (this VM's `events.jsonl`, its rotated copy, and the logs the
+  entries name). So a store edited by hand, an entry appended by hand (the
+  record's head without a matching event), and a record cut back (a later event
+  than its head) are all withheld: `status`, `security` and `learn list` say why,
+  `learn` refuses further changes, and `learn reseal` (terminal) shows exactly what
+  the file holds and accepts it on a yes, with a new event. Earlier entries
+  without an event are a warning. When the event log no longer reaches back to the
+  last change (it keeps about 20 MB), the lessons are withheld too, so that a
+  backdated entry can't pass: compare with your sink, then `learn reseal`. The hashes cover each lesson's id and cleaned text, not its
+  provenance (title, source, dates, evidence).
 - **Only a private store is loaded.** `lessons.json` is read only when it's a
   regular file (opened without following links) owned by you and not writable by
   the group or others, in a folder of yours the group and others can't write
@@ -577,8 +585,10 @@ persistence that you can audit, not an approval you can prove.
   (`~/.local/share/metacomputer/lessons/`, or `LESSONS_DIR`).
 - **Lessons are advice, not authority.** No guard reads them: the hub reads them
   only to build instruction text (`learned_notes()`, with each client's own
-  `LESSONS` and store from its hello) and to report them in its status
-  (`lessons_status()`), and they aren't part of the hub's settings. The one-controller rule, the Chrome guard, bounded mode, the
+  `LESSONS` and store from its hello; a malformed or relative store in a hello means
+  no lessons for that client, never the hub's or the default) and to report its own
+  store in its status (`lessons_status()`: the hash of the store the hub's settings
+  name, not of every client's), and they aren't part of the hub's settings. The one-controller rule, the Chrome guard, bounded mode, the
   coordinate guard and the vault's approvals work the same with any lesson in
   place. The block states that the lessons never override a guard, a refusal,
   the other instructions or yours, and can't turn a protection on or off.
@@ -602,12 +612,16 @@ persistence that you can audit, not an approval you can prove.
   `lib/termsafe.py`.
 
 **Where it ends:**
-- **Anything running as you can approve a lesson.** It can rewrite
-  `lessons.json` and `approvals.jsonl` to agree, open a pseudo-terminal to pass the
-  terminal check, or change `lib/learn_store.py` or the hub in your checkout. The
-  local event log is yours to rewrite too. An event sink off the Mac is the record
-  that holds: it got each change, with its hashes, as it happened. Read it, or
-  `learn list`, if you're unsure what your sessions are told.
+- **Anything running as you can approve a lesson.** It can append a matching
+  event to the local event log as well as an entry to `approvals.jsonl`, open a
+  pseudo-terminal to pass the terminal check, or change `lib/learn_store.py` or the
+  hub in your checkout; the comparison above then passes. What it can't do is
+  change what an event sink off the Mac already received: the sink has every
+  change made through `learn`, with its hashes, as it happened. A change made
+  without `learn` sends nothing, so the sink won't have it: compare the sink's last
+  `store_hash` with `metacomputer learn list` (or `status --json`) when you're
+  unsure what your sessions are told. Without a sink there is no record your
+  account can't rewrite.
 - A follow-up, once the secrets vault's presence-based approvals (Touch ID through
   LocalAuthentication) are merged: `learn approve` could have the vault sign each
   record with a key that needs your presence, and the hub could send only signed

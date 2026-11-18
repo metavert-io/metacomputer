@@ -263,28 +263,46 @@ def emit(type_, lesson, active, entry=None):
     source, the lesson's text hash and the store's hash after the change (as approvals.jsonl records them);
     never the lesson's text."""
     if events is None:
-        return
+        return None
     try:
         title = learn_store.clean_title((lesson or {}).get("title") or (lesson or {}).get("id") or "", 60)
         verb = {"lesson_approved": "approved", "lesson_removed": "removed", "lesson_edited": "edited",
                 "lessons_resealed": "resealed (accepted as they are)"}[type_]
         what = f"was {verb}: {title}" if lesson else f"were {verb}"
-        events.emit("security", type_, f"{'A lesson' if lesson else 'The lessons'} for the virtual computer's "
-                    f"instructions {what}",
-                    data={"id": (lesson or {}).get("id"), "title": title, "source": (lesson or {}).get("source"),
-                          "active": active, "text_hash": (entry or {}).get("text_hash"),
-                          "store_hash": (entry or {}).get("store_hash")},
-                    origin="cli")
+        e = entry or {}
+        return events.emit("security", type_,
+                           f"{'A lesson' if lesson else 'The lessons'} for the virtual computer's instructions {what}",
+                           data={"id": (lesson or {}).get("id"), "title": title, "source": (lesson or {}).get("source"),
+                                 "active": active, "text_hash": e.get("text_hash"), "store_hash": e.get("store_hash"),
+                                 "store_id": e.get("store_id"), "change_id": e.get("change_id")},
+                           origin="cli")
     except Exception:
-        pass
+        return None
+
+
+EVENT_OF = {"approved": "lesson_approved", "edited": "lesson_edited", "removed": "lesson_removed",
+            "resealed": "lessons_resealed"}
+
+
+def record(action, lesson, lessons_list, env=None):
+    """Record a change already saved to lessons.json (the caller holds the Lock): emit its event, carrying the
+    change id and the hashes, then append the entry, naming the event and the event log it went to. The store is
+    sent only while its record's last change has a matching event (learn_store.event_check)."""
+    entry = learn_store.prepare_change(action, lesson, lessons_list, env,
+                                       origin="terminal" if is_tty() else "no terminal")
+    ev = emit(EVENT_OF[action], lesson, len(lessons_list), entry)
+    entry["event_id"] = ev.get("id") if isinstance(ev, dict) else None
+    try:
+        entry["event_log"] = events.log_path() if events is not None else None
+    except Exception:
+        entry["event_log"] = None
+    return learn_store.append_entry(entry, env)
 
 
 def commit_change(action, lesson, lessons):
-    """Save lessons.json, then record the change in approvals.jsonl (the caller holds the Lock). Returns the
-    record's entry for the event."""
+    """Save lessons.json, then record the change (the caller holds the Lock)."""
     save(lessons)
-    return learn_store.record_change(action, lesson, lessons["lessons"],
-                                     origin="terminal" if is_tty() else "no terminal")
+    return record(action, lesson, lessons["lessons"])
 
 
 def require_sealed():
@@ -404,7 +422,9 @@ def print_report(rep, out=sys.stdout):
       + (f"; project {esc(rep['project'])}" if rep.get("project") else "") + ")")
     p(f"  sources: {src['claude_code_sessions']} Claude Code sessions, {src['headless_transcripts']} headless transcripts, "
       f"{src['benchmark_sessions']} benchmark sessions ({src['scanned_files']} recent transcript files looked at, "
-      f"{src['duplicates_skipped']} duplicate copies skipped)")
+      f"{src['duplicates_skipped']} duplicate copies skipped"
+      + (f", {src['unreadable']} unreadable" if src.get("unreadable") else "")
+      + (f", {src['cut_short']} cut short at a size or time limit" if src.get("cut_short") else "") + ")")
     if not rep["sessions"]:
         p("  nothing to learn from yet")
         return
@@ -545,9 +565,7 @@ def cmd_review(a):
             lesson = approve_one(p["id"], lessons, props, ask=False)
             if lesson:
                 save(proposals=props)
-                entry = commit_change("approved", lesson, lessons)
-        if lesson:
-            emit("lesson_approved", lesson, len(lessons["lessons"]), entry)
+                commit_change("approved", lesson, lessons)
 
 
 def cmd_approve(a):
@@ -561,14 +579,11 @@ def cmd_approve(a):
             lesson = approve_one(pid, lessons, props)
             if lesson:
                 done.append(lesson)
-        entries = []
         if done:
             save(proposals=props)
             save(lessons)
-            entries = [learn_store.record_change("approved", x, lessons["lessons"],
-                                                 origin="terminal" if is_tty() else "no terminal") for x in done]
-    for lesson, entry in zip(done, entries):
-        emit("lesson_approved", lesson, len(lessons["lessons"]), entry)
+            for x in done:
+                record("approved", x, lessons["lessons"])
     if done:
         s = learn_store.summary()
         print(f"Active in the MCP instructions of new sessions: {esc(learn_store.status_line(s))}")
@@ -600,10 +615,8 @@ def cmd_remove(a):
             gone.append(x)
             print(f"{esc(pid)}: removed")
         save(lessons)
-        entries = [learn_store.record_change("removed", x, lessons["lessons"],
-                                             origin="terminal" if is_tty() else "no terminal") for x in gone]
-    for x, entry in zip(gone, entries):
-        emit("lesson_removed", x, len(lessons["lessons"]), entry)
+        for x in gone:
+            record("removed", x, lessons["lessons"])
 
 
 def cmd_reseal(a):
@@ -625,8 +638,7 @@ def cmd_reseal(a):
         sys.stderr.flush()
         if sys.stdin.readline().strip().lower() not in ("y", "yes"):
             die("not resealed; nothing is sent until you do, or until lessons.json is removed")
-        entry = learn_store.record_change("resealed", None, st["lessons"], origin="terminal")
-    emit("lessons_resealed", None, len(st["lessons"]), entry)
+        entry = record("resealed", None, st["lessons"])
     print(f"Resealed: {len(st['lessons'])} lessons, store hash {entry['store_hash']}.")
 
 
@@ -669,8 +681,7 @@ def cmd_edit(a):
         if x:
             require_sealed()
             if edit_text(x):
-                entry = commit_change("edited", x, lessons)
-                emit("lesson_edited", x, len(lessons["lessons"]), entry)
+                commit_change("edited", x, lessons)
                 print(f"{esc(a.id)}: changed; new sessions get the new text")
             else:
                 print("unchanged")
@@ -702,8 +713,7 @@ def cmd_add(a):
                   "pattern": None, "approved_at": now_iso(), "approved_from": "terminal",
                   "evidence": {"summary": "written by you"}}
         lessons["lessons"].append(lesson)
-        entry = commit_change("approved", lesson, lessons)
-    emit("lesson_approved", lesson, len(lessons["lessons"]), entry)
+        commit_change("approved", lesson, lessons)
     print(f"{esc(lesson['id'])}: added")
 
 
@@ -973,7 +983,8 @@ def bench_env(config, ident, main_vm):
     """The benchmark's environment, carrying what was confirmed: bench.py checks the VM, its baseline and the
     settings file's hash again before every reset, and bin/metacomputer refuses any command whose settings name
     another VM than MCOMP_EXPECT_VM."""
-    return dict(os.environ, MCOMP_CONFIG=config, MCOMP_EXPECT_VM=ident["vm"], BENCH_EXPECT_VM=ident["vm"],
+    return dict(os.environ, MCOMP_CONFIG=config, MCOMP_EXPECT_VM=ident["vm"], MCOMP_EXPECT_BASELINE=ident["baseline"],
+                MCOMP_EXPECT_CONFIG_SHA=ident["sha"], BENCH_EXPECT_VM=ident["vm"],
                 BENCH_EXPECT_BASELINE=ident["baseline"], BENCH_EXPECT_CONFIG_SHA=ident["sha"],
                 BENCH_PROTECTED_VM=main_vm or "metacomputer")
 

@@ -361,19 +361,32 @@ def learned_notes(env=None):
 
 
 def lessons_of(env=None):
-    """A client's lesson switch and store, for its hello: the hub answers that client's initialize with them."""
+    """A client's lesson switch and store, for its hello: the hub answers that client's initialize with them. The
+    store is resolved here, in the client (~ and a relative path, against the client's own home and folder), so
+    the hub gets an absolute path or nothing."""
     env = os.environ if env is None else env
-    return {"setting": "off" if (env.get("MCOMP_LESSONS") or "on").strip().lower() == "off" else "on",
-            "dir": env.get("MCOMP_LESSONS_DIR") or ""}
+    d = env.get("MCOMP_LESSONS_DIR") or ""
+    if d:
+        home = env.get("HOME") or os.path.expanduser("~")
+        d = os.path.abspath(os.path.join(home, d[2:]) if d == "~" or d.startswith("~/") else d)
+    return {"setting": "off" if (env.get("MCOMP_LESSONS") or "on").strip().lower() == "off" else "on", "dir": d}
+
+
+NO_LESSONS = {"MCOMP_LESSONS": "off"}
 
 
 def lessons_env_of(hello_lessons):
-    """The environment learned_notes() reads, from a hello's `lessons` (None when absent or malformed)."""
-    p = hello_lessons if isinstance(hello_lessons, dict) else None
-    if not p or p.get("setting") not in ("on", "off") or not isinstance(p.get("dir"), str) \
-            or len(p["dir"]) > 4096 or "\0" in p["dir"] or (p["dir"] and not os.path.isabs(p["dir"])):
+    """The environment learned_notes() reads for a client, from its hello's `lessons`: its own switch and store.
+    A hello without `lessons` (an older client) gets None, the hub's own. A malformed one, an explicit "off", or a
+    store path that isn't absolute gets no lessons: never the hub's own, never the default store."""
+    if hello_lessons is None:
         return None
-    return {"MCOMP_LESSONS": p["setting"], "MCOMP_LESSONS_DIR": p["dir"]}
+    p = hello_lessons if isinstance(hello_lessons, dict) else {}
+    d = p.get("dir")
+    if p.get("setting") != "on" or not isinstance(d, str) or len(d) > 4096 or "\0" in d \
+            or (d and not os.path.isabs(d)):
+        return dict(NO_LESSONS)
+    return {"MCOMP_LESSONS": "on", "MCOMP_LESSONS_DIR": d}
 
 
 def lessons_status(env=None):

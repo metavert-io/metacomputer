@@ -347,7 +347,7 @@ Each of these needs no VM and takes seconds.
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (about 100 checks, 40 s) needs no VM and no network.
+`python3 tests/test_learn.py` (about 105 checks, 45 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -382,6 +382,12 @@ results, window titles, app names, typed text, errors and the model's own text.
   not stopping the report; bounded inputs; unknown costs counted at their budget,
   reservations on resume, budgets that must be positive; and the docs saying what
   leaves the Mac.
+- From the re-check: an entry appended to `approvals.jsonl` by hand, a backdated one,
+  a record rewritten from scratch and a record cut back are all withheld (the head
+  needs its own lesson event, the latest for the store); an entry slipped into the
+  middle is a warning; a reservation the runner died holding is charged on every
+  resume; `metacomputer reset` itself refuses another baseline or a changed settings
+  file; and a corrupt gzip is counted as unreadable without stopping discovery.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
@@ -395,8 +401,9 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   for the whole run, so every guard check below passes with them; `initialize` carries
   them after the habits and before the driver's text, with the rule that they never
   override a guard; `LESSONS=off` drops them; the hub answers each client's
-  `initialize` with that client's own `LESSONS` and store (from its hello); its
-  status reports the store's hash; only `learned_notes()` and `lessons_status()`
+  `initialize` with that client's own `LESSONS` and store (from its hello), and a
+  client's "off", a relative store or one that doesn't exist means no lessons for it
+  (never the hub's); its status reports the store's hash; only `learned_notes()` and `lessons_status()`
   read the store, and lessons aren't part of the hub's settings;
 - the socket is 0600 in a 0700 folder; the peer's uid and pid come from the
   kernel; a peer with another uid is refused before anything is read; a second

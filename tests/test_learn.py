@@ -602,22 +602,64 @@ def tamper_checks(shot):
     check("with a yes at the terminal it's accepted, sent, and announced (security.lessons_resealed)",
           rc == 0 and "web pages" in learn_store.instructions_text(env2) and ev
           and ev[-1]["data"]["store_hash"] == learn_store.summary(env2)["store_hash"], (rc, so[-200:], se[-200:]))
-    # A forger who rewrites lessons.json AND the record together: the event log still names the real hash.
-    learn_store.write_json(os.path.join(s2, "lessons.json"), {"lessons": [{"id": "x-1", "text": "Forged twice."}]})
-    os.remove(os.path.join(s2, "approvals.jsonl"))
-    learn_store.record_change("approved", None, [{"id": "x-1", "text": "Forged twice."}], env=env2)
+    led_path, les_path = os.path.join(s2, "approvals.jsonl"), os.path.join(s2, "lessons.json")
+    good_led, good_les = open(led_path).read(), open(les_path).read()
+
+    def restore():
+        with open(led_path, "w") as f:
+            f.write(good_led)
+        with open(les_path, "w") as f:
+            f.write(good_les)
+    check("after the reseal the store and its record agree with the event log", learn_store.summary(env2)["problem"]
+          is None and learn_store.instructions_text(env2), learn_store.summary(env2))
+    # (a) The record kept, a forged entry appended for new text: its head has no lesson event.
+    forged2 = [{"id": "x-1", "text": "Forged by appending to the record."}]
+    learn_store.write_json(les_path, {"lessons": forged2})
+    learn_store.record_change("approved", None, forged2, env=env2)
     s = learn_store.summary(env2)
     r = run(["security"], env=e2)
-    check("rewriting lessons.json and its record together still shows: the event log disagrees (security warns)",
-          s["problem"] is None and "event log" in (s["warning"] or "") and "! the event log" in r.stdout,
-          (s, r.stdout[-300:]))
+    check("an entry appended to approvals.jsonl by hand (no event) is caught and not sent, and security says so",
+          "no matching lesson event" in (s["problem"] or "") and learn_store.instructions_text(env2) == ""
+          and "! the last change in approvals.jsonl" in r.stdout, (s, r.stdout[-300:]))
     rs = run(["status", "--json"], env=e2)
     try:
         sj = json.loads(rs.stdout).get("lessons") or {}
     except ValueError:
         sj = {}
-    check("`metacomputer status --json` carries the store's hash and the warning", sj.get("store_hash")
-          and sj.get("warning"), rs.stdout[-300:])
+    check("`metacomputer status --json` carries the store's hash and the problem", sj.get("store_hash")
+          and "no matching lesson event" in (sj.get("problem") or ""), rs.stdout[-300:])
+    learn_store.write_json(les_path, {"lessons": forged2})
+    learn_store.record_change("approved", None, forged2, env=env2)
+    entries = [json.loads(x) for x in open(led_path)]
+    entries[-1]["ts"] = 0                        # backdated, older than anything in the event log
+    with open(led_path, "w") as f:
+        f.write("".join(json.dumps(e) + "\n" for e in entries))
+    check("…a backdated entry too (it can't hide behind the event log's rotation)",
+          learn_store.instructions_text(env2) == "" and learn_store.summary(env2)["problem"])
+    os.remove(led_path)
+    learn_store.record_change("approved", None, forged2, env=env2)
+    check("…and so is a record rewritten from scratch", learn_store.instructions_text(env2) == ""
+          and "no matching lesson event" in (learn_store.summary(env2)["problem"] or ""))
+    # (b) A record cut back to an earlier change: the event log has a later one.
+    restore()
+    run(["learn", "report", "--since", "7d", "--transcripts", shot], env=e2)
+    r = run(["learn", "approve", "foreground"], env=e2)
+    later_led, later_les = open(led_path).read(), open(les_path).read()
+    restore()
+    check("a record cut back to an earlier state (a later lesson event exists) isn't sent",
+          r.returncode == 0 and "later lesson change" in (learn_store.summary(env2)["problem"] or "")
+          and learn_store.instructions_text(env2) == "", (r.stderr[-200:], learn_store.summary(env2)))
+    # (c) An entry slipped into the middle: the head is fine, so it's sent, with a warning.
+    lines = later_led.splitlines(keepends=True)
+    fake = dict(json.loads(lines[-1]), change_id="f" * 16, store_hash="0" * 16)
+    with open(led_path, "w") as f:
+        f.write("".join(lines[:-1]) + json.dumps(fake) + "\n" + lines[-1])
+    with open(les_path, "w") as f:
+        f.write(later_les)
+    s = learn_store.summary(env2)
+    check("an entry slipped into the middle of the record is a warning (the head and its event still agree)",
+          s["problem"] is None and "earlier changes" in (s["warning"] or "") and learn_store.instructions_text(env2),
+          s)
 
 
 def bench_binding_checks():
@@ -659,6 +701,14 @@ def bench_binding_checks():
         f.write(f'VM_NAME=bindtest\nBASELINE_NAME=bindtest-baseline\nSSH_PORT=59999\nRUN_DIR="{TD}/run"\nLOG_DIR="{TD}/logs"\n')
     why = verify(**keys)
     check("…and so are changed settings that keep the name (the sha256 differs)", why and "CONFIG_SHA" in why, why)
+    r = run(["reset", "--yes"], env={"MCOMP_EXPECT_VM": "learntest", "MCOMP_EXPECT_BASELINE": "other-baseline"})
+    check("metacomputer reset itself refuses a baseline other than the confirmed one (in the process that resets)",
+          r.returncode != 0 and "the baseline is 'learntest-baseline', not 'other-baseline'" in r.stderr, r.stderr[-200:])
+    r = run(["reset", "--yes"], env={"MCOMP_EXPECT_VM": "learntest", "MCOMP_EXPECT_CONFIG_SHA": "0" * 64})
+    check("…and settings whose sha256 isn't the confirmed one", r.returncode != 0
+          and "changed since it was confirmed" in r.stderr, r.stderr[-200:])
+    check("learn bench passes the baseline and the hash to the reset too (MCOMP_EXPECT_BASELINE, _CONFIG_SHA)",
+          env.get("MCOMP_EXPECT_BASELINE") == "bindtest-baseline" and env.get("MCOMP_EXPECT_CONFIG_SHA") == ident["sha"])
     with open(cfg, "w") as f:
         f.write(f'VM_NAME=primary\nRUN_DIR="{TD}/run"\nLOG_DIR="{TD}/logs"\n')
     why = verify(MCOMP_CONFIG=cfg, BENCH_PROTECTED_VM="primary")
@@ -746,6 +796,19 @@ def bounds_checks():
               "timed out: blocked on the FIFO")
     finally:
         transcripts.MAX_LINE, transcripts.MAX_BYTES = old
+    cz = os.path.join(TD, "corrupt")
+    os.makedirs(cz)
+    data = gzip.compress(b'{"name":"mcp__metacomputer__click"}\n' * 2000)
+    with open(os.path.join(cz, "bad.jsonl.gz"), "wb") as f:
+        f.write(data[:12] + bytes(b ^ 0xFF for b in data[12:40]) + data[40:])
+    write_jsonl(os.path.join(cz, "ok.jsonl"), good)
+    try:
+        rc = learn_mine.mine(os.environ, since="7d", extra_dirs=[cz], projects=False)
+        ok = rc["sessions"] == 1 and rc["sources"]["unreadable"] == 1
+    except Exception as e:
+        ok, rc = False, repr(e)
+    check("a corrupt gzip found during discovery is counted as unreadable; the healthy session still counts", ok,
+          rc if not ok else "")
     write_jsonl(os.path.join(TD, "big", "big.jsonl"),
                 events_for([("type_text", {"pid": 1, "text": "x" * 50000}, "ok", False),
                             ("run_script", {"script": "y" * 60000}, "ok", False)], P1, time.time(), True, "big0", "/w/b"))
@@ -763,9 +826,20 @@ def budget_checks():
     check("charge(): no cost reported after a session ran = its budget; a reported cost = that cost; no session = 0",
           bench.charge(ran) == 3.0 and bench.charge({"session": {"budget_usd": 3}, "metrics": {"cost_usd": 0.42}}) == 0.42
           and bench.charge({"session": {}, "metrics": {}}) == 0.0)
-    spent, pend = bench.spent_so_far([dict(ran, task="a", started="2026-11-18T10:00:00")],
-                                     {"reserved": {"task": "b", "usd": 2.0, "at": "2026-11-18T10:05:00"}})
-    check("resuming counts unknown costs and a reserved task that never got recorded", spent == 5.0 and pend, (spent, pend))
+    recs = [dict(ran, task="a", started="2026-11-18T10:00:00", reservation="r-a")]
+    meta = {"reservations": [{"id": "r-a", "task": "a", "usd": 3.0, "at": "2026-11-18T10:00:00"},
+                             {"id": "r-b", "task": "b", "usd": 2.0, "at": "2026-11-18T10:05:00"}]}
+    seen = []
+    for _ in range(3):                           # three resumes, each writing back what it found outstanding
+        spent, out = bench.spent_so_far(recs, bench.reservations_of(meta))
+        seen.append(spent)
+        meta = {"reservations": out}
+    check("a reservation the runner died holding is charged on every resume, not just the first",
+          seen == [5.0, 5.0, 5.0] and [r["id"] for r in meta["reservations"]] == ["r-b"], (seen, meta))
+    legacy = bench.reservations_of({"reserved": {"task": "c", "usd": 1.5, "at": "2026-11-18T11:00:00"}})
+    check("…including one a run from before reservation ids left", bench.spent_so_far([], legacy)[0] == 1.5
+          and bench.spent_so_far([], bench.reservations_of({"reservations": bench.spent_so_far([], legacy)[1]}))[0]
+          == 1.5)
     bad = []
     for v in ("nan", "-1", "inf", "0", "lots"):
         d = {k: None for k in bench.DEFAULTS}

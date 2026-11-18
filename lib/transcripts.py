@@ -19,6 +19,7 @@ import os
 import re
 import stat
 import time
+import zlib
 from datetime import datetime
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -107,8 +108,9 @@ def open_regular(path):
 
 
 def uses_tools(path, chunk=1 << 20):
-    """True when the file has a tool_use of a metacomputer tool. Reads it in chunks (at most MAX_BYTES,
-    decompressed) and keeps nothing: only files that pass this are parsed."""
+    """True when the file has a tool_use of a metacomputer tool, False when it hasn't, None when it can't be read
+    (not a regular file, corrupt gzip, ...). Reads it in chunks (at most MAX_BYTES, decompressed) and keeps
+    nothing: only files that pass this are parsed."""
     try:
         tail, total = b"", 0
         with open_regular(path) as f:
@@ -121,8 +123,8 @@ def uses_tools(path, chunk=1 << 20):
                     return True
                 tail = block[-80:]
         return False
-    except (OSError, EOFError, gzip.BadGzipFile, ValueError):
-        return False
+    except (OSError, EOFError, gzip.BadGzipFile, zlib.error, ValueError):
+        return None
 
 
 def read_events(path, info=None):
@@ -166,7 +168,7 @@ def read_events(path, info=None):
                     continue
                 if isinstance(ev, dict):
                     yield ev
-    except (OSError, EOFError, gzip.BadGzipFile, ValueError):
+    except (OSError, EOFError, gzip.BadGzipFile, zlib.error, ValueError):
         info["truncated"] = info.get("truncated") or "unreadable"
         return
 

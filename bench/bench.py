@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import uuid
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(BENCH)
@@ -408,19 +409,57 @@ def charge(rec):
     return 0.0
 
 
-def spent_so_far(recs, old_meta):
-    """(spent, reservation): what a run being resumed has spent, every record charged as charge() says, plus a
-    task whose budget was reserved but which was never recorded (the runner died during its session)."""
+def reservations_of(meta):
+    """The budget reservations a run.json holds: `reservations` (each with its own id), plus the single
+    `reserved` and the `unrecorded_reservations` that runs before them wrote."""
+    out = []
+    for r in (meta or {}).get("reservations") or []:
+        if isinstance(r, dict) and r.get("id"):
+            out.append(r)
+    legacy = [(meta or {}).get("reserved")] + list((meta or {}).get("unrecorded_reservations") or [])
+    for r in legacy:
+        if isinstance(r, dict) and r.get("task"):
+            out.append(dict(r, id=r.get("id") or f"legacy-{r.get('task')}-{r.get('at')}", legacy=True))
+    seen, uniq = set(), []
+    for r in out:
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            uniq.append(r)
+    return uniq
+
+
+def reconciled(res, recs):
+    """A reservation is settled once a record names it (its cost, or its budget when the cost is unknown, is then
+    charged through that record). Reservations from before ids match by task and time."""
+    if res.get("legacy"):
+        return any(r.get("task") == res.get("task") and str(r.get("started", "")) >= str(res.get("at", ""))
+                   for r in recs)
+    return any(r.get("reservation") == res["id"] for r in recs)
+
+
+def spent_so_far(recs, reservations):
+    """(spent, outstanding): what the run has spent, each record charged as charge() says, plus every reservation
+    no record settles: a session whose runner died before recording it. Outstanding reservations stay in run.json
+    and are charged on every later resume, however many there are."""
+    outstanding = [r for r in reservations if not reconciled(r, recs)]
     spent = sum(charge(r) for r in recs)
-    pend = (old_meta or {}).get("reserved")
-    if isinstance(pend, dict) and not any(r.get("task") == pend.get("task") and str(r.get("started", "")) >=
-                                          str(pend.get("at", "")) for r in recs):
+    for r in outstanding:
         try:
-            spent += max(0.0, float(pend.get("usd") or 0))
+            spent += max(0.0, float(r.get("usd") or 0))
         except (TypeError, ValueError):
             pass
-        return spent, pend
-    return spent, None
+    return spent, outstanding
+
+
+def write_meta(rdir, meta):
+    """run.json, replaced atomically (a reservation must never be lost to a half-written file)."""
+    p = os.path.join(rdir, "run.json")
+    tmp = p + f".tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(meta, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
 
 
 def main_vm():
@@ -466,8 +505,11 @@ def require_config(allow_main):
     ALLOW_MAIN["on"] = bool(allow_main)
     vc = verify_target()
     # Every metacomputer command this run starts (reset, stop, the sessions' bridge) refuses once the settings
-    # name another VM than this one (bin/metacomputer, MCOMP_EXPECT_VM).
+    # name another VM than this one (bin/metacomputer, MCOMP_EXPECT_VM); a reset also checks, in its own process
+    # and right before it replaces the VM, the baseline and the settings file's hash (expect_guard).
     os.environ["MCOMP_EXPECT_VM"] = vc["vm"]
+    os.environ["MCOMP_EXPECT_BASELINE"] = os.environ.get("BENCH_EXPECT_BASELINE") or vc["baseline"]
+    os.environ["MCOMP_EXPECT_CONFIG_SHA"] = os.environ.get("BENCH_EXPECT_CONFIG_SHA") or config_sha()
     return vc
 
 
@@ -494,13 +536,13 @@ def cmd_run(a):
         meta["resumed"] = old.get("resumed", []) + [datetime.datetime.now().isoformat(timespec="seconds")]
         if old.get("switches") != meta["switches"] or (old.get("metacomputer") or {}).get("sha") != meta["metacomputer"]["sha"]:
             meta["resume_note"] = {"earlier_switches": old.get("switches"), "earlier_metacomputer": old.get("metacomputer")}
-    json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
-    log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}")
-    work, cfg, shim = prepare_workdir(run_id, sw)
-    spent, pend = spent_so_far(all_recs, old)
+    spent, meta["reservations"] = spent_so_far(all_recs, reservations_of(old))
     cap = float(sw["cap"])
-    if pend:
-        meta.setdefault("unrecorded_reservations", []).append(pend)
+    write_meta(rdir, meta)
+    log(f"run {run_id}: {len(tasks)} task(s) on VM {vc['vm']}, model {sw['model']}, cap ${sw['cap']}"
+        + (f"; ${spent:.2f} spent already, {len(meta['reservations'])} unsettled reservation(s) counted"
+           if old else ""))
+    work, cfg, shim = prepare_workdir(run_id, sw)
     # done = the latest record of each task, unless that was an infrastructure failure (retried)
     done = {r["task"] for r in report.latest(all_recs) if not infra_reason(r)}
     try:
@@ -519,18 +561,24 @@ def cmd_run(a):
                 meta["stopped"] = "VM in use by another controller"
                 break
             log(f"[{i}/{len(tasks)}] {t['id']}: {t.get('title', '')}")
-            # reserve the task's budget before its session starts, so a crash here still counts on resume
-            meta["reserved"] = {"task": t["id"], "usd": budget,
-                                "at": datetime.datetime.now().isoformat(timespec="seconds")}
-            json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
+            # reserve the task's budget before its session starts: if this process dies before the record is
+            # written, every later resume charges it
+            res = {"id": uuid.uuid4().hex[:12], "task": t["id"], "usd": budget,
+                   "at": datetime.datetime.now().isoformat(timespec="seconds")}
+            meta["reservations"].append(res)
+            write_meta(rdir, meta)
             rec = run_task(t, sw, rdir, work, cfg, shim)
             rec["budget_usd"] = budget
+            rec["reservation"] = res["id"]
             if rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
                 rec["cost_unknown"] = True       # no cost reported: counted at its budget
             spent += charge(rec)
             with open(os.path.join(rdir, "results.jsonl"), "a") as f:
                 f.write(json.dumps(rec) + "\n")
-            meta.pop("reserved", None)
+                f.flush()
+                os.fsync(f.fileno())
+            meta["reservations"] = [r for r in meta["reservations"] if r["id"] != res["id"]]   # settled by the record
+            write_meta(rdir, meta)
             mm = rec["metrics"]
             log(f"  {'PASS' if rec['check'].get('pass') else 'fail'} score={rec['check'].get('score')} "
                 f"cost=${mm.get('cost_usd') or 0:.2f} turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
@@ -545,7 +593,7 @@ def cmd_run(a):
     finally:
         meta["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
         meta["spent_usd"] = round(spent, 4)
-        json.dump(meta, open(os.path.join(rdir, "run.json"), "w"), indent=2)
+        write_meta(rdir, meta)
         shutil.rmtree(work, ignore_errors=True)
         if not a.keep_running:
             log(f"stopping {vc['vm']}")

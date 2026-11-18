@@ -60,8 +60,13 @@ Checks never trust what the agent says. They read the VM's real state:
 - **Unknown costs count.** A session that ends without reporting its cost (killed
   at its timeout, crashed) is counted at its whole budget against the cap
   (`cost_unknown` in its record). Each task's budget is reserved in `run.json`
-  before its session starts, so resuming after the runner itself died counts it.
-  `--budget` and `--cap` must be positive amounts.
+  (`reservations`, each with its own id) before its session starts, and only the
+  task's record settles it: a reservation left by a runner that died stays and is
+  charged on every later resume. `--budget` and `--cap` must be positive amounts.
+- **A reset checks what it replaces.** The runner also sets `MCOMP_EXPECT_BASELINE`
+  and `MCOMP_EXPECT_CONFIG_SHA`, and `metacomputer reset` compares them, and the VM
+  name, with the values it is about to use, in its own process and again right
+  before the copy.
 - **Keep the VM's optional hardening as you mean to measure it.** A test VM's
   settings often turn on `ACTION_LOG`, which puts a relay between the bridge and
   the driver. For a baseline of the defaults, point `MCOMP_CONFIG` at a small

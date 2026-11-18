@@ -499,14 +499,32 @@ sys.exit(0 if out["ready"] else 1)
 EOF
 }
 
+# A caller that confirmed what a reset replaces (learn bench, the benchmark) names it in MCOMP_EXPECT_VM,
+# MCOMP_EXPECT_BASELINE and MCOMP_EXPECT_CONFIG_SHA. Checked here, in the process that replaces the VM, with the
+# VM and baseline names it is about to use, and again right before the copy: any mismatch refuses.
+expect_guard() {
+  local why="" sha
+  if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
+    why="the VM is '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed"
+  elif [ -n "${MCOMP_EXPECT_BASELINE:-}" ] && [ "$MCOMP_EXPECT_BASELINE" != "$BASELINE_NAME" ]; then
+    why="the baseline is '$BASELINE_NAME', not '$MCOMP_EXPECT_BASELINE' as confirmed"
+  elif [ -n "${MCOMP_EXPECT_CONFIG_SHA:-}" ]; then
+    sha="$(shasum -a 256 < "$LOCAL_CONFIG" 2>/dev/null | cut -d' ' -f1)"
+    [ "$sha" = "$MCOMP_EXPECT_CONFIG_SHA" ] || why="the settings file $LOCAL_CONFIG changed since it was confirmed (sha256 ${sha:0:12}, confirmed ${MCOMP_EXPECT_CONFIG_SHA:0:12})"
+  fi
+  [ -z "$why" ] || die "refusing to replace the VM: $why"
+}
+
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
   local src="$1" label="$2" evtype="${3:-restored}"
+  expect_guard
   if vm_exists "$VM_NAME" && vm_running "$VM_NAME"; then
     events_watcher_stop   # start brings it back; meanwhile the replacement isn't a health problem
     say "saving guest recordings to the host first"
     do_recordings --sync >/dev/null || warn "could not sync guest recordings"
     vm_stop "$VM_NAME"
   fi
+  expect_guard   # again, right before the working VM is deleted and replaced
   if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force >/dev/null || die "lume delete failed"; fi
   say "cloning $src -> $VM_NAME"
   "$LUME" clone "$src" "$VM_NAME" >/dev/null || die "lume clone failed"
@@ -517,6 +535,7 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
 
 do_reset() {
   parse_flags "$@"
+  expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"

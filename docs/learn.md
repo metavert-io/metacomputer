@@ -187,25 +187,35 @@ lesson's text. They go to this VM's local event log and to any sinks you added.
 ## Tampering
 
 Lessons are sent only when `lessons.json` matches the last `store_hash` that
-`learn` recorded in `approvals.jsonl`. So a `lessons.json` written some other way
-(by an editor, a script, or an agent that has your account) isn't sent:
+`learn` recorded in `approvals.jsonl`, and that entry has its own lesson event (the
+same change id and store hash), the latest one for this store in the event log.
+Each change emits its event before its entry is written. So a `lessons.json`
+written some other way (by an editor, a script, or an agent that has your
+account), an entry appended to `approvals.jsonl` by hand, or a record cut back to
+an earlier state, isn't sent:
 `metacomputer status`, `security` and `learn list` say "changed outside
 `metacomputer learn`", every change through `learn` is refused until you deal
 with it, and `metacomputer learn reseal`, at your terminal, shows exactly what
 the file holds and accepts it on your yes. To discard it instead, delete
 `lessons.json` and `approvals.jsonl`.
 
-That catches tampering; it can't prevent it. **Anything running as your macOS
-user can approve a lesson**: it can rewrite `approvals.jsonl` to match, type
-into a pseudo-terminal to pass the terminal check, or change the checkout's code
-that does the checking. What makes that visible:
-- `metacomputer security` warns when the event log's last lesson change names a
-  store hash that `approvals.jsonl` doesn't have (the record was rewritten);
-- the hub's status (`metacomputer hub status --json`) reports the store's hash
-  and the hash `learn` recorded;
-- an event sink off the Mac (docs/events.md) keeps a copy of every change, with
-  its hashes, that nothing on the Mac can rewrite afterwards. That is the record
-  to trust.
+This is best-effort detection; it can't prevent tampering. **Anything running
+as your macOS user can approve a lesson**: it can append a matching event to the
+local event log too, type into a pseudo-terminal to pass the terminal check, or
+change the checkout's code that does the checking. What remains:
+- earlier entries without a matching event are a warning in `security`, `status`
+  and `learn list`; when the event log no longer reaches back to the last change (it
+  keeps about 20 MB), the lessons are withheld until you check your sink and
+  `learn reseal`;
+- the hub's status (`metacomputer hub status --json`) reports the hash of the
+  store its own settings name, and the hash `learn` recorded (not each client's);
+- an event sink off the Mac (docs/events.md) keeps every change made through
+  `learn`, with its hashes, where nothing on the Mac can rewrite it. A change made
+  without `learn` sends nothing, so compare the sink's last `store_hash` with
+  `learn list`. That is the record to trust.
+
+The hashes cover each lesson's id and cleaned text (what is sent), not its
+provenance (title, source, dates, evidence).
 
 A follow-up, once the secrets vault's presence-based approvals (Touch ID through
 LocalAuthentication) are merged: have `learn approve` ask the vault to sign each
@@ -238,9 +248,16 @@ comparison spent. The per-task table goes to `results/bench/compare-*.md`.
   `metacomputer` command it starts also refuses if the settings name another VM
   (`MCOMP_EXPECT_VM`).
 - **Unknown costs count.** A session that ends without reporting its cost (killed
-  at its timeout, crashed) is counted at its whole budget against the cap, and a
-  task's budget is reserved before its session starts, so a resumed run counts it
-  even if the runner died.
+  at its timeout, crashed) is counted at its whole budget against the cap. Each
+  task's budget is reserved in `run.json`, with its own id, before its session
+  starts, and only the task's written record settles it; a reservation the runner
+  died holding stays and is charged on every later resume.
+- **The reset itself checks.** `metacomputer reset`, in the process that replaces
+  the VM, compares the VM and baseline names it is about to use, and the settings
+  file's hash, with what was confirmed (`MCOMP_EXPECT_VM`, `MCOMP_EXPECT_BASELINE`,
+  `MCOMP_EXPECT_CONFIG_SHA`), first and again right before the copy, and refuses on
+  any difference. The settings are shell code you trust: this catches a changed
+  file, not hostile settings.
 - **It spends your Claude usage.** A full comparison is 40 headless sessions,
   about $20 and an hour. It says so and asks first; `--yes` skips the question.
   `--tasks` takes a subset, `--budget` caps each task and `--cap` each run.

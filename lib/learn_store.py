@@ -4,18 +4,19 @@ and the text the hub adds to its MCP instructions.
 The store is a folder of the user's own, outside the checkout and the plugin cache:
 $MCOMP_LESSONS_DIR (LESSONS_DIR in the config), else ~/.local/share/metacomputer/lessons. It holds
   lessons.json     the approved lessons, each with its provenance (date, source, evidence summary)
-  approvals.jsonl  one line per change made through `metacomputer learn`: what changed, the lesson's text
-                   hash and the hash of the whole store after it (store_hash)
+  approvals.jsonl  one line per change made through `metacomputer learn`: what changed, its change id, the
+                   lesson's text hash, the hash of the whole store after it (store_hash) and its event
   proposals.json   the latest report's proposals and the ones the user rejected
   .lock            taken while any of them changes
 
 The files are read only when they are private: a regular file (not a link) owned by this user and
 not writable by the group or others, in a folder of the user's that the group and others can't write
-either. Lessons are delivered only when lessons.json matches the last store_hash in approvals.jsonl, so a
-lessons.json written some other way isn't sent (`metacomputer learn reseal` accepts it, at the user's
-terminal). That catches tampering; it can't prevent it: any program running as the user can rewrite both
-files, as it can the code that checks them (SECURITY.md, "Lessons from your own sessions"). The events
-`learn` emits carry the same hashes, and summary() warns when the record disagrees with the event log.
+either. Lessons are delivered only when lessons.json matches the last store_hash in approvals.jsonl and that
+entry has its own lesson event (same change id and store hash), the latest for this store in the event log; so
+a lessons.json written some other way, an entry appended by hand or a record cut back isn't sent (`metacomputer
+learn reseal` accepts it, at the user's terminal). Best-effort detection, not prevention: any program running
+as the user can write all three files, as it can the code that checks them (SECURITY.md, "Lessons from your
+own sessions"); an event sink off the Mac keeps what it received.
 
 The hub reads lessons only to build instruction text (instructions_text). No guard reads them: they
 are advice to the model, never configuration. Stdlib only, and nothing here may stop the hub.
@@ -28,12 +29,15 @@ import re
 import stat
 import tempfile
 import time
+import uuid
+from datetime import datetime, timezone
 
 MAX_LESSONS = 12                    # at most this many reach the instructions
 MAX_LESSON_CHARS = 400              # each one's text, after cleaning
 MAX_TOTAL_CHARS = 2400              # the whole block, heading and preamble included
 MAX_FILE_BYTES = 256 << 10          # a larger store file isn't read
 MAX_LEDGER_BYTES = 4 << 20          # approvals.jsonl
+MAX_EVENT_LOG_BYTES = 24 << 20      # read of each event log when comparing
 LEDGER = "approvals.jsonl"
 LESSON_EVENTS = ("lesson_approved", "lesson_edited", "lesson_removed", "lessons_resealed")
 HEADING = "Notes this user approved from earlier sessions (metacomputer learn)"
@@ -216,9 +220,11 @@ def read_ledger(env=None):
 def state(env=None):
     """The store as read: lessons (cleaned), its hash, the hash `learn` recorded last, and two kinds of problem:
     `private` (the files can't be trusted to be the user's: nothing is read) and `changed` (lessons.json doesn't
-    match the record of changes made through `learn`: nothing is sent until `learn reseal`)."""
+    match the record of changes made through `learn`, or the record's last change has no matching lesson event in
+    the event log: nothing is sent until `learn reseal`); and a `warning` (older changes without an event, or a last
+    change older than the event log reaches)."""
     st = {"lessons": [], "store_hash": EMPTY_HASH, "recorded_hash": EMPTY_HASH, "entries": [], "private": None,
-          "changed": None}
+          "changed": None, "warning": None}
     data, problem = read_json(lessons_path(env), {"lessons": []})
     raw = data.get("lessons") if isinstance(data, dict) else None
     if problem is None and not isinstance(raw, list):
@@ -236,6 +242,11 @@ def state(env=None):
                          f"change learn recorded {st['recorded_hash'] if entries else 'none'}); nothing is sent. "
                          "`metacomputer learn list` shows what's there; `metacomputer learn reseal`, in your own "
                          "terminal, accepts it")
+    elif entries:
+        problem, st["warning"] = event_check(entries, env)
+        if problem:
+            st["changed"] = problem + ("; nothing is sent. `metacomputer learn list` shows what's there; "
+                                       "`metacomputer learn reseal`, in your own terminal, accepts it")
     return st
 
 
@@ -247,14 +258,26 @@ def approved(env=None):
     return ([], problem) if problem else (st["lessons"], None)
 
 
-def record_change(action, lesson, lessons, env=None, origin=None):
-    """Append one line to approvals.jsonl for a change `learn` just saved (the caller holds the Lock). Returns
-    the entry, whose hashes go in the change's event."""
-    entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "action": action, "id": (lesson or {}).get("id"),
-             "title": clean_title((lesson or {}).get("title") or (lesson or {}).get("id") or ""),
-             "source": (lesson or {}).get("source"),
-             "text_hash": text_hash(lesson.get("text")) if lesson and lesson.get("text") else None,
-             "store_hash": content_hash(lessons), "count": len(lessons), "from": origin}
+def store_id(env=None):
+    """A short id for this store (its real path), carried by its events so they're told apart from another
+    store's."""
+    return _h(os.path.realpath(store_dir(env)))
+
+
+def prepare_change(action, lesson, lessons, env=None, origin=None):
+    """The approvals.jsonl entry for a change `learn` just saved: its change id and the hashes its event carries."""
+    return {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ts": round(time.time(), 3),
+            "change_id": uuid.uuid4().hex[:16], "store_id": store_id(env), "action": action,
+            "id": (lesson or {}).get("id"),
+            "title": clean_title((lesson or {}).get("title") or (lesson or {}).get("id") or ""),
+            "source": (lesson or {}).get("source"),
+            "text_hash": text_hash(lesson.get("text")) if lesson and lesson.get("text") else None,
+            "store_hash": content_hash(lessons), "count": len(lessons), "from": origin,
+            "event_id": None, "event_log": None}
+
+
+def append_entry(entry, env=None):
+    """Append an entry to approvals.jsonl (the caller holds the Lock)."""
     d = ensure_dir(env)
     fd = os.open(os.path.join(d, LEDGER), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -268,34 +291,105 @@ def record_change(action, lesson, lessons, env=None, origin=None):
     return entry
 
 
-def event_log_check(entries, env=None):
-    """A warning when the last lesson event in this VM's event log names a store hash that the record of
-    changes doesn't have (the record was rewritten, or lessons.json and the record together), else None."""
-    env = os.environ if env is None else env
-    p = os.path.join(env.get("MCOMP_LOG_DIR") or "", "events.jsonl")
-    if not env.get("MCOMP_LOG_DIR") or not os.path.isfile(p):
-        return None
+def record_change(action, lesson, lessons, env=None, origin=None, event_id=None, event_log=None):
+    """prepare_change() and append_entry() in one; `learn` emits the change's event between the two."""
+    entry = prepare_change(action, lesson, lessons, env, origin)
+    entry.update(event_id=event_id, event_log=event_log)
+    return append_entry(entry, env)
+
+
+def _event_logs(entries, env):
+    """The event logs to compare with: this VM's (MCOMP_LOG_DIR) and the ones the record's entries name, each
+    with its rotated copy."""
+    paths = []
+    ld = env.get("MCOMP_LOG_DIR")
+    if ld:
+        paths.append(os.path.join(ld, "events.jsonl"))
+    for e in entries[-200:]:
+        p = e.get("event_log")
+        if isinstance(p, str) and os.path.isabs(p) and os.path.basename(p) == "events.jsonl":
+            paths.append(p)
+    out, seen = [], set()
+    for p in paths:
+        for q in (p + ".1", p):
+            r = os.path.realpath(q)
+            if r not in seen and os.path.isfile(r):
+                seen.add(r)
+                out.append(r)
+    return out
+
+
+def _event_ts(ev):
+    t = ev.get("time")
     try:
-        with open(p, "rb") as f:
-            f.seek(max(0, os.path.getsize(p) - (512 << 10)))
-            lines = f.read().splitlines()
-    except OSError:
+        return datetime.strptime(t, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
         return None
-    for line in reversed(lines):
+
+
+def lesson_events(sid, paths):
+    """([(time, change_id, store_hash)] of this store's lesson events, oldest first; the earliest time any event in
+    those logs has, which is how far back they reach)."""
+    evs, earliest = [], None
+    key = sid.encode()
+    for p in paths:
         try:
-            ev = json.loads(line)
-        except (ValueError, RecursionError):
+            with open(p, "rb") as f:
+                data = f.read(MAX_EVENT_LOG_BYTES)
+        except OSError:
             continue
-        if not (isinstance(ev, dict) and ev.get("family") == "security" and ev.get("type") in LESSON_EVENTS):
-            continue
-        h = (ev.get("data") or {}).get("store_hash") if isinstance(ev.get("data"), dict) else None
-        if not isinstance(h, str):
-            return None
-        if h in {e.get("store_hash") for e in entries}:
-            return None
-        return (f"the event log's last lesson change (store hash {h[:16]}) isn't in the store's record of changes: "
-                "the record may have been rewritten outside `metacomputer learn`")
-    return None
+        for i, line in enumerate(data.splitlines()):
+            if i and key not in line:
+                continue
+            try:
+                ev = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(ev, dict):
+                continue
+            t = _event_ts(ev)
+            if i == 0 and t is not None:
+                earliest = t if earliest is None else min(earliest, t)
+            d = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            if ev.get("family") == "security" and ev.get("type") in LESSON_EVENTS and d.get("store_id") == sid \
+                    and isinstance(d.get("change_id"), str) and isinstance(d.get("store_hash"), str):
+                evs.append((t or 0.0, d["change_id"], d["store_hash"]))
+    evs.sort(key=lambda x: x[0])
+    return evs, earliest
+
+
+def event_check(entries, env=None):
+    """(problem, warning) from comparing the record of changes with what the event log recorded for this store.
+    The record's last change must have its own lesson event (same change id and store hash), and no later lesson
+    event may exist: otherwise the record was added to or cut back outside `learn`, or can't be checked (a
+    problem: nothing is sent until `learn reseal`). Earlier changes without an event are a warning. Best effort:
+    anything running as the user can write the event log too; an event sink off the Mac keeps what it was sent."""
+    env = os.environ if env is None else env
+    head = entries[-1]
+    sid = head.get("store_id") or store_id(env)
+    evs, earliest = lesson_events(sid, _event_logs(entries, env))
+    by_change = {c: h for _, c, h in evs}
+    head_ok = by_change.get(head.get("change_id")) == head.get("store_hash")
+    ts = head.get("ts") if isinstance(head.get("ts"), (int, float)) else None
+    problem = warning = None
+    if not head_ok:
+        # Fails closed, also when the log may have rotated past the change: a backdated entry must not pass.
+        if earliest is not None and ts is not None and ts < earliest - 1 and not evs:
+            problem = ("the event log no longer reaches back to the last change in approvals.jsonl, so it can't be "
+                       "checked: compare it with what your event sink received")
+        else:
+            problem = (f"the last change in approvals.jsonl (store hash {str(head.get('store_hash'))[:16]}) has no "
+                       "matching lesson event in the event log: it may have been added outside `metacomputer learn`")
+    elif evs and evs[-1][1] != head.get("change_id"):
+        problem = (f"the event log records a later lesson change (store hash {evs[-1][2][:16]}) than the last one in "
+                   "approvals.jsonl: the record may have been cut back outside `metacomputer learn`")
+    if not problem:
+        older = [e for e in entries[:-1] if by_change.get(e.get("change_id")) != e.get("store_hash")
+                 and (earliest is None or (isinstance(e.get("ts"), (int, float)) and e["ts"] >= earliest - 1))]
+        if older:
+            warning = (f"{len(older)} earlier changes in approvals.jsonl have no matching lesson event in the event "
+                       "log: they may have been added outside `metacomputer learn`")
+    return problem, warning
 
 
 # --- the hub's instruction text ------------------------------------------------------------------
@@ -346,7 +440,7 @@ def summary(env=None, check_events=True):
                    store_hash=None if st["private"] else st["store_hash"],
                    recorded_hash=None if st["private"] else st["recorded_hash"])
         if check_events and not st["private"]:
-            out["warning"] = event_log_check(st["entries"], env)
+            out["warning"] = st["warning"]
     except Exception as e:                      # a summary never fails its command
         out["problem"] = f"couldn't read the lessons: {e!r}"[:200]
     return out

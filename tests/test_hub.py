@@ -53,11 +53,12 @@ import mcomp_sdk  # noqa: E402
 import owners  # noqa: E402
 import termsafe  # noqa: E402
 import wirelimits  # noqa: E402
+import learn  # noqa: E402
 import learn_store  # noqa: E402
 
-# The hostile store is recorded as approved through `metacomputer learn` (approvals.jsonl), so it is delivered.
-learn_store.record_change("approved", None, json.load(open(os.path.join(os.environ["MCOMP_LESSONS_DIR"],
-                                                                         "lessons.json")))["lessons"])
+# The hostile store is recorded as approved through `metacomputer learn` (its event, then its entry in
+# approvals.jsonl), so it is delivered.
+learn.record("approved", None, json.load(open(os.path.join(os.environ["MCOMP_LESSONS_DIR"], "lessons.json")))["lessons"])
 
 PY = sys.executable
 FAKE = os.path.join(TD, "fake_driver.py")
@@ -691,7 +692,7 @@ def lessons_checks():
     os.makedirs(other, mode=0o700)
     lb = [{"id": "store-b", "text": "A lesson that only store B holds.", "source": "you"}]
     learn_store.write_json(os.path.join(other, "lessons.json"), {"lessons": lb})
-    learn_store.record_change("approved", lb[0], lb, env=dict(os.environ, MCOMP_LESSONS_DIR=other))
+    learn.record("approved", lb[0], lb, env=dict(os.environ, MCOMP_LESSONS_DIR=other))
     hb = mcomp_sdk.Hub(env=dict(r.env, MCOMP_LESSONS_DIR=other), kind="sdk", timeout=20).connect()
     ins_b = (hb.request("initialize", {"protocolVersion": "2025-06-18"}) or {}).get("instructions") or ""
     st = hb.status()
@@ -700,6 +701,25 @@ def lessons_checks():
           "Notes this user approved" not in ins_off and "How to work on it" in ins_off, ins_off[:120])
     check("…and that client's store (B, not the hub's A)", "only store B holds" in ins_b
           and not any(t in ins_b for t in HOSTILE_LESSONS), ins_b[:120])
+    # A client's own "off", or a store path the hub can't use, means no lessons for it: never the hub's.
+    rel = mcomp_sdk.Hub(env=dict(r.env, MCOMP_LESSONS="off", MCOMP_LESSONS_DIR="./lessons"), kind="sdk",
+                        timeout=20).connect()
+    ins_rel = (rel.request("initialize", {"protocolVersion": "2025-06-18"}) or {}).get("instructions") or ""
+    rel.close()
+    nowhere = mcomp_sdk.Hub(env=dict(r.env, MCOMP_LESSONS_DIR="./no-such-store"), kind="sdk", timeout=20).connect()
+    ins_nowhere = (nowhere.request("initialize", {"protocolVersion": "2025-06-18"}) or {}).get("instructions") or ""
+    nowhere.close()
+    check("a client's off with a relative store path still means off (not the hub's lessons)",
+          "Notes this user approved" not in ins_rel, ins_rel[:120])
+    check("a client's store that doesn't exist means no lessons for it, never the hub's or the default",
+          "Notes this user approved" not in ins_nowhere, ins_nowhere[:120])
+    home = os.path.expanduser("~")
+    check("the client resolves ~ and relative store paths itself; the hub refuses any it can't use",
+          mcp_hub.lessons_of({"MCOMP_LESSONS_DIR": "~/st", "HOME": home})["dir"] == os.path.join(home, "st")
+          and os.path.isabs(mcp_hub.lessons_of({"MCOMP_LESSONS_DIR": "rel/st"})["dir"])
+          and mcp_hub.lessons_env_of({"setting": "on", "dir": "rel/st"}) == {"MCOMP_LESSONS": "off"}
+          and mcp_hub.lessons_env_of({"setting": "maybe", "dir": ""}) == {"MCOMP_LESSONS": "off"}
+          and mcp_hub.lessons_env_of("junk") == {"MCOMP_LESSONS": "off"} and mcp_hub.lessons_env_of(None) is None)
     les = (st or {}).get("lessons") or {}
     check("the hub's status reports its store's hash and the hash `learn` recorded",
           les.get("store_hash") and les.get("store_hash") == les.get("recorded_hash") and les.get("delivered") == 3, les)
