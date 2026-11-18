@@ -75,7 +75,15 @@ MAX_BACKLOG_MSGS = 256              # what may wait for one client before it's d
 MAX_BACKLOG_BYTES = 128 << 20
 HELLO_TIMEOUT_S = 10
 WRITE_TIMEOUT_S = 30                # a driver that doesn't take a message within this is dropped
-LOG_MAX = 5 << 20                   # hub.log is rotated (one old copy) past this, when a hub starts
+LOG_MAX = 5 << 20                   # hub.log is rotated (one old copy) past this, at start and while it runs
+NOTE_REPEAT_MAX = 5                 # the same kind of note at most this often per NOTE_WINDOW_S, then one summary
+NOTE_WINDOW_S = 60.0
+BAD_UPSTREAM_MAX = 50               # unusable messages from the driver within BAD_UPSTREAM_WINDOW_S: the hub hangs up
+BAD_UPSTREAM_WINDOW_S = 60.0
+LEASE_TICK_S = 1.0                  # how often the lease keeper looks
+LEASE_REFRESH_S = 60.0              # a lease's claim is rewritten this often while its calls run (it stays active)
+LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub ends the driver runtime, and only then
+                                                               # lets the computer go
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
 LIVE_WINDOWS_TTL_S = 1.0            # list_windows reused within one batch, never across an action
 DIRECT_TTL_S = 3.0                  # direct SSH connections (owners.py) are looked up at most this often
@@ -125,6 +133,8 @@ HABITS = (
 )
 OVERSIZE_MSG = ("The virtual computer sent a message larger than the hub accepts ({} MB), so the hub closed its "
                 "connection to it. Call again; element tokens from earlier reads are stale.").format(MAX_UPSTREAM_MSG >> 20)
+PROTOCOL_MSG = ("The virtual computer kept sending messages the hub can't use, so the hub closed its connection to "
+                "it. Call again; element tokens from earlier reads are stale.")
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
 BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
 REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
@@ -580,20 +590,63 @@ class Hub:
         self._refreshing = False    # one tools/list refresh at a time (schedule_refresh)
         self._refresh_again = False
         self._refresh_last = 0.0
+        self._lease_keeper = None   # the thread that refreshes leases and ends a runtime past LEASE_MAX_S
+        self._bad_upstream = collections.deque()   # times of unusable messages from the driver (BAD_UPSTREAM_*)
+        self.log_lock = threading.Lock()
+        self._note_kinds = {}       # kind -> [window start, notes written, notes left out] (NOTE_REPEAT_MAX)
+        self.log = None
+        self.log_bytes = 0
+        self._open_log()
+
+    # --- bookkeeping ---------------------------------------------------------------
+    def _open_log(self):
         try:
             os.makedirs(os.path.dirname(self.paths["log"]), exist_ok=True)
             fd = os.open(self.paths["log"], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self.log = os.fdopen(fd, "a", buffering=1)
+            self.log_bytes = os.fstat(fd).st_size
         except OSError:
             self.log = None
 
-    # --- bookkeeping ---------------------------------------------------------------
-    def note(self, text):
-        if self.log:
-            try:
-                self.log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {text}\n")
-            except (OSError, ValueError):
-                pass
+    def rotate_log(self):
+        """hub.log past LOG_MAX: it becomes hub.log.1 (one old copy) and a new one starts. Caller holds log_lock."""
+        try:
+            if self.log:
+                self.log.close()
+            os.replace(self.paths["log"], self.paths["log"] + ".1")
+        except OSError:
+            pass
+        self._open_log()
+
+    def note(self, text, kind=None):
+        """A line in hub.log. Notes of one kind (a misbehaving driver's, say) are written at most NOTE_REPEAT_MAX times
+        per NOTE_WINDOW_S, then counted; and the file is rotated at LOG_MAX while the hub runs, so nothing the VM
+        does can fill the disk through it."""
+        now = time.monotonic()
+        lines = []
+        with self.log_lock:
+            if kind is not None:
+                st = self._note_kinds.setdefault(kind, [now, 0, 0])
+                if now - st[0] >= NOTE_WINDOW_S:
+                    if st[2]:
+                        lines.append(f"({st[2]} more notes like '{kind}' in the last {int(now - st[0])} s were left out)")
+                    st[:] = [now, 0, 0]
+                if st[1] >= NOTE_REPEAT_MAX:
+                    st[2] += 1
+                    return
+                st[1] += 1
+            lines.append(text)
+            if not self.log:
+                return
+            for line in lines:
+                data = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {line}\n"
+                try:
+                    self.log.write(data)
+                except (OSError, ValueError):
+                    return
+                self.log_bytes += len(data.encode())
+            if self.log_bytes > LOG_MAX:
+                self.rotate_log()
 
     def event(self, client, family, type_, message, severity=None, action=None, data=None, debounce=None):
         """The optional event stream (docs/events.md), on a background thread: never delays a call."""
@@ -1035,26 +1088,50 @@ class Hub:
                     why = "oversize"
                     self.note(f"the driver sent a message over {MAX_UPSTREAM_MSG >> 20} MB; closing the connection")
                     break
+                if not line.strip():
+                    continue
                 try:
                     msg = wirelimits.loads(line)       # too deep, too many values or not JSON: never a dead reader
                 except ValueError:
-                    continue
+                    msg = None
+                usable = False
                 if isinstance(msg, dict) and msg.get("method") == "notifications/metacomputer/closing":
-                    why = str((msg.get("params") or {}).get("reason") or "closed")[:40]   # the relay's reason
+                    p = msg.get("params")
+                    why = str((p.get("reason") if isinstance(p, dict) else None) or "closed")[:40]   # the relay's
                     continue
                 if isinstance(msg, dict):
                     try:
-                        self.on_upstream(msg)
+                        usable = self.on_upstream(msg) is not False
                     except Exception as e:
-                        self.note(f"error handling a message from the driver: {e!r}")
+                        self.note(f"error handling a message from the driver: {e!r}"[:300], kind="driver message error")
+                if not usable and self._bad_upstream_message(gen):
+                    why = "protocol"
+                    self.note(f"the driver sent more than {BAD_UPSTREAM_MAX} unusable messages in "
+                              f"{int(BAD_UPSTREAM_WINDOW_S)} s; closing the connection")
+                    break
         except Exception as e:  # whatever ends the reading, the connection is closed and its calls fail
             if not isinstance(e, (OSError, ValueError)):
-                self.note(f"the driver connection's reader stopped: {e!r}")
+                self.note(f"the driver connection's reader stopped: {e!r}"[:300])
         finally:
             self._upstream_closed(proc, gen, why)
 
+    def _bad_upstream_message(self, gen):
+        """One more unusable message from the driver (not JSON, the wrong shape, one the hub couldn't handle). True
+        once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S: a driver that keeps doing it
+        is hung up on rather than logged without end."""
+        now = time.monotonic()
+        q = self._bad_upstream
+        q.append(now)
+        while q and now - q[0] > BAD_UPSTREAM_WINDOW_S:
+            q.popleft()
+        self.note("the driver sent a message the hub couldn't use; skipped", kind="driver unusable message")
+        if len(q) > BAD_UPSTREAM_MAX:
+            q.clear()
+            return True
+        return False
+
     def _upstream_closed(self, proc, gen, why=None):
-        if why == "oversize":
+        if why in ("oversize", "protocol"):
             try:
                 proc.kill()
             except OSError:
@@ -1062,7 +1139,7 @@ class Hub:
         # No connect_lock here: connect() holds it while it waits for the handshake this closing may answer.
         if self.up is proc:
             self.up, self.ready = None, False
-        text = OVERSIZE_MSG if why == "oversize" else DROPPED_MSG
+        text = OVERSIZE_MSG if why == "oversize" else PROTOCOL_MSG if why == "protocol" else DROPPED_MSG
         for key, pend in list(self.pending.items()):
             if pend.get("gen") == gen:
                 self.pending.pop(key, None)
@@ -1092,8 +1169,15 @@ class Hub:
             pass
 
     def on_upstream(self, msg):
+        """Handle one message from the driver. False when its shape is wrong (counted by the reader)."""
         mid, method = msg.get("id"), msg.get("method")
+        if method is not None and not isinstance(method, str):
+            return False
+        if "params" in msg and msg["params"] is not None and not isinstance(msg["params"], dict):
+            return False
         if method is None and mid is not None:
+            if not isinstance(mid, (str, int)) or isinstance(mid, bool):
+                return False
             key = mid if isinstance(mid, str) else json.dumps(mid)
             slot = self.internal.pop(key, None)
             if slot:
@@ -1104,29 +1188,32 @@ class Hub:
                     try:
                         slot[2](msg)
                     except Exception as e:
-                        self.note(f"internal callback failed: {e!r}")
-                return
-            pend = self.pending.pop(key, None)
+                        self.note(f"internal callback failed: {e!r}"[:300], kind="internal callback failed")
+                return True
+            with self.lease_lock:                    # removed, leased and finished under one lock (_pend_finished)
+                pend = self.pending.pop(key, None)
             if not pend:
-                return
+                return True
             self._pend_finished(key, pend)
             try:
                 self.observe(pend, msg, key)
             except Exception as e:  # never let bookkeeping break the relay
                 self.note(f"observe failed: {e!r}")
             if pend.get("orphan"):
-                return
+                return True
             out = dict(msg)
             out["id"] = pend["id"]
             pend["client"].send(out)
-            return
+            return True
         if method is not None and mid is not None:     # the driver asks its client something: the hub answers
+            if not isinstance(mid, (str, int)) or isinstance(mid, bool):
+                return False
             if method == "ping":
                 self.send_up({"jsonrpc": "2.0", "id": mid, "result": {}})
             else:
                 self.send_up({"jsonrpc": "2.0", "id": mid, "error": {
-                    "code": -32601, "message": f"{method} isn't supported through the metacomputer hub"}})
-            return
+                    "code": -32601, "message": f"{clean(method, 80)} isn't supported through the metacomputer hub"}})
+            return True
         if method == "notifications/tools/list_changed":
             # The driver's own tools changed: one refresh, and everyone asks again. Repeats while a refresh is
             # under way fold into it (no new thread, no new notice to the clients).
@@ -1136,10 +1223,15 @@ class Hub:
         elif method == "notifications/progress":
             p = msg.get("params") or {}
             tok = p.get("progressToken")
+            if not isinstance(tok, (str, int)) or isinstance(tok, bool):
+                return False
             target = self.progress.get(json.dumps(tok))
             if target and not target[0].closed:
                 target[0].send({**msg, "params": {**p, "progressToken": target[1]}})
+        elif method is None:
+            return False                             # neither an answer nor a notification
         # other notifications (log messages, ...) aren't any one client's: dropped
+        return True
 
     # --- client requests ----------------------------------------------------------------
     def reply(self, client, msg, result):
@@ -2170,9 +2262,8 @@ class Server:
         self.lock_fd = fd
         try:
             if os.path.getsize(self.paths["log"]) > LOG_MAX:
-                os.replace(self.paths["log"], self.paths["log"] + ".1")
-                self.hub.log = os.fdopen(os.open(self.paths["log"], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
-                                         "a", buffering=1)
+                with self.hub.log_lock:
+                    self.hub.rotate_log()
         except OSError:
             pass
         os.ftruncate(fd, 0)

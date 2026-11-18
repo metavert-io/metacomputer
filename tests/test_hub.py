@@ -189,6 +189,10 @@ for line in sys.stdin:
             sys.stderr.write(chunk)
         sys.stderr.flush()
         ok(mid, "stderr flooded")
+    elif name == "badflood":             # valid JSON of the wrong shape, over and over
+        for _ in range(int(a.get("size", 100))):
+            send({"jsonrpc": "2.0", "method": "notifications/progress", "params": "not an object"})
+        ok(mid, "after the bad messages")
     elif name == "deep":                 # a small line nested far deeper than any parser recursion
         out.write("[" * int(a.get("size", 100000)) + "\n"); out.flush()
         out.write('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"deep":' + "[" * 5000 + "]" * 5000 + '}}\n')
@@ -246,7 +250,7 @@ def setup_driver():
     extra = {"type": "object", "properties": {"session": {"type": "string"}, "s": {"type": "number"},
                                               "size": {"type": "integer"}, "tag": {"type": "string"}}}
     for n in ("whoami", "echo", "slow", "big", "huge", "nonl", "die", "deaf", "expire", "listchange", "flood",
-              "stderrflood", "deep"):
+              "stderrflood", "deep", "badflood"):
         tools.append({"name": n, "description": "test tool", "inputSchema": extra})
     json.dump(tools, open(os.path.join(STATE, "tools.json"), "w"))
     open(FAKE, "w").write(FAKE_DRIVER)
@@ -1536,6 +1540,36 @@ def memory_checks():
           rec)
 
 
+def log_checks():
+    print("N3: a driver that keeps sending unusable messages can't fill hub.log")
+    saved = (mcp_hub.BAD_UPSTREAM_MAX, mcp_hub.LOG_MAX)
+    mcp_hub.BAD_UPSTREAM_MAX = 20
+    try:
+        r = Running()
+        h = client(r)
+        h.call("whoami", {})
+        log = mcp_hub.paths(r.env)["log"]
+        before = os.path.getsize(log)
+        res = h.call("badflood", {"size": 200})
+        time.sleep(0.5)
+        grew = os.path.getsize(log) - before
+        lines = [x for x in open(log).read().splitlines() if "couldn't use" in x or "error handling" in x]
+        check("200 messages of the wrong shape: a handful of log lines, not one each", grew < 3000 and len(lines) <= 10,
+              (grew, len(lines)))
+        check("…and past the limit the hub hangs up on the driver (the call fails clearly; the next call reconnects)",
+              res.is_error and "can't use" in res.text and not h.call("whoami", {}).is_error, res.text[:160])
+        h.close()
+        mcp_hub.LOG_MAX = 4000
+        for i in range(300):
+            r.hub.note(f"line {i} " + "x" * 60)
+        size = os.path.getsize(log)
+        check("hub.log is rotated while the hub runs, not only at start", size <= 4200 and os.path.exists(log + ".1"),
+              size)
+        r.stop()
+    finally:
+        mcp_hub.BAD_UPSTREAM_MAX, mcp_hub.LOG_MAX = saved
+
+
 def main():
     setup_driver()
     try:
@@ -1563,6 +1597,7 @@ def main():
         batch_checks()
         who_checks()
         memory_checks()
+        log_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
