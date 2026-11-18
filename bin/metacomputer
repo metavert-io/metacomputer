@@ -27,7 +27,7 @@
 #   recordings [--sync] [N]
 #   checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
 #   view                           how to watch / take over the desktop (VNC)
-#   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [-- ARGS]
+#   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
 #   ssh [ops|admin] [CMD...]       shell into the guest

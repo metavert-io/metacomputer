@@ -30,6 +30,7 @@ metacomputer sh -c 'COMMANDS' | --file SCRIPT | -   [options] [-- ARGS...]
   --read-only          a check that changes nothing (see "One controller at a time")
   --override           run even though another session is using the computer
   --json               the result as one JSON object
+  --raw                print the output exactly as it came, even to a terminal
   -- ARGS              $1, $2, ... for the script
 ```
 
@@ -37,8 +38,8 @@ metacomputer sh -c 'COMMANDS' | --file SCRIPT | -   [options] [-- ARGS...]
 | --- | --- |
 | 0-255 | The script's own exit status (bash's 126/127/128+N included) |
 | 124 | `--timeout` passed; the script was stopped |
-| 125 | Refused, nothing ran: `VM_SHELL`, the bounded driver, another session, an invalid setting, or an action log that couldn't be opened |
-| 255 | Couldn't run or finish: the VM is off, SSH failed, no such `--cwd` |
+| 125 | Refused, nothing ran: `VM_SHELL`, the bounded driver, another session, an invalid setting, a claim on the computer that couldn't be written, or an action log that couldn't be opened or signed |
+| 255 | Couldn't run or finish: the VM is off, SSH failed, no such `--cwd`, a malformed or oversized answer from the VM, or a run whose final log signature failed |
 | 130 | Interrupted on the Mac; the script was stopped in the VM too |
 | 2 | Usage error |
 
@@ -49,8 +50,18 @@ A script can also exit with 124, 125 or 255 itself; `--json` tells them apart
 `--json` gives `status`, `exit_code`, `exit` (this command's status),
 `stdout`, `stderr`, `stdout_bytes`, `stdout_sha256`, `stdout_truncated` (and
 the same for stderr), `duration_s`, `cwd`, `read_only`, `desktop` (whether the
-desktop's environment was loaded), `max_output`, `logged` (the action-log
-file, if any) and `message`.
+desktop's environment was loaded), `held_open` (a program the script left
+running still had its output), `max_output`, `logged` (the action-log file,
+if any), `message`, and when they apply `kind` (`timeout`, `protocol`,
+`connection`, `guest`, `log`, `interrupted`, `vm_off`), `notes`, `warnings`
+and `remote` (the VM's own diagnostics).
+
+On a terminal, control characters in the output (but newline and tab), C1
+controls and bidirectional overrides are shown escaped (`\x1b`, `\u202e`), so
+the VM can't move the cursor, rewrite the screen or set the clipboard (OSC
+52). `--raw` prints them as they came. Output to a pipe or a file, as Claude
+Code reads it, is always exact. Messages from the command are always
+escaped, since they can quote the VM.
 
 ## How it works
 
@@ -58,8 +69,8 @@ file, if any) and `message`.
 Mac: bin/metacomputer sh ──▶ lib/vm_shell.py ──ssh -T (ops key or certificate, as `metacomputer ssh ops`)──┐
        settings, one-controller check, action log                                                       │
 VM:  python3 -I -c '<read a length, then that much Python, and run it>'   ◀── stdin: lib/vm_shell_guest.py,
-       └─ bash --noprofile --norc SCRIPT ARGS (own process group)            a JSON header, the script
-            stdout, stderr ─▶ files in a private /tmp/mcsh.XXXX folder
+       └─ bash --noprofile --norc /tmp/mcsh.XXXX/script ARGS                 a JSON header, the script
+            (own process group) stdout, stderr ─▶ pipes, read as they come
        ◀── one JSON line: status, exit code, duration, each stream's size, SHA-256, start and end
 ```
 
@@ -75,22 +86,57 @@ VM:  python3 -I -c '<read a length, then that much Python, and run it>'   ◀─
   and Cua Driver reads it like any other. `~/.local/bin` is on `PATH` when it
   exists. If the desktop session isn't up, the script still runs, without
   those, and the command says so.
-- **Output in files, not pipes.** stdout and stderr go to files in a private
-  folder (0700, removed afterwards). A program the script leaves running can't
-  hold the connection open, and doesn't die of a closed pipe later.
-- **The cap.** The VM reads each file once, hashing all of it and keeping its
-  first and last `max_output / 2` bytes, so a huge output never crosses SSH.
-  The Mac trims the cut to whole UTF-8 characters and marks what was left out.
+- **The script** is written to a fixed path, `script`, alone in a private
+  folder (0700, removed afterwards), so `$0` is that path whatever the file
+  was called on the Mac.
+- **Output in pipes, kept bounded.** The VM's half reads stdout and stderr as
+  they come, hashing all of each and keeping only its first and last
+  `max_output / 2` bytes: nothing is written to disk, memory stays at most
+  1.5 times the cap, and a huge output never crosses SSH. The Mac trims the
+  cut to whole UTF-8 characters and marks what was left out.
+- **Programs left running.** After the script's own process ends, its output
+  is read for half a second more. A program it started with `&` that still
+  holds the output is then handed to a `cat` that discards what it prints, so
+  it neither holds up the answer nor dies of a closed pipe; `held_open` says
+  so. Programs started with `setsid -f APP ... >/tmp/APP.log 2>&1` aren't
+  affected.
 - **Timeout.** The VM's half sends SIGTERM to the script's process group, then
-  SIGKILL 3 s later. Programs started with `setsid -f` have their own session
-  and keep running. Programs started with `&` stay in the group: they keep
-  running after a normal end, but a timeout stops them.
+  SIGKILL once the whole group is gone or 3 s later. Programs started with
+  `setsid -f` have their own session and keep running. Programs started with
+  `&` stay in the group: they keep running after a normal end, but a timeout
+  stops them.
 - **Interruption.** The Mac keeps SSH's stdin open until the answer arrives.
   If it closes first (Ctrl-C, the command killed, the connection lost), the
-  VM's half stops the script the same way. The Mac also gives up 30 s after
-  the timeout, which closes the connection.
+  VM's half stops the script the same way.
 - **Leftovers.** A run folder left by a killed runner is removed by the next
   run after a day.
+
+### A VM that misbehaves
+
+The VM is untrusted, and so is every program in it running as the desktop
+user: one could take over the connection's other end, or stand in for the
+VM's half. Whatever comes back, the Mac stays safe:
+- **One deadline,** `--timeout` plus 30 s, starts before ssh does. Writing the
+  request and reading the answer are both non-blocking and checked against
+  it, so a VM that stops reading, or never answers, can't hold the command
+  past it. Past it, or on Ctrl-C, the connection is closed (124 or 130).
+- **Wire limits.** stdout can carry at most what a well-formed answer can
+  hold: each stream's kept bytes as base64, plus 16 KB of JSON. stderr (ssh's
+  and the VM half's own diagnostics) is limited to 64 KB. Past either limit
+  the connection is closed and nothing is shown (255).
+- **A strict schema.** The answer must be exactly one line of JSON with
+  exactly the expected fields and types: a known status, an exit code from 0
+  to 255 (and only when the script exited), a finite duration, true or false
+  where expected, a 64-digit hex SHA-256, and base64 of exactly the size the
+  stream's byte count and the cap call for, with lengths checked before
+  anything is decoded. Duplicate keys, NaN and extra lines are rejected.
+  Anything else is a protocol error (255), logged as one, and nothing from
+  the answer is shown. Rejection messages are fixed text, never the VM's.
+- **Escaped on a terminal,** as above.
+
+What the VM reports, the sizes and hashes included, is its own account.
+Under this trust model they don't prove what ran or what it printed: a
+compromised VM can report anything that fits the schema.
 
 ## Settings
 
@@ -124,6 +170,15 @@ like a click:
   the run, so the claim is held by the caller's Claude Code process, or
   outside Claude Code by the shell that ran it; it's refreshed every minute
   of a long run.
+- the check and the claim are one step under this VM's owners lock
+  (`.run/owners/.lock`, `flock`), so two runs started together can't both
+  pass. If the claim can't be written, the run is refused (125); if a
+  refresh fails, the command says so in a warning. Claims are written through
+  a temporary file of their own, so two runs under one session don't collide.
+  Claude Code's bridge doesn't take the lock yet: it checks from a cache that
+  is at most 3 s old, so a shell run and an acting tool call from two
+  sessions starting in the same moment can still both pass.
+  `owners.lock()` is there for it.
 
 `--read-only` is for a second session that only needs to look: read a saved
 file, list a folder, check a process. It isn't refused and claims nothing.
@@ -144,7 +199,8 @@ form as a driver connection ([SECURITY.md](../SECURITY.md)):
 | --- | --- |
 | `start` | who ran it (`via: "shell"`), from which project, the VM and its settings |
 | `call`, tool `vm_shell` | the script's SHA-256 and size, how it was given (`command`, `file`, `stdin`), `cwd`, timeout, cap, `read_only`, `override`; the script and its arguments only with `ACTION_LOG_TEXT=keep`, otherwise their length |
-| `result`, tool `vm_shell` | status, exit code, duration, whether the desktop's environment was loaded, and each stream's full size and SHA-256 (and whether it was capped); the output text, as returned, only with `ACTION_LOG_TEXT=keep` |
+| `checkpoint` | a signature over the call, made before anything runs |
+| `result`, tool `vm_shell` | status, `kind`, exit code, duration, `desktop`, `held_open`, and each stream's full size and SHA-256 (and whether it was capped); a message written by the Mac; the VM's own diagnostics (its error text, ssh's stderr) as `remote` size and SHA-256. The output text and diagnostics as text (`remote_text`) only with `ACTION_LOG_TEXT=keep` |
 | `refused` | the call's arguments as above and why |
 | `end`, final `checkpoint` | the signature over the whole file |
 
@@ -155,19 +211,30 @@ form as a driver connection ([SECURITY.md](../SECURITY.md)):
 | `on` | `auto` | `redact` (default) | logged: hashes and sizes, no script or output text |
 | `on` | `auto` | `keep` | logged with the script, its arguments and the output text |
 
-If logging applies and the log can't be opened, the run is refused rather
-than run unlogged. `metacomputer actions show` prints a run as
+What stays in plain text with `ACTION_LOG_TEXT=redact`: the folder in the VM
+(`--cwd`) and the `--file` name on the Mac (paths, like a driver call's
+paths), the Mac folder it was run from, the VM's name and settings, and
+refusal reasons, which can name another session's project folder. Everything
+the script contains, its arguments, everything it printed and everything the
+VM said in its own words is a size and a hash.
+
+If logging applies, the log must open and sign the call before anything
+runs; otherwise the run is refused (125) rather than run unlogged. If the
+final signature fails, the command exits 255 and says the run is unlogged,
+though the script did run and its output is shown. `metacomputer actions show` prints a run as
 `-> vm_shell {...}` and `<- vm_shell exit 0 (82 ms; stdout 18 B, stderr 0 B)`;
 `metacomputer actions verify` checks these files like any other, and a
 desktop recording's key moments include shell runs made during it.
 
-The output hashes let you prove later that a file you have is what a run
-printed, without keeping the text in the log.
+The output hashes let you check a file you have against what the VM said a
+run printed, without keeping the text in the log. They are the VM's report,
+not proof (see "A VM that misbehaves").
 
 ## Tests
 
 - `python3 tests/test_vm_shell.py` (no VM): the Mac's and the VM's halves run
-  locally with `bash -c` standing in for SSH.
+  locally with `bash -c` standing in for SSH, and a fake, hostile VM floods,
+  stalls, stops reading and sends malformed answers.
 - `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py F`: the same things
   against a running test VM, plus a detached GUI app the driver can read and
   the isolation checks. See [TESTING.md](../TESTING.md).

@@ -11,19 +11,33 @@ user's. The script goes over SSH's stdin together with the VM's half
 (vm_shell_guest.py), so nothing is quoted or expanded on the Mac. See
 docs/shell.md for the design and SECURITY.md for what it can reach.
 
+The VM is untrusted, including other programs running as its desktop user.
+Whatever comes back, this side:
+- reads at most a fixed number of bytes per stream (set from --max-output),
+  under one deadline that starts before ssh does, and closes the connection
+  past either;
+- accepts only a reply that fits a strict schema, and shows nothing of one
+  that doesn't;
+- escapes control characters before they reach a terminal (--raw opts out);
+- logs only hashes and sizes of the VM's free text unless ACTION_LOG_TEXT=keep.
+
 Settings (config/defaults.env, passed in by bin/metacomputer):
   VM_SHELL   auto | on | off     auto = on, except off while DRIVER_MODE=bounded
   SHELL_LOG  auto | off          auto = every run goes in the signed action log
                                  when ACTION_LOG=on; off = never logged
+MCOMP_SH_GRACE_S (tests only) shortens how long the Mac waits past --timeout.
 """
 import base64
+import binascii
 import hashlib
 import json
+import math
 import os
+import re
+import selectors
 import signal
 import subprocess
 import sys
-import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -39,8 +53,22 @@ TOOL = "vm_shell"
 DEFAULT_TIMEOUT, MAX_TIMEOUT = 120, 3600
 DEFAULT_OUTPUT, MIN_OUTPUT, MAX_OUTPUT = 65536, 1024, 1048576
 MAX_SCRIPT = 1048576
-GRACE_S = 30            # the Mac waits this much longer than the VM's own timeout
+
+
+def _grace():
+    try:
+        return min(300, max(1, int(os.environ.get("MCOMP_SH_GRACE_S") or 30)))
+    except ValueError:
+        return 30
+
+
+GRACE_S = _grace()      # the Mac waits this much longer than the VM's own timeout
 CLAIM_EVERY_S = 60      # a long run keeps its claim on the computer fresh
+CHUNK = 1 << 16
+STDERR_WIRE = 65536     # ssh's and the VM's own diagnostics
+REPLY_OVERHEAD = 16384  # the reply's JSON around the two streams
+MAX_MESSAGE = 1000      # the VM's error text, in characters
+REMOTE_SHOWN = 400      # how much of the VM's diagnostics a terminal shows
 
 # This command's exit codes when the script's own can't be given.
 EXIT_USAGE, EXIT_TIMEOUT, EXIT_REFUSED, EXIT_FAILED, EXIT_INTERRUPTED = 2, 124, 125, 255, 130
@@ -65,19 +93,26 @@ VM's home). Output comes back when the script ends.
   --override           run even though another session is using the computer
                        (ask the user first)
   --json               the result as one JSON object
+  --raw                print the output exactly as it came, even to a terminal
+                       (otherwise control characters are shown escaped there)
   -- ARGS              $1, $2, ... for the script
 
 To leave a program running (a GUI app), start it detached:
   setsid -f APP ARGS </dev/null >/tmp/APP.log 2>&1
 
 Exit status: the script's own; 124 timed out; 125 refused (VM_SHELL, the
-bounded driver, another session); 255 couldn't run or finish (VM off, SSH,
-no such folder); 2 usage.
+bounded driver, another session, the action log); 255 couldn't run or finish
+(VM off, SSH, no such folder, a malformed answer, a log that couldn't be
+signed); 130 interrupted; 2 usage.
 Settings: VM_SHELL=auto|on|off, SHELL_LOG=auto|off (metacomputer security)."""
 
 
 class Usage(Exception):
     pass
+
+
+class Protocol(Exception):
+    """The VM's answer doesn't fit the schema. Messages are fixed text, never the VM's."""
 
 
 # --- settings ------------------------------------------------------------------
@@ -138,7 +173,7 @@ def _int(opt, v, lo, hi):
 
 def parse(argv):
     o = {"source": None, "command": None, "file": None, "cwd": None, "timeout": DEFAULT_TIMEOUT,
-         "max_output": DEFAULT_OUTPUT, "json": False, "read_only": False, "override": False,
+         "max_output": DEFAULT_OUTPUT, "json": False, "raw": False, "read_only": False, "override": False,
          "args": [], "help": False}
 
     def source(kind):
@@ -179,6 +214,8 @@ def parse(argv):
             o["max_output"] = _int("--max-output", value(), MIN_OUTPUT, MAX_OUTPUT)
         elif a == "--json":
             o["json"] = True
+        elif a == "--raw":
+            o["raw"] = True
         elif a == "--read-only":
             o["read_only"] = True
         elif a == "--override":
@@ -222,6 +259,115 @@ def read_script(o, stdin=None):
     return data
 
 
+# --- the VM's answer -------------------------------------------------------------
+GUEST_ERRORS = {"bad_request": "the virtual computer's side couldn't read the request",
+                "no_such_folder": "no such folder in the virtual computer: {cwd}",
+                "internal": "the virtual computer's side failed"}
+STATUSES = ("exited", "timeout", "cancelled")
+OK_KEYS = {"metacomputer_sh", "status", "exit_code", "duration_s", "desktop", "held_open", "stdout", "stderr"}
+STREAM_KEYS = {"bytes", "sha256", "truncated", "head"}
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+MAX_STREAM_BYTES = 1 << 50
+
+
+def b64len(n):
+    return 4 * ((n + 2) // 3)
+
+
+def wire_limit(cap):
+    """The most a well-formed reply can be: each stream's kept bytes as base64, plus the JSON around them."""
+    return 2 * (b64len(cap // 2) + b64len(cap - cap // 2)) + REPLY_OVERHEAD
+
+
+def _no_dupes(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise Protocol("a key appears twice")
+        d[k] = v
+    return d
+
+
+def _no_constant(_c):
+    raise Protocol("NaN or Infinity in the answer")
+
+
+def _b64(s, n, what):
+    """Exactly n bytes from base64 text; the length is checked before anything is decoded."""
+    if not isinstance(s, str) or len(s) != b64len(n):
+        raise Protocol(f"{what}: wrong length")
+    try:
+        b = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError):
+        raise Protocol(f"{what}: not base64")
+    if len(b) != n:
+        raise Protocol(f"{what}: wrong length")
+    return b
+
+
+def check_stream(d, cap, what):
+    if not isinstance(d, dict) or type(d.get("truncated")) is not bool:
+        raise Protocol(f"{what}: not a stream summary")
+    t = d["truncated"]
+    if set(d) != STREAM_KEYS | ({"tail"} if t else set()):
+        raise Protocol(f"{what}: unexpected fields")
+    n, sha = d["bytes"], d["sha256"]
+    if type(n) is not int or not 0 <= n <= MAX_STREAM_BYTES:
+        raise Protocol(f"{what}: bad size")
+    if not isinstance(sha, str) or not SHA256_RE.fullmatch(sha):
+        raise Protocol(f"{what}: bad sha256")
+    if t:
+        if n <= cap:
+            raise Protocol(f"{what}: marked truncated but within the cap")
+        head, tail = _b64(d["head"], cap // 2, what), _b64(d["tail"], cap - cap // 2, what)
+    else:
+        if n > cap:
+            raise Protocol(f"{what}: over the cap but not marked truncated")
+        head, tail = _b64(d["head"], n, what), b""
+    return {"bytes": n, "sha256": sha, "truncated": t, "head": head, "tail": tail}
+
+
+def parse_reply(raw, cap, timeout):
+    """The VM's answer as checked data, or Protocol. raw is already bounded by wire_limit."""
+    if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
+        raise Protocol("not exactly one line")
+    try:
+        d = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_dupes, parse_constant=_no_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise Protocol("not JSON")
+    if not isinstance(d, dict) or type(d.get("metacomputer_sh")) is not int or d["metacomputer_sh"] != 1:
+        raise Protocol("not a metacomputer sh answer")
+    st = d.get("status")
+    if st == "error":
+        if not {"metacomputer_sh", "status", "code"} <= set(d) <= {"metacomputer_sh", "status", "code", "message"}:
+            raise Protocol("unexpected fields")
+        if not isinstance(d["code"], str) or d["code"] not in GUEST_ERRORS:
+            raise Protocol("unknown error code")
+        msg = d.get("message", "")
+        if not isinstance(msg, str) or len(msg) > MAX_MESSAGE:
+            raise Protocol("bad error message")
+        return {"status": "error", "code": d["code"], "message": msg}
+    if not isinstance(st, str) or st not in STATUSES:
+        raise Protocol("unknown status")
+    if set(d) != OK_KEYS:
+        raise Protocol("unexpected fields")
+    ec = d["exit_code"]
+    if st == "exited":
+        if type(ec) is not int or not 0 <= ec <= 255:
+            raise Protocol("exit code out of range")
+    elif ec is not None:
+        raise Protocol("an exit code without an exit")
+    dur = d["duration_s"]
+    if type(dur) not in (int, float) or not math.isfinite(dur) or not 0 <= dur <= timeout + 600:
+        raise Protocol("bad duration")
+    for k in ("desktop", "held_open"):
+        if type(d[k]) is not bool:
+            raise Protocol(f"{k}: not true or false")
+    return {"status": st, "exit_code": ec, "duration_s": float(dur), "desktop": d["desktop"],
+            "held_open": d["held_open"], "stdout": check_stream(d["stdout"], cap, "stdout"),
+            "stderr": check_stream(d["stderr"], cap, "stderr")}
+
+
 # --- output ----------------------------------------------------------------------
 def utf8_cut_end(b):
     """b without a partial UTF-8 character at its end."""
@@ -242,18 +388,29 @@ def utf8_cut_start(b):
     return b[i:]
 
 
-def stream(summary, label):
-    """(bytes shown, info) for one stream from the VM's summary."""
-    head = base64.b64decode(summary.get("head") or "")
-    info = {"bytes": summary.get("bytes", 0), "sha256": summary.get("sha256"), "truncated": bool(summary.get("truncated"))}
-    if not info["truncated"]:
-        return head, info
-    head = utf8_cut_end(head)
-    tail = utf8_cut_start(base64.b64decode(summary.get("tail") or ""))
-    left_out = info["bytes"] - len(head) - len(tail)
-    note = (f"\n[metacomputer sh: {left_out:,} bytes of {label} left out here; it was {info['bytes']:,} bytes in all. "
+def shown_bytes(st, label):
+    """What a terminal or --json shows of one checked stream."""
+    if not st["truncated"]:
+        return st["head"]
+    head, tail = utf8_cut_end(st["head"]), utf8_cut_start(st["tail"])
+    left_out = st["bytes"] - len(head) - len(tail)
+    note = (f"\n[metacomputer sh: {left_out:,} bytes of {label} left out here; it was {st['bytes']:,} bytes in all. "
             f"Use --max-output, or write it to a file in the VM and copy it with metacomputer get.]\n").encode()
-    return head + note + tail, info
+    return head + note + tail
+
+
+# Control characters (but newline and tab), DEL, C1 controls and the bidirectional
+# overrides and isolates, which can move the cursor, rewrite what's on screen, set the
+# clipboard (OSC 52) or make text read differently from what it is.
+UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
+
+
+def clean(text):
+    return UNSAFE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100 else f"\\u{ord(m.group()):04x}", text)
+
+
+def clean_bytes(b):
+    return clean(b.decode("utf-8", "backslashreplace")).encode("utf-8")
 
 
 # --- the action log --------------------------------------------------------------
@@ -268,7 +425,8 @@ def session_info(s):
 
 def call_args(o, script, cwd, keep_text):
     """The call record's arguments. The script and its arguments are kept only
-    with ACTION_LOG_TEXT=keep, like typed text; the hash and size always."""
+    with ACTION_LOG_TEXT=keep, like typed text; their hash and size always. The
+    guest folder and the --file name are paths, kept like a driver call's paths."""
     text = script.decode("utf-8", "replace")
     args = {"script": text if keep_text else {"redacted": True, "chars": len(text)},
             "script_bytes": len(script), "script_sha256": hashlib.sha256(script).hexdigest(),
@@ -282,18 +440,26 @@ def call_args(o, script, cwd, keep_text):
     return args
 
 
-def result_fields(res, shown, keep_text):
-    """The result record's summary of a run (sizes and hashes of the whole streams)."""
-    out = {"status": res["status"], "exit_code": res.get("exit_code"), "error": res["status"] != "exited" or res.get("exit_code") != 0,
-           "desktop": res.get("desktop")}
+def result_fields(res, keep_text):
+    """The result record. Only fixed text written here and checked values; what the
+    VM said in its own words (output, diagnostics) only as size and hash unless keep."""
+    out = {"status": res["status"], "kind": res.get("kind"), "exit_code": res.get("exit_code"),
+           "error": res["status"] != "exited" or res.get("exit_code") != 0 or bool(res.get("kind")),
+           "desktop": res.get("desktop"), "held_open": res.get("held_open")}
     if res.get("message"):
         out["message"] = res["message"][:300]
     for k in ("stdout", "stderr"):
-        if k in shown:
-            info = dict(shown[k][1])
+        st = (res.get("_streams") or {}).get(k)
+        if st:
+            out[k] = {"bytes": st["bytes"], "sha256": st["sha256"], "truncated": st["truncated"]}
             if keep_text:
-                info["text"] = shown[k][0].decode("utf-8", "replace")
-            out[k] = info
+                out[k]["text"] = shown_bytes(st, k).decode("utf-8", "replace")
+    remote = res.get("_remote") or b""
+    if remote:
+        if keep_text:
+            out["remote_text"] = remote[-2000:].decode("utf-8", "replace")
+        else:
+            out["remote"] = {"bytes": len(remote), "sha256": hashlib.sha256(remote).hexdigest()}
     return out
 
 
@@ -323,117 +489,199 @@ class Log:
         if self.log:
             self.log.call(1, TOOL, args)
 
+    def sign_now(self):
+        return self.log.sign_now() if self.log else True
+
     def result(self, ms, fields):
         if self.log:
             self.log.event("result", id=1, tool=TOOL, ms=ms, result=fields)
 
     def close(self):
-        if self.log:
-            self.log.close()
+        """True when the log (if any) ended with a good final signature."""
+        if not self.log:
+            return True
+        self.log.close()
+        return self.log.sign_error is None
 
 
-# --- running -----------------------------------------------------------------------
-def run_remote(transport, header, script, timeout, on_tick=None):
-    """Send the VM's half, the header and the script; wait for the one-line answer.
-    Returns (answer dict or None, ssh stderr text, host_timeout)."""
-    guest = open(GUEST_PART, "rb").read()
-    payload = (str(len(guest)).encode() + b"\n" + guest
-               + json.dumps(header).encode() + b"\n" + script)
+# --- the connection --------------------------------------------------------------
+def run_remote(transport, payload, deadline, limits, on_tick=None):
+    """Send the payload and read the answer, never past the deadline or a stream's limit.
+    The transport's stdin stays open until the end: the VM's half stops the script if it
+    closes first. Returns (stdout, stderr, problem), problem being None, "timeout",
+    "overflow:stdout", "overflow:stderr" or "spawn"."""
+    out = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         p = subprocess.Popen(transport + [BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE)
     except OSError as e:
-        return None, str(e), False
-    got = {}
-
-    def reader(name, f):
-        got[name] = f.read()
-
-    threads = [threading.Thread(target=reader, args=(n, f), daemon=True)
-               for n, f in (("out", p.stdout), ("err", p.stderr))]
-    for t in threads:
-        t.start()
+        return b"", str(e).encode(), "spawn"
+    problem = None
+    sel = selectors.DefaultSelector()
     try:
-        p.stdin.write(payload)
-        p.stdin.flush()     # stdin stays open: the VM's half stops the script if it closes early
-    except (BrokenPipeError, OSError):
-        pass
-    deadline = time.monotonic() + timeout + GRACE_S
-    host_timeout = False
-    try:
-        while True:
-            try:
-                p.wait(timeout=max(0.1, min(CLAIM_EVERY_S, deadline - time.monotonic())))
+        fin = p.stdin.fileno()
+        for f in (p.stdin, p.stdout, p.stderr):
+            os.set_blocking(f.fileno(), False)
+        sel.register(fin, selectors.EVENT_WRITE, "stdin")
+        sel.register(p.stdout.fileno(), selectors.EVENT_READ, "stdout")
+        sel.register(p.stderr.fileno(), selectors.EVENT_READ, "stderr")
+        view, sent, reading = memoryview(payload), 0, 2
+        next_tick = time.monotonic() + CLAIM_EVERY_S
+        while reading and not problem:
+            now = time.monotonic()
+            if now >= deadline:
+                problem = "timeout"
                 break
-            except subprocess.TimeoutExpired:
-                if time.monotonic() >= deadline:
-                    host_timeout = True
+            if on_tick and now >= next_tick:
+                on_tick()
+                next_tick = now + CLAIM_EVERY_S
+            for key, _ in sel.select(min(1.0, deadline - now)):
+                if key.data == "stdin":
+                    try:
+                        sent += os.write(fin, view[sent:sent + CHUNK])
+                    except BlockingIOError:
+                        continue
+                    except OSError:          # the VM's side closed it
+                        sel.unregister(fin)
+                        continue
+                    if sent >= len(payload):
+                        sel.unregister(fin)  # all sent; it stays open
+                    continue
+                try:
+                    data = os.read(key.fd, CHUNK)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    sel.unregister(key.fd)
+                    reading -= 1
+                    continue
+                buf = out[key.data]
+                if len(buf) + len(data) > limits[key.data]:
+                    problem = "overflow:" + key.data
                     break
-                if on_tick:
-                    on_tick()
-    finally:
-        try:
-            p.stdin.close()
-        except OSError:
-            pass
-        if p.poll() is None:
+                buf += data
+        if not problem:
             try:
-                p.wait(timeout=5 if not host_timeout else 0.5)
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait()
-    for t in threads:
-        t.join(timeout=5)
-    answer = None
-    for line in reversed((got.get("out") or b"").splitlines()):
+                problem = "timeout"
+    finally:
+        # Closing stdin tells the VM's half to stop the script. Give the connection a moment
+        # to end by itself (none for a VM that misbehaved), then end it; a second interrupt
+        # can't skip that.
+        sel.close()
         try:
-            d = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(d, dict) and d.get("metacomputer_sh") == 1:
-            answer = d
-            break
-    return answer, (got.get("err") or b"").decode("utf-8", "replace"), host_timeout
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
+            if p.poll() is None:
+                p.wait(timeout=0.5 if problem else 5)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            pass
+        finally:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+            for f in (p.stdout, p.stderr):
+                try:
+                    f.close()
+                except OSError:
+                    pass
+    return bytes(out["stdout"]), bytes(out["stderr"]), problem
 
 
-def claim():
-    """This session (its Claude Code process, else the calling shell) is acting on the computer."""
+def execute(o, transport, header, script, deadline, base, on_tick):
+    """Run it and turn whatever came back into (result, exit code)."""
+    guest = open(GUEST_PART, "rb").read()
+    payload = str(len(guest)).encode() + b"\n" + guest + json.dumps(header).encode() + b"\n" + script
+    cap = o["max_output"]
+    limits = {"stdout": wire_limit(cap), "stderr": STDERR_WIRE}
+    raw, remote, problem = run_remote(transport, payload, deadline, limits, on_tick)
+    err = {**base, "status": "error", "exit_code": None, "_remote": remote}
+    if problem == "timeout":
+        return {**err, "status": "timeout", "kind": "timeout", "message":
+                f"no complete answer from the virtual computer within {o['timeout'] + GRACE_S} s; the connection was "
+                "closed, which stops the script"}, EXIT_TIMEOUT
+    if problem and problem.startswith("overflow:"):
+        which = problem.split(":", 1)[1]
+        return {**err, "_remote": b"", "kind": "protocol", "message":
+                f"the virtual computer sent more on {which} than a reply can hold ({limits[which]:,} bytes); "
+                "the connection was closed and nothing from it is shown"}, EXIT_FAILED
+    if problem == "spawn":
+        return {**err, "kind": "connection", "message": "couldn't start ssh (metacomputer status)"}, EXIT_FAILED
+    if not raw:
+        return {**err, "kind": "connection", "message": "no answer from the virtual computer (metacomputer status)"}, EXIT_FAILED
     try:
-        owners.claim_for_shell(TOOL)
-    except OSError:
-        pass
+        rep = parse_reply(raw, cap, o["timeout"])
+    except Protocol as e:
+        return {**err, "kind": "protocol", "message":
+                f"the virtual computer's answer was malformed ({e}); nothing from it is shown"}, EXIT_FAILED
+    if rep["status"] == "error":
+        return {**err, "kind": "guest", "message": GUEST_ERRORS[rep["code"]].format(cwd=base["cwd"]),
+                "_remote": rep["message"].encode() + (b"\n" + remote if remote else b"")}, EXIT_FAILED
+    res = {**base, "status": rep["status"], "exit_code": rep["exit_code"], "duration_s": rep["duration_s"],
+           "desktop": rep["desktop"], "held_open": rep["held_open"],
+           "_streams": {k: rep[k] for k in ("stdout", "stderr")}, "notes": []}
+    if rep["status"] == "exited":
+        code = rep["exit_code"]
+        if not o["read_only"] and not rep["desktop"]:
+            res["notes"].append("the desktop session isn't up, so this ran without DISPLAY and the session bus "
+                                "(metacomputer status)")
+    elif rep["status"] == "timeout":
+        code = EXIT_TIMEOUT
+        res["message"] = (f"stopped after {o['timeout']} s (--timeout); the script and the processes it started in "
+                          "its group were ended")
+    else:
+        code = EXIT_FAILED
+        res["message"] = "the connection closed before the script finished; it was stopped"
+    if rep["held_open"]:
+        res["notes"].append("a program the script left running still had its output open; anything more it prints "
+                            "is discarded (start it with: setsid -f APP ... </dev/null >/tmp/APP.log 2>&1)")
+    return res, code
 
 
+# --- printing ----------------------------------------------------------------------
 def finish(o, res, exit_code):
     """Print the result (plain or JSON) and return the exit code."""
-    shown = res.get("_shown") or {}
+    streams = res.get("_streams") or {}
+    remote = (res.get("_remote") or b"")[-2000:].decode("utf-8", "replace")
     if o.get("json"):
         out = {k: v for k, v in res.items() if not k.startswith("_")}
         out["exit"] = exit_code
         for k in ("stdout", "stderr"):
-            data, info = shown.get(k, (b"", None))
-            out[k] = data.decode("utf-8", "replace")
-            if info:
-                out[k + "_bytes"] = info["bytes"]
-                out[k + "_sha256"] = info["sha256"]
-                out[k + "_truncated"] = info["truncated"]
-        print(json.dumps(out, indent=1, ensure_ascii=False))
+            st = streams.get(k)
+            out[k] = shown_bytes(st, k).decode("utf-8", "replace") if st else ""
+            if st:
+                out[k + "_bytes"], out[k + "_sha256"], out[k + "_truncated"] = st["bytes"], st["sha256"], st["truncated"]
+        if remote:
+            out["remote"] = remote
+        print(json.dumps(out, indent=1, ensure_ascii=sys.stdout.isatty()))
         return exit_code
-    for k, f in (("stdout", sys.stdout.buffer), ("stderr", sys.stderr.buffer)):
-        data = shown.get(k, (b"", None))[0]
-        if data:
-            f.write(data)
-            f.flush()
-    if res.get("message"):
-        sys.stderr.write(f"metacomputer sh: {res['message']}\n")
+    for k, f in (("stdout", sys.stdout), ("stderr", sys.stderr)):
+        st = streams.get(k)
+        if st:
+            data = shown_bytes(st, k)
+            f.buffer.write(data if o.get("raw") or not f.isatty() else clean_bytes(data))
+            f.buffer.flush()
+    lines = ([res["message"]] if res.get("message") else []) + list(res.get("notes") or [])
+    if remote and res.get("status") != "exited":
+        lines.append("the virtual computer said: " + remote.strip()[-REMOTE_SHOWN:])
     for k in ("stdout", "stderr"):
-        info = shown.get(k, (b"", None))[1]
-        if info and info["truncated"]:
-            sys.stderr.write(f"metacomputer sh: {k} was {info['bytes']:,} bytes; kept its first and last "
-                             f"{o['max_output'] // 2:,} (--max-output)\n")
+        st = streams.get(k)
+        if st and st["truncated"]:
+            lines.append(f"{k} was {st['bytes']:,} bytes; kept its first and last {o['max_output'] // 2:,} (--max-output)")
+    lines += [f"warning: {w}" for w in res.get("warnings") or []]
+    for line in lines:   # diagnostics are always escaped: they can carry the VM's words
+        sys.stderr.write(f"metacomputer sh: {clean(line)}\n")
     return exit_code
 
 
+# --- main ----------------------------------------------------------------------------
 def main(argv):
     transport = []
     if argv[:1] == ["--transport"]:
@@ -454,7 +702,7 @@ def main(argv):
         if want_json:
             print(json.dumps({"status": "usage", "exit": EXIT_USAGE, "message": str(e)}))
         else:
-            print(f"metacomputer sh: {e}\n\n{USAGE}", file=sys.stderr)
+            print(f"metacomputer sh: {clean(str(e))}\n\n{USAGE}", file=sys.stderr)
         return EXIT_USAGE
     if not transport:
         return finish(o, {"status": "error", "message": "no way to reach the VM (run it as metacomputer sh)"}, EXIT_FAILED)
@@ -463,6 +711,7 @@ def main(argv):
     user = os.environ.get("MCOMP_GUEST_USER") or "cua"
     cwd = guest_cwd(o["cwd"], user)
     base = {"cwd": cwd, "read_only": o["read_only"], "max_output": o["max_output"], "logged": None}
+    warnings = []
 
     log_on = logging_on(s["shell_log"], s["action_log"])
     if log_on is None:
@@ -479,7 +728,7 @@ def main(argv):
         try:
             log.open()
         except Exception as e:  # never run unlogged by accident
-            return f"the action log is on but couldn't be opened ({e}); not running unlogged"
+            return f"the action log is on but couldn't be opened ({type(e).__name__}); not running unlogged"
         base["logged"] = log.name()
         return None
 
@@ -501,9 +750,20 @@ def main(argv):
                       "VM_SHELL=on: the shell isn't limited by the driver's manifest. That's the user's setting; "
                       "ask them if you need it, and don't use `metacomputer ssh` to get around it.")
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
-        return finish(o, {**base, "status": "error", "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED)
-    if not o["read_only"] and not o["override"]:
-        busy = [x for x in owners.others() if x["active"]]
+        return finish(o, {**base, "status": "error", "kind": "vm_off",
+                          "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED)
+
+    # One controller at a time: look for others and claim the computer as one step.
+    if not o["read_only"]:
+        busy = []
+        try:
+            with owners.lock():
+                if not o["override"]:
+                    busy = [x for x in owners.others() if x["active"]]
+                if not busy:
+                    owners.claim_for_shell(TOOL)
+        except (OSError, TimeoutError) as e:
+            return refuse(f"couldn't record that this session is using the virtual computer ({e}); not running")
         if busy:
             return refuse("the virtual computer is in use by another session:\n" +
                           "\n".join("  - " + owners.describe(x) for x in busy) +
@@ -511,77 +771,60 @@ def main(argv):
                           "agree, run again with --override (or run `metacomputer release`). --read-only runs checks "
                           "that change nothing without taking over.")
 
-    header = {"cwd": cwd, "timeout": o["timeout"], "max_output": o["max_output"], "desktop": not o["read_only"],
-              "args": o["args"], "script_bytes": len(script),
-              "name": os.path.basename(o["file"]) if o["source"] == "file" else "metacomputer-sh"}
+    def refresh():
+        try:
+            owners.claim_for_shell(TOOL)
+        except OSError as e:
+            w = f"couldn't refresh this session's claim on the virtual computer ({e.strerror or e})"
+            if w not in warnings:
+                warnings.append(w)
+
     err = open_log()
     if err:
         return finish(o, {**base, "status": "refused", "message": err}, EXIT_REFUSED)
     log.call(args)
-    if not o["read_only"]:
-        claim()
-    t0 = time.monotonic()
-    interrupted = []
+    if not log.sign_now():
+        msg = "the action log couldn't be signed (ACTION_LOG_KEY); not running unsigned"
+        log.result(0, {"status": "refused", "kind": "log", "error": True, "message": msg})
+        log.close()
+        return finish(o, {**base, "status": "refused", "kind": "log", "message": msg}, EXIT_REFUSED)
 
-    def on_signal(signum, _frame):
-        interrupted.append(signum)
+    header = {"cwd": cwd, "timeout": o["timeout"], "max_output": o["max_output"], "desktop": not o["read_only"],
+              "args": o["args"], "script_bytes": len(script)}
+    t0 = time.monotonic()
+    deadline = t0 + o["timeout"] + GRACE_S    # starts before ssh does
+
+    def on_signal(_signum, _frame):
         raise KeyboardInterrupt
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
+    res, code = None, EXIT_FAILED
     try:
-        answer, ssh_err, host_timeout = run_remote(transport, header, script, o["timeout"],
-                                                   None if o["read_only"] else claim)
-    except KeyboardInterrupt:
-        ms = int((time.monotonic() - t0) * 1000)
-        log.result(ms, {"status": "cancelled", "exit_code": None, "error": True,
-                        "message": "interrupted on the Mac; the VM stops the script when the connection closes"})
-        log.close()
-        return finish(o, {**base, "status": "cancelled", "message": "interrupted; the script in the VM is stopped too"},
-                      EXIT_INTERRUPTED)
-    ms = int((time.monotonic() - t0) * 1000)
+        try:
+            res, code = execute(o, transport, header, script, deadline, base,
+                                None if o["read_only"] else refresh)
+        except KeyboardInterrupt:
+            res, code = {**base, "status": "cancelled", "kind": "interrupted", "exit_code": None,
+                         "message": "interrupted; the script in the VM is stopped too"}, EXIT_INTERRUPTED
+        except Exception as e:
+            res, code = {**base, "status": "error", "kind": "internal", "exit_code": None,
+                         "message": f"metacomputer sh failed on the Mac ({type(e).__name__})"}, EXIT_FAILED
+    finally:
+        if res is None:
+            res = {**base, "status": "error", "kind": "internal", "exit_code": None,
+                   "message": "metacomputer sh stopped unexpectedly"}
+        if log.log:
+            log.result(int((time.monotonic() - t0) * 1000), result_fields(res, log.keep))
+            if not log.close():
+                res = {**res, "status": "error", "kind": "log", "message":
+                       (f"the script ended ({res.get('status')}, exit code {res.get('exit_code')}) but its action-log "
+                        "record couldn't be signed (ACTION_LOG_KEY); treat this run as unlogged")}
+                code = EXIT_FAILED
     if not o["read_only"]:
-        claim()
-
-    if answer is None:
-        tail = ssh_err.strip()[-400:]
-        if host_timeout:
-            res = {**base, "status": "timeout", "exit_code": None, "message":
-                   f"no answer from the virtual computer within {o['timeout'] + GRACE_S} s; the connection was closed, "
-                   "which stops the script"}
-            code = EXIT_TIMEOUT
-        else:
-            res = {**base, "status": "error", "exit_code": None, "message":
-                   "couldn't run it in the virtual computer" + (f": {tail}" if tail else "") +
-                   " (metacomputer status)"}
-            code = EXIT_FAILED
-        log.result(ms, result_fields(res, {}, log.keep))
-        log.close()
-        return finish(o, res, code)
-
-    shown = {k: stream(answer.get(k) or {}, k) for k in ("stdout", "stderr")} if answer.get("status") != "error" else {}
-    res = {**base, "status": answer.get("status"), "exit_code": answer.get("exit_code"),
-           "duration_s": answer.get("duration_s"), "desktop": answer.get("desktop"), "_shown": shown}
-    if answer.get("cwd"):
-        res["cwd"] = answer["cwd"]
-    if res["status"] == "exited":
-        code = res["exit_code"] if isinstance(res["exit_code"], int) else EXIT_FAILED
-        if not o["read_only"] and not answer.get("desktop"):
-            res["message"] = ("the desktop session isn't up, so this ran without DISPLAY and the session bus "
-                              "(metacomputer status)")
-    elif res["status"] == "timeout":
-        code = EXIT_TIMEOUT
-        res["message"] = (f"stopped after {o['timeout']} s (--timeout); the script and the processes it started in "
-                          "its group were ended")
-    elif res["status"] == "cancelled":
-        code = EXIT_FAILED
-        res["message"] = "the connection closed before the script finished; it was stopped"
-    else:
-        code = EXIT_FAILED
-        res["status"] = "error"
-        res["message"] = answer.get("message") or "the virtual computer's side failed"
-    log.result(ms, result_fields(res, shown, log.keep))
-    log.close()
+        refresh()
+    if warnings:
+        res["warnings"] = warnings
     return finish(o, res, code)
 
 

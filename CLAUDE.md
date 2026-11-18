@@ -48,7 +48,9 @@ through **Cua Driver's MCP server running inside the VM**, exposed as the
   route work by where the state lives (`skills/metacomputer/SHELL.md`); never
   fake a GUI result. `VM_SHELL` (auto = off while bounded) and `SHELL_LOG`
   (auto = logged when `ACTION_LOG=on`) must keep those defaults; a run counts
-  as an acting call for the one-controller rule.
+  as an acting call for the one-controller rule. The VM is untrusted: keep the
+  Mac side's wire limits, deadline, strict reply schema and terminal escaping
+  (docs/shell.md, "A VM that misbehaves").
 
 ## Useful commands
 

@@ -196,8 +196,17 @@ What it can't do:
 - **Get root.** `cua` has no sudo.
 - **Get around the one-controller rule by accident.** A run counts as acting:
   it's refused while another session is using the computer, unless the user
-  agrees to `--override`. `--read-only` skips that for checks, as a promise
-  rather than a sandbox.
+  agrees to `--override`. The check and the claim are one step under a lock,
+  and a run whose claim can't be written is refused. `--read-only` skips
+  that for checks, as a promise rather than a sandbox.
+- **Harm the Mac through what comes back.** The VM, and any program in it
+  running as the desktop user, is treated as hostile
+  ([docs/shell.md](docs/shell.md#a-vm-that-misbehaves)). The Mac reads a
+  bounded number of bytes per stream under one deadline (a VM that floods,
+  stalls or stops reading gets its connection closed), accepts only an answer
+  that fits a strict schema, and escapes control characters before they reach
+  a terminal (`--raw` opts out), so the VM can't move the cursor, rewrite the
+  screen or set the clipboard through OSC 52.
 
 Settings:
 - `VM_SHELL=auto` (the default) is on, except while `DRIVER_MODE=bounded`:
@@ -207,11 +216,16 @@ Settings:
 - `SHELL_LOG=auto` (the default) records every run in the signed action log
   when `ACTION_LOG=on`, as a `vm_shell` call and result: the script's
   SHA-256 and size, the folder, the exit code and duration, and each output
-  stream's size and SHA-256. The script, its arguments and the output text
-  are kept only with `ACTION_LOG_TEXT=keep`, like typed text. `SHELL_LOG=off`
-  keeps shell runs out of the log; with `ACTION_LOG=off` nothing is logged
-  either way. Refused runs are logged too, and a run whose required log
-  can't be opened is refused.
+  stream's size and SHA-256. The script, its arguments, the output text and
+  the VM's own diagnostics are kept only with `ACTION_LOG_TEXT=keep`, like
+  typed text; otherwise they're a size and a hash, and the result's message
+  is written by the Mac. In plain text either way: the folder in the VM, the
+  `--file` name, the Mac folder it was run from, and refusal reasons.
+  `SHELL_LOG=off` keeps shell runs out of the log; with `ACTION_LOG=off`
+  nothing is logged either way. Refused runs and malformed answers are logged
+  too. The call is signed before anything runs, and a run whose log can't be
+  opened or signed is refused; if the final signature fails, the command
+  exits 255 and says the run is unlogged.
 
 `metacomputer security` shows both settings and what they come to.
 
@@ -225,6 +239,12 @@ Settings:
 - The log records what was sent and hashes of what came back; it doesn't
   record what the script did inside the VM. Programs it started detached keep
   running after the run is logged.
+- The sizes and hashes in a result are the VM's own report. They let you
+  check a file against what the VM said, but a compromised VM can report
+  anything that fits the schema, so they don't prove what ran or printed.
+- Claude Code's bridge doesn't take the owners lock yet, so a shell run and
+  an acting tool call from two sessions starting in the same moment can both
+  pass the check.
 - `--read-only` isn't enforced; it only skips the one-controller check and
   leaves out the desktop's environment.
 

@@ -20,11 +20,14 @@ CLI (used by bin/metacomputer):
   owners.py check             exit 3 (and explain) if another controller is active
   owners.py release           forget other sessions' claims (after the user agrees)
 """
+import contextlib
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -113,14 +116,44 @@ def claim_path(bridge_pid):
     return os.path.join(OWNERS_DIR, f"{bridge_pid}.json")
 
 
+@contextlib.contextmanager
+def lock(timeout=10.0):
+    """This VM's owners lock: hold it to check for other controllers and claim the
+    computer as one step (metacomputer sh does; an acting bridge can too).
+    TimeoutError if another process holds it for longer than timeout."""
+    os.makedirs(OWNERS_DIR, exist_ok=True)
+    fd = os.open(os.path.join(OWNERS_DIR, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("another process holds the owners lock")
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)   # releases the lock
+
+
 def write_claim(bridge_pid, claude_pid, cwd, tool, started):
     os.makedirs(OWNERS_DIR, exist_ok=True)
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
-    tmp = claim_path(bridge_pid) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f)
-    os.replace(tmp, claim_path(bridge_pid))
+    # A temporary file of its own: two writers for one claim (two runs under one session) don't collide.
+    fd, tmp = tempfile.mkstemp(dir=OWNERS_DIR, prefix=".claim-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, claim_path(bridge_pid))
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def claim_for_shell(tool):

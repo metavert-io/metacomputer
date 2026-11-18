@@ -201,6 +201,13 @@ class ActionLog:
     def event(self, kind, **fields):
         self._add({"type": kind, **fields})
 
+    def sign_now(self):
+        """Sign the chain so far; True while every signature has worked."""
+        with self.lock:
+            if not self.closed:
+                self._sign()
+            return self.sign_error is None
+
     def close(self):
         with self.lock:
             if self.closed:

@@ -359,7 +359,7 @@ def test_f():
         f = os.path.join(TMP, "check-f.sh")
         open(f, "w").write('echo "$(basename "$0") ran"\n')
         r, _ = sh(BASE, "--file", f)
-        check("--file sends a script from the Mac", r.stdout == "check-f.sh ran\n", r.stdout + r.stderr)
+        check("--file sends a script from the Mac (run from a fixed path)", r.stdout == "script ran\n", r.stdout + r.stderr)
         r, _ = sh(BASE, "-c", 'echo "$DISPLAY"; echo "$GTK_MODULES"; xset q >/dev/null 2>&1 && echo x-ok; '
                               'dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.GetId >/dev/null && echo bus-ok')
         out = r.stdout.split("\n")

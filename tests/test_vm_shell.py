@@ -1,29 +1,73 @@
 #!/usr/bin/env python3
 """Offline checks for `metacomputer sh` (lib/vm_shell.py, lib/vm_shell_guest.py).
 
-No VM needed: the "transport" is `bash -c` on this Mac instead of SSH, so the
-VM's half runs locally. Run:
+No VM needed. Two stand-ins for SSH:
+- `bash -c` on this Mac, so the real VM half runs locally;
+- a fake, hostile VM (FAKE_VM below) that floods stdout or stderr, sends one
+  endless line, stops reading stdin, holds the connection without answering,
+  or sends crafted answers, malformed or not.
+Run:
     python3 tests/test_vm_shell.py
 """
-import base64
 import hashlib
 import json
 import os
+import pty
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import actionlog  # noqa: E402
+import owners  # noqa: E402
 import vm_shell  # noqa: E402
 import vm_shell_guest  # noqa: E402
 
 SH = os.path.join(LAB, "lib", "vm_shell.py")
 results = []
+
+# A VM that misbehaves. The transport's last argument (the bootstrap) is ignored.
+FAKE_VM = r'''
+import json, os, sys, time
+mode = sys.argv[1]
+if os.environ.get("FAKE_PIDFILE"):
+    open(os.environ["FAKE_PIDFILE"], "w").write(str(os.getpid()))
+def read_request():
+    b = sys.stdin.buffer
+    n = int(b.readline()); b.read(n)
+    hdr = json.loads(b.readline()); b.read(hdr["script_bytes"])
+try:
+    if mode == "flood-stdout":
+        while True:
+            sys.stdout.buffer.write(b"A" * 65536); sys.stdout.flush()
+    elif mode == "flood-stderr":
+        while True:
+            sys.stderr.buffer.write(b"E" * 65536); sys.stderr.flush()
+    elif mode == "huge-line":
+        sys.stdout.buffer.write(b'{"metacomputer_sh":1,"status":"exited","pad":"')
+        while True:
+            sys.stdout.buffer.write(b"A" * 65536); sys.stdout.flush()
+    elif mode == "deaf":
+        time.sleep(3600)
+    elif mode == "silent":
+        read_request(); time.sleep(3600)
+    elif mode == "reply":
+        read_request()
+        if os.environ.get("FAKE_STDERR"):
+            sys.stderr.buffer.write(os.environ["FAKE_STDERR"].encode()); sys.stderr.flush()
+        for p in filter(None, os.environ.get("FAKE_DELETE", "").split(":")):
+            os.remove(p)
+        if os.environ.get("FAKE_CHMOD"):
+            os.chmod(os.environ["FAKE_CHMOD"], 0o500)
+        sys.stdout.buffer.write(open(os.environ["FAKE_REPLY"], "rb").read()); sys.stdout.flush()
+except BrokenPipeError:
+    pass
+'''
 
 
 def check(name, cond, detail=""):
@@ -39,19 +83,41 @@ def usage_error(argv):
     return None
 
 
-def unit_checks(td):
+def capture(data, cap):
+    c = vm_shell_guest.Capture(cap)
+    for i in range(0, len(data), 7000):   # in uneven pieces, as a pipe delivers them
+        c.add(data[i:i + 7000])
+    return c.summary()
+
+
+def reply(cap=65536, out=b"hello\n", err=b"", **over):
+    d = {"metacomputer_sh": 1, "status": "exited", "exit_code": 0, "duration_s": 0.25, "desktop": True,
+         "held_open": False, "stdout": capture(out, cap), "stderr": capture(err, cap)}
+    d.update(over)
+    return (json.dumps(d) + "\n").encode()
+
+
+def protocol_error(raw, cap=65536):
+    try:
+        vm_shell.parse_reply(raw, cap, 120)
+    except vm_shell.Protocol as e:
+        return str(e)
+    return None
+
+
+# --- pure functions ---------------------------------------------------------------
+def unit_checks():
     p = vm_shell.parse
     o = p(["-c", "echo hi"])
     check("parse: -c", o["source"] == "command" and o["command"] == "echo hi" and o["timeout"] == 120
-          and o["max_output"] == 65536 and not o["json"])
-    o = p(["--file", "x.sh", "--cwd", "/tmp", "--timeout=5", "--max-output", "2048", "--json", "--", "a", "-c", "--json"])
-    check("parse: --file, options (both forms), arguments after --",
+          and o["max_output"] == 65536 and not o["json"] and not o["raw"])
+    o = p(["--file", "x.sh", "--cwd", "/tmp", "--timeout=5", "--max-output", "2048", "--json", "--raw", "--", "a", "-c", "--json"])
+    check("parse: --file, options (both forms), --raw, arguments after --",
           o["source"] == "file" and o["file"] == "x.sh" and o["cwd"] == "/tmp" and o["timeout"] == 5
-          and o["max_output"] == 2048 and o["json"] and o["args"] == ["a", "-c", "--json"], o)
+          and o["max_output"] == 2048 and o["json"] and o["raw"] and o["args"] == ["a", "-c", "--json"], o)
     o = p(["-", "--read-only"])
     check("parse: - and --read-only", o["source"] == "stdin" and o["read_only"])
-    o = p(["-c", "-x"])
-    check("parse: a -c script may start with a dash", o["command"] == "-x")
+    check("parse: a -c script may start with a dash", p(["-c", "-x"])["command"] == "-x")
     bad = {"no script": [], "two scripts": ["-c", "a", "-"], "unknown option": ["-c", "a", "--frob"],
            "timeout 0": ["-c", "a", "--timeout", "0"], "timeout too long": ["-c", "a", "--timeout", "3601"],
            "timeout not a number": ["-c", "a", "--timeout", "soon"], "output cap too small": ["-c", "a", "--max-output", "10"],
@@ -68,8 +134,7 @@ def unit_checks(td):
     a = vm_shell.shell_allowed
     check("VM_SHELL: auto is on in standard mode, off in bounded mode",
           a("auto", "standard")[0] is True and a("auto", "bounded")[0] is False)
-    check("VM_SHELL: on is on even when bounded; off is off",
-          a("on", "bounded")[0] is True and a("off", "standard")[0] is False)
+    check("VM_SHELL: on is on even when bounded; off is off", a("on", "bounded")[0] is True and a("off", "standard")[0] is False)
     check("VM_SHELL: an unknown value is neither", a("yes", "standard")[0] is None)
     lo = vm_shell.logging_on
     check("SHELL_LOG: auto follows ACTION_LOG; off never logs; unknown is neither",
@@ -78,39 +143,87 @@ def unit_checks(td):
                                     "action_log_text": "keep", "driver_mode": "standard"})
     check("security summary", d["effective"] == "on" and d["logged"] and d["text"] == "keep" and not d["problems"], d)
 
-    # output caps: the VM's summary and the Mac's rendering
-    def summary(data, cap):
-        path = os.path.join(td, "stream")
-        open(path, "wb").write(data)
-        return vm_shell_guest.summarize(path, cap)
-
+    # the VM's capture of a stream, and the Mac's check of it
     data = bytes(range(256)) * 10
-    s = summary(data, 4096)
-    check("cap: output under the cap comes back whole", not s["truncated"] and base64.b64decode(s["head"]) == data
-          and s["bytes"] == len(data) and s["sha256"] == hashlib.sha256(data).hexdigest())
-    s = summary(b"x" * 4096, 4096)
-    check("cap: exactly the cap is not truncated", not s["truncated"] and s["bytes"] == 4096)
-    data = os.urandom(3000) + b"MIDDLE" + os.urandom(3000)
-    s = summary(data, 2048)
-    head, tail = base64.b64decode(s["head"]), base64.b64decode(s["tail"])
-    check("cap: over the cap keeps the first and last halves", s["truncated"] and head == data[:1024]
-          and tail == data[-1024:] and s["bytes"] == len(data) and s["sha256"] == hashlib.sha256(data).hexdigest())
-    data = b"a" * 2050
-    s = summary(data, 2048)
-    check("cap: just over the cap", s["truncated"] and base64.b64decode(s["tail"]) == data[-1024:])
-    shown, info = vm_shell.stream(summary(("é" * 3000).encode(), 2048), "stdout")
+    s = capture(data, 4096)
+    check("capture: under the cap comes back whole", not s["truncated"] and s["bytes"] == len(data)
+          and s["sha256"] == hashlib.sha256(data).hexdigest())
+    check("capture: exactly the cap is not truncated", not capture(b"x" * 4096, 4096)["truncated"])
+    data = os.urandom(3000) + b"MIDDLE" + os.urandom(300000)
+    s = capture(data, 2048)
+    st = vm_shell.check_stream(s, 2048, "stdout")
+    check("capture: over the cap keeps the first and last halves, hashes all of it",
+          st["truncated"] and st["head"] == data[:1024] and st["tail"] == data[-1024:] and st["bytes"] == len(data)
+          and st["sha256"] == hashlib.sha256(data).hexdigest())
+    st = vm_shell.check_stream(capture(b"a" * 2050, 2048), 2048, "stdout")
+    check("capture: just over the cap", st["truncated"] and st["tail"] == b"a" * 1024)
+    c = vm_shell_guest.Capture(65536)
+    for _ in range(200):
+        c.add(os.urandom(65536))
+    check("capture: memory stays bounded (13 MB in, at most 1.5 times the cap held)",
+          len(c.head) + len(c.tail) <= 65536 + 32768 and c.total == 200 * 65536)
+    shown = vm_shell.shown_bytes(vm_shell.check_stream(capture(("é" * 3000).encode(), 2048), 2048, "stdout"), "stdout")
     try:
-        text = shown.decode("utf-8")
-        ok = "left out here" in text and info["bytes"] == 6000
-    except UnicodeDecodeError as e:
-        ok, text = False, str(e)
-    check("cap: cuts fall on UTF-8 character boundaries", ok, text[:80])
+        ok = "left out here" in shown.decode("utf-8")
+    except UnicodeDecodeError:
+        ok = False
+    check("display: cuts fall on UTF-8 character boundaries", ok)
+    t = vm_shell.clean("a\tb\nc\x1b]52;c;SGk=\x07\r‮⁦\x9b\x7f")
+    check("display: control characters, C1, DEL and bidi controls are escaped; tab and newline kept",
+          t == "a\tb\nc\\x1b]52;c;SGk=\\x07\\x0d\\u202e\\u2066\\x9b\\x7f", repr(t))
+
+    # the reply schema
+    check("schema: a good answer passes", protocol_error(reply()) is None)
+    long_one = json.loads(reply(cap=2048, out=b"x" * 5000))
+    check("schema: a truncated answer passes", protocol_error((json.dumps(long_one) + "\n").encode(), cap=2048) is None)
+    good = json.loads(reply())
+    nan = reply(duration_s=float("nan"))
+    variants = {
+        "a stream that's a number": reply(stdout=1),
+        "exit code 256": reply(exit_code=256),
+        "exit code -1": reply(exit_code=-1),
+        "exit code true": reply(exit_code=True),
+        "exit code as text": reply(exit_code="0"),
+        "an exit code on a timeout": reply(status="timeout", exit_code=0),
+        "an unknown status": reply(status="fine"),
+        "NaN duration": nan,
+        "a huge duration": reply(duration_s=1e12),
+        "desktop as text": reply(desktop="yes"),
+        "held_open missing": (json.dumps({k: v for k, v in good.items() if k != "held_open"}) + "\n").encode(),
+        "an extra field": reply(note="hi"),
+        "metacomputer_sh true": reply(metacomputer_sh=True),
+        "sha256 not hex": reply(stdout={**good["stdout"], "sha256": "\x1b[2J" + "0" * 60}),
+        "head not base64": reply(stdout={**good["stdout"], "head": "!!!!!!!!"}),
+        "head longer than its size": reply(stdout={**good["stdout"], "bytes": 2}),
+        "over the cap, not truncated": reply(stdout={**good["stdout"], "bytes": 70000}),
+        "truncated within the cap": reply(stdout={**good["stdout"], "truncated": True, "tail": ""}),
+        "a truncated stream's head of the wrong size": reply(cap=2048, out=b"x" * 5000, stdout={
+            **long_one["stdout"], "head": long_one["stdout"]["head"][:-8]}),
+        "a key twice": reply().replace(b'"desktop": true', b'"desktop": true, "desktop": false'),
+        "two lines": reply() + reply(),
+        "no final newline": reply()[:-1],
+        "not JSON": b"hello\n",
+        "a JSON list": b"[1, 2]\n",
+        "deep nesting": b"[" * 200000 + b"\n",
+        "not UTF-8": b'{"metacomputer_sh": 1, "status": "\xff"}\n',
+        "an unknown error code": b'{"metacomputer_sh": 1, "status": "error", "code": "oops"}\n',
+        "an over-long error message": (json.dumps({"metacomputer_sh": 1, "status": "error", "code": "internal",
+                                                   "message": "x" * 5000}) + "\n").encode(),
+    }
+    errs = {k: protocol_error(v, cap=2048 if "truncated stream" in k else 65536) for k, v in variants.items()}
+    check(f"schema: {len(variants)} malformed answers are all rejected", all(errs.values()),
+          [k for k, v in errs.items() if not v])
+    leaked = [k for k, v in errs.items() if v and ("\x1b" in v or "secret" in v or "oops" in v)]
+    check("schema: rejection messages are fixed text, never the VM's", not leaked, leaked)
+    check("wire limit: a full answer fits, with room only for the JSON around it",
+          len(reply(cap=2048, out=os.urandom(5000), err=os.urandom(5000))) <= vm_shell.wire_limit(2048) < 2 * 2048 * 4 / 3 + 20000)
 
 
+# --- runs ----------------------------------------------------------------------------
 def env_for(td, **extra):
     env = dict(os.environ)
     for k in list(env):
-        if k.startswith("MCOMP_"):
+        if k.startswith("MCOMP_") or k.startswith("FAKE_"):
             env.pop(k)
     env.update(MCOMP_RUN_DIR=os.path.join(td, "run"), MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions"),
                MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys", "action-log"), MCOMP_VM_NAME="testvm",
@@ -121,10 +234,19 @@ def env_for(td, **extra):
     return env
 
 
-def sh(td, *args, stdin=None, timeout=60, **env):
+def cmd(td, args, fake=None):
     work = os.path.join(td, "work")
-    return subprocess.run([sys.executable, SH, "--transport", "2", "bash", "-c", "--cwd", work, *args],
-                          input=stdin, capture_output=True, text=True, timeout=timeout, env=env_for(td, **env))
+    transport = ["2", "bash", "-c"] if fake is None else ["3", sys.executable, os.path.join(td, "fake_vm.py"), fake]
+    return [sys.executable, SH, "--transport", *transport, "--cwd", work, *args]
+
+
+def sh(td, *args, stdin=None, timeout=90, fake=None, **env):
+    return subprocess.run(cmd(td, args, fake), input=stdin, capture_output=True, text=True, timeout=timeout,
+                          env=env_for(td, **env))
+
+
+def shb(td, *args, fake=None, **env):
+    return subprocess.run(cmd(td, args, fake), capture_output=True, timeout=90, env=env_for(td, **env))
 
 
 def js(r):
@@ -138,8 +260,24 @@ def log_files(td):
     return actionlog.files(os.path.join(td, "actions"))
 
 
+def records(path):
+    return [json.loads(x) for x in open(path)]
+
+
+def verifies(td, path, key=None):
+    return actionlog.verify_file(path, os.path.join(td, "actions"), (key or os.path.join(td, "keys", "action-log")) + ".pub")
+
+
 def pgrep(pattern):
     return subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
+
+
+def gone(pidfile):
+    try:
+        os.kill(int(open(pidfile).read()), 0)
+        return False
+    except (ProcessLookupError, ValueError, OSError):
+        return True
 
 
 def run_checks(td):
@@ -147,21 +285,26 @@ def run_checks(td):
     r = sh(td, "-c", 'echo out; echo err >&2; exit 7')
     check("exit status is the script's, streams kept apart", r.returncode == 7 and r.stdout == "out\n"
           and "err\n" in r.stderr, (r.returncode, r.stdout, r.stderr))
-    r = sh(td, "-c", 'echo "$0|$1|$2|$(pwd)"', "--", "one", "two words")
-    check("arguments after -- are $1, $2; --cwd is the folder", r.stdout.strip().endswith(
-        "|one|two words|" + os.path.realpath(os.path.join(td, "work"))), r.stdout)
+    r = sh(td, "-c", 'echo "$1|$2|$(pwd)"', "--", "one", "two words")
+    check("arguments after -- are $1, $2; --cwd is the folder", r.stdout.strip() ==
+          "one|two words|" + os.path.realpath(os.path.join(td, "work")), r.stdout)
     r = sh(td, "-", stdin='x=$((6*7))\necho "$x"\nread -r line || echo "stdin empty"\n')
     check("script on stdin; its own stdin is empty", r.stdout == "42\nstdin empty\n", r.stdout + r.stderr)
-    script = os.path.join(td, "fix-things.sh")
-    open(script, "w").write('echo "running $(basename "$0")"\n')
-    r = sh(td, "--file", script)
-    check("--file sends a Mac file and keeps its name", r.stdout == "running fix-things.sh\n", r.stdout + r.stderr)
+    for name in ("stdout", ".stdout", "stderr", "script"):
+        path = os.path.join(td, name)
+        open(path, "w").write(f'echo "ran {name} as $(basename "$0"), folder holds: $(ls -A "$(dirname "$0")")"\n')
+        r = sh(td, "--file", path)
+        ok = r.returncode == 0 and r.stdout == f"ran {name} as script, folder holds: script\n"
+        if not ok:
+            break
+    check("--file: any name runs from one fixed path, alone in its folder (stdout, .stdout, stderr, script)", ok,
+          r.stdout + r.stderr)
     r = sh(td, "--json", "-c", 'printf "%s" "$1"', "--", "data")
     j = js(r)
     check("--json gives the result as data", j.get("status") == "exited" and j.get("exit") == 0 and j.get("exit_code") == 0
           and j.get("stdout") == "data" and j.get("stdout_bytes") == 4
           and j.get("stdout_sha256") == hashlib.sha256(b"data").hexdigest() and j.get("stdout_truncated") is False
-          and isinstance(j.get("duration_s"), (int, float)), j)
+          and isinstance(j.get("duration_s"), float), j)
     r = sh(td, "--json", "--max-output", "1024", "-c", "head -c 5000 /dev/zero | tr '\\0' a")
     j = js(r)
     check("--max-output caps a stream and says so", j.get("stdout_truncated") and j.get("stdout_bytes") == 5000
@@ -169,7 +312,6 @@ def run_checks(td):
     r = sh(td, "-c", "head -c 5000 /dev/zero | tr '\\0' a", "--max-output", "1024")
     check("plain output notes the cap on stderr", "stdout was 5,000 bytes" in r.stderr, r.stderr)
 
-    # the desktop's environment comes from the session file in the VM
     xdg = os.path.join(td, "xdg", "metacomputer")
     os.makedirs(xdg)
     open(os.path.join(xdg, "session.env"), "w").write("DISPLAY=:77\nDBUS_SESSION_BUS_ADDRESS=unix:path=/nowhere\n")
@@ -182,29 +324,57 @@ def run_checks(td):
     r = sh(td, "-c", "true")
     check("without a desktop session it runs and says so", r.returncode == 0 and "desktop session isn't up" in r.stderr, r.stderr)
 
-    # a program left running doesn't hold the result; a timeout ends the script's group
+    # programs left running, timeouts, interruptions (the real VM half)
     t = time.monotonic()
-    r = sh(td, "-c", "sleep 31.7 & echo started")
+    r = sh(td, "--json", "-c", "sleep 31.7 & echo started")
     el = time.monotonic() - t
-    check("a background program doesn't hold the result back", r.returncode == 0 and el < 5 and r.stdout == "started\n", el)
+    check("a program left running with & doesn't hold the result back (the output drain is short)",
+          r.returncode == 0 and el < 4 and js(r).get("stdout") == "started\n" and js(r).get("held_open") is True, el)
     check("... and keeps running after a normal end", bool(pgrep("sleep 31.7")))
     subprocess.run(["pkill", "-f", "sleep 31.7"])
+    ticker = os.path.join(td, "ticker.pid")
+    r = sh(td, "-c", f"sh -c 'echo $$ > {ticker}; while :; do echo tick; sleep 0.1; done' & echo started")
+    time.sleep(1.5)
+    alive = not gone(ticker)
+    check("a program that keeps printing after the run isn't killed by a closed pipe", r.returncode == 0 and alive
+          and "still had its output open" in r.stderr, (alive, r.stderr[-200:]))
+    try:
+        os.kill(int(open(ticker).read()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    t = time.monotonic()
+    r = sh(td, "--json", "-c", "head -c 30000000 /dev/zero; echo done >&2")
+    j, el = js(r), time.monotonic() - t
+    check("30 MB of output: counted and hashed in full, only 64 KB kept, nothing written to disk",
+          j.get("stdout_bytes") == 30000000 and j.get("stdout_sha256") == hashlib.sha256(b"\0" * 30000000).hexdigest()
+          and j.get("stdout_truncated") and len(j.get("stdout", "")) < 70000 and j.get("stderr") == "done\n", el)
+    r = sh(td, "-c", 'd=$(dirname "$0"); rm -f "$d/stdout" "$d/stderr"; ln -s /dev/zero "$d/stdout"; '
+                     'mkfifo "$d/stderr"; echo swapped', timeout=30)
+    check("planting a FIFO or a /dev/zero link in the run folder changes nothing", r.returncode == 0 and r.stdout == "swapped\n",
+          r.stdout + r.stderr)
     t = time.monotonic()
     r = sh(td, "--timeout", "1", "-c", "sleep 32.1 & sleep 32.2; echo never")
     el = time.monotonic() - t
     check("--timeout: exit 124, the script's group is ended", r.returncode == 124 and "never" not in r.stdout and el < 8
           and not pgrep("sleep 32.1") and not pgrep("sleep 32.2"), (r.returncode, el, r.stderr))
-    r = sh(td, "--json", "--timeout", "1", "-c", "sleep 32.3")
-    check("--timeout in JSON", js(r).get("status") == "timeout" and js(r).get("exit") == 124 and js(r).get("exit_code") is None)
-    p = subprocess.Popen([sys.executable, SH, "--transport", "2", "bash", "-c", "--cwd", os.path.join(td, "work"),
-                          "-c", "sleep 33.4; echo never"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    t = time.monotonic()
+    r = sh(td, "--json", "--timeout", "1", "-c", "yes")
+    j, el = js(r), time.monotonic() - t
+    check("--timeout on a command that floods its output: 124, bounded, quick", j.get("status") == "timeout"
+          and j.get("exit") == 124 and j.get("exit_code") is None and j.get("stdout_bytes", 0) > 65536 and el < 8, el)
+    marker = os.path.join(td, "cleaned-up")
+    r = sh(td, "--timeout", "1", "-c", f"(trap 'sleep 1; echo cleaned > {marker}; exit' TERM; "
+                                       "while :; do sleep 0.1; done) & wait")
+    check("SIGTERM grace lasts until the whole group is gone, not just bash", r.returncode == 124 and os.path.exists(marker),
+          r.stderr[-200:])
+    p = subprocess.Popen(cmd(td, ["-c", "sleep 33.4; echo never"]), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=env_for(td))
     time.sleep(1.5)
     p.send_signal(signal.SIGTERM)
-    out, err = p.communicate(timeout=20)
+    p.communicate(timeout=20)
     time.sleep(0.5)
     check("interrupted on the Mac: exit 130, the script is stopped too", p.returncode == 130 and not pgrep("sleep 33.4"),
-          (p.returncode, err[-200:]))
+          p.returncode)
 
     # settings
     marker = os.path.join(td, "ran")
@@ -212,8 +382,7 @@ def run_checks(td):
     check("VM_SHELL=off: refused (125), nothing runs", r.returncode == 125 and not os.path.exists(marker)
           and "VM_SHELL=off" in r.stderr, r.stderr)
     r = sh(td, "-c", f"touch {marker}", MCOMP_DRIVER_MODE="bounded")
-    check("bounded driver with VM_SHELL=auto: refused", r.returncode == 125 and not os.path.exists(marker)
-          and "bounded" in r.stderr, r.stderr)
+    check("bounded driver with VM_SHELL=auto: refused", r.returncode == 125 and not os.path.exists(marker), r.stderr)
     r = sh(td, "-c", "echo ok", MCOMP_DRIVER_MODE="bounded", MCOMP_VM_SHELL="on")
     check("bounded driver with VM_SHELL=on: runs", r.returncode == 0 and r.stdout == "ok\n", r.stderr)
     r = sh(td, "-c", "echo ok", MCOMP_VM_SHELL="yes")
@@ -229,14 +398,139 @@ def run_checks(td):
     r = sh(td, "--json", "--frob")
     check("usage error in JSON", js(r).get("status") == "usage" and js(r).get("exit") == 2)
 
-    # one controller at a time
+
+def hostile_checks(td):
+    open(os.path.join(td, "fake_vm.py"), "w").write(FAKE_VM)
+    pidfile = os.path.join(td, "fake.pid")
+    big = os.path.join(td, "big.sh")
+    open(big, "w").write(("# padding so the request can't fit in a pipe's buffer\n" * 8000) + "echo hi\n")
+
+    for mode, what in (("flood-stdout", "endless stdout"), ("flood-stderr", "endless stderr"), ("huge-line", "one endless line")):
+        t = time.monotonic()
+        r = sh(td, "--json", "-c", "true", fake=mode, FAKE_PIDFILE=pidfile)
+        j, el = js(r), time.monotonic() - t
+        check(f"hostile VM, {what}: cut off at the wire limit, exit 255, the connection closed",
+              r.returncode == 255 and j.get("kind") == "protocol" and el < 10 and gone(pidfile)
+              and j.get("stdout") == "" and len(r.stdout) < 20000, (r.returncode, j.get("kind"), el))
+    for mode, what in (("deaf", "stops reading stdin"), ("silent", "never answers")):
+        t = time.monotonic()
+        r = sh(td, "--json", "--timeout", "1", "--file", big, fake=mode, FAKE_PIDFILE=pidfile, MCOMP_SH_GRACE_S="2")
+        j, el = js(r), time.monotonic() - t
+        check(f"hostile VM {what}: given up at the deadline (124), the connection closed",
+              r.returncode == 124 and j.get("status") == "timeout" and 2.5 < el < 9 and gone(pidfile), (r.returncode, el))
+    p = subprocess.Popen(cmd(td, ["--file", big], fake="deaf"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=env_for(td, FAKE_PIDFILE=pidfile))
+    time.sleep(1.5)
+    p.send_signal(signal.SIGTERM)
+    p.communicate(timeout=20)
+    check("interrupted while the VM won't read: exit 130, the connection closed", p.returncode == 130 and gone(pidfile),
+          p.returncode)
+
+    def fake_reply(raw, *args, **env):
+        path = os.path.join(td, "reply.bin")
+        open(path, "wb").write(raw)
+        return sh(td, "--json", "-c", "true", *args, fake="reply", FAKE_REPLY=path, **env)
+
+    r = fake_reply(reply(out=b"faked\n", exit_code=3))
+    check("a well-formed answer from the fake VM is shown", r.returncode == 3 and js(r).get("stdout") == "faked\n", r.stdout)
+    n0 = len(log_files(td))
+    bad = {"a stream that's a number": reply(stdout=1), "exit code 256": reply(exit_code=256),
+           "not JSON": b"\x1b[2J secret\n", "two lines": reply() + reply(),
+           "a key twice": reply().replace(b'"desktop": true', b'"desktop": true, "desktop": false')}
+    fails = {}
+    for name, raw in bad.items():
+        r = fake_reply(raw, MCOMP_ACTION_LOG="on")
+        j = js(r)
+        recs = records(log_files(td)[-1]) if len(log_files(td)) > n0 else []
+        n0 = len(log_files(td))
+        res = next((x for x in recs if x["type"] == "result"), {}).get("result") or {}
+        ok = (r.returncode == 255 and j.get("kind") == "protocol" and j.get("stdout") == "" and "secret" not in r.stdout
+              and res.get("kind") == "protocol" and recs and recs[-1].get("final") and verifies(td, log_files(td)[-1])["ok"])
+        if not ok:
+            fails[name] = (r.returncode, j.get("kind"), res)
+    check("malformed answers end to end: exit 255, nothing shown, logged as a protocol error and signed", not fails, fails)
+    r = fake_reply(b"")
+    check("no answer at all: a connection error (255)", r.returncode == 255 and js(r).get("kind") == "connection", r.stdout)
+
+    # control characters reach a terminal only escaped
+    path = os.path.join(td, "reply.bin")
+    nasty = b"\x1b]52;c;SGk=\x07\x1b[2Jforged\r\n\xe2\x80\xae"
+    open(path, "wb").write(reply(out=nasty))
+
+    def on_tty(*args):
+        m, s = pty.openpty()
+        p = subprocess.Popen(cmd(td, args, "reply"), stdout=s, stderr=subprocess.PIPE, env=env_for(td, FAKE_REPLY=path))
+        os.close(s)
+        out = b""
+        while True:
+            try:
+                chunk = os.read(m, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        p.wait()
+        os.close(m)
+        return out
+
+    out = on_tty("-c", "true")
+    check("on a terminal, control characters in the output are shown escaped", b"\x1b" not in out and b"\x07" not in out
+          and b"\xe2\x80\xae" not in out and b"\\x1b]52;c;SGk=\\x07" in out and b"\\u202e" in out, out[:200])
+    out = on_tty("--raw", "-c", "true")
+    check("--raw prints them as they came", b"\x1b]52;c;SGk=\x07" in out, out[:100])
+    r = shb(td, "-c", "true", fake="reply", FAKE_REPLY=path)
+    check("to a pipe (not a terminal) the output is exact", r.stdout == nasty, r.stdout[:100])
+    err_reply = (json.dumps({"metacomputer_sh": 1, "status": "error", "code": "internal",
+                             "message": "secret-guest-diag \x1b[31m"}) + "\n").encode()
+    open(path, "wb").write(err_reply)
+    r = shb(td, "-c", "true", fake="reply", FAKE_REPLY=path, FAKE_STDERR="secret-ssh-diag \x1b]0;title\x07")
+    check("the VM's diagnostics are always escaped in messages", r.returncode == 255 and b"\x1b" not in r.stderr
+          and b"secret-guest-diag \\x1b[31m" in r.stderr, r.stderr[-300:])
+
+    # what the log keeps of the VM's own words
+    r = fake_reply(err_reply, MCOMP_ACTION_LOG="on", FAKE_STDERR="secret-ssh-diag")
+    raw = open(log_files(td)[-1]).read()
+    res = next((x for x in map(json.loads, raw.splitlines()) if x["type"] == "result"), {}).get("result") or {}
+    check("ACTION_LOG_TEXT=redact: the VM's diagnostics only as size and hash; the message is the Mac's",
+          "secret" not in raw and res.get("kind") == "guest" and (res.get("remote") or {}).get("bytes", 0) > 30
+          and len((res.get("remote") or {}).get("sha256", "")) == 64 and res.get("message") == "the virtual computer's side failed",
+          res)
+    r = fake_reply(err_reply, MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_TEXT="keep", FAKE_STDERR="secret-ssh-diag")
+    raw = open(log_files(td)[-1]).read()
+    check("ACTION_LOG_TEXT=keep: they're kept", "secret-guest-diag" in raw and "secret-ssh-diag" in raw)
+
+    # signing
+    nokey = os.path.join(td, "agentkey")
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", nokey], check=True)
+    os.remove(nokey)    # only the .pub is left, and no agent holds the key
+    marker = os.path.join(td, "ran-unsigned")
+    sign_logs = os.path.join(td, "sign-actions")   # signed with other keys: kept apart from the main check
+    r = sh(td, "-c", f"touch {marker}", MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_KEY=nokey + ".pub",
+           MCOMP_ACTION_LOG_DIR=sign_logs, SSH_AUTH_SOCK=os.path.join(td, "no-agent"))
+    check("a log that can't be signed at the start: refused (125), nothing runs", r.returncode == 125
+          and not os.path.exists(marker) and "couldn't be signed" in r.stderr, r.stderr[-300:])
+    key2 = os.path.join(td, "keys2", "action-log")
+    open(path, "wb").write(reply(out=b"ran\n"))
+    r = sh(td, "--json", "-c", "true", fake="reply", FAKE_REPLY=path, FAKE_DELETE=key2,
+           MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_KEY=key2, MCOMP_ACTION_LOG_DIR=sign_logs)
+    j = js(r)
+    v = actionlog.verify_file(actionlog.files(sign_logs)[-1], sign_logs, key2 + ".pub")
+    check("the final signature fails: exit 255 and says the run is unlogged; the output is still shown",
+          r.returncode == 255 and j.get("kind") == "log" and j.get("stdout") == "ran\n" and "unlogged" in j.get("message", "")
+          and v["ok"] and v["signed_through"] >= 1 and not v["final"], (r.returncode, j.get("kind"), j.get("message"), v))
+
+
+def owner_checks(td):
     run_dir = os.path.join(td, "run", "owners")
     os.makedirs(run_dir, exist_ok=True)
+    marker = os.path.join(td, "ran2")
     other = subprocess.Popen(["sleep", "60"])
+    claim = os.path.join(run_dir, f"{other.pid}.json")
     try:
         now = time.time()
         json.dump({"bridge_pid": other.pid, "claude_pid": None, "cwd": "/another/project", "started": now,
-                   "last_call": now, "last_tool": "click"}, open(os.path.join(run_dir, f"{other.pid}.json"), "w"))
+                   "last_call": now, "last_tool": "click"}, open(claim, "w"))
         r = sh(td, "-c", f"touch {marker}")
         check("another session acting: refused (125), nothing runs", r.returncode == 125 and not os.path.exists(marker)
               and "/another/project" in r.stderr, r.stderr)
@@ -245,14 +539,73 @@ def run_checks(td):
         check("--read-only runs anyway and doesn't claim the computer", r.returncode == 0
               and set(os.listdir(run_dir)) == before, sorted(os.listdir(run_dir)))
         r = sh(td, "--override", "-c", "echo took over")
-        mine = [json.load(open(os.path.join(run_dir, f))) for f in os.listdir(run_dir) if f != f"{other.pid}.json"]
+        mine = [json.load(open(os.path.join(run_dir, f))) for f in os.listdir(run_dir)
+                if f.endswith(".json") and f != f"{other.pid}.json"]
         check("--override runs, and the run claims the computer for this session", r.returncode == 0 and len(mine) == 1
               and mine[0].get("last_tool") == "vm_shell", mine)
     finally:
         other.kill()
         other.wait()
+        if os.path.exists(claim):
+            os.remove(claim)
 
-    # the action log
+    holder = ("import os, sys, time; sys.path.insert(0, sys.argv[1]); import owners\n"
+              "with owners.lock():\n    open(sys.argv[2], 'w').close(); time.sleep(1.5)\n")
+    flag = os.path.join(td, "locked")
+    p = subprocess.Popen([sys.executable, "-c", holder, os.path.join(LAB, "lib"), flag], env=env_for(td))
+    while not os.path.exists(flag):
+        time.sleep(0.02)
+    t = time.monotonic()
+    r = sh(td, "-c", "true")
+    el = time.monotonic() - t
+    p.wait()
+    check("the check-and-claim waits for the owners lock (one step for concurrent starts)", r.returncode == 0 and el > 1.0, el)
+
+    errors = []
+
+    def writer(i):
+        try:
+            for _ in range(25):
+                owners.write_claim(4242, None, "/x", f"t{i}", 0)
+        except Exception as e:
+            errors.append(repr(e))
+
+    os.environ["MCOMP_RUN_DIR"] = os.path.join(td, "run2")
+    try:
+        import importlib
+        importlib.reload(owners)
+        ts = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+        for t_ in ts:
+            t_.start()
+        for t_ in ts:
+            t_.join()
+        d = os.path.join(td, "run2", "owners")
+        leftovers = [f for f in os.listdir(d) if f.endswith(".tmp")]
+        check("concurrent claim writes for one holder don't collide", not errors and not leftovers
+              and json.load(open(os.path.join(d, "4242.json"))).get("bridge_pid") == 4242, errors[:2] + leftovers)
+    finally:
+        os.environ.pop("MCOMP_RUN_DIR", None)
+        importlib.reload(owners)
+
+    open(os.path.join(run_dir, ".lock"), "a").close()
+    os.chmod(run_dir, 0o500)
+    try:
+        r = sh(td, "-c", f"touch {marker}")
+        check("the claim can't be written: refused (125), nothing runs", r.returncode == 125 and not os.path.exists(marker)
+              and "couldn't record" in r.stderr, r.stderr[-300:])
+    finally:
+        os.chmod(run_dir, 0o700)
+    path = os.path.join(td, "reply.bin")
+    open(path, "wb").write(reply(out=b"ok\n"))
+    try:
+        r = sh(td, "--json", "-c", "true", fake="reply", FAKE_REPLY=path, FAKE_CHMOD=run_dir)
+        w = js(r).get("warnings") or []
+        check("the claim can't be refreshed: reported as a warning", r.returncode == 0 and any("refresh" in x for x in w), w)
+    finally:
+        os.chmod(run_dir, 0o700)
+
+
+def log_checks(td):
     n0 = len(log_files(td))
     sh(td, "-c", "echo x", MCOMP_ACTION_LOG="off")
     sh(td, "-c", "echo x", MCOMP_ACTION_LOG="on", MCOMP_SHELL_LOG="off")
@@ -267,31 +620,30 @@ def run_checks(td):
         kinds = [x["type"] for x in recs]
         call = next((x for x in recs if x["type"] == "call"), {})
         res = (next((x for x in recs if x["type"] == "result"), {}).get("result")) or {}
-        check("records: start, a vm_shell call and its result, end, final signature",
-              kinds == ["start", "call", "result", "end", "checkpoint"] and call.get("tool") == "vm_shell"
-              and recs[-1].get("final") and (recs[0].get("session") or {}).get("via") == "shell", kinds)
+        check("records: start, a vm_shell call, a signature before running, its result, end, final signature",
+              kinds == ["start", "call", "checkpoint", "result", "end", "checkpoint"] and call.get("tool") == "vm_shell"
+              and recs[-1].get("final") and not recs[2].get("final") and (recs[0].get("session") or {}).get("via") == "shell", kinds)
         a = call.get("args") or {}
         check("call: script hash and size, cwd; script and its arguments redacted",
               a.get("script_sha256") == hashlib.sha256(body.encode()).hexdigest() and a.get("script_bytes") == len(body)
-              and (a.get("script") or {}).get("redacted") and (a.get("script_args") or {}).get("count") == 1
-              and a.get("cwd"), a)
+              and (a.get("script") or {}).get("redacted") and (a.get("script_args") or {}).get("count") == 1 and a.get("cwd"), a)
         check("result: exit code, output sizes and hashes",
               res.get("exit_code") == 3 and res.get("error") is True
               and (res.get("stdout") or {}).get("sha256") == hashlib.sha256(b"secret-out-marker\n").hexdigest()
               and (res.get("stderr") or {}).get("bytes") == len("secret-err-marker\n"), res)
         check("no script, argument or output text in the file", "secret" not in raw)
-        v = actionlog.verify_file(files[-1], os.path.join(td, "actions"), os.path.join(td, "keys", "action-log.pub"))
+        v = verifies(td, files[-1])
         check("the log verifies", v["ok"] and v["final"] and v["calls"] == 1, v)
-    r = sh(td, "-c", body, "--", "secret-arg-marker", MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_TEXT="keep")
+    sh(td, "-c", body, "--", "secret-arg-marker", MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_TEXT="keep")
     raw = open(log_files(td)[-1]).read()
     check("ACTION_LOG_TEXT=keep: the script, its arguments and its output are kept",
           all(m in raw for m in ("secret-out-marker; echo", "secret-arg-marker", "secret-out-marker\\n", "secret-err-marker\\n")))
-    r = sh(td, "-c", f"touch {marker}", MCOMP_ACTION_LOG="on", MCOMP_VM_SHELL="off")
-    recs = [json.loads(x) for x in open(log_files(td)[-1])]
+    r = sh(td, "-c", "touch /nonexistent/x", MCOMP_ACTION_LOG="on", MCOMP_VM_SHELL="off")
+    recs = records(log_files(td)[-1])
     check("a refused run is logged as refused", r.returncode == 125 and any(
         x["type"] == "refused" and x.get("tool") == "vm_shell" for x in recs), [x["type"] for x in recs])
-    r = sh(td, "-c", "sleep 34.5", "--timeout", "1", MCOMP_ACTION_LOG="on")
-    res = next((x for x in map(json.loads, open(log_files(td)[-1])) if x["type"] == "result"), {}).get("result") or {}
+    sh(td, "-c", "sleep 34.5", "--timeout", "1", MCOMP_ACTION_LOG="on")
+    res = next((x for x in records(log_files(td)[-1]) if x["type"] == "result"), {}).get("result") or {}
     check("a timeout is logged as one", res.get("status") == "timeout" and res.get("error") is True, res)
     env = env_for(td)
     v = subprocess.run([sys.executable, os.path.join(LAB, "lib", "actionlog.py"), "verify", "--all"],
@@ -305,9 +657,17 @@ def run_checks(td):
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-sh-")
     try:
-        unit_checks(td)
+        unit_checks()
         run_checks(td)
+        hostile_checks(td)
+        owner_checks(td)
+        log_checks(td)
     finally:
+        for d, _, _ in os.walk(td):
+            try:
+                os.chmod(d, 0o700)
+            except OSError:
+                pass
         shutil.rmtree(td, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if results and all(results) else 1

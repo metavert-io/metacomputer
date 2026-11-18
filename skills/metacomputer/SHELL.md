@@ -45,8 +45,9 @@ EOF
 - **The script's own stdin is empty.** Data goes in a file (`metacomputer put`, or a heredoc inside the script).
 - **Output comes back when the script ends.** Each stream keeps its first and last 32 KB (`--max-output BYTES`, up to 1 MB); the full size and SHA-256 are reported. For big outputs, write a file in the VM and `metacomputer get` it.
 - **`--timeout SECONDS`** (default 120, at most 3600) ends the script and everything it started in its process group.
-- **`--json`** returns `status`, `exit_code`, `exit`, `stdout`, `stderr`, their `_bytes`, `_sha256` and `_truncated`, `duration_s`, `cwd`, `desktop` and `logged`.
-- **Exit status:** the script's own; 124 timed out; 125 refused; 255 couldn't run (VM off, SSH, no such folder); 130 interrupted; 2 usage.
+- **`--json`** returns `status`, `exit_code`, `exit`, `stdout`, `stderr`, their `_bytes`, `_sha256` and `_truncated`, `duration_s`, `cwd`, `desktop`, `held_open` and `logged`; on errors also `kind` and `message`.
+- **Exit status:** the script's own; 124 timed out; 125 refused; 255 couldn't run or finish (VM off, SSH, no such folder, a malformed answer from the VM); 130 interrupted; 2 usage.
+- **The script runs from a fixed path,** so `$0` isn't the file's name on the Mac.
 
 ## Starting a GUI app from the shell
 
@@ -56,7 +57,7 @@ EOF
 metacomputer sh -c 'setsid -f mousepad ~/Inbox/notes.txt </dev/null >/tmp/mousepad.log 2>&1'
 ```
 
-- **`setsid -f`** gives the app its own session, so it outlives the run and isn't stopped by a timeout. A program started with `&` keeps running after a normal end but is stopped with the script on a timeout.
+- **`setsid -f`** gives the app its own session, so it outlives the run and isn't stopped by a timeout. A program started with `&` keeps running after a normal end (anything more it prints is discarded) but is stopped with the script on a timeout.
 - **The redirections** keep the app from holding the output open.
 - **Then find it with the desktop tools:** `list_windows {app}`. The shell's environment includes the desktop's accessibility settings, so the driver reads the app like any other.
 

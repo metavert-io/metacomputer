@@ -151,19 +151,27 @@ shell on the Mac. In the VM:
 - the script gets the desktop session's environment (`session.env`, plus the
   accessibility variables from `/etc/X11/Xsession.d/90metacomputer-env`), so
   apps it starts with `setsid -f` open on the desktop and the driver reads them;
-- it runs in its own process group with stdout and stderr in files in a
-  private `/tmp/mcsh.*` folder, so programs it leaves running don't hold the
-  connection;
+- it runs from a fixed path (`/tmp/mcsh.*/script`) in its own process group;
+  its stdout and stderr are pipes the VM's half reads as they come, hashing
+  all of each and keeping only the first and last `max_output / 2` bytes (no
+  disk, bounded memory);
+- after the script's own process ends, its output is read for 0.5 s more; a
+  program it left running that still holds the output is handed to a `cat`
+  that discards it;
 - one JSON line comes back: status, exit code, duration, and each stream's
-  size, SHA-256 and first and last `max_output / 2` bytes;
+  size, SHA-256 and kept bytes;
 - a timeout, or stdin closing early (the Mac's side interrupted), ends the
-  process group: SIGTERM, then SIGKILL after 3 s.
+  process group: SIGTERM, then SIGKILL once the group is gone or after 3 s.
 
-On the Mac, `VM_SHELL` (`auto` is off while `DRIVER_MODE=bounded`) and the
-one-controller rule are checked first, a run claims the computer in
-`.run/owners/` like an acting tool call (held by the caller's Claude Code
-process), and with `ACTION_LOG=on` and `SHELL_LOG=auto` each run is its own
-signed action-log file with a `vm_shell` call and result.
+On the Mac, `VM_SHELL` (`auto` is off while `DRIVER_MODE=bounded`) is checked
+first; then, under the owners lock, the one-controller rule, and the run
+claims the computer in `.run/owners/` like an acting tool call (held by the
+caller's Claude Code process). With `ACTION_LOG=on` and `SHELL_LOG=auto` each
+run is its own signed action-log file with a `vm_shell` call, signed before
+anything runs, and its result. The VM is untrusted: the Mac reads each stream
+up to a fixed limit under one deadline, accepts only an answer that fits a
+strict schema, and escapes control characters before they reach a terminal
+([docs/shell.md](docs/shell.md#a-vm-that-misbehaves)).
 
 ## Observation and accessibility
 

@@ -4,30 +4,38 @@ Runs INSIDE the virtual computer as the desktop user. The Mac sends it over
 the ops SSH connection's stdin, so nothing is quoted on either side:
 
   1. its length and this file (read by the one-line bootstrap in vm_shell.py);
-  2. one JSON line: cwd, timeout, max_output, desktop, args, name, script_bytes;
+  2. one JSON line: cwd, timeout, max_output, desktop, args, script_bytes;
   3. the script itself (script_bytes bytes).
 
 The Mac then keeps stdin open until the answer arrives. The script runs with
-bash in its own process group, with stdout and stderr going to files in a
-private folder, so a program it leaves running can't hold the connection
-open. When the script ends, this prints one JSON line: how it ended, its exit
-code and duration, and for each stream its size, SHA-256 and its start and
-end (up to max_output bytes, base64).
+bash, from a fixed path in a private folder, in its own process group. Its
+stdout and stderr are pipes read here as they arrive: each stream is hashed
+whole while only its first and last max_output/2 bytes are kept, so nothing
+of it is written to disk and memory stays bounded. When the script ends this
+prints one JSON line: how it ended, its exit code and duration, and for each
+stream its size, SHA-256 and the kept bytes (base64).
 
-- Timeout: the script's process group gets SIGTERM, then SIGKILL 3 s later.
+- Timeout: the script's process group gets SIGTERM; once the whole group is
+  gone, or 3 s later, SIGKILL.
 - Stdin closes early (the Mac's command was interrupted or lost the
   connection): the same, reported as "cancelled".
+- After the script's own process ends, its output is read for DRAIN_S more.
+  A program it left running that still holds the output (started with `&`
+  and not redirected) is then handed to a `cat >/dev/null`, so its later
+  output is discarded instead of hitting a closed pipe; "held_open" says so.
 - Programs started with `setsid -f` have their own session and keep running.
 - desktop: load the XFCE session's environment (DISPLAY, XAUTHORITY, the
   session bus, XDG variables) and its accessibility settings, so programs the
   script starts open on the desktop and Cua Driver can read them.
 
-Python 3 standard library only.
+The Mac treats everything this prints as untrusted (vm_shell.py validates
+it). Python 3 standard library only.
 """
 import base64
 import hashlib
 import json
 import os
+import selectors
 import shutil
 import signal
 import subprocess
@@ -40,6 +48,7 @@ ACCESS_ENV = "/etc/X11/Xsession.d/90metacomputer-env"
 DESKTOP_KEYS = ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY")
 CHUNK = 1 << 16
 KILL_AFTER = 3.0
+DRAIN_S = 0.5
 
 
 def build_env(desktop):
@@ -55,7 +64,7 @@ def build_env(desktop):
         return env, False
     try:
         with open(os.path.join(run, "metacomputer", "session.env")) as f:
-            lines = f.read().splitlines()
+            lines = f.read(65536).splitlines()
     except OSError:
         return env, False
     for line in lines:
@@ -75,47 +84,55 @@ def build_env(desktop):
     return env, "DISPLAY" in env
 
 
-def summarize(path, cap):
-    """Size, SHA-256 and the kept part of a captured stream: all of it up to cap
-    bytes, else its first cap/2 and last cap/2 bytes (base64)."""
-    h, total, head, tail = hashlib.sha256(), 0, bytearray(), bytearray()
-    keep_tail = cap - cap // 2
+class Capture:
+    """One output stream: hashed whole, its first cap/2 and last cap/2 bytes kept."""
+
+    def __init__(self, cap):
+        self.cap, self.keep_tail = cap, cap - cap // 2
+        self.h, self.total, self.head, self.tail = hashlib.sha256(), 0, bytearray(), bytearray()
+
+    def add(self, b):
+        self.h.update(b)
+        self.total += len(b)
+        if len(self.head) < self.cap:
+            need = self.cap - len(self.head)
+            self.head += b[:need]
+            b = b[need:]
+        if b:
+            self.tail += b
+            if len(self.tail) > self.keep_tail:
+                del self.tail[:len(self.tail) - self.keep_tail]
+
+    def summary(self):
+        if self.total <= self.cap:
+            return {"bytes": self.total, "sha256": self.h.hexdigest(), "truncated": False,
+                    "head": base64.b64encode(bytes(self.head)).decode()}
+        end = (self.head + self.tail)[-self.keep_tail:]   # head + tail is a contiguous suffix of the stream
+        return {"bytes": self.total, "sha256": self.h.hexdigest(), "truncated": True,
+                "head": base64.b64encode(bytes(self.head[:self.cap // 2])).decode(),
+                "tail": base64.b64encode(bytes(end)).decode()}
+
+
+def group_alive(pgid, proc):
+    proc.poll()   # reap the script's own process: a zombie still counts as a member of its group
     try:
-        f = open(path, "rb")
-    except OSError:
-        return {"bytes": 0, "sha256": h.hexdigest(), "truncated": False, "head": ""}
-    with f:
-        while True:
-            b = f.read(CHUNK)
-            if not b:
-                break
-            h.update(b)
-            total += len(b)
-            if len(head) < cap:
-                need = cap - len(head)
-                head += b[:need]
-                b = b[need:]
-            if b:
-                tail += b
-                if len(tail) > keep_tail:
-                    del tail[:len(tail) - keep_tail]
-    if total <= cap:
-        return {"bytes": total, "sha256": h.hexdigest(), "truncated": False,
-                "head": base64.b64encode(bytes(head)).decode()}
-    end = (head + tail)[-keep_tail:]   # head + tail is a contiguous suffix of the stream
-    return {"bytes": total, "sha256": h.hexdigest(), "truncated": True,
-            "head": base64.b64encode(bytes(head[:cap // 2])).decode(),
-            "tail": base64.b64encode(bytes(end)).decode()}
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def stop(proc):
-    """SIGTERM to the script's process group, SIGKILL after KILL_AFTER seconds."""
+    """SIGTERM to the script's process group; SIGKILL once the whole group is
+    gone (nothing to do) or after KILL_AFTER seconds."""
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return
     deadline = time.monotonic() + KILL_AFTER
-    while time.monotonic() < deadline and proc.poll() is None:
+    while time.monotonic() < deadline and group_alive(proc.pid, proc):
         time.sleep(0.05)
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -147,6 +164,57 @@ def emit(obj):
         pass
 
 
+def collect(proc, timeout, cap, state):
+    """Read the script's stdout and stderr until both close, or DRAIN_S after its
+    own process ends; stop it on timeout. Returns (captures, timed_out, held_open)."""
+    caps = {"stdout": Capture(cap), "stderr": Capture(cap)}
+    sel = selectors.DefaultSelector()
+    for name, f in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        os.set_blocking(f.fileno(), False)
+        sel.register(f.fileno(), selectors.EVENT_READ, name)
+    deadline = time.monotonic() + timeout
+    drain_until, timed_out = None, False
+    try:
+        while sel.get_map():
+            now = time.monotonic()
+            if drain_until is None and proc.poll() is not None:
+                drain_until = now + DRAIN_S
+            if drain_until is not None and now >= drain_until:
+                break
+            if not timed_out and drain_until is None and now >= deadline:
+                timed_out = True
+                stop(proc)
+                continue
+            wait = (drain_until if drain_until is not None else deadline) - now
+            for key, _ in sel.select(max(0.0, min(0.2, wait))):
+                try:
+                    data = os.read(key.fd, CHUNK)
+                except BlockingIOError:
+                    continue
+                if data:
+                    caps[key.data].add(data)
+                else:
+                    sel.unregister(key.fd)
+        held = [key.fd for key in sel.get_map().values()]
+    finally:
+        sel.close()
+    for fd in held:   # still held by a program the script left running: discard its later output
+        try:
+            os.set_blocking(fd, True)
+            subprocess.Popen(["cat"], stdin=fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError:
+            pass
+    for f in (proc.stdout, proc.stderr):
+        try:
+            f.close()
+        except OSError:
+            pass
+    if state["cancelled"] and proc.poll() is None:
+        stop(proc)
+    return caps, timed_out, bool(held)
+
+
 def main():
     inp = sys.stdin.buffer
     try:
@@ -155,29 +223,28 @@ def main():
         script = inp.read(n)
         if len(script) != n:
             raise ValueError(f"expected {n} bytes of script, got {len(script)}")
+        cap = int(hdr["max_output"])
+        timeout = float(hdr["timeout"])
     except (ValueError, KeyError, TypeError) as e:
-        emit({"status": "error", "message": f"bad request from the Mac: {e}"})
+        emit({"status": "error", "code": "bad_request", "message": str(e)[:300]})
         return 2
     cwd = hdr.get("cwd") or os.path.expanduser("~")
     if not os.path.isdir(cwd):
-        emit({"status": "error", "message": f"no such folder in the virtual computer: {cwd}"})
+        emit({"status": "error", "code": "no_such_folder", "message": cwd[:300]})
         return 2
     env, desktop = build_env(bool(hdr.get("desktop", True)))
     base = tempfile.gettempdir()
     sweep(base)
     d = tempfile.mkdtemp(prefix="mcsh.", dir=base)
     try:
-        name = "".join(c for c in str(hdr.get("name") or "") if c.isalnum() or c in "._-")[:64].lstrip(".") or "metacomputer-sh"
-        path = os.path.join(d, name)
-        with open(path, "wb") as f:
+        path = os.path.join(d, "script")   # fixed: nothing else lives in this folder
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
             f.write(script)
-        cap = int(hdr.get("max_output") or 65536)
-        out_p, err_p = os.path.join(d, "stdout"), os.path.join(d, "stderr")
-        with open(out_p, "wb") as fo, open(err_p, "wb") as fe:
-            t0 = time.monotonic()
-            proc = subprocess.Popen(["bash", "--noprofile", "--norc", path, *[str(a) for a in hdr.get("args") or []]],
-                                    cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe,
-                                    start_new_session=True)
+        t0 = time.monotonic()
+        proc = subprocess.Popen(["bash", "--noprofile", "--norc", path, *[str(a) for a in hdr.get("args") or []]],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True)
         state = {"done": False, "cancelled": False}
 
         def watch():   # stdin closes before the answer only if the Mac's side is gone
@@ -194,22 +261,18 @@ def main():
                 stop(proc)
 
         threading.Thread(target=watch, daemon=True).start()
-        status = "exited"
-        try:
-            rc = proc.wait(timeout=float(hdr.get("timeout") or 120))
-        except subprocess.TimeoutExpired:
-            status = "timeout"
-            stop(proc)
-            rc = proc.wait()
-        if state["cancelled"]:
-            status = "cancelled"
+        caps, timed_out, held = collect(proc, timeout, cap, state)
+        rc = proc.wait()
+        status = "cancelled" if state["cancelled"] else "timeout" if timed_out else "exited"
         state["done"] = True
-        duration = time.monotonic() - t0
         code = 128 - rc if rc < 0 else rc
-        emit({"status": status, "exit_code": code if status == "exited" else None, "raw_exit": code,
-              "duration_s": round(duration, 3), "cwd": cwd, "desktop": desktop,
-              "stdout": summarize(out_p, cap), "stderr": summarize(err_p, cap)})
+        emit({"status": status, "exit_code": code if status == "exited" else None,
+              "duration_s": round(time.monotonic() - t0, 3), "desktop": desktop, "held_open": held,
+              "stdout": caps["stdout"].summary(), "stderr": caps["stderr"].summary()})
         return 0
+    except Exception as e:  # report it rather than leave the Mac without an answer
+        emit({"status": "error", "code": "internal", "message": f"{type(e).__name__}: {e}"[:300]})
+        return 2
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
