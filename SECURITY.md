@@ -450,19 +450,22 @@ Settings:
 
 Out of the box the VM shares no storage with your Mac or with other VMs. Storage
 ([docs/storage.md](docs/storage.md)) adds it, one kind at a time, and only what you
-attach in `VOLUMES` and `REFDISKS` (`start --no-volumes` attaches none of it). What
+attach in `VOLUMES` and `REFDISKS` (`start --no-volumes` attaches none of it), read-only
+unless it's a disk volume (one VM's own) or a folder you mark `:rw`. What
 each kind lets a hostile VM (root in the VM included) do, and what protects the Mac:
 
 | Kind | A hostile VM can | It can't | What protects the Mac |
 | --- | --- | --- | --- |
 | **Disk volume** (read-write, one VM) | Read, change, encrypt or delete everything on the volume; write a filesystem crafted to be hostile to whoever mounts it next | Reach anything on the Mac but the image file: it sees a block device, not a Mac folder; attach the volume while another VM holds it | The Mac never mounts the image (macOS has no ext4 driver, and nothing here asks it to); the next VM's kernel checks it with `e2fsck` before mounting it `nodev,nosuid`; a disk that isn't blank and isn't this volume's ext4 (by UUID) is refused, never formatted; the lock |
+| **Folder, read-only** (the default) | Read every file in the folder, and see changes you make to it live | Create, change or delete anything in it: the Mac holds the share read-only, whatever the VM remounts | The share is read-only at the hypervisor, and the VM's helper proves it at every start (as root, through the raw virtiofs mount, it tries to create a file and refuses to mount the folder if the Mac allows it); private folders are refused |
+| **Folder, read-write** (`:rw`, one VM) | Create, change and delete files in the folder, which land on your Mac as your own files; make links pointing anywhere, FIFOs and hard links (inside the folder); remove or rewrite extended attributes, `com.apple.quarantine` included | Reach files outside the folder: virtiofs resolves its links inside the VM, so a link can only mislead a program on the Mac that follows it; set the set-user-ID bit (the Mac drops it); have the folder read-write in two VMs at once | The watcher, every few seconds: the quarantine attribute (exact value enforced) on everything new or changed, so Gatekeeper checks it; links out of the folder replaced by a note; FIFOs, sockets and devices removed; set-id bits removed; events for each. Spotlight kept out (a `.noindex` path is required). One VM at a time (lock). Private folders refused |
 | **Reference disk** (read-only, any VMs) | Read everything on it | Change it: it's read-only at the hypervisor (`--mount` / USB storage attached read-only), whatever the VM does | Read-only attachment; the image file is read-only on the Mac; `refdisk create` refuses private folders and leaves links out, so nothing outside the folder is packed |
 
 Common to every kind:
 - **Choose what goes in.** Whatever you attach can be read by anything running in the
   VM, which can reach the public internet. Don't put credentials or personal files on a
   volume or a reference disk; keep credentials in the vault.
-- **Private folders are refused** for reference disks, links resolved first: your home
+- **Private folders are refused** for folder volumes and reference disks, links resolved first: your home
   folder and its personal folders (and their parents), `~/Library` with iCloud Drive and
   other cloud drives, home dot-folders such as `.ssh`, `SSH_DIR`, this checkout, Lume's
   VMs, the storage registry and system folders ([the list](docs/storage.md#what-may-not-go-into-the-vm)).
@@ -495,7 +498,18 @@ Common to every kind:
   connection can damage a volume that's being written. `start` warns about
   network filesystems.
 - A volume isn't versioned: the VM can delete its files. Checkpoints
-  (`--with-volumes`) are your history.
+  (`--with-volumes`) are your history. A read-write folder has no history here at all
+  (Time Machine's, if you use it).
+- **A read-write folder is the strongest thing you can attach.** The watcher works after
+  the fact, with a gap of up to a few seconds: a program on the Mac that opens a new file
+  or follows a new link in that gap isn't protected, and macOS remembers a binary it let
+  run, so a quarantine put back later doesn't stop that binary again. Quarantine makes
+  Gatekeeper check apps and programs; it doesn't stop a script fed to an interpreter
+  (`sh file`) or a malicious document exploiting the app that opens it. Don't run or open
+  what the VM wrote without the care you'd give a download. The VM can also set other
+  extended attributes (Finder tags, icons) there; only quarantine is enforced. If the
+  watcher stops, `status` says so in red. Measurements and details:
+  [docs/storage.md](docs/storage.md#folder-volumes).
 
 ## Secrets and logins (`metacomputer secrets`)
 

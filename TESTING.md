@@ -337,15 +337,23 @@ again, a lock file from another computer refuses, release); the statfs network-f
 classifier and the warning; the plan for a start (missing images, read-only disk volumes,
 a VM without storage support, bounded mode, the order of the run arguments, the helper
 accepting the plan); sizes and names; sparse copies, APFS clones and checkpoints of
-volumes; reference disks leaving links out; and `put`'s SHA-256 comparison and collision
-names. From the storage audit: other spellings of refused folders (case, the data volume's
-firmlinks) refused and one image under two spellings one lock; a file swapped for a link to a
-private file while a reference disk is packed isn't packed; `put` and the attach cutting off a VM
-that floods or stalls; checkpoint, restore and resize holding the volume so no VM can attach it
-meanwhile; and the bounded manifest read as YAML (an inline comment isn't policy, a `files:` block
-outside `resources` grants nothing, unsupported forms grant nothing, the shipped profiles parse).
+volumes; reference disks leaving links out; `put`'s SHA-256 comparison and collision
+names; folder volumes (read-only by default, `.noindex` required for read-write, `:` refused,
+one VM read-write at a time including nested folders, the `--shared-dir` arguments and the
+share names Lume gives them); and the folder watcher on a real folder (quarantine on new files
+and folders, a removed or rewritten attribute put back, links out of the folder replaced by a
+note while inside ones stay, a FIFO and set-id bits removed, what was there before left alone).
+With `MCOMP_TEST_GATEKEEPER=1` and a C compiler it also runs an unsigned binary carrying the
+attribute (Gatekeeper must refuse it); off by default, because Gatekeeper can hold such a
+process for minutes or show a dialog on the Mac's screen. From the storage audit: other
+spellings of refused folders (case, the data volume's firmlinks) refused and one image under two
+spellings one lock; a file swapped for a link to a private file while a reference disk is packed
+isn't packed; `put` and the attach cutting off a VM that floods or stalls; checkpoint, restore and
+resize holding the volume so no VM can attach it meanwhile; and the bounded manifest read as YAML
+(an inline comment isn't policy, a `files:` block outside `resources` grants nothing, unsupported
+forms grant nothing, the shipped profiles parse).
 
-`MCOMP_CONFIG=... python3 tests/test_storage_vm.py [V] [R] [P]` needs a test VM built
+`MCOMP_CONFIG=... python3 tests/test_storage_vm.py [V] [R] [P] [F]` needs a test VM built
 from this version (it stops, starts and resets it, and leaves it stopped; its volumes and
 registry live in a temporary folder):
 - **V** disk volumes: formatted on first use, writable by the desktop user, `nodev,nosuid`;
@@ -357,6 +365,15 @@ registry live in a temporary folder):
   attached (one by `--mount`, one by USB), read-only in the VM.
 - **P** `put`: SHA-256 checked, `name (1).ext` collisions, `--overwrite`, a binary file
   byte for byte, into a volume.
+- **F** folder volumes: read-write without `.noindex` refused; a read-only folder at
+  `/mnt/shared` rejects every write from the VM and the Mac's file stays unchanged; in a
+  read-write folder, the quarantine attribute on what the VM writes (files and an app
+  bundle), links out of the folder replaced by notes, an inside link kept, a FIFO removed,
+  an attribute the VM removed put back, the three `security` events in the local event log;
+  another VM refused the folder read-write; `status` and `stop` report the watcher;
+  Spotlight indexes a plain folder's file but not the VM's file in the `.noindex` folder (a
+  temporary folder in your home, removed at the end; skipped if Spotlight indexed nothing
+  within 3 minutes).
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 

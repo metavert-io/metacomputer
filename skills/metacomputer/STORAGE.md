@@ -12,6 +12,8 @@ it's mounted); `metacomputer volume list` and `refdisk list` list everything the
 | Kind | In the VM | You can |
 | --- | --- | --- |
 | Disk volume | `~/data/NAME` by default, or the mount point in `VOLUMES` (e.g. `/volume`, `/mnt/...`) | read and write; it's the user's data, kept across resets |
+| Folder volume, read-only | `~/data/NAME` or its mount point | read only; it's a folder on the user's Mac, live |
+| Folder volume, read-write (`:rw`) | `~/data/NAME` or its mount point | read and write; files appear in the user's Finder at once |
 | Reference disk | `~/ref/NAME` by default, or the mount point in `REFDISKS` | read only |
 
 - **They survive `reset`, `restore` and rebuilds.** Everything else in the VM goes back to the
@@ -20,6 +22,11 @@ it's mounted); `metacomputer volume list` and `refdisk list` list everything the
 - **Mount points:** `/volume`, `/mnt`, `/data`, `/srv`, `/workspace` or folders in `~`.
 - **A volume belongs to one VM at a time.** If `start` says a volume is in use by another VM,
   report it; don't stop that VM or start this one with `--no-volumes` unless the user agrees.
+- **A read-write folder is the user's own Mac folder.** Write only what the task asks for there.
+  Everything you write gets macOS's quarantine attribute, links that lead out of the folder are
+  replaced by a `NAME.link-removed.txt` note, and FIFOs are removed; never try to get around that
+  (no removing attributes, no links out). If the user asks why a file "came from the internet" on
+  their Mac, that's the quarantine.
 
 ## Rules
 

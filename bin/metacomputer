@@ -31,8 +31,10 @@
 #                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR)
 #   recordings [--sync] [N]
 #   checkpoint NAME [--replace] [--with-volumes] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes]
-#   volume create NAME --size 20G [--dir PATH] | list [--json] | delete NAME [--yes] | resize NAME --size 40G
-#                                  disk volumes: kept outside the VM, attached with VOLUMES=name[:mountpoint]
+#   volume create NAME --size 20G [--dir PATH] | create NAME --folder PATH | list [--json] | delete NAME [--yes]
+#          | resize NAME --size 40G
+#                                  disk volumes (kept outside the VM) and Mac folders (shared, read-only unless
+#                                  :rw), attached with VOLUMES=name[:mountpoint][:rw]
 #   refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
 #                                  read-only reference disks, attached with REFDISKS=name[:mountpoint]
 #   view                           how to watch / take over the desktop (VNC)
@@ -445,8 +447,10 @@ sharing = None
 if hs:
     parts = (hs.split("---") + ["", "", ""])[:3]
     ports, devices, tags = (p.split() for p in parts)
+    # Rosetta is a virtiofs device (0x001a); so is the share for folder volumes, when there is one.
+    shares = 1 if any(i.get("kind") in ("folder", "s3") for i in (stg or {}).get("items", [])) else 0
     sharing = {"clipboard": "com.redhat.spice.0" in ports, "audio": "0x0019" in devices,
-               "rosetta": "rosetta" in tags or ("0x001a" in devices and not tags)}
+               "rosetta": "rosetta" in tags or (devices.count("0x001a") > shares and not tags)}
 out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.split(),
        "lease": lease, "ssh": sshok == "true", "guest": gs, "mcp": mcp,
        "host_sharing": sharing, "lume": lume, "guest_layout": layout,

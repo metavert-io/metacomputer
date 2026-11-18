@@ -17,7 +17,14 @@ nothing of this Mac's own storage, config or Keychain is read or changed. It che
   arguments' order, and the guest's helper accepts the plan the Mac writes;
 - sizes and names; sparse copies and checkpoints of volumes (save, change, restore);
 - reference disks leave links out of what they pack;
-- put: SHA-256 comparison (missing, changed, extra files) and the "name (1).ext" collision names.
+- put: SHA-256 comparison (missing, changed, extra files) and the "name (1).ext" collision names;
+- folder volumes: read-only by default, read-write only with .noindex in the path, refused
+  folders, ':' refused, one VM read-write at a time (nested folders too), --shared-dir arguments
+  and the share names the VM runner gives them;
+- the folder watcher, on a real folder: a new file gets the quarantine attribute (and Gatekeeper
+  then refuses to run an unsigned binary carrying it), a removed or rewritten attribute is put back,
+  a link out of the folder becomes a note while one inside stays, a FIFO goes, set-id bits go, and
+  what was there before the VM booted is left alone.
 """
 import contextlib
 import importlib.machinery
@@ -582,6 +589,140 @@ def test_manifest_parsing():
     os.environ.update(MCOMP_DRIVER_PROFILE="desktop", MCOMP_DRIVER_ORIGINS="")
 
 
+def test_folders():
+    os.environ.update(MCOMP_VOLUMES="", MCOMP_REFDISKS="")
+    base = os.path.join(TMP, "folders")
+    plain = os.path.join(base, "plain")
+    noidx = os.path.join(base, "share.noindex")
+    inner = os.path.join(noidx, "inner")
+    for d in (plain, inner, os.path.join(base, "has:colon")):
+        os.makedirs(d, exist_ok=True)
+    quiet(storage.cmd_volume_create, Args(name="fplain", folder=plain, size=None, dir=None))
+    quiet(storage.cmd_volume_create, Args(name="fnoidx", folder=noidx, size=None, dir=None))
+    quiet(storage.cmd_volume_create, Args(name="finner", folder=inner, size=None, dir=None))
+    check("a folder volume records the real folder", storage.reg_load("volume", "fplain")["path"] == os.path.realpath(plain))
+    check("a folder in a refused place is refused", raises(storage.cmd_volume_create, Args(
+        name="fbad", folder=os.path.expanduser("~/Library"), size=None, dir=None)) is not None)
+    check("a folder whose path has ':' is refused (the VM runner splits on it)", raises(storage.cmd_volume_create, Args(
+        name="fcolon", folder=os.path.join(base, "has:colon"), size=None, dir=None)) is not None)
+    check("--size makes no sense for a folder", raises(storage.cmd_volume_create, Args(
+        name="fx", folder=plain, size="1G", dir=None)) is not None)
+    os.environ["MCOMP_VOLUMES"] = "fplain, fnoidx:/data/shared:rw"
+    items, problems, notes = storage.build_plan()
+    check("folders plan read-only by default, rw when asked", not problems and [i["rw"] for i in items] == [False, True],
+          (problems, items))
+    check("...only the read-write one is locked (overlap-checked)", items[0]["lock"] is None and items[1]["lock"]
+          and items[1]["lock_overlap"])
+    args = storage.lume_args(items)
+    check("run arguments: --shared-dir PATH:ro and PATH:rw", args == ["--shared-dir", os.path.realpath(plain) + ":ro",
+                                                                      "--shared-dir", os.path.realpath(noidx) + ":rw"], args)
+    plan = storage.guest_plan(items)
+    check("the VM's plan names each folder's share", [f["share"] for f in plan["folders"]] == ["plain", "share.noindex"]
+          and plan["folders"][1]["rw"] is True, plan["folders"])
+    h = helper()
+    try:
+        h.check_plan(plan, H)
+        ok = True
+    except h.Refused as e:
+        ok = str(e)
+    check("...and the VM's helper accepts it", ok is True, ok)
+    check("share names follow the VM runner: the last component, ' (2)' for a repeat",
+          storage.share_names(["/a/data", "/b/data", "/c/x", "/d/data"]) == ["data", "data (2)", "x", "data (3)"])
+    os.environ["MCOMP_VOLUMES"] = "fplain:rw"
+    e = storage.build_plan()[1]
+    check("read-write without .noindex is refused, saying how to fix it", any(".noindex" in p and "Spotlight" in p
+                                                                             for p in e), e)
+    os.environ["MCOMP_VOLUMES"] = "fnoidx:rw"
+    items = storage.build_plan()[0]
+    storage.acquire(items, "vm-a", "/lab", os.getpid())
+    e = raises(storage.acquire, items, "vm-b", "/lab", os.getpid())
+    check("a folder is read-write in one VM at a time", e and "vm-a" in e, e)
+    os.environ["MCOMP_VOLUMES"] = "finner:rw"
+    e = raises(storage.acquire, storage.build_plan()[0], "vm-b", "/lab", os.getpid())
+    check("...and a folder inside it can't be read-write elsewhere either", e and "vm-a" in e, e)
+    os.environ["MCOMP_VOLUMES"] = "finner"
+    check("...but it can be read-only elsewhere", storage.build_plan()[0][0]["lock"] is None)
+    storage.release_locks("vm-a", "/lab")
+    os.environ["MCOMP_VOLUMES"] = ""
+
+
+def gatekeeper(path):
+    """Run a binary: 'ran' when it exits 0 or 3 (the test programs' codes), else 'refused' (killed, refused,
+    or held by Gatekeeper past 20 s)."""
+    try:
+        r = subprocess.run([path], capture_output=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return "refused"
+    return "ran" if r.returncode in (0, 3) else "refused"
+
+
+def test_watcher():
+    root = os.path.join(TMP, "watched.noindex")
+    os.makedirs(os.path.join(root, "sub"))
+    open(os.path.join(root, "before.txt"), "w").write("the Mac's own file")
+    os.symlink("/etc", os.path.join(root, "mac-link"))          # the Mac's own link, there before the VM
+    snap = storage.walk_sigs(root)
+    ours, stats = set(), {"quarantined": 0, "restored": 0, "links_removed": 0, "special_removed": 0, "errors": 0}
+    # what a VM would do through the share
+    open(os.path.join(root, "new.txt"), "w").write("from the VM")
+    os.makedirs(os.path.join(root, "made.app", "Contents"))
+    os.symlink(os.path.expanduser("~/.ssh"), os.path.join(root, "escape-abs"))
+    os.symlink("../../../..", os.path.join(root, "sub", "escape-rel"))
+    os.symlink("new.txt", os.path.join(root, "inside-link"))
+    os.mkfifo(os.path.join(root, "pipe"))
+    tool = os.path.join(root, "tool")
+    # An unsigned (ad-hoc signed) program, like one built in the VM; Apple's own binaries always run.
+    src = os.path.join(TMP, "tool.c")
+    open(src, "w").write("int main(void){return 0;}\n")
+    # Running a quarantined binary can make Gatekeeper hold it for minutes or show a dialog on the Mac's screen,
+    # so these checks run only with MCOMP_TEST_GATEKEEPER=1 (docs/storage.md has the results on macOS 27).
+    gk = os.environ.get("MCOMP_TEST_GATEKEEPER") == "1"
+    built = gk and shutil.which("cc") and subprocess.run(["cc", "-o", tool, src], capture_output=True).returncode == 0
+    if not built:
+        shutil.copy("/usr/bin/true", tool)
+    os.chmod(tool, 0o4755)
+    tool2 = os.path.join(root, "tool2")
+    open(src, "w").write("int main(void){return 3;}\n")
+    if not built or subprocess.run(["cc", "-o", tool2, src], capture_output=True).returncode != 0:
+        shutil.copy("/usr/bin/true", tool2)
+    cur, links, special = storage.protect(root, snap, ours, stats)
+    q = lambda p: storage.get_xattr(os.path.join(root, p), storage.QUARANTINE)  # noqa: E731
+    check("a file the VM wrote gets the quarantine attribute", q("new.txt") and storage.QUAR_OK.match(q("new.txt")),
+          q("new.txt"))
+    check("...and so does a folder (an app bundle is one)", q("made.app") is not None)
+    check("the Mac's own file from before the VM booted is left alone", q("before.txt") is None)
+    check("a link out of the folder (absolute) is replaced by a note",
+          not os.path.lexists(os.path.join(root, "escape-abs")) and os.path.isfile(os.path.join(root, "escape-abs.link-removed.txt")))
+    check("...and so is one that climbs out with ..", not os.path.lexists(os.path.join(root, "sub", "escape-rel")))
+    check("a link that stays inside the folder is kept", os.path.islink(os.path.join(root, "inside-link")))
+    check("the Mac's own link from before is left alone", os.path.islink(os.path.join(root, "mac-link")))
+    check("a FIFO is removed", not os.path.lexists(os.path.join(root, "pipe")) and special == ["pipe"], special)
+    check("set-id bits are removed", not os.stat(tool).st_mode & 0o6000, oct(os.stat(tool).st_mode))
+    check("it reports what it did", stats["links_removed"] == 2 and stats["special_removed"] == 1 and
+          stats["quarantined"] >= 4 and len(links) == 2, stats)
+    if built:
+        check("Gatekeeper refuses to run an unsigned binary the VM wrote (it carries our quarantine)",
+              gatekeeper(tool) == "refused")
+    else:
+        print("SKIP running quarantined binaries (MCOMP_TEST_GATEKEEPER=1 runs them; needs a C compiler)")
+    subprocess.run(["xattr", "-d", storage.QUARANTINE, os.path.join(root, "new.txt")], check=True)
+    subprocess.run(["xattr", "-w", storage.QUARANTINE, "00c1;6745a1b2;Safari;", tool], check=True)
+    subprocess.run(["xattr", "-w", storage.QUARANTINE, "00c1;6745a1b2;Safari;", tool2], check=True)
+    if built:
+        check("(a rewritten value with the 'user approved' flag would let it run: why it's enforced)",
+              gatekeeper(tool) == "ran")
+    cur, links, special = storage.protect(root, cur, ours, stats)
+    check("a removed attribute is put back, and a rewritten one replaced", storage.QUAR_OK.match(q("new.txt") or b"")
+          and storage.QUAR_OK.match(q("tool2") or b"") and stats["restored"] == 3, (q("new.txt"), q("tool2"), stats))
+    # (tool ran while its value said "approved", and macOS remembers that: putting the attribute back doesn't
+    # stop that same binary again. tool2 never ran, so the restored attribute holds.)
+    if built:
+        check("...so Gatekeeper refuses a binary whose attribute the VM rewrote, once it's put back",
+              gatekeeper(tool2) == "refused")
+    cur2, links, special = storage.protect(root, cur, ours, stats)
+    check("a pass with nothing new changes nothing", stats["restored"] == 3 and not links and not special)
+
+
 def main():
     try:
         test_parsing()
@@ -597,6 +738,8 @@ def main():
         test_bounded_replies()
         test_reservations()
         test_manifest_parsing()
+        test_folders()
+        test_watcher()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")

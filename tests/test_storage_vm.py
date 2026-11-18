@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared and persistent storage, end to end on a test VM (docs/storage.md).
 
-    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_storage_vm.py [V] [R] [P]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_storage_vm.py [V] [R] [P] [F]
 
 Use a test VM built from this branch (storage needs its guest side): this stops, starts and
 resets it, and leaves it stopped. Volumes, reference disks and their registry live in a
@@ -17,6 +17,13 @@ R  Reference disks: packed from a Mac folder (long and non-ASCII names, the exec
    link left out), two attached (one by --mount, one by --usb-storage), read-only in the VM.
 P  put: every file checked by SHA-256, a taken name lands as "name (1).ext", --overwrite
    replaces, a folder lands whole; into a volume.
+F  Folder volumes: read-write without .noindex refuses the start; a read-only folder (at
+   /mnt/shared, as Cua Spaces scripts expect) rejects writes from the VM; in a read-write one,
+   a file the VM writes gets the quarantine attribute on the Mac, a removed attribute comes
+   back, a link out of the folder becomes a note (and a security event) while one inside stays,
+   a FIFO goes; another VM is refused the folder read-write; Spotlight doesn't index what the
+   VM writes (a .noindex folder in your home, next to a plain one that it does index; removed
+   at the end); stop reports what the watcher did.
 """
 import json
 import os
@@ -215,14 +222,109 @@ def test_p():
     stop(cfg)
 
 
+def test_f():
+    print("F  folder volumes")
+    plain = variant("plain")
+    stop(plain)
+    ro = os.path.join(TMP, "ro-share")
+    os.makedirs(ro)
+    open(os.path.join(ro, "from-mac.txt"), "w").write("mac\n")
+    spot = tempfile.mkdtemp(prefix="mcst-spotlight-", dir=os.path.expanduser("~"))
+    rw = os.path.join(spot, "rw-share.noindex")
+    control = os.path.join(spot, "plain")
+    os.makedirs(rw)
+    os.makedirs(control)
+    token = "mcsttok" + os.urandom(6).hex()
+    open(os.path.join(control, token + "_control.txt"), "w").write(f"{token} control\n")
+    try:
+        mc(plain, "volume", "create", "fro", "--folder", ro)
+        mc(plain, "volume", "create", "frw", "--folder", rw)
+        mc(plain, "volume", "create", "fctl", "--folder", control)
+        r = start(variant("f-bad", 'VOLUMES="fctl:rw"'))
+        check("read-write without .noindex refuses the start (Spotlight)", r.returncode != 0 and ".noindex" in out(r), out(r))
+        cfg = variant("f1", 'VOLUMES="fro:/mnt/shared,frw:/data/rw:rw"')
+        r = start(cfg)
+        check("start attaches a read-only and a read-write folder, and starts the watcher", r.returncode == 0
+              and "folder 'fro' at /mnt/shared (ro)" in out(r) and "(rw)" in out(r) and "watcher running" in out(r), out(r))
+        rc, so, se = sh(cfg, "cat /mnt/shared/from-mac.txt; touch /mnt/shared/x 2>&1; echo vm > /mnt/shared/from-mac.txt 2>&1; "
+                             "findmnt -n -o OPTIONS /mnt/shared")
+        check("the read-only folder: readable, every write refused", "mac" in so and (so + se).count("Read-only file system") == 2
+              and so.strip().splitlines()[-1].startswith("ro"), so + se)
+        check("...and the Mac's file is unchanged", open(os.path.join(ro, "from-mac.txt")).read() == "mac\n")
+        rc, so, se = sh(cfg, f"cd /data/rw && echo vm > vm.txt && echo '{token} written by the VM' > {token}_vm.txt && "
+                             "ln -s ~/.ssh esc-abs && ln -s ../../.. esc-rel && ln -s vm.txt inside && mkfifo pipe && "
+                             "mkdir -p Tool.app/Contents && echo ok")
+        time.sleep(6)
+        q = subprocess.run(["xattr", "-p", "com.apple.quarantine", os.path.join(rw, "vm.txt")], capture_output=True, text=True)
+        check("a file the VM wrote carries the quarantine attribute on the Mac", rc == 0 and q.stdout.strip().endswith(
+            ";metacomputer;") and q.stdout.startswith("0081;"), q.stdout + q.stderr + so + se)
+        q2 = subprocess.run(["xattr", "-p", "com.apple.quarantine", os.path.join(rw, "Tool.app")], capture_output=True, text=True)
+        check("...and so does a folder it made (an app bundle)", q2.returncode == 0, q2.stderr)
+        check("links out of the folder became notes", not os.path.lexists(os.path.join(rw, "esc-abs"))
+              and not os.path.lexists(os.path.join(rw, "esc-rel")) and os.path.isfile(os.path.join(rw, "esc-abs.link-removed.txt")),
+              os.listdir(rw))
+        check("a link inside the folder stays; the FIFO is gone", os.path.islink(os.path.join(rw, "inside"))
+              and not os.path.lexists(os.path.join(rw, "pipe")), os.listdir(rw))
+        sh(cfg, "cd /data/rw && python3 -c 'import os; os.removexattr(\"vm.txt\", \"com.apple.quarantine\")'")
+        time.sleep(6)
+        q = subprocess.run(["xattr", "-p", "com.apple.quarantine", os.path.join(rw, "vm.txt")], capture_output=True, text=True)
+        check("the VM removing the attribute: it's put back", q.returncode == 0 and ";metacomputer;" in q.stdout, q.stderr)
+        logs = os.path.join(settings_logs(cfg), "events.jsonl")
+        evs = [json.loads(l) for l in open(logs)] if os.path.exists(logs) else []
+        types = {e.get("type") for e in evs if e.get("data", {}).get("volume") == "frw"}
+        check("security events for the removed links and FIFO and the restored attribute (local event log)",
+              {"symlink_neutralized", "special_file_removed", "quarantine_restored"} <= types, types)
+        r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "storage.py"), "prepare", "--pid", str(os.getpid())],
+                           capture_output=True, text=True, env=dict(os.environ, MCOMP_STORAGE_HOME=STATE, MCOMP_STORAGE_DIR=DATA,
+                           MCOMP_VM_NAME="mcst-other-vm", MCOMP_VOLUMES="frw:rw", MCOMP_REFDISKS="",
+                           MCOMP_RUN_DIR=os.path.join(TMP, "other-run"), MCOMP_SSH_DIR=settings(cfg)["ssh_dir"]))
+        check("another VM is refused the folder read-write", r.returncode != 0 and "in use" in r.stderr, r.stderr)
+        r = mc(cfg, "status")
+        check("status shows both folders and the watcher", "/mnt/shared" in r.stdout and "watcher  running" in r.stdout,
+              r.stdout[-700:])
+        r = stop(cfg)
+        check("stop reports what the watcher did", "link(s)" in out(r) and "quarantine restored" in out(r), out(r))
+        found_ctl, found_vm = mdfind_wait(token, control, rw)
+        if found_ctl:
+            check("Spotlight: the plain folder's file is indexed, the VM's file in the .noindex folder isn't",
+                  not found_vm, (found_ctl, found_vm))
+        else:
+            print("  SKIP Spotlight: it hadn't indexed even the plain folder within 3 minutes (is indexing on?)")
+    finally:
+        shutil.rmtree(spot, ignore_errors=True)
+
+
+def mdfind_wait(token, control, rw, wait=180):
+    end = time.time() + wait
+    ctl = vm = False
+    while time.time() < end:
+        r = subprocess.run(["mdfind", "-name", token], capture_output=True, text=True)
+        hits = r.stdout.split("\n")
+        ctl = any(h.startswith(control) for h in hits)
+        vm = any(h.startswith(rw) for h in hits)
+        if ctl:
+            time.sleep(10)
+            r = subprocess.run(["mdfind", "-name", token], capture_output=True, text=True)
+            vm = any(h.startswith(rw) for h in r.stdout.split("\n"))
+            return ctl, vm
+        time.sleep(10)
+    return ctl, vm
+
+
+def settings_logs(cfg):
+    return subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; printf "%s" "$LOG_DIR"'], capture_output=True,
+                          text=True, env=dict(os.environ, MCOMP_CONFIG=cfg)).stdout
+
+
 def main(argv):
     if not BASE or not os.path.isfile(BASE):
         print("set MCOMP_CONFIG to a test VM's config (this stops, starts and resets that VM)", file=sys.stderr)
         return 2
-    which = [a.upper() for a in argv] or ["V", "R", "P"]
+    which = [a.upper() for a in argv] or ["V", "R", "P", "F"]
+    os.makedirs(os.path.join(TMP, "other-run"), exist_ok=True)
     try:
         for k in which:
-            {"V": test_v, "R": test_r, "P": test_p}[k]()
+            {"V": test_v, "R": test_r, "P": test_p, "F": test_f}[k]()
     finally:
         stop(variant("final"))
         shutil.rmtree(TMP, ignore_errors=True)

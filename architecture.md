@@ -447,7 +447,19 @@ images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-
   grows the filesystem after `volume resize`, finds reference disks by volume label,
   and mounts through descriptors opened without following links. It mounts all of it
   or nothing; on failure, `start` stops the VM again.
-- **`stop`**, `reset`, `restore` and `baseline` release the locks once the VM is off.
+- **Folder volumes** go to `lume run --shared-dir PATH:ro|rw`. Lume puts every shared
+  folder in one virtiofs device (tag `com.apple.virtio-fs.automount`), a subfolder each,
+  named after its last path component; the helper mounts it at `/run/metacomputer/vfs`
+  (0700), proves each read-only one is read-only at the Mac (it tries to create a file as
+  root), and bind-mounts each at its mount point. For a read-write folder, `start` records
+  its contents before the VM boots, and a watcher process (`storage.py watch`, detached,
+  pid in `RUN_DIR/storage-watcher.pid`) compares the folder with that every 2 s or more:
+  quarantine on what's new or changed (exact value enforced), links resolving outside the
+  folder replaced by a note, FIFOs, sockets and devices removed, set-id bits dropped,
+  `security` events. It does a last pass and exits when `stop` signals it or the VM's
+  process is gone.
+- **`stop`**, `reset`, `restore` and `baseline` stop the watcher and release the locks once
+  the VM is off.
   `restore NAME` of a checkpoint taken `--with-volumes` first puts back each volume
   from its snapshot (an APFS clone beside the image, or a sparse copy).
 - `guest-status` reports what the helper mounted (`/run/metacomputer/storage.json`,

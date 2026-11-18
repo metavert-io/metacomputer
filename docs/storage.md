@@ -9,6 +9,7 @@ until you attach it, and lives outside the VM, so `reset`, `restore` and
 | Kind | What it is | In the VM | Shared with |
 | --- | --- | --- | --- |
 | **Disk volume** | An ext4 disk image on the Mac (`volume create NAME --size 20G`) | Read-write, at `~/data/NAME` by default | One VM at a time (locked while it runs) |
+| **Folder volume** | A folder on your Mac, shared live (`volume create NAME --folder PATH`); it's what makes the VM's files visible in Finder | Read-only by default; read-write only with `:rw` | Read-only: any number of VMs and the Mac. Read-write: one VM at a time |
 | **Reference disk** | A read-only image packed from a Mac folder (`refdisk create NAME --from FOLDER`) | Read-only, at `~/ref/NAME` by default | Any number of VMs |
 
 To copy a single file in without keeping it anywhere, use `metacomputer put`
@@ -61,6 +62,78 @@ metacomputer volume delete NAME [--yes]         # asks first; its checkpoint sna
   `checkpoints` lists which volumes each one holds; `checkpoint --delete` removes
   their snapshots too.
 
+## Folder volumes
+
+```bash
+metacomputer volume create NAME --folder PATH     # PATH is made if only its last part is missing
+VOLUMES="NAME"                                    # read-only, at ~/data/NAME
+VOLUMES="NAME:/mnt/shared:rw"                     # read-write: an explicit opt-in
+```
+
+A folder volume is a folder on your Mac, shared into the VM over virtiofs
+(`lume run --shared-dir PATH:ro|rw`). Both sides see the same files at once, and the
+folder stays an ordinary folder in Finder. `volume delete` only forgets it: the folder
+and its files stay.
+
+**Read-only** (the default): the VM can read the folder and nothing else. The Mac
+holds it read-only; the VM's own read-only mount is a second layer. At every start the
+VM's helper, as root and through the raw virtiofs mount (which the VM could remount
+however it liked), tries to create a file in each read-only folder, and refuses to
+mount the folder if the Mac lets it.
+
+**Read-write** (`:rw`) is for handing work back and forth. It's an explicit opt-in, and:
+- **One VM at a time.** A lock, like a disk volume's; a folder inside a folder that
+  another VM has read-write (or one containing it) is refused too. Other VMs may
+  still have it read-only.
+- **Spotlight stays out.** The folder's name, or a parent's, must end in `.noindex`
+  (for example `~/vm-share.noindex`; Finder shows the name like that). Spotlight
+  doesn't index such folders, so its importers never parse files the VM wrote. Measured
+  on macOS 27: a `.noindex` folder (or any folder inside one) wasn't indexed, while a
+  `.metadata_never_index` file in a folder no longer kept that folder out, and neither
+  did `.metadata_never_index_unless_rootfs`. `mdutil` works only on whole volumes.
+  Without `.noindex`, a read-write attach is refused, with the rename to make.
+- **A watcher on the Mac** (`lib/storage.py watch`, started by `start`, stopped by
+  `stop`) goes over the folder every 2 seconds (longer for big folders: five times as
+  long as a pass takes) and compares it with what was there when the VM booted:
+  - every new or changed file and folder gets macOS's quarantine attribute
+    (`com.apple.quarantine`, `0081;<time>;metacomputer;`), so Gatekeeper checks it like
+    a download;
+  - a symbolic link whose target resolves outside the folder is replaced by a short
+    note, `NAME.link-removed.txt`, saying where it pointed; a link that stays inside
+    is kept;
+  - a FIFO, socket or device is removed, and set-user-ID and set-group-ID bits come off;
+  - each of these sends a `security` event (`symlink_neutralized`,
+    `special_file_removed`, `quarantine_restored`); `status`, `security` and `stop`
+    report the counts.
+  What was in the folder before the VM booted is left alone, so your own files and
+  links stay as they were. Files you change in the folder while the VM runs are
+  treated as the VM's (the watcher can't tell who wrote them) and get the attribute too.
+- Folders holding more than 500,000 files and folders can't be attached read-write.
+
+What the VM can do through virtiofs, measured on macOS 27 with Apple's virtiofs
+(Lume 0.7.2): read and write files (they're owned by your Mac account), create links
+pointing anywhere, FIFOs and hard links (inside the folder only), and list, remove
+or rewrite any extended attribute, `com.apple.quarantine` included. It couldn't set
+the set-user-ID bit (the Mac dropped it). That's why the watcher
+enforces the exact quarantine value rather than only adding a missing one: a value
+rewritten with the "user approved" flag (`00c1;…`) let an unsigned binary run on the
+Mac, where ours had it killed by Gatekeeper.
+
+**Where it ends:**
+- The watcher works after the fact: there's a gap of up to a few seconds between the
+  VM writing something and the watcher seeing it. A program on the Mac that follows
+  a new link or opens a new file inside that gap isn't protected. And macOS remembers
+  a binary it let run: if one ran while the VM had marked it "approved", putting the
+  attribute back doesn't stop that same binary later.
+- Quarantine makes Gatekeeper check apps and programs opened from Finder or run
+  directly. It doesn't stop a script being fed to an interpreter (`sh file`,
+  `python3 file`), and documents get only whatever checks the app that opens them
+  makes.
+- The VM can set other extended attributes (Finder tags, custom icons and the like) on
+  files in a read-write folder; only quarantine is enforced.
+- Only the watcher stands between the VM and the folder's files while it runs; if it
+  stops, `status` says so in red.
+
 ## Reference disks
 
 ```bash
@@ -95,8 +168,9 @@ VOLUMES="work:/volume,cache:/mnt/cache" # your own mount points, separated by co
 REFDISKS="docs, models:/data/models"    # ~/ref/docs, /data/models
 ```
 
-Each entry is `name[:mountpoint]`. They're attached at the next `start` (or
-`restart`); a VM that's already running keeps what it started with.
+Each entry is `name[:mountpoint][:rw]`; `:rw` applies to folder volumes (disk volumes
+are always read-write, reference disks always read-only). They're attached at the next
+`start` (or `restart`); a VM that's already running keeps what it started with.
 
 **Mount points** in the VM: `/volume`, `/mnt`, `/data`, `/srv`, `/workspace`, any
 folder in them, or any folder in the desktop user's home (`~/...`, not a dot-folder
@@ -117,6 +191,8 @@ of them or none; if anything fails, `start` stops the VM again and says why.
   manifest lists its mount point under `resources.files` (read-only items under
   `read` or `write`, read-write ones under `write`); the rest are left out, and
   `start` says which. The default profiles list none of them.
+- A folder path can't contain `:` (the VM runner splits on it), and a folder on a
+  network filesystem gets the same warning about locks.
 
 ## Where it's kept
 
@@ -134,11 +210,11 @@ of them or none; if anything fails, `start` stops the VM again and says why.
 
 ## What may not go into the VM
 
-A folder packed into a reference disk is refused when it is, holds, or is inside one
-of these. The folder is opened first (so a link to one is refused too) and judged by the
-spelling the kernel gives the opened folder and by its identity (device and inode), compared
-the way APFS compares names: so `~/library`, `/USERS/you/.SSH` or
-`/System/Volumes/Data/Users/you/Documents` are the folders they name:
+A folder volume, or a folder packed into a reference disk, is refused when it is,
+holds, or is inside one of these. The folder is opened first (so a link to one is refused
+too) and judged by the spelling the kernel gives the opened folder and by its identity
+(device and inode), compared the way APFS compares names: so `~/library`, `/USERS/you/.SSH`
+or `/System/Volumes/Data/Users/you/Documents` are the folders they name:
 - your home folder itself, and Documents, Desktop, Downloads, Pictures, Movies, Music
   and Public themselves (a folder inside Documents is allowed), or any parent of them;
 - anything in `~/Library` (iCloud Drive is `~/Library/Mobile Documents`, other cloud
@@ -201,6 +277,9 @@ drive; it attaches plain disks to one VM on your Mac. The closest equivalents:
 | Files outlive the Space | Volumes outlive `reset`, `restore` and `build --replace` |
 | Restore a file from its history | `checkpoint NAME --with-volumes` / `restore NAME`: the whole volume, at the moments you chose |
 | `send_file`: SHA-256 verified, `name (1).ext` on a collision, `conflict: "overwrite"` | `metacomputer put`: the same rules; `--overwrite` |
+| Show it in Finder (`cua volume mount`, an NFS mount at `~/Cua Volume`) | A folder volume: a Mac folder you pick, shared into the VM (`volume create NAME --folder PATH`) |
+| Read-write volume mounts (the default before Secure Spaces) | Folder volumes are read-only unless `:rw`; read-write ones are quarantined and watched |
+| `.DS_Store` and `._*` stay on the Mac | `put` sends no Mac metadata; in a folder volume, both sides see the same files |
 | Storage on this computer (`~/.cua/volume/data`) | `STORAGE_DIR` (default `~/.local/share/metacomputer`), or `--dir` per item, on any drive |
 
 What isn't offered:
@@ -223,10 +302,17 @@ What isn't offered:
 - In the VM, `/opt/metacomputer/bin/storage-helper` (root-owned, run only through
   `sudo metacomputer-admin storage attach`) reads the plan on stdin. It finds each
   volume among the extra read-write virtio disks by its place in that order and checks
-  its size against the image's; each reference disk by its volume label. It mounts
+  its size against the image's; each reference disk by its volume label. Folders arrive
+  as one virtiofs device (tag `com.apple.virtio-fs.automount`) holding one subfolder
+  per shared folder, named after its last path component (`name (2)` for a repeat);
+  the helper mounts it at `/run/metacomputer/vfs` (root only), checks that each
+  read-only one really is read-only, and bind-mounts each at its mount point,
+  `nosuid,nodev`, read-only unless it's `rw`. It mounts
   through descriptors opened without following links, undoes everything if one item
   fails, and records what it mounted in `/run/metacomputer/storage.json`, which
   `guest-status` reports.
+- For a read-write folder, `start` records what's in it before the VM boots
+  (`RUN_DIR/storage-snap-NAME.json`), and the watcher starts from that.
 - `checkpoint --with-volumes`, `restore`, `volume resize` and `volume delete` hold each disk
   volume they work on through the same locks, from before they check it to when they finish,
   so no VM can attach it in between (and they're refused while a VM holds it).

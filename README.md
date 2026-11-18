@@ -827,6 +827,25 @@ metacomputer restart         # attached at start
 
 [docs/storage.md](docs/storage.md) has the details and a table for anyone coming from Cua Volume.
 
+### Share a folder with the VM (visible in Finder)
+
+- "Put your results in a folder I can open in Finder."
+- "Read the files in my project's `assets` folder, but don't change them."
+
+```bash
+metacomputer volume create assets --folder ~/work/assets            # read-only unless you say :rw
+metacomputer volume create handoff --folder ~/vm-handoff.noindex    # read-write needs .noindex in the path
+# in config/local.env:
+VOLUMES="assets:/mnt/assets,handoff:/data/handoff:rw"
+metacomputer restart
+```
+
+- **Read-only by default.** The Mac holds the share read-only, and the VM proves it at every start.
+- **Read-write (`:rw`) is opt-in** and one VM at a time. While the VM runs, a watcher on the Mac puts macOS's quarantine attribute on everything the VM writes (so Gatekeeper checks it like a download, and puts it back if the VM removes it), replaces links that lead out of the folder with a note, and removes FIFOs and devices. The folder must be kept out of Spotlight with a `.noindex` name, because `.metadata_never_index` no longer works.
+- Your personal folders (home, Documents, Desktop, Downloads, Library and iCloud Drive, `.ssh` and other dot-folders) and this checkout are refused, links resolved.
+
+Details and what the watcher can't do: [docs/storage.md](docs/storage.md#folder-volumes).
+
 ### Look inside the VM without the GUI
 
 - "What's running on your computer right now? Is anything still downloading?"
@@ -1015,7 +1034,7 @@ alias). `metacomputer help` prints the same list with every option.
 | `who` / `release` | Who is using the VM; hand it over (one controller at a time) |
 | `reset [--yes]` | Restore the clean baseline (asks first; evidence on the Mac is kept) |
 | `checkpoint NAME [--replace] [--with-volumes]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes]` | Saved states of the stopped VM, with its disk volumes if you ask (deleting and restoring ask first) |
-| `volume create NAME --size 20G [--dir PATH]` / `volume list [--json]` / `volume resize NAME --size 40G` / `volume delete NAME [--yes]` | Disk volumes: kept outside the VM, attached read-write to one VM with `VOLUMES` |
+| `volume create NAME --size 20G [--dir PATH]` / `volume create NAME --folder PATH` / `volume list [--json]` / `volume resize NAME --size 40G` / `volume delete NAME [--yes]` | Disk volumes (kept outside the VM, read-write to one VM) and folder volumes (a Mac folder, read-only unless `:rw`), attached with `VOLUMES` |
 | `refdisk create NAME --from FOLDER [--dir PATH]` / `refdisk list [--json]` / `refdisk delete NAME [--yes]` | Read-only reference disks packed from a Mac folder, attached with `REFDISKS` |
 | `baseline [--yes]` | Make the current VM the new baseline (the old one is kept as `-prev`) |
 | `build [--replace]` | Build the VM and its baseline from scratch |
@@ -1117,7 +1136,7 @@ instead.
 | Key | Default | |
 | --- | --- | --- |
 | `STORAGE_DIR` | `~/.local/share/metacomputer` | Where new volumes and reference disks go: any folder you can reach, such as an external drive or a NAS mount (`--dir` per item) |
-| `VOLUMES` | (none) | Disk volumes to attach, read-write: `name[:mountpoint]`, comma-separated; default mount point `~/data/NAME` |
+| `VOLUMES` | (none) | Volumes to attach: `name[:mountpoint][:rw]`, comma-separated; default mount point `~/data/NAME`. Disk volumes are read-write; folder volumes read-only unless `:rw` |
 | `REFDISKS` | (none) | Read-only reference disks to attach: `name[:mountpoint]`; default `~/ref/NAME` |
 
 **Desktop recordings** (`metacomputer record`):

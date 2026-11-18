@@ -3,6 +3,9 @@
 
   disk volumes    ext4 disk images on the Mac, attached read-write to one VM at a time
                   (`lume run --disk`); formatted inside the VM on first use, only when blank
+  folder volumes  a Mac folder shared over virtiofs (`--shared-dir`), read-only unless rw is
+                  asked for; while a VM has one read-write, a watcher on the Mac quarantines what
+                  the VM writes, removes links out of the folder and special files
   reference disks read-only ISO/UDF images packed from a Mac folder; any number of VMs
                   (`--mount` for the first, `--usb-storage` for the rest, both read-only)
 
@@ -13,13 +16,14 @@ The registry (one JSON file per item) and the locks are on this Mac's internal d
 STORAGE_DIR (default ~/.local/share/metacomputer) or a per-item --dir says: an external
 drive, a NAS mount, anything this user can reach.
 
-  storage.py volume create NAME --size 20G [--dir PATH] | list [--json] | delete NAME [--yes]
-             | resize NAME --size 40G
+  storage.py volume create NAME --size 20G [--dir PATH] | create NAME --folder PATH
+             | list [--json] | delete NAME [--yes] | resize NAME --size 40G
   storage.py refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
   storage.py prepare --pid PID [--no-volumes]   before `lume run`: check, lock, write the run arguments
   storage.py started --pid PID                  after `lume run`: the VM's process holds the locks
   storage.py attached                           the guest's answer (stdin): report, record, event
   storage.py release                            after the VM stopped: let go of everything
+  storage.py watch                              the folder watcher (started by `attached`)
   storage.py checkpoint save|restore|delete NAME | list   volume snapshots for --with-volumes
   storage.py status [--json]
 Settings come from bin/metacomputer's environment (MCOMP_*), else the config files.
@@ -703,8 +707,64 @@ def plan_volume(rec, v, problems, notes):
                          "while the VM writes, the volume can be damaged, and locks don't hold across computers")
         return {"kind": "disk", "name": name, "path": path, "ident": list(ident), "mount": v["mount"], "rw": True,
                 "size": size, "uuid": rec["uuid"], "lock": lock_key("disk", path)}
+    if kind in FOLDER_KINDS:
+        return plan_folder(rec, v, problems, notes)
     problems.append(f"volume '{name}': unknown kind {kind!r}")
     return None
+
+
+FOLDER_KINDS = ("folder",)
+MAX_WATCH = 500_000          # entries a read-write folder may hold (the watcher keeps one record each)
+
+
+def has_noindex(real):
+    """Spotlight leaves out any folder whose name ends in .noindex, and everything in it (measured on
+    macOS 27: .metadata_never_index files no longer keep a folder out)."""
+    return any(c.endswith(".noindex") for c in real.split("/"))
+
+
+def plan_folder(rec, v, problems, notes):
+    name, path = rec["name"], rec.get("path", "")
+    if not os.path.isdir(path):
+        problems.append(f"volume '{name}': the folder {path} is missing (is its drive connected?)")
+        return None
+    try:
+        real = check_shareable(path)
+    except StorageError as e:
+        problems.append(f"volume '{name}': {e}")
+        return None
+    if ":" in real:
+        problems.append(f"volume '{name}': {real} has a ':' in its path, which the VM runner can't share")
+        return None
+    rw = v["mode"] == "rw"
+    if rw and not has_noindex(real):
+        problems.append(f"volume '{name}': a folder shared read-write must be kept out of Spotlight, so its name (or a "
+                        f"parent's) must end in .noindex: rename {os.path.basename(real)} to "
+                        f"{os.path.basename(real)}.noindex (Finder shows it like that) and run `metacomputer volume "
+                        f"create {name} --folder NEWPATH` again after `volume delete {name}`; or attach it read-only")
+        return None
+    if rw:
+        net = network_fs(real)
+        if net:
+            notes.append(f"volume '{name}' is on a network filesystem ({net[0]} at {net[1]}): locks don't hold across "
+                         "computers, so another computer could write it at the same time")
+    return {"kind": rec["kind"], "name": name, "path": real, "mount": v["mount"], "rw": rw,
+            "lock": lock_key("folder", real) if rw else None, "lock_overlap": rw}
+
+
+def share_names(paths):
+    """The subfolder each shared folder gets in the VM's virtiofs share: the VM runner names them by
+    their last path component, adding " (2)", " (3)" for repeats, in the order given."""
+    taken, out = set(), []
+    for p in paths:
+        base = os.path.basename(p.rstrip("/")) or "Shared Folder"
+        name, n = base, 2
+        while name in taken:
+            name = f"{base} ({n})"
+            n += 1
+        taken.add(name)
+        out.append(name)
+    return out
 
 
 def bounded_filter(items):
@@ -995,6 +1055,9 @@ def lume_args(items):
         if it["kind"] == "refdisk":
             args += ["--mount" if refs == 0 else "--usb-storage", it["path"]]
             refs += 1
+    for it in items:
+        if it["kind"] in FOLDER_KINDS:
+            args += ["--shared-dir", f"{it['path']}:{'rw' if it['rw'] else 'ro'}"]
     return args
 
 
@@ -1005,6 +1068,9 @@ def guest_plan(items):
             plan["disks"].append({"name": it["name"], "uuid": it["uuid"], "size": it["size"], "mount": it["mount"]})
         elif it["kind"] == "refdisk":
             plan["refdisks"].append({"name": it["name"], "label": it["label"], "mount": it["mount"]})
+    folders = [it for it in items if it["kind"] in FOLDER_KINDS]
+    for it, share in zip(folders, share_names([it["path"] for it in folders])):
+        plan["folders"].append({"name": it["name"], "share": share, "mount": it["mount"], "rw": it["rw"]})
     return plan
 
 
@@ -1020,6 +1086,16 @@ def clear_state():
             os.unlink(p)
         except FileNotFoundError:
             pass
+    try:
+        for f in os.listdir(run_dir()):
+            if f.startswith("storage-snap-") or f == "storage-watch.json":
+                os.unlink(os.path.join(run_dir(), f))
+    except OSError:
+        pass
+
+
+def snap_path(name):
+    return os.path.join(run_dir(), f"storage-snap-{name}.json")
 
 
 def cmd_prepare(a):
@@ -1033,7 +1109,17 @@ def cmd_prepare(a):
     if not items:
         return 0
     vm, lab = vm_name(), lab_root()
+    snaps = {}
+    for it in items:
+        if it["kind"] in FOLDER_KINDS and it["rw"]:
+            sigs = walk_sigs(it["path"])
+            if sigs is None:
+                raise StorageError(f"not starting: volume '{it['name']}' holds over {MAX_WATCH} files and folders, more "
+                                   "than the watcher protects; attach it read-only, or share a smaller folder")
+            snaps[it["name"]] = sigs
     acquire(items, vm, lab, a.pid)
+    for name, sigs in snaps.items():
+        atomic_json(snap_path(name), {k: list(v) for k, v in sigs.items()})
     f = state_files()
     atomic_json(f["plan"], guest_plan(items))
     atomic_json(f["state"], {"vm": vm, "lab": lab, "prepared": now(), "items": items, "attached": None})
@@ -1154,6 +1240,10 @@ def attached(data):
         print(f"  ✓ {it['kind']} '{it['name']}' at {it['mount']} ({mode})" + (f", {', '.join(extra)}" if extra else ""))
     st["attached"] = now()
     atomic_json(state_files()["state"], st)
+    if any(it["kind"] in FOLDER_KINDS and it["rw"] for it in want.values()):
+        pid = watcher_start()
+        print(f"  ✓ folder watcher running (pid {pid}): what the VM writes is quarantined, links out of a folder are "
+              "removed" if pid else "  ! the folder watcher didn't start (see storage-watcher.log)")
     emit("lifecycle", "storage_attached",
          f"Storage attached to {vm_name()}: " + ", ".join(f"{it['kind']} {it['name']} ({'rw' if it['rw'] else 'ro'})"
                                                          for it in want.values()),
@@ -1164,6 +1254,12 @@ def attached(data):
 
 def cmd_release(a):
     st = load_state()
+    stats = watcher_stop()
+    if stats and not a.quiet:
+        for name, s_ in stats.get("folders", {}).items():
+            print(f"  ✓ folder '{name}': {s_.get('quarantined', 0)} item(s) quarantined, {s_.get('links_removed', 0)} "
+                  f"link(s) and {s_.get('special_removed', 0)} special file(s) removed, quarantine restored "
+                  f"{s_.get('restored', 0)} time(s)")
     n = release_locks(vm_name(), lab_root())
     clear_state()
     if st and st.get("items") and not a.quiet:
@@ -1171,10 +1267,10 @@ def cmd_release(a):
     return 0
 
 
-def emit(family, type_, message, severity=None, data=None, action=None):
+def emit(family, type_, message, severity=None, data=None, action=None, origin="cli"):
     try:
         import events
-        events.emit(family, type_, message, severity, action, data)
+        events.emit(family, type_, message, severity, action, data, origin=origin)
     except Exception:  # noqa: BLE001 - events never fail a command
         pass
 
@@ -1199,6 +1295,8 @@ def cmd_volume_create(a):
     check_name(a.name)
     if reg_load("volume", a.name):
         raise StorageError(f"there's already a volume named {a.name} (metacomputer volume list)")
+    if getattr(a, "folder", None):
+        return create_folder(a)
     if not a.size:
         raise StorageError("usage: metacomputer volume create NAME --size 20G [--dir PATH]")
     size = parse_size(a.size)
@@ -1227,6 +1325,31 @@ def cmd_volume_create(a):
     return 0
 
 
+def create_folder(a):
+    if a.size or a.dir:
+        raise StorageError("a folder volume is the folder itself: no --size or --dir")
+    path = os.path.abspath(os.path.expanduser(check_host_path(a.folder, "--folder")))
+    if not os.path.isdir(path):
+        if not os.path.isdir(os.path.dirname(path)):
+            raise StorageError(f"{os.path.dirname(path)}: no such folder (is the drive connected?)")
+        os.mkdir(path, 0o755)
+    real = check_shareable(path)
+    if ":" in real:
+        raise StorageError(f"{real} has a ':' in its path, which the VM runner can't share")
+    reg_save("volume", {"name": a.name, "kind": "folder", "path": real, "created": now()})
+    print(f"volume '{a.name}': the Mac folder {esc(real)}, shared into the VM (it stays visible in Finder)")
+    print(f"Attach it read-only: VOLUMES={a.name} (in the VM at ~/data/{a.name}), or read-write: "
+          f"VOLUMES={a.name}:rw (one VM at a time; what the VM writes is quarantined)")
+    if not has_noindex(real):
+        print(f"  ! read-write needs it kept out of Spotlight: its name (or a parent's) must end in .noindex. "
+              f"Read-only works as it is.")
+    net = network_fs(real)
+    if net:
+        print(f"  ! it's on a network filesystem ({net[0]} at {esc(net[1])}): locks don't hold across computers")
+    note_rebuild()
+    return 0
+
+
 def note_rebuild():
     if guest_features().get("storage") != "1":
         print(f"  ! {REBUILD.format(vm=vm_name()).split('. Rebuild')[0]}: rebuild it before attaching "
@@ -1240,6 +1363,12 @@ def volume_state(rec):
             return "missing (is its drive connected?)"
         h = holder_of(path, "disk")
         return f"in use by {describe_holder(h)}" if h else "free"
+    if rec.get("kind") in FOLDER_KINDS:
+        if not os.path.isdir(path):
+            return "missing (is its drive connected?)"
+        h = holder_of(path, "folder")
+        return (f"read-write in {describe_holder(h)}" if h else "free") + ("" if has_noindex(_real(path))
+                                                                           else "; read-only only (no .noindex)")
     return "?"
 
 
@@ -1295,8 +1424,15 @@ def cmd_volume_delete(a):
     if rec.get("kind") == "disk":
         with reserved([rec], "delete"):
             delete_disk(a, rec)
+    elif rec.get("kind") in FOLDER_KINDS:
+        h = holder_of(rec.get("path", ""), "folder")
+        if h:
+            raise StorageError(f"volume '{a.name}' is shared read-write with {describe_holder(h)}; stop that VM first")
     reg_delete("volume", a.name)
-    print(f"volume '{a.name}' deleted")
+    if rec.get("kind") in FOLDER_KINDS:
+        print(f"volume '{a.name}' removed; the folder {esc(rec.get('path', ''))} and its files are untouched")
+    else:
+        print(f"volume '{a.name}' deleted")
     if a.name in {e["name"] for e in safe_parse(env("VOLUMES"), "volume")}:
         print(f"  ! VOLUMES in your config still lists {a.name}: remove it, or start refuses")
     return 0
@@ -1671,12 +1807,285 @@ def restore_checkpoint(man):
                                 "created": now()})
         print(f"  ✓ volume '{v['name']}' rolled back with the checkpoint")
     return 0
+
+
+# --- read-write folders: the watcher ---------------------------------------------------------
+# While a VM has a Mac folder read-write, everything it writes there is on the Mac. Measured
+# through Apple's virtiofs (docs/storage.md): the VM can create links to anywhere, FIFOs and hard
+# links, and list, remove or rewrite any extended attribute, com.apple.quarantine included (a value
+# with the "user approved" flag lets an unsigned binary run). So, every few seconds, the watcher
+# compares the folder with what it saw before: a new or changed file or folder gets (back) the
+# quarantine attribute, so Gatekeeper checks it like a download; a link whose target resolves
+# outside the folder is replaced by a note; a FIFO, socket or device is removed; set-id bits go.
+# What was there before the VM booted is left alone (that was the Mac's).
+QUARANTINE = "com.apple.quarantine"
+QUAR_OK = re.compile(rb"^0081;[0-9a-f]{8};metacomputer;$")
+XATTR_NOFOLLOW = 0x0001
+WATCH_EVERY = 2.0
+
+
+def _xlibc():
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    libc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
+                              ctypes.c_int]
+    libc.getxattr.restype = ctypes.c_ssize_t
+    libc.setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32,
+                              ctypes.c_int]
+    return libc
+
+
+def get_xattr(path, name):
+    libc = _xlibc()
+    buf = ctypes.create_string_buffer(256)
+    n = libc.getxattr(path.encode(), name.encode(), buf, 256, 0, XATTR_NOFOLLOW)
+    return None if n < 0 else buf.raw[:n]
+
+
+def set_xattr(path, name, value):
+    libc = _xlibc()
+    if libc.setxattr(path.encode(), name.encode(), value, len(value), 0, XATTR_NOFOLLOW) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e), path)
+
+
+def quarantine_value():
+    return f"0081;{int(time.time()):08x};metacomputer;".encode()
+
+
+def ensure_quarantine(path):
+    """True when it had to be set (it was missing or not ours)."""
+    v = get_xattr(path, QUARANTINE)
+    if v is not None and QUAR_OK.match(v):
+        return False
+    set_xattr(path, QUARANTINE, quarantine_value())
+    return True
+
+
+def walk_sigs(root, limit=MAX_WATCH):
+    """{relative path: (type, mode, inode, mtime_ns, ctime_ns, size)} for everything under root, links not
+    followed; None past limit entries. A changed attribute changes ctime, so it shows here too."""
+    out, stack = {}, [""]
+    while stack:
+        rel = stack.pop()
+        try:
+            it = os.scandir(os.path.join(root, rel) if rel else root)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                r = os.path.join(rel, e.name) if rel else e.name
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                t = stat.S_IFMT(st.st_mode)
+                out[r] = (t, st.st_mode, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+                if len(out) > limit:
+                    return None
+                if t == stat.S_IFDIR:
+                    stack.append(r)
+    return out
+
+
+def sig_of(path):
+    st = os.lstat(path)
+    return (stat.S_IFMT(st.st_mode), st.st_mode, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
+def neutralize_link(path, target):
+    """Replace a link that leads out of the folder with a note saying what it pointed to."""
+    os.unlink(path)
+    note = path + ".link-removed.txt"
+    shown = esc(target)[:500]
+    try:
+        fd = os.open(note, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        return None
+    with os.fdopen(fd, "w") as f:
+        f.write("metacomputer removed a symbolic link the VM made here: it pointed outside this shared folder,\n"
+                f"to {shown!r}, where a program on the Mac following it would have left the folder.\n")
+    try:
+        set_xattr(note, QUARANTINE, quarantine_value())
+    except OSError:
+        pass
+    return note
+
+
+def protect(root, prev, ours, stats):
+    """One pass over a read-write folder; returns the new picture and what it did."""
+    rootreal = _real(root)
+    cur = walk_sigs(root, MAX_WATCH * 2) or {}
+    links, special = [], []
+    for rel in sorted(cur):
+        sig = cur[rel]
+        if prev.get(rel) == tuple(sig):
+            continue
+        p = os.path.join(root, rel)
+        t = sig[0]
+        try:
+            if t == stat.S_IFLNK:
+                target = os.readlink(p)
+                if not inside(_real(p), rootreal):
+                    neutralize_link(p, target)
+                    links.append((rel, target))
+                    stats["links_removed"] += 1
+                    cur.pop(rel)
+                continue
+            if t in (stat.S_IFREG, stat.S_IFDIR):
+                if t == stat.S_IFREG and sig[1] & (stat.S_ISUID | stat.S_ISGID):
+                    os.chmod(p, stat.S_IMODE(sig[1]) & ~(stat.S_ISUID | stat.S_ISGID), follow_symlinks=False)
+                if ensure_quarantine(p):
+                    if rel in ours:
+                        stats["restored"] += 1
+                    else:
+                        stats["quarantined"] += 1
+                    ours.add(rel)
+                cur[rel] = sig_of(p)
+                continue
+            os.unlink(p)                     # FIFO, socket, device
+            special.append(rel)
+            stats["special_removed"] += 1
+            cur.pop(rel)
+        except FileNotFoundError:
+            cur.pop(rel, None)
+        except OSError as e:
+            stats["errors"] += 1
+            stats["last_error"] = f"{rel}: {e.strerror}"
+    return cur, links, special
+
+
+def watcher_pid_path():
+    return os.path.join(run_dir(), "storage-watcher.pid")
+
+
+def watch_stats_path():
+    return os.path.join(run_dir(), "storage-watch.json")
+
+
+def lume_pid():
+    try:
+        return int(open(os.path.join(run_dir(), "lume.pid")).read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def cmd_watch(a):
+    import signal
+    st = load_state() or {}
+    folders = [it for it in st.get("items", []) if it["kind"] in FOLDER_KINDS and it["rw"]]
+    if not folders:
+        return 0
+    with open(watcher_pid_path(), "w") as f:
+        f.write(str(os.getpid()))
+    stop = {"now": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(now=True))
+    signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
+    vm_pid = lume_pid()
+    vm_start = proc_start(vm_pid)
+    known, ours = {}, {}
+    stats = {"pid": os.getpid(), "started": now(), "vm": vm_name(), "folders": {}}
+    for it in folders:
+        snap = read_json(snap_path(it["name"])) or {}
+        known[it["name"]] = {k: tuple(v) for k, v in snap.items()}
+        ours[it["name"]] = set()
+        stats["folders"][it["name"]] = {"path": it["path"], "quarantined": 0, "restored": 0, "links_removed": 0,
+                                        "special_removed": 0, "errors": 0, "last_scan": None}
+    last_write = 0
+    while True:
+        t0 = time.monotonic()
+        final = stop["now"] or (vm_pid and proc_start(vm_pid) != vm_start)
+        for it in folders:
+            fs = stats["folders"][it["name"]]
+            before = dict(fs)
+            known[it["name"]], links, special = protect(it["path"], known[it["name"]], ours[it["name"]], fs)
+            fs["last_scan"] = now()
+            if links:
+                emit("security", "symlink_neutralized",
+                     f"The VM made {len(links)} link(s) leading out of the shared folder '{it['name']}'; removed",
+                     data={"volume": it["name"], "folder": it["path"],
+                           "links": [{"path": r, "target": t} for r, t in links[:10]]}, origin="watcher")
+            if special:
+                emit("security", "special_file_removed",
+                     f"The VM made {len(special)} FIFO(s), socket(s) or device(s) in the shared folder '{it['name']}'; removed",
+                     data={"volume": it["name"], "folder": it["path"], "paths": special[:10]}, origin="watcher")
+            if fs["restored"] > before["restored"]:
+                emit("security", "quarantine_restored",
+                     f"The VM removed or changed the quarantine attribute on {fs['restored'] - before['restored']} "
+                     f"item(s) in the shared folder '{it['name']}'; put back", data={"volume": it["name"],
+                                                                                      "folder": it["path"]},
+                     origin="watcher")
+        elapsed = time.monotonic() - t0
+        if final or time.monotonic() - last_write > 5:
+            stats["interval_s"] = round(max(WATCH_EVERY, 5 * elapsed), 2)
+            atomic_json(watch_stats_path(), stats, mode=0o644)
+            last_write = time.monotonic()
+        if final:
+            break
+        end = time.monotonic() + max(WATCH_EVERY, 5 * elapsed)
+        while time.monotonic() < end and not stop["now"]:
+            time.sleep(0.2)
+    try:
+        os.unlink(watcher_pid_path())
+    except OSError:
+        pass
+    return 0
+
+
+def watcher_alive():
+    try:
+        pid = int(open(watcher_pid_path()).read().strip())
+    except (OSError, ValueError):
+        return 0
+    r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+    return pid if "storage.py watch" in r.stdout else 0
+
+
+def watcher_start():
+    if watcher_alive():
+        return watcher_alive()
+    log = os.path.join(os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB, "logs"), "storage-watcher.log")
+    with open(log, "a") as out:
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "watch"], stdin=subprocess.DEVNULL,
+                             stdout=out, stderr=out, start_new_session=True)
+    for _ in range(40):
+        if watcher_alive() == p.pid:
+            return p.pid
+        if p.poll() is not None:
+            return 0
+        time.sleep(0.1)
+    return p.pid if p.poll() is None else 0
+
+
+def watcher_stop(timeout=30):
+    """Stop the watcher after its last pass (the VM is off by now); returns its final stats."""
+    pid = watcher_alive()
+    if pid:
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        end = time.time() + timeout
+        while time.time() < end and watcher_alive() == pid:
+            time.sleep(0.2)
+        if watcher_alive() == pid:
+            os.kill(pid, signal.SIGKILL)
+    return read_json(watch_stats_path())
+
+
+def watcher_status():
+    st = read_json(watch_stats_path()) or {}
+    pid = watcher_alive()
+    return dict(st, running=bool(pid), pid=pid or st.get("pid")) if (st or pid) else None
+
+
+# --- status ----------------------------------------------------------------------------------
 def status():
     st = load_state() or {}
     configured = bool((env("VOLUMES") or "").strip() or (env("REFDISKS") or "").strip())
     return {"configured": configured, "volumes": env("VOLUMES"), "refdisks": env("REFDISKS"),
             "guest_features": guest_features().get("storage") == "1", "items": st.get("items", []),
-            "attached": st.get("attached")}
+            "attached": st.get("attached"), "watcher": watcher_status()}
 
 
 def describe_status(host, guest, running):
@@ -1700,6 +2109,15 @@ def describe_status(host, guest, running):
         mark = "\033[32m✓\033[0m" if m else ("\033[31m✗\033[0m" if running else "-")
         lines.append(f"  {mark} {it['kind']:<8} {it['name']:<14} {it['mount']:<28} {'rw' if it['rw'] else 'ro'}  "
                      f"{esc(it['path'])}")
+    if any(it["kind"] in FOLDER_KINDS and it["rw"] for it in host["items"]):
+        w = host.get("watcher") or {}
+        if w.get("running"):
+            tot = lambda k: sum(f.get(k, 0) for f in (w.get("folders") or {}).values())  # noqa: E731
+            lines.append(f"  watcher  running: {tot('quarantined')} quarantined, {tot('links_removed')} links and "
+                         f"{tot('special_removed')} special files removed (metacomputer security)")
+        elif running:
+            lines.append("  \033[31m✗\033[0m watcher  not running: what the VM writes isn't quarantined "
+                         "(metacomputer restart)")
     return lines
 
 
@@ -1709,13 +2127,23 @@ def security_summary(host):
     return {"configured": bool(host.get("configured")), "volumes": host.get("volumes") or "",
             "refdisks": host.get("refdisks") or "", "guest_features": bool(host.get("guest_features")),
             "attached": [{k: it.get(k) for k in ("kind", "name", "mount", "rw", "path")}
-                         for it in host.get("items") or []]}
+                         for it in host.get("items") or []], "watcher": host.get("watcher")}
 
 
 PROTECTION = {
     "disk": "read-write, this VM only (locked while it runs); the VM can read and change everything on it",
     "refdisk": "read-only at the hypervisor; any number of VMs",
+    "folder-ro": "a Mac folder, read-only: the Mac refuses writes (checked as root at each start)",
+    "folder-rw": "a Mac folder, read-write, this VM only: what it writes is quarantined, links out of the folder and "
+                 "special files are removed, Spotlight is kept out (.noindex)",
 }
+
+
+def protection(it):
+    k = it["kind"]
+    if k in FOLDER_KINDS:
+        k = "folder-rw" if it.get("rw") else "folder-ro"
+    return PROTECTION.get(k, "")
 
 
 def describe_security(s):
@@ -1728,7 +2156,17 @@ def describe_security(s):
             lines.append("  nothing attached: the VM shares no storage with this Mac or other VMs")
         return lines
     for it in s["attached"]:
-        lines.append(f"  {it['kind']:<8} {it['name']:<14} at {it['mount']:<24} {PROTECTION.get(it['kind'], '')}")
+        lines.append(f"  {it['kind']:<8} {it['name']:<14} at {it['mount']:<24} {protection(it)}")
+    w = s.get("watcher")
+    if any(it["kind"] in FOLDER_KINDS and it.get("rw") for it in s["attached"]):
+        if w and w.get("running"):
+            lines.append(f"  watcher  running (pid {w.get('pid')})" + "".join(
+                f"; {n}: {f.get('quarantined', 0)} quarantined, {f.get('links_removed', 0)} links and "
+                f"{f.get('special_removed', 0)} special files removed, quarantine restored {f.get('restored', 0)}x"
+                for n, f in (w.get("folders") or {}).items()))
+        else:
+            lines.append("  \033[33m! the folder watcher isn't running\033[0m: nothing quarantines what the VM writes "
+                         "(metacomputer restart starts it)")
     return lines
 
 
@@ -1746,6 +2184,7 @@ def main(argv):
     p.add_argument("name")
     p.add_argument("--size")
     p.add_argument("--dir")
+    p.add_argument("--folder")
     p.set_defaults(fn=cmd_volume_create)
     p = vol.add_parser("list")
     p.add_argument("--json", action="store_true")
@@ -1786,6 +2225,7 @@ def main(argv):
     p = sub.add_parser("release")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(fn=cmd_release)
+    sub.add_parser("watch").set_defaults(fn=cmd_watch)
     p = sub.add_parser("checkpoint")
     p.add_argument("op", choices=["save", "restore", "delete", "list"])
     p.add_argument("name")
