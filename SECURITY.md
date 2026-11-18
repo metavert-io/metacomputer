@@ -333,7 +333,7 @@ the result exactly.
 **The coordinate guard (`COORD_GUARD=on`, the default).** A pixel click is aimed
 from a screenshot. Cua Driver 0.52.1 maps window pixels through the window's
 current position and refuses a point outside the window or a background press
-under another app's window, but in our tests it clicked when the window had been
+under another app's window, but in our tests (again on 0.53.0) it clicked when the window had been
 resized since the screenshot, and a foreground click landed on a window that had
 since moved over the point. The hub records the window layout at each screenshot
 and refuses a pixel action when the target window's size, the windows above it
@@ -356,8 +356,8 @@ your screenshot; take a fresh one" (code `windows_changed_since_screenshot`).
   a read can make its element tokens stale. Both fail closed.
 - The coordinate guard compares window geometry, not pixels: a page that
   scrolled or re-rendered inside an unchanged window isn't caught, popup menus
-  aren't in `list_windows`, and steps that name their window only by title, or
-  `run_script`'s `[x, y]` targets, aren't checked. When the hub saw no screenshot
+  aren't in `list_windows`, and steps that name their window only by title,
+  `run_script`'s `[x, y]` targets and `parallel_mouse_drag`'s paths aren't checked. When the hub saw no screenshot
   for that driver session and window, or `list_windows` fails, the action is
   passed on to the driver's own checks (fail open, and logged in `hub.log`).
 - `metacomputer call`'s claim belongs to its Claude Code process. Outside Claude
@@ -1002,7 +1002,7 @@ something waits for you:
   - the vault's audit log or the signed action log;
   - Claude's normal tool results.
 
-  Cua's page snapshots mask password fields (checked with Cua Driver 0.52.1: neither
+  Cua's page snapshots mask password fields (checked with Cua Driver 0.52.1 and 0.53.0: neither
   `semantic_v2` nor `dom_refs_v1` contains a password field's value), and the driver
   has no tool for running page scripts.
   - On screen and in recordings, passwords show as dots.

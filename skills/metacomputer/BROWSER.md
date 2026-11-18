@@ -1,6 +1,6 @@
 # Browsers on the virtual computer
 
-Verified on Cua Driver 0.52.1 with Firefox (Mozilla's arm64 build) and Google
+Verified on Cua Driver 0.52.1 (rechecked on 0.53.0) with Firefox (Mozilla's arm64 build) and Google
 Chrome 157 (Google's arm64 build) on 2026-11-16. Background:
 `docs/chrome-investigation.md` in the project folder (`metacomputer where`).
 

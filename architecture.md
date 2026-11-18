@@ -28,7 +28,7 @@ Your Mac (Apple silicon, macOS 14+) - trusted controller
             LightDM autologin ─▶ Xorg (modesetting) ─▶ XFCE 4.18             │
             user `cua` (no sudo)                                             │
             ├── /opt/metacomputer/bin/driver-mcp ◀────────────────────────────┘
-            │     └── cua-driver 0.52.1 mcp (stdio; X11/EWMH, XTest, uinput,
+            │     └── cua-driver 0.53.0 mcp (stdio; X11/EWMH, XTest, uinput,
             │         AT-SPI over the session D-Bus, ffmpeg x11grab recording)
             ├── AT-SPI2 registry on the session bus (toolkit-accessibility on)
             ├── Firefox (Mozilla .deb), LibreOffice Writer + Calc (gtk3 VCL),
@@ -57,7 +57,7 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 | mcomp-vm (default; formerly lume-secure) | metacomputer's build of Lume (made by Metavert, not by Cua): Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/mcomp-vm/`, wrapper `~/.local/bin/mcomp-vm`, from github.com/metavert-io/metacomputer-vm (`MCOMP_VM_TAG`, `MCOMP_VM_COMMIT`). While `LUME`'s runner isn't installed and `~/.local/bin/lume-secure` is, `scripts/lib.sh` uses that one and prints a notice | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
 | Lume (alternative) | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | the same, with clipboard, audio and Rosetta always attached |
 | cua-netgw | built from trycua/cua `ca6a643` (`libs/cua/netgw`) | `vendor/bin/cua-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
-| Cua Driver | 0.52.1 linux-arm64 (sha256 `ea8229f4…`) | guest `/opt/cua-driver/0.52.1` | desktop observation/control, MCP server, recording |
+| Cua Driver | 0.53.0 linux-arm64 (sha256 `fd5e6a9d…`) | guest `/opt/cua-driver/0.53.0` | desktop observation/control, MCP server, recording |
 | Ubuntu | 24.04 LTS arm64 cloud image, release 20261017 (sha256 `50e24e1f…`, SHA256SUMS signed by `D2EB4462…7C81`) | VM disk | guest OS |
 | qcow2raw | `tools/qcow2raw` (Lima's go-qcow2reader v0.8.0) | `vendor/bin/qcow2raw` | converts the qcow2 cloud image to the raw disk Lume boots |
 | Firefox | Mozilla APT repo (arm64 .deb; key `35BAA0B3…15A3`) | guest | default browser (no snaps in the guest) |
@@ -143,7 +143,7 @@ the MCP server, the CLI and an SDK share, so references and state carry over.
 - **Driver sessions.** Every client shares one driver runtime, so element
   tokens, driver sessions, recordings and a Chrome that `browser_prepare`
   started outlive any one call. Screenshot frames are per driver session (Cua
-  Driver 0.52.1 refuses pixels against "a screenshot that belongs to another
+  Driver 0.52.1 and 0.53.0 refuse pixels against "a screenshot that belongs to another
   session"), so the hub gives each Claude Code session a driver session of its
   own (`mcp-<pid>-<n>`, added to calls that take a `session` and don't name
   one) and ends it when that session disconnects, as its own connection used to.
@@ -219,7 +219,8 @@ no refusals), and the GUI and option tests pass with both on.
 
 ### The coordinate guard
 
-Pixel input is aimed from a screenshot. Measured on Cua Driver 0.52.1: it maps
+Pixel input is aimed from a screenshot. Measured on Cua Driver 0.52.1 (the
+resize, covering-window, occluded and other-session cases again on 0.53.0): it maps
 window-local x,y through the window's live position, so moving the window is
 harmless; it refuses a point outside the window, a pixel action without a
 screenshot of that window in that driver session, and a background press under
@@ -235,7 +236,8 @@ So with `COORD_GUARD=on` (the default) the hub records the window layout
 screenshot (the layout is asked for just before the read, without waiting),
 `get_desktop_state` (its own window list), and a `run_steps` result that carries
 one. Before it passes on a pixel-addressed action (`click`, `double_click`,
-`right_click`, `drag`, `scroll`, `type_text`, `mouse_button_down`/`drag`/`up`
+`right_click`, `drag`, `scroll`, `type_text`, `press_key`, `hotkey` (the three
+keyboard tools click their x,y to focus it first), `mouse_button_down`/`drag`/`up`
 and `move_cursor` with a target, with x/y, and `run_steps` steps that use x/y),
 it compares that layout with the live one and refuses, before any input, when:
 - the target window's size changed;
@@ -252,8 +254,8 @@ which a batch shares (it's reused until the next action is passed on, at most
 driver connection drops. When the hub saw no screenshot for that session and
 window, or `list_windows` fails, the action is passed on and the driver's own
 checks decide. Not covered: popup menus (`list_windows` doesn't list them),
-windows named only by title in a batch step, and `run_script`'s `[x, y]`
-targets. The active window isn't reported by `list_windows`, and on its own it
+windows named only by title in a batch step, `run_script`'s `[x, y]`
+targets, and `parallel_mouse_drag`'s paths. The active window isn't reported by `list_windows`, and on its own it
 doesn't change where a point lands; a window raised over the point is caught
 by the stacking check.
 
@@ -632,7 +634,7 @@ such as the secrets vault ("approval waiting", "vault locked"):
 - **Firefox text entry needs foreground input** (AT-SPI insertion into its
   fields and synthetic background keys are ignored). Foreground input moves the
   real pointer/focus; harmless in a dedicated VM, but one controller at a time.
-- **Focused element** is not reported by the driver on Linux (0.52.1).
+- **Focused element** is not reported by the driver on Linux (0.52.1, 0.53.0).
 - **Thunar's icon view** has no accessible items; use List View.
 - **Host-sharing devices.** Lume attaches a SPICE clipboard channel
   (`VZSpiceAgentPortAttachment`, shares the Mac's clipboard), a virtio sound

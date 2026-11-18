@@ -20,6 +20,8 @@ All notable changes to metacomputer are recorded here. The format follows
 - A benchmark (`bench/`, bench/README.md): 20 desktop tasks run in fresh headless Claude Code sessions on a test VM, scored by checks that read the VM's real state, with switches to compare one change at a time. The first baseline passed all 20 for $11.95.
 
 ### Changed
+- Cua Driver 0.53.0 in the VM (was 0.52.1); rebuild a VM to get it. The same 65 tools and arguments; on Linux it no longer re-sends input that may already have landed, joins the accessibility bus `AT_SPI_BUS_ADDRESS` names, presses Enter for a trailing newline in `browser_type` on a single-line field, and refuses a trusted `browser_click` whose point another element covers (`browser_input_trust_unavailable`). The driver's skill pack in `.claude/skills/cua-driver/` and the cached tool list follow it.
+- The coordinate guard also checks `press_key` and `hotkey` when they carry x,y (they click that point to focus it first), as it already did `type_text`.
 - After a successful build, the VM's private SSH host key is deleted from the Mac; only the public key and `known_hosts` are kept.
 - `metacomputer secrets set` on a name that already exists now refuses unless you add `--replace`.
 - The desktop user's display name, shown in the VM's panel, is now `metacomputer` instead of "Cua automation" (new builds).
