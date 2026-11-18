@@ -27,13 +27,17 @@
 #   recordings [--sync] [N]
 #   checkpoint NAME [--replace] | checkpoint --delete NAME | checkpoints | restore NAME
 #   view                           how to watch / take over the desktop (VNC)
+#   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [-- ARGS]
+#                                  run bash in the VM as the desktop user, with the desktop's environment;
+#                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
 #   ssh [ops|admin] [CMD...]       shell into the guest
 #   mcp                            direct stdio MCP bridge (tests, mcp_client.py)
 #   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use)
 #   build [--replace]              build the VM + baseline from scratch
 #   baseline [--yes]               re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
-#   security [apply] [--json]      the optional hardening: action log, SSH certificates, bounded driver
+#   security [apply] [--json]      the optional hardening: action log, SSH certificates, bounded driver;
+#                                  and the shell channel (VM_SHELL, SHELL_LOG)
 #   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
 #                                  the signed action log (ACTION_LOG=on in config/local.env)
 # stop, reset, restore, baseline and test refuse while another session is
@@ -131,9 +135,11 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
     req_err="$(export_options; "$PY" "$LAB_ROOT/lib/driver_profiles.py" render 2>&1 >/dev/null)" || true
   fi
   export_options
-  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" <<'EOF'
+  "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" <<'EOF'
 import json, os, subprocess, sys
-js, vm_ssh, vm_drv, req_err, ca_pub, logdir = sys.argv[1:]
+js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir = sys.argv[1:]
+sys.path.insert(0, libdir)
+import vm_shell
 e = os.environ.get
 log_on = e("MCOMP_ACTION_LOG") == "on"
 key = e("MCOMP_ACTION_LOG_KEY", "")
@@ -150,6 +156,7 @@ out = {
              "profile": (e("MCOMP_DRIVER_MANIFEST") and "manifest: " + e("MCOMP_DRIVER_MANIFEST")) or e("MCOMP_DRIVER_PROFILE"),
              "origins": e("MCOMP_DRIVER_ORIGINS", "").split(), "expires": e("MCOMP_DRIVER_EXPIRES"), "idle": e("MCOMP_DRIVER_IDLE"),
              "vm_policy": vm_drv or None, "problem": req_err.strip() or None},
+  "shell": vm_shell.describe_settings(),
 }
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0)
@@ -172,6 +179,17 @@ if d["problem"]:
     print(f"  ! {d['problem']}")
 if (s["vm"] and s["vm"] != s["setting"]) or (d["vm_policy"] and d["vm_policy"] != d["setting"]):
     print("  ! the VM doesn't match the config yet: metacomputer security apply (start does it too)")
+sh = out["shell"]
+print("Shell channel (metacomputer sh: bash in the VM; docs/shell.md)")
+if sh["effective"] == "on":
+    logged = (f"each run in the action log (text {sh['text']})" if sh["logged"] else
+              "runs aren't logged (SHELL_LOG=off)" if sh["log"] == "off" else "runs aren't logged (the action log is off)")
+    print(f"  shell        on   {sh['why']}; {logged}")
+else:
+    print(f"  shell        {y('off')}  {sh['why']}: metacomputer sh refuses"
+          + ("; VM_SHELL=on allows it in bounded mode" if sh["setting"] == "auto" else ""))
+for pr in sh["problems"]:
+    print(f"  ! {pr}")
 EOF
 }
 
@@ -565,6 +583,13 @@ do_desktop_restart() { # [--override]: log the desktop session out and back in (
   ok "desktop session ready"
 }
 
+do_sh() { # bash in the VM as the desktop user, over the ops connection (lib/vm_shell.py, docs/shell.md)
+  export_options
+  local state=off; vm_running "$VM_NAME" && state=running
+  ssh_base ops
+  MCOMP_VM_STATE="$state" exec "$PY" "$LAB_ROOT/lib/vm_shell.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
+}
+
 do_who() {
   local st; st="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   if [ "${1:-}" = "--json" ]; then exec "$PY" "$LAB_ROOT/lib/owners.py" who --json; fi
@@ -808,6 +833,7 @@ case "$cmd" in
   _record-pipe) do_record_pipe "$@" ;;
   recordings) do_recordings "$@" ;;
   view)       do_view "$@" ;;
+  sh)         do_sh "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
   mcp)        vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }

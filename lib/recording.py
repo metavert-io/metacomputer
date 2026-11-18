@@ -24,7 +24,7 @@ import time
 
 # Arguments worth showing in a moment, in order; the rest of a call is in the action log.
 SHOW = ("app", "name", "bundle_id", "title", "url", "key", "keys", "action", "path", "role",
-        "x", "y", "text", "value")
+        "x", "y", "text", "value", "script")
 STEP_LIST = ("steps", "actions")
 
 

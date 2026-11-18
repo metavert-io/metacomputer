@@ -8,8 +8,12 @@ Two kinds of controller can drive the VM's desktop:
 - Direct connections (`metacomputer mcp`: the GUI tests, mcp_client.py, older
   configs). They are found as live SSH processes using the MCP key.
 
+The shell channel (`metacomputer sh`) acts too: each run (except --read-only)
+keeps .run/owners/<pid>.json up to date, where pid is its Claude Code process,
+or outside Claude Code the shell that ran it, since the command itself exits.
+
 "Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
-so a session never blocks itself.
+or a shell it runs under, so a session never blocks itself.
 
 CLI (used by bin/metacomputer):
   owners.py who [--json]      list controllers
@@ -119,6 +123,20 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started):
     os.replace(tmp, claim_path(bridge_pid))
 
 
+def claim_for_shell(tool):
+    """`metacomputer sh` acted. Its process ends with the run, so the claim lives
+    as long as the caller's Claude Code session, or else the shell that ran it."""
+    table = ps_table()
+    claude = claude_of(os.getpid(), table)
+    holder = claude or os.getppid()
+    started = time.time()
+    try:
+        started = json.load(open(claim_path(holder))).get("started", started)
+    except (OSError, ValueError):
+        pass
+    write_claim(holder, claude, os.getcwd(), tool, started)
+
+
 def drop_claim(bridge_pid):
     try:
         os.remove(claim_path(bridge_pid))
@@ -186,7 +204,8 @@ def others(self_pid=None, table=None):
     my_claude = claude_of(self_pid, table)
     found = []
     for c in claims():
-        if c.get("bridge_pid") == self_pid or (my_claude and c.get("claude_pid") == my_claude):
+        # mine: also a claim held by a shell above the caller (metacomputer sh outside Claude Code)
+        if c.get("bridge_pid") == self_pid or c.get("bridge_pid") in mine or (my_claude and c.get("claude_pid") == my_claude):
             continue
         found.append({"kind": "session", **c})
     for d in direct_connections(table):

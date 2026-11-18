@@ -7,6 +7,9 @@ log on, that command runs mcp_relay.py, which writes one JSON Lines file per
 connection under logs/actions/YYYY-MM-DD/: a start record (who connected,
 from which project), then every tool call exactly as it was sent to the VM,
 its result summary and timing, and the calls Claude Code's bridge refused.
+`metacomputer sh` (vm_shell.py) writes one file per run in the same form: a
+`vm_shell` call (the script's SHA-256 and size, cwd, timeout) and its result
+(exit code, and each output stream's size and SHA-256), unless SHELL_LOG=off.
 
 - Each record carries the hash of the one before it ("prev") and its own
   ("hash" = SHA-256 of the record without "hash"), so editing, inserting or
@@ -332,6 +335,11 @@ def main(argv):
             t, ts = r.get("type"), (r.get("ts") or "")[11:19]
             if t == "call":
                 print(f"{r['seq']:5} {ts} -> {r.get('tool')} {_fmt_args(r.get('args'))}")
+            elif t == "result" and r.get("tool") == "vm_shell":   # metacomputer sh (lib/vm_shell.py)
+                res = r.get("result") or {}
+                state = f"exit {res.get('exit_code')}" if res.get("status") == "exited" else str(res.get("status"))
+                sizes = ", ".join(f"{k} {(res.get(k) or {}).get('bytes', 0)} B" for k in ("stdout", "stderr") if k in res)
+                print(f"{r['seq']:5} {ts} <- vm_shell {state} ({r.get('ms')} ms" + (f"; {sizes})" if sizes else ")"))
             elif t == "result":
                 res = r.get("result") or {}
                 state = f"rpc error: {r['rpc_error']}" if r.get("rpc_error") else ("ERROR" if res.get("error") else "ok")
