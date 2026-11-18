@@ -631,7 +631,9 @@ metacomputer secrets import-session --browser chrome --site github.com --name gh
 Imported logins ask before every use until you relax them (`policy NAME --approval session`).
 A Passwords app or 1Password export's one-time-code column comes in as a 2FA secret too.
 `import-session` brings a site's cookies, not its localStorage, sealed for a page-mode Chrome
-profile in the VM; `session load NAME` puts them there. Delete a CSV export once it's in.
+profile in the VM; `session load NAME` puts them there (`--site HOST` sends only the cookies
+that site gets). It needs Chrome 130 or later, whose cookie values name their own domain, and
+stops if any value names another one. Delete a CSV export once it's in.
 
 Then Claude:
 1. opens the site in page-mode Chrome;

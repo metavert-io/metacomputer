@@ -586,9 +586,9 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] | policy NAME --approval session|each | delete NAME"
+    let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] [--site HOST ...] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid"], flags: ["replace"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site"], flags: ["replace"])
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")
@@ -624,18 +624,24 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let profile = a.last("profile")
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm),
           profile.map(validName) ?? (sub == "load") else {
-        throw usageError(sub == "save" ? "usage: session save NAME --vm VM --profile P [--replace]" : "usage: session load NAME --vm VM [--profile P]")
+        throw usageError(sub == "save" ? "usage: session save NAME --vm VM --profile P [--replace]" : "usage: session load NAME --vm VM [--profile P] [--site HOST ...]")
+    }
+    let sites = a.all("site")
+    if !sites.isEmpty {
+        guard sub == "load" else { throw usageError("--site goes with session load (an imported session: only the cookies those sites get)") }
+        guard sites.count <= 20, sites.allSatisfy(validSiteHost) else { throw usageError("--site: a host name like github.com (at most 20)") }
     }
     let name = a.positional[0]
     var req: [String: Any] = ["op": "session_\(sub)", "name": name, "vm": vm]
     if let p = profile { req["profile"] = p }
+    if !sites.isEmpty { req["sites"] = sites }
     if a.has("replace") { req["replace"] = true }
     try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 1800) } catch ClientError.locked {
         return lockedUse(paths, "session_\(sub)", ["name": name, "vm": vm, "profile": profile ?? ""])
     }
-    printResult(res)
+    printResult(res, ["ok", "name", "vm", "profile", "sites", "bytes", "cookies", "request_id", "reason"])
     return exitFor(res)
 }
 

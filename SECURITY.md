@@ -1132,15 +1132,23 @@ rule).
   (recorded as a rotation) and never duplicates. Skipped, and counted: sites that aren't
   https (http only for `localhost` or `127.0.0.1` with a port), apps' logins, "never save"
   entries, empty passwords, and passwords in a form other than Chrome's macOS one (`v10`).
+- The copy is read as a file someone else may have prepared: `logins` must be an ordinary
+  table (a view or a virtual table, which would run a query of the file's choosing, is
+  refused), no value may pass 16 MB, and reading stops with nothing imported after 200,000
+  rows, 256 MB of values or 60 seconds, or if the query ends early for any reason.
 
 **CSV exports**, `import-passwords --csv FILE`: Chrome's (`name,url,username,password,note`),
 the macOS Passwords app's (`Title,URL,Username,Password,Notes,OTPAuth`), 1Password's
 (`Title,Url,Username,Password,OTPAuth,...`) and Bitwarden's (`...,type,name,...,login_uri,
 login_username,login_password,login_totp`), recognized by their headers. A one-time-code
 column (`OTPAuth`, `login_totp`) becomes a TOTP secret beside the login (`NAME-otp`) when
-it's a SHA1, 6-digit, 30-second code; others are skipped and said. Bitwarden's non-login
-items are skipped; all of a login's URIs become its sites. An export file holds every
-password in plain text: delete it once it's imported.
+it's a SHA1, 6-digit, 30-second code; others are skipped and said. The code is recorded as
+that login's own (`totp_for` in the vault and the audit record), and importing again
+replaces only that one, never another account's code on the same site; every code made or
+replaced has its own audit record (`set` or `rotate`, `kind: totp`), even when the password
+is unchanged. Bitwarden's non-login items are skipped; a login's URIs become its sites, at
+most its first 20 (the import says when it cut one). An export file holds every password in
+plain text: delete it once it's imported.
 
 **A site's session from your Chrome**, `import-session --browser chrome --site HOST [--site
 ...] --name NAME --to-profile P`:
@@ -1148,7 +1156,14 @@ password in plain text: delete it once it's imported.
   the site itself, its subdomains, and domain cookies above it. There is no "every site".
 - The values are decrypted with the Safe Storage key (macOS asks, as above) and sealed in
   the vault like a saved session, for profile `P` on the current VM. The session's approval
-  starts at `each`.
+  starts at `each`, also when `--replace` replaces one, and a replaced session that reached
+  an identity provider keeps that mark.
+- **Each value must name its own domain.** From version 24 of its cookie store (Chrome 130),
+  Chrome puts the SHA-256 of the cookie's domain before each encrypted value. The import
+  requires it: a store older than version 24 is refused (update Chrome), and a value whose
+  domain isn't the host it's filed under, as when someone relabels an identity provider's
+  cookie as one of your site's, stops the whole import. The table checks and limits of a
+  password import apply too (`cookies` and `meta` must be ordinary tables).
 - **localStorage and IndexedDB are not imported.** Chrome keeps them in LevelDB stores that
   can't be merged into another profile reliably; a site that keeps its sign-in there needs a
   fresh sign-in in the VM. Only cookies come along.
@@ -1163,6 +1178,11 @@ password in plain text: delete it once it's imported.
   path are replaced. Each value goes there encrypted with the VM's Chrome key (Chromium's
   fixed key for a Linux machine without a keyring, as the VM is built), so the VM's Chrome
   reads it as its own; the key on this Mac is never copied anywhere.
+- `session load NAME --site HOST` (repeatable) sends only the cookies a browser would send to
+  those sites, filtered on the Mac before anything goes to the VM. The question and the audit
+  record (`sites`) name that scope; an answer that reaches further (`NAME session`) covers
+  loads of exactly those sites; a site the session doesn't hold, and `--site` on a whole
+  browser profile (which loads whole), are refused.
 
 Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME_DIR` (a
 folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
@@ -1309,6 +1329,8 @@ no spaces, ASCII), and each event is chained to the one before:
 | `request_id`, `use` | the request a use waited on (`request` when it was filed, `authorize` when you allowed it), and what it was for |
 | `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked) |
 | `username_hint` | a password secret's username, masked (`a***@example.com`) |
+| `totp_for` | the login an imported 2FA code belongs to |
+| `sites`, `cookies` | the sites a cookie session's load was narrowed to (`--site`), and how many cookies went |
 | `identity_provider` | `true` on a request for an identity provider's site |
 | `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted |
 | `reason` | why it was refused or failed |
