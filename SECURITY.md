@@ -82,12 +82,18 @@ How it resists tampering:
 Typed text, values and scripts are recorded as their length only.
 `ACTION_LOG_TEXT=keep` records them in full; only do that when you can keep
 the log as safe as the passwords that might be typed. Results are never stored,
-only their hash, so a log doesn't copy what was on the screen. The driver calls the hub
-makes itself for `request_site_login` and `teleport_browser_session` are recorded as
-`secret_adjacent`: the tool, its argument names and sizes, and whether it failed, never
-the arguments, the answer's text, an error message or a hash of them, whatever
-`ACTION_LOG_TEXT` says (the VM may hold a value by then and could spell it in any of
-those).
+only their hash, so a log doesn't copy what was on the screen. While a
+`request_site_login` or `teleport_browser_session` runs, every call on the driver
+connection and every answer is recorded as `secret_adjacent`: the hub's own calls for it,
+other clients' calls, the hub's own requests (such as ending a departing client's driver
+session) and calls already under way when it started. Such a record keeps the tool, its
+argument names and sizes, and whether it failed. It never keeps the arguments, the
+answer's text, an error message or a hash of them, whatever `ACTION_LOG_TEXT` says: the
+VM may hold a value by then and could spell it in any message. A client that ever had
+one of these sign-ins gets the end of its driver session recorded the same way, even
+after the sign-in is over. The connection's stderr is withheld from the moment such a
+job starts until that connection ends. upstream.stderr gets a fixed line saying so, and
+a count of the bytes left out.
 
 ```
 metacomputer actions list            # recent sessions
@@ -899,8 +905,9 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    It gives up after 40 seconds.
 7. Claude gets back only the outcome, for example
    `{"ok":true,"field":"password","origin":"https://x.com","chars":16}`, or a refusal
-   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error. The VM's
-   answer is held to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
+   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error, 5 no
+   answer (see "A request whose requester goes away stops"). The VM's answer is held
+   to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
    `reason`, `profile` as strings or booleans, `chars` a number): anything else is
    dropped, a field of the wrong type makes it an error, and an answer holding the value
    anywhere, at any depth, is withheld. Once the VM has the value, nothing it chose goes
@@ -1171,6 +1178,35 @@ the site, which must be one of the secret's, and the username field must be on t
 site), then both are typed through the same path as `fill`, to that site only. The
 answer lists the fields filled, the site and a masked username.
 
+### A request whose requester goes away stops
+
+While the unlock process serves a `fill`, `login`, `session save|load` or `token`
+request, it watches the requester's connection. If the requester closes its side or
+dies, the vault stops the request:
+
+- **What withdraws it.** The client closes its side when it gets SIGINT, SIGTERM or
+  SIGHUP, when the program that ran it ends (the `metacomputer secrets` wrapper killed
+  outright), when the process named by `--while-pid` ends (the hub passes its own), or at
+  its own deadline. A client killed outright simply disconnects.
+- **What the unlock process does.**
+  - A question still waiting is withdrawn: the dialog is cancelled and `approve ID` finds
+    nothing.
+  - No further step starts. A sign-in whose username is being typed never sends the
+    password.
+  - A step in progress, the ssh to the VM, is killed with its process group.
+  - A request still queued behind another's question never starts.
+- **The confirmation.** It then answers (`cancelled`), and records the request as
+  `cancelled` with its request id. That answer is the confirmation the client waits for
+  (up to 40 s; exit 4). With no answer the client exits 5, and `metacomputer secrets
+  settle` waits until the unlock process has finished everything it got before. It
+  answers only then, or says no unlock process runs.
+- **The hub waits for it.** The hub runs its vault calls in a process group of their own,
+  withdraws one with SIGTERM, and waits for that confirmation, or for `settle`, before it
+  lets the computer go.
+- **Limit.** A step the VM has already started may still finish there. Killing ssh ends
+  the connection, not the VM's side of it. No later step is sent, and nothing it does
+  afterwards can reach the vault or the hub.
+
 ### Bringing logins in: Chrome, CSV exports, a site's cookies
 
 All of these run in your own terminal and ask for the vault passphrase, like `set`; the
@@ -1311,15 +1347,28 @@ documents (docs/moving-from-spaces.md maps the rest). They add no new way to a v
   `pending` (or `consent_required`) with the vault's own request id while you decide; the
   use goes ahead the moment you approve, and a later call with that `request_id` collects
   the outcome. Outcomes are kept in the hub for 10 minutes, for the session that asked only.
-- **The work holds the computer.** From the call until the fill, the submit or the load is
-  done, the work counts as the client's acting call: if the client disconnects (a script
-  that got `pending` and exited), the hub keeps the computer for it under the client's
-  lease, as for any call a client leaves running, so no other controller can act on the
-  page meanwhile. Past the lease's life the hub ends the driver runtime and the vault call
-  first, and only then lets go.
-- **Nothing the VM says comes back.** The tools' errors are their own words: a driver error
-  or refusal, the page's address, an exception's text are never passed to the client, the
-  action log (above), hub.log or the events.
+- **The work holds the computer until it has provably stopped.** From the call until the
+  fill, the submit or the load is done, the work counts as the client's acting call. If
+  the client disconnects (a script that got `pending` and exited), the hub keeps the
+  computer for it under the client's lease, as for any call a client leaves running, so
+  no other controller can act on the page meanwhile.
+  - The computer is let go only once nothing the job started can still act. Its vault
+    call has answered (the unlock process answers only after the request has stopped
+    there), or `mcomp-vault settle` has said that everything sent before it finished.
+    Every driver call it made has answered, or the connection it went on has been ended
+    with its whole process tree.
+  - A driver call that doesn't answer in time ends that connection first. So does a
+    lease past its life.
+  - A job that's stopped (the lease past its life, the hub stopping) withdraws its vault
+    call. The vault withdraws the question, starts no further step and kills a step in
+    progress (its ssh), then confirms.
+  - architecture.md, "Tools the hub serves itself", lists every way a job ends and what
+    proves each one stopped.
+- **Nothing the VM says comes back or is kept.** The tools' errors are their own words. A
+  driver error or refusal, the page's address and an exception's text are never passed
+  to the client. They also stay out of the action log (above), hub.log (while a job runs,
+  and for the rest of a connection's life after one, exceptions are logged by type only),
+  upstream.stderr (withheld, above) and the events.
 
 `metacomputer secrets lock` ends the running unlock from any terminal (anyone may: it only
 restricts). `init --passphrase` and `unlock --passphrase` are accepted as other vaults
@@ -1769,6 +1818,14 @@ something waits for you:
 
 ### What doesn't hold
 
+- **The hub or the unlock process killed outright (SIGKILL).** Each process ends its
+  requests when told to stop: the hub on SIGTERM, the unlock process on Ctrl-C, `lock` or
+  SIGTERM. SIGKILL, from you or a program running as you, skips that.
+  - A hub killed that way lets the computer go as it dies. Its vault calls withdraw
+    themselves within half a second (`--while-pid`), and a vault step already under way
+    in the VM may finish.
+  - An unlock process killed that way leaves an ssh it started running until that step
+    ends.
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
   sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:
@@ -1912,6 +1969,7 @@ something waits for you:
 | `unlock [--for 30m] [--confirm each] [--allow-multiplexer] [--touch-id]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
 | `approve ID [--passphrase]`, `rule add ... --for D [--passphrase]` | you, any terminal (Touch ID / login password, or the passphrase) | Allow one waiting request; make an unattended rule |
 | `requests`, `deny ID`, `rule list`, `rule remove ID`, `lock` | anywhere, while unlocked | What waits for you (ids, who asked, site, masked username, age); refuse one; the rules; remove one; lock now |
+| `settle [--timeout S]` | anywhere | Return once the unlock process has finished every request it got before (or none runs); for a requester that got no confirmation (exit 5) |
 | MCP `request_site_login`, `teleport_browser_session` | Claude, through the hub | Sign in to a site with a saved login; load an imported session ("Tools for agents written for Cua Spaces") |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |

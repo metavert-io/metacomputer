@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets as _random
+import signal
 import subprocess
 import threading
 import time
@@ -38,6 +39,9 @@ LAB = os.path.dirname(LIB)
 CLI = os.path.join(LAB, "bin", "metacomputer")
 FIRST_WAIT_S = 3.0          # a use that needs no approval usually finishes within this, on the first call
 JOB_TTL_S = 600             # a request's outcome is kept this long for the agent to collect
+VAULT_ACK_S = 45            # a vault call told to stop: how long its confirmation may take (mcomp-vault waits 40 s)
+SETTLE_S = 120              # each wait for the unlock process to finish what it was doing (`mcomp-vault settle`)
+WITHDRAWABLE = ("fill", "login", "session", "token")     # vault commands that act, and stop when withdrawn
 
 TOOLS = [
     {
@@ -268,8 +272,10 @@ _current = threading.local()      # the Hold the work on this thread belongs to 
 class Hold:
     """The computer held for one of these tool calls and the work it starts in the background (the vault's question,
     the fill, the submit): while it lasts, it counts as the client's acting call, so if the client disconnects the hub
-    keeps the computer for it under the client's lease (hub.job_start); past the lease's life the hub stops it (the
-    vault call is ended). end() is idempotent."""
+    keeps the computer for it under the client's lease (hub.job_start); past the lease's life, or when the hub stops, it
+    is stopped. It ends (end(), idempotent; job_end lets the computer go) only once its work has provably stopped: the
+    vault answered, or confirmed the withdrawn request stopped, or `settle` said it had finished (vault()), and every
+    driver call answered or its connection's process tree was ended (hub.call_for)."""
 
     def __init__(self, hub, client, name):
         self.hub, self.lock, self.ended, self.proc, self.stopped = hub, threading.Lock(), False, None, False
@@ -278,14 +284,10 @@ class Hold:
         self.key = start(client, name, self.stop) if start else None
 
     def stop(self):
+        """Stop the work: no further driver call is made, and a vault call under way is withdrawn (vault() sees this and
+        does it, once). Returns at once."""
         with self.lock:
             self.stopped = True
-            proc = self.proc
-        if proc is not None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
 
     def end(self):
         with self.lock:
@@ -297,31 +299,79 @@ class Hold:
 
 
 # --- the vault and the driver -----------------------------------------------------------------------
-def vault(hub, *args, timeout=330, hold=None):
-    """`metacomputer secrets ARGS` with the hub's settings; (exit code, its JSON answer, its stderr). A hold that is
-    stopped (past its lease's life) ends the vault call."""
+def _signal_group(proc, sig):
+    """sig to the vault call's process group (its own session: the wrapper and mcomp-vault), while it's unreaped."""
+    if proc.returncode is not None:
+        return
     try:
-        proc = subprocess.Popen([CLI, "secrets", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                env=dict(hub.env), stdin=subprocess.DEVNULL)
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+
+def vault(hub, *args, timeout=330, hold=None):
+    """`metacomputer secrets ARGS` with the hub's settings; (exit code, its JSON answer, its stderr). It returns only
+    once the vault's work for it has provably stopped. A call that acts (WITHDRAWABLE) is withdrawn when its hold is
+    stopped or at timeout: SIGTERM to its process group, and mcomp-vault closes its side of the request, which the unlock
+    process takes as "stop" (no further step; a step in progress, its ssh, is killed), then waits for the unlock
+    process's answer, the confirmation. mcomp-vault also withdraws it if this process ends (--while-pid). Without an
+    answer from the vault (no confirmation within VAULT_ACK_S, a client that died), `mcomp-vault settle` is waited for:
+    the unlock process answers it only once everything it got before has finished, or it isn't running."""
+    withdrawable = bool(args) and args[0] in WITHDRAWABLE
+    cmd = [CLI, "secrets", *args] + (["--while-pid", str(os.getpid())] if withdrawable else [])
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(hub.env),
+                                stdin=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
         return 4, {}, f"could not run metacomputer secrets ({type(e).__name__})"
     if hold is not None:
         with hold.lock:
             hold.proc = proc
-            stopped = hold.stopped
-        if stopped:
-            proc.kill()
+    end, told, out, err = time.monotonic() + timeout, None, "", ""
     try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        return 4, {}, "metacomputer secrets didn't finish in time"
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            if told is None and (now >= end or (hold is not None and hold.stopped)):
+                told = now                       # once: a second signal would end mcomp-vault's wait for the confirmation
+                _signal_group(proc, signal.SIGTERM)
+            elif told is not None and now - told >= VAULT_ACK_S:
+                _signal_group(proc, signal.SIGKILL)
+                out, err = proc.communicate()
+                break
     finally:
         if hold is not None:
             with hold.lock:
                 hold.proc = None
-    return proc.returncode, last_json(out), err.strip()
+    res = last_json(out)
+    # The unlock process's own answer (any outcome) is written only once the request has stopped there.
+    answered = proc.returncode in (0, 2, 3, 4) and "ok" in res
+    if withdrawable and not answered:
+        settle(hub)
+    if told is not None and not answered:
+        return 4, {}, "metacomputer secrets didn't finish in time; the vault confirmed that nothing more is running for it"
+    return proc.returncode, res, (err or "").strip()
+
+
+def settle(hub):
+    """Wait until the unlock process has finished every request it got before now, or isn't running (`mcomp-vault
+    settle`). There's no giving up: until it says so, the job holds the computer (the user ends a stuck unlock process
+    with Ctrl-C in its terminal)."""
+    while True:
+        try:
+            r = subprocess.run([CLI, "secrets", "settle", "--timeout", str(SETTLE_S)], capture_output=True, text=True,
+                               env=dict(hub.env), stdin=subprocess.DEVNULL, timeout=SETTLE_S + 30)
+            if r.returncode == 0 and last_json(r.stdout).get("settled") is True:
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        hub.note("waiting for the vault to confirm that a sign-in or session load it was asked for has stopped",
+                 kind="vault settle wait")
+        time.sleep(2)
 
 
 def driver(hub, client, tool, args, timeout=60):
@@ -331,7 +381,15 @@ def driver(hub, client, tool, args, timeout=60):
     tool_name = re.sub(r"[^A-Za-z0-9_]", "", str(tool))[:40]
     hold = getattr(_current, "hold", None)
     if hold is not None and hold.stopped:
-        raise ToolError("driver", "stopped: the computer was held past its lease's life")
+        raise ToolError("driver", "stopped: the computer was held past its lease's life, or the hub is stopping")
+    # MCOMP_SITE_LOGIN_CALL_S: a shorter limit for each of these driver calls (tests); a call past its limit ends the
+    # driver connection before the job goes on (hub.call_for).
+    try:
+        cap = float(hub.env.get("MCOMP_SITE_LOGIN_CALL_S") or 0)
+    except (TypeError, ValueError, AttributeError):
+        cap = 0
+    if cap > 0:
+        timeout = max(1.0, min(timeout, cap))
     m = hub.call_for(client, tool, args, timeout=timeout, job=hold.key if hold is not None else None)
     if m is None:
         raise ToolError("driver", f"the virtual computer didn't answer {tool_name} in time")

@@ -5,6 +5,12 @@ import Foundation
 
 // Set by the signal handlers; read by the loops that wait (unlock, prompts, ssh).
 nonisolated(unsafe) var receivedSignal: Int32 = 0
+// A client's request withdrawn by a signal (installCancelSignalHandlers): how many arrived.
+nonisolated(unsafe) var cancelSignals: Int32 = 0
+/// In the unlock process, while it serves a fill, sign-in, session or token request: whether the program that asked
+/// has gone away or withdrawn it (UnlockServer.requesterGone). runProcess checks it, so a step whose requester left is
+/// ended (its process group killed) and the next one never starts. nil outside such a request.
+nonisolated(unsafe) var requesterProbe: (() -> Bool)? = nil
 // The terminal settings to put back if a signal arrives while the echo is off.
 nonisolated(unsafe) var savedTermios = termios()
 nonisolated(unsafe) var termiosSaved: Int32 = 0
@@ -22,6 +28,15 @@ func installPromptSignalHandlers() {
         _ = write(2, "\n", 1)
         _exit(128 + sig)
     }
+    signal(SIGINT, h)
+    signal(SIGTERM, h)
+    signal(SIGHUP, h)
+}
+
+/// A request waiting for the unlock process: SIGINT, SIGTERM or SIGHUP withdraws it (request(), cancellable), and the
+/// process waits for the unlock process to confirm that it stopped; a second signal ends the wait.
+func installCancelSignalHandlers() {
+    let h: @convention(c) (Int32) -> Void = { _ in cancelSignals += 1 }
     signal(SIGINT, h)
     signal(SIGTERM, h)
     signal(SIGHUP, h)

@@ -10,6 +10,7 @@ enum Exit {
     static let denied: Int32 = 2
     static let locked: Int32 = 3
     static let error: Int32 = 4
+    static let unconfirmed: Int32 = 5   // a request was sent and no answer came: the unlock process may still be on it (`settle`)
     static let usage: Int32 = 64
 }
 
