@@ -440,12 +440,41 @@ func eventHash(_ e: [String: Any]) -> String {
     return sha256Hex(Array(canonicalJSON(x).utf8))
 }
 
+/// A record stays small whatever a caller puts in it: a list keeps its first 32 items (how many more there
+/// were goes in `<key>_more`), and a record still over 64 KiB keeps only the fields that say what it was.
+func boundAuditRecord(_ r: [String: Any]) -> [String: Any] {
+    var out = r
+    for (k, v) in r {
+        if let a = v as? [Any], a.count > 32 {
+            out[k] = Array(a.prefix(32))
+            out[k + "_more"] = a.count - 32
+        }
+    }
+    guard canonicalJSON(out).utf8.count > 64 << 10 else { return out }
+    var small: [String: Any] = ["truncated": true]
+    for k in ["op", "result", "name", "vm", "use", "request_id", "event", "approval", "reason", "requester"] {
+        if let v = out[k] { small[k] = v }
+    }
+    return small
+}
+
 /// The last event in the audit log: (seq, hash). A line from an earlier build without a
 /// chain counts by the hash of its bytes, so the chain still links to it.
 func lastAuditEvent(_ path: String) -> (Int, String) {
-    guard let bytes = readTail(path, 1 << 18), !bytes.isEmpty else { return (0, zeroHash) }
+    // Read back far enough to hold the whole last line: a record longer than what was read is read
+    // further back, never taken for a line from an earlier build.
+    var size = 1 << 18
+    var bytes: [UInt8] = []
+    while true {
+        guard let b = readTail(path, size), !b.isEmpty else { return (0, zeroHash) }
+        bytes = b
+        var end = bytes.count
+        while end > 0 && bytes[end - 1] == 0x0A { end -= 1 }
+        if bytes.count < size || bytes[0..<end].contains(0x0A) || size >= 1 << 30 { break }
+        size *= 4
+    }
     var lines = bytes.split(separator: 0x0A, omittingEmptySubsequences: true)
-    if bytes.count == 1 << 18, lines.count > 1 { lines.removeFirst() }  // a partial first line
+    if bytes.count == size, lines.count > 1 { lines.removeFirst() }  // a partial first line
     guard let last = lines.last else { return (0, zeroHash) }
     if let e = parseJSONObject(Array(last)), let seq = (e["seq"] as? NSNumber)?.intValue, let h = e["hash"] as? String {
         return (seq, h)
@@ -465,7 +494,7 @@ func lastAuditEvent(_ path: String) -> (Int, String) {
 /// record, or nil when it couldn't be written (the caller decides whether to go on).
 @discardableResult
 func audit(_ paths: Paths, _ record: [String: Any], macKey: [UInt8]? = nil) -> [String: Any]? {
-    var r = (cleanAll(record) as? [String: Any]) ?? [:]
+    var r = boundAuditRecord((cleanAll(record) as? [String: Any]) ?? [:])
     r["ts"] = auditTime()
     r["id"] = UUID().uuidString.lowercased()   // the CloudEvents id: receivers drop repeated deliveries by it
     for k in ["time", "mac", "hash", "seq", "prev"] { r[k] = nil }
@@ -569,10 +598,11 @@ struct Requester {
     let claudePID: pid_t?
     let claudeStart: Double?
     let project: String?
-    // A request passed on by a program outside every Claude Code session (the metacomputer hub, which
-    // runs detached) for the Claude Code process it names: that program, shown beside the requester.
-    var viaPID: pid_t? = nil
-    var viaExe: String? = nil
+    // What the client says about whom it asks for (`--on-behalf-pid`): the Claude Code process it names.
+    // Shown and recorded, never used to decide anything (project limits, rules and grants use the fields above).
+    var claimedClaudePID: pid_t? = nil
+    var claimedProject: String? = nil
+    var claimedClientPID: pid_t? = nil
 
     static func of(_ pid: pid_t) -> Requester {
         let exe = pid > 0 ? (processPath(pid).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "?") : "?"
@@ -592,18 +622,18 @@ struct Requester {
         return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil)
     }
 
-    /// Who asked, when the client says it asks for another process (`on_behalf_pid`). Honoured only
-    /// when the client itself runs outside every Claude Code session and the process it names runs
-    /// inside one: a command from a Claude Code session is always that session's own. Attribution, like
-    /// the rest: a program of yours outside Claude Code can name any live Claude Code process.
+    /// Who asked, with what the client says about whom it asks for (`on_behalf_pid`) kept beside it as an
+    /// unverified claim. The claim is attribution only: anything running as you can name any live process,
+    /// so it never satisfies a project limit, an unattended rule or a grant; those see the client itself.
     static func of(_ pid: pid_t, onBehalf: pid_t?) -> Requester {
-        let direct = of(pid)
-        guard direct.claudePID == nil, let ob = onBehalf, ob > 1, ob != pid, procEntry(ob) != nil else { return direct }
-        var r = of(ob)
-        guard r.claudePID != nil else { return direct }
-        r.viaPID = pid
-        r.viaExe = direct.clientExe
-        return r
+        var direct = of(pid)
+        guard let ob = onBehalf, ob > 1, ob != pid, procEntry(ob) != nil else { return direct }
+        let c = of(ob)
+        guard c.claudePID != nil, c.claudePID != direct.claudePID else { return direct }
+        direct.claimedClaudePID = c.claudePID
+        direct.claimedProject = c.project
+        direct.claimedClientPID = ob
+        return direct
     }
 
     /// Is that Claude Code process still the same one (same pid, same start)?
@@ -616,17 +646,22 @@ struct Requester {
         var d: [String: Any] = ["client_pid": Int(clientPID), "client": clientExe]
         if let p = claudePID { d["claude_pid"] = Int(p) }
         if let pr = project { d["project"] = pr }
-        if let v = viaPID { d["via"] = ["client_pid": Int(v), "client": viaExe ?? "?"] as [String: Any] }
+        if let c = claimedClaudePID {
+            var b: [String: Any] = ["claude_pid": Int(c), "verified": false]
+            if let pr = claimedProject { b["project"] = pr }
+            if let cp = claimedClientPID { b["client_pid"] = Int(cp) }
+            d["on_behalf"] = b
+        }
         return d
     }
 
     /// One printable line (a folder or program name can hold a newline or terminal codes).
     var describe: String {
+        let claim = claimedClaudePID.map { ", for Claude Code in \(tildePath(claimedProject ?? "?")) (pid \($0)) as it says (unverified)" } ?? ""
         if let p = claudePID {
-            return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))"
-                         + (viaPID.map { ", through \(viaExe ?? "?") (pid \($0))" } ?? ""), max: 300)
+            return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
         }
-        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code", max: 300)
+        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code" + claim, max: 300)
     }
 }
 

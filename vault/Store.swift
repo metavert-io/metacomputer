@@ -64,6 +64,12 @@ struct SessionMeta: Codable {
     var identity_provider: Bool? = nil   // holds an identity provider's sign-in: every load asks, whatever the policy
 }
 
+extension SessionMeta {
+    /// Whether every load asks, whatever the policy, grants or rules: a whole Chrome profile saved from a VM may
+    /// hold any sign-in, an identity provider's included, so it's treated as one.
+    var alwaysAsks: Bool { true }
+}
+
 /// Somewhere off this Mac that receives every audit event (Sinks.swift).
 struct AuditSink: Codable {
     var kind: String                // webhook | otlp | syslog | ntfy
@@ -91,6 +97,7 @@ struct Payload: Codable {
     // or a log older than this vault): records up to it are legacy, unverified, not forgeries.
     var audit_key_since: Int? = nil
     var rules: [UnattendedRule]? = nil      // unattended rules (Approvals.swift): uses that don't ask, until they expire
+    var require_presence: String? = nil     // "on" | "off": the unlock's presence mode when no flag says; nil: on where Touch ID is
 
     /// A new vault. `boundary`: the audit log's last seq now (records before the vault are legacy).
     static func fresh(boundary: Int) -> Payload {

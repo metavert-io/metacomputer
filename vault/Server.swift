@@ -205,13 +205,21 @@ final class UnlockServer {
     var tamperSeen: Set<String> = []
     var auditSize: off_t = -1
 
-    init(paths: Paths, key: VaultKey, seconds: Int, confirmEach: Bool, multiplexer: String?, allowMultiplexer: Bool, touchID: Bool = false) {
+    // Presence mode (Approvals.swift, resolvePresence): every approval and grant needs the dialog or the
+    // passphrase; a typed answer only chooses how far it reaches.
+    let requirePresence: Bool
+    let presenceWhy: String
+    let presenceWarning: String?
+
+    init(paths: Paths, key: VaultKey, seconds: Int, confirmEach: Bool, multiplexer: String?, allowMultiplexer: Bool, touchID: Bool = false,
+         presence: (Bool, String, String?) = (false, "off", nil)) {
         self.paths = paths
         self.key = key
         self.confirmEach = confirmEach
         self.multiplexer = multiplexer
         self.allowMultiplexer = allowMultiplexer
         self.touchID = touchID
+        (self.requirePresence, self.presenceWhy, self.presenceWarning) = presence
         self.expires = Date().addingTimeInterval(TimeInterval(seconds))
         #if MCOMP_VAULT_TESTING
         if let t = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_PROMPT_TIMEOUT"], let n = Int(t), n > 0 { promptTimeout = n }
@@ -273,7 +281,8 @@ final class UnlockServer {
                 return ApprovalOutcome(yes: true, how: "rule:\(r.id)", why: "")
             }
         }
-        let terminalOK = multiplexer == nil || allowMultiplexer
+        // In presence mode a typed answer only chooses a scope, so a terminal others can type into may still be used.
+        let terminalOK = multiplexer == nil || allowMultiplexer || requirePresence
         if let m = multiplexer, !terminalOK, !touchID {
             return ApprovalOutcome(yes: false, how: "each:no", why: "the unlock terminal runs inside \(m), where any program can type into it, so confirmations there are refused: run unlock outside \(m) (or with --allow-multiplexer, or --touch-id to confirm with Touch ID instead)")
         }
@@ -301,48 +310,58 @@ final class UnlockServer {
                   data: ["op": kind, "name": name, "site": site ?? "", "request_id": id])
         let q = question.components(separatedBy: "\n").prefix(4).map { clean($0, max: 500) }.joined(separator: "\n")
             + "\n  Request \(id): or approve it from any terminal with `metacomputer secrets approve \(id)` (Touch ID or your login password)"
-            + (identityProvider ? "\n  This is an identity provider's sign-in: what you allow covers this one use." : "")
+            + (identityProvider ? "\n  An identity provider's sign-in (or one that may hold one): what you allow covers this one use." : "")
         var prompt: String?
-        if terminalOK {
+        if terminalOK && requirePresence {
+            prompt = presencePrompt(q, name: name, id: id)
+        } else if terminalOK {
             prompt = approvalPrompt(q, name: name)
         } else {
             say(q + "\n  This terminal runs inside \(multiplexer ?? "a multiplexer"), so typed answers are refused here: confirm with Touch ID or your login password in the dialog, or `deny \(id)`.")
         }
         let outcome = waitForDecision(p, prompt: prompt, name: name, timeout: t)
         var how: String
-        switch outcome {
-        case .terminal(let scope):
+        var confirmed = "terminal"
+        /// The scope chosen, as a grant where it reaches further than this use (never for an identity provider).
+        func grant(_ scope: ApprovalScope, _ oneUse: String) -> String {
             switch scope {
             case _ where identityProvider && scope != .use:
                 say("  (an identity provider's sign-in: allowed for this use only)")
-                how = "each:yes"
+                return oneUse
             case .unlock:
                 grants.append(Grant(kind: kind, name: name, claudePID: nil, claudeStart: nil))
-                how = "each:unlock"
+                return "each:unlock"
             case .session:
                 if let cp = who.claudePID {
                     grants.append(Grant(kind: kind, name: name, claudePID: cp, claudeStart: who.claudeStart))
-                    how = "each:session"
-                } else {
-                    say("  (not from a Claude Code session: allowed for this use only)")
-                    how = "each:yes"
+                    return "each:session"
                 }
+                say("  (not from a Claude Code session: allowed for this use only)")
+                return oneUse
             case .use:
-                how = "each:yes"
+                return oneUse
             }
+        }
+        switch outcome {
+        case .terminal(let scope):
+            how = grant(scope, "each:yes")
         case .localAuth:
-            say("          allowed with Touch ID or the login password (this use only)")
-            how = "each:local-auth"
+            let scope = p.selectedScope ?? .use
+            say("          allowed with Touch ID or the login password" + (scope == .use ? " (this use only)" : ""))
+            how = grant(scope, "each:local-auth")
+            confirmed = "local-auth"
         case .passphrase:
-            say("          allowed with the vault passphrase (`approve \(id) --passphrase`; this use only)")
-            how = "each:passphrase"
+            let scope = p.selectedScope ?? .use
+            say("          allowed with the vault passphrase (`approve \(id) --passphrase`" + (scope == .use ? "; this use only)" : ")"))
+            how = grant(scope, "each:passphrase")
+            confirmed = "passphrase"
         case .terminalNo:
             return ApprovalOutcome(yes: false, how: "each:no", why: "not allowed at the vault's terminal", requestID: id)
         case .denied(let why):
             return ApprovalOutcome(yes: false, how: "each:no", why: why, requestID: id)
         }
         var auth: [String: Any] = ["op": "authorize", "result": "ok", "request_id": id, "use": use, "name": name, "vm": vm,
-                                   "approval": how, "requester": who.record]
+                                   "approval": how, "confirmed": confirmed, "presence": requirePresence, "requester": who.record]
         if let s = site { auth["origin"] = s }
         if let u = usernameHint { auth["username_hint"] = u }
         if ["fill", "login"].contains(use) { auth["event"] = "login.authorize" }
@@ -360,7 +379,7 @@ final class UnlockServer {
             eprintRaw(pr)
             promptOpen = true
         }
-        if touchID {
+        if touchID || requirePresence {
             p.localAuth = startLocalAuth("approve request \(p.id): \(p.summary)")
             p.autoLocalAuth = true
         }
@@ -395,13 +414,16 @@ final class UnlockServer {
                     p.decision = .denied("refused at the Touch ID dialog")
                     continue
                 }
-                say("          Touch ID / login password: \(la.why)" + (stdinOpen ? "; you can still answer in this terminal" : ""))
+                say("          Touch ID / login password: \(la.why)" + (requirePresence
+                    ? "; approve with `metacomputer secrets approve \(p.id) --passphrase` instead" + (stdinOpen ? " (typing here only chooses how far it reaches)" : "")
+                    : (stdinOpen ? "; you can still answer in this terminal" : "")))
                 p.localAuth = nil
                 p.autoLocalAuth = false
             }
-            if let pr = prompt, !promptOpen, stdinOpen {
-                eprintRaw("  (still waiting) Type \(name) to allow (\(name) session / \(name) unlock); anything else refuses: ")
-                _ = pr
+            if prompt != nil, !promptOpen, stdinOpen {
+                eprintRaw(requirePresence
+                    ? "  (still waiting) \(name), \(name) session or \(name) unlock chooses how far it reaches; the dialog or the passphrase confirms; anything else refuses: "
+                    : "  (still waiting) Type \(name) to allow (\(name) session / \(name) unlock); anything else refuses: ")
                 promptOpen = true
             }
             var fds = [pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)]
@@ -421,17 +443,28 @@ final class UnlockServer {
                 if rv & Int16(POLLIN) != 0 {
                     var ch: UInt8 = 0
                     let n = read(0, &ch, 1)
-                    if n <= 0 { stdinOpen = false; if !touchID { return result } else { continue } }
+                    if n <= 0 { stdinOpen = false; if !(touchID || requirePresence) { return result } else { continue } }
                     if ch == 0x0A {
                         promptOpen = false
                         let answer = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces)
-                        result = approvalAnswer(answer, name: name).map { .terminal($0) } ?? .terminalNo
-                        return result
+                        line = []
+                        guard let scope = approvalAnswer(answer, name: name) else { result = .terminalNo; return result }
+                        if !requirePresence { result = .terminal(scope); return result }
+                        // Presence mode: what's typed only chooses; the dialog (shown again if it was closed) or a
+                        // passphrase proof confirms it.
+                        p.selectedScope = scope
+                        say("  chosen: " + (scope == .use ? "this use" : (scope == .session ? "this Claude Code session" : "until the vault locks"))
+                            + ". Now confirm it with Touch ID or your login password in macOS's dialog, or `metacomputer secrets approve \(p.id) --passphrase`.")
+                        if p.localAuth == nil || p.localAuth!.done {
+                            p.localAuth = startLocalAuth("approve request \(p.id): \(p.summary)")
+                            p.autoLocalAuth = true
+                        }
+                        continue
                     }
                     if line.count < 120 { line.append(ch) }
                 } else if rv & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
                     stdinOpen = false
-                    if !touchID { return result }
+                    if !(touchID || requirePresence) { return result }
                 }
             }
         }
@@ -821,18 +854,29 @@ final class UnlockServer {
         if let m = multiplexer {
             say("  WARNING: this terminal runs inside \(m). Any program of yours can type into it (for example")
             say("  `tmux send-keys` or `screen -X stuff`), including the answer to a confirmation.")
-            say(allowMultiplexer ? "  Confirmations are taken here anyway (--allow-multiplexer)."
-                : (touchID ? "  Typed confirmations are refused here; each question shows the Touch ID / login password dialog instead."
-                   : "  Uses that need a confirmation are refused here. For those, unlock in a terminal outside \(m)."))
+            say(requirePresence ? "  Typing here only chooses how far an approval reaches; macOS's dialog or the passphrase confirms it."
+                : (allowMultiplexer ? "  Confirmations are taken here anyway (--allow-multiplexer)."
+                   : (touchID ? "  Typed confirmations are refused here; each question shows the Touch ID / login password dialog instead."
+                      : "  Uses that need a confirmation are refused here. For those, unlock in a terminal outside \(m).")))
         }
-        if touchID {
-            say("  Each question also shows macOS's Touch ID / login password dialog (--touch-id); either answer counts.")
+        if requirePresence {
+            say("  Presence mode (\(presenceWhy)): every approval, and every `session` or `unlock` answer, needs Touch ID or your")
+            say("  login password in macOS's dialog, or the vault passphrase (`metacomputer secrets approve ID --passphrase`).")
+            if ProcessInfo.processInfo.environment["MCOMP_VAULT_LOCAL_AUTH"] == "noninteractive" {
+                say("  (MCOMP_VAULT_LOCAL_AUTH=noninteractive: no dialog is shown, so approvals come only from the passphrase.)")
+            }
+        } else {
+            if touchID {
+                say("  Each question also shows macOS's Touch ID / login password dialog (--touch-id); either answer counts.")
+            }
+            if let w = presenceWarning { say("  WARNING: \(w).") }
         }
         #if MCOMP_VAULT_TESTING
         say("  TEST BUILD: honours MCOMP_VAULT_TEST_* settings; never use it for real secrets")
         #endif
         var unlockRec: [String: Any] = ["op": "unlock", "result": "ok", "until": isoTime(expires), "confirm": confirmEach ? "each" : "session",
-                                        "multiplexer": multiplexer ?? "none", "pid": Int(getpid()), "enclave": key.usesEnclave]
+                                        "multiplexer": multiplexer ?? "none", "pid": Int(getpid()), "enclave": key.usesEnclave,
+                                        "presence": requirePresence, "presence_why": presenceWhy]
         if touchID { unlockRec["touch_id"] = true }
         record(unlockRec)
         flushSinks(force: true)
@@ -954,7 +998,7 @@ final class UnlockServer {
         ["ok": true, "status": "ok", "unlocked": true, "since": isoTime(started), "expires": isoTime(expires),
          "expires_in_s": remaining(), "confirm": confirmEach ? "each" : "session", "multiplexer": multiplexer ?? "none",
          "pid": Int(getpid()), "build": Build.kind, "enclave": key.usesEnclave, "tokens": hub.live().count,
-         "touch_id": touchID, "requests": pendingRequests.count]
+         "touch_id": touchID, "requests": pendingRequests.count, "presence": requirePresence, "presence_why": presenceWhy]
     }
 
     func opList() -> [String: Any] {
@@ -1110,13 +1154,13 @@ final class UnlockServer {
         let proposed = req["request_id"] as? String
         var requestID: String?
 
-        // A secret with an identity provider among its sites is always checked first: a use on that site asks.
+        // A use that may ask is always checked first, and the value then goes only to the site the VM reported: a
+        // grant or a rule decides whether to ask, never where the value may go. A secret with an identity
+        // provider among its sites is always checked too: a use on that site asks.
         let hasIdP = s.origins.contains(where: isIdentityProviderOrigin)
         var approval = "session"
         if confirmEach || s.approval == "each" || hasIdP {
-            if !hasIdP, let g = granted("fill", name, who) {
-                approval = g
-            } else {
+            do {
                 var chk = base
                 chk["mode"] = "check"
                 chk["origins"] = origins
@@ -1139,10 +1183,8 @@ final class UnlockServer {
                     approval = o.how
                     requestID = o.requestID
                     if !o.yes { return finish("fill", fields, denied(o.why), who, approval: approval, requestID: requestID) }
-                    if o.thisUseOnly || idp { origins = [origin] }   // only the site that was approved, this time
-                } else {
-                    origins = [origin]          // no question: its other site, never the identity provider's
                 }
+                origins = [origin]          // only the site that was checked (and approved, or covered), whatever covered it
                 if let problem = runner.listenerProblem(t) {
                     return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval, requestID: requestID)
                 }
@@ -1538,8 +1580,9 @@ final class UnlockServer {
         defer { wipe(&archive) }
         if let why = sealedSessionRefusal(r) { return finish("session_save", fields, failed(why), who, approval: approval) }
         if r.interrupted || r.timedOut || r.tooLarge || r.status != 0 || archive.count < 2 || archive[0] != 0x1F || archive[1] != 0x8B {
+            // The VM's own words never go into a result or the audit log here: only what this process knows.
             let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time" : r.tooLarge ? "the profile is too large"
-                : (r.stderr.isEmpty ? "exit \(r.status)" : oneLine(String(decoding: r.stderr, as: UTF8.self), max: 200))
+                : sessionFailure(r.status, profile: profile, saving: true)
             return finish("session_save", fields, r.status == 4 ? denied(why) : failed(why), who, approval: approval)
         }
         do {
@@ -1550,8 +1593,9 @@ final class UnlockServer {
             try updateVault(paths, key) { p in
                 guard let d = Data(base64Encoded: p.session_key), d.count == 32 else { throw VaultError("the vault's session key is damaged") }
                 try writeFileAtomic(paths.sessions + "/\(name).sealed", try sealGCM(key: Array(d), plaintext: a, aad: sessionAAD(name)))
+                // A replacement keeps every restrictive mark the session had.
                 p.sessions[name] = SessionMeta(vm: vm, profile: profile, saved_at: isoTime(), bytes: bytes, last_loaded: nil, loads: 0,
-                                               approval: old?.approval)
+                                               approval: old?.approval, identity_provider: old?.identity_provider)
             }
             return finish("session_save", fields, ["ok": true, "status": "ok", "bytes": bytes], who, approval: approval)
         } catch let e as VaultError {
@@ -1589,7 +1633,9 @@ final class UnlockServer {
             return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
         }
         var approval = "session"
-        let idp = meta.identity_provider == true
+        // A whole browser profile may hold any sign-in, an identity provider's included: every load asks, whatever
+        // its policy, and no grant or rule covers it.
+        let idp = meta.alwaysAsks
         if confirmEach || meta.approval != "session" || meta.vm != vm || idp {
             let question = meta.vm != vm
                 ? "  Load the sealed session \(name), saved from VM \(meta.vm), into a different VM, \(vm) (profile \(profile); replaces it)?"
@@ -1598,7 +1644,7 @@ final class UnlockServer {
             let kind = meta.vm != vm ? "session_load_elsewhere:\(vm)" : "session_load"
             let o = approve(kind, name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil, use: "session_load",
                             summary: "load the sealed session \(name) into profile \(profile)", identityProvider: idp,
-                            proposedID: req["request_id"] as? String, ruleUse: meta.vm == vm ? "session_load" : nil)
+                            proposedID: req["request_id"] as? String, ruleUse: (meta.vm == vm && !idp) ? "session_load" : nil)
             approval = o.how
             if !o.yes { return finish("session_load", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
             if let problem = runner.listenerProblem(t) {
@@ -1618,8 +1664,8 @@ final class UnlockServer {
         catch { return finish("session_load", fields, failed("cannot reach the VM"), who, approval: approval) }
         if let why = sealedSessionRefusal(r) { return finish("session_load", fields, failed(why), who, approval: approval) }
         if r.interrupted || r.timedOut || r.status != 0 {
-            let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time"
-                : (r.stderr.isEmpty ? "exit \(r.status)" : oneLine(String(decoding: r.stderr, as: UTF8.self), max: 200))
+            // The VM has the session now and its stderr could carry any of it: only this process's own words go on.
+            let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time" : sessionFailure(r.status, profile: profile, saving: false)
             return finish("session_load", fields, (r.status == 4 || r.status == 5) ? denied(why) : failed(why), who, approval: approval)
         }
         do {
@@ -1629,6 +1675,18 @@ final class UnlockServer {
             }
         } catch { say("          (couldn't record the use in the vault)") }
         return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": archive.count], who, approval: approval)
+    }
+}
+
+/// Why a sealed-session save or load failed, from its exit status alone: the VM's stderr is never passed on,
+/// since after a load the VM holds the session's cookies and could write them there.
+func sessionFailure(_ status: Int32, profile: String, saving: Bool) -> String {
+    switch status {
+    case 3: return "no Chrome profile named \(profile) in the VM"
+    case 4: return "Chrome is using profile \(profile); end its browser session first"
+    case 5: return "the VM refused to " + (saving ? "pack" : "unpack") + " it safely (a symbolic link, an entry outside the profile, a special file, or a cookie store it can't use)"
+    case 6: return "the VM has no driver profile \(profile) with a cookie store yet: open it once in page-mode Chrome (browser_prepare, profile isolated_named \(profile)), end that session, then load again"
+    default: return "the VM couldn't " + (saving ? "save" : "load") + " it (exit \(status))"
     }
 }
 

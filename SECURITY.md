@@ -919,9 +919,14 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
 - `session load NAME` puts it back. It goes into a profile of the same name only:
   the driver records a profile's name inside it (`.cua-driver-owned-profile.json`),
   so it won't use a renamed copy.
-- Loading asks you every time unless you've run `session policy NAME --approval
-  session`, which asks for the passphrase. Even then, loading into a VM other than the
-  one it was saved from asks, naming both.
+- Loading asks you every time. A whole browser profile may hold any sign-in, an
+  identity provider's included, so it's treated as one: `session policy NAME
+  --approval session` doesn't stop the question, an earlier `NAME session` or `NAME
+  unlock` answer covers only that load, and no unattended rule can cover it. Loading
+  into a VM other than the one it was saved from names both.
+- When a save or load fails, the result and the audit log say why in the vault's own
+  words, from the VM's exit status: once the VM has the session it could write its
+  cookies into its error output, so that output is never passed on.
 - Save and load refuse while a Chrome is using that profile. A load unpacks with
   Python's safe tar filter: no absolute paths, no `..`, no links leading outside, no
   special files.
@@ -942,13 +947,12 @@ and folder (its project) are the **requester**:
 - the audit log records it (`requester`: `client`, `client_pid`, `claude_pid`,
   `project`), and so does the waiting-for-you event;
 - a request from anything else says so: `python3 (pid 99), not from Claude Code`;
-- a program outside every Claude Code session may pass a request on for a Claude Code
-  process it names (`--on-behalf-pid`; the metacomputer hub does, since it runs
-  detached). The vault then attributes the request to that process and names the one
-  that passed it: `Asked by Claude Code in ~/Projects/foo (pid 4242), through python3
-  (pid 777)`, and `requester.via` in the audit log. It ignores the option when the
-  client itself runs inside a Claude Code session, so a session's own commands are
-  always its own.
+- a client may say which Claude Code process it asks for (`--on-behalf-pid`). That is
+  shown and recorded as an unverified claim (`..., for Claude Code in ~/Projects/foo
+  (pid 4242) as it says (unverified)`, and `requester.on_behalf` with `verified:
+  false` in the audit log), and nothing more: any program of yours can name any live
+  process, so the claim never satisfies a `--project` limit, an unattended rule or a
+  grant. Those always see the client itself.
 
 When a use needs your approval, what you type decides how long it lasts:
 
@@ -959,8 +963,11 @@ When a use needs your approval, what you type decides how long it lasts:
 | `NAME unlock` | every use of that secret, from anyone, until the vault locks |
 
 Anything else refuses. A grant covers the same kind of use of that one secret on its
-own sites; it never widens them. `--project DIR` on a secret refuses requests whose
-Claude Code process works outside DIR (or that come from no Claude Code process).
+own sites; it never widens them. A grant or a rule only decides whether to ask: a use
+that may ask is always checked in the VM first, and the value then goes only to the site
+the VM reported for that check, whatever covered it. `--project DIR` on a secret refuses
+requests whose Claude Code process works outside DIR (or that come from no Claude Code
+process).
 
 **This is attribution and scoping, not isolation.** Every process involved runs as
 you. Any program of yours can name itself `claude`, change folder, run under a real
@@ -986,6 +993,33 @@ question; either answer counts, and cancelling the dialog refuses. Inside tmux o
 where typed answers are refused, `--touch-id` is how you approve (and `--confirm each`
 starts there with it).
 
+**Presence mode** goes further: every approval, and every `NAME session` or `NAME
+unlock` grant, needs macOS's dialog (Touch ID, or your login password) or the passphrase
+(`approve ID --passphrase`). What you type at the unlock terminal only chooses how far an
+approval reaches (`NAME`, `NAME session`, `NAME unlock`); it never approves on its own,
+and anything else typed still refuses. Unattended rules are made the same way, as before.
+- **The default depends on the Mac.** On a Mac with Touch ID and a finger enrolled,
+  presence mode is on: a typed line could come from any program that can type into
+  that terminal (a multiplexer, an editor's terminal, `script`, `expect`), and Touch ID
+  can't. On a Mac without Touch ID, or with a sensor and no fingerprint enrolled, typed
+  answers stay the default, and `unlock` says so in one line with how to turn presence
+  mode on (your login password then confirms in the dialog).
+- **Either way can be switched:** `unlock --require-presence` or
+  `--no-require-presence` for one unlock, and `metacomputer secrets presence on|off|auto`
+  (with the passphrase) for the vault's own default, kept inside the vault.
+- `metacomputer secrets status` and `metacomputer security` show which mode is in force
+  (while the vault is locked, the default for this Mac).
+- Where the dialog can't be shown (`MCOMP_VAULT_LOCAL_AUTH=noninteractive`, or an SSH
+  session with no window), presence-mode approvals come only from `approve ID
+  --passphrase`.
+- **Its limit:** a program that controls the terminal you type into sees what you type
+  there, the passphrase included (the echo is off, but the program reads the keystrokes
+  themselves). Only the system dialog defends against that: macOS draws it and reads
+  Touch ID or your login password itself. If you can't trust the terminal, approve with
+  Touch ID.
+- Test builds decide "has Touch ID" from `MCOMP_VAULT_TEST_BIOMETRY` instead of asking
+  macOS, and release builds don't contain that switch.
+
 **Nothing a program does can approve.** Claude Code runs as you and can run any
 `metacomputer` or `mcomp-vault` command, or write to the vault's socket directly, so a
 request on the socket proves nothing about who sent it:
@@ -999,7 +1033,8 @@ request on the socket proves nothing about who sent it:
   and the summary you were shown. The unlock process checks it; a forged proof, one
   made for other text, or one kept from an earlier request approves nothing.
 - A terminal of its own isn't the bar: `script` or `expect` can make one. The
-  passphrase, the dialog or a line typed at the unlock terminal is.
+  passphrase, the dialog or (outside presence mode) a line typed at the unlock terminal
+  is.
 - `deny`, `requests` and listing or removing rules need nothing: they only restrict.
 - Test builds can't show the dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH` stands in for the
   person there, and release builds don't contain it (`tests/test_vault_approvals.py`
@@ -1031,8 +1066,11 @@ metacomputer secrets rule list | rule remove ID
   locked). `--for` is required, at most 30 days. Rules live inside the vault and apply
   only while it's unlocked; expired ones are dropped.
 - A rule covers requests whose Claude Code process works in that folder or below it,
-  never one from outside Claude Code. It never covers an identity provider, a sealed-
-  session save, or a load into another VM.
+  never one from outside Claude Code, and never a client's claim to ask for such a
+  process (`--on-behalf-pid`). It never covers an identity provider, a sealed-session
+  save, a load into another VM, or a whole browser profile (only imported sessions,
+  whose sites are known, can have one). It decides whether to ask, never where the value
+  goes: the fill is bound to the site checked.
 - The audit log records each use it covers as `approval: rule:ID`, and the rule's
   making (`rule_add`, with how it was confirmed) and removal.
 - `metacomputer secrets policy NAME --approval session|each` (passphrase) changes
@@ -1058,8 +1096,9 @@ question allows that one use only. This is a tightening: before, a secret set to
   on the provider's site it asks; on its other sites it goes ahead as set, and the value
   goes only to the site the VM reported.
 - An API secret whose host is on the list asks for every token.
-- A sealed session that holds a provider's sign-in (an imported one says so) asks at
-  every load.
+- A sealed session that holds a provider's sign-in asks at every load, and so does
+  every whole browser profile saved from the VM, since its contents aren't known.
+  Replacing a session keeps that mark.
 
 ### Signing in with one approval (`login`)
 
@@ -1211,8 +1250,10 @@ no spaces, ASCII), and each event is chained to the one before:
 | `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked) |
 | `username_hint` | a password secret's username, masked (`a***@example.com`) |
 | `identity_provider` | `true` on a request for an identity provider's site |
-| `requester` | `client`, `client_pid`, `claude_pid`, `project` |
+| `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted |
 | `reason` | why it was refused or failed |
+| `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
+| `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
 | `method`, `host`, `path`, `status`, `token_id`, `key_withheld` | a proxied API request (the path without its query) |
 
@@ -1563,7 +1604,10 @@ something waits for you:
   Once typed, the value is the page's and Chrome's, as if typed by hand. Chrome may
   keep ordinary text fields (not password fields) in the profile's session files, and
   a sealed login carries those along.
-- **Keystroke injection into the unlock terminal.**
+- **Keystroke injection into the unlock terminal.** In presence mode (the default on
+  a Mac with Touch ID) a typed line only chooses how far an approval reaches, so this
+  can't approve anything; a program that controls the terminal still sees the
+  passphrase as you type it. Outside presence mode:
   - With `--allow-multiplexer`, a confirmation can be forged.
   - Detection is a list. It doesn't catch:
     - an editor's built-in terminal (VS Code and the like, which extensions can type
@@ -1609,8 +1653,8 @@ something waits for you:
   records to rely on.
 - **Requesters can be faked by your own processes.** Who asked, `NAME session` grants,
   `--project` and unattended rules rest on process names, parents and folders, all of
-  which a program running as you controls ("Who is asking"); a program outside Claude
-  Code can also pass a request on for any live Claude Code process (`--on-behalf-pid`).
+  which a program running as you controls ("Who is asking"). A client's
+  `--on-behalf-pid` claim is shown as unverified and never counts for any of them.
   A rule is a standing approval for whatever can pose as a session in its folder: keep
   its folder narrow and its time short.
 - **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac

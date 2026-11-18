@@ -18,6 +18,7 @@ Run: python3 tests/test_vault_approvals.py
      MCOMP_VAULT_TEST_BIN=/path/to/test-build [MCOMP_VAULT_REL_BIN=/path/to/release-build] python3 tests/test_vault_approvals.py
 """
 import glob
+import hashlib
 import json
 import os
 import re
@@ -423,6 +424,18 @@ def run(td, procs):
     u.send("web-each\n")
     rc, out, _ = finish(proc)
     check("typing the name at the unlock terminal still allows it (each:yes)", rc == 0, out)
+    # A grant (`NAME session`) decides whether to ask, never where the value goes: the next use is checked first.
+    p, outs = as_claude(proj2, fill, fill)
+    next_request(u)
+    u.expect("Type web-each to allow")
+    u.send("web-each session\n")
+    res = claude_results(p, outs)
+    kinds = [c.get("kind") for c in calls()][-4:]
+    last_fill = [json.loads(c["stdin"]) for c in calls() if c.get("kind") == "fill:fill"][-1]
+    rec = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-1]
+    check("a use a grant covers is still checked first, and the value goes only to the site reported then",
+          [x[0] for x in res] == [0, 0] and rec.get("approval") == "grant:session" and kinds == ["fill:check", "fill:fill", "fill:check", "fill:fill"]
+          and last_fill.get("origins") == [SITE], (res, kinds, last_fill.get("origins")))
     proc = background(*fill)
     next_request(u)
     rc, out, _ = finish(proc)
@@ -543,6 +556,9 @@ def run(td, procs):
     rec = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-1]
     check("the rule covers a Claude Code session in that project (or below it): no question (rule:ID)", res[0][0] == 0
           and rec.get("approval") == f"rule:{rule_id}", (res, rec))
+    last_fill = [json.loads(c["stdin"]) for c in calls() if c.get("kind") == "fill:fill"][-1]
+    check("...and the value goes only to the site the VM reported at the check, not every site of the secret",
+          last_fill.get("origins") == [SITE], last_fill.get("origins"))
     p, outs = as_claude(proj2, fill)
     next_request(u)
     u.send("no\n")
@@ -553,26 +569,41 @@ def run(td, procs):
     u.send("no\n")
     rc, out = detached_wait(h)
     check("...nor a request from outside Claude Code", rc == 2, out)
-    # on behalf of: a program outside Claude Code (the hub) passes a request on for a Claude Code process
+    # on behalf of: a program says it asks for a Claude Code process. That's attribution only: it never satisfies a
+    # rule (or a project limit, or a grant), since any program of the user's can name any live process.
     holder = subprocess.Popen([fake, proj1, "/bin/sleep", "60"], env=env)
     procs.append(holder)
     sleeper = wait_for(lambda: subprocess.run(["pgrep", "-P", str(holder.pid)], capture_output=True, text=True).stdout.split(), 5)
-    rc, out = detached_wait(detached_start(*fill, "--on-behalf-pid", sleeper[0] if sleeper else "2"))
+    h = detached_start(*fill, "--on-behalf-pid", sleeper[0] if sleeper else "2")
+    asked_for = next_request(u)
+    shown = u.text()
+    u.send("no\n")
+    rc, out = detached_wait(h)
     rec = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-1]
-    check("a request passed on for a Claude Code process (--on-behalf-pid) is that session's: the rule covers it, and the record names who passed it",
-          rc == 0 and rec.get("requester", {}).get("project") == proj1
-          and rec["requester"].get("via", {}).get("client") == os.path.basename(BIN), (out, rec.get("requester")))
+    req_ = rec.get("requester", {})
+    check("a request passed on for a Claude Code process (--on-behalf-pid): the rule for that project doesn't cover it (it asks), "
+          "and the record keeps the claim as unverified, apart from who asked",
+          asked_for and rc == 2 and "project" not in req_ and req_.get("on_behalf", {}).get("project") == proj1
+          and req_["on_behalf"].get("verified") is False and "as it says (unverified)" in shown, (out, req_))
     p, outs = as_claude(proj2, [*fill, "--on-behalf-pid", sleeper[0] if sleeper else "2"])
     next_request(u)
     u.send("no\n")
     res = claude_results(p, outs)
-    check("...but a command from a Claude Code session can't claim another session that way", res[0][0] == 2, res)
+    check("...nor does a command from another Claude Code session that names one there", res[0][0] == 2, res)
     holder.kill()
     r = client("rule", "add", "--site", SITE2, "--project", proj1, "--for", "1h")
     site_rule = (re.findall(r"Rule ([0-9a-f]{8})", r.stdout) or [None])[0]
     p, outs = as_claude(proj1, ["fill", "other", "--vm", "avm", "--field", "password"])
     res = claude_results(p, outs)
     check("a rule for a site covers any secret's fill into it", r.returncode == 0 and res[0][0] == 0, (r.stdout, res))
+    client("rule", "remove", rule_id)
+    flag("origin-last-next")            # the tab is on web-each's second site, SITE2, which the site rule covers
+    p, outs = as_claude(proj1, fill)
+    res = claude_results(p, outs)
+    last_fill = [json.loads(c["stdin"]) for c in calls() if c.get("kind") == "fill:fill"][-1]
+    check("a site rule covers a two-site secret only on that site, and the value goes there alone",
+          res[0][0] == 0 and last_fill.get("origins") == [SITE2], (res, last_fill.get("origins")))
+    rule_id = (re.findall(r"Rule ([0-9a-f]{8})", client("rule", "add", "--secret", "web-each", "--project", proj1, "--for", "1h").stdout) or [None])[0]
     r = client("rule", "remove", rule_id)
     p, outs = as_claude(proj1, fill)
     next_request(u)
@@ -657,6 +688,113 @@ def run(td, procs):
     check("inside tmux with --touch-id, a typed answer doesn't approve (only the dialog would)", typed_ok is None and rc == 2, out)
     lock(u)
 
+    # --- 6b. presence mode: every approval needs the dialog or the passphrase; typing only chooses ---------------------
+    # MCOMP_VAULT_TEST_BIOMETRY stands in for the Mac's Touch ID check (a test build never asks the real one).
+    P = dict(T, MCOMP_VAULT_TEST_BIOMETRY="available", MCOMP_VAULT_TEST_LOCAL_AUTH="wait")
+    u = start_unlock(["--for", "10m", *allow], P)
+    u.expect("Presence mode (this Mac has Touch ID)")
+    st = json.loads(client("status", "--json").stdout or "{}")
+    proc = background(*fill)
+    rid = next_request(u)
+    u.expect("typing never approves on its own")
+    u.send("web-each\n")
+    u.expect("chosen: this use")
+    time.sleep(1.5)
+    typed_only = proc.poll()
+    rc_t, out_t = tty([BIN, "approve", rid, "--passphrase"], [("Vault passphrase", PASS + "\n")])
+    rc, out, _ = finish(proc)
+    au = [x for x in audit_recs() if x.get("op") == "authorize" and x.get("request_id") == rid]
+    check("presence mode by default where Touch ID is: typing the name doesn't approve; the passphrase proof then does",
+          st.get("presence") is True and typed_only is None and rc_t == 0 and rc == 0 and au and au[0]["approval"] == "each:passphrase"
+          and au[0].get("presence") is True and au[0].get("confirmed") == "passphrase", (st, typed_only, out, au))
+    p, outs = as_claude(proj2, fill, fill)
+    rid = next_request(u)
+    u.send("web-each session\n")
+    u.expect("chosen: this Claude Code session")
+    time.sleep(1)
+    grants_before = p.poll()
+    tty([BIN, "approve", rid, "--passphrase"], [("Vault passphrase", PASS + "\n")])
+    res = claude_results(p, outs)
+    recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-2:]
+    check("...`NAME session` typed there only chooses: the grant exists once the passphrase (or the dialog) confirms it",
+          grants_before is None and [x[0] for x in res] == [0, 0] and [x.get("approval") for x in recs] == ["each:session", "grant:session"],
+          (res, [x.get("approval") for x in recs]))
+    proc = background(*fill)
+    next_request(u)
+    u.send("nope\n")
+    rc, out, _ = finish(proc)
+    check("...and anything else typed refuses, as before", rc == 2, out)
+    lock(u)
+    u = start_unlock(["--for", "10m", *allow], dict(P, MCOMP_VAULT_TEST_LOCAL_AUTH="allow"))
+    r = client(*fill)
+    rec = [x for x in audit_recs() if x.get("op") == "fill"][-1]
+    check("presence mode with the dialog answering (the stand-in): allowed, nothing typed (each:local-auth)", r.returncode == 0
+          and rec.get("approval") == "each:local-auth", r.stdout)
+    lock(u)
+    u = start_unlock(["--for", "10m", "--confirm", "each"], dict(P, TMUX="/tmp/tmux-test/default,1,0", MCOMP_VAULT_TEST_LOCAL_AUTH="allow"))
+    r = client("fill", "web-sess", "--vm", "avm", "--field", "password")
+    check("presence mode inside tmux: --confirm each starts, and the dialog approves (typing could only choose)", r.returncode == 0, r.stdout)
+    lock(u)
+    u = start_unlock(["--for", "10m", *allow], dict(T, MCOMP_VAULT_TEST_BIOMETRY="none"))
+    u.expect("WARNING: this Mac has no Touch ID")
+    st = json.loads(client("status", "--json").stdout or "{}")
+    proc = background(*fill)
+    next_request(u)
+    u.expect("Type web-each to allow")
+    u.send("web-each\n")
+    rc, out, _ = finish(proc)
+    check("no Touch ID: typed approval stays the default, with a warning saying why and how to turn presence mode on",
+          st.get("presence") is False and rc == 0 and "--require-presence" in u.text(), st)
+    lock(u)
+    u = start_unlock(["--for", "10m", *allow], dict(T, MCOMP_VAULT_TEST_BIOMETRY="not-enrolled"))
+    u.expect("no fingerprint enrolled")
+    st = json.loads(client("status", "--json").stdout or "{}")
+    check("a Touch ID sensor with no fingerprint counts as none, and the unlock says so", st.get("presence") is False, st)
+    lock(u)
+    u = start_unlock(["--for", "10m", "--no-require-presence", *allow], P)
+    s1 = json.loads(client("status", "--json").stdout or "{}")
+    lock(u)
+    u = start_unlock(["--for", "10m", "--require-presence", *allow], dict(T, MCOMP_VAULT_TEST_BIOMETRY="none"))
+    s2 = json.loads(client("status", "--json").stdout or "{}")
+    lock(u)
+    check("either default can be switched for one unlock: --no-require-presence, --require-presence",
+          s1.get("presence") is False and s2.get("presence") is True and s2.get("presence_why") == "--require-presence", (s1, s2))
+    r = client("presence", "on")
+    check("presence on|off|auto without a terminal: refused (it needs the passphrase)", r.returncode != 0 and "own terminal" in r.stderr, r.stderr)
+    rc1, o1 = tty([BIN, "presence", "on"], [("Vault passphrase", PASS + "\n")])
+    u = start_unlock(["--for", "10m", *allow], dict(T, MCOMP_VAULT_TEST_BIOMETRY="none"))
+    s1 = json.loads(client("status", "--json").stdout or "{}")
+    lock(u)
+    rc2, o2 = tty([BIN, "presence", "off"], [("Vault passphrase", PASS + "\n")])
+    u = start_unlock(["--for", "10m", *allow], P)
+    s2 = json.loads(client("status", "--json").stdout or "{}")
+    lock(u)
+    rc3, o3 = tty([BIN, "presence", "auto"], [("Vault passphrase", PASS + "\n")])
+    locked_st = json.loads(client("status", "--json", extra={"MCOMP_VAULT_TEST_BIOMETRY": "available"}).stdout or "{}")
+    check("the vault's own setting (presence on|off|auto, with the passphrase) changes the default; status shows the mode",
+          rc1 == rc2 == rc3 == 0 and s1.get("presence") is True and "setting" in s1.get("presence_why", "")
+          and s2.get("presence") is False and locked_st.get("presence_default") is True
+          and any(x.get("op") == "presence" for x in audit_recs()), (s1, s2, locked_st))
+    conf = os.path.join(td, "sec.env")
+    open(conf, "w").write(f'VM_NAME=avm-not-a-vm\nSSH_PORT={port}\nSSH_DIR="{sshdir}"\nRUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\n')
+    sec = subprocess.run([os.path.join(LAB, "bin", "metacomputer"), "security", "--json"], capture_output=True, text=True, timeout=120,
+                         env=dict(env, MCOMP_CONFIG=conf, MCOMP_VAULT_BIN=BIN, MCOMP_VAULT_TEST_BIOMETRY="available"))
+    sec2 = subprocess.run([os.path.join(LAB, "bin", "metacomputer"), "security"], capture_output=True, text=True, timeout=120,
+                          env=dict(env, MCOMP_CONFIG=conf, MCOMP_VAULT_BIN=BIN, MCOMP_VAULT_TEST_BIOMETRY="none"))
+    vsec = (json.loads(sec.stdout or "{}").get("vault") or {}) if sec.returncode == 0 else {}
+    check("`metacomputer security` shows which approval mode is in force (presence where Touch ID is, typed elsewhere)",
+          vsec.get("approvals") == "presence" and "approvals    typed" in sec2.stdout.replace("\x1b[33m", "").replace("\x1b[0m", ""),
+          (sec.stdout[-300:], sec.stderr[-300:], sec2.stdout[-300:]))
+    rd = os.path.join(td, "relstatus")
+    os.makedirs(rd, mode=0o700)
+    ra = subprocess.run([REL, "status", "--json"], capture_output=True, text=True,
+                        env={"PATH": "/usr/bin:/bin", "MCOMP_VAULT_DIR": rd, "MCOMP_VAULT_TEST_BIOMETRY": "available"})
+    rn = subprocess.run([REL, "status", "--json"], capture_output=True, text=True,
+                        env={"PATH": "/usr/bin:/bin", "MCOMP_VAULT_DIR": rd, "MCOMP_VAULT_TEST_BIOMETRY": "none"})
+    check("a release build ignores the Touch ID stand-in: it asks macOS (the same answer whatever the setting says)",
+          json.loads(ra.stdout).get("biometry") == json.loads(rn.stdout).get("biometry") and b"MCOMP_VAULT_TEST_BIOMETRY" not in open(REL, "rb").read(),
+          (ra.stdout, rn.stdout))
+
     # --- 7. a release build goes to the real framework: the stand-in doesn't approve it --------------------------
     # `selftest --local-auth` asks LocalAuthentication once, through the same function every approval uses, and
     # touches no vault and no log. A release build runs it only with MCOMP_VAULT_LOCAL_AUTH=noninteractive, which
@@ -700,6 +838,24 @@ def run(td, procs):
     lock(u)
     r = subprocess.run([sys.executable, os.path.join(LAB, "scripts/verify-audit.py"), alog], capture_output=True, text=True)
     check("verify-audit.py: the local log still checks out", r.returncode == 0, r.stdout[-400:])
+
+    # --- 10. a last audit record longer than the tail that's read: the next record still follows it ---------------
+    adir = os.path.join(td, "a10")
+    os.makedirs(adir, mode=0o700)
+
+    def canon(o):
+        return json.dumps(o, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    big = {"op": "set", "result": "ok", "name": "x", "origins": ["https://a%05d.example" % i for i in range(20000)], "seq": 1,
+           "prev": "0" * 64, "ts": "2026-01-01T00:00:00.000000Z", "id": "00000000-0000-4000-8000-000000000001"}
+    big["hash"] = hashlib.sha256(canon(big).encode()).hexdigest()
+    open(os.path.join(adir, "audit.jsonl"), "w").write(canon(big) + "\n")
+    client("fill", "x", "--vm", "avm", "--field", "password", extra={"MCOMP_VAULT_DIR": adir})
+    lines = open(os.path.join(adir, "audit.jsonl")).read().splitlines()
+    nxt = json.loads(lines[-1]) if len(lines) > 1 else {}
+    vr = subprocess.run([sys.executable, os.path.join(LAB, "scripts/verify-audit.py"), os.path.join(adir, "audit.jsonl")], capture_output=True, text=True)
+    check("a last record over 256 KiB: the next one still gets seq + 1 and links to it, and the chain verifies",
+          len(canon(big)) > 1 << 18 and nxt.get("seq") == 2 and nxt.get("prev") == big["hash"] and vr.returncode == 0,
+          (nxt.get("seq"), nxt.get("prev"), vr.stdout[-200:]))
 
     # --- every output ----------------------------------------------------------------------------------------
     text = open(alog).read()

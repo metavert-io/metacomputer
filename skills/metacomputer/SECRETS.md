@@ -7,7 +7,7 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 - **Only the user, in their own terminal window:** `init`, `set`, `delete`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value.
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
-- **Only the user, from any terminal:** `approve ID` and `rule add`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
+- **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
 - **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`.
 
 ## First: what's stored
@@ -25,11 +25,13 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 
 ## When the user has to approve
 
-A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save (and load, unless relaxed), an `each` API token and every use on an identity provider's sign-in page (Google, Microsoft, Apple, Okta) wait up to 2 minutes for the user. Their unlock terminal shows the question, a request id and "Asked by Claude Code in <this project>"; `metacomputer secrets requests` lists what waits. Tell them which secret, what for, and how to answer:
+A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save, every load of a whole browser profile, an `each` API token and every use on an identity provider's sign-in page (Google, Microsoft, Apple, Okta) wait up to 2 minutes for the user. Their unlock terminal shows the question, a request id and "Asked by Claude Code in <this project>"; `metacomputer secrets requests` lists what waits. Tell them which secret, what for, and how to answer:
 - in the vault's terminal: `NAME` to allow this use, `NAME session` for the rest of this Claude Code session, `NAME unlock` until the vault locks;
 - or from any terminal: `metacomputer secrets approve ID` (Touch ID or their login password; `--passphrase` for the vault passphrase), for this use only.
 
-On an identity provider's page every use asks and `session` / `unlock` cover only that use: don't suggest them there. Inside tmux or screen typed answers are refused unless the user unlocked with `--allow-multiplexer` or `--touch-id`; the reason says so. If the user set up an unattended rule for this project (`rule list`), covered uses don't ask.
+In presence mode (the default on a Mac with Touch ID; `metacomputer secrets status` says which) a typed answer only chooses `NAME` / `NAME session` / `NAME unlock`, and the user then confirms with Touch ID or the passphrase: tell them to expect that.
+
+On an identity provider's page, and for a whole-profile session load, every use asks and `session` / `unlock` cover only that use: don't suggest them there. Inside tmux or screen typed answers are refused unless the user unlocked with `--allow-multiplexer` or `--touch-id`; the reason says so. If the user set up an unattended rule for this project (`rule list`), covered uses don't ask. A rule or an earlier answer never changes where a value goes: each fill is still checked against the focused page's site.
 
 ## Signing in to a site (fill)
 

@@ -170,6 +170,7 @@ final class PendingRequest {
     let identityProvider: Bool
     let summary: String                 // one line: what approving it allows (shown, and signed by a passphrase proof)
     var decision: Decision?
+    var selectedScope: ApprovalScope?   // presence mode: what was typed, waiting for the dialog or the passphrase to confirm it
     var localAuth: LocalAuthAttempt?
     var autoLocalAuth = false           // the dialog `unlock --touch-id` showed by itself
     var waiters: [Int32] = []           // `approve ID` clients waiting for the dialog's answer
@@ -280,6 +281,76 @@ func localAuthError(_ e: NSError?) -> String {
         }
     }
     return clean("\(e.localizedDescription) (\(e.code))", max: 160)
+}
+
+// MARK: - presence mode
+
+/// Whether this Mac has Touch ID with a finger enrolled (LocalAuthentication's biometrics policy; no dialog).
+/// A sensor with no fingerprints counts as none. Test builds take MCOMP_VAULT_TEST_BIOMETRY (available,
+/// not-enrolled, none; default none) instead; release builds don't contain that switch.
+enum Biometry: String { case touchID = "touch-id", notEnrolled = "not-enrolled", none = "none" }
+
+func detectBiometry() -> Biometry {
+    #if MCOMP_VAULT_TESTING
+    switch ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_BIOMETRY"] ?? "" {
+    case "available": return .touchID
+    case "not-enrolled": return .notEnrolled
+    default: return .none
+    }
+    #else
+    let ctx = LAContext()
+    var err: NSError?
+    if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err) { return .touchID }
+    if let e = err, e.domain == LAErrorDomain {
+        if e.code == LAError.biometryNotEnrolled.rawValue { return .notEnrolled }
+        if e.code == LAError.biometryLockout.rawValue { return .touchID }   // a sensor and fingers, locked for now
+    }
+    return .none
+    #endif
+}
+
+/// Presence mode: every approval, and every grant (`NAME session`, `NAME unlock`), needs macOS's dialog (Touch ID
+/// or the login password) or the passphrase (`approve ID --passphrase`); what's typed at the unlock terminal only
+/// chooses how far it reaches. The default: on where Touch ID is (so nothing typed into a terminal a program could
+/// control approves), off elsewhere. Changed by `unlock --require-presence | --no-require-presence`, else by the
+/// vault's setting (`presence on|off|auto`). Returns (on, why, a warning for the unlock terminal or nil).
+func resolvePresence(flag: Bool?, setting: String?, biometry b: Biometry) -> (Bool, String, String?) {
+    let how = "`metacomputer secrets unlock --require-presence`, or `metacomputer secrets presence on` to keep it"
+    if let f = flag {
+        return f ? (true, "--require-presence", nil)
+            : (false, "--no-require-presence", "typed answers approve here (--no-require-presence): a program that can type into this terminal could approve")
+    }
+    if setting == "on" { return (true, "the vault's setting (presence on)", nil) }
+    if setting == "off" {
+        return (false, "the vault's setting (presence off)", "typed answers approve here (presence off): a program that can type into this terminal could approve; \(how) changes that")
+    }
+    switch b {
+    case .touchID: return (true, "this Mac has Touch ID", nil)
+    case .notEnrolled:
+        return (false, "this Mac's Touch ID has no fingerprint enrolled",
+                "this Mac's Touch ID sensor has no fingerprint enrolled, so typed answers approve here; a program that can type into this terminal could approve. Enroll a finger, or \(how) (your login password then confirms)")
+    case .none:
+        return (false, "this Mac has no Touch ID",
+                "this Mac has no Touch ID, so typed answers approve here; a program that can type into this terminal could approve. \(how) makes every approval need your login password in macOS's dialog")
+    }
+}
+
+/// `presence on|off|auto`: the vault's own setting for presence mode (the passphrase, like `policy`).
+func cmdPresence(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: [], flags: [])
+    guard a.positional.count == 1, ["on", "off", "auto"].contains(a.positional[0]) else {
+        throw usageError("usage: presence on|off|auto  (auto: on where this Mac has Touch ID)")
+    }
+    let mode = a.positional[0]
+    try requireTTY("presence")
+    installPromptSignalHandlers()
+    let (key, _) = try unlockKey(paths)
+    defer { key.wipeKey() }
+    try updateVault(paths, key) { p in p.require_presence = mode == "auto" ? nil : mode }
+    audit(paths, ["op": "presence", "result": "ok", "mode": mode], macKey: vaultAuditKey(paths, key))
+    let (on, why, _) = resolvePresence(flag: nil, setting: mode == "auto" ? nil : mode, biometry: detectBiometry())
+    oprint("Presence mode: \(mode) (now \(on ? "on" : "off"): \(why)). It applies from the next unlock; `unlock --require-presence` or `--no-require-presence` overrides it for one unlock.")
+    return Exit.ok
 }
 
 // MARK: - the passphrase proof
@@ -404,7 +475,9 @@ func buildRule(_ p: Payload, use: String, secret: String?, site: String?, sessio
         u = "fill"
     } else if let ss = session {
         guard let m = p.sessions[ss] else { return (nil, "no saved session named \(ss)") }
-        if m.identity_provider == true { return (nil, "the sealed session \(ss) holds an identity provider's sign-in, which always asks: no rule can cover it") }
+        if m.alwaysAsks {
+            return (nil, "the sealed session \(ss) asks at every load (it holds, or as a whole browser profile may hold, an identity provider's sign-in): no rule can cover it")
+        }
         u = "session_load"
     }
     let now = Date()
