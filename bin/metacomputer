@@ -70,7 +70,7 @@
 #           | import-passwords --browser chrome|--csv FILE | import-session --browser chrome --site HOST --name N --to-profile P
 #           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
-#           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove
+#           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove | lock
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | tokens | revoke ID|--all   use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list

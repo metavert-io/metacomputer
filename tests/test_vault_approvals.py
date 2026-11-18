@@ -839,6 +839,27 @@ def run(td, procs):
     r = subprocess.run([sys.executable, os.path.join(LAB, "scripts/verify-audit.py"), alog], capture_output=True, text=True)
     check("verify-audit.py: the local log still checks out", r.returncode == 0, r.stdout[-400:])
 
+    # --- 9. the verbs other vaults use: lock, --passphrase, no --passphrase-stdin -------------------------------
+    r = client("init", "--passphrase-stdin")
+    r2 = client("unlock", "--passphrase-stdin")
+    check("--passphrase-stdin is refused (the passphrase is typed on your terminal, never piped)", r.returncode == 64
+          and r2.returncode == 64 and "never piped" in r.stderr + r2.stderr, (r.stderr, r2.stderr))
+    u = start_unlock(["--for", "10m", "--passphrase", *allow], T)
+    r = client("lock")
+    gone = wait_for(lambda: not os.path.exists(sock), 10)
+    lock_rec = [x for x in audit_recs() if x.get("op") == "lock"][-1]
+    check("unlock --passphrase works (it always asks for it); `lock` from any program ends the unlock (it only restricts)",
+          r.returncode == 0 and "Locked" in r.stdout and gone and u.wait(15) == 0 and "`lock`" in lock_rec.get("reason", ""), (r.stdout, lock_rec))
+    r = client("lock")
+    check("lock when already locked: says so, exit 0", r.returncode == 0 and "already locked" in r.stdout, r.stdout)
+    u = start_unlock(["--for", "10m", *allow], T)
+    proc = background(*fill)
+    next_request(u)
+    client("lock")
+    rc, out, _ = finish(proc)
+    check("lock while a question waits: the use is refused and the vault locks", rc in (2, 3) and wait_for(lambda: not os.path.exists(sock), 10), out)
+    u.wait(15)
+
     # --- 10. a last audit record longer than the tail that's read: the next record still follows it ---------------
     adir = os.path.join(td, "a10")
     os.makedirs(adir, mode=0o700)

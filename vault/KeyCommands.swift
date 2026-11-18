@@ -2,6 +2,14 @@
 import Darwin
 import Foundation
 
+/// `--passphrase-stdin` (a passphrase piped in by a script) is refused: here the passphrase is typed on your
+/// own terminal, never read from a pipe a program could fill.
+func refusePassphraseStdin(_ argv: [String]) throws {
+    if argv.contains(where: { $0 == "--passphrase-stdin" || $0.hasPrefix("--passphrase-stdin=") }) {
+        throw usageError("--passphrase-stdin isn't supported: the vault passphrase is typed on your own terminal, never piped in (a script could pass it, and so could any program running as you)")
+    }
+}
+
 func showRecoveryKey(_ text: String) {
     oprint("""
 
@@ -15,7 +23,9 @@ func showRecoveryKey(_ text: String) {
 }
 
 func cmdInit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["enclave", "no-enclave"])
+    try refusePassphraseStdin(argv)
+    // --passphrase, as other vaults spell it: this vault always uses one (typed twice, never an argument).
+    let a = try parseArgs(argv, values: [], flags: ["enclave", "no-enclave", "passphrase"])
     guard !(a.has("enclave") && a.has("no-enclave")) else { throw usageError("--enclave or --no-enclave, not both") }
     let enclave = a.has("no-enclave") ? false : (a.has("enclave") || enclaveAvailable())
     if enclave && !enclaveAvailable() { throw VaultError("this Mac has no Secure Enclave; use --no-enclave") }

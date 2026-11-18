@@ -397,6 +397,7 @@ final class UnlockServer {
         }
         while true {
             if receivedSignal != 0 { return result }
+            if stopReason != nil { result = .denied("the vault was locked"); return result }
             if let d = p.decision { result = d; return d }
             if Date() >= deadline {
                 if promptOpen { eprint("\n  (no answer in \(timeout) s: not allowed)"); promptOpen = false } else {
@@ -503,6 +504,10 @@ final class UnlockServer {
         case "requests": res = opRequests()
         case "rule_list": res = opRuleList()
         case "deny": res = opDeny(req, who)
+        case "lock":
+            stopReason = "locked with `lock` (from \(who.describe))"
+            say("\(clockTime())  `lock` from \(who.describe)")
+            res = ["ok": true, "status": "ok"]
         case "approve":
             res = opApprove(c, req, who)
             if res == nil { return }            // it waits for the dialog: replyWaiters answers it
@@ -969,6 +974,11 @@ final class UnlockServer {
         case "rule_add": res = opRuleAdd(req, who)
         case "rule_list": res = opRuleList()
         case "rule_remove": res = opRuleRemove(req, who)
+        case "lock":
+            // It only restricts: anyone may. The loop ends after this reply.
+            stopReason = "locked with `lock` (from \(who.describe))"
+            say("\(clockTime())  `lock` from \(who.describe)")
+            res = ["ok": true, "status": "ok"]
         default: res = ["ok": false, "status": "error", "reason": "unknown request \(clean(op, max: 40))"]
         }
         setTimeouts(c, seconds: 10)
@@ -1251,8 +1261,11 @@ final class UnlockServer {
         }
         let profile = req["profile"] as? String
         let userSel = req["username_selector"] as? String
+        // What the agent calls itself (request_site_login's `agent`): shown and recorded, never trusted.
+        let agent = (req["agent"] as? String).map { promptText($0, max: 64) }.flatMap { $0.isEmpty ? nil : $0 }
         fields["password_selector"] = clean(passSel, max: 300)
         if let u = userSel { fields["username_selector"] = clean(u, max: 300) }
+        if let ag = agent { fields["agent"] = ag }
         say("\(clockTime())  sign in with \(name) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
             + ", password '\(promptText(passSel, max: 60))'" + (userSel.map { ", username '\(promptText($0, max: 60))'" } ?? "")
             + ", asked by \(who.describe)")
@@ -1308,7 +1321,8 @@ final class UnlockServer {
         var requestID: String?
         if idp || confirmEach || s.approval == "each" {
             let o = approve("fill", name, "  Sign in with \(name) (" + (userSel == nil ? "password" : "username and password") + ") on \(origin), VM \(vm)"
-                            + (profile.map { ", Chrome profile \($0)" } ?? "") + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin,
+                            + (profile.map { ", Chrome profile \($0)" } ?? "") + "?\n  Asked by \(who.describe)"
+                            + (agent.map { "; the agent calls itself \"\($0)\" (unverified)" } ?? "") + ".", who, vm: vm, site: origin,
                             use: "login", summary: "sign in with \(name) on \(origin)", usernameHint: hint, identityProvider: idp,
                             proposedID: req["request_id"] as? String, ruleUse: "fill")
             approval = o.how
@@ -1655,6 +1669,16 @@ final class UnlockServer {
         if let why = requiredSinkProblem("session_load", fields, who) { return finish("session_load", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
             return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
+        }
+        if cookies {
+            // Nobody is asked to approve a load that can't work: the profile needs a cookie store first.
+            if let r = try? runner.opsSSH(t, remote: cookieStoreCheckScript(user: t.binding.guest_user, profile: profile), input: [], timeout: 30) {
+                if let why = sealedSessionRefusal(r) { return finish("session_load", fields, failed(why), who, approval: "-") }
+                if r.status == 5 || r.status == 6 {
+                    let why = oneLine(String(decoding: r.stderr, as: UTF8.self), max: 300)
+                    return finish("session_load", fields, r.status == 5 ? denied(why) : failed(why), who, approval: "-")
+                }
+            }
         }
         var approval = "session"
         // A whole browser profile may hold any sign-in, an identity provider's included: every load asks, whatever

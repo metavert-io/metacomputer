@@ -763,6 +763,16 @@ except sqlite3.Error as e:
 print(json.dumps({"ok": True, "cookies": n}))
 """#
 
+/// Before anyone is asked: does the profile have a cookie store to load into? (exit 6 when it doesn't)
+func cookieStoreCheckScript(user: String, profile: String) -> String {
+    let root = profileRoot(user), d = root + "/" + profile
+    return "# mcomp-cookie-check\n"
+        + "[ ! -L '\(root)' ] && [ ! -L '\(d)' ] || { echo 'the profile folder is a symbolic link; refusing' >&2; exit 5; }\n"
+        + "[ -f '\(d)/Default/Network/Cookies' ] || [ -f '\(d)/Default/Cookies' ] || { echo 'the VM has no driver profile \(profile) with a cookie store yet: "
+        + "open it once in page-mode Chrome (browser_prepare, profile isolated_named \(profile)), end that session, then load again' >&2; exit 6; }\n"
+        + "exit 0\n"
+}
+
 func cookieLoadScript(user: String, profile: String) -> String {
     let root = profileRoot(user), d = root + "/" + profile
     return "set -e\n"

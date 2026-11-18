@@ -794,7 +794,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_site_login.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -974,7 +974,9 @@ person at it, and without it there is none. It covers:
 - **`unlock --touch-id`:** the dialog allows or refuses; inside tmux a typed answer
   doesn't approve;
 - **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit
-  --verify` and `verify-audit.py` on the log with the new records.
+  --verify` and `verify-audit.py` on the log with the new records;
+- **the verbs other vaults use:** `--passphrase-stdin` refused, `unlock --passphrase`,
+  `lock` from any program (also while a question waits), `lock` when already locked.
 
 `python3 tests/test_vault_import.py` (55 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
@@ -1003,6 +1005,33 @@ release build contains neither switch. It covers:
   and replaced, a profile never opened (exit 6), a keyring-encrypted store and a symbolic
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
+
+`python3 tests/test_site_login.py` (24 checks, about a minute) runs the hub with a stand-in
+driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
+0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
+standing in for the VM. It covers:
+- the two tools in `tools/list` with Keyvault's parameters;
+- `request_site_login`: locked, a bad url, no saved login (naming the import command),
+  several logins (a masked list); the main path (pending with the vault's own request id,
+  the question naming the agent as unverified, `approve ID`, then filled with a masked
+  username and the tab, the fields filled through the vault's path with the snapshot's
+  selectors, the submit click, the audit record with the hub as `via`); declined; an
+  unknown request id; a tab on another site refused before typing; the SDK's
+  `request_site_login`; another controller refused by the hub;
+- `teleport_browser_session`: no imported session (naming `import-session`), Firefox
+  refused, a profile with no cookie store (the hub has the driver create it before the vault
+  asks), then moved.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (13 checks, a test VM) does both
+tools end to end. It serves the fixture pages and a cookie-echo page in the VM, then:
+- **`request_site_login`:** the hub opens page-mode Chrome, the test build's stand-in
+  approves through `approve ID`, and the fill account types both fields. The page's own
+  result line shows the right lengths.
+- **`teleport_browser_session`:** a session imported from a synthetic Chrome profile (a
+  cookie for localhost under a test key) loads into a new driver profile, and the VM's
+  Chrome sends that cookie: the page sees its value's hash.
+
+It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 
 `python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.

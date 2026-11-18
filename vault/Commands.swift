@@ -7,7 +7,7 @@ mcomp-vault: credentials for the metacomputer VM, used without passing through t
 (Usually run as `metacomputer secrets ...`, which fills in the current VM.)
 
 In your own terminal (these ask for the vault passphrase):
-  init [--no-enclave]                    create the vault (bound to this Mac's Secure Enclave when it has one;
+  init [--no-enclave] [--passphrase]     create the vault (bound to this Mac's Secure Enclave when it has one;
                                          prints a one-time recovery key)
   set NAME --kind password|totp|text --origin https://site [--origin ...]
       [--username U] [--approval session|each] [--project DIR ...] [--replace]
@@ -52,13 +52,14 @@ From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
   fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
-  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID]
+  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID] [--agent TEXT]
                                          sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
   session load NAME --vm VM [--profile P]            put a sealed profile back, under its own name
   token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
   tokens [--json]   revoke ID|--all      live tokens; end them
   requests [--json]                      uses waiting for your approval: id, who asked, site, masked username, age
+  lock                                   end the running unlock now (anyone may: it only restricts)
   deny ID                                refuse a waiting request
   rule list [--json] | rule remove ID    unattended rules; remove one
   audit-sink list | show NAME | test NAME
@@ -98,6 +99,7 @@ func runMain(_ argv: [String]) -> Int32 {
         case "recover": return try cmdRecover(paths, rest)
         case "rotate-session-key": return try cmdRotateSessionKey(paths, rest)
         case "unlock": return try cmdUnlock(paths, rest)
+        case "lock": return try cmdLock(paths, rest)
         case "list": return try cmdList(paths, rest)
         case "fill": return try cmdFill(paths, rest)
         case "login": return try cmdLogin(paths, rest)
@@ -365,7 +367,9 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 // MARK: - unlock
 
 func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id", "require-presence", "no-require-presence"])
+    try refusePassphraseStdin(argv)
+    // --passphrase, as other vaults spell it: unlocking always asks for it here.
+    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id", "require-presence", "no-require-presence", "passphrase"])
     guard a.positional.isEmpty else {
         throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]")
     }
@@ -406,6 +410,23 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     ftruncate(lfd, 0)
     close(lfd)
     return rc
+}
+
+/// `lock`: end the running unlock now. Anyone may (it only restricts); the unlock terminal says who asked.
+func cmdLock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: [], flags: ["json"])
+    guard a.positional.isEmpty else { throw usageError("usage: lock") }
+    do {
+        let res = try request(paths, ["op": "lock"], timeout: 15)
+        if a.has("json") { printResult(res, ["ok", "reason"]); return exitFor(res) }
+        if res["ok"] as? Bool == true { oprint("Locked: the unlock process is ending; tokens end with it.") } else {
+            eprint(clean("mcomp-vault: \(res["reason"] as? String ?? "no answer")", max: 300))
+        }
+        return exitFor(res)
+    } catch ClientError.locked {
+        if a.has("json") { oprint(jsonLine(["ok": true, "reason": "already locked"])) } else { oprint("The vault is already locked.") }
+        return Exit.ok
+    }
 }
 
 // MARK: - client side
@@ -510,8 +531,11 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID]"
-    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid"])
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent"])
     guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
+    if let ag = a.last("agent") {
+        guard ag.count <= 200 else { throw usageError("--agent: at most 200 characters") }
+    }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
     var req: [String: Any] = ["op": "login", "name": name, "vm": vm]
@@ -524,6 +548,7 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard validName(p) else { throw usageError("--profile: a driver profile name") }
         req["profile"] = p
     }
+    if let ag = a.last("agent") { req["agent"] = ag }
     try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {

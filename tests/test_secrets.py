@@ -256,6 +256,12 @@ elif "mcomp-session-load" in remote:
         log()
         sys.stderr.write("SECRET-FROM-GUEST-7731\n")
         sys.exit(7)
+elif "mcomp-cookie-check" in remote:
+    rec["kind"] = "cookies:check"
+    if flag("no-cookie-store-next"):
+        log()
+        sys.stderr.write("the VM has no driver profile with a cookie store yet: open it once in page-mode Chrome, end that session, then load again\n")
+        sys.exit(6)
 elif "mcomp-cookie-load" in remote:
     # Imported cookies (tests/test_vault_import.py): what the VM's loader would get.
     rec["kind"] = "cookies:load"

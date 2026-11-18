@@ -9,7 +9,7 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
 - **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
-- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`.
+- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, and the MCP tools `request_site_login` and `teleport_browser_session`. `lock` only if the user asks you to lock the vault.
 
 ## First: what's stored
 
@@ -48,6 +48,8 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 7. Submit with a click, then check the signed-in page with a fresh snapshot.
 
 `{"ok":true,...,"chars":N}` means it was typed and checked. That is the verification: don't read the field back.
+
+**The MCP tool, in one step:** `request_site_login {url}` (the `metacomputer` server's own tool) does the above for a standard sign-in form. It opens page-mode Chrome on the page (or uses your tab: pass `session`, `target_id`, `tab_id`), finds the fields, has the vault fill them under one approval and submits. If the user must approve, it answers `status: "pending"` with a `request_id`: tell them the id and how to approve, then call again with `{url, request_id, wait_secs: 60}`. `status: "filled"` gives the tab to keep working in; `denied` means the user said no. Pass `username` when the site has several logins. `teleport_browser_session {sites: ["github.com"]}` loads a session the user imported from their own Chrome (same two steps); if there is none, its error names the `import-session` command for the user.
 
 **One approval for username and password:** `metacomputer secrets login NAME --username-selector '#user' --password-selector '#pass' [--profile P]` (selectors from a `dom_refs_v1` snapshot, each matching exactly one field) fills both into the page's fields with one question instead of two. Leave out `--username-selector` on a password-only page. The answer lists `fields`, the `origin` and a masked `username_hint`. Then submit with a click and check the page.
 
