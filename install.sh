@@ -4,16 +4,17 @@
 #   ./install.sh               interactive; asks at most four questions
 #   ./install.sh --yes         accept the defaults (Chrome included, build now)
 #   ./install.sh --no-chrome   Firefox only in the VM
-#   ./install.sh --lume=standard   Cua's notarized Lume instead of lume-secure (the
-#                              VM then always shares your clipboard, audio and Rosetta)
+#   ./install.sh --lume=standard   Cua's notarized Lume instead of mcomp-vm (the
+#                              VM then always shares your clipboard, audio and Rosetta);
+#                              (--lume=mcomp-vm, or --lume=secure as before the rename, picks mcomp-vm)
 #   ./install.sh --no-build    set everything up but don't build the VM yet
 #   ./install.sh --no-claude   don't touch Claude Code (skill, MCP server, metacomputer command)
 #   ./install.sh --uninstall   remove the Claude Code hooks this installed (the VM stays)
 #
 # What it does (each step is skipped when already done):
 #   1. checks the Mac, installs missing tools with Homebrew (asks first)
-#   2. installs Lume, the VM runner: lume-secure (default; built from the pinned
-#      tag, can leave out clipboard/audio/Rosetta sharing) or Cua's release
+#   2. installs Lume, the VM runner: mcomp-vm (default; metacomputer's build of Lume
+#      from the pinned tag, can leave out clipboard/audio/Rosetta sharing) or Cua's release
 #   3. writes config/local.env, this Mac's settings (asks whether to add Chrome)
 #   4. links the `metacomputer` command, the `metacomputer` skill and the
 #      `metacomputer` MCP server into Claude Code, for every project
@@ -26,8 +27,9 @@ for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;; --no-chrome) CHROME=no ;; --no-build) BUILD=no ;;
     --no-claude) CLAUDE=0 ;; --uninstall) UNINSTALL=1 ;;
-    --lume=secure|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --lume=mcomp-vm|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
+    --lume=secure) LUME_CHOICE=mcomp-vm ;;   # mcomp-vm's former name, lume-secure
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $a (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -71,13 +73,22 @@ if [ "$UNINSTALL" = 1 ]; then
   fi
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$ROOT/config/local.env" ] && . "$ROOT/config/local.env"
-  # The runner this checkout uses (LUME in config/local.env; lume-secure by default), named as it's installed.
-  runner="${LUME:-$HOME/.local/bin/lume-secure}"
-  [ -x "$runner" ] || runner="$(command -v lume-secure || command -v lume || echo lume-secure)"
+  # The runner this checkout uses (LUME in config/local.env; mcomp-vm by default), found as
+  # scripts/lib.sh finds it: lume-secure, mcomp-vm's former name, while LUME's isn't installed.
+  runner="${LUME:-$HOME/.local/bin/mcomp-vm}"
+  command -v "$runner" >/dev/null 2>&1 || [ ! -x "$HOME/.local/bin/lume-secure" ] || runner="$HOME/.local/bin/lume-secure"
+  name="$(basename "$runner")"
   echo "The VM is untouched. To delete it too, with the runner that made it ($runner):"
   echo "  $runner delete $VM_NAME && $runner delete $BASELINE_NAME"
   echo "  and any checkpoints ($VM_NAME-ckpt-*) and $BASELINE_NAME-prev that '$runner ls' lists"
-  echo "(then its SSH keys: rm -r $SSH_DIR; and last, lume-secure itself: rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure)"
+  if [ "$runner" = "$HOME/.local/bin/$name" ]; then
+    echo "(then its SSH keys: rm -r $SSH_DIR; and last, $name itself: rm -rf ~/.local/share/$name ~/.local/bin/$name)"
+  else
+    echo "(then its SSH keys: rm -r $SSH_DIR; and last, the runner itself, $runner)"
+  fi
+  if [ "$name" != lume-secure ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
+    echo "(lume-secure, mcomp-vm's former name, is installed too: rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure)"
+  fi
   exit 0
 fi
 
@@ -105,34 +116,57 @@ ok "tools: git curl go gpg ffmpeg python3"
 
 # shellcheck source=config/defaults.env
 . "$ROOT/config/defaults.env"
+CONF="$ROOT/config/local.env"
+# This Mac's settings, if it has them, can change the pins, e.g. mcomp-vm's source. A
+# local.env from before the rename may set that under the former names
+# (LUME_SECURE_REPO, _TAG, _COMMIT): those still count; the new names win over them.
+pin_repo="$MCOMP_VM_REPO" pin_tag="$MCOMP_VM_TAG" pin_commit="$MCOMP_VM_COMMIT"
+unset MCOMP_VM_REPO MCOMP_VM_TAG MCOMP_VM_COMMIT
+# shellcheck source=/dev/null
+[ ! -f "$CONF" ] || . "$CONF"
+MCOMP_VM_REPO="${MCOMP_VM_REPO:-${LUME_SECURE_REPO:-$pin_repo}}"
+MCOMP_VM_TAG="${MCOMP_VM_TAG:-${LUME_SECURE_TAG:-$pin_tag}}"
+MCOMP_VM_COMMIT="${MCOMP_VM_COMMIT:-${LUME_SECURE_COMMIT:-$pin_commit}}"
 
 # --- 2. Lume ------------------------------------------------------------------------
 step "Lume (runs the VM with Apple's Virtualization framework)"
-CONF="$ROOT/config/local.env"
 if [ -z "$LUME_CHOICE" ] && [ -f "$CONF" ] && grep -q '^LUME=' "$CONF"; then
-  case "$(grep '^LUME=' "$CONF" | tail -1)" in *lume-secure*) LUME_CHOICE=secure ;; *) LUME_CHOICE=standard ;; esac
-  ok "keeping your choice: $LUME_CHOICE"
+  case "$(grep '^LUME=' "$CONF" | tail -1)" in
+    *mcomp-vm*) LUME_CHOICE=mcomp-vm; ok "keeping your choice: mcomp-vm" ;;
+    *lume-secure*) LUME_CHOICE=mcomp-vm; ok "keeping your choice: mcomp-vm (formerly lume-secure)" ;;
+    *) LUME_CHOICE=standard; ok "keeping your choice: standard" ;;
+  esac
 fi
 if [ -z "$LUME_CHOICE" ]; then
-  echo "  lume-secure (recommended) is Lume plus flags that keep your Mac's clipboard, audio and"
-  echo "  Rosetta away from the VM; it's built from source (about a minute). Standard Lume is"
-  echo "  Cua's notarized release, which always shares them with the VM."
-  if ask "Use lume-secure?" Y; then LUME_CHOICE=secure; else LUME_CHOICE=standard; fi
+  echo "  mcomp-vm (recommended) is metacomputer's build of Lume, with flags that keep your Mac's"
+  echo "  clipboard, audio and Rosetta away from the VM; it's built from source (about a minute)."
+  echo "  Standard Lume is Cua's notarized release, which always shares them with the VM."
+  if ask "Use mcomp-vm?" Y; then LUME_CHOICE=mcomp-vm; else LUME_CHOICE=standard; fi
 fi
-if [ "$LUME_CHOICE" = secure ]; then
-  LUME_BIN="$HOME/.local/bin/lume-secure"
-  if [ -x "$LUME_BIN" ] && grep -qs "upstream=lume-v$LUME_VERSION" "$HOME/.local/share/lume-secure/BUILD_INFO" \
+if [ "$LUME_CHOICE" = mcomp-vm ]; then
+  LUME_BIN="$HOME/.local/bin/mcomp-vm"
+  if [ -x "$LUME_BIN" ] && grep -qs "upstream=lume-v$LUME_VERSION" "$HOME/.local/share/mcomp-vm/BUILD_INFO" \
      && "$LUME_BIN" run --help 2>&1 | grep -q -- "--no-host-sharing"; then
     ok "already installed: $LUME_BIN"
   else
     if ! xcode-select -p >/dev/null 2>&1 || ! command -v swift >/dev/null 2>&1; then
-      die "lume-secure is built with Swift: install Apple's Command Line Tools (xcode-select --install), then run this again, or use ./install.sh --lume=standard"
+      die "mcomp-vm is built with Swift: install Apple's Command Line Tools (xcode-select --install), then run this again, or use ./install.sh --lume=standard"
     fi
-    src="$ROOT/.cache/lume-secure"; rm -rf "$src"; mkdir -p "$ROOT/.cache"
-    git clone -q --depth 1 --branch "$LUME_SECURE_TAG" "$LUME_SECURE_REPO" "$src"
-    [ "$(git -C "$src" rev-parse HEAD)" = "$LUME_SECURE_COMMIT" ] || die "lume-secure $LUME_SECURE_TAG isn't the pinned commit $LUME_SECURE_COMMIT"
+    src="$ROOT/.cache/mcomp-vm"; rm -rf "$src"; mkdir -p "$ROOT/.cache"
+    git clone -q --depth 1 --branch "$MCOMP_VM_TAG" "$MCOMP_VM_REPO" "$src"
+    [ "$(git -C "$src" rev-parse HEAD)" = "$MCOMP_VM_COMMIT" ] || die "mcomp-vm $MCOMP_VM_TAG isn't the pinned commit $MCOMP_VM_COMMIT"
     "$src/install.sh"
-    ok "installed $LUME_BIN (lume-secure $LUME_SECURE_TAG)"
+    # A tag from before the rename (pinned in local.env) installs the runner as lume-secure.
+    if [ ! -x "$LUME_BIN" ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
+      LUME_BIN="$HOME/.local/bin/lume-secure"
+      warn "$MCOMP_VM_TAG installs the runner under its former name, lume-secure"
+    fi
+    [ -x "$LUME_BIN" ] || die "$src/install.sh didn't install $LUME_BIN"
+    ok "installed $LUME_BIN (mcomp-vm $MCOMP_VM_TAG)"
+  fi
+  if [ "$LUME_BIN" != "$HOME/.local/bin/lume-secure" ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
+    ok "lume-secure, its former name, stays installed and sees the same VMs; once nothing uses it:"
+    echo "    rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure"
   fi
 else
   LUME_BIN="$HOME/.local/bin/lume"

@@ -23,7 +23,17 @@ NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
 QCOW2RAW_BIN="$LAB_ROOT/vendor/bin/qcow2raw"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 export LUME_TELEMETRY_ENABLED=0
-LUME="${LUME:-$HOME/.local/bin/lume-secure}"
+# The VM runner. mcomp-vm was called lume-secure, and a Mac set up before the
+# rename may have only ~/.local/bin/lume-secure (the same build; it sees the
+# same VMs). While LUME's runner isn't installed and that one is, use it and say
+# so once per command. With neither, LUME stays as set and the usual errors apply.
+LUME="${LUME:-$HOME/.local/bin/mcomp-vm}"
+LUME_FORMER="$HOME/.local/bin/lume-secure"
+if ! command -v "$LUME" >/dev/null 2>&1 && [ -x "$LUME_FORMER" ]; then
+  [ -n "${MCOMP_LUME_NOTICE:-}" ] || printf '%s\n' "metacomputer: $LUME isn't installed, so this uses $LUME_FORMER, mcomp-vm's former name (./install.sh installs mcomp-vm)" >&2
+  export MCOMP_LUME_NOTICE=1   # scripts this command runs don't repeat it
+  LUME="$LUME_FORMER"
+fi
 PY="${PY:-/opt/homebrew/bin/python3}"
 [ -x "$PY" ] || PY=python3
 
@@ -123,7 +133,7 @@ EOF
 # --- VM run/stop ------------------------------------------------------------
 # Host-sharing devices: Lume attaches the SPICE clipboard port, a sound device
 # (host speakers + microphone) and the Rosetta share to every VM. A Lume with
-# the opt-out flags (lume-secure, or a Lume that adopted them) leaves out each
+# the opt-out flags (mcomp-vm, or a Lume that adopted them) leaves out each
 # one whose SHARE_* setting isn't "on"; any other Lume always shares them.
 host_sharing_args() {
   if "$LUME" run --help 2>&1 | grep -q -- "--no-host-sharing"; then
@@ -133,7 +143,7 @@ host_sharing_args() {
     [ "${SHARE_ROSETTA:-off}" = on ] || a="$a --no-share-rosetta"
     printf '%s' "$a"
   elif [ "${SHARE_CLIPBOARD:-off}${SHARE_AUDIO:-off}${SHARE_ROSETTA:-off}" != ononon ]; then
-    warn "$LUME always shares your clipboard, audio and Rosetta with the VM; lume-secure can turn them off (README: Isolation)"
+    warn "$LUME always shares your clipboard, audio and Rosetta with the VM; mcomp-vm can turn them off (README: Isolation)"
   fi
 }
 
