@@ -43,6 +43,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import owners  # noqa: E402
+from termsafe import UNSAFE, escape_for_terminal  # noqa: E402,F401
 
 LAB = owners.LAB
 GUEST_PART = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vm_shell_guest.py")
@@ -400,14 +401,9 @@ def shown_bytes(st, label):
     return head + note + tail
 
 
-# Control characters (but newline and tab), DEL, C1 controls and the bidirectional
-# overrides and isolates, which can move the cursor, rewrite what's on screen, set the
-# clipboard (OSC 52) or make text read differently from what it is.
-UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
-
-
-def clean(text):
-    return UNSAFE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100 else f"\\u{ord(m.group()):04x}", text)
+# Terminal escaping lives in termsafe.py (shared with inspect and web): control
+# characters but newline and tab, DEL, C1 controls and bidi controls are shown escaped.
+clean = escape_for_terminal
 
 
 def clean_bytes(b):
