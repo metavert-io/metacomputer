@@ -88,10 +88,20 @@ def ancestors(pid, table):
     return chain
 
 
+# Claude Code's process: `claude` (npm, Homebrew, the IDE extensions' native-binary/claude) or,
+# for the native installer, the version file itself: ~/.local/share/claude/versions/2.1.325.
+_NATIVE_CLAUDE = re.compile(r"/claude/versions/\d+\.\d+\.\d+[^/]*$")
+
+
+def is_claude(comm):
+    """True when a process table command (ps comm=) is Claude Code."""
+    return os.path.basename(comm or "") == "claude" or bool(_NATIVE_CLAUDE.search(comm or ""))
+
+
 def claude_of(pid, table):
     """Nearest Claude Code process above pid (None outside Claude Code)."""
     for p in ancestors(pid, table)[1:]:
-        if os.path.basename(table[p][1]) == "claude":
+        if is_claude(table[p][1]):
             return p
     return None
 
@@ -271,10 +281,10 @@ def direct_connections(table):
         chain = ancestors(pid, table)
         who = None
         for p in chain[1:]:
-            base = os.path.basename(table[p][1])
-            if base == "claude" or "python" in base:
+            claude = is_claude(table[p][1])
+            if claude or "python" in os.path.basename(table[p][1]):
                 who = p
-                if base == "claude":
+                if claude:
                     break
         who = who or ppid
         out.append({"ssh_pid": pid, "via_pid": who, "via": full_command(who)[:120],
