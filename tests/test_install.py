@@ -956,7 +956,8 @@ def test_get_confirm_local_state():
             ("an unknown .cache entry", lambda d: write(os.path.join(d, ".cache", "mystuff", "notes.txt"), "mine\n"), ".cache/mystuff"),
             ("cached sources (.cache/cua-src)", lambda d: write(os.path.join(d, ".cache", "cua-src", "x"), "x\n"), ".cache/cua-src"),
             ("Python bytecode (__pycache__)", lambda d: write(os.path.join(d, "lib", "__pycache__", "m.pyc"), "x"), "lib/__pycache__"),
-            # rclone's download: the unpacked program is checked only against the digest kept beside it.
+            # rclone's download: the unpacked program and a digest file beside it aren't needed (storage checks the
+            # program against its pinned digest and unpacks it again from the zip), so get.sh refuses them.
             ("the unpacked rclone program and its recorded digest", lambda d: [
                 write(os.path.join(d, ".cache", "rclone-v1.75.2", "SHA256SUMS"), "x\n"),
                 write(os.path.join(d, ".cache", "rclone-v1.75.2", "rclone"), "#!/bin/sh\n", 0o755),

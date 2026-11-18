@@ -2512,31 +2512,106 @@ def scrub(text, keys):
     return text
 
 
-def rclone_bin(fetch=True):
-    """The pinned rclone (.cache/rclone-vVERSION/rclone), checked against the digest recorded when its
-    signed, pinned zip was unpacked; fetched (scripts/fetch-artifacts.sh rclone) if missing."""
-    ver = env("RCLONE_VERSION", "")
+def rclone_pins():
+    """(version, zip name, zip sha256, program sha256) from config/defaults.env; StorageError if one is malformed."""
+    ver, zipname = env("RCLONE_VERSION", ""), env("RCLONE_ZIP", "")
+    zsha, bsha = env("RCLONE_SHA256", "").lower(), env("RCLONE_BIN_SHA256", "").lower()
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", ver or ""):
         raise StorageError("RCLONE_VERSION isn't set (config/defaults.env)")
-    d = os.path.join(LAB, ".cache", f"rclone-v{ver}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.zip", zipname or "") or ".." in zipname:
+        raise StorageError("RCLONE_ZIP isn't set (config/defaults.env)")
+    for name, v in (("RCLONE_SHA256", zsha), ("RCLONE_BIN_SHA256", bsha)):
+        if not re.fullmatch(r"[0-9a-f]{64}", v or ""):
+            raise StorageError(f"{name} isn't set (config/defaults.env)")
+    return ver, zipname, zsha, bsha
+
+
+def file_sha256(path):
+    """SHA-256 of the file at path itself (a link there isn't followed), or None when there's none."""
+    import hashlib
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 8 * MIB)
+            if not chunk:
+                return h.hexdigest()
+            h.update(chunk)
+    finally:
+        os.close(fd)
+
+
+def unpack_rclone(d, zipname, zsha, bsha):
+    """Unpack the rclone program from the downloaded zip in d, if the zip is the pinned one (RCLONE_SHA256) and the
+    program in it is the pinned one (RCLONE_BIN_SHA256): written beside, then renamed over d/rclone. True when done."""
+    import hashlib
+    import zipfile
+    z = os.path.join(d, zipname)
+    if file_sha256(z) != zsha:
+        return False
+    try:
+        with zipfile.ZipFile(z) as zf:
+            members = [i for i in zf.infolist() if not i.is_dir() and i.filename.split("/")[-1] == "rclone"]
+            if len(members) != 1:
+                return False
+            data = zf.read(members[0])
+    except (OSError, zipfile.BadZipFile):
+        return False
+    if hashlib.sha256(data).hexdigest() != bsha:
+        return False
+    part = os.path.join(d, "rclone.part")
+    try:
+        os.unlink(part)
+    except FileNotFoundError:
+        pass
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o755)
+    try:
+        write_all(fd, data, 0)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(part, 0o755)
+    os.replace(part, os.path.join(d, "rclone"))
+    try:
+        os.unlink(os.path.join(d, "rclone.sha256"))      # an earlier version's digest file: never read, so gone
+    except OSError:
+        pass
+    return True
+
+
+def rclone_bin(fetch=True, cache=None):
+    """The pinned rclone (CACHE/rclone-vVERSION/rclone, CACHE being the checkout's .cache), checked before every use
+    against the program's pinned digest (RCLONE_BIN_SHA256 in config/defaults.env), never against a file on disk.
+    Missing or different (a planted program included), it's unpacked again from the downloaded zip once that zip
+    matches its own pin; failing that, downloaded and verified again (scripts/fetch-artifacts.sh rclone: the signed
+    SHA256SUMS, the zip's pin, the program's pin)."""
+    ver, zipname, zsha, bsha = rclone_pins()
+    d = os.path.join(cache or os.path.join(LAB, ".cache"), f"rclone-v{ver}")
     b = os.path.join(d, "rclone")
-    if not os.path.isfile(b) and fetch:
+    if file_sha256(b) != bsha and not (os.path.isdir(d) and unpack_rclone(d, zipname, zsha, bsha)):
+        if not fetch:
+            raise StorageError(f"{b} isn't the pinned rclone (RCLONE_BIN_SHA256) and the pinned zip isn't there to "
+                               "unpack it again; scripts/fetch-artifacts.sh rclone downloads and verifies it")
         r = subprocess.run([os.path.join(LAB, "scripts", "fetch-artifacts.sh"), "rclone"], stdout=sys.stderr)
         if r.returncode != 0:
             raise StorageError("could not download and verify rclone (scripts/fetch-artifacts.sh rclone)")
-    return verify_rclone(b, ver)
+    return verify_rclone(b, ver, bsha)
 
 
-def verify_rclone(b, ver):
-    import hashlib
-    try:
-        want = open(os.path.join(os.path.dirname(b), "rclone.sha256")).read().strip()
-        got = hashlib.sha256(open(b, "rb").read()).hexdigest()
-    except OSError:
+def verify_rclone(b, ver, want=None):
+    """b is the pinned rclone: its SHA-256 is want (RCLONE_BIN_SHA256 unless given), checked before it's ever run,
+    and only then does it have to report version ver."""
+    want = (want or rclone_pins()[3]).lower()
+    got = file_sha256(b)
+    if got is None:
         raise StorageError(f"rclone isn't installed ({b}); scripts/fetch-artifacts.sh rclone installs it")
-    if not want or got != want:
-        raise StorageError(f"{b} doesn't match the digest recorded when it was verified; run "
-                           "scripts/fetch-artifacts.sh rclone again")
+    if got != want:
+        raise StorageError(f"{b} isn't the pinned rclone (its SHA-256 isn't RCLONE_BIN_SHA256); not running it")
     r = subprocess.run([b, "version"], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
     first = (r.stdout.splitlines() or [""])[0].strip()
     if first != f"rclone v{ver}":

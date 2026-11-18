@@ -318,9 +318,12 @@ again, and its first sync brings the bucket's files back.
 - **rclone** is pinned by version and SHA-256 in `config/defaults.env` and downloaded on
   first use by `scripts/fetch-artifacts.sh rclone`, like the build's other artifacts:
   rclone's `SHA256SUMS` must be signed by rclone's release key (fingerprint pinned; only
-  that key is kept from the key file), the pinned digest must match the signed list and
-  the zip, and the program's own digest is recorded and checked before every run. It
-  runs only on the Mac.
+  that key is kept from the key file), and the pinned digest must match the signed list and
+  the zip. The program inside the zip is pinned as well (`RCLONE_BIN_SHA256`): before every
+  use the unpacked program is checked against that pinned value, never against a file on
+  disk, and one that's missing or different (a planted copy, say) is never run but unpacked
+  again from the zip, once the zip matches its own pin (downloaded and verified again if
+  needed). It runs only on the Mac.
 - **Endpoints:** `https://...`, or `http://` (a warning unless it's this Mac's
   loopback: the keys sign each request but the files travel unencrypted). Use a key
   limited to that bucket.

@@ -379,8 +379,9 @@ env_is_data() { # FILE: blank lines, comments and NAME=value lines that only set
 # A file in .cache/rclone-vVERSION/ (scripts/fetch-artifacts.sh rclone, for S3 volumes) that is checked again
 # before every use: SHA256SUMS (downloaded again, then its signature by the pinned key), the key files (used
 # only through that check) and the zip (its pinned SHA-256), with an unfinished download of it. Not the
-# unpacked program (rclone) or rclone.sha256: storage checks the program only against the digest kept beside
-# it, so a planted pair would run on this Mac.
+# unpacked program (rclone) or a digest file beside it: storage checks the program against its pinned digest
+# (RCLONE_BIN_SHA256) before every use and unpacks it again from the zip, so one in a checkout is never
+# needed, and refusing it keeps this check from depending on that.
 rclone_download() {
   case "$1" in
     */*) return 1 ;;

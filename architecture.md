@@ -611,7 +611,9 @@ images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-
   reserve while it runs. Backups are pruned to `S3_BACKUP_MAX_GB` before and after. A resync
   runs only on `volume sync NAME --resync` (or for the first sync of an empty copy). rclone
   itself is `.cache/rclone-vVERSION/rclone`, from `scripts/fetch-artifacts.sh rclone` (signed
-  `SHA256SUMS`, pinned key and digest), its digest checked before each run.
+  `SHA256SUMS`, pinned key and zip digest), checked before each use against the program's own
+  pinned digest (`RCLONE_BIN_SHA256`; `rclone_bin`), and unpacked again from the verified zip
+  (`unpack_rclone`) when it's missing or different; no digest file is written or read.
 - **Registered paths are walked** (`walk_dir`, `walk_file`): from `/`, one component at a time,
   each `openat(..., O_NOFOLLOW | O_DIRECTORY)` relative to the last, so no link anywhere in a
   path is followed. Paths are registered as the kernel spells them (`fd_path` of the checked

@@ -50,12 +50,15 @@ fetch_rclone() {
   unzip -q -o "$R/$RCLONE_ZIP" -d "$R/x" || die "could not unpack $RCLONE_ZIP"
   got="$(find "$R/x" -type f -name rclone -perm -u+x | head -1)"
   [ -n "$got" ] || die "$RCLONE_ZIP has no rclone program"
+  # The program itself is pinned (RCLONE_BIN_SHA256); storage checks it against that value before every use,
+  # so no digest is written beside it (one there would only invite trusting it).
+  [ -n "${RCLONE_BIN_SHA256:-}" ] && [ "$(shasum -a 256 "$got" | cut -d' ' -f1)" = "$RCLONE_BIN_SHA256" ] \
+    || { rm -rf "$R/x"; die "the rclone program in $RCLONE_ZIP isn't the pinned one (RCLONE_BIN_SHA256)"; }
   install -m 0755 "$got" "$R/rclone.part" && mv "$R/rclone.part" "$R/rclone"
-  rm -rf "$R/x"
-  shasum -a 256 "$R/rclone" | cut -d' ' -f1 > "$R/rclone.sha256"
+  rm -rf "$R/x" "$R/rclone.sha256"
   "$R/rclone" version 2>/dev/null | head -1 | grep -q "rclone v$RCLONE_VERSION\$" \
     || die "the unpacked rclone doesn't report version $RCLONE_VERSION"
-  ok "rclone $RCLONE_VERSION installed at $R/rclone"
+  ok "rclone $RCLONE_VERSION installed at $R/rclone (its sha256 is the pinned RCLONE_BIN_SHA256)"
 }
 if [ "${1:-}" = rclone ]; then fetch_rclone; exit 0; fi
 
