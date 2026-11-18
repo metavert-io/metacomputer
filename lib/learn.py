@@ -48,6 +48,7 @@ import learn_mine  # noqa: E402
 import learn_store  # noqa: E402
 import transcripts  # noqa: E402
 import termsafe  # noqa: E402
+import wirelimits  # noqa: E402
 try:
     import events  # noqa: E402  (the optional event stream; never let it stop a command)
 except Exception:
@@ -827,7 +828,7 @@ def parse_drafts(text, allowed):
     """The drafted lessons that pass every check, as proposals; and the ones dropped, with why."""
     m = re.search(r"\{.*\}", text or "", re.S)
     try:
-        data = json.loads(m.group(0)) if m else {}
+        data = wirelimits.loads(m.group(0)) if m else {}
     except ValueError:
         data = {}
     items = data.get("lessons") if isinstance(data, dict) else None
@@ -887,7 +888,7 @@ def draft_with_claude(rep, covered, model=None, quiet=False, min_count=2):
             say("  Claude didn't answer in time; no drafts.")
             return []
         try:
-            res = json.loads(r.stdout or "{}")
+            res = wirelimits.loads(r.stdout or "{}")
         except ValueError:
             res = {}
         cost = res.get("total_cost_usd") if isinstance(res, dict) else None

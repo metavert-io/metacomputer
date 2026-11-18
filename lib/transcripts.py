@@ -19,10 +19,13 @@ import os
 import re
 import stat
 import time
+import sys
 import zlib
 from datetime import datetime
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(LAB, "lib"))
+import wirelimits  # noqa: E402  (JSON depth and size limits, shared with the hub and its clients)
 # The metacomputer tools: mcp__metacomputer__* (user-scope or --mcp-config server) or the plugin's.
 MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
 # A tool_use of a metacomputer tool, as both formats write it (compact JSON; a space allowed).
@@ -162,7 +165,7 @@ def read_events(path, info=None):
                     info["truncated"] = "time"
                     return
                 try:
-                    ev = json.loads(raw)
+                    ev = wirelimits.loads(raw)
                 except (ValueError, RecursionError):
                     info["skipped"] += 1
                     continue

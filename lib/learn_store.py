@@ -29,8 +29,12 @@ import re
 import stat
 import tempfile
 import time
+import sys
 import uuid
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wirelimits  # noqa: E402  (JSON depth and size limits, shared with the hub and its clients)
 
 MAX_LESSONS = 12                    # at most this many reach the instructions
 MAX_LESSON_CHARS = 400              # each one's text, after cleaning
@@ -159,7 +163,7 @@ def read_json(path, default):
     if raw is None:
         return default, None
     try:
-        return json.loads(raw.decode("utf-8")), None
+        return wirelimits.loads(raw.decode("utf-8")), None
     except (ValueError, UnicodeDecodeError):
         return default, f"{path} is not valid JSON"
 
@@ -210,7 +214,7 @@ def read_ledger(env=None):
     out = []
     for line in (raw or b"").splitlines():
         try:
-            e = json.loads(line)
+            e = wirelimits.loads(line)
         except (ValueError, RecursionError):
             continue
         if isinstance(e, dict) and isinstance(e.get("store_hash"), str):
@@ -365,7 +369,7 @@ def lesson_events(sid, paths):
             if (i or kind == "lessons") and key not in line:
                 continue
             try:
-                ev = json.loads(line)
+                ev = wirelimits.loads(line)
             except (ValueError, RecursionError):
                 continue
             if not isinstance(ev, dict):

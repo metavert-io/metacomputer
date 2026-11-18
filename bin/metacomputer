@@ -351,11 +351,11 @@ for pr in sh["problems"]:
 if out["lessons"] is not None:
     lo = out["lessons"]
     print("Lessons (metacomputer learn: notes you approved, sent to the model as advice; no guard reads them; docs/learn.md)")
-    print(f"  lessons      {learn_store.status_line(dict(lo, problem=None, warning=None)) if not lo.get('problem') else 'none sent'}"
+    print(f"  lessons      {_esc(learn_store.status_line(dict(lo, problem=None, warning=None))) if not lo.get('problem') else 'none sent'}"
           "   (metacomputer learn list)")
     for pr in (lo.get("problem"), lo.get("warning")):
         if pr:
-            print(f"  ! {pr}")
+            print(f"  ! {_esc(pr)}")
 EOF
 }
 
@@ -493,7 +493,7 @@ if ev.get("sinks"):
     import events
     print(f"events        {events.status_line(ev)}   (metacomputer events)")
 if out["lessons"] is not None:
-    print(f"lessons       {learn_store.status_line(out['lessons'])}   (metacomputer learn list)")
+    print(f"lessons       {_esc(learn_store.status_line(out['lessons']))}   (metacomputer learn list)")
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF

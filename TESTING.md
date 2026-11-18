@@ -347,7 +347,7 @@ Each of these needs no VM and takes seconds.
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (about 110 checks, 45 s) needs no VM and no network.
+`python3 tests/test_learn.py` (111 checks, about 45 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -396,7 +396,7 @@ results, window titles, app names, typed text, errors and the model's own text.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (148 checks, about 90 s). A stand-in
+`python3 tests/test_hub.py` needs no VM (159 checks, about 90 s). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
