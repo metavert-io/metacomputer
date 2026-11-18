@@ -968,7 +968,7 @@ fails a request.
 ### What doesn't hold
 
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
-  ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
+  sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:
   - **pose as Chrome's DevTools** on 127.0.0.1 and receive a fill. Nothing the fill
     account can check rules this out: the listener's answers, including the command line
@@ -980,9 +980,10 @@ fails a request.
   - Chrome's own developer tools (F12, `devtools://` pages) can read any field;
   - so can a `javascript:` address typed into the address bar.
 - **Narrowing those two.**
-  - Deny Claude `metacomputer ssh` (and `put`) in Claude Code's permissions, and use
-    `DRIVER_MODE=bounded` with the `desktop` profile (no terminal app). That removes
-    the easy shell routes, not the browser ones.
+  - Turn the shell channel off (`VM_SHELL=off`; `auto` already turns it off while the
+    driver is bounded), deny Claude `metacomputer ssh` (and `put`) in Claude Code's
+    permissions, and use `DRIVER_MODE=bounded` with the `desktop` profile (no terminal
+    app). That removes the easy shell routes, not the browser ones.
   - The VM's managed Chrome policy doesn't turn off developer tools:
     `DeveloperToolsAvailability` might also close the debugging port the driver relies
     on (unconfirmed).

@@ -70,6 +70,6 @@ Never put a real key in the VM (no file, environment variable or command line th
 
 ## Never
 
-- Read a secret, or a filled field's value: no snapshot that includes a field's value, no "show password" buttons, no Chrome developer tools (F12, `devtools://`), no `javascript:` addresses, no querying or posing as Chrome's DevTools through `metacomputer ssh ops`. If a page shows a secret anyway, don't read it out, and tell the user.
+- Read a secret, or a filled field's value: no snapshot that includes a field's value, no "show password" buttons, no Chrome developer tools (F12, `devtools://`), no `javascript:` addresses, no querying or posing as Chrome's DevTools through `metacomputer sh` or `metacomputer ssh ops`. If a page shows a secret anyway, don't read it out, and tell the user.
 - Type a secret with `type_text`, `browser_type` or a shell command.
 - Record sign-in steps unless the user wants that: password fields show dots, but usernames and codes are visible on screen.

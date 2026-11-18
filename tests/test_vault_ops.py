@@ -992,13 +992,13 @@ def run(td, procs):
         r = client("audit-sink", "test", "noca")
         check("a syslog sink without --ca refuses the self-signed server (system trust only)", r.returncode != 0, r.stdout + r.stderr)
         tty([BIN, "audit-sink", "remove", "noca"], [("Vault passphrase", current + "\n")])
-        tty([BIN, "audit-sink", "add", "badhost", "--kind", "syslog", "--url", f"syslog+tls://localhost:{sl.port}", "--ca", ca],
+        # A receiver of its own, so the other syslog sink's deliveries meanwhile don't count.
+        sl_bad = SyslogTLS(srv_cert, srv_key)
+        tty([BIN, "audit-sink", "add", "badhost", "--kind", "syslog", "--url", f"syslog+tls://localhost:{sl_bad.port}", "--ca", ca],
             [("Vault passphrase", current + "\n")])
-        hf = sl.handshake_failures
-        got_before = len(sl.got)
         r = client("audit-sink", "test", "badhost")
         check("a syslog sink with --ca still checks the host name (the certificate is for 127.0.0.1, the URL says localhost)",
-              r.returncode != 0 and sl.handshake_failures > hf and len(sl.got) == got_before, (r.stdout + r.stderr, hf, sl.handshake_failures))
+              r.returncode != 0 and sl_bad.handshake_failures > 0 and not sl_bad.got, (r.stdout + r.stderr, sl_bad.handshake_failures))
         tty([BIN, "audit-sink", "remove", "badhost"], [("Vault passphrase", current + "\n")])
 
     # H2: the dispatcher signs only what the vault wrote
