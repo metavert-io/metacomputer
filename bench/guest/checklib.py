@@ -147,20 +147,50 @@ def auto_styles(root):
 
 
 def bold_runs(p):
-    """Texts of spans (or whole paragraphs) set in bold in an .odt."""
+    """Texts that show in bold in an .odt, as runs of consecutive bold text (whitespace-only runs left out).
+
+    Bold is worked out the way Writer displays it: a paragraph's automatic style sets the starting weight,
+    and each span's style can turn bold on or off for its text ("normal" turns it off). So a paragraph
+    styled bold with the rest of its text in a not-bold span counts only the part left bold."""
     blocks, root = odt_blocks(p)
     styles = auto_styles(root)
 
-    def is_bold(name):
-        return styles.get(name, (None, {}))[1].get("font-weight") == "bold"
+    def weight(name):
+        w = styles.get(name, (None, {}))[1].get("font-weight")
+        if w is None:
+            return None
+        return w == "bold" or (w.isdigit() and int(w) >= 600)
 
     out = []
     for kind, _, sname, text, el in blocks:
-        if is_bold(sname):
-            out.append(text)
-        for span in el.iter(q("text:span")):
-            if is_bold(span.get(q("text:style-name"))):
-                out.append(text_of(span))
+        segs = []
+
+        def walk(e, bold):
+            w = weight(e.get(q("text:style-name")))
+            b = bold if w is None else w
+            segs.append((e.text or "", b))
+            for c in e:
+                if c.tag == q("text:s"):
+                    segs.append((" " * int(c.get(q("text:c"), "1")), b))
+                elif c.tag == q("text:tab"):
+                    segs.append(("\t", b))
+                elif c.tag == q("text:line-break"):
+                    segs.append(("\n", b))
+                elif c.tag in (q("text:span"), q("text:a")):
+                    walk(c, b)
+                else:
+                    segs.append((text_of(c), b))
+                segs.append((c.tail or "", b))
+
+        walk(el, False)
+        run = []
+        for t, b in [(t, b) for t, b in segs if t] + [(" ", False)]:
+            if b:
+                run.append(t)
+            elif run:
+                if "".join(run).strip():
+                    out.append("".join(run))
+                run = []
     return out
 
 

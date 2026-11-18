@@ -45,6 +45,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - The benchmark runs in a fresh private folder and runs `claude` by an absolute path found before its shim folder goes on PATH.
 
 ### Fixed
+- Benchmark: `bold_runs` reports what Writer shows in bold. A bold paragraph style with the rest of its text in a not-bold span no longer counts as the whole paragraph bold, which failed `writer-format` runs whose documents were right (`tests/test_bench_checks.py`).
 - `./install.sh --help` shows its whole description again (the last step was cut off).
 - Two VMs side by side: a session on one VM no longer makes the other refuse every tool call ("in use by another controller").
 - A refused `build` (the VM exists, or a bad setting) no longer replaces the host key and `known_hosts`, which broke SSH to the existing VM.
