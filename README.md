@@ -142,8 +142,8 @@ the following. These are **always on**:
 | **Nothing listens off loopback** | SSH and the live view are forwarded only to `127.0.0.1` on your Mac. Lume's own VNC server, which listens on every interface, is never started. The live view is a password-protected VNC server inside the VM, and the VM's firewall admits it, and SSH, only from the gateway. |
 | **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, `fill` can only run the vault's fill program, and `proxy` can only open one port on the VM's loopback for the vault's API proxy. The Mac's ssh ignores your SSH config and forwards nothing to the VM: no agent, no X11, no ports. |
 | **Narrow accounts** | The desktop user has no sudo. After the build, the maintenance account can run only one root script with a fixed list of verbs, cloud-init is turned off, and its cached user-data (which held the host key) is deleted. All accounts have locked passwords. |
-| **Verified inputs** | The Ubuntu image (signed `SHA256SUMS`, pinned signing key and image digest), the Cua Driver release (pinned SHA-256, cross-checked against the release's checksums and checked again inside the VM), Lume (pinned checksum, or mcomp-vm's pinned tag and commit), and the Mozilla and Google repository keys (pinned fingerprints). The VM never downloads Cua components itself. |
-| **Less in the guest** | No snaps. No clipboard agent (`spice-vdagent` is removed) and the virtio sound driver is blacklisted, a second layer for when standard Lume attaches those devices. No shared folders. Cua Driver's telemetry and update checks are off, and so is Lume's telemetry. Browser policies turn off telemetry and password saving in both browsers, and sign-in and sync in Chrome. Security updates install automatically, without automatic reboots. |
+| **Verified inputs** | The Ubuntu image (signed `SHA256SUMS`, pinned signing key and image digest), the Cua Driver release (pinned SHA-256, cross-checked against the release's checksums and checked again inside the VM), Lume (pinned checksum, or mcomp-vm's pinned tag and commit), and the Mozilla and Google repository keys (pinned fingerprints), and rclone for S3 volumes (signed checksums, pinned key and digest). The VM never downloads Cua components itself. |
+| **Less in the guest** | No snaps. No clipboard agent (`spice-vdagent` is removed) and the virtio sound driver is blacklisted, a second layer for when standard Lume attaches those devices. No shared storage unless you attach some ([docs/storage.md](docs/storage.md)). Cua Driver's telemetry and update checks are off, and so is Lume's telemetry. Browser policies turn off telemetry and password saving in both browsers, and sign-in and sync in Chrome. Security updates install automatically, without automatic reboots. |
 | **Page text is data** | The skill and the MCP server's own instructions tell Claude that pages, documents, window titles, accessibility text and shell output from the VM are data, never instructions. Claude never asks you for a password: you sign in through the live view yourself, or keep the credential in the vault and approve its use. `metacomputer web open-untrusted` opens a link in a throwaway Chrome profile without clicking anything on it. |
 | **The VM is treated as hostile** | What comes back from the VM is bounded and checked. `metacomputer sh` reads a capped amount of output under one deadline, accepts only an answer that fits a strict schema, and escapes control characters before they reach your terminal. The hub caps every message from the driver. Files copied to the Mac arrive as plain files and folders only (links, devices and unsafe names are left out, and nothing is written through a link), and a copy stops before it can fill your disk. Event text from the VM never goes into a message, only into cleaned data. |
 | **Every guard on every path** | One hub per VM holds the only connection to Cua Driver, and Claude Code's tools, `metacomputer call` and scripts all go through it, so its guards apply to each of them. One session controls the desktop at a time. Chrome gets real input, never background typing. Bounded mode's limits hold. The coordinate guard refuses a pixel click when the windows have changed since the screenshot it was aimed from (resized, or covered by a dialog or another app), so a click can't land somewhere Claude didn't look. A refusal is reported to you, never worked around. |
@@ -815,7 +815,7 @@ those steps out of the recording.
 
 | Ask | Or run |
 | --- | --- |
-| "Here's data.csv. Open it on your computer." | `metacomputer put data.csv` (to `~/Inbox` in the VM; `--to '~/Documents'` for elsewhere) |
+| "Here's data.csv. Open it on your computer." | `metacomputer put data.csv` (to `~/Inbox` in the VM; `--to '~/Documents'` for elsewhere). Every file is checked by SHA-256, and a name that's taken lands as `data (1).csv` unless you add `--overwrite` |
 | "Give me the file you saved." | `metacomputer get '~/Documents/memo.odt'` (to `results/files/<time>/`, or `--task NAME`) |
 | "Take a screenshot of the virtual computer." | `metacomputer shot` (to `screenshots/manual/`, or `--task NAME`) |
 | "Rename that download to report.pdf." | `metacomputer rename GUEST_PATH report.pdf` |
@@ -832,6 +832,61 @@ metacomputer task finish NAME           # copies everything to HOST_DIR, makes c
 
 With `ACTION_LOG=on`, `task finish` also copies the action logs written
 during the task; the copies verify like the originals.
+
+### Keep files across resets: volumes and reference disks
+
+- "Keep my project files on a volume so they survive a reset."
+- "Give the VM a read-only copy of this folder of reference papers."
+
+```bash
+metacomputer volume create work --size 20G        # a disk image on the Mac, sparse
+metacomputer refdisk create papers --from ~/papers-for-vm   # a read-only image of a folder
+# in config/local.env:
+VOLUMES=work                 # in the VM at ~/data/work, read-write
+REFDISKS=papers:/mnt/papers  # read-only, at a mount point of your choice
+metacomputer restart         # attached at start
+```
+
+- A **disk volume** is read-write, belongs to one VM at a time, and is formatted inside the VM on first use (only if it's blank). It survives `reset`, `restore` and `build --replace`; `checkpoint NAME --with-volumes` snapshots it with the VM.
+- A **reference disk** is read-only and any number of VMs can attach it.
+- Mount points: `/volume`, `/mnt`, `/data`, `/srv`, `/workspace` or a folder in the VM user's home, so scripts written for Cua Spaces' `/volume` keep working.
+- Images go in `STORAGE_DIR` (default `~/.local/share/metacomputer`) or `--dir`: an external drive or a NAS mount works too (read-write volumes on a network drive get a warning). A missing image refuses the start; `start --no-volumes` starts with nothing attached.
+
+[docs/storage.md](docs/storage.md) has the details and a table for anyone coming from Cua Volume.
+
+### Share a folder with the VM (visible in Finder)
+
+- "Put your results in a folder I can open in Finder."
+- "Read the files in my project's `assets` folder, but don't change them."
+
+```bash
+metacomputer volume create assets --folder ~/work/assets            # read-only unless you say :rw
+metacomputer volume create handoff --folder ~/vm-handoff.noindex    # read-write needs .noindex in the path
+# in config/local.env:
+VOLUMES="assets:/mnt/assets,handoff:/data/handoff:rw"
+metacomputer restart
+```
+
+- **Read-only by default.** The Mac holds the share read-only, and the VM proves it at every start.
+- **Read-write (`:rw`) is opt-in** and one VM at a time. While the VM runs, a watcher on the Mac puts macOS's quarantine attribute on everything the VM writes (so Gatekeeper checks it like a download, and puts it back if the VM removes it), replaces links that lead out of the folder with a note, and removes FIFOs and devices. The folder must be kept out of Spotlight with a `.noindex` name, because `.metadata_never_index` no longer works.
+- Your personal folders (home, Documents, Desktop, Downloads, Library and iCloud Drive, `.ssh` and other dot-folders) and this checkout are refused, links resolved.
+
+Details and what the watcher can't do: [docs/storage.md](docs/storage.md#folder-volumes).
+
+### Keep a folder in step with an S3 bucket
+
+- "Use the project files in our team bucket, and put your results there."
+
+```bash
+metacomputer volume create team --s3 --bucket my-bucket --endpoint https://s3.us-east-1.amazonaws.com --prefix projects/x
+metacomputer volume keys team      # in your own terminal: macOS asks for the keys (into the Keychain)
+metacomputer volume test team      # endpoint, keys, bucket versioning
+# in config/local.env:
+VOLUMES="team:/mnt/team:rw"
+metacomputer restart
+```
+
+The VM sees a folder; rclone (pinned and verified, on the Mac) syncs it with the bucket at start, every minute (`S3_SYNC_INTERVAL`) and at stop. A file changed on both sides is kept twice (`name.conflict1.ext`). The keys never enter the VM, a command line or a config file. Works with AWS S3, R2, MinIO or any S3-compatible store. Details: [docs/storage.md](docs/storage.md#s3-volumes).
 
 ### Look inside the VM without the GUI
 
@@ -1016,17 +1071,20 @@ alias). `metacomputer help` prints the same list with every option.
 
 | Command | What it does |
 | --- | --- |
-| `start` / `stop [--force]` / `restart` | Boot (about 12 s); shut down from inside the VM, forced after 90 s |
+| `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s |
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
 | `who` / `release` | Who is using the VM; hand it over (one controller at a time) |
 | `reset [--yes]` | Restore the clean baseline (asks first; evidence on the Mac is kept) |
-| `checkpoint NAME [--replace]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes]` | Saved states of the stopped VM (deleting and restoring ask first) |
+| `checkpoint NAME [--replace] [--with-volumes]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes]` | Saved states of the stopped VM, with its disk volumes if you ask (deleting and restoring ask first) |
+| `volume create NAME --size 20G [--dir PATH]` / `volume create NAME --folder PATH` / `volume list [--json]` / `volume resize NAME --size 40G` / `volume delete NAME [--yes]` | Disk volumes (kept outside the VM, read-write to one VM) and folder volumes (a Mac folder, read-only unless `:rw`), attached with `VOLUMES` |
+| `volume create NAME --s3 --bucket B --endpoint URL [--region R] [--prefix P]` / `volume keys NAME` / `volume test NAME` / `volume sync NAME [--force] [--resync]` | S3 volumes: a folder kept in step with a bucket; the keys (your own terminal, into the Keychain); a connection check; a sync now |
+| `refdisk create NAME --from FOLDER [--dir PATH]` / `refdisk list [--json]` / `refdisk delete NAME [--yes]` | Read-only reference disks packed from a Mac folder, attached with `REFDISKS` |
 | `baseline [--yes]` | Make the current VM the new baseline (the old one is kept as `-prev`) |
 | `build [--replace]` | Build the VM and its baseline from scratch |
 | `sh -c CMD \| --file SCRIPT \| - [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]` | Run bash in the VM as the desktop user, with the desktop's environment |
 | `inspect [SECTION...] [--minutes N] [--top N] [--json]` | Read-only snapshot of the VM: `system`, `windows`, `processes`, `ports`, `files`, `browser` |
 | `task start SLUG` / `task finish NAME` | One folder per task: video, contact sheet, screenshots, files, `artifacts.json` |
-| `put HOST_PATH... [--to GUEST_DIR]` | Copy files into the VM (default `~/Inbox`) |
+| `put HOST_PATH... [--to GUEST_DIR] [--overwrite]` | Copy files into the VM (default `~/Inbox`), each checked by SHA-256; a taken name lands as `name (1).ext` unless `--overwrite` |
 | `get GUEST_PATH [HOST_DIR] [--task NAME]` | Copy files out of the VM |
 | `shot [HOST_PATH] [--task NAME]` | A PNG of the whole VM screen |
 | `rename GUEST_PATH NEW_NAME` | Rename a file in the VM (a download saved under its id) |
@@ -1126,6 +1184,16 @@ instead.
 | --- | --- | --- |
 | `VM_SHELL` | `auto` | `auto`: on, except while `DRIVER_MODE=bounded`; `on`: always; `off`: every run is refused |
 | `SHELL_LOG` | `auto` | `auto`: each run goes in the signed action log when `ACTION_LOG=on`; `off`: never logged |
+
+**Storage** ([docs/storage.md](docs/storage.md); each takes effect at the next start):
+
+| Key | Default | |
+| --- | --- | --- |
+| `STORAGE_DIR` | `~/.local/share/metacomputer` | Where new volumes and reference disks go: any folder you can reach, such as an external drive or a NAS mount (`--dir` per item) |
+| `VOLUMES` | (none) | Volumes to attach: `name[:mountpoint][:rw]`, comma-separated; default mount point `~/data/NAME`. Disk volumes are read-write; folder volumes read-only unless `:rw` |
+| `REFDISKS` | (none) | Read-only reference disks to attach: `name[:mountpoint]`; default `~/ref/NAME` |
+| `S3_SYNC_INTERVAL` | `60` | Seconds between syncs of S3 volumes while the VM runs (they also sync at start and stop) |
+| `S3_BACKUP_MAX_GB` | `5` | How much of the local files a sync overwrote or deleted is kept (newest first) |
 
 **Desktop recordings** (`metacomputer record`):
 

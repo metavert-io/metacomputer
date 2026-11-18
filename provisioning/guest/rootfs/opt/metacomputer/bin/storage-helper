@@ -1,0 +1,485 @@
+#!/usr/bin/python3 -I
+"""storage-helper: mounts metacomputer's storage inside the guest. Runs as root, only
+through `sudo metacomputer-admin storage VERB` (the maintenance account's fixed verbs).
+
+  version   the storage protocol this guest speaks (the Mac checks it before attaching)
+  attach    read a plan (one JSON object, at most 64 KiB) on stdin, mount everything in it
+            or nothing, print one JSON result
+  status    what this boot attached (JSON)
+
+What a plan holds (the Mac writes it; checked here anyway):
+  disks     disk volumes: blank ext4-to-be or ext4 images, attached read-write as virtio
+            block devices in this order. Each is found by its place among the extra
+            read-write virtio disks and checked against its size; a blank one is
+            formatted (ext4, with the volume's UUID); one with any other filesystem or
+            signature is refused, never formatted. Mounted nodev,nosuid.
+  refdisks  reference disks: read-only ISO/UDF images, found by their volume label,
+            mounted read-only, nodev, nosuid.
+  folders   Mac folders shared over virtiofs (one device, tag com.apple.virtio-fs.automount;
+            one subfolder per share). Bind-mounted read-only unless the plan says rw (the
+            Mac enforces read-only too).
+
+Mount points: /volume, /mnt, /data, /srv, /workspace or below, or below the desktop user's
+home (not a dot-folder). Every component is opened without following links (a link
+planted by the desktop user can't redirect a root mount), and the mount goes on that
+opened folder.
+"""
+import ctypes
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+VERSION = 1
+CONF = "/etc/metacomputer/storage.conf"
+STATE_DIR = "/run/metacomputer"
+STATE = STATE_DIR + "/storage.json"
+VFS_DIR = STATE_DIR + "/vfs"
+VFS_TAG = "com.apple.virtio-fs.automount"
+MAX_PLAN = 64 * 1024
+ROOTS = ("/volume", "/mnt", "/data", "/srv", "/workspace")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+LABEL_RE = re.compile(r"^MC[0-9A-F]{12,30}$")
+COMP_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
+MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOATIME, MS_REMOUNT, MS_BIND = 1, 2, 4, 1024, 32, 4096
+UMOUNT_NOFOLLOW = 8
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+PCI_RE = re.compile(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]")
+
+_libc = None
+
+
+def libc():
+    """glibc, loaded on first use (the Mac's tests import this file for its checks)."""
+    global _libc
+    if _libc is None:
+        _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        _libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p]
+        _libc.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    return _libc
+
+
+class Refused(Exception):
+    pass
+
+
+def b(s):
+    return None if s is None else s.encode()
+
+
+def sys_mount(src, target, fstype, flags, data=None):
+    if libc().mount(b(src), b(target), b(fstype), flags, b(data)) != 0:
+        e = ctypes.get_errno()
+        raise Refused(f"mount failed: {os.strerror(e)}")
+
+
+def sys_umount(path):
+    libc().umount2(b(path), UMOUNT_NOFOLLOW)
+
+
+def run(cmd, timeout=600):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+def desktop_user():
+    import pwd
+    user = "cua"
+    try:
+        for line in open(CONF):
+            k, _, v = line.strip().partition("=")
+            if k == "desktop_user" and v:
+                user = v
+    except OSError:
+        pass
+    pw = pwd.getpwnam(user)
+    if pw.pw_uid < 1000:
+        raise Refused("the desktop user isn't a normal account")
+    return pw
+
+
+# --- the plan ---------------------------------------------------------------------
+def valid_mountpoint(p, home):
+    """Refuse anything but the data roots and the desktop user's own (non-dot) folders."""
+    if not isinstance(p, str) or not p.startswith("/") or len(p) > 255 or p != os.path.normpath(p):
+        return False
+    parts = p.strip("/").split("/")
+    if not all(COMP_RE.match(c) for c in parts) or len(parts) > 16:
+        return False
+    if any(p == r or p.startswith(r + "/") for r in ROOTS):
+        return True
+    return p.startswith(home + "/") and not p[len(home) + 1:].startswith(".")
+
+
+def overlaps(a, b):
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def check_plan(plan, home):
+    if not isinstance(plan, dict) or plan.get("version") != VERSION:
+        raise Refused(f"the plan isn't storage protocol {VERSION}")
+    out = {"disks": [], "refdisks": [], "folders": []}
+    seen_names, mounts = set(), []
+    for kind in out:
+        items = plan.get(kind) or []
+        if not isinstance(items, list) or len(items) > 32:
+            raise Refused(f"{kind}: not a list of at most 32")
+        for it in items:
+            if not isinstance(it, dict):
+                raise Refused(f"{kind}: bad entry")
+            name, mp = it.get("name"), it.get("mount")
+            if not isinstance(name, str) or not NAME_RE.match(name) or (kind, name) in seen_names:
+                raise Refused(f"{kind}: bad or repeated name")
+            seen_names.add((kind, name))
+            if not valid_mountpoint(mp, home):
+                raise Refused(f"{name}: mount point {mp!r} isn't allowed (use /volume, /mnt, /data, /srv, "
+                              f"/workspace or a folder in {home}, not a dot-folder)")
+            for m in mounts:
+                if overlaps(m, mp):
+                    raise Refused(f"{name}: mount point {mp} overlaps {m}")
+            mounts.append(mp)
+            if kind == "disks":
+                if not isinstance(it.get("uuid"), str) or not UUID_RE.match(it["uuid"]):
+                    raise Refused(f"{name}: bad uuid")
+                if not isinstance(it.get("size"), int) or it["size"] <= 0:
+                    raise Refused(f"{name}: bad size")
+            elif kind == "refdisks":
+                if not isinstance(it.get("label"), str) or not LABEL_RE.match(it["label"]):
+                    raise Refused(f"{name}: bad label")
+            else:
+                s = it.get("share")
+                if not isinstance(s, str) or not s or len(s) > 255 or "/" in s or "\0" in s or s in (".", ".."):
+                    raise Refused(f"{name}: bad share name")
+                if not isinstance(it.get("rw"), bool):
+                    raise Refused(f"{name}: rw must be true or false")
+            out[kind].append(it)
+    return out
+
+
+# --- devices ----------------------------------------------------------------------
+def root_disk():
+    src = run(["findmnt", "-n", "-o", "SOURCE", "/"]).stdout.strip()
+    pk = run(["lsblk", "-n", "-o", "PKNAME", src]).stdout.strip() if src else ""
+    return pk or (os.path.basename(src).rstrip("0123456789") if src else "")
+
+
+def sysread(dev, attr):
+    try:
+        return open(f"/sys/block/{dev}/{attr}").read().strip()
+    except OSError:
+        return ""
+
+
+def dev_size(dev):
+    try:
+        return int(sysread(dev, "size")) * 512
+    except ValueError:
+        return -1
+
+
+def probe(dev):
+    """blkid's low-level probe: {} when it finds nothing."""
+    r = run(["blkid", "-p", "-o", "export", f"/dev/{dev}"])
+    if r.returncode == 2:
+        return {}
+    return dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l) or {"TYPE": "unknown"}
+
+
+def blank(dev):
+    """No signature from blkid or wipefs, and the first and last MiB read as zeros."""
+    if probe(dev):
+        return False
+    w = run(["wipefs", "--no-act", "--noheadings", "--output", "TYPE", f"/dev/{dev}"])
+    if w.returncode != 0 or w.stdout.strip():
+        return False
+    size = dev_size(dev)
+    with open(f"/dev/{dev}", "rb", buffering=0) as f:
+        for off in (0, max(0, size - (1 << 20))):
+            f.seek(off)
+            if f.read(1 << 20).strip(b"\0"):
+                return False
+    return True
+
+
+def extra_disks(root, ref_labels):
+    """The extra read-write virtio disks, in PCI order (the order they were given to the VM)."""
+    devs = []
+    for d in os.listdir("/sys/block"):
+        if not d.startswith("vd") or d == root:
+            continue
+        if sysread(d, "ro") == "1":
+            continue
+        if probe(d).get("LABEL") in ref_labels:
+            continue
+        m = PCI_RE.findall(os.path.realpath(f"/sys/block/{d}"))
+        devs.append((m[-1] if m else "~" + d, d))
+    return [d for _, d in sorted(devs)]
+
+
+def fs_bytes(dev):
+    r = run(["dumpe2fs", "-h", f"/dev/{dev}"])
+    v = dict(l.split(":", 1) for l in r.stdout.splitlines() if ":" in l)
+    try:
+        return int(v["Block count"].strip()) * int(v["Block size"].strip())
+    except (KeyError, ValueError):
+        return 0
+
+
+# --- mount points -----------------------------------------------------------------
+def open_mountpoint(path, pw):
+    """A descriptor for PATH, created if missing (as the desktop user's under their home), never
+    through a link. The mount goes on /proc/self/fd/N, so swapping a component later changes nothing."""
+    home = pw.pw_dir
+    fd = os.open("/", DIR_FLAGS)
+    cur = ""
+    try:
+        for comp in path.strip("/").split("/"):
+            cur += "/" + comp
+            try:
+                nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(comp, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                nfd = os.open(comp, DIR_FLAGS, dir_fd=fd)
+                if cur.startswith(home + "/"):
+                    os.fchown(nfd, pw.pw_uid, pw.pw_gid)
+            except OSError as e:
+                raise Refused(f"{cur} isn't a plain folder ({os.strerror(e.errno)}); not mounting through it")
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def mounted_at(path):
+    try:
+        for line in open("/proc/self/mountinfo"):
+            f = line.split()
+            if len(f) > 4 and f[4].encode().decode("unicode_escape") == path:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+# --- attach -----------------------------------------------------------------------
+def attach(plan_text):
+    pw = desktop_user()
+    try:
+        plan = json.loads(plan_text)
+    except ValueError:
+        raise Refused("the plan isn't JSON")
+    plan = check_plan(plan, pw.pw_dir)
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    done, items = [], []
+
+    def undo():
+        for mp in reversed(done):
+            sys_umount(mp)
+
+    try:
+        for it in plan["disks"] + plan["refdisks"] + plan["folders"]:
+            if mounted_at(it["mount"]):
+                raise Refused(f"{it['name']}: something is already mounted at {it['mount']}")
+        root = root_disk()
+        ref_labels = {r["label"] for r in plan["refdisks"]}
+        disks = extra_disks(root, ref_labels)
+        if len(disks) != len(plan["disks"]):
+            raise Refused(f"expected {len(plan['disks'])} extra read-write disk(s), found {len(disks)}; mounting nothing")
+        for dev, it in zip(disks, plan["disks"]):
+            if dev_size(dev) != it["size"]:
+                raise Refused(f"{it['name']}: /dev/{dev} is {dev_size(dev)} bytes, not the volume's {it['size']}; "
+                              "mounting nothing")
+        for dev, it in zip(disks, plan["disks"]):
+            items.append(attach_disk(dev, it, pw, done))
+        for it in plan["refdisks"]:
+            items.append(attach_refdisk(it, root, set(disks), pw, done))
+        if plan["folders"]:
+            vfd = vfs_root()
+            try:
+                for it in plan["folders"]:
+                    items.append(attach_folder(vfd, it, pw, done))
+            finally:
+                os.close(vfd)
+    except Refused:
+        undo()
+        raise
+    except Exception as e:  # noqa: BLE001 - never leave half a plan mounted
+        undo()
+        raise Refused(f"{type(e).__name__}: {e}")
+    state = {"version": VERSION, "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "items": items}
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, STATE)
+    return state
+
+
+def attach_disk(dev, it, pw, done):
+    name, path = it["name"], f"/dev/{dev}"
+    info = probe(dev)
+    formatted = grown = False
+    if not info:
+        if not blank(dev):
+            raise Refused(f"{name}: /dev/{dev} isn't blank but has no filesystem blkid recognizes; not formatting it")
+        label = ("mc-" + name)[:16]
+        r = run(["mkfs.ext4", "-q", "-U", it["uuid"], "-L", label, "-m", "0",
+                 "-E", f"root_owner={pw.pw_uid}:{pw.pw_gid}", path])
+        if r.returncode != 0:
+            raise Refused(f"{name}: mkfs.ext4 failed: {r.stderr.strip()[:300]}")
+        formatted = True
+        info = probe(dev)
+    if info.get("TYPE") != "ext4" or info.get("UUID") != it["uuid"]:
+        raise Refused(f"{name}: /dev/{dev} holds a {info.get('TYPE', 'unknown')} filesystem that isn't this volume "
+                      f"(UUID {info.get('UUID', '-')}, expected {it['uuid']}); not mounting, not formatting")
+    if not formatted:
+        if dev_size(dev) - fs_bytes(dev) >= (1 << 20) and it.get("grow", True):
+            r = run(["e2fsck", "-f", "-p", path])
+            if r.returncode >= 4:
+                raise Refused(f"{name}: e2fsck found problems it couldn't fix (exit {r.returncode}); not mounting")
+            r = run(["resize2fs", path])
+            if r.returncode != 0:
+                raise Refused(f"{name}: resize2fs failed: {r.stderr.strip()[:300]}")
+            grown = True
+        else:
+            r = run(["e2fsck", "-p", path])
+            if r.returncode >= 4:
+                raise Refused(f"{name}: e2fsck found problems it couldn't fix (exit {r.returncode}); not mounting")
+    fd = open_mountpoint(it["mount"], pw)
+    try:
+        sys_mount(path, f"/proc/self/fd/{fd}", "ext4", MS_NODEV | MS_NOSUID | MS_NOATIME)
+    finally:
+        os.close(fd)
+    done.append(it["mount"])
+    return {"kind": "disk", "name": name, "mount": it["mount"], "device": dev, "formatted": formatted,
+            "grown": grown, "fs_uuid": info.get("UUID"), "rw": True, "ok": True}
+
+
+def attach_refdisk(it, root, taken, pw, done):
+    name = it["name"]
+    found = None
+    for d in sorted(os.listdir("/sys/block")):
+        if d == root or d in taken or not d.startswith(("vd", "sd", "sr")):
+            continue
+        if probe(d).get("LABEL") == it["label"]:
+            found = d
+            break
+    if not found:
+        raise Refused(f"{name}: no attached disk has the label {it['label']}; mounting nothing")
+    fd = open_mountpoint(it["mount"], pw)
+    err = None
+    try:
+        for fstype, data in (("udf", f"uid={pw.pw_uid},gid={pw.pw_gid},umask=022"), ("iso9660", None)):
+            try:
+                sys_mount(f"/dev/{found}", f"/proc/self/fd/{fd}", fstype, MS_RDONLY | MS_NODEV | MS_NOSUID, data)
+                break
+            except Refused as e:
+                err = e
+        else:
+            raise Refused(f"{name}: /dev/{found} doesn't mount as UDF or ISO 9660 ({err})")
+    finally:
+        os.close(fd)
+    done.append(it["mount"])
+    return {"kind": "refdisk", "name": name, "mount": it["mount"], "device": found, "fstype": fstype,
+            "rw": False, "ok": True}
+
+
+def vfs_root():
+    os.makedirs(VFS_DIR, mode=0o700, exist_ok=True)
+    os.chmod(VFS_DIR, 0o700)
+    if not mounted_at(VFS_DIR):
+        sys_mount(VFS_TAG, VFS_DIR, "virtiofs", MS_NODEV | MS_NOSUID)
+    return os.open(VFS_DIR, DIR_FLAGS)
+
+
+def host_holds_read_only(sfd):
+    """For a read-only share: try, as root and through the raw virtiofs mount (which is read-write
+    in this guest), to create a file. The Mac must refuse it; a guest's own read-only bind mount
+    alone wouldn't stop root in the VM."""
+    probe_name = f".metacomputer-ro-check-{os.getpid()}-{time.time_ns()}"
+    try:
+        fd = os.open(probe_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                     dir_fd=sfd)
+    except OSError:
+        return True
+    os.close(fd)
+    try:
+        os.unlink(probe_name, dir_fd=sfd)
+    except OSError:
+        pass
+    return False
+
+
+def attach_folder(vfd, it, pw, done):
+    name = it["name"]
+    try:
+        sfd = os.open(it["share"], DIR_FLAGS, dir_fd=vfd)
+    except OSError as e:
+        raise Refused(f"{name}: the Mac's shared folder {it['share']!r} isn't in the VM's share ({os.strerror(e.errno)})")
+    try:
+        if not it["rw"] and not host_holds_read_only(sfd):
+            raise Refused(f"{name}: the Mac doesn't hold this folder read-only (a test file could be created in it); "
+                          "not mounting it")
+        fd = open_mountpoint(it["mount"], pw)
+        try:
+            sys_mount(f"/proc/self/fd/{sfd}", f"/proc/self/fd/{fd}", None, MS_BIND)
+            done.append(it["mount"])
+        finally:
+            os.close(fd)
+        # A bind mount takes its flags on a remount, aimed at the new mount's root: walking the
+        # path again (never through a link) enters the mount just made.
+        fd = open_mountpoint(it["mount"], pw)
+        try:
+            flags = MS_REMOUNT | MS_BIND | MS_NOSUID | MS_NODEV | (0 if it["rw"] else MS_RDONLY)
+            sys_mount(None, f"/proc/self/fd/{fd}", None, flags)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(sfd)
+    return {"kind": "folder", "name": name, "mount": it["mount"], "share": it["share"], "rw": it["rw"],
+            "host_read_only": not it["rw"], "ok": True}
+
+
+def status():
+    try:
+        st = json.load(open(STATE))
+    except (OSError, ValueError):
+        st = {"version": VERSION, "items": []}
+    for it in st.get("items", []):
+        it["mounted"] = mounted_at(it.get("mount", ""))
+    return st
+
+
+def main(argv):
+    verb = argv[1] if len(argv) > 1 else ""
+    if verb == "version":
+        print(VERSION)
+        return 0
+    if verb == "status":
+        print(json.dumps(status()))
+        return 0
+    if verb == "attach":
+        data = sys.stdin.read(MAX_PLAN + 1)
+        if len(data) > MAX_PLAN:
+            print(json.dumps({"ok": False, "error": "the plan is too large"}))
+            return 1
+        try:
+            st = attach(data)
+        except Refused as e:
+            print(json.dumps({"ok": False, "error": str(e)}))
+            return 1
+        print(json.dumps({"ok": True, "items": st["items"]}))
+        return 0
+    print("usage: storage-helper version|attach|status", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

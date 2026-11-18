@@ -399,6 +399,138 @@ results, window titles, app names, typed text, errors and the model's own text.
   approved lessons working (the never-rotated `lesson-events.jsonl` keeps the
   evidence) while a forged head is still refused.
 
+## Storage: `tests/test_storage.py`, `tests/test_storage_vm.py`
+
+`python3 tests/test_storage.py` needs no VM (about 10 s). It works in a temporary
+registry and data folder and checks: `VOLUMES` / `REFDISKS` parsing (default and custom
+mount points; system folders, dot-folders and the home folder refused) and that the VM's
+helper agrees on every mount point; the folders that may never go into the VM (personal
+folders and their parents, Library and iCloud Drive, dot-folders, `SSH_DIR`, the checkout,
+system folders, the gateway's socket folders), with links resolved; locks (a live holder
+refuses and is named, a dead or reused pid doesn't count, the same VM may take its own
+again, a lock file from another computer refuses, release); the statfs network-filesystem
+classifier and the warning, and a real network filesystem as a local stand-in (WebDAV served by
+the pinned rclone on 127.0.0.1, mounted with macOS's `mount_webdav`, no root): detected, warned
+about at create and start, and refused once unmounted (skipped until rclone is fetched); the plan for a start (missing images, read-only disk volumes,
+a VM without storage support, bounded mode, the order of the run arguments, the helper
+accepting the plan); sizes and names; sparse copies, APFS clones and checkpoints of
+volumes; reference disks leaving links out; `put`'s SHA-256 comparison and collision
+names; folder volumes (read-only by default, `.noindex` required for read-write, `:` refused,
+one VM read-write at a time including nested folders, the `--shared-dir` arguments and the
+share names Lume gives them); and the folder watcher on a real folder (quarantine on new files
+and folders, a removed or rewritten attribute put back, links out of the folder replaced by a
+note while inside ones stay, a FIFO and set-id bits removed, what was there before left alone).
+With `MCOMP_TEST_GATEKEEPER=1` and a C compiler it also runs an unsigned binary carrying the
+attribute (Gatekeeper must refuse it); off by default, because Gatekeeper can hold such a
+process for minutes or show a dialog on the Mac's screen. From the storage audit: other
+spellings of refused folders (case, the data volume's firmlinks) refused and one image under two
+spellings one lock; a file swapped for a link to a private file while a reference disk is packed
+isn't packed; `put` and the attach cutting off a VM that floods or stalls; checkpoint, restore and
+resize holding the volume so no VM can attach it meanwhile; and the bounded manifest read as YAML
+(an inline comment isn't policy, a `files:` block outside `resources` grants nothing, unsupported
+forms grant nothing, the shipped profiles parse). For folders: a folder swapped for a link to a
+private folder in the middle of a watcher pass (the private files are neither deleted nor given an
+attribute); a folder over the watcher's limit is a protection failure; a folder the VM made
+unreadable is opened again and checked; an attribute stripped right after it was set comes back on
+the next pass; low free space is a protection failure; a folder inside another VM's read-write
+share (even read-only), a read-write share holding another VM's folder, and a disk image inside
+another VM's read-write share are refused; a folder replaced after it was checked is noticed; the
+watcher starts with the VM's process (and `start` fails if it can't); a protection failure ends the
+VM's process and says why. For S3 volumes: name, endpoint,
+prefix and region checks; with stand-ins for `security` and rclone that record what they're
+given, the keys never reach either program's arguments, the registry, `rclone.conf`, logs or
+events, only rclone's environment (which holds nothing else of ours); `volume keys` refuses
+without a terminal and takes no value; a sync's conflict is reported; and the pinned rclone:
+a changed binary or another version is refused, and `scripts/fetch-artifacts.sh rclone`,
+against a local server and a throwaway signing key, installs a correctly signed and pinned
+release but refuses a wrong pinned digest, a `SHA256SUMS` signed by another key and a
+tampered zip. From the storage audit, with the pinned rclone: unconfined, it copies a private
+file through a folder swapped for a link; confined (as every sync runs it), it neither copies it
+nor writes through the link. With stand-ins: a failed sync's download, and a file an earlier run
+left, end up quarantined; no sync below the free-space reserve, transfers capped to what's above
+it, backups pruned to `S3_BACKUP_MAX_GB`, a copy over the entry limit fails the sync; rclone asking
+for a resync gets none on its own (the sync fails and names the command), the first sync of a copy
+that already holds files waits for `--resync`, which then runs with the bucket-side backup folder;
+and a read-write copy the first sync grows past the limit refuses the start. From the recheck (each
+check fails against the code before it): the overlap rules don't depend on order (a read-write
+folder around an image an operation holds is refused, as the reverse was), cover one start's own
+items in either order, and hold for reference disks (a shared record each); a folder holding a
+registered image (or its parent) can't be shared; an image swapped for a link isn't followed; a new
+image can't go into a folder volume; `volume delete` holds its reservation until the registry entry
+is gone; checkpoint delete is refused while a restore holds its volume or the checkpoint; the link
+rule removes `a -> .` + `leak -> a/../outside` and an absolute `ROOT/../..` target and keeps links
+that can only stay inside; a quoted `"files "` (or `" files"`, or a flow mapping's `"dir "`) grants
+nothing; across filesystems (an APFS disk image mounted for the test) a sparse file's copy stays
+sparse and stops at the size that was checked, and a reference disk whose files at full size don't
+fit above the reserve is refused before packing; a folder is counted while it's listed (a stand-in
+listing of 100,000 entries stops at the limit), a pass past its time limit fails, and the
+supervisor checks free space on its own; with writing the report failing (a full disk), a protection
+failure still stops the VM; a watcher killed or stopped (`SIGSTOP`) is caught by its supervisor,
+which stops the VM; `storage_abort` powers the VM off without asking the guest, and an ordinary stop
+gives up on a guest that never powers off within its deadline (both with a guest stand-in that
+hangs). S3, with stand-ins: rclone is never given the shared copy; the VM's file is in the sync copy
+before rclone runs; a file from the bucket reaches the shared copy with the quarantine attribute,
+which it had before it got its name there; a link the VM made to a private file isn't read; a shared
+copy replaced by a link, or whose parent was replaced, isn't synced (nothing private marked or
+copied), nor is one inside another VM's read-write folder; deletions go both ways, and a file changed
+on both sides keeps both in both copies; a bucket with more entries than the limit brings nothing in;
+a sync's transfers are capped to what another sync's claim leaves; backups are pruned before rclone
+runs; rclone is stopped when the disk falls below the reserve; a failed sync names rclone's error
+line. With the pinned rclone: the sandbox denies writes outside the volume's state folder even where
+this user may write (positive control: unconfined, it can), denies reads of a private file, and
+allows work inside it; and a whole sync through the two stages, with a folder in the state folder
+standing in for the bucket, has every option a first and an ordinary sync pass accepted (a stand-in
+rclone can't catch one rclone refuses) and files crossing both ways. From the second recheck (each
+check fails against the code before it): Codex's five steps, so a volume or reference disk can't be
+created in `STORAGE_DIR` (no `--dir`) inside a folder a VM has read-write, a folder in an image's path
+replaced by a link to another folder holding an image of the same name isn't followed (the start is
+refused, and `volume delete` through it deletes nothing), and an image replaced at its own path is
+refused; files bound for an S3 shared copy are made outside it, in a private staging folder on the
+same disk that can't be shared; a restore whose manifest changed under it (a VM holding the new
+volume) rolls nothing back, and a volume delete waits for a busy checkpoint that holds it; two APFS
+volumes of one container (the Data and VM volumes) share one space claim, and a long copy stops when
+free space falls below the reserve midway; both copies changed to different contents with the same
+size and time are kept as a conflict (the same contents aren't); an S3 local copy may go inside a
+stopped folder volume but not one a VM has read-write. From the third recheck: there's no `adopt`
+command; a volume recorded under a firmlink alias of its path (`/System/Volumes/Data/...`) is
+refused; one without its identity is refused with delete-and-create-again (and what happens to the
+data), and `volume delete --keep-image` leaves the image file; an S3 volume isn't made where a VM
+already has the folder its staging folder goes in (read-only too), and a sync is refused while a VM
+has that folder or the staging folder itself; cleanup removes only a recorded session's temporary
+names, never another file in the staging folder or a file of the VM's in the shared copy, and a
+staging folder replaced by another is refused with nothing in it touched.
+
+`MCOMP_CONFIG=... python3 tests/test_storage_vm.py [V] [R] [P] [F] [S]` needs a test VM built
+from this version (it stops, starts and resets it, and leaves it stopped; its volumes and
+registry live in a temporary folder):
+- **V** disk volumes: formatted on first use, writable by the desktop user, `nodev,nosuid`;
+  kept across `reset`; a custom mount point (`/volume`); `--no-volumes`; another VM refused
+  while one holds the volume; a missing image refuses the start; a VM without storage
+  support is refused before it boots; `checkpoint --with-volumes` and `restore`; `volume
+  resize` and the filesystem growing at the next start.
+- **R** reference disks: long and non-ASCII names, the exec bit, the link left out, two
+  attached (one by `--mount`, one by USB), read-only in the VM.
+- **P** `put`: SHA-256 checked, `name (1).ext` collisions, `--overwrite`, a binary file
+  byte for byte, into a volume.
+- **F** folder volumes: read-write without `.noindex` refused; a read-only folder at
+  `/mnt/shared` rejects every write from the VM and the Mac's file stays unchanged; in a
+  read-write folder, the quarantine attribute on what the VM writes (files and an app
+  bundle), links out of the folder replaced by notes, an inside link kept, a FIFO removed,
+  an attribute the VM removed put back, the three `security` events in the local event log;
+  another VM refused the folder read-write; `status` and `stop` report the watcher;
+  Spotlight indexes a plain folder's file but not the VM's file in the `.noindex` folder (a
+  temporary folder in your home, removed at the end; skipped if Spotlight indexed nothing
+  within 3 minutes).
+- **S** S3 volumes against `rclone serve s3` on 127.0.0.1 (random port, throwaway keys,
+  stopped at the end): `volume keys` at macOS's own prompt in a pseudo-terminal (and refused
+  without one), `volume test`, a file another computer put in the bucket reaching the VM at
+  start (with the quarantine attribute on the Mac), the VM's file reaching the bucket on the
+  interval, a file changed on both sides kept twice (and a `task.s3_conflict` event), a write
+  just before `stop` reaching the bucket at stop; no process's command line holding a key
+  during a sync, no key in any file of the registry, data or logs, an empty `rclone.conf`, no
+  key in the VM; `volume delete` removing the Keychain items. Only items the test made are
+  touched.
+
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
 `python3 tests/test_hub.py` needs no VM (187 checks, about 2 min). A stand-in

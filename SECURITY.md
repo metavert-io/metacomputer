@@ -5,7 +5,8 @@ your Mac that Claude drives through Cua Driver. The defaults already isolate
 it:
 - the VM reaches only the public internet, not your Mac or your network;
 - nothing listens off your Mac's loopback;
-- the VM has no shared folders;
+- the VM shares no storage with your Mac or other VMs unless you attach some
+  ([Storage](#storage));
 - with mcomp-vm, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
   adds a sound card inside the VM that plays into nothing; it never reaches the Mac.)
 
@@ -479,7 +480,7 @@ What it can't do:
   every connection to the VM (`sh`, `ssh`, the driver, recordings, status).
   The VM's side of the key refuses forwarding too, but a hostile VM's sshd
   wouldn't, so the Mac's side is what counts. The gateway refuses every connection from the VM to the
-  Mac, your network and the tailnet, and the VM has no shared folders. The
+  Mac, your network and the tailnet, and the VM shares no Mac folders. The
   script travels on SSH's stdin and is never run by a shell on the Mac.
 - **Get root.** `cua` has no sudo.
 - **Get around the one-controller rule by accident.** A run counts as acting:
@@ -677,6 +678,92 @@ persistence that you can audit, not an approval you can prove.
 - A misclassified error only moves a count: the classes come from fixed
   patterns over the driver's and the hub's messages, and a page can contain
   those words.
+
+## Storage
+
+Out of the box the VM shares no storage with your Mac or with other VMs. Storage
+([docs/storage.md](docs/storage.md)) adds it, one kind at a time, and only what you
+attach in `VOLUMES` and `REFDISKS` (`start --no-volumes` attaches none of it), read-only
+unless it's a disk volume (one VM's own) or a folder you mark `:rw`. What
+each kind lets a hostile VM (root in the VM included) do, and what protects the Mac:
+
+| Kind | A hostile VM can | It can't | What protects the Mac |
+| --- | --- | --- | --- |
+| **Disk volume** (read-write, one VM) | Read, change, encrypt or delete everything on the volume; write a filesystem crafted to be hostile to whoever mounts it next | Reach anything on the Mac but the image file: it sees a block device, not a Mac folder; attach the volume while another VM holds it | The Mac never mounts the image (macOS has no ext4 driver, and nothing here asks it to); the next VM's kernel checks it with `e2fsck` before mounting it `nodev,nosuid`; a disk that isn't blank and isn't this volume's ext4 (by UUID) is refused, never formatted; the lock |
+| **Folder, read-only** (the default) | Read every file in the folder, and see changes you make to it live | Create, change or delete anything in it: the Mac holds the share read-only, whatever the VM remounts | The share is read-only at the hypervisor, and the VM's helper proves it at every start (as root, through the raw virtiofs mount, it tries to create a file and refuses to mount the folder if the Mac allows it); private folders are refused |
+| **Folder, read-write** (`:rw`, one VM) | Create, change and delete files in the folder, which land on your Mac as your own files; make links pointing anywhere, FIFOs and hard links (inside the folder); remove or rewrite extended attributes, `com.apple.quarantine` included | Reach files outside the folder: virtiofs resolves its links inside the VM, so a link can only mislead a program on the Mac that follows it; set the set-user-ID bit (the Mac drops it); have the folder read-write in two VMs at once | The watcher, started with the VM and working only through descriptors that never follow a link: the quarantine attribute (exact value, verified on every pass) on everything new or changed, so Gatekeeper checks it; links kept only when their text can't lead out (relative, leading `..` within the link's depth, then names; never absolute), others replaced by a note; FIFOs, sockets and devices removed; set-id bits removed; events for each. If it can't cover the folder (too big, too slow, unreadable, the Mac's disk below its reserve, any failure) it stops the VM from the Mac first, then reports. A supervisor process stops the VM if the watcher dies or stalls, and checks free space twice a second. Spotlight kept out (a `.noindex` path is required). One VM at a time (lock); symmetric rules, so no folder, image or reference disk of another VM's (or of a running operation) inside a read-write one, whichever came first. Private folders, and folders holding images, refused |
+| **S3 volume** (a folder volume over a local copy of a bucket) | What a folder volume allows (read-only or read-write, as attached); what it writes reaches the bucket at the next sync, and so every computer that syncs it | See the bucket, the endpoint or the keys: it sees only the local folder; reach the network through the sync (rclone runs on the Mac, not in the VM) | The folder protections above; rclone works only on a private sync copy no VM can reach, and metacomputer exchanges it with the shared copy through descriptors (the copy checked to be the folder that was created and reserved for the sync; no link followed; only plain files; each new file made and quarantined in a staging folder no VM sees (made exclusively and bound to its identity; no folder shared with any VM, even read-only, may hold it; cleanup removes only names this program recorded), then renamed into the shared copy in one step, so nothing from the bucket is visible there without the attribute, read-only or read-write, finished sync or not; files changed on both sides compared by content, both kept when they differ); rclone also confined by `sandbox-exec` (writes only in its state folder, no reads of home folders, drives or temporary folders); free space claimed per sync across concurrent ones, per allocation pool (an APFS container), rclone capped to its claim and stopped below the reserve, copies re-checked as they go; keys in the macOS Keychain, typed at macOS's own prompt, given to rclone only in its environment (never arguments, `rclone.conf`, logs, events or the VM); conflicts keep both copies; resyncs only when you ask; overwritten local files kept in a backup folder; bucket versioning recommended (`volume test`); rclone pinned by version and SHA-256 behind a pinned signing key |
+| **Reference disk** (read-only, any VMs) | Read everything on it | Change it: it's read-only at the hypervisor (`--mount` / USB storage attached read-only), whatever the VM does | Read-only attachment; the image file is read-only on the Mac; `refdisk create` refuses private folders and leaves links out, so nothing outside the folder is packed |
+
+Common to every kind:
+- **Choose what goes in.** Whatever you attach can be read by anything running in the
+  VM, which can reach the public internet. Don't put credentials or personal files on a
+  volume or a reference disk; keep credentials in the vault.
+- **Private folders are refused** for folder volumes and reference disks, links resolved first: your home
+  folder and its personal folders (and their parents), `~/Library` with iCloud Drive and
+  other cloud drives, home dot-folders such as `.ssh`, `SSH_DIR`, this checkout, Lume's
+  VMs, the storage registry and system folders ([the list](docs/storage.md#what-may-not-go-into-the-vm)).
+- **Mount points** in the VM are limited to `/volume`, `/mnt`, `/data`, `/srv`,
+  `/workspace` and the desktop user's own folders, checked on the Mac and again in the VM,
+  where the root helper opens every component without following links. So a link the
+  desktop user plants can't make root mount a volume over `/etc`, `~/.ssh` or another
+  system path. The helper takes its plan only from the maintenance account's fixed verb
+  (`sudo metacomputer-admin storage attach`).
+- **Nothing half-attached:** problems found before boot refuse the start; a mount that
+  fails after boot stops the VM again.
+- **The VM's answers are data.** What the helper reports back is read with a size cap and a
+  deadline (a VM that floods or stalls is cut off, and the VM is stopped), checked and escaped
+  before it reaches your terminal; it decides nothing on the Mac. `put` reads the VM's answers
+  the same way.
+- **Checked means bound.** Refusals compare the opened folder's canonical spelling,
+  case- and normalization-insensitively, and its identity, so another spelling of a refused
+  folder is refused. Reference disks are packed through descriptors that never follow a link
+  (sparse-aware, bounded to the size checked and to the space above the reserve). Registered
+  paths are recorded in the kernel's own spelling (no firmlink, case or Unicode alias) and
+  walked from `/` one folder at a time without following any link, images are bound to the
+  device and inode recorded when they were made (no re-binding in place), the folders holding images
+  can't be shared, a new image's folder (`--dir` or `STORAGE_DIR` alike) may not be inside a
+  folder any VM has read-write, and after the VM starts every attached path must still lead,
+  through the same walk, to the file or folder that was checked. Operations on a volume (checkpoint, restore, checkpoint delete,
+  resize, delete, an S3 sync) hold it until every change is made, so no VM can attach it, or
+  a read-write folder around it, halfway through.
+- **Failing closed means from the Mac.** A storage problem after the VM started (a path
+  that changed, the watcher not starting, mounts failing) powers the VM off by ending its
+  process on the Mac; the guest is never asked to shut down, so a guest that stalls can't
+  keep itself running. An ordinary `stop` asks the guest first, with a 90-second deadline
+  that holds whatever the guest does with the request.
+- **Bounded mode** attaches only what the driver's manifest lists.
+
+**Where it ends:**
+- A volume holds whatever the VM wrote. Copying files out of one (`metacomputer get`)
+  goes through the same checks as any copy from the VM (links and special files left
+  out, size limits), but opening those files on the Mac is up to you.
+- Locks are files on this Mac. They stop a second VM on this Mac; across computers
+  sharing a network drive, the lock file beside the image is advisory, and a dropped
+  connection can damage a volume that's being written. `start` warns about
+  network filesystems.
+- **S3:** a VM with an S3 volume read-write can delete or overwrite files in the bucket
+  through the sync (deletions propagate; overwrites of the Mac's copy are backed up
+  locally). Turn on bucket versioning and give the volume a key limited to its bucket.
+  The keys are read into memory for each rclone run; anything running as you can read
+  them from the Keychain the same way (`security find-generic-password`), as it can any
+  login-Keychain item.
+- A volume isn't versioned: the VM can delete its files. Checkpoints
+  (`--with-volumes`) are your history. A read-write folder has no history here at all
+  (Time Machine's, if you use it).
+- **A read-write folder is the strongest thing you can attach.** The watcher works after
+  the fact, with a gap of up to a few seconds: a program on the Mac that opens a new file
+  or follows a new link in that gap isn't protected, and macOS remembers a binary it let
+  run, so a quarantine put back later doesn't stop that binary again. Quarantine makes
+  Gatekeeper check apps and programs; it doesn't stop a script fed to an interpreter
+  (`sh file`) or a malicious document exploiting the app that opens it. Don't run or open
+  what the VM wrote without the care you'd give a download. The VM can also set other
+  extended attributes (Finder tags, icons) there; only quarantine is enforced. If the
+  watcher fails, or dies, or stalls, the VM stops (its supervisor sees to the last two);
+  kill both at once and nothing does, and `status` says so in red. The free-space reserve
+  is polled twice a second, not a quota: for a hard limit, give the folder an APFS volume
+  with a quota or a disk image of its own. Measurements and details:
+  [docs/storage.md](docs/storage.md#folder-volumes).
 
 ## Secrets and logins (`metacomputer secrets`)
 

@@ -38,6 +38,7 @@ SOFTWARE.
 | Lume (VM runner) | trycua/cua release `lume-v0.7.2`, checksum pinned; or built from that tag by mcomp-vm | MIT, © Cua AI, Inc. |
 | mcomp-vm (metacomputer's build of Lume, formerly lume-secure; made by Metavert, not by Cua) | github.com/metavert-io/metacomputer-vm (patches and build scripts), tag and commit pinned | MIT, © Metavert LLC |
 | Cua Driver (in the VM) | trycua/cua release `cua-driver-rs-v0.53.0`, checksum pinned | MIT, © Cua AI, Inc. |
+| rclone (on the Mac, only for S3 volumes; downloaded on first use) | rclone/rclone release `v1.75.2`, `SHA256SUMS` signature and zip checksum pinned | MIT, © Nick Craig-Wood |
 | cua-netgw (network gateway) | built from trycua/cua source at a pinned commit (`libs/cua/netgw`) | MIT, © Cua AI, Inc.; uses gvisor-tap-vsock (Apache-2.0) |
 | go-qcow2reader (used by `tools/qcow2raw`) | github.com/lima-vm/go-qcow2reader v0.8.0, fetched by Go | Apache-2.0 |
 | Ubuntu 24.04 cloud image and packages | cloud-images.ubuntu.com, signature checked | Ubuntu's licenses |

@@ -7,6 +7,10 @@
 #     and cross-checked against the release's SHA256SUMS
 #   - Mozilla (and Google) APT signing keys: fingerprints pinned in config/defaults.env;
 #     only the pinned key is kept from each download (scripts/pin-gpg-key.sh)
+#
+#   scripts/fetch-artifacts.sh rclone   only rclone, for S3-backed folder volumes (Mac side):
+#     SHA256SUMS signed by rclone's release key (fingerprint pinned; only that key kept),
+#     the zip's SHA-256 pinned and cross-checked, installed to .cache/rclone-vVERSION/rclone
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
@@ -17,6 +21,43 @@ U="$CACHE_DIR/ubuntu-$UBUNTU_RELEASE"; mkdir -p "$U"
 # Signatures are checked with gpgv against a key file, which needs no agent.
 GNUPGHOME="$(mktemp -d /tmp/mcomp-gpg.XXXXXX)"; export GNUPGHOME
 trap 'rm -rf "$GNUPGHOME"' EXIT
+
+fetch_rclone() {
+  local R="$CACHE_DIR/rclone-v$RCLONE_VERSION" listed got
+  say "rclone $RCLONE_VERSION (S3-backed folder volumes, on the Mac)"
+  mkdir -p "$R"
+  curl -fsSL -o "$R/SHA256SUMS" "$RCLONE_BASE_URL/SHA256SUMS" || die "could not download rclone's SHA256SUMS"
+  if [ ! -s "$R/signing-key.gpg" ]; then
+    curl -fsSL -o "$R/KEYS.asc" "$RCLONE_KEYS_URL" || die "could not download rclone's signing keys"
+    rm -f "$R/pinned-key.asc"
+    "$LAB_ROOT/scripts/pin-gpg-key.sh" "$R/KEYS.asc" "$RCLONE_SIGNING_KEY_FPR" "$R/pinned-key.asc" \
+      || die "rclone's key file has no key with the pinned fingerprint $RCLONE_SIGNING_KEY_FPR"
+    gpg --batch --dearmor < "$R/pinned-key.asc" > "$R/signing-key.gpg.part" && mv "$R/signing-key.gpg.part" "$R/signing-key.gpg"
+  fi
+  gpgv --keyring "$R/signing-key.gpg" --status-fd 1 "$R/SHA256SUMS" 2>/dev/null \
+    | grep -q "VALIDSIG $RCLONE_SIGNING_KEY_FPR" || die "rclone's SHA256SUMS is not signed by $RCLONE_SIGNING_KEY_FPR"
+  ok "SHA256SUMS signed by $RCLONE_SIGNING_KEY_FPR"
+  listed="$(awk -v f="$RCLONE_ZIP" '$2==f{print $1}' "$R/SHA256SUMS" | head -1)"
+  [ "$listed" = "$RCLONE_SHA256" ] || die "pinned rclone digest differs from the signed SHA256SUMS (${listed:-not listed})"
+  if [ ! -f "$R/$RCLONE_ZIP" ] || ! echo "$RCLONE_SHA256  $R/$RCLONE_ZIP" | shasum -a 256 -c - >/dev/null 2>&1; then
+    rm -f "$R/$RCLONE_ZIP"
+    curl -fL --progress-bar -o "$R/$RCLONE_ZIP.part" "$RCLONE_BASE_URL/$RCLONE_ZIP" || die "could not download $RCLONE_ZIP"
+    mv "$R/$RCLONE_ZIP.part" "$R/$RCLONE_ZIP"
+  fi
+  echo "$RCLONE_SHA256  $R/$RCLONE_ZIP" | shasum -a 256 -c - >/dev/null || { rm -f "$R/$RCLONE_ZIP"; die "rclone zip digest mismatch"; }
+  ok "$RCLONE_ZIP sha256 verified"
+  rm -rf "$R/x"; mkdir -p "$R/x"
+  unzip -q -o "$R/$RCLONE_ZIP" -d "$R/x" || die "could not unpack $RCLONE_ZIP"
+  got="$(find "$R/x" -type f -name rclone -perm -u+x | head -1)"
+  [ -n "$got" ] || die "$RCLONE_ZIP has no rclone program"
+  install -m 0755 "$got" "$R/rclone.part" && mv "$R/rclone.part" "$R/rclone"
+  rm -rf "$R/x"
+  shasum -a 256 "$R/rclone" | cut -d' ' -f1 > "$R/rclone.sha256"
+  "$R/rclone" version 2>/dev/null | head -1 | grep -q "rclone v$RCLONE_VERSION\$" \
+    || die "the unpacked rclone doesn't report version $RCLONE_VERSION"
+  ok "rclone $RCLONE_VERSION installed at $R/rclone"
+}
+if [ "${1:-}" = rclone ]; then fetch_rclone; exit 0; fi
 
 say "Ubuntu cloud image ($UBUNTU_RELEASE)"
 curl -fsSL -o "$U/SHA256SUMS" "$UBUNTU_BASE_URL/SHA256SUMS"

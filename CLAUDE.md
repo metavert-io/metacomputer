@@ -80,6 +80,12 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   as an acting call for the one-controller rule. The VM is untrusted: keep the
   Mac side's wire limits, deadline, strict reply schema and terminal escaping
   (docs/shell.md, "A VM that misbehaves").
+- Storage (docs/storage.md; `lib/storage.py`, the guest's `storage-helper`): volumes, Mac folders,
+  S3-backed folders and reference disks, attached at `start` from `VOLUMES` / `REFDISKS`. Create,
+  attach, delete or restore them only when the user asks; only the user runs `volume keys`. The VM
+  is hostile here too: keep the refusal list, the mount-point rules, the folder watcher and the
+  rule that keys reach rclone only in its environment. Guest-side changes need a rebuild, and a VM
+  without `storage=1` in `SSH_DIR/guest-features` must keep refusing storage.
 - Optional event stream (docs/events.md): `metacomputer notify` when blocked
   on the user; `metacomputer events sink …` only when the user asks (it
   decides what leaves the Mac). Off by default and best effort: an emitter
@@ -145,8 +151,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
-  `test_bench_workdir`, `test_vm_runner`, `test_plugin`, `test_learn` (no VM),
-  `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
+  `test_bench_workdir`, `test_vm_runner`, `test_plugin`, `test_learn`, `test_storage` (no VM),
+  `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings) and
+  `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
   it with `scripts/build-vault.sh`. Values must never reach output, logs or a

@@ -54,7 +54,7 @@ def navigate(c, pid, wid, path, background=True):
 
 
 def main():
-    subprocess.run([CUA, "put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", GUEST_RUNS],
+    subprocess.run([CUA, "put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", GUEST_RUNS, "--overwrite"],
                    check=True, capture_output=True)
     ssh(f"cd {GUEST_RUNS}/site && (nohup python3 -m http.server {PORT} --bind 127.0.0.1 >/dev/null 2>&1 "
         f"& echo $! > /tmp/cua-guard-http.pid); sleep 1")
