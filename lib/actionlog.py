@@ -2,11 +2,12 @@
 """Signed action log (optional; ACTION_LOG=on, off by default).
 
 Every connection to Cua Driver in the VM goes through `metacomputer mcp`
-(Claude Code's bridge, `metacomputer call`, `web`, the tests). With the
-log on, that command runs mcp_relay.py, which writes one JSON Lines file per
-connection under logs/actions/YYYY-MM-DD/: a start record (who connected,
-from which project), then every tool call exactly as it was sent to the VM,
-its result summary and timing, and the calls Claude Code's bridge refused.
+(the hub, which carries Claude Code's bridge, `metacomputer call` and scripts;
+`web`; the tests). With the log on, that command runs mcp_relay.py, which
+writes one JSON Lines file per connection under logs/actions/YYYY-MM-DD/: a
+start record (who connected, from which project), then every tool call exactly
+as it was sent to the VM (through the hub, with the client that made it), its
+result summary and timing, and the calls the hub refused.
 `metacomputer sh` (vm_shell.py) writes one file per run in the same form: a
 `vm_shell` call (the script's SHA-256 and size, cwd, timeout) and its result
 (exit code, and each output stream's size and SHA-256), unless SHELL_LOG=off.
@@ -199,10 +200,13 @@ class ActionLog:
                 if not self.closed and self.unsigned and time.time() - self.last_sign >= EVERY_S:
                     self._sign()
 
-    def call(self, call_id, tool, args):
+    def call(self, call_id, tool, args, client=None):
+        """client: the hub's note on whose call it is (kind, pid, Claude Code pid, project, driver session)."""
         self.started[call_id] = time.time()
-        self._add({"type": "call", "id": call_id, "tool": tool,
-                   "args": args if self.keep_text else redact(args)})
+        rec = {"type": "call", "id": call_id, "tool": tool, "args": args if self.keep_text else redact(args)}
+        if client:
+            rec["client"] = client
+        self._add(rec)
 
     def result(self, call_id, tool, msg):
         t0 = self.started.pop(call_id, None)
@@ -214,9 +218,11 @@ class ActionLog:
             rec["result"] = summarize_result(msg.get("result"), self.keep_text)
         self._add(rec)
 
-    def refused(self, tool, args, reason):
-        self._add({"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args),
-                   "reason": reason[:300]})
+    def refused(self, tool, args, reason, client=None):
+        rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
+        if client:
+            rec["client"] = client
+        self._add(rec)
 
     def event(self, kind, **fields):
         self._add({"type": kind, **fields})

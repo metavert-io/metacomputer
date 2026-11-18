@@ -6,8 +6,12 @@
   mcp_relay.py ssh -T ...ssh arguments...
 
 Messages pass through unchanged, in order. tools/call requests and their
-responses are recorded (actionlog.py); a `notifications/metacomputer/refused`
-message from Claude Code's bridge is recorded and not passed on.
+responses are recorded (actionlog.py). Notes from the hub (lib/mcp_hub.py) are
+recorded and never passed on to the driver:
+- `notifications/metacomputer/client` names the client (a Claude Code session,
+  `metacomputer call`, a script) of the tools/call that follows it, since one hub
+  connection carries every client's calls;
+- `notifications/metacomputer/refused` is a call the hub refused.
 """
 import json
 import os
@@ -25,6 +29,10 @@ except Exception:  # never let it stop the relay
     events = None
 
 REFUSED = "notifications/metacomputer/refused"
+CLOSING = "notifications/metacomputer/closing"     # to the client: why the relay is closing the connection
+MAX_MSG = 64 << 20          # one message either way (the VM is untrusted: a line must end within this)
+CLIENT = "notifications/metacomputer/client"
+OURS = "notifications/metacomputer/"
 DROPPED = "the connection to the VM closed before this call finished"
 
 
@@ -32,7 +40,8 @@ def session_info():
     pid = os.getpid()
     table = owners.ps_table()
     parent = owners.full_command(os.getppid())
-    via = ("claude-code" if "mcp_lazy" in parent else "call" if "mcp_client" in parent
+    via = ("hub" if "mcp_hub" in parent else "claude-code" if "mcp_lazy" in parent
+           else "call" if "mcp_client" in parent or "mcomp_sdk" in parent
            else "web" if "browser_tools" in parent else "tests" if "run_tests" in parent or "test_" in parent
            else "direct")
     return {"bridge_pid": pid, "claude_pid": owners.claude_of(pid, table), "cwd": os.getcwd(), "via": via,
@@ -63,6 +72,7 @@ def main(cmd):
     log = actionlog.ActionLog(session_info(), listener=actions_listener())
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     pending = {}            # json(id) -> tool
+    clients = {}            # json(id) -> the hub's note on whose call it is
     plock = threading.Lock()
     out = sys.stdout.buffer
 
@@ -86,8 +96,21 @@ def main(cmd):
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGHUP, on_signal)
 
+    client_done = threading.Event()
+
     def downstream():           # VM -> client
-        for line in proc.stdout:
+        why = None
+        while True:
+            try:
+                line = proc.stdout.readline(MAX_MSG + 1)
+            except (OSError, ValueError):
+                break
+            if not line:
+                break
+            if len(line) > MAX_MSG and not line.endswith(b"\n"):
+                why = "oversize"         # a line from the VM that doesn't end within the limit: drop the connection
+                log.event("protocol_error", reason=f"the VM sent a message over {MAX_MSG >> 20} MB; connection closed")
+                break
             try:
                 msg = json.loads(line)
             except ValueError:
@@ -98,31 +121,69 @@ def main(cmd):
                     tool = pending.pop(key, None)
                 if tool:
                     log.result(msg["id"], tool, msg)
-            out.write(line)
+            try:
+                out.write(line)
+                out.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                break
+        if client_done.is_set():
+            return               # the client closed first: main() finishes
+        # The driver's side ended (or misbehaved): nothing more can happen on this connection. Say why, sign
+        # the log's end and exit, so the client sees the end now rather than at its next write.
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            if why:
+                out.write((json.dumps({"jsonrpc": "2.0", "method": CLOSING,
+                                       "params": {"reason": why, "limit_mb": MAX_MSG >> 20}}) + "\n").encode())
             out.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finish()
+        os._exit(0 if not why else 1)
 
     t = threading.Thread(target=downstream, daemon=True)
     t.start()
-    for line in sys.stdin.buffer:   # client -> VM
+    inp = sys.stdin.buffer
+    while True:                     # client -> VM
+        line = inp.readline(MAX_MSG + 1)
+        if not line:
+            break
+        if len(line) > MAX_MSG and not line.endswith(b"\n"):
+            log.event("protocol_error", reason=f"the client sent a message over {MAX_MSG >> 20} MB; connection closed")
+            break
         try:
             msg = json.loads(line)
         except ValueError:
             msg = None
         if isinstance(msg, dict):
-            if msg.get("method") == REFUSED:
+            method = msg.get("method")
+            if method == REFUSED:
                 p = msg.get("params") or {}
-                log.refused(str(p.get("tool", "")), p.get("args") or {}, str(p.get("reason", "")))
+                log.refused(str(p.get("tool", "")), p.get("args") or {}, str(p.get("reason", "")),
+                            client=p.get("client") if isinstance(p.get("client"), dict) else None)
                 continue
-            if msg.get("method") == "tools/call" and "id" in msg:
+            if method == CLIENT:
+                p = msg.get("params") or {}
+                if "id" in p and isinstance(p.get("client"), dict) and len(clients) < 10000:
+                    clients[json.dumps(p["id"])] = p["client"]
+                continue
+            if isinstance(method, str) and method.startswith(OURS):
+                continue            # anything else of ours never reaches the driver
+            if method == "tools/call" and "id" in msg:
                 p = msg.get("params") or {}
                 with plock:
                     pending[json.dumps(msg["id"])] = p.get("name", "")
-                log.call(msg["id"], p.get("name", ""), p.get("arguments") or {})
+                log.call(msg["id"], p.get("name", ""), p.get("arguments") or {},
+                         client=clients.pop(json.dumps(msg["id"]), None))
         try:
             proc.stdin.write(line)
             proc.stdin.flush()
         except (BrokenPipeError, OSError):
             break
+    client_done.set()
     try:
         proc.stdin.close()
     except OSError:

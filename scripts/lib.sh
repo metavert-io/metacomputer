@@ -187,6 +187,10 @@ export_options() {
          MCOMP_DRIVER_MANIFEST="$DRIVER_MANIFEST" MCOMP_DRIVER_ORIGINS="$DRIVER_ORIGINS" MCOMP_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
          MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}"
+  # The hub (lib/mcp_hub.py) and its coordinate guard. MCOMP_MCP_HUB / MCOMP_COORD_GUARD already in the
+  # environment win over the config (the benchmark's switches).
+  export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
+         MCOMP_HUB_IDLE="${HUB_IDLE:-10m}"
 }
 
 # --- the optional event stream (docs/events.md; off until a sink is added) ------

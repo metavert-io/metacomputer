@@ -2,11 +2,16 @@
 
 Two kinds of controller can drive the VM's desktop:
 
-- On-demand bridges (`metacomputer mcp-lazy`, what Claude Code sessions use). Each
-  one that has acted keeps .run/owners/<bridge-pid>.json up to date: its Claude
-  Code process, the project folder, the time and name of its last tool call.
-- Direct connections (`metacomputer mcp`: the GUI tests, mcp_client.py, older
-  configs). They are found as live SSH processes using the MCP key.
+- Clients of the hub (mcp_hub.py: Claude Code's `metacomputer mcp-lazy`,
+  `metacomputer call`, scripts through mcomp_sdk.py) or, with MCP_HUB=off,
+  bridges with their own connection. Each one that has acted keeps
+  .run/owners/<pid>.json up to date: its Claude Code process, the project
+  folder, the time and name of its last tool call. The hub writes them for its
+  clients; a one-shot `metacomputer call` is held by its Claude Code process,
+  or else the shell that ran it.
+- Direct connections (`metacomputer mcp` with MCOMP_DIRECT_BRIDGE=1: the GUI
+  tests, `web`, mcp_client.py). They are found as live SSH processes using the
+  MCP key. The hub's own connection (and a bridge's) isn't one of them.
 
 The shell channel (`metacomputer sh`) acts too: each run (except --read-only)
 keeps .run/owners/<pid>.json up to date, where pid is its Claude Code process,
@@ -169,6 +174,14 @@ def my_sid():
         return None
 
 
+def sid_of(pid):
+    """Another process's terminal session (the hub asks for its clients')."""
+    try:
+        return os.getsid(int(pid))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def claim_for_shell(tool, who=None):
     """`metacomputer sh` acted. Its process ends with the run, so the claim lives
     as long as the caller's Claude Code session. Outside Claude Code it's held in
@@ -250,9 +263,10 @@ def direct_connections(table):
         if not MCP_KEY_RE.search(cmd) or "@127.0.0.1" not in cmd or not for_this_vm(cmd):
             continue
         parent = full_command(ppid)
-        if "mcp_lazy.py" in parent:
-            continue  # an on-demand bridge's own upstream: reported through its claim
-        if "mcp_relay.py" in parent and "mcp_lazy.py" in full_command(table.get(ppid, (0, ""))[0]):
+        if "mcp_lazy.py" in parent or "mcp_hub.py" in parent:
+            continue  # an on-demand bridge's or the hub's own upstream: its clients are reported through claims
+        if "mcp_relay.py" in parent and any(b in full_command(table.get(ppid, (0, ""))[0])
+                                            for b in ("mcp_lazy.py", "mcp_hub.py")):
             continue  # the same, through the action-log relay (ACTION_LOG=on)
         chain = ancestors(pid, table)
         who = None
@@ -268,13 +282,18 @@ def direct_connections(table):
     return out
 
 
-def others(self_pid=None, table=None):
-    """Controllers other than the caller's own Claude Code session."""
-    table = table or ps_table()
+def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, sid=None):
+    """Controllers other than the caller's own Claude Code session. The hub, which asks for its clients,
+    passes what it already knows: the client's ancestors (mine), its Claude Code process, its terminal
+    session (sid) and a recent list of direct connections, so no process table is read."""
     self_pid = self_pid or os.getpid()
-    mine = set(ancestors(self_pid, table))
-    my_claude = claude_of(self_pid, table)
-    sid = my_sid()
+    if mine is None or direct is None:
+        table = table or ps_table()
+    if mine is None:
+        mine = set(ancestors(self_pid, table))
+        my_claude = claude_of(self_pid, table)
+    if sid is None:
+        sid = my_sid() if self_pid == os.getpid() else sid_of(self_pid)
     found = []
     for c in claims():
         # mine: also a claim held by a shell above the caller (metacomputer sh outside Claude Code)
@@ -285,7 +304,7 @@ def others(self_pid=None, table=None):
                 and c.get("sid") is not None and c.get("sid") == sid):
             continue
         found.append({**c, "kind": "session", "claim": c.get("kind") or "bridge"})
-    for d in direct_connections(table):
+    for d in (direct if direct is not None else direct_connections(table)):
         chain = set(d["chain"])
         if self_pid in chain or (my_claude and my_claude in chain) or (chain & mine - {1}):
             continue
@@ -312,10 +331,18 @@ def main(argv):
         me = claude_of(os.getpid(), table)
         all_claims = claims()
         direct = direct_connections(table)
+        hub = None
+        try:   # the hub's own view: its clients (they act through it), idle time
+            import mcp_hub
+            hub = mcp_hub.query_status()
+        except Exception:
+            pass
         if "--json" in argv:
             print(json.dumps({"self_claude_pid": me, "sessions": all_claims, "direct": direct,
-                              "active_s": ACTIVE_S}, indent=2, default=str))
+                              "active_s": ACTIVE_S, "hub": hub}, indent=2, default=str))
             return 0
+        if hub:
+            print("  hub: " + mcp_hub.describe_status(hub).replace("\n", "\n  "))
         if not all_claims and not direct:
             print("Nobody is using the virtual computer.")
             return 0
