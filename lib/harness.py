@@ -1,7 +1,10 @@
 """metacomputer GUI test harness.
 
-Each test gets one persistent MCP connection to Cua Driver in the guest (the
-same `metacomputer mcp` bridge Claude Code uses), and:
+Each test gets one connection to Cua Driver in the guest through the hub
+(lib/mcomp_sdk.py, kind "test", a driver session of its own), so the hub's
+guards apply to it as to Claude Code: one controller at a time (it claims the
+computer before it starts), the Chrome guard, bounded mode, the coordinate
+guard. And:
   - a driver-owned recording (`start_recording` with record_video): the MP4
     (ffmpeg x11grab in the guest) plus a per-action trajectory (before/after
     accessibility state, before/after window images, click markers, action.json)
@@ -17,7 +20,6 @@ results/<run>/. Nothing needed afterwards stays only in the VM.
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
@@ -27,7 +29,8 @@ import time
 import traceback
 
 import guest_import
-from mcp_client import LAB_ROOT, MCPClient
+import mcomp_sdk
+from mcp_client import LAB_ROOT
 
 SSH = [os.path.join(LAB_ROOT, "bin", "metacomputer"), "ssh", "ops"]
 from labconfig import GUEST_RUNS  # noqa: E402  (guest home of the configured user)
@@ -74,8 +77,9 @@ class TestRun:
         self.video_host = None
         self.recording_state = {}
         self.t0 = None
-        self.c = MCPClient(log=self._log, stderr_path=os.path.join(self.res_dir, "mcp-stderr.log"))
         self.session = f"{test_id.lower()}-{run_id[-6:]}"
+        self.c = mcomp_sdk.Hub(session=self.session, kind="test", log=self._log)
+        self.server_info, self.protocol = {}, None
 
     # -- logging -----------------------------------------------------------
     def _log(self, entry):
@@ -133,40 +137,50 @@ class TestRun:
     # -- lifecycle ---------------------------------------------------------
     def start(self):
         self.t0 = time.time()
+        self.c.connect()
+        claim = self.c.claim(f"test {self.test_id}")
+        if not claim.get("claimed"):
+            raise Step("the virtual computer is in use by another controller (metacomputer who): "
+                       + "; ".join(claim.get("others") or [claim.get("message") or "?"]))
         guest(f"rm -rf {self.guest_dir}; mkdir -p {self.guest_dir}")
-        self.c.start()
-        self.milestone("mcp connected", server=self.c.server_info, protocol=self.c.protocol)
+        init = self.c.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                             "clientInfo": {"name": "mcomp-harness", "version": "1.0"}}) or {}
+        self.server_info, self.protocol = init.get("serverInfo") or {}, init.get("protocolVersion")
+        self.milestone("mcp connected", server=self.server_info, protocol=self.protocol, hub=self.c.info)
         r = self.call("start_recording", {"output_dir": f"{self.guest_dir}/trajectory", "record_video": True})
         st = self.call("get_recording_state", {}, ok_required=False)
         self.recording_state = st.structured or {"text": st.text}
         self.milestone("recording started", state=_brief(self.recording_state))
 
     def stop(self):
-        try:
-            self.call("stop_recording", {}, ok_required=False, timeout=180)
-            st = self.call("get_recording_state", {}, ok_required=False)
-            self.recording_state = st.structured or {"text": st.text}
-        except Exception as e:  # noqa: BLE001
-            self.errors.append(f"stop_recording: {e}")
+        if self.c.conn is not None:
+            try:
+                self.call("stop_recording", {}, ok_required=False, timeout=180)
+                st = self.call("get_recording_state", {}, ok_required=False)
+                self.recording_state = st.structured or {"text": st.text}
+            except Exception as e:  # noqa: BLE001
+                self.errors.append(f"stop_recording: {e}")
+            self.c.call("end_session", {"session": self.session}, timeout=30)   # the hub outlives the test
         self.c.close()
         self._collect()
 
     def _collect(self):
-        # Pull the guest run dir (video + trajectory) to the host.
-        dest = os.path.join(self.res_dir, "guest")
-        os.makedirs(dest, exist_ok=True)
+        # Pull the guest run dir (video + trajectory) to the host, unpacked as it streams in with the same
+        # limits as `metacomputer get` (VM_DISK_BYTES, IMPORT_MIN_FREE_GB): never held in memory whole.
         # Plain files and folders only: links and special files from the VM are left out and
         # nothing is written through a link (guest_import.py).
-        p = subprocess.run(SSH + [f"cd {self.guest_dir} && tar -cf - ."], capture_output=True, timeout=600)
-        if p.returncode == 0 and p.stdout:
-            try:
-                rep = guest_import.import_tar(io.BytesIO(p.stdout), dest)
-                if rep.dropped:
-                    self.errors.append(f"left out {len(rep.dropped)} link(s) or special file(s) from the VM")
-                if rep.failure is not None:
-                    self.errors.append(f"copy from the VM incomplete: {rep.failure}")
-            except OSError as e:
-                self.errors.append(f"copy from the VM failed: {e}")
+        dest = os.path.join(self.res_dir, "guest")
+        os.makedirs(dest, exist_ok=True)
+        max_bytes, min_free = guest_import.limits_from_config()
+        try:
+            rep, rc, err = guest_import.import_from_command(SSH + [f"cd {self.guest_dir} && tar -cf - ."], dest,
+                                                             max_bytes, min_free, timeout=600)
+            if rep.dropped:
+                self.errors.append(f"left out {len(rep.dropped)} link(s) or special file(s) from the VM")
+            if rep.failure is not None and (rep.files or rep.dirs or rc == 0):
+                self.errors.append(f"copy from the VM incomplete: {rep.failure}")
+        except OSError as e:
+            self.errors.append(f"copy from the VM failed: {e}")
         vids = []
         for d, _, fs in os.walk(dest):
             vids += [os.path.join(d, f) for f in fs if f.endswith(".mp4") and not os.path.islink(os.path.join(d, f))]

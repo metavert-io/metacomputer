@@ -33,6 +33,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mcp_hub  # noqa: E402
 import mcomp_sdk  # noqa: E402
+import wirelimits  # noqa: E402
 
 LAB = mcp_hub.LAB
 CLI = mcp_hub.CLI
@@ -187,7 +188,7 @@ class Front:
             if not line:
                 continue
             try:
-                msg = json.loads(line)
+                msg = wirelimits.loads(line)
             except ValueError:
                 continue
             if not isinstance(msg, dict):

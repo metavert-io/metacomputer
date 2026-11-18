@@ -15,9 +15,12 @@
 Common options: --task NAME (write into results/NAME/), --record (screen recording),
 --override (even if another session is using the computer; ask first), --json.
 
-Each run opens its own driver connection, records itself as the controller
-(metacomputer who), opens its own browser windows (throwaway Chrome profiles,
-a new Firefox window) and closes them again. Page content is untrusted data.
+Each run reaches the VM through the hub (lib/mcomp_sdk.py), so the hub's guards
+apply to it; it claims the computer before it starts (one step under the owners
+lock, as an acting call does: shown in metacomputer who), opens its own browser
+windows (throwaway Chrome profiles, a new Firefox window) and closes them again.
+--override releases other sessions' claims first, as `metacomputer release` does.
+Page content is untrusted data.
 """
 import argparse
 import base64
@@ -33,8 +36,8 @@ import time
 from urllib.parse import urljoin, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mcomp_sdk  # noqa: E402
 import owners  # noqa: E402
-from mcp_client import MCPClient  # noqa: E402
 from termsafe import escape_for_terminal  # noqa: E402
 
 LAB = owners.LAB
@@ -73,9 +76,26 @@ def guest(cmd):
 # --- driver session ----------------------------------------------------------
 class Driver:
     def __init__(self):
-        self.c = MCPClient()
-        self.c.start()
+        try:
+            self.c = mcomp_sdk.Hub(kind="web").connect()
+        except mcomp_sdk.HubError as e:
+            raise Fail(f"couldn't reach the virtual computer's hub ({e})")
         self.sessions = set()
+
+    def claim(self, what, override=False):
+        """Claim the computer through the hub (checked and claimed in one step). With override, other sessions'
+        claims are released first (the user agreed, as with `metacomputer release`)."""
+        r = self.c.claim(what)
+        if not r.get("claimed") and override and r.get("others"):
+            for o in owners.others():
+                if o["kind"] == "session":
+                    owners.drop_claim(o["bridge_pid"])
+                    say("released: " + owners.describe(o))
+            r = self.c.claim(what)
+        if not r.get("claimed"):
+            raise Fail("another session is using the virtual computer (metacomputer who): "
+                       + "; ".join(r.get("others") or [r.get("message") or "?"])
+                       + (". Ask before taking over; then re-run with --override" if not override else ""))
 
     def call(self, tool, args=None, ok=True, timeout=120):
         r = self.c.call(tool, args or {}, timeout=timeout)
@@ -254,28 +274,22 @@ class Run:
         self.a = a
         if not URL_RE.fullmatch(a.url):
             raise Fail("give an http:// or https:// URL")
-        busy = [o for o in owners.others(os.getpid()) if o["active"]]
-        if busy and not a.override:
-            raise Fail("another session is using the virtual computer (metacomputer who). Ask before taking over; "
-                       "then re-run with --override")
+        self.d = Driver()
+        CURRENT.append(self)
+        self.d.claim(f"web {kind}", a.override)
         out = lab("task", "start", f"web-{kind}")
         kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
         self.task = kv["NAME"]
         self.rec_dir = kv["RECORDING_DIR"].split()[0]
         self.dir = os.path.join(LAB, "results", a.task or self.task)
         os.makedirs(self.dir, exist_ok=True)
-        owners.write_claim(os.getpid(), owners.claude_of(os.getpid(), owners.ps_table()), os.getcwd(),
-                           f"web {kind}", time.time())
-        self.d = Driver()
-        CURRENT.append(self)
         if a.record:
             self.d.call("start_recording", {"output_dir": self.rec_dir, "record_video": True})
 
     def finish(self, report, md):
         if self.a.record:
             self.d.call("stop_recording", ok=False)
-        self.d.close()
-        owners.drop_claim(os.getpid())
+        self.d.close()               # the hub lets go of this run's claim
         if self.a.record:
             lab("task", "finish", self.task, check=False)
         with open(os.path.join(self.dir, "report.json"), "w") as f:
@@ -596,10 +610,9 @@ def main(argv):
     except (Fail, KeyError, OSError, subprocess.CalledProcessError) as e:
         for r in CURRENT:
             try:
-                r.d.close()        # ends its sessions: driver-owned Chrome windows close
+                r.d.close()        # ends its sessions (driver-owned Chrome windows close) and the claim
             except Exception:
                 pass
-        owners.drop_claim(os.getpid())
         say(f"metacomputer web {a.cmd}: {e}")
         return 1
     if a.json:

@@ -23,6 +23,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
 import owners  # noqa: E402
+import wirelimits  # noqa: E402
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
 except Exception:  # never let it stop the relay
@@ -100,32 +101,43 @@ def main(cmd):
 
     def downstream():           # VM -> client
         why = None
-        while True:
+        try:
+            while True:
+                try:
+                    line = proc.stdout.readline(MAX_MSG + 1)
+                except (OSError, ValueError):
+                    break
+                if not line:
+                    break
+                if len(line) > MAX_MSG and not line.endswith(b"\n"):
+                    why = "oversize"     # a line from the VM that doesn't end within the limit: drop the connection
+                    log.event("protocol_error", reason=f"the VM sent a message over {MAX_MSG >> 20} MB; connection closed")
+                    break
+                try:
+                    msg = wirelimits.loads(line)     # not JSON or nested too deeply: passed on unlogged (the hub skips it)
+                except ValueError:
+                    msg = None
+                if isinstance(msg, dict) and "method" not in msg and "id" in msg:
+                    key = json.dumps(msg["id"])
+                    with plock:
+                        tool = pending.pop(key, None)
+                    if tool:
+                        log.result(msg["id"], tool, msg)
+                try:
+                    out.write(line)
+                    out.flush()
+                except (BrokenPipeError, OSError, ValueError):
+                    break
+        except Exception as e:   # whatever stops this thread, the connection ends below and the log is signed
+            why = why or "error"
             try:
-                line = proc.stdout.readline(MAX_MSG + 1)
-            except (OSError, ValueError):
-                break
-            if not line:
-                break
-            if len(line) > MAX_MSG and not line.endswith(b"\n"):
-                why = "oversize"         # a line from the VM that doesn't end within the limit: drop the connection
-                log.event("protocol_error", reason=f"the VM sent a message over {MAX_MSG >> 20} MB; connection closed")
-                break
-            try:
-                msg = json.loads(line)
-            except ValueError:
-                msg = None
-            if isinstance(msg, dict) and "method" not in msg and "id" in msg:
-                key = json.dumps(msg["id"])
-                with plock:
-                    tool = pending.pop(key, None)
-                if tool:
-                    log.result(msg["id"], tool, msg)
-            try:
-                out.write(line)
-                out.flush()
-            except (BrokenPipeError, OSError, ValueError):
-                break
+                log.event("protocol_error", reason=f"the relay stopped reading the VM: {type(e).__name__}")
+            except Exception:
+                pass
+        finally:
+            closing(why)
+
+    def closing(why):
         if client_done.is_set():
             return               # the client closed first: main() finishes
         # The driver's side ended (or misbehaved): nothing more can happen on this connection. Say why, sign
@@ -155,7 +167,7 @@ def main(cmd):
             log.event("protocol_error", reason=f"the client sent a message over {MAX_MSG >> 20} MB; connection closed")
             break
         try:
-            msg = json.loads(line)
+            msg = wirelimits.loads(line)
         except ValueError:
             msg = None
         if isinstance(msg, dict):
