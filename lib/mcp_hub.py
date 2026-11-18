@@ -673,8 +673,9 @@ class Hub:
         self.gen_procs = {}         # driver connection generation -> its process, until that connection's reader is done
                                     # (a lease's calls run in their own generation, which may no longer be self.up)
         self._bad_upstream = collections.deque()   # times of unusable messages from the driver (BAD_UPSTREAM_*)
+        self._bad_gen = None        # ...on this driver connection only: a new one starts with none
         self.log_lock = threading.Lock()
-        self._note_kinds = {}       # kind -> [window start, notes written, notes left out] (NOTE_REPEAT_MAX)
+        self._note_kinds = {}       # kind -> its window: start, written, left out, examples, timer (NOTE_REPEAT_MAX)
         self.log = None
         self.log_bytes = 0
         self._open_log()
@@ -701,33 +702,76 @@ class Hub:
 
     def note(self, text, kind=None):
         """A line in hub.log. Notes of one kind (a misbehaving driver's, say) are written at most NOTE_REPEAT_MAX times
-        per NOTE_WINDOW_S, then counted; and the file is rotated at LOG_MAX while the hub runs, so nothing the VM
-        does can fill the disk through it."""
+        per NOTE_WINDOW_S; the rest are counted, with a few different examples, and one summary line says so when the
+        window ends (a timer), when a driver connection closes and when the hub stops (flush_notes), so nothing is
+        lost silently. The file is rotated at LOG_MAX while the hub runs, so nothing the VM does can fill the disk
+        through it."""
         now = time.monotonic()
         lines = []
         with self.log_lock:
             if kind is not None:
-                st = self._note_kinds.setdefault(kind, [now, 0, 0])
-                if now - st[0] >= NOTE_WINDOW_S:
-                    if st[2]:
-                        lines.append(f"({st[2]} more notes like '{kind}' in the last {int(now - st[0])} s were left out)")
-                    st[:] = [now, 0, 0]
-                if st[1] >= NOTE_REPEAT_MAX:
-                    st[2] += 1
+                st = self._note_kinds.get(kind)
+                if st is None or now - st["t0"] >= NOTE_WINDOW_S:
+                    if st is not None:
+                        lines += self._note_summary(kind, st, now)
+                    st = self._note_kinds[kind] = {"t0": now, "written": 0, "left": 0, "examples": [], "timer": None}
+                if st["written"] >= NOTE_REPEAT_MAX:
+                    st["left"] += 1
+                    ex = clean(text, 160)
+                    if len(st["examples"]) < 3 and ex not in st["examples"]:
+                        st["examples"].append(ex)
+                    if st["timer"] is None:          # the summary comes when the window ends, more notes or not
+                        t = threading.Timer(max(0.0, st["t0"] + NOTE_WINDOW_S - now), self._flush_kind, args=(kind, st))
+                        t.daemon = True
+                        st["timer"] = t
+                        t.start()
+                    self._write_lines(lines)
                     return
-                st[1] += 1
+                st["written"] += 1
             lines.append(text)
-            if not self.log:
+            self._write_lines(lines)
+
+    def _note_summary(self, kind, st, now):
+        """The summary line for a window of left-out notes (caller holds log_lock), and the window closed."""
+        if st.get("timer") is not None:
+            st["timer"].cancel()
+            st["timer"] = None
+        if not st["left"]:
+            return []
+        n, st["left"] = st["left"], 0
+        ex = "; for example: " + " | ".join(st["examples"]) if st["examples"] else ""
+        st["examples"] = []
+        return [f"({n} more notes like '{kind}' in the last {max(1, int(now - st['t0']))} s were left out{ex})"]
+
+    def _flush_kind(self, kind, st):
+        with self.log_lock:
+            if self._note_kinds.get(kind) is st:
+                st["timer"] = None
+                self._write_lines(self._note_summary(kind, st, time.monotonic()))
+
+    def flush_notes(self):
+        """Write the summary of every kind of note left out so far (a driver connection closed, the hub stops)."""
+        now = time.monotonic()
+        with self.log_lock:
+            lines = []
+            for kind, st in list(self._note_kinds.items()):
+                lines += self._note_summary(kind, st, now)
+                st["t0"], st["written"] = now, 0
+            self._write_lines(lines)
+
+    def _write_lines(self, lines):
+        """Caller holds log_lock."""
+        if not self.log or not lines:
+            return
+        for line in lines:
+            data = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {line}\n"
+            try:
+                self.log.write(data)
+            except (OSError, ValueError):
                 return
-            for line in lines:
-                data = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [hub {self.pid}] {line}\n"
-                try:
-                    self.log.write(data)
-                except (OSError, ValueError):
-                    return
-                self.log_bytes += len(data.encode())
-            if self.log_bytes > LOG_MAX:
-                self.rotate_log()
+            self.log_bytes += len(data.encode())
+        if self.log_bytes > LOG_MAX:
+            self.rotate_log()
 
     def event(self, client, family, type_, message, severity=None, action=None, data=None, debounce=None):
         """The optional event stream (docs/events.md), on a background thread: never delays a call."""
@@ -1289,14 +1333,16 @@ class Hub:
                     break
                 if not line.strip():
                     continue
+                bad = None                             # why a message is unusable (its kind of note)
                 try:
                     msg = wirelimits.loads(line)       # too deep, too many values or not JSON: never a dead reader
                 except wirelimits.LimitError:
                     msg = None
+                    bad = "over the value or depth limit, no call of ours named"
                     if self._answer_refused(line, gen):
                         continue                       # too complex for the hub, and answered: not a broken driver
                 except ValueError:
-                    msg = None
+                    msg, bad = None, "not JSON"
                 usable = False
                 if isinstance(msg, dict) and msg.get("method") == "notifications/metacomputer/closing":
                     p = msg.get("params")
@@ -1305,9 +1351,14 @@ class Hub:
                 if isinstance(msg, dict):
                     try:
                         usable = self.on_upstream(msg) is not False
+                        bad = None if usable else "the wrong shape"
                     except Exception as e:
-                        self.note(f"error handling a message from the driver: {e!r}"[:300], kind="driver message error")
-                if not usable and self._bad_upstream_message(gen):
+                        bad = f"an error handling it: {type(e).__name__}"
+                        self.note(f"error handling a message from the driver: {e!r}"[:300],
+                                  kind=f"driver message error ({type(e).__name__})")
+                elif msg is not None:
+                    bad = "not a JSON object"
+                if not usable and self._bad_upstream_message(gen, bad or "unusable"):
                     why = "protocol"
                     self.note(f"the driver sent more than {BAD_UPSTREAM_MAX} unusable messages in "
                               f"{int(BAD_UPSTREAM_WINDOW_S)} s; closing the connection")
@@ -1357,16 +1408,20 @@ class Hub:
                       kind="driver answer over limits")
         return answered
 
-    def _bad_upstream_message(self, gen):
-        """One more unusable message from the driver (not JSON, the wrong shape, one the hub couldn't handle). True
-        once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S: a driver that keeps doing it
-        is hung up on rather than logged without end."""
+    def _bad_upstream_message(self, gen, why="unusable"):
+        """One more unusable message from this driver connection (not JSON, the wrong shape, one the hub couldn't
+        handle: why). True once there have been more than BAD_UPSTREAM_MAX within BAD_UPSTREAM_WINDOW_S on the same
+        connection: a driver that keeps doing it is hung up on rather than logged without end."""
         now = time.monotonic()
         q = self._bad_upstream
+        if self._bad_gen != gen:                     # counted per driver connection: a new one starts clean
+            q.clear()
+            self._bad_gen = gen
         q.append(now)
         while q and now - q[0] > BAD_UPSTREAM_WINDOW_S:
             q.popleft()
-        self.note("the driver sent a message the hub couldn't use; skipped", kind="driver unusable message")
+        self.note(f"the driver (connection {gen}) sent a message the hub couldn't use ({why}); skipped",
+                  kind=f"driver message {why.split(':')[0]}")
         if len(q) > BAD_UPSTREAM_MAX:
             q.clear()
             return True
@@ -1403,6 +1458,7 @@ class Hub:
             self._reset_runtime()
         self.last_activity = time.time()
         self.gen_procs.pop(gen, None)
+        self.flush_notes()                           # what was left out about this connection, counted, before it ends
         self.note(f"driver connection closed (generation {gen}{', ' + why if why else ''})")
 
     def on_upstream(self, msg):
@@ -2228,6 +2284,7 @@ class Hub:
         for old in list(self.gen_procs.values()):    # earlier connections still finishing (a bounded session's end)
             if old is not proc:
                 self._end_transport(old, True)
+        self.flush_notes()
         with self.lease_lock:
             had_lease, self.leases = bool(self.leases), {}
         if had_lease and not self.local:

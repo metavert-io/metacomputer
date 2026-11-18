@@ -2064,6 +2064,41 @@ def batch3_checks():
     clear_claims()
 
 
+def notes_checks():
+    print("#11: notes left out are counted and summarized, and a driver's bad messages count per connection")
+    saved = (mcp_hub.NOTE_WINDOW_S, mcp_hub.BAD_UPSTREAM_MAX)
+    try:
+        mcp_hub.NOTE_WINDOW_S = 1.0
+        r = Running()
+        log = mcp_hub.paths(r.env)["log"]
+        for i in range(8):
+            r.hub.note(f"odd thing {i}", kind="test burst")
+        time.sleep(1.8)                              # nothing more of that kind comes
+        text = open(log).read()
+        check("notes past the limit are summarized when their window ends, with their count and examples, even if "
+              "no other note of that kind follows", "3 more notes like 'test burst'" in text and "odd thing 5" in text
+              and "odd thing 7" not in text.split("3 more notes")[0], text[-400:])
+        mcp_hub.NOTE_WINDOW_S = 600.0
+        for i in range(8):
+            r.hub.note(f"later thing {i}", kind="test burst 2")
+        h = client(r)
+        h.call("die", {})                            # the driver connection ends
+        time.sleep(0.5)
+        text = open(log).read()
+        check("…and when a driver connection closes, what was left out so far is summarized at once",
+              "3 more notes like 'test burst 2'" in text, text[-400:])
+        mcp_hub.BAD_UPSTREAM_MAX = 40
+        a = h.call("badflood", {"size": 30})
+        h.call("die", {})
+        b = h.call("badflood", {"size": 30})
+        check("a driver's bad messages are counted per connection: 30 on one and 30 on the next aren't 'more than 40'",
+              not a.is_error and not b.is_error and "after the bad messages" in b.text, (a.text[:80], b.text[:80]))
+        h.close()
+        r.stop()
+    finally:
+        mcp_hub.NOTE_WINDOW_S, mcp_hub.BAD_UPSTREAM_MAX = saved
+
+
 def main():
     setup_driver()
     try:
@@ -2103,6 +2138,7 @@ def main():
         chrome_batch_checks()
         coord_incomplete_checks()
         batch3_checks()
+        notes_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)
