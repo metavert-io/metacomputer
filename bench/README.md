@@ -246,7 +246,16 @@ three times and compare the totals.
 
 ## Costs
 
-Each task is capped at $3 by default, and the run at $60. With Opus, a task
-usually costs $0.50 to $2 and takes 2 to 6 minutes, plus about 20 s to reset
-the VM. A full run is about $20 to $40 and 1 to 2 hours. The
-baseline's actual numbers are in its `summary.md`.
+Each task is capped at $3 by default, and the run at $60.
+
+The first baseline (2026-11-17, Opus 5.5, Cua Driver 0.52.1, the default skill)
+passed all 20 tasks:
+- it cost $11.95 in all, from $0.20 to $1.31 per task, $0.60 on average;
+- a session took 20 s to 2.3 min, 0.9 min on average;
+- with about 25 s per task for the reset and setup, a full run takes about 35
+  minutes.
+
+Its numbers are in `results/bench/baseline-2026-11-17/summary.md`. Because every
+task passed, later changes will show up mostly in cost, turns, time and the
+tool-call mix. Make tasks harder (or add some) when you need pass rates to
+separate two variants.

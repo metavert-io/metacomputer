@@ -27,7 +27,6 @@ import glob
 import gzip
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -412,19 +411,7 @@ def cmd_run(a):
     log(f"summary: {path}")
 
 
-API_FAIL = re.compile(r"hit your (weekly |daily |session )?limit|usage limit|rate limit|overloaded|credit balance|"
-                      r"API Error|authentication", re.I)
-
-
-def infra_reason(rec):
-    """Why a task's record isn't a real attempt (and gets retried on resume), or None."""
-    if rec.get("infra_failure"):
-        return rec["infra_failure"] if isinstance(rec["infra_failure"], str) else "setup failed"
-    m = rec.get("metrics") or {}
-    if m.get("is_error") and not (m.get("cost_usd") or 0) and (
-            m.get("api_error_status") or API_FAIL.search(m.get("final_text") or "")):
-        return f"api error {m.get('api_error_status') or ''}: {(m.get('final_text') or '')[:120]}".replace("  ", " ")
-    return None
+infra_reason = report.infra_reason
 
 
 def run_task(t, sw, rdir, work, cfg, shim):

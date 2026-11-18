@@ -2,6 +2,21 @@
 per task and in total (HCU-style tables). Reads results/bench/<run>/results.jsonl."""
 import json
 import os
+import re
+
+API_FAIL = re.compile(r"hit your (weekly |daily |session )?limit|usage limit|rate limit|overloaded|credit balance|"
+                      r"API Error|authentication", re.I)
+
+
+def infra_reason(rec):
+    """Why a task's record isn't a real attempt (the runner retries it on resume), or None."""
+    if rec.get("infra_failure"):
+        return rec["infra_failure"] if isinstance(rec["infra_failure"], str) else "setup failed"
+    m = rec.get("metrics") or {}
+    if m.get("is_error") and not (m.get("cost_usd") or 0) and (
+            m.get("api_error_status") or API_FAIL.search(m.get("final_text") or "")):
+        return f"api error {m.get('api_error_status') or ''}: {(m.get('final_text') or '')[:120]}".replace("  ", " ")
+    return None
 
 
 def load_all(rdir):
@@ -22,7 +37,7 @@ def latest(recs):
     out = []
     for t in order:
         r = dict(by[t][-1])
-        r["earlier_attempts"] = [x.get("infra_failure") or "earlier attempt" for x in by[t][:-1]]
+        r["earlier_attempts"] = [infra_reason(x) or "earlier attempt" for x in by[t][:-1]]
         out.append(r)
     return out
 
@@ -85,6 +100,8 @@ def header(meta):
             f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
             f"spent ${meta.get('spent_usd', 0):.2f}; {meta.get('started')} to {meta.get('finished', '?')}"
             + (f" (resumed {', '.join(meta['resumed'])})" if meta.get("resumed") else "")
+            + (f"\n- resumed on metacomputer `{((meta['resume_note'].get('earlier_metacomputer') or {}).get('sha') or '')[:10]}` before; "
+               "check that the code under test didn't change between the two" if meta.get("resume_note") else "")
             + (f"\n- stopped early: {meta['stopped']}" if meta.get("stopped") else ""))
 
 
