@@ -12,7 +12,7 @@ In your own terminal (these ask for the vault passphrase):
   set NAME --kind password|totp|text --origin https://site [--origin ...]
       [--username U] [--approval session|each] [--project DIR ...] [--replace]
   set NAME --kind api --api-host api.example.com [--header 'Authorization: Bearer {value}']
-      [--api-path-prefix /v1/] [--approval session|each] [--project DIR ...] [--replace]
+      [--api-path-prefix /v1] [--approval session|each] [--project DIR ...] [--replace]
                                          store a secret (the value is typed, not echoed); --replace rotates it
   delete NAME                            remove a secret
   bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U
@@ -149,8 +149,14 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         }
         apiHeader = template
         if let p = a.last("api-path-prefix") {
-            guard p.hasPrefix("/"), clean(p, max: 200) == p, !p.contains("..") else { throw usageError("--api-path-prefix: a path like /v1/") }
-            apiPrefix = p
+            guard p.hasPrefix("/"), clean(p, max: 200) == p, !p.contains(".."), !p.contains("?"), !p.contains("#") else {
+                throw usageError("--api-path-prefix: a path like /v1 (whole segments: it allows /v1 and /v1/..., never /v10)")
+            }
+            // Kept without a trailing slash: the proxy matches whole segments (pathWithin), so
+            // /v1 and /v1/ mean the same, and / means every path.
+            var norm = p
+            while norm.hasSuffix("/") { norm.removeLast() }
+            apiPrefix = norm.isEmpty ? nil : norm
         }
     } else {
         guard a.last("api-host") == nil, a.last("header") == nil, a.last("api-path-prefix") == nil else {

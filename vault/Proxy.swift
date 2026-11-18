@@ -64,11 +64,15 @@ final class ProxyListener: @unchecked Sendable {
     let macPort: Int
     let guestPort: Int
     var tunnel: Tunnel?
-    init(vm: String, fd: Int32, macPort: Int, guestPort: Int) {
+    /// This VM's connections at once: each VM has its own, so one VM holding all of its
+    /// slots never slows another.
+    let slots: DispatchSemaphore
+    init(vm: String, fd: Int32, macPort: Int, guestPort: Int, slots: Int) {
         self.vm = vm
         self.fd = fd
         self.macPort = macPort
         self.guestPort = guestPort
+        self.slots = DispatchSemaphore(value: slots)
     }
 }
 
@@ -82,7 +86,18 @@ final class ProxyHub: @unchecked Sendable {
     var tokens: [String: APIToken] = [:]        // by token hash
     var listeners: [String: ProxyListener] = [:]
     var closed = false
-    let slots = DispatchSemaphore(value: 32)    // connections at once
+    /// Connections at once from one VM (each VM's listener has its own count, so one VM holding
+    /// all of its slots never slows another). A connection over the limit waits up to slotWait
+    /// seconds for a slot (its VM's accept loop with it), then gets 503.
+    let slotsPerVM: Int
+    let slotWait: TimeInterval
+    /// The whole request head must arrive within this many seconds of the connection, however
+    /// slowly its bytes trickle in; the token is checked right after it, before any body is read.
+    let headDeadline: TimeInterval
+    /// An authenticated request's body must arrive within this many seconds.
+    let bodyDeadline: TimeInterval = 300
+    /// The whole upstream answer must be through within this many seconds.
+    let answerTimeout: TimeInterval
     // Set by the unlock process before the first token: write an audit record with the vault's
     // MAC, and get a request's pre-use record acknowledged by every required audit sink.
     var recorder: (([String: Any]) -> [String: Any]?)?
@@ -93,11 +108,25 @@ final class ProxyHub: @unchecked Sendable {
         self.key = key
         self.sshPath = sshPath
         var scheme = "https"
+        var slots = 16
+        var wait: TimeInterval = 15
+        var head: TimeInterval = 10
+        var answer: TimeInterval = 600
         #if MCOMP_VAULT_TESTING
-        // Test builds only: plain http to a local stand-in API (no certificate to check).
-        if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_API_HTTP"] == "1" { scheme = "http" }
+        // Test builds only: plain http to a local stand-in API (no certificate to check), and
+        // smaller limits so a test needn't wait long.
+        let env = ProcessInfo.processInfo.environment
+        if env["MCOMP_VAULT_TEST_API_HTTP"] == "1" { scheme = "http" }
+        if let s = env["MCOMP_VAULT_TEST_PROXY_SLOTS"], let n = Int(s), n > 0 { slots = n }
+        if let s = env["MCOMP_VAULT_TEST_SLOT_WAIT"], let n = Double(s), n > 0 { wait = n }
+        if let s = env["MCOMP_VAULT_TEST_HEAD_DEADLINE"], let n = Double(s), n > 0 { head = n }
+        if let s = env["MCOMP_VAULT_TEST_ANSWER_TIMEOUT"], let n = Double(s), n > 0 { answer = n }
         #endif
         upstreamScheme = scheme
+        slotsPerVM = slots
+        slotWait = wait
+        headDeadline = head
+        answerTimeout = answer
     }
 
     func withLock<T>(_ body: () -> T) -> T {
@@ -196,7 +225,7 @@ final class ProxyHub: @unchecked Sendable {
         var got = sockaddr_in()
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
         _ = withUnsafeMutablePointer(to: &got) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
-        return ProxyListener(vm: vm, fd: fd, macPort: Int(UInt16(bigEndian: got.sin_port)), guestPort: guestPort)
+        return ProxyListener(vm: vm, fd: fd, macPort: Int(UInt16(bigEndian: got.sin_port)), guestPort: guestPort, slots: slotsPerVM)
     }
 
     /// ssh -N -R 127.0.0.1:<guest port>:127.0.0.1:<mac port> as the proxy account, with the
@@ -291,14 +320,42 @@ final class ProxyHub: @unchecked Sendable {
             _ = fcntl(c, F_SETFD, FD_CLOEXEC)
             var one: Int32 = 1
             setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-            slots.wait()
+            // This VM's slots, never another's. With all of them taken (by connections that drip
+            // their heads, say, each of which the head deadline ends), wait a while, then refuse.
+            guard l.slots.wait(timeout: .now() + slotWait) == .success else {
+                refuseBusy(c)
+                continue
+            }
+            if withLock({ closed }) {
+                l.slots.signal()
+                close(c)
+                return
+            }
             let hub = self
             Thread.detachNewThread {
                 hub.serve(c, l)
                 close(c)
-                hub.slots.signal()
+                l.slots.signal()
             }
         }
+    }
+
+    /// 503 for a connection over its VM's limit: the answer, then what the client already sent is
+    /// read and dropped for at most 0.3 s (closing with it unread would reset the connection and
+    /// lose the answer), then the socket is closed.
+    func refuseBusy(_ c: Int32) {
+        setTimeouts(c, seconds: 1)
+        respond(c, 503, "too many connections from this VM at once; try again shortly")
+        Darwin.shutdown(c, SHUT_WR)
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let until = Date().addingTimeInterval(0.3)
+        var total = 0
+        while total < 65536 {
+            let n = readBefore(c, &buf, until)
+            if n <= 0 { break }
+            total += n
+        }
+        close(c)
     }
 
     func respond(_ c: Int32, _ status: Int, _ message: String) {
@@ -309,8 +366,9 @@ final class ProxyHub: @unchecked Sendable {
 
     func serve(_ c: Int32, _ l: ProxyListener) {
         setTimeouts(c, seconds: 30)
-        let req: HTTPRequest
-        switch readHTTPRequest(c) {
+        // The head, within an absolute deadline; the token is checked before any body is read.
+        let req: HTTPHead
+        switch readHTTPHead(c, deadline: Date().addingTimeInterval(headDeadline)) {
         case .ok(let r): req = r
         case .bad(let code, let why): respond(c, code, why); return
         }
@@ -361,9 +419,18 @@ final class ProxyHub: @unchecked Sendable {
         }
         let segments = rest.split(separator: "/").map { $0.removingPercentEncoding ?? "/" }
         guard !segments.contains(where: { $0 == ".." || $0 == "." || $0.contains("/") || $0.contains("\\") }),
-              token.prefix.map({ rest.hasPrefix($0) }) ?? true else {
+              token.prefix.map({ pathWithin(rest, prefix: $0) }) ?? true else {
             respond(c, 403, "that path isn't allowed for \(name)")
             log(403, 0, token, host, "path not allowed")
+            return
+        }
+        // Only now, with a live token for this VM, the body (within its own deadline).
+        let body: [UInt8]
+        switch readHTTPBody(c, req, deadline: Date().addingTimeInterval(bodyDeadline)) {
+        case .ok(let b): body = b
+        case .bad(let code, let why):
+            respond(c, code, why)
+            log(code, 0, token, host, why)
             return
         }
         // With a required audit sink, this request's own record must reach it first.
@@ -397,15 +464,35 @@ final class ProxyHub: @unchecked Sendable {
         let named = Set((req.header("Connection") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
         for (k, v) in req.headers where !dropped.contains(k.lowercased()) && !named.contains(k.lowercased()) { u.addValue(v, forHTTPHeaderField: k) }
         u.setValue(hPrefix + s2.value + hSuffix, forHTTPHeaderField: hName)
-        if !req.body.isEmpty { u.httpBody = Data(req.body) }
+        if !body.isEmpty { u.httpBody = Data(body) }
         let stream = StreamBack(fd: c, upstreamHost: host, scheme: upstreamScheme,
                                 proxyBase: "http://127.0.0.1:\(l.guestPort)/\(name)", secret: Array(s2.value.utf8))
         let session = URLSession(configuration: plainSessionConfig(timeout: 120), delegate: stream, delegateQueue: nil)
         session.dataTask(with: u).resume()
-        _ = stream.done.wait(timeout: .now() + 600)
-        session.invalidateAndCancel()
+        if stream.done.wait(timeout: .now() + answerTimeout) == .timedOut {
+            session.invalidateAndCancel()
+            if stream.failure == nil { stream.failure = "the answer took over \(Int(answerTimeout)) s; cancelled" }
+            // Give the cancelled task a moment to report its end (didCompleteWithError)...
+            _ = stream.done.wait(timeout: .now() + 5)
+        } else {
+            session.invalidateAndCancel()
+        }
+        // ...and whatever it does, no callback writes to this connection from here on: the caller
+        // closes the descriptor next, and its number could soon belong to another connection.
+        stream.closeOutput()
         log(stream.status, stream.bytes, token, host, stream.failure, redacted: stream.redactions)
     }
+}
+
+/// Whether a request path is within an API secret's path prefix, by whole segments: the
+/// prefix "/v1" (or "/v1/") allows /v1 and /v1/..., never /v10 or /v1-admin. A prefix of
+/// "/" allows every path. Both are compared as sent (percent-encoded); encoded slashes and
+/// dot segments are refused before this.
+func pathWithin(_ path: String, prefix: String) -> Bool {
+    var p = prefix
+    while p.hasSuffix("/") { p.removeLast() }
+    if p.isEmpty { return true }
+    return path == p || path.hasPrefix(p + "/")
 }
 
 func shutdownSocket(_ fd: Int32) { Darwin.shutdown(fd, SHUT_RDWR) }
@@ -421,44 +508,67 @@ func splitTemplate(_ t: String) -> (String, String, String)? {
 
 func reason(_ status: Int) -> String {
     [200: "OK", 201: "Created", 204: "No Content", 301: "Moved Permanently", 302: "Found", 304: "Not Modified", 307: "Temporary Redirect",
-     308: "Permanent Redirect", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 429: "Too Many Requests",
+     308: "Permanent Redirect", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
+     429: "Too Many Requests",
      500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"][status]
         ?? HTTPURLResponse.localizedString(forStatusCode: status).capitalized
 }
 
-struct HTTPRequest {
+/// A request's head: what the proxy needs to route and authenticate it before any body is read.
+struct HTTPHead {
     let method: String
     let target: String
     let headers: [(String, String)]
-    let body: [UInt8]
+    let contentLength: Int?     // checked: at most the body limit
+    let chunked: Bool
+    let early: [UInt8]          // bytes that arrived after the head (the start of the body)
     func header(_ name: String) -> String? { headers.first { $0.0.lowercased() == name.lowercased() }?.1 }
 }
 
 /// A request the proxy will take, or why not (an HTTP status and a reason).
-enum ParsedRequest {
-    case ok(HTTPRequest)
+enum Parsed<T> {
+    case ok(T)
     case bad(Int, String)
 }
 
-/// One HTTP/1.x request, strictly: origin-form targets only (no absolute URIs, no CONNECT or
-/// TRACE), CRLF line ends only, no folded or control-character headers, Content-Length or
-/// chunked but never both, a head of at most 64 KB and a body of at most 32 MB. Every size is
-/// bounded before it's added, so no arithmetic can overflow.
-func readHTTPRequest(_ c: Int32) -> ParsedRequest {
-    let headLimit = 65536
-    let bodyLimit = 32 << 20
+let requestHeadLimit = 65536
+let requestBodyLimit = 32 << 20
+
+/// read(2) that gives up at an absolute deadline however slowly bytes trickle in: each read
+/// waits at most until the deadline (and at most 30 s). -1 once the deadline has passed.
+func readBefore(_ c: Int32, _ buf: inout [UInt8], _ deadline: Date) -> Int {
+    let left = deadline.timeIntervalSinceNow
+    guard left > 0 else { return -1 }
+    let wait = min(left, 30)
+    var tv = timeval(tv_sec: Int(wait), tv_usec: Int32((wait - wait.rounded(.down)) * 1_000_000))
+    if tv.tv_sec == 0 && tv.tv_usec < 1000 { tv.tv_usec = 1000 }
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    while true {
+        let n = read(c, &buf, buf.count)
+        if n < 0 && errno == EINTR && deadline.timeIntervalSinceNow > 0 { continue }
+        return n
+    }
+}
+
+/// One HTTP/1.x request head, strictly: origin-form targets only (no absolute URIs, no CONNECT
+/// or TRACE), CRLF line ends only, no folded or control-character headers, Content-Length or
+/// chunked but never both, at most 64 KB, all of it before the deadline (408 after). Every size
+/// is bounded before it's added, so no arithmetic can overflow.
+func readHTTPHead(_ c: Int32, deadline: Date) -> Parsed<HTTPHead> {
     var buf = [UInt8]()
     var chunk = [UInt8](repeating: 0, count: 16384)
     var headEnd: Int?
     while headEnd == nil {
-        let n = read(c, &chunk, chunk.count)
-        if n <= 0 { return .bad(400, "incomplete request") }
+        let n = readBefore(c, &chunk, deadline)
+        if n <= 0 {
+            return deadline.timeIntervalSinceNow <= 0 ? .bad(408, "the request head didn't arrive in time") : .bad(400, "incomplete request")
+        }
         let searchFrom = max(0, buf.count - 3)
         buf.append(contentsOf: chunk[0..<n])
         headEnd = findSubsequence(buf, [13, 10, 13, 10], from: searchFrom)
-        if headEnd == nil && buf.count > headLimit { return .bad(431, "request head too large") }
+        if headEnd == nil && buf.count > requestHeadLimit { return .bad(431, "request head too large") }
     }
-    guard let he = headEnd, he <= headLimit else { return .bad(431, "request head too large") }
+    guard let he = headEnd, he <= requestHeadLimit else { return .bad(431, "request head too large") }
     guard let head = String(bytes: buf[0..<he], encoding: .utf8) else { return .bad(400, "request head isn't UTF-8") }
     let lines = head.components(separatedBy: "\r\n")
     if lines.contains(where: { $0.contains("\r") || $0.contains("\n") }) { return .bad(400, "bare CR or LF in the request head") }
@@ -488,19 +598,38 @@ func readHTTPRequest(_ c: Int32) -> ParsedRequest {
     if !cl.isEmpty && !te.isEmpty { return .bad(400, "both Content-Length and Transfer-Encoding") }
     if cl.count > 1 { return .bad(400, "more than one Content-Length") }
     if te.count > 1 || (te.count == 1 && te[0].lowercased() != "chunked") { return .bad(501, "only Transfer-Encoding: chunked") }
-    var rest = Array(buf[(he + 4)...])
+    var length: Int?
+    if let c0 = cl.first {
+        guard matches(c0, "^[0-9]{1,10}$"), let n = Int(c0) else { return .bad(400, "malformed Content-Length") }
+        guard n <= requestBodyLimit else { return .bad(413, "request body too large") }
+        length = n
+    }
+    return .ok(HTTPHead(method: method, target: target, headers: headers, contentLength: length, chunked: te.count == 1,
+                        early: Array(buf[(he + 4)...])))
+}
+
+/// The body that follows a head: Content-Length or chunked, at most 32 MB, all of it before the
+/// deadline (408 after).
+func readHTTPBody(_ c: Int32, _ h: HTTPHead, deadline: Date) -> Parsed<[UInt8]> {
+    var rest = h.early
+    var chunk = [UInt8](repeating: 0, count: 16384)
+    var late = false
     // Read until `want` bytes are buffered; want is always bounded by the limits above.
     func fill(_ want: Int) -> Bool {
         while rest.count < want {
-            let n = read(c, &chunk, chunk.count)
-            if n <= 0 { return false }
+            let n = readBefore(c, &chunk, deadline)
+            if n <= 0 {
+                late = deadline.timeIntervalSinceNow <= 0
+                return false
+            }
             rest.append(contentsOf: chunk[0..<n])
-            if rest.count > bodyLimit + (4 << 20) { return false }   // the body plus chunk framing, at most
+            if rest.count > requestBodyLimit + (4 << 20) { return false }   // the body plus chunk framing, at most
         }
         return true
     }
+    func incomplete(_ why: String) -> Parsed<[UInt8]> { late ? .bad(408, "the request body didn't arrive in time") : .bad(400, why) }
     var body = [UInt8]()
-    if te.count == 1 {
+    if h.chunked {
         var pos = 0
         // One CRLF-ended line starting at pos, of at most 1 KB.
         func line() -> String?? {
@@ -515,33 +644,31 @@ func readHTTPRequest(_ c: Int32) -> ParsedRequest {
             }
         }
         while true {
-            guard let l = line() else { return .bad(400, "incomplete chunked body") }
+            guard let l = line() else { return incomplete("incomplete chunked body") }
             guard let text = l, let sizeText = text.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first,
                   matches(String(sizeText), "^[0-9A-Fa-f]{1,8}$"), let size = Int(sizeText, radix: 16) else {
                 return .bad(400, "malformed chunk size")
             }
-            guard size <= bodyLimit - body.count else { return .bad(413, "request body too large") }
+            guard size <= requestBodyLimit - body.count else { return .bad(413, "request body too large") }
             if size == 0 {
                 // Trailers, up to the empty line that ends the body.
                 for _ in 0..<64 {
-                    guard let t = line() else { return .bad(400, "incomplete chunked body") }
+                    guard let t = line() else { return incomplete("incomplete chunked body") }
                     guard let tt = t else { return .bad(400, "malformed trailer") }
-                    if tt.isEmpty { return .ok(HTTPRequest(method: method, target: target, headers: headers, body: body)) }
+                    if tt.isEmpty { return .ok(body) }
                 }
                 return .bad(400, "too many trailers")
             }
-            guard fill(pos + size + 2) else { return .bad(400, "incomplete chunked body") }
+            guard fill(pos + size + 2) else { return incomplete("incomplete chunked body") }
             guard rest[pos + size] == 13, rest[pos + size + 1] == 10 else { return .bad(400, "a chunk isn't followed by CRLF") }
             body.append(contentsOf: rest[pos..<(pos + size)])
             pos += size + 2
         }
-    } else if let c0 = cl.first {
-        guard matches(c0, "^[0-9]{1,10}$"), let n = Int(c0) else { return .bad(400, "malformed Content-Length") }
-        guard n <= bodyLimit else { return .bad(413, "request body too large") }
-        guard fill(n) else { return .bad(400, "incomplete body") }
+    } else if let n = h.contentLength {
+        guard fill(n) else { return incomplete("incomplete body") }
         body = Array(rest[0..<n])
     }
-    return .ok(HTTPRequest(method: method, target: target, headers: headers, body: body))
+    return .ok(body)
 }
 
 /// The first place `needle` occurs in `hay` at or after `from`.
@@ -576,6 +703,11 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     var carry: [UInt8] = []
     var redactions = 0
     static let marker = Array("[key withheld by metacomputer secrets]".utf8)
+    /// Every write to the connection holds this lock and checks `outputClosed` first. serve()
+    /// sets it (closeOutput) before it returns and the descriptor is closed, so a callback that
+    /// runs late (after a timeout and cancel) can never write to a reused descriptor number.
+    let writeLock = NSLock()
+    var outputClosed = false
 
     init(fd: Int32, upstreamHost: String, scheme: String, proxyBase: String, secret: [UInt8]) {
         self.fd = fd
@@ -586,6 +718,22 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     }
 
     deinit { wipe(&secret); wipe(&carry) }
+
+    /// Write to the VM's connection unless serve() is done with it. False when nothing more
+    /// should be written.
+    func send(_ bytes: [UInt8]) -> Bool {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard !outputClosed else { return false }
+        return writeAll(fd, bytes)
+    }
+
+    /// No write reaches the connection after this returns (one in progress finishes first).
+    func closeOutput() {
+        writeLock.lock()
+        outputClosed = true
+        writeLock.unlock()
+    }
 
     /// Replace each copy of the secret; with `final` false, keep back a tail that could start one.
     func redact(_ input: [UInt8], final: Bool) -> [UInt8] {
@@ -639,7 +787,7 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
                 completionHandler(.cancel)
                 return
             }
-            location = proxyBase + a.path + (a.query.map { "?" + $0 } ?? "")
+            location = proxyBase + sameHostLocation(a)
         }
         status = h.statusCode
         let skip: Set<String> = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "trailer",
@@ -652,7 +800,7 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         if let l = location { head += "Location: \(redactText(l))\r\n" }
         head += "Connection: close\r\n\r\n"
         headSent = true
-        if !writeAll(fd, Array(head.utf8)) { completionHandler(.cancel); return }
+        if !send(Array(head.utf8)) { completionHandler(.cancel); return }
         completionHandler(.allow)
     }
 
@@ -660,13 +808,13 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         bytes += data.count
         var chunk = redact(Array(data), final: false)
         defer { wipe(&chunk) }
-        if !chunk.isEmpty, !writeAll(fd, chunk) { dataTask.cancel() }
+        if !chunk.isEmpty, !send(chunk) { dataTask.cancel() }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if headSent && !carry.isEmpty {
             var tail = redact([], final: true)
-            _ = writeAll(fd, tail)
+            _ = send(tail)
             wipe(&tail)
         }
         if let e = error, failure == nil {
@@ -680,6 +828,17 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         status = code
         headSent = true
         let body = Array((jsonLine(["error": message]) + "\n").utf8)
-        _ = writeAll(fd, Array("HTTP/1.1 \(code) \(reason(code))\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body)
+        _ = send(Array("HTTP/1.1 \(code) \(reason(code))\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body)
     }
+}
+
+/// The path, query and fragment of a same-host redirect's target, exactly as the API encoded
+/// them: percent-escapes (an encoded slash stays %2F) and a trailing slash are kept, which
+/// URL.path would decode or drop and so point somewhere else.
+func sameHostLocation(_ a: URL) -> String {
+    let c = URLComponents(url: a, resolvingAgainstBaseURL: true)
+    var path = c?.percentEncodedPath ?? ""
+    if path.isEmpty { path = "/" }
+    if !path.hasPrefix("/") { path = "/" + path }
+    return path + (c?.percentEncodedQuery.map { "?" + $0 } ?? "") + (c?.percentEncodedFragment.map { "#" + $0 } ?? "")
 }

@@ -1020,6 +1020,9 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       local kind="secrets_$sub"
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
+        # The vault signs in for sealed sessions with the VM's static ops key, which a VM on
+        # certificates refuses: say so before anyone is asked to approve.
+        [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
       out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?

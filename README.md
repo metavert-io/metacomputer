@@ -153,7 +153,7 @@ behaves the way Cua Driver does on its own. Turn on any of them in
 | Setting | What it adds |
 | --- | --- |
 | `ACTION_LOG=on` | A signed, hash-chained log of every tool call sent to the VM, and of every `metacomputer sh` run. Each record carries the hash of the one before it, and the chain's head is signed with an SSH key (`ssh-keygen -Y sign`) every 20 records, every minute with new activity, and at the end. By default, typed text is recorded as its length, and scripts and shell output as sizes and hashes. `metacomputer actions verify` finds edited, inserted, reordered or removed records. |
-| `SSH_AUTH=cert` | A fresh key and a 5-minute SSH certificate for every connection, limited to one role and to the Mac's side of the VM network. Its key ID (`mcomp:ROLE:USER:PROJECT:pidN`) appears in the VM's auth log. The static `ops` and `mcp` keys stop working. |
+| `SSH_AUTH=cert` | A fresh key and a 5-minute SSH certificate for every connection, limited to one role and to the Mac's side of the VM network. Its key ID (`mcomp:ROLE:USER:PROJECT:pidN`) appears in the VM's auth log. The static `ops` and `mcp` keys stop working, and with them sealed browser sessions (`secrets session save` and `load`), for now. |
 | `DRIVER_MODE=bounded` | Cua Driver's bounded mode: every call must fit a capability manifest of tools, apps, folders and websites, with a time limit. Profiles `readonly`, `desktop` (no terminal) and `browser` (only the sites you list), or your own manifest. The Mac asks for the manifest by its SHA-256, and the VM refuses a manifest that doesn't match and, while bounded, any standard session. The shell channel is off while bounded (`VM_SHELL=auto`), since a shell isn't held to the manifest. |
 | An event sink | `metacomputer events sink add` sends events as they happen; with no sink, nothing leaves the Mac. See [The event stream](#the-event-stream) below. |
 
@@ -332,7 +332,7 @@ rebuild; see [Add apps](#add-apps)).
 | "Fill in the contact form on our public staging site with test data and confirm the thank-you page appears." | Chrome in page mode fills each field exactly, submits, and checks the next page. |
 | "Sign in to the demo dashboard with my `demo` login and its 2FA code from the vault, then download this month's report." | The vault types the username, password and current code; Claude never sees them. You approve in your terminal if you asked to. |
 | "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there." | Claude gets a 15-minute token; the script calls the proxy inside the VM, and the proxy on your Mac adds the real key. |
-| "Keep me signed in to the admin site between runs." | Claude seals the signed-in Chrome profile into the vault and loads it next time, both with your OK. |
+| "Keep me signed in to the admin site between runs." | Claude seals the signed-in Chrome profile into the vault and loads it next time, both with your OK. (Sealed sessions need `SSH_AUTH=key`, the default, for now.) |
 | "Run an accessibility check on our sign-up page." | `metacomputer web a11y`: unlabelled controls, images without text alternatives, missing headings, vague links. |
 
 **Testing and QA**
@@ -553,7 +553,7 @@ How it works:
   - `NAME session`: this use and later uses of that secret from the same Claude Code session;
   - `NAME unlock`: every use of that secret until the vault locks.
 - **Limiting a secret to a project:** `set ... --project DIR` refuses requests from Claude Code sessions working outside that folder. Like the "who asked" line, this keeps honest sessions apart; it isn't a wall, since any program of yours can pose as a Claude Code session.
-- **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset.
+- **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset. For now this needs `SSH_AUTH=key` (the default): the vault signs in with the VM's static desktop key, which `SSH_AUTH=cert` turns off, so both commands refuse at once under `cert`. Fills and API tokens use their own accounts and work either way.
 - **What Claude can see:** `metacomputer secrets list` shows names, kinds, sites, usernames, approval, project limits, ages and use counts, never values. `metacomputer secrets audit` shows the history.
 
 Limits to know:
@@ -574,7 +574,7 @@ You store the key once, in your own terminal. It goes in a request header (by de
 
 ```bash
 metacomputer secrets set openai --kind api --api-host api.openai.com
-metacomputer secrets set example-api --kind api --api-host api.example.com --header 'x-api-key: {value}' --api-path-prefix /v1/
+metacomputer secrets set example-api --kind api --api-host api.example.com --header 'x-api-key: {value}' --api-path-prefix /v1
 ```
 
 Then Claude asks for a token and points the program in the VM at the proxy:
@@ -586,8 +586,9 @@ metacomputer secrets revoke ID                # end one now (--all for every one
 ```
 
 The program in the VM sends its requests to that base URL with the token where the key
-would go. The proxy on your Mac takes only well-formed HTTP/1.1 requests, checks the
-token and the path, puts the real key in, and sends the request on to that API's host
+would go. The proxy on your Mac takes only well-formed HTTP/1.1 (or 1.0) requests, checks the
+token and the path (a prefix such as `/v1` covers whole segments: `/v1` and `/v1/...`,
+never `/v10` or `/v1-admin`), puts the real key in, and sends the request on to that API's host
 only, over HTTPS. It never follows a redirect. If an answer contains the key, even
 compressed, the proxy replaces it with `[key withheld by metacomputer secrets]`.
 

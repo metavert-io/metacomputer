@@ -996,6 +996,7 @@ final class UnlockServer {
         catch { return finish("session_save", fields, failed("cannot reach the VM"), who, approval: approval) }
         var archive = r.stdout
         defer { wipe(&archive) }
+        if let why = sealedSessionRefusal(r) { return finish("session_save", fields, failed(why), who, approval: approval) }
         if r.interrupted || r.timedOut || r.tooLarge || r.status != 0 || archive.count < 2 || archive[0] != 0x1F || archive[1] != 0x8B {
             let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time" : r.tooLarge ? "the profile is too large"
                 : (r.stderr.isEmpty ? "exit \(r.status)" : oneLine(String(decoding: r.stderr, as: UTF8.self), max: 200))
@@ -1072,6 +1073,7 @@ final class UnlockServer {
         do { r = try runner.opsSSH(t, remote: sessionLoadScript(user: t.binding.guest_user, profile: profile), input: archive,
                                    timeout: TimeInterval(min(600, remaining()))) }
         catch { return finish("session_load", fields, failed("cannot reach the VM"), who, approval: approval) }
+        if let why = sealedSessionRefusal(r) { return finish("session_load", fields, failed(why), who, approval: approval) }
         if r.interrupted || r.timedOut || r.status != 0 {
             let why = r.interrupted ? "interrupted" : r.timedOut ? "the VM didn't finish in time"
                 : (r.stderr.isEmpty ? "exit \(r.status)" : oneLine(String(decoding: r.stderr, as: UTF8.self), max: 200))
@@ -1085,6 +1087,14 @@ final class UnlockServer {
         } catch { say("          (couldn't record the use in the vault)") }
         return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": archive.count], who, approval: approval)
     }
+}
+
+/// Sealed sessions sign in to the VM as the desktop user with its static ops key. A VM on SSH
+/// certificates (SSH_AUTH=cert) refuses that key: say so, rather than a bare ssh error.
+func sealedSessionRefusal(_ r: ProcResult) -> String? {
+    guard r.status == 255, String(decoding: r.stderr, as: UTF8.self).contains("Permission denied") else { return nil }
+    return "the VM refused the desktop account's static key: sealed sessions need SSH_AUTH=key for now "
+        + "(a VM on SSH certificates refuses it; fills and API tokens use their own accounts and still work)"
 }
 
 // MARK: - the events hook
