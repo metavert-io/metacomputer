@@ -34,7 +34,10 @@ PW2 = "Dummy-site-pass-12"
 USER = "site-user@example.com"
 SITE = ts.SITE                  # http://127.0.0.1:8765
 SITE2 = ts.SITE2
-VALUES = [PASS, PW, PW2, tvi.CHROME_KEY, tvi.COOKIE_GH]
+SITE4, SITE5, SITE6 = "http://127.0.0.1:8768", "http://localhost:8769", "http://127.0.0.1:8770"
+URL_TOKEN = "Dummy-url-token-14"
+COOKIE_BANK = "Dummy-bank-cookie-15"
+VALUES = [PASS, PW, PW2, tvi.CHROME_KEY, tvi.COOKIE_GH, URL_TOKEN, COOKIE_BANK]
 
 FAKE_DRIVER = r'''
 import json, os, sys
@@ -83,12 +86,21 @@ for line in sys.stdin:
     elif name == "list_windows":
         ok(mid, {"windows": [{"pid": 4242, "window_id": 7, "app_name": "Google-chrome", "title": "Chrome"}]})
     elif name == "get_browser_state" and "snapshot_format" in a:
-        ok(mid, {"status": "ok", "refs": REFS, "url": s.get("force_url") or s.get("url", "about:blank"), "snapshot_id": "p1"})
+        # move_on_snap: from that page snapshot on, the tab is on move_url (a page that navigated away after the fill)
+        s["snaps"] = s.get("snaps", 0) + 1; save(s)
+        url = s.get("force_url") or s.get("url", "about:blank")
+        if s.get("move_on_snap") and s["snaps"] >= s["move_on_snap"]:
+            url = s["move_url"]
+        ok(mid, {"status": "ok", "refs": REFS, "url": url, "snapshot_id": "p1"})
     elif name == "get_browser_state":
         ok(mid, {"target_id": "bt-1", "tabs": [{"tab_id": "tab-1", "url": s.get("url", "about:blank")}], "binding_quality": "exact"})
     elif name == "browser_navigate":
         s["url"] = a.get("url"); save(s)
         ok(mid, {"status": "ok", "url": a.get("url")})
+    elif name == "browser_click" and s.get("after_click_url"):
+        # the page after the sign-in, with whatever it put in its own URL
+        s["url"] = s["after_click_url"]; save(s)
+        ok(mid, {"status": "ok"})
     else:
         ok(mid, {"status": "ok"})
 '''
@@ -155,7 +167,8 @@ def run(td, procs):
     open(fake, "w").write(FAKE_DRIVER)
     chrome = os.path.join(td, "chrome")
     tvi.make_cookies(os.path.join(chrome, "Default", "Network", "Cookies"),
-                     [("github.com", "user_session", tvi.COOKIE_GH), (".github.com", "_gh_sess", tvi.COOKIE_GH + "2")])
+                     [("github.com", "user_session", tvi.COOKIE_GH), (".github.com", "_gh_sess", tvi.COOKIE_GH + "2"),
+                      ("bank.example", "s", COOKIE_BANK)])
 
     def calls():
         return [json.loads(l) for l in open(stub_log)] if os.path.exists(stub_log) else []
@@ -194,9 +207,12 @@ def run(td, procs):
           and tty([BIN, "bind", "slvm", "--port", str(port), "--host-key-line", hostkey, "--fill-key", sshdir + "/fill", "--fill-user",
                    "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua", "--gateway", my_exe],
                   [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])[0] == 0)
-    rc, out = tty([BIN, "import-session", "--browser", "chrome", "--site", "github.com", "--name", "gh", "--vm", "slvm", "--to-profile", "work"],
-                  [("Vault passphrase", PASS + "\n")])
-    check("...and a session imported from a synthetic Chrome profile", rc == 0, out)
+    rc, out = tty([BIN, "import-session", "--browser", "chrome", "--site", "github.com", "--site", "bank.example", "--name", "gh",
+                   "--vm", "slvm", "--to-profile", "work"], [("Vault passphrase", PASS + "\n")])
+    check("...and a session imported from a synthetic Chrome profile (two sites' cookies)", rc == 0, out)
+    rc, out = tty([BIN, "set", "dual", "--kind", "password", "--origin", SITE4, "--origin", SITE5, "--username", USER, "--approval", "session"],
+                  [("Vault passphrase", PASS + "\n"), ("Password for dual", PW + "\n"), ("same password again", PW + "\n")])
+    check("...a login saved for two sites that doesn't ask", rc == 0, out)
 
     sys.path.insert(0, os.path.join(LAB, "lib"))
     import mcomp_sdk
@@ -279,10 +295,26 @@ def run(td, procs):
     import owners
     under_claude = owners.claude_of(os.getpid(), owners.ps_table()) is not None
     req = lg[0].get("requester", {}) if lg else {}
-    check("the audit log: the sign-in, its request id, login.fill and the agent's name; passed on for this process by the hub "
-          "(attributed to its Claude Code session when there is one, with the hub as `via`)",
-          lg and lg[0].get("event") == "login.fill" and lg[0].get("agent") == "test-agent"
-          and (bool(req.get("via")) if under_claude else not req.get("claude_pid")), lg[:1])
+    check("the audit log: the sign-in, its request id, login.fill and the agent's name; the requester is the hub itself (no "
+          "Claude Code session, no project), with the client's session only as an unverified claim",
+          lg and lg[0].get("event") == "login.fill" and lg[0].get("agent") == "test-agent" and req.get("hub_pid")
+          and not req.get("claude_pid") and not req.get("project")
+          and ((req.get("on_behalf") or {}).get("verified") is False if under_claude else True), lg[:1])
+    # A login limited to the project of the session running this test: through the hub it's refused, whichever
+    # session started the hub, since the hub asks as itself.
+    cpid = owners.claude_of(os.getpid(), owners.ps_table())
+    proj = None
+    if cpid:
+        lo = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(cpid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
+        proj = next((l[1:] for l in lo.splitlines() if l.startswith("n")), None)
+    rc, out = tty([BIN, "set", "proj", "--kind", "password", "--origin", SITE6, "--username", USER, "--approval", "session",
+                   "--project", proj or td], [("Vault passphrase", PASS + "\n"), ("Password for proj", PW + "\n"), ("same password again", PW + "\n")])
+    n = len(calls())
+    r = call("request_site_login", {"url": SITE6 + "/login.html"})
+    sc = r.structured
+    check("a login limited to this session's project is refused through the hub (it asks as itself: no session, no project), "
+          "nothing typed", rc == 0 and sc.get("status") == "denied" and "limited to" in sc.get("reason", "")
+          and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], (out[-200:], r.raw))
 
     # declined
     r = call("request_site_login", {"url": SITE + "/login.html"})
@@ -300,6 +332,28 @@ def run(td, procs):
     r = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1"})
     check("a tab that is on another site: login_refused before anything is typed", r.is_error and r.structured.get("error") == "login_refused"
           and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], r.raw)
+    json.dump({"url": SITE + "/login.html"}, open(os.path.join(state, "state.json"), "w"))
+
+    # bound to what the hub checked: the origin, the tab before the submit; only the origin comes back
+    open(os.path.join(stubdir, "origin-last-next"), "w").close()
+    n = len(calls())
+    r = call("request_site_login", {"url": SITE4 + "/login.html"})
+    sent = [json.loads(c["stdin"]) for c in calls()[n:] if c.get("kind", "").startswith("fill:")]
+    check("a login saved for two sites, asked for on one: the vault gets that origin and fills only there, even when the VM "
+          "reports the login's other site", not r.is_error and r.structured.get("status") == "filled" and sent
+          and all(x.get("origins") == [SITE4] for x in sent), (r.raw, [x.get("origins") for x in sent]))
+    json.dump({"after_click_url": SITE4 + "/home?session=" + URL_TOKEN + "#pw=" + URL_TOKEN}, open(os.path.join(state, "state.json"), "w"))
+    r = call("request_site_login", {"url": SITE4 + "/login.html"})
+    check("after the sign-in only the page's origin comes back as page_url, never its path, query or fragment",
+          not r.is_error and r.structured.get("submitted") is True and r.structured.get("page_url") == SITE4
+          and URL_TOKEN not in json.dumps(r.raw), r.raw)
+    json.dump({"move_on_snap": 2, "move_url": "https://evil.example/collect"}, open(os.path.join(state, "state.json"), "w"))
+    nd = len(driver_calls())
+    r = call("request_site_login", {"url": SITE4 + "/login.html"})
+    dnew = [c["tool"] for c in driver_calls()[nd:]]
+    check("a tab that leaves the site between the fill and the submit isn't submitted, and the answer says so",
+          not r.is_error and r.structured.get("submitted") is False and "left" in r.structured.get("note", "")
+          and "browser_click" not in dnew and "browser_type" not in dnew, (r.raw, dnew))
     json.dump({"url": SITE + "/login.html"}, open(os.path.join(state, "state.json"), "w"))
 
     # the SDK, as Spaces' SDK calls it
@@ -360,6 +414,15 @@ def run(td, procs):
     check("after the approval: moved, the profile to open and what's next; no cookie value", not r.is_error and r.structured.get("moved") is True
           and r.structured.get("profile") == "work" and "isolated_named" in r.structured.get("next", "")
           and not any(v in json.dumps(r.raw) for v in VALUES), r.raw)
+    lp = os.path.join(stubdir, "loaded-cookies.json")
+    hosts = sorted({c.get("host_key") for c in json.load(open(lp)).get("cookies", [])}) if os.path.exists(lp) else []
+    load_rec = [x for x in (json.loads(l) for l in open(os.path.join(vdir, "audit.jsonl"))) if x.get("op") == "session_load"]
+    check("the VM's own words from the cookie-store check (a stand-in writes a marker there) reach no result or audit record: "
+          "the vault says what its exit status means", "SECRET-FROM-GUEST-7731" not in open(os.path.join(vdir, "audit.jsonl")).read()
+          and "SECRET-FROM-GUEST-7731" not in json.dumps(r.raw), r.raw)
+    check("teleport for github.com sends only github.com's cookies, not the session's other site (filtered on the Mac); "
+          "the audit record names the scope", hosts == [".github.com", "github.com"] and r.structured.get("sites") == ["github.com"]
+          and load_rec and load_rec[-1].get("sites") == ["github.com"], (hosts, r.raw, load_rec[-1:]))
 
     h.close()
     u.send("\x03")

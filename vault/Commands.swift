@@ -50,12 +50,14 @@ You, from any terminal (they need Touch ID / your login password, or the passphr
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
-  fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--request-id ID]
+  fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--origin URL] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
-  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID] [--agent TEXT]
+  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--origin URL] [--request-id ID] [--agent TEXT]
                                          sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
-  session load NAME --vm VM [--profile P]            put a sealed profile back, under its own name
+  session load NAME --vm VM [--profile P] [--site HOST ...]
+                                         put a sealed profile back, under its own name (--site: only those
+                                         sites' cookies, from an imported session)
   token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
   tokens [--json]   revoke ID|--all      live tokens; end them
   requests [--json]                      uses waiting for your approval: id, who asked, site, masked username, age
@@ -504,9 +506,9 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin"])
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
-        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]")
+        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--origin https://site]")
     }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
@@ -520,6 +522,10 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard s.count <= 300 else { throw usageError("--selector: at most 300 characters") }
         req["selector"] = s
     }
+    if let o = a.last("origin") {
+        guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
+        req["origin"] = o
+    }
     try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
@@ -530,8 +536,8 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID]"
-    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent"])
+    let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID] [--origin https://site]"
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent", "origin"])
     guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
     if let ag = a.last("agent") {
         guard ag.count <= 200 else { throw usageError("--agent: at most 200 characters") }
@@ -549,6 +555,10 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         req["profile"] = p
     }
     if let ag = a.last("agent") { req["agent"] = ag }
+    if let o = a.last("origin") {
+        guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
+        req["origin"] = o
+    }
     try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {

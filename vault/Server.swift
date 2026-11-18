@@ -1132,6 +1132,8 @@ final class UnlockServer {
         let profile = req["profile"] as? String
         let selector = (req["selector"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         if let sel = selector { fields["selector"] = clean(sel, max: 300) }
+        let only = req["origin"] as? String
+        if let o = only { fields["for_origin"] = clean(o, max: 300) }
         say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
             + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who.describe)")
         let p: Payload
@@ -1151,6 +1153,9 @@ final class UnlockServer {
         if field == "username" && (s.username ?? "").isEmpty {
             return finish("fill", fields, denied("\(name) has no username stored"), who, approval: "-")
         }
+        if let o = only, canonicalOrigin(o) != o || !s.origins.contains(o) {
+            return finish("fill", fields, denied("--origin \(clean(o, max: 120)) isn't one of \(name)'s sites"), who, approval: "-")
+        }
         if let why = projectProblem(name, s, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         guard let t = target(p, vm) else {
             return finish("fill", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
@@ -1162,7 +1167,9 @@ final class UnlockServer {
         var base: [String: Any] = ["field": field]
         if let pr = profile { base["profile"] = pr }
         if let sel = selector { base["selector"] = sel }
-        var origins = s.origins
+        // --origin: the one site the caller checked (request_site_login's page); a tab on any other of the secret's
+        // sites is refused, not filled.
+        var origins = only.map { [$0] } ?? s.origins
         let hint = s.kind == "password" ? s.username.map(maskUsername) : nil
         if let h = hint { fields["username_hint"] = h }
         let proposed = req["request_id"] as? String
@@ -1183,7 +1190,7 @@ final class UnlockServer {
                     return finish("fill", fields, failed(e.message), who, approval: "each")
                 } catch { return finish("fill", fields, failed("the check failed"), who, approval: "each") }
                 guard r["ok"] as? Bool == true else { return finish("fill", fields, r, who, approval: "each") }
-                guard originOK(r, s.origins), let origin = r["origin"] as? String else {
+                guard originOK(r, origins), let origin = r["origin"] as? String else {
                     return finish("fill", fields, failed("the VM reported a site outside this secret's sites; refusing"), who, approval: "each")
                 }
                 let idp = isIdentityProviderOrigin(origin)
@@ -1261,6 +1268,8 @@ final class UnlockServer {
         }
         let profile = req["profile"] as? String
         let userSel = req["username_selector"] as? String
+        let only = req["origin"] as? String
+        if let o = only { fields["for_origin"] = clean(o, max: 300) }
         // What the agent calls itself (request_site_login's `agent`): shown and recorded, never trusted.
         let agent = (req["agent"] as? String).map { promptText($0, max: 64) }.flatMap { $0.isEmpty ? nil : $0 }
         fields["password_selector"] = clean(passSel, max: 300)
@@ -1284,6 +1293,9 @@ final class UnlockServer {
         }
         let hint = s.username.map(maskUsername)
         if let h = hint { fields["username_hint"] = h }
+        if let o = only, canonicalOrigin(o) != o || !s.origins.contains(o) {
+            return finish("login", fields, denied("--origin \(clean(o, max: 120)) isn't one of \(name)'s sites"), who, approval: "-")
+        }
         if let why = projectProblem(name, s, who) { return finish("login", fields, denied(why), who, approval: "-") }
         guard let t = target(p, vm) else {
             return finish("login", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
@@ -1310,7 +1322,7 @@ final class UnlockServer {
                 return (r, o)
             } catch let e as VaultError { return (failed(e.message), nil) } catch { return (failed("the check failed"), nil) }
         }
-        let (pr, originOpt) = check("password", passSel, s.origins)
+        let (pr, originOpt) = check("password", passSel, only.map { [$0] } ?? s.origins)
         guard let origin = originOpt else { return finish("login", fields, pr, who, approval: "each") }
         if let us = userSel {
             let (ur, uo) = check("username", us, [origin])
@@ -1675,7 +1687,8 @@ final class UnlockServer {
             if let r = try? runner.opsSSH(t, remote: cookieStoreCheckScript(user: t.binding.guest_user, profile: profile), input: [], timeout: 30) {
                 if let why = sealedSessionRefusal(r) { return finish("session_load", fields, failed(why), who, approval: "-") }
                 if r.status == 5 || r.status == 6 {
-                    let why = oneLine(String(decoding: r.stderr, as: UTF8.self), max: 300)
+                    // The VM may hold cookies loaded earlier: its own words never go on, only the status's meaning.
+                    let why = sessionFailure(r.status, profile: profile, saving: false)
                     return finish("session_load", fields, r.status == 5 ? denied(why) : failed(why), who, approval: "-")
                 }
             }

@@ -15,6 +15,12 @@ its own approvals, and this module gets back status, a site and a masked usernam
 Keyvault's two-step shape is kept: the first call starts the use and answers `pending` with a request_id
 when it waits for the user; a later call with that request_id collects the outcome (waiting up to
 wait_secs). Here the use goes ahead as soon as the user approves, whether or not the agent calls again.
+
+The vault sees these requests as the hub's own (no Claude Code session, no project): the hub serves every
+session from one process, so the client's pid it passes on (`--on-behalf-pid`) is shown and recorded as an
+unverified claim and never satisfies a project limit, a rule or a grant. What the hub checked is bound into
+the vault's call instead: the login's exact origin (`--origin`), the sites of a session load (`--site`).
+After a login only the page's origin comes back, never its URL (a page can put anything in its URL).
 """
 import json
 import os
@@ -40,7 +46,8 @@ TOOLS = [
             "path, only on the saved login's exact site, after the user approves (Touch ID, their login password, the "
             "vault passphrase, or their unlock terminal; identity providers always ask). The first call answers "
             "status \"pending\" with a request_id while the user decides; call again with the same url and request_id "
-            "to get \"filled\" (site, origin, a masked username_hint, submitted, page_url and the tab) or \"denied\". "
+            "to get \"filled\" (site, origin, a masked username_hint, submitted, page_url (the page's origin only, never "
+            "its path or query) and the tab) or \"denied\". "
             "Pass the tab you opened (session, target_id, tab_id from get_browser_state) to sign in there; without one "
             "it opens page-mode Chrome on url itself and returns its tab. A multi-step sign-in needs one call per page "
             "(a page with only a username field gets only the username). Never returns a password."),
@@ -70,8 +77,9 @@ TOOLS = [
             "Load the user's signed-in session for specific sites into the virtual computer's page-mode Chrome: the "
             "cookies they imported from their own Chrome with `metacomputer secrets import-session`, sealed in their "
             "vault. Name each site; there is no 'every site'. The first call answers consent_required with a "
-            "request_id while the user approves the load (Touch ID, password, passphrase or their unlock terminal); "
-            "call again with the request_id to get moved: true and the driver profile to open with browser_prepare "
+            "request_id while the user approves the load (Touch ID, password, passphrase or their unlock terminal); only "
+            "the cookies those sites get are loaded. Call again with the request_id to get moved: true and the driver "
+            "profile to open with browser_prepare "
             "({mode: \"isolated_named\", name: profile}). If no imported session covers the sites, it says which command "
             "the user runs in their own terminal to import one. Chrome only (no Firefox); cookies only, not localStorage. "
             "Use it only when the user asks to browse as themselves."),
@@ -383,15 +391,17 @@ def site_login(hub, client, args):
 
     def work():
         try:
+            # --origin: the vault fills only a tab on the origin checked here, not another of the login's sites.
             if pw:
-                cmd = ["login", secret["name"], "--password-selector", pw[0], "--request-id", rid, "--on-behalf-pid", on_behalf]
+                cmd = ["login", secret["name"], "--password-selector", pw[0], "--origin", origin, "--request-id", rid,
+                       "--on-behalf-pid", on_behalf]
                 if user and secret.get("username"):
                     cmd += ["--username-selector", user[0]]
             else:
                 if not secret.get("username"):
                     raise ToolError("login_refused", "the page asks only for a username, and this login has none saved")
-                cmd = ["fill", secret["name"], "--field", "username", "--selector", user[0], "--request-id", rid,
-                       "--on-behalf-pid", on_behalf]
+                cmd = ["fill", secret["name"], "--field", "username", "--selector", user[0], "--origin", origin,
+                       "--request-id", rid, "--on-behalf-pid", on_behalf]
             if profile:
                 cmd += ["--profile", profile]
             if isinstance(args.get("agent"), str) and args["agent"] and pw:
@@ -399,26 +409,34 @@ def site_login(hub, client, args):
             rc, res, err = vault(hub, *cmd)
             out = {"request_id": rid, "site": job.info["site"], "space": hub.settings.get("vm_name") or ""}
             if rc == 0 and res.get("ok"):
-                submitted = False
+                submitted, held = False, None
                 if args.get("submit", True) is not False:
                     try:
-                        if submit and submit[1]:
+                        # The tab must still be on the checked site: a page that moved it elsewhere gets no submit.
+                        here = canonical_origin((driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url"))
+                        if here != origin:
+                            held = "the tab left " + origin + " after the fill, so the form wasn't submitted"
+                        elif submit and submit[1]:
                             driver(hub, client, "browser_click", dict(tgt, ref=submit[1], delivery_mode="foreground"))
+                            submitted = True
                         else:
                             driver(hub, client, "browser_type", dict(tgt, ref=(pw or user)[1], text="\n"))
-                        submitted = True
+                            submitted = True
                     except ToolError:
                         submitted = False
                 time.sleep(1.0 if submitted else 0)
-                page = ""
+                page = None
                 try:
-                    page = (driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url") or ""
+                    # Only the origin: a page can write the password, or a token, into its own URL.
+                    page = canonical_origin((driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url"))
                 except ToolError:
                     pass
                 out.update(status="filled", origin=res.get("origin") or origin,
                            username_hint=res.get("username_hint") or mask(secret.get("username")), submitted=submitted,
-                           page_url=clean(page, 2048), fields=res.get("fields") or ["username"],
+                           page_url=page or "", fields=res.get("fields") or ["username"],
                            session=tgt["session"], target_id=tgt["target_id"], tab_id=tgt["tab_id"])
+                if held:
+                    out["note"] = held
             elif rc == 2:
                 out.update(status="denied", error="login_refused", reason=clean(res.get("reason") or err, 300))
             elif rc == 3:
@@ -509,8 +527,9 @@ def teleport(hub, client, args):
     s = fit[0]
     profile = s.get("profile")
     rid = new_request_id()
-    summary = (f"load {s['name']} (cookies for {', '.join(s.get('sites') or [])}, imported from {s.get('source', 'Chrome')}) "
-               f"into the driver profile {profile}")
+    sites = sorted(set(sites))
+    summary = (f"load {s['name']}: only the cookies for {', '.join(sites)} (of those imported for {', '.join(s.get('sites') or [])} "
+               f"from {s.get('source', 'Chrome')}) into the driver profile {profile}")
     job = Job("teleport", owner_of(client), {"summary": summary, "profile": profile, "name": s["name"]})
     with JOBS_LOCK:
         JOBS[rid] = job
@@ -519,7 +538,9 @@ def teleport(hub, client, args):
     def work():
         try:
             def load():
-                return vault(hub, "session", "load", s["name"], "--request-id", rid, "--on-behalf-pid", on_behalf)
+                # --site: the vault sends only the cookies those sites get (filtered on the Mac), whatever else the session holds.
+                return vault(hub, "session", "load", s["name"], *[a for x in sites for a in ("--site", x)], "--request-id", rid,
+                             "--on-behalf-pid", on_behalf)
             rc, res, err = load()
             if rc != 0 and "open it once" in (res.get("reason") or err or ""):
                 # The profile has no cookie store yet: let the driver create it, close it, then load (asked only now).
@@ -531,8 +552,8 @@ def teleport(hub, client, args):
                 time.sleep(1)
                 rc, res, err = load()
             if rc == 0 and res.get("ok"):
-                job.result = {"moved": True, "request_id": rid, "session": s["name"], "sites": s.get("sites") or [],
-                              "profile": profile,
+                job.result = {"moved": True, "request_id": rid, "session": s["name"], "sites": sites,
+                              "cookies": res.get("cookies"), "profile": profile,
                               "next": (f"browser_prepare with profile {{mode: \"isolated_named\", name: \"{profile}\"}} and "
                                        "allow_launch: true opens Chrome with these cookies"),
                               "note": "cookies only: localStorage wasn't imported; they stay in the profile until it's deleted or the VM is reset"}

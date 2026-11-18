@@ -590,6 +590,25 @@ def run(td, procs):
     u.send("no\n")
     res = claude_results(p, outs)
     check("...nor does a command from another Claude Code session that names one there", res[0][0] == 2, res)
+    # The metacomputer hub serves every session from one process, which may sit under the session that started it: a
+    # request from it (recognised by its command line, which only takes standing away) is the hub's own.
+    hubfile = os.path.join(td, "hubfake", "lib", "mcp_hub.py")
+    os.makedirs(os.path.dirname(hubfile), exist_ok=True)
+    open(hubfile, "w").write("import subprocess, sys\nsys.exit(subprocess.call(sys.argv[2:]))\n")
+    hp = subprocess.Popen([fake, proj1, sys.executable, hubfile, "serve", BIN, *fill], env=env, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(hp)
+    try:
+        asked = next_request(u, 10)
+        u.send("no\n")
+    except AssertionError:
+        asked = None
+    hp.wait(60)
+    rec = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-1]
+    req_ = rec.get("requester", {})
+    check("a request from the metacomputer hub started inside a Claude Code session in the rule's project: the hub asks as "
+          "itself (no session, no project), so the rule doesn't cover it", asked and req_.get("hub_pid")
+          and "claude_pid" not in req_ and "project" not in req_ and hp.returncode == 2, (req_, hp.returncode))
     holder.kill()
     r = client("rule", "add", "--site", SITE2, "--project", proj1, "--for", "1h")
     site_rule = (re.findall(r"Rule ([0-9a-f]{8})", r.stdout) or [None])[0]
