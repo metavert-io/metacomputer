@@ -21,7 +21,8 @@ Mac's own Claude Code setup is never touched.
 - install.sh: plugin mode by default (marketplace + plugin at user scope; earlier installs'
   skill link and user-scope MCP server removed only when they are this checkout's), idempotent;
   --no-plugin keeps the skill link + server and removes this checkout's plugin; no `claude
-  plugin` falls back to the skill link + server; a GitHub marketplace is kept; another
+  plugin` falls back to the skill link + server; the project's own GitHub marketplace is kept, one
+  named metacomputer from any other source is refused (its plugin isn't installed); another
   checkout's marketplace is replaced; a plugin turned off is left so; --uninstall removes both.
 - The skill and the driver pack name both prefixes; bench and the skill-test analyzer count both.
 """
@@ -392,6 +393,42 @@ def test_install(real=False):
               p.stdout)
     finally:
         b.close()
+
+    # Its git URL is the same repository: kept too.
+    b = Box()
+    try:
+        b.seed(mkts={"metacomputer": {"source": "git", "url": "https://github.com/Metavert-io/metacomputer.git"}})
+        p, calls = b.install("--only-claude")
+        check("the canonical repository by git URL: kept, plugin installed from it",
+              p.returncode == 0 and "metacomputer@metacomputer" in b.plugins()
+              and ["plugin", "marketplace", "add", LAB] not in calls, p.stdout + p.stderr)
+    finally:
+        b.close()
+
+    # A marketplace named metacomputer from anywhere else (another repository, a fork, a URL) is never used:
+    # its plugin would run its own code on this Mac. Refused with a clear message; the skill link and a
+    # user-scope server (this checkout) instead; that marketplace and its plugin are left alone.
+    for src in ({"source": "github", "repo": "someone-else/metacomputer"},
+                {"source": "git", "url": "https://github.com/metavert-io/metacomputer-fork.git"},
+                {"source": "url", "url": "https://example.com/marketplace.json"}):
+        b = Box()
+        try:
+            b.seed(mkts={"metacomputer": dict(src)})
+            p, calls = b.install("--only-claude")
+            out = p.stdout + p.stderr
+            check(f"a marketplace named metacomputer from {src.get('repo') or src.get('url')}: plugin NOT installed, "
+                  "says why and how to remove it, falls back to the skill link + server",
+                  p.returncode == 0 and "metacomputer@metacomputer" not in b.plugins()
+                  and not [c for c in calls if c[:2] == ["plugin", "install"]]
+                  and "NOT installed" in out and "claude plugin marketplace remove metacomputer" in out
+                  and b.link(".claude/skills/metacomputer") == os.path.join(LAB, "skills", "metacomputer")
+                  and b.server() == CLI and "metacomputer" in b.mkts(), out)
+            b.seed(mkts={"metacomputer": dict(src)}, plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}})
+            p, _ = b.install("--uninstall")
+            check("…and --uninstall leaves that marketplace's plugin alone", "metacomputer@metacomputer" in b.plugins(),
+                  p.stdout)
+        finally:
+            b.close()
 
     # Another checkout's marketplace (same name) is replaced by this one.
     b = Box()
