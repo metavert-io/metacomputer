@@ -298,7 +298,7 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 
 Each of these needs no VM and takes seconds.
 
-- `python3 tests/test_guest_import.py` (52 checks; needs ffmpeg): files copied from the
+- `python3 tests/test_guest_import.py` (54 checks; needs ffmpeg): files copied from the
   VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
   stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
   a device, a folder link with a file behind it, absolute and `..` names and names with
@@ -312,7 +312,8 @@ Each of these needs no VM and takes seconds.
   chain of extension headers, global pax headers past their cap and GNU sparse
   entries are refused, pax-marked sparse entries (formats 0.1 and 1.0) before their
   map is read; members aren't kept as the stream goes by, and every extension
-  header counts against one metadata budget; folders a path implies count toward the object limit; a
+  header counts against one metadata budget; a header with a negative size is
+  refused before any budget counts it (on Python 3.9 as on 3.15); folders a path implies count toward the object limit; a
   stream of folders only meets the free-space floor; the whole stream is capped
   (left-out entries' data counts); a compressed stream isn't decompressed. Copying
   from a command (the GUI test harness): streamed, stopped at the limit with the
@@ -320,14 +321,17 @@ Each of these needs no VM and takes seconds.
   tail, and the limits taken from the settings; a command that exits nonzero or a
   copy cut short is reported (exit code, escaped stderr) and the evidence marked
   incomplete, keeping what arrived whole.
-- `python3 tests/test_termsafe.py` (20 checks): text from the VM and from pages reaches
+- `python3 tests/test_termsafe.py` (23 checks): text from the VM and from pages reaches
   the terminal escaped in `inspect`, `browser`'s profile list, `web` (its report, its
   messages and errors) and `record moments`; `web --json` stays exact. With a fake
   `ssh` writing escape sequences on stdout and stderr: `record start`, `record status`,
   `status` (the guest's report and the probes), `inspect --json`
   (written again as ASCII-only JSON) and `input-reset` on a terminal show them
-  escaped, SSH's stderr included, and `input-reset` in a pipe stays exact; the
-  `termsafe.py` filter escapes line by line and caps what it passes.
+  escaped, SSH's stderr included, and `input-reset` in a pipe stays exact; `record
+  start` passes the recorder's words on as they come (not held until it ends) and
+  still fails when the recorder does; `status` shows a load average or memory figure
+  that isn't numbers as `?`, never its keys raw; the `termsafe.py` filter escapes
+  line by line and caps what it passes.
 - `python3 tests/test_key_pinning.py` (12 checks; needs gpg): `scripts/pin-gpg-key.sh`
   keeps only the pinned key from a download with an extra key appended (or first),
   refuses one without it, drops a subkey grafted on without a binding signature, and
@@ -396,7 +400,7 @@ results, window titles, app names, typed text, errors and the model's own text.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (159 checks, about 90 s). A stand-in
+`python3 tests/test_hub.py` needs no VM (176 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -476,15 +480,19 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   two refreshes and no thread each, and reach the clients once or twice; a tool
   list that always has one more page, or repeats a cursor, is cut off and the
   earlier list kept; 4 MB on stderr leaves a log at its cap and a short memory
-  tail; a 100,000-deep line and a 5,000-deep answer are skipped by the hub, the
-  action-log relay and the direct client, whose readers carry on, and a client
-  sending one gets a parse error; the direct client won't open the raw driver
+  tail; a 100,000-deep line is skipped and a 5,000-deep answer gets its call an
+  error from the hub (`answer_too_complex`); the hub, the action-log relay and the
+  direct client carry on, and a client sending one gets a parse error; the direct client won't open the raw driver
   connection unless a transport test asks, and drops a connection past its byte
   budget; the depth check's memory follows the depth, not the width, and a frame
-  with millions of values is refused before parsing; screenshot layouts keep only
-  checked geometry within their window caps; 200 messages of the wrong shape write a
-  handful of log lines and make the hub hang up on the driver (the next call
-  reconnects); hub.log rotates while the hub runs;
+  with millions of values is refused before parsing, while a 3.6 MB text full of
+  commas, brackets and colons passes whole; an answer with more values than the hub
+  takes gets its call an error at once and isn't counted against the driver;
+  screenshot layouts keep only checked geometry within their window caps; 200
+  messages of the wrong shape write a handful of log lines and make the hub hang up
+  on the driver (the next call reconnects), and bad messages count per connection;
+  hub.log rotates while the hub runs, and notes left out are summarized with their
+  count when their minute ends or the connection closes;
 - `web` and the GUI tests: `web` is a hub client whose claim is refused while
   another session acts, `--override` releases that claim and claims, closing lets
   go, and of two runs started together exactly one gets the computer;
@@ -497,19 +505,27 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   claim until it can; a call finishing during a hand-over leaves no lease behind;
   another controller's running acting call counts as busy without its claim file;
   a status connection can't claim, and one holding a claim drops it on disconnect;
+  after a bounded session's end a lease's expiry ends its own (earlier) connection,
+  never the current one; a lease that couldn't be written holds the computer after
+  its client exited; with a relay in front of a driver that ignores SIGTERM, expiry
+  lets the relay finish, kills the rest, and lets go only after;
 - element tokens: `set_value` by a Chrome token alone refused (alone and as a
   step), input by a Chrome token sent in the foreground, another app's token passed
   as it was, a token from a read the hub never saw refused (`element_token_unknown`),
   also when the call names a non-Chrome window or app, a token with another app's
-  pid refused (`target_conflict`), a window the driver doesn't list refused
-  (`window_unknown`);
+  pid refused (`target_conflict`), and so are a token that matches only one of a
+  pid and a window_id and a pid with another app's window; a window the driver
+  doesn't list refused (`window_unknown`); in a batch, `set_value` in a step that
+  inherits Chrome from an earlier step refused, typing there sent in the foreground;
   what the hub remembers from results is capped; progress tokens are forgotten;
 - the coordinate guard in a batch: a pixel step after Super+Up, F11, Ctrl+S, a
   double click (also a click with count 2), a click with Alt held, Escape, a click on
-  a dialog's OK button, a drag, a desktop press or Alt+Tab is refused before the
-  batch runs (`pixels_after_window_change`), while clicks (a shift-click, a Bold
-  button), typing, Return and Ctrl+A between pixel steps, pixels before such a step
-  and role/name targets after it pass.
+  a dialog's OK button or the window's Maximize button, a drag, a desktop press or
+  Alt+Tab is refused before the batch runs (`pixels_after_window_change`), while
+  clicks (a shift-click, a Bold button), typing (newlines too), Return and Ctrl+A
+  between pixel steps, pixels before such a step and role/name targets after it
+  pass; with more windows open than a layout keeps, pixels are refused
+  (`too_many_windows`) and role/name targets pass.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py G` (19 checks) runs
 against a running test VM. It opens Mousepad, the calculator and a throwaway
