@@ -100,14 +100,21 @@ VM:  python3 -I -c '<read a length, then that much Python, and run it>'   ◀─
   it neither holds up the answer nor dies of a closed pipe; `held_open` says
   so. Programs started with `setsid -f APP ... >/tmp/APP.log 2>&1` aren't
   affected.
-- **Timeout.** The VM's half sends SIGTERM to the script's process group, then
-  SIGKILL once the whole group is gone or 3 s later. Programs started with
-  `setsid -f` have their own session and keep running. Programs started with
-  `&` stay in the group: they keep running after a normal end, but a timeout
-  stops them.
+- **Timeout.** One loop in the VM's half watches the script's process, the
+  deadline and its output; the deadline holds even if the script closes its
+  output (`exec >/dev/null`). It sends SIGTERM to the script's process group,
+  keeps reading its output (so a TERM handler that prints a lot isn't
+  blocked), and sends SIGKILL 3 s later to whatever of the group is left. The
+  answer comes only once the whole group is gone, not just bash. Programs
+  started with `setsid -f` have their own session and keep running. Programs
+  started with `&` stay in the group: they keep running after a normal end,
+  but a timeout stops them.
 - **Interruption.** The Mac keeps SSH's stdin open until the answer arrives.
   If it closes first (Ctrl-C, the command killed, the connection lost), the
-  VM's half stops the script the same way.
+  VM's half stops the script the same way, and exits only once the group is
+  gone. On the Mac, interrupts that arrive while the connection is being
+  ended are noted, not acted on, so ssh is always killed, reaped and its
+  pipes closed, and the result is still logged and printed.
 - **Leftovers.** A run folder left by a killed runner is removed by the next
   run after a day.
 
@@ -169,7 +176,8 @@ like a click:
   acting calls and `stop`/`reset` are refused in turn. The command ends with
   the run, so the claim is held by the caller's Claude Code process, or
   outside Claude Code by the shell that ran it; it's refreshed every minute
-  of a long run.
+  of a long run, from the holder found at the start (a file write, without
+  reading the process table, so it can't hold up the deadline).
 - the check and the claim are one step under this VM's owners lock
   (`.run/owners/.lock`, `flock`), so two runs started together can't both
   pass. If the claim can't be written, the run is refused (125); if a
@@ -221,7 +229,8 @@ VM said in its own words is a size and a hash.
 If logging applies, the log must open and sign the call before anything
 runs; otherwise the run is refused (125) rather than run unlogged. If the
 final signature fails, the command exits 255 and says the run is unlogged,
-though the script did run and its output is shown. `metacomputer actions show` prints a run as
+though the script did run and its output is shown. A signer that doesn't
+answer within 10 s is stopped and counts as a failure. `metacomputer actions show` prints a run as
 `-> vm_shell {...}` and `<- vm_shell exit 0 (82 ms; stdout 18 B, stderr 0 B)`;
 `metacomputer actions verify` checks these files like any other, and a
 desktop recording's key moments include shell runs made during it.

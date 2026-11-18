@@ -230,8 +230,14 @@ ssh_base() { # ROLE(admin|ops|mcp) -> prints nothing; sets SSH_ARGS array
       ids+=(-o IdentityFile="$CERT_KEY" -o CertificateFile="$CERT_KEY-cert.pub")
     fi
   fi
-  SSH_ARGS=(-o BatchMode=yes -o IdentitiesOnly=yes "${ids[@]}"
+  # The VM is untrusted. No ssh config file applies (-F /dev/null: no Host blocks from
+  # ~/.ssh/config or /etc/ssh, so no ProxyCommand, forwards or multiplexing from there),
+  # and nothing of the Mac's is forwarded to it: no agent, no X11, no ports, no tunnel.
+  SSH_ARGS=(-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes "${ids[@]}"
             -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null
+            -o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no
+            -o ClearAllForwardings=yes -o Tunnel=no -o ControlMaster=no -o ControlPath=none
+            -o PermitLocalCommand=no -o ProxyCommand=none
             -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR
             -p "$SSH_PORT" "$user@127.0.0.1")
 }

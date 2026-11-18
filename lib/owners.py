@@ -156,18 +156,23 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started):
         raise
 
 
-def claim_for_shell(tool):
+def claim_for_shell(tool, who=None):
     """`metacomputer sh` acted. Its process ends with the run, so the claim lives
-    as long as the caller's Claude Code session, or else the shell that ran it."""
-    table = ps_table()
-    claude = claude_of(os.getpid(), table)
-    holder = claude or os.getppid()
+    as long as the caller's Claude Code session, or else the shell that ran it.
+    Returns who holds it, (holder pid, claude pid); passing that back (a refresh
+    during a run) skips looking at the process table."""
+    if who is None:
+        table = ps_table()
+        claude = claude_of(os.getpid(), table)
+        who = (claude or os.getppid(), claude)
+    holder, claude = who
     started = time.time()
     try:
         started = json.load(open(claim_path(holder))).get("started", started)
     except (OSError, ValueError):
         pass
     write_claim(holder, claude, os.getcwd(), tool, started)
+    return who
 
 
 def drop_claim(bridge_pid):
@@ -213,8 +218,11 @@ def direct_connections(table):
         cmd = full_command(pid)
         if not MCP_KEY_RE.search(cmd) or "@127.0.0.1" not in cmd or not for_this_vm(cmd):
             continue
-        if "mcp_lazy.py" in full_command(ppid):
+        parent = full_command(ppid)
+        if "mcp_lazy.py" in parent:
             continue  # an on-demand bridge's own upstream: reported through its claim
+        if "mcp_relay.py" in parent and "mcp_lazy.py" in full_command(table.get(ppid, (0, ""))[0]):
+            continue  # the same, through the action-log relay (ACTION_LOG=on)
         chain = ancestors(pid, table)
         who = None
         for p in chain[1:]:

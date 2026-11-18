@@ -161,7 +161,9 @@ shell on the Mac. In the VM:
 - one JSON line comes back: status, exit code, duration, and each stream's
   size, SHA-256 and kept bytes;
 - a timeout, or stdin closing early (the Mac's side interrupted), ends the
-  process group: SIGTERM, then SIGKILL once the group is gone or after 3 s.
+  process group from the same loop that reads the output: SIGTERM, then
+  SIGKILL after 3 s to whatever is left; the answer waits until the group is
+  gone.
 
 On the Mac, `VM_SHELL` (`auto` is off while `DRIVER_MODE=bounded`) is checked
 first; then, under the owners lock, the one-controller rule, and the run
@@ -203,7 +205,11 @@ certificate from `$SSH_DIR/ca` per connection (`scripts/lib.sh` `cert_for`):
 `metacomputer-admin ssh-auth cert|key` switches it, and `start` and `security apply` call it.
 
 Guest accounts have locked passwords; SSH is key-only with `AllowUsers cua cuaadmin`.
-No macOS credentials are used anywhere.
+No macOS credentials are used anywhere. On the Mac, every connection to the VM
+(`scripts/lib.sh` `ssh_base`) runs with `-F /dev/null`, so no `~/.ssh/config`
+`Host` block applies, and with agent, X11, port and tunnel forwarding,
+connection sharing, local commands and proxies turned off
+(`tests/test_ssh_options.py`).
 
 ## Network
 

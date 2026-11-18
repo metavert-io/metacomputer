@@ -109,7 +109,7 @@ The GUI suite also runs under the `desktop` profile: put
 
 ## The shell channel: `tests/test_vm_shell.py`, `tests/test_options.py F`
 
-`python3 tests/test_vm_shell.py` needs no VM (87 checks). `bash -c` stands in
+`python3 tests/test_vm_shell.py` needs no VM (97 checks). `bash -c` stands in
 for SSH, so the Mac's half (`lib/vm_shell.py`) and the VM's half
 (`lib/vm_shell_guest.py`) both run locally; a fake, hostile VM stands in for
 the rest. It checks:
@@ -141,6 +141,19 @@ the rest. It checks:
   run, and a run claims the computer; the check and claim wait for the owners
   lock; concurrent claim writes don't collide; a claim that can't be written
   refuses the run, and one that can't be refreshed is a warning;
+- the VM half's lifecycle: a script that closes its output still times out
+  on time; a SIGTERM handler that prints 300 KB finishes because output is
+  still read during the grace; on cancellation a child that ignores SIGTERM is
+  killed before the VM half exits;
+- interrupts arriving all through the Mac's cleanup (a transport that ignores
+  SIGTERM and SIGINT): ssh is still killed and reaped, exit 130;
+- a signer that hangs (a fake `ssh-keygen`): refused at the start, exit 255
+  at the end, within the bound, the signer killed, the failure sticky;
+- a claim refresh doesn't read the process table, and the deadline is checked
+  again right after a slow one;
+- `who`: a bridge's own connection through the action-log relay isn't counted
+  as another controller (a fake bridge, relay and ssh process tree), while a
+  relay under another client is;
 - the action log: no file with `ACTION_LOG=off` or `SHELL_LOG=off`; with
   logging, a `vm_shell` call signed before anything runs and a result with
   hashes and sizes, nothing of the script, its output or the VM's diagnostics
@@ -155,6 +168,20 @@ gateway refuses it, that the desktop's display, session bus and accessibility
 settings work, and that a GUI app started with `setsid -f` outlives the run
 with an accessibility tree the driver can read. It changes no VM settings: the
 `VM_SHELL`, bounded-driver and logging cases are config variants on the Mac.
+
+## SSH options: `tests/test_ssh_options.py`
+
+`python3 tests/test_ssh_options.py` needs no VM and connects nowhere (44
+checks). For each role (`admin`, `ops`, `mcp`) with static keys and with
+certificates, it builds the arguments `scripts/lib.sh` uses for every
+connection to the VM and checks:
+- `-F /dev/null` comes first, so no ssh config file applies;
+- agent, X11, port and tunnel forwarding, connection sharing, local commands
+  and proxies are turned off, and no forwarding flag is present;
+- the real `ssh -G` accepts them and resolves them safely, also with a hostile
+  config read in place of `/dev/null`;
+- `metacomputer sh` hands its transport exactly these arguments (captured
+  through a stand-in Python, without connecting).
 
 ## Browser checks: `metacomputer web …`
 

@@ -46,6 +46,9 @@ FORMAT = 1
 ZERO = "0" * 64
 TEXT_KEYS = {"text", "value", "script", "password", "secret", "token"}
 EVERY_N, EVERY_S = 20, 60
+# A signer that doesn't answer (an agent or hardware key waiting for a touch or a
+# passphrase) is stopped after this long, and that counts as a failed signature.
+SIGN_TIMEOUT_S = float(os.environ.get("MCOMP_SIGN_TIMEOUT_S") or 10)
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -153,10 +156,17 @@ class ActionLog:
             return
         covers = self.seq - 1
         msg = checkpoint_message(self.name, covers, self.head, final)
-        r = subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", self.key, "-n", NAMESPACE],
-                           input=msg, capture_output=True)
-        if r.returncode != 0:
-            self.sign_error = (r.stderr or b"").decode(errors="replace").strip()[:200] or "ssh-keygen failed"
+        try:   # run() kills and reaps a signer that times out
+            r = subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", self.key, "-n", NAMESPACE],
+                               input=msg, capture_output=True, timeout=SIGN_TIMEOUT_S)
+            err = None if r.returncode == 0 else (
+                (r.stderr or b"").decode(errors="replace").strip()[:200] or "ssh-keygen failed")
+        except subprocess.TimeoutExpired:
+            err = f"ssh-keygen didn't finish within {SIGN_TIMEOUT_S:g} s"
+        except OSError as e:
+            err = f"couldn't run ssh-keygen ({e.strerror or e})"
+        if err:
+            self.sign_error = err   # sticky: sign_now() and close() report it from then on
             self._append({"type": "sign_failed", "covers_seq": covers, "error": self.sign_error})
             return
         self._append({"type": "checkpoint", "covers_seq": covers, "head": self.head,

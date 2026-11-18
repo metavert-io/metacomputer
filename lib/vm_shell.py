@@ -29,6 +29,7 @@ MCOMP_SH_GRACE_S (tests only) shortens how long the Mac waits past --timeout.
 """
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import math
@@ -505,6 +506,23 @@ class Log:
 
 
 # --- the connection --------------------------------------------------------------
+@contextlib.contextmanager
+def deferred_signals():
+    """While cleanup runs, SIGINT, SIGTERM and SIGHUP are only noted (the list it
+    yields), so a repeated Ctrl-C can't cut short killing, reaping and closing."""
+    late = []
+
+    def note(signum, _frame):
+        late.append(signum)
+
+    old = {sig: signal.signal(sig, note) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield late
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
+
 def run_remote(transport, payload, deadline, limits, on_tick=None):
     """Send the payload and read the answer, never past the deadline or a stream's limit.
     The transport's stdin stays open until the end: the VM's half stops the script if it
@@ -529,13 +547,15 @@ def run_remote(transport, payload, deadline, limits, on_tick=None):
         next_tick = time.monotonic() + CLAIM_EVERY_S
         while reading and not problem:
             now = time.monotonic()
+            if on_tick and now >= next_tick:
+                on_tick()                    # a claim refresh: a file write, no process table
+                now = time.monotonic()       # it took time: check the deadline from now
+                next_tick = now + CLAIM_EVERY_S
             if now >= deadline:
                 problem = "timeout"
                 break
-            if on_tick and now >= next_tick:
-                on_tick()
-                next_tick = now + CLAIM_EVERY_S
-            for key, _ in sel.select(min(1.0, deadline - now)):
+            wait = min(1.0, deadline - now, (next_tick - now) if on_tick else 1.0)
+            for key, _ in sel.select(max(0.0, wait)):
                 if key.data == "stdin":
                     try:
                         sent += os.write(fin, view[sent:sent + CHUNK])
@@ -567,31 +587,35 @@ def run_remote(transport, payload, deadline, limits, on_tick=None):
                 problem = "timeout"
     finally:
         # Closing stdin tells the VM's half to stop the script. Give the connection a moment
-        # to end by itself (none for a VM that misbehaved), then end it; a second interrupt
-        # can't skip that.
-        sel.close()
-        try:
+        # to end by itself (none for a VM that misbehaved), then end it, reap it and close
+        # its pipes; interrupts meanwhile are noted, not acted on, so nothing is skipped.
+        with deferred_signals() as late:
+            sel.close()
             try:
-                p.stdin.close()
-            except OSError:
-                pass
-            if p.poll() is None:
-                p.wait(timeout=0.5 if problem else 5)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
-            pass
-        finally:
-            if p.poll() is None:
-                p.terminate()
                 try:
-                    p.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    p.wait()
-            for f in (p.stdout, p.stderr):
-                try:
-                    f.close()
+                    p.stdin.close()
                 except OSError:
                     pass
+                if p.poll() is None:
+                    try:
+                        p.wait(timeout=0.5 if problem else 5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            finally:
+                if p.poll() is None:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                        p.wait()
+                for f in (p.stdout, p.stderr):
+                    try:
+                        f.close()
+                    except OSError:
+                        pass
+        if late:
+            raise KeyboardInterrupt
     return bytes(out["stdout"]), bytes(out["stderr"]), problem
 
 
@@ -754,6 +778,7 @@ def main(argv):
                           "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED)
 
     # One controller at a time: look for others and claim the computer as one step.
+    who = None
     if not o["read_only"]:
         busy = []
         try:
@@ -761,7 +786,7 @@ def main(argv):
                 if not o["override"]:
                     busy = [x for x in owners.others() if x["active"]]
                 if not busy:
-                    owners.claim_for_shell(TOOL)
+                    who = owners.claim_for_shell(TOOL)
         except (OSError, TimeoutError) as e:
             return refuse(f"couldn't record that this session is using the virtual computer ({e}); not running")
         if busy:
@@ -771,9 +796,9 @@ def main(argv):
                           "agree, run again with --override (or run `metacomputer release`). --read-only runs checks "
                           "that change nothing without taking over.")
 
-    def refresh():
+    def refresh():   # the holder found above: no process table, so it can't stall the run
         try:
-            owners.claim_for_shell(TOOL)
+            owners.claim_for_shell(TOOL, who)
         except OSError as e:
             w = f"couldn't refresh this session's claim on the virtual computer ({e.strerror or e})"
             if w not in warnings:
@@ -794,23 +819,33 @@ def main(argv):
     t0 = time.monotonic()
     deadline = t0 + o["timeout"] + GRACE_S    # starts before ssh does
 
-    def on_signal(_signum, _frame):
-        raise KeyboardInterrupt
+    # Interrupts (Ctrl-C, SIGTERM, SIGHUP) stop the run while it's in flight; from the moment
+    # it ends they're only noted, so logging, signing and printing the result always finish.
+    sig_state = {"defer": False}
 
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    def on_signal(_signum, _frame):
+        if not sig_state["defer"]:
+            raise KeyboardInterrupt
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
     res, code = None, EXIT_FAILED
     try:
         try:
             res, code = execute(o, transport, header, script, deadline, base,
                                 None if o["read_only"] else refresh)
-        except KeyboardInterrupt:
-            res, code = {**base, "status": "cancelled", "kind": "interrupted", "exit_code": None,
-                         "message": "interrupted; the script in the VM is stopped too"}, EXIT_INTERRUPTED
-        except Exception as e:
-            res, code = {**base, "status": "error", "kind": "internal", "exit_code": None,
-                         "message": f"metacomputer sh failed on the Mac ({type(e).__name__})"}, EXIT_FAILED
+        finally:
+            sig_state["defer"] = True
+    except KeyboardInterrupt:
+        sig_state["defer"] = True
+        res, code = {**base, "status": "cancelled", "kind": "interrupted", "exit_code": None,
+                     "message": "interrupted; the script in the VM is stopped too"}, EXIT_INTERRUPTED
+    except Exception as e:
+        sig_state["defer"] = True
+        res, code = {**base, "status": "error", "kind": "internal", "exit_code": None,
+                     "message": f"metacomputer sh failed on the Mac ({type(e).__name__})"}, EXIT_FAILED
     finally:
+        sig_state["defer"] = True   # the result is logged and signed whatever arrives meanwhile
         if res is None:
             res = {**base, "status": "error", "kind": "internal", "exit_code": None,
                    "message": "metacomputer sh stopped unexpectedly"}
@@ -818,15 +853,14 @@ def main(argv):
             log.result(int((time.monotonic() - t0) * 1000), result_fields(res, log.keep))
             if not log.close():
                 res = {**res, "status": "error", "kind": "log", "message":
-                       (f"the script ended ({res.get('status')}, exit code {res.get('exit_code')}) but its action-log "
-                        "record couldn't be signed (ACTION_LOG_KEY); treat this run as unlogged")}
+                       (f"the script ended ({res.get('status')}, exit code {res.get('exit_code')}) but its "
+                        "action-log record couldn't be signed (ACTION_LOG_KEY); treat this run as unlogged")}
                 code = EXIT_FAILED
     if not o["read_only"]:
         refresh()
     if warnings:
         res["warnings"] = warnings
     return finish(o, res, code)
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

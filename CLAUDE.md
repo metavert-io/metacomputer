@@ -75,7 +75,8 @@ metacomputer call TOOL '{json}'   # or: python3 lib/mcp_client.py --tools | --de
   `status` says to rebuild them.
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
-  `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py` and `python3 tests/test_vm_shell.py` (no VM),
+  `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py` and
+  `python3 tests/test_ssh_options.py` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings). See TESTING.md.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),

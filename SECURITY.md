@@ -86,6 +86,9 @@ its results folder; copies verify like the originals.
   see below), not `metacomputer ssh`.
 - It records what was asked and what came back, not what the screen showed.
   Use `metacomputer record` for that.
+- A signer that doesn't answer within 10 s (an agent or hardware key waiting
+  for a touch or a passphrase) is stopped, and that counts as a failed
+  signature from then on.
 
 To verify on another machine, use the public key:
 `metacomputer actions verify FILE --key action-log.pub`, or plain
@@ -188,9 +191,14 @@ What it can do:
 
 What it can't do:
 - **Reach your Mac.** It uses the same SSH path, account and key (or
-  certificate) as `metacomputer ssh ops`. The VM's side of that key refuses
-  agent, port and X11 forwarding, so nothing in the VM can reach back through
-  the connection. The gateway refuses every connection from the VM to the
+  certificate) as `metacomputer ssh ops`. The Mac's ssh runs with no config
+  file (`-F /dev/null`, so no `Host` block in `~/.ssh/config` can add a
+  `ForwardAgent`, `RemoteForward`, `ProxyCommand`, `SendEnv` or shared
+  connection) and with agent, X11, port and tunnel forwarding, connection
+  sharing and local commands turned off on the command line; that holds for
+  every connection to the VM (`sh`, `ssh`, the driver, recordings, status).
+  The VM's side of the key refuses forwarding too, but a hostile VM's sshd
+  wouldn't, so the Mac's side is what counts. The gateway refuses every connection from the VM to the
   Mac, your network and the tailnet, and the VM has no shared folders. The
   script travels on SSH's stdin and is never run by a shell on the Mac.
 - **Get root.** `cua` has no sudo.

@@ -15,10 +15,11 @@ of it is written to disk and memory stays bounded. When the script ends this
 prints one JSON line: how it ended, its exit code and duration, and for each
 stream its size, SHA-256 and the kept bytes (base64).
 
-- Timeout: the script's process group gets SIGTERM; once the whole group is
-  gone, or 3 s later, SIGKILL.
+- Timeout: the script's process group gets SIGTERM, then SIGKILL 3 s later if
+  any of it is left, while its output is still read. The answer waits until the
+  whole group is gone, not just bash.
 - Stdin closes early (the Mac's command was interrupted or lost the
-  connection): the same, reported as "cancelled".
+  connection): the same, reported as "cancelled", and this exits only after it.
 - After the script's own process ends, its output is read for DRAIN_S more.
   A program it left running that still holds the output (started with `&`
   and not redirected) is then handed to a `cat >/dev/null`, so its later
@@ -47,8 +48,9 @@ import time
 ACCESS_ENV = "/etc/X11/Xsession.d/90metacomputer-env"
 DESKTOP_KEYS = ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY")
 CHUNK = 1 << 16
-KILL_AFTER = 3.0
-DRAIN_S = 0.5
+KILL_AFTER = 3.0   # SIGTERM grace for the script's process group
+KILL_WAIT = 2.0    # after SIGKILL, how long to wait for the group to be gone
+DRAIN_S = 0.5      # output still read after the script's own process ends
 
 
 def build_env(desktop):
@@ -124,18 +126,9 @@ def group_alive(pgid, proc):
         return True
 
 
-def stop(proc):
-    """SIGTERM to the script's process group; SIGKILL once the whole group is
-    gone (nothing to do) or after KILL_AFTER seconds."""
+def signal_group(pgid, sig):
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    deadline = time.monotonic() + KILL_AFTER
-    while time.monotonic() < deadline and group_alive(proc.pid, proc):
-        time.sleep(0.05)
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
@@ -164,37 +157,62 @@ def emit(obj):
         pass
 
 
-def collect(proc, timeout, cap, state):
-    """Read the script's stdout and stderr until both close, or DRAIN_S after its
-    own process ends; stop it on timeout. Returns (captures, timed_out, held_open)."""
+def collect(proc, timeout, cap, cancel):
+    """The script's whole lifecycle, in one loop that never blocks on its output:
+    - stdout and stderr are read as they come, into bounded captures;
+    - the deadline and cancel (set when the Mac's side is gone) are checked whether
+      or not the script still has its output open;
+    - to stop the script, its process group gets SIGTERM, then SIGKILL once
+      KILL_AFTER has passed, and its output is still read meanwhile, so a TERM
+      handler that prints a lot isn't blocked;
+    - it returns once the script's own process has ended and its output is read
+      (or DRAIN_S has passed), and, when it was being stopped, once its whole group
+      is gone (or KILL_WAIT after SIGKILL): its own process ending isn't enough.
+    Returns (captures, "timeout" | "cancelled" | None, held_open)."""
     caps = {"stdout": Capture(cap), "stderr": Capture(cap)}
     sel = selectors.DefaultSelector()
     for name, f in (("stdout", proc.stdout), ("stderr", proc.stderr)):
         os.set_blocking(f.fileno(), False)
         sel.register(f.fileno(), selectors.EVENT_READ, name)
     deadline = time.monotonic() + timeout
-    drain_until, timed_out = None, False
+    exited_at = term_at = kill_at = why = None
     try:
-        while sel.get_map():
+        while True:
             now = time.monotonic()
-            if drain_until is None and proc.poll() is not None:
-                drain_until = now + DRAIN_S
-            if drain_until is not None and now >= drain_until:
-                break
-            if not timed_out and drain_until is None and now >= deadline:
-                timed_out = True
-                stop(proc)
-                continue
-            wait = (drain_until if drain_until is not None else deadline) - now
-            for key, _ in sel.select(max(0.0, min(0.2, wait))):
-                try:
-                    data = os.read(key.fd, CHUNK)
-                except BlockingIOError:
-                    continue
-                if data:
-                    caps[key.data].add(data)
-                else:
-                    sel.unregister(key.fd)
+            if exited_at is None and proc.poll() is not None:
+                exited_at = now
+            if why is None and exited_at is None and (cancel.is_set() or now >= deadline):
+                why = "cancelled" if cancel.is_set() else "timeout"
+                signal_group(proc.pid, signal.SIGTERM)
+                term_at = now
+            group_gone = term_at is not None and not group_alive(proc.pid, proc)
+            if exited_at is None and proc.returncode is not None:
+                exited_at = now
+            if term_at is not None and kill_at is None and not group_gone and now >= term_at + KILL_AFTER:
+                signal_group(proc.pid, signal.SIGKILL)
+                kill_at = now
+            killed_long_ago = kill_at is not None and now >= kill_at + KILL_WAIT
+            if exited_at is not None:
+                drained = not sel.get_map() or now >= exited_at + DRAIN_S
+                if drained and (term_at is None or group_gone or killed_long_ago):
+                    break
+            elif killed_long_ago:
+                break   # its own process outlived SIGKILL (stuck in the kernel): stop waiting
+            step = 0.05 if term_at is not None else 0.2
+            if exited_at is None and term_at is None:
+                step = max(0.0, min(step, deadline - now))
+            if sel.get_map():
+                for key, _ in sel.select(step):
+                    try:
+                        data = os.read(key.fd, CHUNK)
+                    except BlockingIOError:
+                        continue
+                    if data:
+                        caps[key.data].add(data)
+                    else:
+                        sel.unregister(key.fd)
+            else:
+                time.sleep(step)
         held = [key.fd for key in sel.get_map().values()]
     finally:
         sel.close()
@@ -210,9 +228,7 @@ def collect(proc, timeout, cap, state):
             f.close()
         except OSError:
             pass
-    if state["cancelled"] and proc.poll() is None:
-        stop(proc)
-    return caps, timed_out, bool(held)
+    return caps, why, bool(held)
 
 
 def main():
@@ -245,7 +261,7 @@ def main():
         proc = subprocess.Popen(["bash", "--noprofile", "--norc", path, *[str(a) for a in hdr.get("args") or []]],
                                 cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, start_new_session=True)
-        state = {"done": False, "cancelled": False}
+        cancel, done = threading.Event(), threading.Event()
 
         def watch():   # stdin closes before the answer only if the Mac's side is gone
             # The raw fd, not sys.stdin.buffer: a thread blocked in the buffered reader
@@ -256,16 +272,15 @@ def main():
                     pass
             except OSError:
                 pass
-            if not state["done"]:
-                state["cancelled"] = True
-                stop(proc)
+            if not done.is_set():
+                cancel.set()   # collect() stops the script and waits until its group is gone
 
         threading.Thread(target=watch, daemon=True).start()
-        caps, timed_out, held = collect(proc, timeout, cap, state)
-        rc = proc.wait()
-        status = "cancelled" if state["cancelled"] else "timeout" if timed_out else "exited"
-        state["done"] = True
-        code = 128 - rc if rc < 0 else rc
+        caps, why, held = collect(proc, timeout, cap, cancel)
+        done.set()
+        rc = proc.poll()
+        status = why or "exited"
+        code = None if rc is None else 128 - rc if rc < 0 else rc
         emit({"status": status, "exit_code": code if status == "exited" else None,
               "duration_s": round(time.monotonic() - t0, 3), "desktop": desktop, "held_open": held,
               "stdout": caps["stdout"].summary(), "stderr": caps["stderr"].summary()})

@@ -54,6 +54,11 @@ try:
             sys.stdout.buffer.write(b"A" * 65536); sys.stdout.flush()
     elif mode == "deaf":
         time.sleep(3600)
+    elif mode == "stubborn":   # deaf, and ignores SIGTERM and SIGINT: only SIGKILL ends it
+        import signal
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        time.sleep(3600)
     elif mode == "silent":
         read_request(); time.sleep(3600)
     elif mode == "reply":
@@ -654,6 +659,187 @@ def log_checks(td):
     check("actions show reads a shell run", "-> vm_shell" in s and "<- vm_shell timeout" in s, s[-300:])
 
 
+FAKE_KEYGEN = """#!/bin/bash
+# ssh-keygen that hangs on signing after FAKE_SIGN_OK good signatures; anything else is the real one.
+if [ "$2" = "-Y" ] && [ "$3" = "sign" ]; then
+  n=$(cat "$FAKE_SIGN_COUNT" 2>/dev/null || echo 0)
+  echo $((n + 1)) > "$FAKE_SIGN_COUNT"
+  if [ "$n" -ge "${FAKE_SIGN_OK:-0}" ]; then exec sleep 61.3; fi
+fi
+exec REAL "$@"
+"""
+
+
+def lifecycle_checks(td):
+    """The VM half's lifecycle (round 2): the deadline without open output, cancellation
+    that waits for the whole group, and draining while a TERM handler runs."""
+    t = time.monotonic()
+    r = sh(td, "--json", "--timeout", "1", "-c", "exec >/dev/null 2>&1; sleep 20.6")
+    el = time.monotonic() - t
+    check("a script that closes its output still times out (124) on time", r.returncode == 124
+          and js(r).get("status") == "timeout" and el < 6 and not pgrep("sleep 20.6"), (r.returncode, el))
+
+    marker = os.path.join(td, "saved-after-term")
+    r = sh(td, "--json", "--timeout", "1", "--max-output", "1024", "-c",
+           f"(trap 'head -c 300000 /dev/zero; echo saved > {marker}; exit' TERM; while :; do sleep 0.1; done) & wait")
+    j = js(r)
+    check("output is still read during the SIGTERM grace: a handler printing 300 KB finishes",
+          r.returncode == 124 and os.path.exists(marker) and j.get("stdout_bytes", 0) >= 300000, (r.returncode, j.get("stdout_bytes")))
+
+    p = subprocess.Popen(cmd(td, ["-c", "(trap '' TERM; sleep 35.1) & wait"]), stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env_for(td))
+    time.sleep(1.5)
+    t = time.monotonic()
+    p.send_signal(signal.SIGTERM)
+    p.communicate(timeout=30)
+    el = time.monotonic() - t
+    left = pgrep("sleep 35.1")
+    check("cancelled: a child that ignores SIGTERM is killed before the VM half exits", p.returncode == 130 and not left
+          and el >= 2.5, (p.returncode, left, el))
+    for pid in left:
+        subprocess.run(["kill", "-9", pid])
+
+
+def signal_checks(td):
+    """Repeated interrupts while the Mac ends the connection can't skip the kill."""
+    pidfile = os.path.join(td, "stubborn.pid")
+    p = subprocess.Popen(cmd(td, ["-c", "true"], "stubborn"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=env_for(td, FAKE_PIDFILE=pidfile))
+    time.sleep(1.0)
+    t = time.monotonic()
+    while p.poll() is None and time.monotonic() - t < 20:
+        p.send_signal(signal.SIGTERM if int((time.monotonic() - t) * 4) % 2 else signal.SIGINT)
+        time.sleep(0.25)
+    p.communicate(timeout=30)
+    el = time.monotonic() - t
+    check("interrupts arriving all through cleanup: the transport is still killed and reaped (130)",
+          p.returncode == 130 and gone(pidfile) and el < 15, (p.returncode, gone(pidfile), el))
+
+
+def signer_checks(td):
+    """A signer that never answers counts as a failed signature, within a bound."""
+    import shutil as _sh
+    fakebin = os.path.join(td, "fakebin")
+    os.makedirs(fakebin)
+    keygen = os.path.join(fakebin, "ssh-keygen")
+    open(keygen, "w").write(FAKE_KEYGEN.replace("REAL", _sh.which("ssh-keygen")))
+    os.chmod(keygen, 0o755)
+    path = fakebin + ":" + os.environ["PATH"]
+    marker = os.path.join(td, "ran-hung-signer")
+    count = os.path.join(td, "sign-count")
+    logs = os.path.join(td, "hung-actions")
+    t = time.monotonic()
+    r = sh(td, "-c", f"touch {marker}", PATH=path, FAKE_SIGN_COUNT=count, FAKE_SIGN_OK="0", MCOMP_SIGN_TIMEOUT_S="1",
+           MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=logs, MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys3", "k"))
+    el = time.monotonic() - t
+    check("a signer that hangs at the start: refused (125) within the bound, nothing runs, the signer killed",
+          r.returncode == 125 and not os.path.exists(marker) and el < 8 and not pgrep("sleep 61.3"),
+          (r.returncode, el, r.stderr[-200:]))
+    os.remove(count)
+    open(os.path.join(td, "reply.bin"), "wb").write(reply(out=b"ran\n"))
+    t = time.monotonic()
+    r = sh(td, "--json", "-c", "true", fake="reply", FAKE_REPLY=os.path.join(td, "reply.bin"), PATH=path,
+           FAKE_SIGN_COUNT=count, FAKE_SIGN_OK="1", MCOMP_SIGN_TIMEOUT_S="1", MCOMP_ACTION_LOG="on",
+           MCOMP_ACTION_LOG_DIR=logs, MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys3", "k"))
+    el = time.monotonic() - t
+    check("a signer that hangs at the end: exit 255 (unlogged) within the bound, the signer killed",
+          r.returncode == 255 and js(r).get("kind") == "log" and el < 8 and not pgrep("sleep 61.3"), (r.returncode, el))
+
+    old_path, old_timeout = os.environ["PATH"], actionlog.SIGN_TIMEOUT_S
+    os.environ.update(PATH=path, FAKE_SIGN_COUNT=count, FAKE_SIGN_OK="0")
+    os.remove(count)
+    actionlog.SIGN_TIMEOUT_S = 1
+    try:
+        log = actionlog.ActionLog({"bridge_pid": 1}, {"on": True, "keep_text": False, "dir": os.path.join(td, "sticky"),
+                                                      "key": os.path.join(td, "keys4", "k")})
+        log.call(1, "vm_shell", {})
+        t = time.monotonic()
+        first = log.sign_now()
+        el = time.monotonic() - t
+        os.environ["FAKE_SIGN_OK"] = "100"   # the signer works again
+        log.call(2, "vm_shell", {})
+        second = log.sign_now()
+        log.close()
+        kinds = [x["type"] for x in records(log.path)]
+        check("ActionLog: a hung signer fails within SIGN_TIMEOUT_S and the failure is sticky",
+              first is False and second is False and el < 3 and "sign_failed" in kinds and log.sign_error, (first, second, el, kinds))
+    finally:
+        os.environ["PATH"] = old_path
+        for k in ("FAKE_SIGN_COUNT", "FAKE_SIGN_OK"):
+            os.environ.pop(k, None)
+        actionlog.SIGN_TIMEOUT_S = old_timeout
+
+
+def refresh_checks(td):
+    """The claim refresh during a run can't stall the deadline."""
+    os.environ["MCOMP_RUN_DIR"] = os.path.join(td, "run3")
+    import importlib
+    importlib.reload(owners)
+    real_ps = owners.ps_table
+    try:
+        def no_ps(*_a, **_k):
+            raise AssertionError("ps called")
+        owners.ps_table = no_ps
+        who = owners.claim_for_shell("vm_shell", (424242, None))
+        rec = json.load(open(os.path.join(td, "run3", "owners", "424242.json")))
+        check("a refresh reuses the holder found at the start: no process table", who == (424242, None)
+              and rec.get("last_tool") == "vm_shell")
+    except AssertionError as e:
+        check("a refresh reuses the holder found at the start: no process table", False, e)
+    finally:
+        owners.ps_table = real_ps
+        os.environ.pop("MCOMP_RUN_DIR", None)
+        importlib.reload(owners)
+    old = vm_shell.CLAIM_EVERY_S
+    vm_shell.CLAIM_EVERY_S = 0.2
+    ticks = []
+    try:
+        t = time.monotonic()
+        _, _, problem = vm_shell.run_remote([sys.executable, os.path.join(td, "fake_vm.py"), "deaf"], b"x" * 10,
+                                            t + 1.0, {"stdout": 1000, "stderr": 1000},
+                                            lambda: (ticks.append(time.monotonic() - t), time.sleep(1.5)))
+        el = time.monotonic() - t
+        check("the deadline is checked again right after a slow refresh", problem == "timeout" and len(ticks) == 1
+              and ticks[0] < 0.5 and 1.5 < el < 2.7, (problem, ticks, el))
+    finally:
+        vm_shell.CLAIM_EVERY_S = old
+
+
+def relay_owner_checks(td):
+    """With ACTION_LOG=on a bridge's connection runs through mcp_relay.py; it's the
+    bridge's own, not a second controller. A relay under anything else still counts."""
+    tree = os.path.join(td, "tree")
+    os.makedirs(os.path.join(tree, "k"))
+    spawner = "import subprocess, sys\nsubprocess.Popen(sys.argv[1:]).wait()\n"
+    for name in ("mcp_lazy.py", "mcp_relay.py", "mcp_client.py"):
+        open(os.path.join(tree, name), "w").write(spawner)
+    ssh = ["ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ProxyCommand=sleep 40",
+           "-o", f"IdentityFile={tree}/k/mcp", "-p", "59997", "cua@127.0.0.1", "true"]
+    py = sys.executable
+    bridge = subprocess.Popen([py, os.path.join(tree, "mcp_lazy.py"), py, os.path.join(tree, "mcp_relay.py"), *ssh],
+                              start_new_session=True, stdin=subprocess.DEVNULL)
+    client = subprocess.Popen([py, os.path.join(tree, "mcp_client.py"), py, os.path.join(tree, "mcp_relay.py"), *ssh],
+                              start_new_session=True, stdin=subprocess.DEVNULL)
+    try:
+        time.sleep(1.5)
+        r = subprocess.run([py, "-c", "import json, sys; sys.path.insert(0, sys.argv[1]); import owners; "
+                                      "print(json.dumps(owners.direct_connections(owners.ps_table())))",
+                            os.path.join(LAB, "lib")], capture_output=True, text=True,
+                           env=dict(os.environ, MCOMP_SSH_PORT="59997"))
+        found = json.loads(r.stdout or "[]")
+        chains = [set(d.get("chain") or []) for d in found]
+        check("who: a bridge's connection through the action-log relay isn't another controller; a relay under a "
+              "client is", len(found) == 1 and client.pid in chains[0] and bridge.pid not in chains[0],
+              (len(found), r.stderr[-200:]))
+    finally:
+        for proc in (bridge, client):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-sh-")
     try:
@@ -662,6 +848,11 @@ def main():
         hostile_checks(td)
         owner_checks(td)
         log_checks(td)
+        lifecycle_checks(td)
+        signal_checks(td)
+        signer_checks(td)
+        refresh_checks(td)
+        relay_owner_checks(td)
     finally:
         for d, _, _ in os.walk(td):
             try:
