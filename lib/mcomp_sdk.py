@@ -202,15 +202,16 @@ class SiteLoginOptions:
     """Options for Hub.request_site_login, named as Cua Spaces' SiteLoginOptions record names them."""
 
     def __init__(self, username=None, agent=None, session=None, target_id=None, tab_id=None, request_id=None,
-                 wait_secs=None, profile=None, submit=None):
+                 wait_secs=None, profile=None, submit=None, pid=None):
         self.username, self.agent, self.session = username, agent, session
         self.target_id, self.tab_id, self.request_id, self.wait_secs = target_id, tab_id, request_id, wait_secs
-        self.profile, self.submit = profile, submit
+        self.profile, self.submit, self.pid = profile, submit, pid
 
 
 class SiteLoginReport:
-    """What request_site_login did. Never the password."""
-    FIELDS = ("status", "request_id", "site", "origin", "username_hint", "submitted", "page_url", "session",
+    """What request_site_login did. Never the password, and nothing the page chose: same_site says whether it's still
+    on the login's origin (no page address comes back)."""
+    FIELDS = ("status", "request_id", "site", "origin", "username_hint", "submitted", "same_site", "session",
               "target_id", "tab_id")
 
     def __init__(self, **kw):
@@ -320,8 +321,9 @@ class Hub:
     def request_site_login(self, url, options=None, **kw):
         """Sign in to url in the VM's page-mode Chrome with a login saved in `metacomputer secrets`, the way Cua
         Spaces' `space.request_site_login(url, options)` is called (synchronous here). options: a dict or a
-        SiteLoginOptions (username, agent, session, target_id, tab_id, request_id, wait_secs; profile and submit
-        are this project's own), and keyword arguments override it. Returns a SiteLoginReport: status "pending"
+        SiteLoginOptions (username, agent, session, target_id, tab_id, request_id, wait_secs; profile, pid and
+        submit are this project's own: a tab given needs its Chrome's pid or named profile), and keyword arguments
+        override it. Returns a SiteLoginReport: status "pending"
         (with request_id: call again with it once the user approved) or "filled"; never a password. Raises
         SiteLoginError (its .code: not_found, invalid_argument, login_refused, locked, ...) otherwise."""
         args = dict(options.__dict__ if isinstance(options, SiteLoginOptions) else (options or {}))

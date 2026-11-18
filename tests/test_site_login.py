@@ -37,7 +37,7 @@ SITE2 = ts.SITE2
 SITE4, SITE5, SITE6 = "http://127.0.0.1:8768", "http://localhost:8769", "http://127.0.0.1:8770"
 URL_TOKEN = "Dummy-url-token-14"
 COOKIE_BANK = "Dummy-bank-cookie-15"
-VALUES = [PASS, PW, PW2, tvi.CHROME_KEY, tvi.COOKIE_GH, URL_TOKEN, COOKIE_BANK]
+VALUES = [PASS, PW, PW2, tvi.CHROME_KEY, tvi.COOKIE_GH, URL_TOKEN, URL_TOKEN.encode().hex(), COOKIE_BANK]
 
 FAKE_DRIVER = r'''
 import json, os, sys
@@ -289,6 +289,9 @@ def run(td, procs):
           [(s["mode"], s["field"], s.get("selector")) for s in sent] == [("check", "password", "#password"), ("check", "username", "#username"),
                                                                          ("fill", "username", "#username"), ("fill", "password", "#password")]
           and sent[2].get("value") == USER and sent[3].get("value") == PW and all(s["origins"] == [SITE] for s in sent[1:]), sent)
+    check("N4: every request to the VM names the Chrome the hub opened, by its browser process id (4242 here), so the "
+          "value can't go to a same-site tab in another Chrome", sent and all(s.get("browser_pid") == 4242 for s in sent),
+          [s.get("browser_pid") for s in sent])
     check("the hub opened page-mode Chrome on the url through the driver, read the page, then clicked the submit button",
           dc[:5] == ["browser_prepare", "list_windows", "get_browser_state", "browser_navigate", "get_browser_state"]
           and any(c["tool"] == "browser_click" and str(c["args"].get("ref")).endswith(":6") for c in driver_calls())
@@ -333,7 +336,11 @@ def run(td, procs):
     # the page is somewhere else
     json.dump({"url": SITE + "/login.html", "force_url": "https://evil.example/login"}, open(os.path.join(state, "state.json"), "w"))
     n = len(calls())
-    r = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1"})
+    r0 = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1"})
+    check("N4: a tab given without the Chrome it's in (pid, or a named profile) is refused, nothing typed",
+          r0.is_error and r0.structured.get("error") == "invalid_argument" and "pid" in r0.structured.get("message", "")
+          and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], r0.raw)
+    r = call("request_site_login", {"url": SITE + "/login.html", "target_id": "bt-1", "tab_id": "tab-1", "pid": 4242})
     check("a tab that is on another site: login_refused before anything is typed", r.is_error and r.structured.get("error") == "login_refused"
           and not [c for c in calls()[n:] if c.get("kind", "").startswith("fill:")], r.raw)
     json.dump({"url": SITE + "/login.html"}, open(os.path.join(state, "state.json"), "w"))
@@ -348,9 +355,15 @@ def run(td, procs):
           and all(x.get("origins") == [SITE4] for x in sent), (r.raw, [x.get("origins") for x in sent]))
     json.dump({"after_click_url": SITE4 + "/home?session=" + URL_TOKEN + "#pw=" + URL_TOKEN}, open(os.path.join(state, "state.json"), "w"))
     r = call("request_site_login", {"url": SITE4 + "/login.html"})
-    check("after the sign-in only the page's origin comes back as page_url, never its path, query or fragment",
-          not r.is_error and r.structured.get("submitted") is True and r.structured.get("page_url") == SITE4
-          and URL_TOKEN not in json.dumps(r.raw), r.raw)
+    check("after the sign-in nothing of the page's address comes back: same_site true, no page_url, no path or query",
+          not r.is_error and r.structured.get("submitted") is True and r.structured.get("same_site") is True
+          and "page_url" not in r.structured and URL_TOKEN not in json.dumps(r.raw), r.raw)
+    spelled = URL_TOKEN.encode().hex() + ".exfil.example"
+    json.dump({"after_click_url": "https://" + spelled + "/"}, open(os.path.join(state, "state.json"), "w"))
+    r = call("request_site_login", {"url": SITE4 + "/login.html"})
+    check("N3: a page that goes to a host spelling a value after the sign-in: only same_site false comes back, never the host",
+          not r.is_error and r.structured.get("status") == "filled" and r.structured.get("same_site") is False
+          and "exfil.example" not in json.dumps(r.raw) and URL_TOKEN.encode().hex() not in json.dumps(r.raw), r.raw)
     json.dump({"move_on_snap": 2, "move_url": "https://evil.example/collect"}, open(os.path.join(state, "state.json"), "w"))
     nd = len(driver_calls())
     r = call("request_site_login", {"url": SITE4 + "/login.html"})
@@ -361,7 +374,7 @@ def run(td, procs):
     json.dump({"url": SITE + "/login.html"}, open(os.path.join(state, "state.json"), "w"))
 
     # the SDK, as Spaces' SDK calls it
-    rep = h.request_site_login(SITE + "/login.html", mcomp_sdk.SiteLoginOptions(target_id="bt-1", tab_id="tab-1", username=USER))
+    rep = h.request_site_login(SITE + "/login.html", mcomp_sdk.SiteLoginOptions(target_id="bt-1", tab_id="tab-1", pid=4242, username=USER))
     rid = rep.request_id
     subprocess.run([BIN, "approve", rid], env=venv, capture_output=True, text=True, timeout=60)
     rep2 = h.request_site_login(SITE + "/login.html", {"request_id": rid, "wait_secs": 30})

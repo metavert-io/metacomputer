@@ -191,7 +191,7 @@ def run(td, procs):
     sc = r.structured
     check("after `approve ID`: filled and submitted, on the test site, with a masked username; no value in the result",
           ra.returncode == 0 and not r.is_error and sc.get("status") == "filled" and sc.get("origin") == SITE and sc.get("submitted") is True
-          and sc.get("username_hint") == "v***@example.com" and sc.get("page_url") == SITE
+          and sc.get("username_hint") == "v***@example.com" and sc.get("same_site") is True and "page_url" not in sc
           and not any(v in json.dumps(r.raw) for v in VALUES), (ra.stderr, r.raw))
     tgt = {"target_id": sc.get("target_id"), "tab_id": sc.get("tab_id"), "session": sc.get("session")}
     text = ""

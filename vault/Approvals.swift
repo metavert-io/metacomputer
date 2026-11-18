@@ -151,8 +151,8 @@ func newRuleID() -> String { randomBytes(4).map { String(format: "%02x", $0) }.j
 enum Decision {
     case terminal(ApprovalScope)        // the name typed on the unlock terminal (with its scope)
     case terminalNo                     // anything else typed there, the terminal closing
-    case localAuth                      // Touch ID or the login password, in the system's dialog
-    case passphrase                     // `approve ID --passphrase`
+    case localAuth(ApprovalScope)       // Touch ID or the login password, in a dialog that named this scope
+    case passphrase(ApprovalScope)      // `approve ID --passphrase [--scope S]`: a proof over this scope
     case denied(String)                 // `deny ID`, or a refusal at the Touch ID dialog
 }
 
@@ -170,8 +170,7 @@ final class PendingRequest {
     let identityProvider: Bool
     let summary: String                 // one line: what approving it allows (shown, and signed by a passphrase proof)
     var decision: Decision?
-    var selectedScope: ApprovalScope?   // presence mode: what was typed, waiting for the dialog or the passphrase to confirm it
-    var localAuth: LocalAuthAttempt?
+    var localAuth: LocalAuthAttempt?    // the dialog in flight, if any: it names one scope, and only grants that one
     var autoLocalAuth = false           // the dialog `unlock --touch-id` showed by itself
     var waiters: [Int32] = []           // `approve ID` clients waiting for the dialog's answer
 
@@ -201,8 +200,11 @@ final class PendingRequest {
 
 // MARK: - Touch ID or the login password (LocalAuthentication)
 
-/// One request to macOS for the device owner, answered on another thread.
+/// One request to macOS for the device owner, answered on another thread. Its scope is fixed when it starts and
+/// named in the dialog's text: allowing it grants that scope and no other.
 final class LocalAuthAttempt: @unchecked Sendable {
+    let scope: ApprovalScope
+    init(scope: ApprovalScope) { self.scope = scope }
     private let lock = NSLock()
     private var finished = false
     private var allowed = false
@@ -240,11 +242,18 @@ final class LocalAuthAttempt: @unchecked Sendable {
 /// in for the person there (allow, deny, wait), and without it there is none. Release builds don't contain
 /// that switch. MCOMP_VAULT_LOCAL_AUTH=noninteractive (release builds too) never shows the dialog: for a Mac
 /// nobody sits at, where approvals then come from the terminal or the passphrase.
-func startLocalAuth(_ reason: String) -> LocalAuthAttempt {
-    let a = LocalAuthAttempt()
+func startLocalAuth(_ reason: String, scope: ApprovalScope = .use) -> LocalAuthAttempt {
+    let a = LocalAuthAttempt(scope: scope)
     #if MCOMP_VAULT_TESTING
     testTrace("local-auth " + reason)
-    switch ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_LOCAL_AUTH"] ?? "" {
+    testLocalAuthCount += 1
+    let mode = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_LOCAL_AUTH"] ?? ""
+    // allow-first-after:N: the first dialog of this process is allowed N seconds after it opens; later ones wait.
+    if mode.hasPrefix("allow-first-after:"), let secs = Double(mode.dropFirst("allow-first-after:".count)) {
+        if testLocalAuthCount == 1 { DispatchQueue.global().asyncAfter(deadline: .now() + secs) { a.finish(true, "") } }
+        return a
+    }
+    switch mode {
     case "allow": DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { a.finish(true, "") }
     case "deny": DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { a.finish(false, "you cancelled the dialog", refused: true) }
     case "wait": break
@@ -268,6 +277,23 @@ func startLocalAuth(_ reason: String) -> LocalAuthAttempt {
     return a
 }
 
+#if MCOMP_VAULT_TESTING
+nonisolated(unsafe) var testLocalAuthCount = 0
+#endif
+
+/// The words a dialog, a passphrase prompt and the audit use for how far an approval reaches.
+func scopeWords(_ s: ApprovalScope, name: String) -> String {
+    switch s {
+    case .use: return "for this one use"
+    case .session: return "for this use and the rest of this Claude Code session"
+    case .unlock: return "for every use of \(name) until the vault locks"
+    }
+}
+
+func scopeName(_ s: ApprovalScope) -> String { s == .use ? "use" : (s == .session ? "session" : "unlock") }
+
+func parseScope(_ s: String) -> ApprovalScope? { ["use": .use, "session": .session, "unlock": .unlock][s] }
+
 func localAuthError(_ e: NSError?) -> String {
     guard let e else { return "no answer" }
     if e.domain == LAErrorDomain {
@@ -285,36 +311,49 @@ func localAuthError(_ e: NSError?) -> String {
 
 // MARK: - presence mode
 
-/// Whether this Mac has Touch ID with a finger enrolled (LocalAuthentication's biometrics policy; no dialog).
-/// A sensor with no fingerprints counts as none. Test builds take MCOMP_VAULT_TEST_BIOMETRY (available,
-/// not-enrolled, none; default none) instead; release builds don't contain that switch.
-enum Biometry: String { case touchID = "touch-id", notEnrolled = "not-enrolled", none = "none" }
+/// What LocalAuthentication's biometrics policy says about this Mac (no dialog): Touch ID with a finger enrolled
+/// (or locked out for now), a sensor with no finger enrolled, no sensor (no Touch ID keyboard paired), or that it
+/// can't tell right now: a paired Touch ID keyboard that's disconnected, biometry unavailable, any other error.
+/// Only a clean answer counts as no Touch ID; anything else is `unavailable` and keeps presence mode on.
+/// (macOS answers "not enrolled" on a Mac that has no sensor at all but could take a Touch ID keyboard.) Test
+/// builds take MCOMP_VAULT_TEST_BIOMETRY (available, not-enrolled, none, unavailable; default none) instead;
+/// release builds don't contain that switch. Returns the answer and, for `unavailable`, what the check said.
+enum Biometry: String { case touchID = "touch-id", notEnrolled = "not-enrolled", none = "none", unavailable = "unavailable" }
 
-func detectBiometry() -> Biometry {
+func detectBiometry() -> (Biometry, String) {
     #if MCOMP_VAULT_TESTING
     switch ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_BIOMETRY"] ?? "" {
-    case "available": return .touchID
-    case "not-enrolled": return .notEnrolled
-    default: return .none
+    case "available": return (.touchID, "")
+    case "not-enrolled": return (.notEnrolled, "")
+    case "unavailable": return (.unavailable, "the Touch ID keyboard is disconnected (test stand-in)")
+    default: return (.none, "")
     }
     #else
     let ctx = LAContext()
     var err: NSError?
-    if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err) { return .touchID }
-    if let e = err, e.domain == LAErrorDomain {
-        if e.code == LAError.biometryNotEnrolled.rawValue { return .notEnrolled }
-        if e.code == LAError.biometryLockout.rawValue { return .touchID }   // a sensor and fingers, locked for now
+    if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err) { return (.touchID, "") }
+    guard let e = err else { return (.unavailable, "the check gave no answer") }
+    guard e.domain == LAErrorDomain else { return (.unavailable, clean("\(e.domain) \(e.code)", max: 80)) }
+    switch e.code {
+    case LAError.biometryNotEnrolled.rawValue: return (.notEnrolled, "")
+    case LAError.biometryLockout.rawValue: return (.touchID, "")          // a sensor and fingers, locked for now
+    case LAError.biometryNotPaired.rawValue: return (.none, "")           // no Touch ID keyboard paired
+    case LAError.biometryDisconnected.rawValue: return (.unavailable, "the paired Touch ID keyboard is disconnected")
+    case LAError.biometryNotAvailable.rawValue: return (.unavailable, "Touch ID isn't available right now")
+    default: return (.unavailable, clean("\(e.localizedDescription) (\(e.code))", max: 120))
     }
-    return .none
     #endif
 }
 
 /// Presence mode: every approval, and every grant (`NAME session`, `NAME unlock`), needs macOS's dialog (Touch ID
 /// or the login password) or the passphrase (`approve ID --passphrase`); what's typed at the unlock terminal only
-/// chooses how far it reaches. The default: on where Touch ID is (so nothing typed into a terminal a program could
-/// control approves), off elsewhere. Changed by `unlock --require-presence | --no-require-presence`, else by the
-/// vault's setting (`presence on|off|auto`). Returns (on, why, a warning for the unlock terminal or nil).
-func resolvePresence(flag: Bool?, setting: String?, biometry b: Biometry) -> (Bool, String, String?) {
+/// chooses how far it reaches. The default fails closed: on where Touch ID is, on when the check can't tell, and on
+/// for good once this vault has seen Touch ID enrolled on this Mac (`seen`, kept inside the vault), until the
+/// person turns it off (`presence off`, with the passphrase). Only a clean "no sensor" or "no finger enrolled" on a
+/// vault that never saw Touch ID leaves typed answers as the default. Changed by `unlock --require-presence |
+/// --no-require-presence`, else by the vault's setting (`presence on|off|auto`). Returns (on, why, a warning for the
+/// unlock terminal or nil).
+func resolvePresence(flag: Bool?, setting: String?, biometry b: Biometry, detail: String = "", seen: Bool = false) -> (Bool, String, String?) {
     let how = "`metacomputer secrets unlock --require-presence`, or `metacomputer secrets presence on` to keep it"
     if let f = flag {
         return f ? (true, "--require-presence", nil)
@@ -324,8 +363,15 @@ func resolvePresence(flag: Bool?, setting: String?, biometry b: Biometry) -> (Bo
     if setting == "off" {
         return (false, "the vault's setting (presence off)", "typed answers approve here (presence off): a program that can type into this terminal could approve; \(how) changes that")
     }
+    let off = "`metacomputer secrets presence off` (with the passphrase) turns it off if you mean it"
     switch b {
     case .touchID: return (true, "this Mac has Touch ID", nil)
+    case .unavailable:
+        return (true, "Touch ID can't be checked right now (\(detail)), so presence mode stays on",
+                "Touch ID can't be checked right now (\(detail)): presence mode stays on, so the dialog asks for your login password or Touch ID once it's back. \(off)")
+    case _ where seen:
+        return (true, "this vault has seen Touch ID enrolled on this Mac, so presence mode stays on",
+                "this Mac's Touch ID reports \(b == .notEnrolled ? "no finger enrolled" : "no sensor") now, but this vault has seen it enrolled: presence mode stays on. \(off)")
     case .notEnrolled:
         return (false, "this Mac's Touch ID has no fingerprint enrolled",
                 "this Mac's Touch ID sensor has no fingerprint enrolled, so typed answers approve here; a program that can type into this terminal could approve. Enroll a finger, or \(how) (your login password then confirms)")
@@ -344,11 +390,13 @@ func cmdPresence(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let mode = a.positional[0]
     try requireTTY("presence")
     installPromptSignalHandlers()
-    let (key, _) = try unlockKey(paths)
+    let (key, existing) = try unlockKey(paths)
     defer { key.wipeKey() }
     try updateVault(paths, key) { p in p.require_presence = mode == "auto" ? nil : mode }
     audit(paths, ["op": "presence", "result": "ok", "mode": mode], macKey: vaultAuditKey(paths, key))
-    let (on, why, _) = resolvePresence(flag: nil, setting: mode == "auto" ? nil : mode, biometry: detectBiometry())
+    let (bio, detail) = detectBiometry()
+    let (on, why, _) = resolvePresence(flag: nil, setting: mode == "auto" ? nil : mode, biometry: bio, detail: detail,
+                                       seen: existing.biometry_seen != nil)
     oprint("Presence mode: \(mode) (now \(on ? "on" : "off"): \(why)). It applies from the next unlock; `unlock --require-presence` or `--no-require-presence` overrides it for one unlock.")
     return Exit.ok
 }
@@ -361,9 +409,10 @@ func approvalProofKey(_ key: VaultKey) -> [UInt8] {
     hkdf32(key.bytes, salt: Array("mcomp-vault".utf8), info: "mcomp-vault|approval-proof|1")
 }
 
-/// Binds the approval to this request, its one-time challenge and the summary the person was shown.
-func approvalProof(_ k: [UInt8], id: String, challenge: String, summary: String) -> String {
-    hmacSHA256Hex(key: k, data: Array("mcomp-vault|approve|1|\(id)|\(challenge)|\(summary)".utf8))
+/// Binds the approval to this request, its one-time challenge, the summary the person was shown and how far it
+/// reaches (the scope they were shown): a proof for one use can't be presented for a session or the whole unlock.
+func approvalProof(_ k: [UInt8], id: String, challenge: String, summary: String, scope: ApprovalScope) -> String {
+    hmacSHA256Hex(key: k, data: Array("mcomp-vault|approve|2|\(id)|\(challenge)|\(scopeName(scope))|\(summary)".utf8))
 }
 
 func constantTimeEqual(_ a: String, _ b: String) -> Bool {
@@ -403,10 +452,14 @@ func cmdRequests(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["passphrase", "json"])
-    guard a.positional.count == 1, validRequestID(a.positional[0]) else { throw usageError("usage: approve ID [--passphrase]  (ID: 8 hex digits, from `requests`)") }
+    let a = try parseArgs(argv, values: ["scope"], flags: ["passphrase", "json"])
+    guard a.positional.count == 1, validRequestID(a.positional[0]) else {
+        throw usageError("usage: approve ID [--passphrase] [--scope use|session|unlock]  (ID: 8 hex digits, from `requests`)")
+    }
+    // How far it reaches is part of what's confirmed: the dialog's text and the passphrase proof both name it.
+    guard let scope = parseScope(a.last("scope") ?? "use") else { throw usageError("--scope use, session or unlock (default: use, this one use)") }
     let id = a.positional[0]
-    var req: [String: Any] = ["op": "approve", "id": id, "method": "local-auth"]
+    var req: [String: Any] = ["op": "approve", "id": id, "method": "local-auth", "scope": scopeName(scope)]
     if a.has("passphrase") {
         try requireTTY("approve --passphrase")
         installPromptSignalHandlers()
@@ -418,20 +471,21 @@ func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
               let challenge = r["challenge"] as? String, let summary = r["summary"] as? String else {
             throw VaultError("no request \(id) waits for approval (metacomputer secrets requests)")
         }
-        oprint(clean("Approve request \(id): \(summary)?", max: 600))
-        oprint("Your vault passphrase approves this one use; Ctrl-C refuses nothing and leaves it waiting.")
+        let name = r["name"] as? String ?? "it"
+        oprint(clean("Approve request \(id), \(scopeWords(scope, name: name)): \(summary)?", max: 600))
+        oprint("Your vault passphrase approves it \(scopeWords(scope, name: name)); Ctrl-C refuses nothing and leaves it waiting.")
         let (key, _) = try unlockKey(paths)
         var k = approvalProofKey(key)
         defer { wipe(&k); key.wipeKey() }
         req["method"] = "passphrase"
-        req["proof"] = approvalProof(k, id: id, challenge: challenge, summary: summary)
+        req["proof"] = approvalProof(k, id: id, challenge: challenge, summary: summary, scope: scope)
     }
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 200) } catch ClientError.locked {
         throw VaultError("the vault is locked: nothing waits for approval", code: Exit.locked)
     }
     if a.has("json") { printResult(res, ["ok", "id", "reason"]); return exitFor(res) }
-    if res["ok"] as? Bool == true { oprint("Approved request \(id) for this one use.") } else {
+    if res["ok"] as? Bool == true { oprint("Approved request \(id) " + (res["scope_words"] as? String ?? "for this one use") + ".") } else {
         eprint(clean("mcomp-vault: not approved: \(res["reason"] as? String ?? "no answer")", max: 400))
     }
     return exitFor(res)
@@ -516,6 +570,11 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if a.has("passphrase") || !unlocked {
             try requireTTY("rule add")
             installPromptSignalHandlers()
+            // What the passphrase confirms, shown before it's asked for: the rule, for whom, and until when.
+            let what = a.last("secret").map { "uses of \($0)" } ?? a.last("session").map { "loads of the sealed session \($0)" }
+                ?? "fills into \(site ?? "?")"
+            oprint(clean("Make an unattended rule: \(what) without asking, for Claude Code sessions in \(tildePath(project)), "
+                         + "until \(isoTime(Date().addingTimeInterval(TimeInterval(seconds)))). Your vault passphrase confirms it.", max: 500))
             let (key, existing) = try unlockKey(paths)
             defer { key.wipeKey() }
             let (rule, why) = buildRule(existing, use: "", secret: a.last("secret"), site: site, session: a.last("session"), project: project,

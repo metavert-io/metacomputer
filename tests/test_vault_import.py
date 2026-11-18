@@ -44,7 +44,8 @@ SEED = ts.SEED
 SEED2 = "GEZDGNBVGY3TQOJQ"
 PW_TW = "Dummy-tw-pass-10"
 LEAK = "SECRET-FROM-GUEST-7731"
-VALUES = [PASS, CHROME_KEY, PW_GH, PW_GH2, PW_EX, PW_LOCAL, PW_NEW, *CSV_PW, COOKIE_GH, COOKIE_LOCAL, COOKIE_SID, SEED, SEED2, PW_TW, LEAK]
+SEED3 = "MFRGGZDFMZTWQ2LK"
+VALUES = [PASS, CHROME_KEY, PW_GH, PW_GH2, PW_EX, PW_LOCAL, PW_NEW, *CSV_PW, COOKIE_GH, COOKIE_LOCAL, COOKIE_SID, SEED, SEED2, SEED3, PW_TW, LEAK]
 outputs = []
 OPENSSL = shutil.which("openssl") or "/usr/bin/openssl"
 
@@ -413,6 +414,34 @@ def run(td, procs):
           "bob's is untouched, and the new code has its own audit record", rc == 0 and rc2 == 0 and bob_otp == "tw.example-2-otp"
           and "tw.example-otp" in s2 and not s2.get(bob_otp, {}).get("rotated") and len(new_otp) == 1,
           (out2[-500:], sorted(n for n in s2 if n.startswith("tw.")), s2.get(bob_otp)))
+    # N5: a 2FA code belongs to its login's id, which is never reused; a name is.
+    tz_a = csv_file("tz-a.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                    f"tz,https://tz.example/,alice-tz,{PW_TW}a,,otpauth://totp/x:alice?secret={SEED}&issuer=x\n")
+    tz_b = csv_file("tz-b.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                    f"tz,https://tz.example/,bob-tz,{PW_TW}b,,otpauth://totp/x:bob?secret={SEED2}&issuer=x\n")
+    rc1, o1 = tty([BIN, "import-passwords", "--csv", tz_a], [("Vault passphrase", PASS + "\n")])
+    s1 = secrets()
+    rc2, o2 = tty([BIN, "delete", "tz.example"], [("Vault passphrase", PASS + "\n")])
+    rc3, o3 = tty([BIN, "import-passwords", "--csv", tz_b], [("Vault passphrase", PASS + "\n")])
+    s3 = secrets()
+    recs = [json.loads(l) for l in open(alog)]
+    alice_rotated = [x for x in recs if x.get("op") == "rotate" and x.get("name") == "tz.example-otp"]
+    check("N5: Alice's login deleted, then Bob's imported under the same name: Bob gets a 2FA code of his own, Alice's is "
+          "left as it was (the delete said it belongs to no login now)", rc1 == rc2 == rc3 == 0 and "tz.example-otp" in s1
+          and "tied to no login" in o2 and not alice_rotated and not s3.get("tz.example-otp", {}).get("rotated")
+          and "tz.example-otp-2" in s3 and any(x.get("op") == "delete" and x.get("totp_unlinked") == ["tz.example-otp"] for x in recs),
+          (o2[-300:], o3[-400:], sorted(n for n in s3 if n.startswith("tz.")), alice_rotated))
+    rc4, o4 = tty([BIN, "set", "tz.example-otp-2", "--kind", "totp", "--origin", "https://tz.example", "--replace"],
+                  [("Vault passphrase", PASS + "\n"), ("TOTP seed for", SEED3 + "\n")])
+    tz_b2 = csv_file("tz-b2.csv", "Title,URL,Username,Password,Notes,OTPAuth\n"
+                     f"tz,https://tz.example/,bob-tz,{PW_TW}b,,otpauth://totp/x:bob?secret={SEED2}&issuer=x\n")
+    rc5, o5 = tty([BIN, "import-passwords", "--csv", tz_b2], [("Vault passphrase", PASS + "\n")])
+    s5 = secrets()
+    recs = [json.loads(l) for l in open(alog)]
+    check("...and `set --replace` on a 2FA code keeps the login it belongs to: Bob's next import rotates that code, it "
+          "doesn't make another", rc4 == 0 and rc5 == 0 and "tz.example-otp-3" not in s5
+          and any(x.get("op") == "rotate" and x.get("name") == "tz.example-otp-2" and x.get("kind") == "totp"
+                  and x.get("imported_from") for x in recs), (o5[-400:], sorted(n for n in s5 if n.startswith("tz."))))
     bad = csv_file("bad.csv", "a,b\n1,2\n")
     rc, out = tty([BIN, "import-passwords", "--csv", bad], [("Vault passphrase", PASS + "\n")])
     check("a CSV without url and password columns is refused", rc != 0 and "no url and password columns" in out, out)

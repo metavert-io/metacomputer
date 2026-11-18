@@ -936,7 +936,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (98 checks, about 3 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (105 checks, about 4 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -963,12 +963,22 @@ person at it, and without it there is none. It covers:
 - **binding:** a use covered by a grant or a rule is still checked in the VM and the
   value goes only to the site checked, including a site rule on the secret's second
   site;
-- **presence mode** (`MCOMP_VAULT_TEST_BIOMETRY=available|not-enrolled|none` stands in
-  for macOS's Touch ID check): on by default with Touch ID, where a typed answer only
-  chooses the scope and the passphrase or the dialog approves; the warning without
-  Touch ID or with no finger enrolled; `--require-presence`, `--no-require-presence`
-  and `presence on|off|auto`; the mode in `status` (locked and unlocked) and
-  `metacomputer security`; and that a release build ignores the stand-in;
+- **presence mode** (`MCOMP_VAULT_TEST_BIOMETRY=available|not-enrolled|none|unavailable`
+  stands in for macOS's Touch ID check): on by default with Touch ID, where a typed answer
+  only chooses the scope and the passphrase or the dialog approves; on when the check
+  can't tell, saying why; on for good once the vault has seen Touch ID enrolled, even when
+  it later reports no finger or no sensor, until `presence off`; the warning without Touch
+  ID or with no finger enrolled on a vault that never saw it; `--require-presence`,
+  `--no-require-presence` and `presence on|off|auto`; the mode in `status` (locked and
+  unlocked) and `metacomputer security`; and that a release build ignores the stand-in;
+- **the scope is confirmed:** `NAME unlock` typed and then a passphrase proof for one use
+  gives one use and no grant; `approve ID --passphrase --scope session|unlock` (its prompt
+  naming the scope) gives that grant; `NAME unlock` typed while the dialog for one use is
+  open withdraws that dialog (`MCOMP_VAULT_TEST_LOCAL_AUTH=allow-first-after:N` would have
+  allowed it) and opens one naming the wider scope, so no unlock-wide grant comes from the
+  first; `rule add --passphrase` showing the rule and its expiry before the passphrase;
+- **the hub's fills name their Chrome:** one through the hub without `--profile` or
+  `--browser-pid` is refused before anyone is asked;
 - **audit continuity:** after a last record of several megabytes, the next one still
   links to it;
 - **`unlock --touch-id`:** the dialog allows or refuses; inside tmux a typed answer
@@ -981,7 +991,7 @@ person at it, and without it there is none. It covers:
   inside a Claude Code session in a rule's project, has no session or project, so the rule
   doesn't cover it.
 
-`python3 tests/test_vault_import.py` (55 checks, about a minute) covers the imports with
+`python3 tests/test_vault_import.py` (57 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
 their values encrypted as Chrome on macOS does with a test key. The test build reads them
 through `MCOMP_VAULT_TEST_CHROME_DIR` and takes the key from `MCOMP_VAULT_TEST_CHROME_KEY`;
@@ -996,6 +1006,9 @@ release build contains neither switch. It covers:
   one skipped), 1Password and Bitwarden (several URIs, its TOTP, notes skipped); a login with
   12,000 sites in one cell (cut to 20, and the audit chain still verifies); a 2FA seed for one
   account never replacing another account's code on the same site, with its own audit record;
+  a login deleted and another imported under its name, which gets a code of its own while the
+  old code is left untouched (and `delete` says it's tied to no login now); `set --replace`
+  on a code keeping the login it belongs to;
 - **`import-session`:** `--site` required, a dry run, only the named site's cookies sealed,
   `--replace` (which keeps an identity provider's mark), an identity provider needing
   `--allow-identity-provider` and asking at every load whatever its policy, the load sending
@@ -1009,7 +1022,7 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (31 checks, about a minute) runs the hub with a stand-in
+`python3 tests/test_site_login.py` (34 checks, about a minute) runs the hub with a stand-in
 driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
 0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
 standing in for the VM. It covers:
@@ -1022,8 +1035,11 @@ standing in for the VM. It covers:
   calling session only as an unverified claim); a login limited to the session's project
   refused through the hub; declined; an unknown request id; a tab on another site refused
   before typing; a login saved for two sites filled only on the one asked for, even when the
-  VM reports the other; only the page's origin returned as `page_url` when the page puts a
-  token in its URL; no submit when the tab leaves the site after the fill; the SDK's
+  VM reports the other; no page address returned after the sign-in, only `same_site` (true
+  when the page put a token in its URL, false and nothing more when it went to a host
+  spelling a value); every request to the VM naming the Chrome the hub opened by its
+  browser process id; a tab given without `pid` or `profile` refused; no submit when the tab
+  leaves the site after the fill; the SDK's
   `request_site_login`; another controller refused by the hub;
 - `teleport_browser_session`: no imported session (naming `import-session`), Firefox
   refused, a profile with no cookie store (the hub has the driver create it before the vault
@@ -1041,7 +1057,7 @@ tools end to end. It serves the fixture pages and a cookie-echo page in the VM, 
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 
-`python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
+`python3 tests/test_secret_fill.py` (169 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -1055,7 +1071,8 @@ It uses its own vault folder in /tmp and a TEST build, and never the installed v
   - frames with loader ids, isolated worlds, `DOM.describeNode` and `SystemInfo`;
   - a tab list, or a page's own world, that disagrees with the frame tree;
   - cross-origin, srcdoc, sandboxed and out-of-process frames;
-  - several tabs;
+  - several tabs on the site, refused even when one is focused, and the Chrome chosen by
+    its browser process id (`browser_pid`);
   - profiles found from the browser's command line (`SystemInfo.getInfo`), from its
     pid and `/proc`, or from `Browser.getBrowserCommandLine`, and a failure that
     says what each route answered;

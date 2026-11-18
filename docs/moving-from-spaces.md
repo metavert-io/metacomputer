@@ -58,9 +58,13 @@ does. It adds `profile` (a named driver profile to open) and `submit` (default t
    you decide.
 5. Call again with that `request_id` (and `wait_secs`, default 20, at most 120). The
    answer is `status: "filled"` with `site`, `origin`, `username_hint` (`a***@example.com`),
-   `submitted`, `page_url` (the page's origin only, never its path or query) and the tab, or
-   `status: "denied"`. The vault fills only a tab on that one origin, and the form isn't
-   submitted if the tab has left it.
+   `submitted`, `same_site` and the tab, or `status: "denied"`. There is no `page_url`: no
+   address of the page comes back after a sign-in, only whether it's still on the login's
+   origin (`same_site`). The vault fills only a tab on that one origin, in the Chrome the
+   tool read, and only when no other tab there is on the site; the form isn't submitted if
+   the tab has left it.
+   A tab you pass needs its Chrome: `pid` (the process you bound with `get_browser_state`)
+   or `profile` (a named driver profile).
 
 **`teleport_browser_session`** takes `sites` (required), `browser`, `name`, `reason`,
 `request_id` and `duration_minutes`. It adds `session` and `wait_secs`.

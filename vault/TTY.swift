@@ -111,9 +111,9 @@ func approvalPrompt(_ question: String, name: String) -> String {
 /// The prompt in presence mode: what's typed chooses how far the approval reaches, and macOS's dialog (or a
 /// passphrase proof) confirms it; anything else refuses.
 func presencePrompt(_ question: String, name: String, id: String) -> String {
-    question + "\n  Confirm with Touch ID or your login password in macOS's dialog (or `metacomputer secrets approve \(id) --passphrase`)."
-        + "\n  To reach further, type \(name) session (this Claude Code session) or \(name) unlock (until the vault locks) first;"
-        + " typing never approves on its own. Anything else refuses: "
+    question + "\n  Confirm this one use with Touch ID or your login password in macOS's dialog (or `metacomputer secrets approve \(id) --passphrase`)."
+        + "\n  To reach further, type \(name) session (this Claude Code session) or \(name) unlock (until the vault locks): a new dialog"
+        + " then names that, and only it can allow it. Typing never approves on its own. Anything else refuses: "
 }
 
 /// What a line typed at an approval prompt allows (nil: it refuses).
