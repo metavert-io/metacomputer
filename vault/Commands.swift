@@ -27,23 +27,37 @@ In your own terminal (these ask for the vault passphrase):
       [--ca FILE] [--required]           send every audit event off this Mac (prints its key once;
                                          `ask` and {ask} are typed with the echo off)
   audit-sink show NAME --key | remove NAME
-  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]
-                                         serve requests from this terminal until Ctrl-C or the time is up
+  policy NAME --approval session|each    whether a secret's uses ask first (without typing its value again)
+  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id]
+                                         serve requests from this terminal until Ctrl-C or the time is up;
+                                         --touch-id also shows macOS's Touch ID / login password dialog per question
+
+You, from any terminal (they need Touch ID / your login password, or the passphrase):
+  approve ID [--passphrase]              allow one waiting request, for this one use
+  rule add (--secret NAME | --site https://site | --session NAME) --project DIR --for 8h [--passphrase]
+                                         an unattended rule: that use by Claude Code sessions in DIR doesn't ask,
+                                         until it expires (at most 30d); never for an identity provider
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
-  fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]
+  fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
+  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID]
+                                         sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
   session load NAME --vm VM [--profile P]            put a sealed profile back, under its own name
   token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
   tokens [--json]   revoke ID|--all      live tokens; end them
+  requests [--json]                      uses waiting for your approval: id, who asked, site, masked username, age
+  deny ID                                refuse a waiting request
+  rule list [--json] | rule remove ID    unattended rules; remove one
   audit-sink list | show NAME | test NAME
 
 Any time:
   status [--json]    audit [--tail N] [--json] | --head | --verify    selftest    version [--json]
 
-fill, session and token: exit 0 ok, 2 refused, 3 locked, 4 error.
+fill, login, session and token: exit 0 ok, 2 refused, 3 locked, 4 error. A program outside Claude Code that
+passes a request on for a Claude Code process adds --on-behalf-pid PID (the metacomputer hub does).
 """
 
 func runMain(_ argv: [String]) -> Int32 {
@@ -76,6 +90,12 @@ func runMain(_ argv: [String]) -> Int32 {
         case "unlock": return try cmdUnlock(paths, rest)
         case "list": return try cmdList(paths, rest)
         case "fill": return try cmdFill(paths, rest)
+        case "login": return try cmdLogin(paths, rest)
+        case "requests": return try cmdRequests(paths, rest)
+        case "approve": return try cmdApprove(paths, rest)
+        case "deny": return try cmdDeny(paths, rest)
+        case "rule": return try cmdRule(paths, rest)
+        case "policy": return try cmdPolicy(paths, rest)
         case "session": return try cmdSession(paths, rest)
         case "token": return try cmdToken(paths, rest)
         case "tokens": return try cmdTokens(paths, rest)
@@ -83,7 +103,7 @@ func runMain(_ argv: [String]) -> Int32 {
         case "audit-sink": return try cmdAuditSink(paths, rest)
         case "status": return try cmdStatus(paths, rest)
         case "audit": return try cmdAudit(paths, rest)
-        case "selftest": return selftest()
+        case "selftest": return rest == ["--local-auth"] ? localAuthSelftest() : selftest()
         case "version": return cmdVersion(rest)
         case "help", "-h", "--help": oprint(usageText); return Exit.ok
         default: throw usageError("unknown command '\(cmd)' (mcomp-vault help)")
@@ -332,16 +352,17 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 // MARK: - unlock
 
 func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer"])
-    guard a.positional.isEmpty else { throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]") }
+    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id"])
+    guard a.positional.isEmpty else { throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id]") }
     let dur = a.last("for") ?? "30m"
     guard let seconds = parseDuration(dur), seconds <= 12 * 3600 else { throw usageError("--for: like 90s, 30m or 2h (at most 12h)") }
     let confirm = a.last("confirm") ?? "session"
     guard ["session", "each"].contains(confirm) else { throw usageError("--confirm session or each") }
     try requireTTY("unlock")
     let mux = terminalMultiplexer()
-    if let m = mux, confirm == "each", !a.has("allow-multiplexer") {
-        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), or add --allow-multiplexer if you accept that")
+    // With --touch-id the confirmation is the system's dialog, which nothing typed into the pane can answer.
+    if let m = mux, confirm == "each", !a.has("allow-multiplexer"), !a.has("touch-id") {
+        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), add --touch-id to confirm with Touch ID or your login password instead, or add --allow-multiplexer if you accept that")
     }
     try ensurePrivateDir(paths.dir)
     _ = try readHeader(paths)
@@ -359,7 +380,7 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     installPromptSignalHandlers()
     let (key, _) = try unlockKey(paths)
     let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each",
-                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"))
+                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"), touchID: a.has("touch-id"))
     let rc = try server.serve()
     ftruncate(lfd, 0)
     close(lfd)
@@ -404,11 +425,25 @@ func exitFor(_ res: [String: Any]) -> Int32 {
     }
 }
 
-func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "reason"]) {
+func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route",
+                                                           "request_id", "reason"]) {
     var out: [String: Any] = [:]
     for k in keys { if let v = res[k] { out[k] = v } }
     if out["ok"] == nil { out["ok"] = false }
     oprint(jsonLine((cleanAll(out) as? [String: Any]) ?? ["ok": false]))
+}
+
+/// --request-id ID (the id the request gets if it has to wait for approval; 8 hex digits, unused) and
+/// --on-behalf-pid PID (a program outside Claude Code passing a request on for a Claude Code process).
+func useOptions(_ a: Args, _ req: inout [String: Any]) throws {
+    if let id = a.last("request-id") {
+        guard validRequestID(id) else { throw usageError("--request-id: 8 hex digits (0-9, a-f)") }
+        req["request_id"] = id
+    }
+    if let p = a.last("on-behalf-pid") {
+        guard let n = Int32(p), n > 1 else { throw usageError("--on-behalf-pid: a process id") }
+        req["on_behalf_pid"] = Int(n)
+    }
 }
 
 /// A use refused because the vault is locked: recorded, and said in the client's output.
@@ -416,6 +451,7 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
     var rec = fields
     rec["op"] = op
     rec["result"] = "locked"
+    if op == "fill" || op == "login" { rec["event"] = "login.denied" }
     audit(paths, rec)
     var out = fields
     out["ok"] = false
@@ -426,7 +462,7 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
         throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]")
     }
@@ -442,6 +478,7 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard s.count <= 300 else { throw usageError("--selector: at most 300 characters") }
         req["selector"] = s
     }
+    try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
         return lockedUse(paths, "fill", ["name": name, "vm": vm, "field": field])
@@ -450,15 +487,42 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     return exitFor(res)
 }
 
+func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--request-id ID]"
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid"])
+    guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
+    let name = a.positional[0]
+    guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
+    var req: [String: Any] = ["op": "login", "name": name, "vm": vm]
+    for (flag, key, v) in [("password-selector", "password_selector", Optional(ps)), ("username-selector", "username_selector", a.last("username-selector"))] {
+        guard let v else { continue }
+        guard !v.isEmpty, v.count <= 300 else { throw usageError("--\(flag): 1-300 characters of CSS that match exactly one field") }
+        req[key] = v
+    }
+    if let p = a.last("profile") {
+        guard validName(p) else { throw usageError("--profile: a driver profile name") }
+        req["profile"] = p
+    }
+    try useOptions(a, &req)
+    let res: [String: Any]
+    do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
+        return lockedUse(paths, "login", ["name": name, "vm": vm])
+    }
+    printResult(res, ["ok", "name", "vm", "profile", "origin", "chars", "fields", "username_hint", "request_id", "reason"])
+    return exitFor(res)
+}
+
 func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "ttl"])
+    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
         throw usageError("usage: token NAME --vm VM [--ttl 15m]")
     }
     guard let ttl = parseDuration(a.last("ttl") ?? "15m"), ttl <= 8 * 3600 else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }
     let name = a.positional[0]
+    var req: [String: Any] = ["op": "token", "name": name, "vm": vm, "ttl_s": ttl]
+    try useOptions(a, &req)
     let res: [String: Any]
-    do { res = try request(paths, ["op": "token", "name": name, "vm": vm, "ttl_s": ttl], timeout: 300) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
         return lockedUse(paths, "token", ["name": name, "vm": vm])
     }
     printResult(res, ["ok", "name", "vm", "token_id", "token", "base_url", "header", "api_host", "expires", "expires_in_s", "reason"])
@@ -503,7 +567,7 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval"], flags: ["replace"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid"], flags: ["replace"])
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")
@@ -543,6 +607,7 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     var req: [String: Any] = ["op": "session_\(sub)", "name": name, "vm": vm]
     if let p = profile { req["profile"] = p }
     if a.has("replace") { req["replace"] = true }
+    try useOptions(a, &req)
     let res: [String: Any]
     do { res = try request(paths, req, timeout: 1800) } catch ClientError.locked {
         return lockedUse(paths, "session_\(sub)", ["name": name, "vm": vm, "profile": profile ?? ""])
@@ -772,3 +837,22 @@ func selftest() -> Int32 {
 }
 
 func sha256HexRaw(_ b: [UInt8]) -> String { b.map { String(format: "%02x", $0) }.joined() }
+
+/// `selftest --local-auth`: one request to LocalAuthentication through the function every approval uses, with
+/// no vault and no log. A release build runs it only with MCOMP_VAULT_LOCAL_AUTH=noninteractive, so it never
+/// shows a dialog and can only report that nothing was allowed: tests use it to show that a release build
+/// ignores the test builds' stand-in for the person (MCOMP_VAULT_TEST_LOCAL_AUTH).
+func localAuthSelftest() -> Int32 {
+    #if !MCOMP_VAULT_TESTING
+    guard ProcessInfo.processInfo.environment["MCOMP_VAULT_LOCAL_AUTH"] == "noninteractive" else {
+        eprint("mcomp-vault: selftest --local-auth runs only with MCOMP_VAULT_LOCAL_AUTH=noninteractive (otherwise it would show the Touch ID dialog)")
+        return Exit.usage
+    }
+    #endif
+    let a = startLocalAuth("check that nothing is approved here")
+    let deadline = Date().addingTimeInterval(20)
+    while !a.done && Date() < deadline { usleep(50_000) }
+    if !a.done { a.cancel() }
+    oprint(a.ok ? "local-auth: allowed" : "local-auth: not allowed (\(a.why))")
+    return a.ok ? Exit.ok : Exit.failed
+}

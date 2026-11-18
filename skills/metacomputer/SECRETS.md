@@ -4,32 +4,32 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 
 ## Who runs what
 
-- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value.
+- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value.
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
-- **You:** `list`, `fill`, `session save|load`, `token`, `tokens`, `revoke`, `status`, `audit`, `audit-sink list|test`.
+- **Only the user, from any terminal:** `approve ID` and `rule add`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
+- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`.
 
 ## First: what's stored
 
 `metacomputer secrets list` shows names, kinds, sites (or API hosts), usernames, which `--field`s each secret fills, its approval, any project limit and its age. Never values. It works only while the vault is unlocked.
 
-## Exit codes (fill, session, token) and what to tell the user
+## Exit codes (fill, login, session, token) and what to tell the user
 
 | Exit | Means | Do |
 | --- | --- | --- |
 | 0 | done | carry on; for a fill, `chars` is the check |
-| 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ...": this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
+| 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal", "refused with `deny`", "refused at the Touch ID dialog": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ...": this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
 | 3 | the vault is locked | ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. No vault yet: they run `metacomputer secrets init` and `set` |
 | 4 | error | VM off, no Chrome, no tab on that site. "Rebuild the VM": the VM predates the fill or proxy account; tell the user. "Bind again": the user runs `metacomputer secrets bind` |
 
 ## When the user has to approve
 
-A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save (and load, unless relaxed) and an `each` API token wait up to 2 minutes for the user. Their unlock terminal shows the question and "Asked by Claude Code in <this project>". Tell them which secret, what for, and that they type in the vault's terminal:
-- `NAME` to allow this use;
-- `NAME session` for the rest of this Claude Code session;
-- `NAME unlock` until the vault locks.
+A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save (and load, unless relaxed), an `each` API token and every use on an identity provider's sign-in page (Google, Microsoft, Apple, Okta) wait up to 2 minutes for the user. Their unlock terminal shows the question, a request id and "Asked by Claude Code in <this project>"; `metacomputer secrets requests` lists what waits. Tell them which secret, what for, and how to answer:
+- in the vault's terminal: `NAME` to allow this use, `NAME session` for the rest of this Claude Code session, `NAME unlock` until the vault locks;
+- or from any terminal: `metacomputer secrets approve ID` (Touch ID or their login password; `--passphrase` for the vault passphrase), for this use only.
 
-Inside tmux or screen these are refused unless the user unlocked with `--allow-multiplexer`; the reason says so.
+On an identity provider's page every use asks and `session` / `unlock` cover only that use: don't suggest them there. Inside tmux or screen typed answers are refused unless the user unlocked with `--allow-multiplexer` or `--touch-id`; the reason says so. If the user set up an unattended rule for this project (`rule list`), covered uses don't ask.
 
 ## Signing in to a site (fill)
 
@@ -45,6 +45,8 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 7. Submit with a click, then check the signed-in page with a fresh snapshot.
 
 `{"ok":true,...,"chars":N}` means it was typed and checked. That is the verification: don't read the field back.
+
+**One approval for username and password:** `metacomputer secrets login NAME --username-selector '#user' --password-selector '#pass' [--profile P]` (selectors from a `dom_refs_v1` snapshot, each matching exactly one field) fills both into the page's fields with one question instead of two. Leave out `--username-selector` on a password-only page. The answer lists `fields`, the `origin` and a masked `username_hint`. Then submit with a click and check the page.
 
 ## Keeping the user signed in (sealed sessions)
 

@@ -862,7 +862,9 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    `Fill x-login (password) into https://x.com on VM metacomputer?`
    `Asked by Claude Code in ~/Projects/foo (pid 4242).`
    - You type the secret's name to allow this use, `NAME session` for this Claude
-     Code session, or `NAME unlock` until the vault locks ("Who is asking" below).
+     Code session, or `NAME unlock` until the vault locks ("Who is asking" below). Or,
+     from any terminal, `metacomputer secrets approve ID` with Touch ID or your login
+     password, or the passphrase ("Approving from elsewhere" below).
    - No answer within 120 seconds, or before the unlock's time runs out, counts as no.
    - After you allow it, only that site is sent with the value.
    - The listener is checked again before the value goes.
@@ -933,12 +935,20 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
 
 The unlock process asks the kernel which process is on the other end of its socket
 (`LOCAL_PEERPID`) and walks up that process's parents to the nearest Claude Code
-process (one named `claude`, or `node` running Claude Code's script). That process's
-pid, start time and folder (its project) are the **requester**:
+process (one named `claude`, `node` running Claude Code's script, or the native
+installer's version file, `.../claude/versions/X.Y.Z`). That process's pid, start time
+and folder (its project) are the **requester**:
 - your terminal shows it: `Asked by Claude Code in ~/Projects/foo (pid 4242)`;
 - the audit log records it (`requester`: `client`, `client_pid`, `claude_pid`,
   `project`), and so does the waiting-for-you event;
-- a request from anything else says so: `python3 (pid 99), not from Claude Code`.
+- a request from anything else says so: `python3 (pid 99), not from Claude Code`;
+- a program outside every Claude Code session may pass a request on for a Claude Code
+  process it names (`--on-behalf-pid`; the metacomputer hub does, since it runs
+  detached). The vault then attributes the request to that process and names the one
+  that passed it: `Asked by Claude Code in ~/Projects/foo (pid 4242), through python3
+  (pid 777)`, and `requester.via` in the audit log. It ignores the option when the
+  client itself runs inside a Claude Code session, so a session's own commands are
+  always its own.
 
 When a use needs your approval, what you type decides how long it lasts:
 
@@ -953,9 +963,112 @@ own sites; it never widens them. `--project DIR` on a secret refuses requests wh
 Claude Code process works outside DIR (or that come from no Claude Code process).
 
 **This is attribution and scoping, not isolation.** Every process involved runs as
-you. Any program of yours can name itself `claude`, change folder, or run under a real
-Claude Code process. The requester keeps honest sessions apart and tells you which one
-asked; it doesn't stop a hostile process of yours.
+you. Any program of yours can name itself `claude`, change folder, run under a real
+Claude Code process, or pass a request on for one. The requester keeps honest sessions
+apart and tells you which one asked; it doesn't stop a hostile process of yours.
+
+### Approving from elsewhere: request ids, Touch ID, the passphrase
+
+Every use that waits for you is a **request** with an 8-digit id, shown in the unlock
+terminal (`Request 5f2c9a0e: ...`) and listed by `metacomputer secrets requests`: the
+id, what it would do, the secret, the site, the VM, a masked username (`a***@example.com`),
+who asked and how long it has waited. You can answer it in the unlock terminal as before,
+or from any terminal:
+
+| Command | What it takes | Allows |
+| --- | --- | --- |
+| `approve ID` | macOS's own dialog: Touch ID, or your login password on a Mac without it (LocalAuthentication, `deviceOwnerAuthentication`), shown by the unlock process | this one use |
+| `approve ID --passphrase` | the vault passphrase, typed on that terminal | this one use |
+| `deny ID` | nothing | refuses it |
+
+`unlock --touch-id` shows that dialog for every question by itself, beside the terminal
+question; either answer counts, and cancelling the dialog refuses. Inside tmux or screen,
+where typed answers are refused, `--touch-id` is how you approve (and `--confirm each`
+starts there with it).
+
+**Nothing a program does can approve.** Claude Code runs as you and can run any
+`metacomputer` or `mcomp-vault` command, or write to the vault's socket directly, so a
+request on the socket proves nothing about who sent it:
+- `approve ID` only asks the unlock process to show the system dialog. macOS draws it,
+  naming the program and what it allows (`approve request 5f2c9a0e: fill x-login
+  (password) into https://x.com on VM metacomputer, asked by Claude Code in
+  ~/Projects/foo`), and only a finger or the login password answers it.
+- `approve ID --passphrase` opens the vault with the passphrase on that terminal and
+  sends a proof: an HMAC, under a key derived from the vault's data key (which only the
+  passphrase or the running unlock gives), over the request's id, a one-time challenge
+  and the summary you were shown. The unlock process checks it; a forged proof, one
+  made for other text, or one kept from an earlier request approves nothing.
+- A terminal of its own isn't the bar: `script` or `expect` can make one. The
+  passphrase, the dialog or a line typed at the unlock terminal is.
+- `deny`, `requests` and listing or removing rules need nothing: they only restrict.
+- Test builds can't show the dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH` stands in for the
+  person there, and release builds don't contain it (`tests/test_vault_approvals.py`
+  checks both, by the binary's strings and by its behaviour).
+- `MCOMP_VAULT_LOCAL_AUTH=noninteractive` in the unlock's environment never shows the
+  dialog (for a Mac nobody sits at, or one you reach only over SSH): `approve ID` then
+  fails at once, and you use the terminal or `--passphrase`.
+
+Requests live only while the unlock process waits for an answer (at most 120 seconds,
+and never past the unlock's end); while one waits, `status`, `list`, `tokens`,
+`requests`, `approve`, `deny` and `rule list` are still answered, and other uses wait
+their turn. A client may choose its request's id (`--request-id`, 8 hex digits never
+used before in that unlock); the metacomputer hub does, so it can report the id at once.
+
+### Unattended rules
+
+A rule lets one use happen without asking, for Claude Code sessions in one folder,
+until it expires:
+
+```
+metacomputer secrets rule add --secret x-login --project ~/Projects/foo --for 8h   # its fills (an api secret: its tokens)
+metacomputer secrets rule add --site https://x.com --project ~/Projects/foo --for 8h # any secret's fill into that site
+metacomputer secrets rule add --session s1 --project ~/Projects/foo --for 1d        # loading that sealed session (its own VM)
+metacomputer secrets rule list | rule remove ID
+```
+
+- Making one takes macOS's Touch ID / password dialog (shown by the unlock process),
+  or `--passphrase` on your terminal (also how you make one while the vault is
+  locked). `--for` is required, at most 30 days. Rules live inside the vault and apply
+  only while it's unlocked; expired ones are dropped.
+- A rule covers requests whose Claude Code process works in that folder or below it,
+  never one from outside Claude Code. It never covers an identity provider, a sealed-
+  session save, or a load into another VM.
+- The audit log records each use it covers as `approval: rule:ID`, and the rule's
+  making (`rule_add`, with how it was confirmed) and removal.
+- `metacomputer secrets policy NAME --approval session|each` (passphrase) changes
+  whether a secret's uses ask at all, without typing its value again.
+
+### Identity providers always ask
+
+A sign-in at an identity provider opens every site that trusts it, so a use there
+asks every time, whatever else is set: a secret's `--approval session`, the unlock's
+default `--confirm session`, an earlier `NAME session` or `NAME unlock` answer, and
+unattended rules never cover it, and `NAME session` or `NAME unlock` typed at such a
+question allows that one use only. This is a tightening: before, a secret set to
+`session` didn't ask on any of its sites. The built-in list (`vault/Approvals.swift`):
+
+| Provider | Sites |
+| --- | --- |
+| Google | `accounts.google.com`, `myaccount.google.com`, `accounts.youtube.com` |
+| Microsoft | `login.microsoftonline.com`, `login.microsoftonline.us`, `login.partner.microsoftonline.cn`, `login.microsoft.com`, `login.live.com`, `login.windows.net`, `account.live.com`, `account.microsoft.com` |
+| Apple | `appleid.apple.com`, `idmsa.apple.com`, `account.apple.com`, `iforgot.apple.com` |
+| Okta | any subdomain of `okta.com`, `oktapreview.com`, `okta-emea.com`, `okta-gov.com` |
+
+- A fill of a secret with one of these among its sites always checks the page first:
+  on the provider's site it asks; on its other sites it goes ahead as set, and the value
+  goes only to the site the VM reported.
+- An API secret whose host is on the list asks for every token.
+- A sealed session that holds a provider's sign-in (an imported one says so) asks at
+  every load.
+
+### Signing in with one approval (`login`)
+
+`metacomputer secrets login NAME --password-selector CSS [--username-selector CSS]`
+fills a saved login's username and password into the two fields the selectors name,
+under one approval. Each field is checked in the VM first (the password field names
+the site, which must be one of the secret's, and the username field must be on the same
+site), then both are typed through the same path as `fill`, to that site only. The
+answer lists the fields filled, the site and a masked username.
 
 ### API keys: short-lived tokens through a proxy
 
@@ -1090,10 +1203,14 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `set`, `rotate`, `delete`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
-| `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
+| `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
-| `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `grant:session` / `grant:unlock` (covered by one), `-` |
+| `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
+| `request_id`, `use` | the request a use waited on (`request` when it was filed, `authorize` when you allowed it), and what it was for |
+| `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked) |
+| `username_hint` | a password secret's username, masked (`a***@example.com`) |
+| `identity_provider` | `true` on a request for an identity provider's site |
 | `requester` | `client`, `client_pid`, `claude_pid`, `project` |
 | `reason` | why it was refused or failed |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
@@ -1154,8 +1271,8 @@ both:
 
 | Kind | Sends | URL |
 | --- | --- | --- |
-| `webhook` | one POST per event, a CloudEvents 1.0 JSON in structured mode (`Content-Type: application/cloudevents+json; charset=utf-8`): `id` the event's UUID, `source` `metacomputer/<host>`, `subject` the VM, `type` `io.metavert.metacomputer.vault.<op>`, `time`, `data` the event. Signed: `X-Metacomputer-Signature: sha256=<HMAC of the body>` | `https://...` |
-| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added unless the URL ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
+| `webhook` | one POST per event, a CloudEvents 1.0 JSON in structured mode (`Content-Type: application/cloudevents+json; charset=utf-8`): `id` the event's UUID, `source` `metacomputer/<host>`, `subject` the VM, `type` `io.metavert.metacomputer.vault.<op>`, `time`, `data` the event, and `mcompevent` its `event` name when it has one. Signed: `X-Metacomputer-Signature: sha256=<HMAC of the body>` | `https://...` |
+| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added unless the URL ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid`, `.event`, `.request_id`, `.username_hint` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
 | `syslog` | RFC 5424 over TLS, octet-counted (RFC 5425), up to 100 messages a connection: facility user, severity 6 info, 4 warn, 3 error; APP-NAME `metacomputer-vault`, PROCID `-`, MSGID the op; structured data `[metacomputer@32473 seq family vm id hash prev sig]` (32473 is the enterprise number for documentation, RFC 5612); MSG the event's line, no byte-order mark | `syslog+tls://host:6514` |
 | `ntfy` | ntfy's JSON publishing to the server's root: `topic` (the URL's last part), `title` `<vm> - vault: <op>`, `message` one line such as `#42 fill name=x-login field=password vm=metacomputer -> ok https://x.com [Claude in ~/Projects/foo]`, `priority` 4 for refusals and errors, 3 otherwise, `tags`. No signature | `https://ntfy.sh/<topic>` |
 
@@ -1334,7 +1451,9 @@ something waits for you:
   terminal with its passphrase.
   - It locks again on Ctrl-C, when its time is up, or when that terminal closes.
   - Your terminal shows every request and its outcome, never the values.
-  - With `each`, you confirm each use by typing its name.
+  - With `each`, you confirm each use by typing its name, or with Touch ID, your login
+    password or the passphrase through `approve ID`; nothing a program sends can do it
+    for you. Identity providers' sign-in pages always ask.
   - Adding, changing or deleting a secret, binding a VM and relaxing a session's
     approval each need the passphrase again, even while the vault is unlocked.
 - **The request travels to a program Claude can't change or read from.** The value
@@ -1455,6 +1574,13 @@ something waits for you:
   - On a Mac you sit at, apps with Accessibility or Automation access can type into
     windows. macOS asks the first time an app wants that access, not every time.
   - Unlock in a plain terminal window you watch.
+- **The Touch ID dialog can be asked for by anyone.** `approve ID` and `rule add` (and
+  `unlock --touch-id`) make the unlock process show macOS's dialog; any program of
+  yours can trigger that, Claude included. Only you can answer it, and it names what
+  it allows, but a dialog you didn't expect is a reason to say no. The password fallback
+  is a system dialog; whether an app with Accessibility access could type into it is
+  macOS's to enforce (not tested here). Where nobody sits at the Mac,
+  `MCOMP_VAULT_LOCAL_AUTH=noninteractive` keeps it from appearing at all.
 - **On the screen.** Password fields show dots. Usernames, one-time codes and text
   values are visible on the VM's screen, in screenshots and in recordings.
 - **Page-mode Chrome only.** Fills need Chrome that the driver started with
@@ -1481,9 +1607,12 @@ something waits for you:
   delivered before the file was rewritten, are simply missing: what an audit sink has
   received, a required sink's `begin` records and the signed action log are the
   records to rely on.
-- **Requesters can be faked by your own processes.** Who asked, `NAME session` grants
-  and `--project` rest on process names, parents and folders, all of which a program
-  running as you controls ("Who is asking").
+- **Requesters can be faked by your own processes.** Who asked, `NAME session` grants,
+  `--project` and unattended rules rest on process names, parents and folders, all of
+  which a program running as you controls ("Who is asking"); a program outside Claude
+  Code can also pass a request on for any live Claude Code process (`--on-behalf-pid`).
+  A rule is a standing approval for whatever can pose as a session in its folder: keep
+  its folder narrow and its time short.
 - **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac
   (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends. The
   key is withheld from answers only as an exact copy. Compressed answers are
@@ -1501,12 +1630,15 @@ something waits for you:
 
 | Command | Where | What it does |
 | --- | --- | --- |
-| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `policy NAME`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
 | `rekey [--enclave\|--no-enclave]`, `recover [--no-enclave]`, `rotate-session-key` | your terminal | New keys; open with the recovery key ("Keys, the Secure Enclave and rotation") |
 | `audit-sink add\|remove NAME`, `audit-sink show NAME --key` | your terminal | Off-Mac copies of the audit log, and a sink's signing key |
-| `unlock [--for 30m] [--confirm each] [--allow-multiplexer]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
+| `unlock [--for 30m] [--confirm each] [--allow-multiplexer] [--touch-id]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
+| `approve ID [--passphrase]`, `rule add ... --for D [--passphrase]` | you, any terminal (Touch ID / login password, or the passphrase) | Allow one waiting request; make an unattended rule |
+| `requests`, `deny ID`, `rule list`, `rule remove ID` | anywhere, while unlocked | What waits for you (ids, who asked, site, masked username, age); refuse one; the rules; remove one |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
+| `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
 | `audit-sink list`, `audit-sink show NAME` | anywhere (while locked: each sink's delivery state only, not its settings) | Sinks, their backlog and last error (URLs masked) |

@@ -281,13 +281,15 @@ func epochNanos(_ iso: String) -> String {
 /// CloudEvents 1.0, structured mode, as the events stream sends them: `id` the event's UUID
 /// (at-least-once delivery: receivers drop duplicates by it), `source` metacomputer/<host>,
 /// `subject` the VM, `type` io.metavert.metacomputer.vault.<op>, `data` the event itself;
-/// the extension `mcompverified` says whether its creation MAC checked out.
+/// the extension `mcompverified` says whether its creation MAC checked out, and `mcompevent` carries the
+/// site-login event name (login.request, login.authorize, login.fill, login.denied) when the record has one.
 func cloudEventBody(_ ev: OutEvent) -> String {
     let e = ev.e
     let op = (e["op"] as? String) ?? "event"
     var s = "{\"data\":" + ev.raw + ",\"datacontenttype\":\"application/json\",\"id\":"
         + canonicalString((e["id"] as? String) ?? (e["hash"] as? String) ?? "")
-        + ",\"mcompverified\":" + (ev.verified ? "true" : "false")
+    if let name = e["event"] as? String, matches(name, "^[a-z]+\\.[a-z]+$") { s += ",\"mcompevent\":" + canonicalString(name) }
+    s += ",\"mcompverified\":" + (ev.verified ? "true" : "false")
         + ",\"source\":" + canonicalString("metacomputer/" + hostLabel()) + ",\"specversion\":\"1.0\""
     if let vm = e["vm"] as? String { s += ",\"subject\":" + canonicalString(vm) }
     return s + ",\"time\":" + canonicalString((e["ts"] as? String) ?? "") + ",\"type\":"
@@ -306,7 +308,8 @@ func otlpBody(_ events: [OutEvent], key: [UInt8]) -> String {
                                       ["key": "metacomputer.verified", "value": ["boolValue": NSNumber(value: ev.verified)]]]
         for (k, name) in [("op", "metacomputer.type"), ("vm", "metacomputer.vm"), ("id", "metacomputer.id"), ("name", "metacomputer.secret"),
                           ("field", "metacomputer.field"), ("origin", "metacomputer.origin"), ("result", "metacomputer.outcome"),
-                          ("hash", "metacomputer.hash"), ("prev", "metacomputer.prev")] {
+                          ("hash", "metacomputer.hash"), ("prev", "metacomputer.prev"), ("event", "metacomputer.event"),
+                          ("request_id", "metacomputer.request_id"), ("username_hint", "metacomputer.username_hint")] {
             if let v = e[k] as? String { attrs.append(s(name, v)) }
         }
         if let n = (e["seq"] as? NSNumber)?.intValue { attrs.append(i("metacomputer.seq", n)) }
@@ -390,7 +393,7 @@ struct OutEvent {
 
 /// Uses a locked client may record without the vault key (it has none): refusals while locked.
 func clientMayWrite(_ e: [String: Any]) -> Bool {
-    (e["result"] as? String) == "locked" && ["fill", "session_save", "session_load", "token"].contains(e["op"] as? String ?? "")
+    (e["result"] as? String) == "locked" && ["fill", "login", "session_save", "session_load", "token"].contains(e["op"] as? String ?? "")
 }
 
 /// A notice that stands in for a record that failed its checks. Its id is fixed by the seq and

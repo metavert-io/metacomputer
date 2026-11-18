@@ -729,6 +729,10 @@ How it works:
   - `NAME`: this use only;
   - `NAME session`: this use and later uses of that secret from the same Claude Code session;
   - `NAME unlock`: every use of that secret until the vault locks.
+- **Approving from elsewhere:** each waiting use has a request id. `metacomputer secrets requests` lists them (who asked, the site, a masked username, how long it has waited); `metacomputer secrets approve ID` allows one with Touch ID or your login password, `approve ID --passphrase` with the vault passphrase, and `deny ID` refuses it. `unlock --touch-id` shows the Touch ID dialog for every question by itself. Nothing Claude can run approves: only your finger, your password or your passphrase does.
+- **Unattended rules:** `metacomputer secrets rule add --secret NAME --project DIR --for 8h` (or `--site https://...`, or `--session NAME`) lets that use happen without asking for Claude Code sessions in that folder, until it expires (at most 30 days). Making one takes Touch ID or the passphrase; `rule list` and `rule remove ID` manage them. `policy NAME --approval session|each` changes whether a secret asks at all.
+- **Identity providers always ask:** a fill on Google's, Microsoft's, Apple's or Okta's sign-in pages asks every time, whatever the secret, the unlock or a rule says (the list is in [SECURITY.md](SECURITY.md#identity-providers-always-ask)).
+- **One approval per sign-in:** `metacomputer secrets login NAME --username-selector CSS --password-selector CSS` fills both fields under one question.
 - **Limiting a secret to a project:** `set ... --project DIR` refuses requests from Claude Code sessions working outside that folder. Like the "who asked" line, this keeps honest sessions apart; it isn't a wall, since any program of yours can pose as a Claude Code session.
 - **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset. For now this needs `SSH_AUTH=key` (the default): the vault signs in with the VM's static desktop key, which `SSH_AUTH=cert` turns off, so both commands refuse at once under `cert`. Fills and API tokens use their own accounts and work either way.
 - **What Claude can see:** `metacomputer secrets list` shows names, kinds, sites, usernames, approval, project limits, ages and use counts, never values. `metacomputer secrets audit` shows the history.
@@ -737,7 +741,7 @@ Limits to know:
 - Fills need the page-mode Chrome that Cua Driver starts, not Firefox.
 - The VM needs to be built with this version, which adds the locked fill account. Older VMs say so and refuse.
 - Usernames and one-time codes are visible on the page once typed; passwords show as dots.
-- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so uses that need your answer are refused there unless you unlock with `--allow-multiplexer`.
+- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so uses that need your answer are refused there unless you unlock with `--touch-id` (answer with Touch ID instead) or `--allow-multiplexer`.
 
 The full model is in [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
 

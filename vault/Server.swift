@@ -150,18 +150,43 @@ struct Grant {
     let claudeStart: Double?
 }
 
+/// What approve() decided: whether the use goes ahead, the approval to record, why not, and the id of the
+/// request it filed (nil when a grant or a rule covered it, or nothing was asked).
+struct ApprovalOutcome {
+    let yes: Bool
+    let how: String
+    let why: String
+    var requestID: String? = nil
+    /// Allowed for this one use only: the value goes only to the site that was named.
+    var thisUseOnly: Bool { ["each:yes", "each:local-auth", "each:passphrase"].contains(how) }
+}
+
+/// A connection read while the unlock process waited for an answer, served once it's free.
+struct DeferredRequest {
+    let fd: Int32
+    let req: [String: Any]
+    let op: String
+    let pid: Int32
+}
+
 final class UnlockServer {
     let paths: Paths
     let key: VaultKey
     let confirmEach: Bool
     let multiplexer: String?
     let allowMultiplexer: Bool
+    let touchID: Bool                   // unlock --touch-id: each question also shows the system's Touch ID / password dialog
     let started = Date()
     let expires: Date
     let runner = GuestRunner()
     var promptTimeout = 120
     var grants: [Grant] = []
     var stopReason: String?
+    var listenFD: Int32 = -1
+    var pendingRequests: [String: PendingRequest] = [:]
+    var usedRequestIDs: Set<String> = []
+    var deferred: [DeferredRequest] = []
+    var promptOpen = false              // a question waits on the terminal, its cursor at the end of the prompt
     lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
     // The audit log and its sinks. The audit key (from the vault) MACs every record this
     // process writes; `known` holds their hashes. Sink places, backoff and acknowledged begins
@@ -180,20 +205,23 @@ final class UnlockServer {
     var tamperSeen: Set<String> = []
     var auditSize: off_t = -1
 
-    init(paths: Paths, key: VaultKey, seconds: Int, confirmEach: Bool, multiplexer: String?, allowMultiplexer: Bool) {
+    init(paths: Paths, key: VaultKey, seconds: Int, confirmEach: Bool, multiplexer: String?, allowMultiplexer: Bool, touchID: Bool = false) {
         self.paths = paths
         self.key = key
         self.confirmEach = confirmEach
         self.multiplexer = multiplexer
         self.allowMultiplexer = allowMultiplexer
+        self.touchID = touchID
         self.expires = Date().addingTimeInterval(TimeInterval(seconds))
         #if MCOMP_VAULT_TESTING
         if let t = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_PROMPT_TIMEOUT"], let n = Int(t), n > 0 { promptTimeout = n }
         #endif
     }
 
-    /// Lines for the unlock terminal, each made printable.
+    /// Lines for the unlock terminal, each made printable. While a question waits, they go on lines of
+    /// their own below it.
     func say(_ s: String) {
+        if promptOpen { eprint(""); promptOpen = false }
         for line in s.split(separator: "\n", omittingEmptySubsequences: false) { oprint(clean(String(line), max: 400)) }
     }
 
@@ -210,38 +238,369 @@ final class UnlockServer {
         return nil
     }
 
-    /// Ask at the unlock terminal. The person types NAME (this use), NAME session (this
-    /// Claude Code session) or NAME unlock (until the vault locks). Returns (allowed, the
-    /// approval to record, why not).
-    func approve(_ kind: String, _ name: String, _ question: String, _ who: Requester, vm: String, site: String?) -> (Bool, String, String) {
-        if let g = granted(kind, name, who) { return (true, g, "") }
-        if let m = multiplexer, !allowMultiplexer {
-            return (false, "each:no", "the unlock terminal runs inside \(m), where any program can type into it, so confirmations there are refused: run unlock outside \(m) (or with --allow-multiplexer)")
+    /// The unattended rule that covers this use, if any (never for an identity provider: callers check).
+    func coveringRule(_ use: String, name: String, site: String?, _ who: Requester) -> UnattendedRule? {
+        guard let p = try? load() else { return nil }
+        return (p.rules ?? []).first { $0.covers(use: use, name: name, site: site, who: who) }
+    }
+
+    /// A new request id: the client's own (8 hex digits, not used before in this unlock) or a random one.
+    func newRequestID(_ proposed: String?) -> String? {
+        if let p = proposed {
+            guard validRequestID(p), !usedRequestIDs.contains(p) else { return nil }
+            usedRequestIDs.insert(p)
+            return p
+        }
+        while true {
+            let id = randomBytes(4).map { String(format: "%02x", $0) }.joined()
+            if usedRequestIDs.insert(id).inserted { return id }
+        }
+    }
+
+    /// Ask the person. A grant (`NAME session` / `NAME unlock` answered earlier) or an unattended rule
+    /// may cover the use first, never for an identity provider. Otherwise it files a request with an id
+    /// and waits for: the name typed at the unlock terminal (NAME this use, NAME session for this Claude
+    /// Code session, NAME unlock until the vault locks), `approve ID` with Touch ID / the login password or
+    /// the passphrase, the Touch ID dialog itself with `unlock --touch-id`, or `deny ID`. An identity
+    /// provider's use is allowed for that one use, whatever is typed. `use` and `summary` name the use in the
+    /// request list (`requests`), the dialog and the audit log.
+    func approve(_ kind: String, _ name: String, _ question: String, _ who: Requester, vm: String, site: String?,
+                 use: String, summary: String, usernameHint: String? = nil, identityProvider: Bool = false,
+                 proposedID: String? = nil, ruleUse: String? = nil) -> ApprovalOutcome {
+        if !identityProvider {
+            if let g = granted(kind, name, who) { return ApprovalOutcome(yes: true, how: g, why: "") }
+            if let ru = ruleUse, let r = coveringRule(ru, name: name, site: site, who) {
+                return ApprovalOutcome(yes: true, how: "rule:\(r.id)", why: "")
+            }
+        }
+        let terminalOK = multiplexer == nil || allowMultiplexer
+        if let m = multiplexer, !terminalOK, !touchID {
+            return ApprovalOutcome(yes: false, how: "each:no", why: "the unlock terminal runs inside \(m), where any program can type into it, so confirmations there are refused: run unlock outside \(m) (or with --allow-multiplexer, or --touch-id to confirm with Touch ID instead)")
         }
         let t = min(promptTimeout, remaining())
-        guard t > 0 else { return (false, "each:no", "the vault's time is up") }
+        guard t > 0 else { return ApprovalOutcome(yes: false, how: "each:no", why: "the vault's time is up") }
+        guard let id = newRequestID(proposedID) else {
+            return ApprovalOutcome(yes: false, how: "each:no", why: "the request id \(clean(proposedID ?? "", max: 12)) isn't 8 hex digits, or was used already in this unlock")
+        }
+        let fullSummary = clean(summary + " on VM \(vm), asked by \(who.describe)", max: 400)
+        let p = PendingRequest(id: id, use: use, name: name, vm: vm, site: site, usernameHint: usernameHint, who: who,
+                               identityProvider: identityProvider, summary: fullSummary)
+        pendingRequests[id] = p
+        defer { pendingRequests[id] = nil }
+        var rec: [String: Any] = ["op": "request", "result": "pending", "request_id": id, "use": use, "name": name, "vm": vm,
+                                  "requester": who.record]
+        if let s = site { rec["origin"] = s }
+        if let u = usernameHint { rec["username_hint"] = u }
+        if identityProvider { rec["identity_provider"] = true }
+        if ["fill", "login"].contains(use) { rec["event"] = "login.request" }
+        record(rec)
         dropEvent(type: "approval_waiting", severity: "warn", vm: vm,
                   message: "Vault approval waiting: \(kind.replacingOccurrences(of: "_", with: " ")) of \(name)" + (site.map { " into \($0)" } ?? "")
                     + " on VM \(vm), asked by \(who.describe)",
                   action: "Type \(name) in the vault's terminal to allow", project: who.project,
-                  data: ["op": kind, "name": name, "site": site ?? ""])
-        guard let scope = askApproval(question.components(separatedBy: "\n").prefix(4).map { clean($0, max: 500) }.joined(separator: "\n"), name: name, timeout: t) else {
-            return (false, "each:no", "not allowed at the vault's terminal")
+                  data: ["op": kind, "name": name, "site": site ?? "", "request_id": id])
+        let q = question.components(separatedBy: "\n").prefix(4).map { clean($0, max: 500) }.joined(separator: "\n")
+            + "\n  Request \(id): or approve it from any terminal with `metacomputer secrets approve \(id)` (Touch ID or your login password)"
+            + (identityProvider ? "\n  This is an identity provider's sign-in: what you allow covers this one use." : "")
+        var prompt: String?
+        if terminalOK {
+            prompt = approvalPrompt(q, name: name)
+        } else {
+            say(q + "\n  This terminal runs inside \(multiplexer ?? "a multiplexer"), so typed answers are refused here: confirm with Touch ID or your login password in the dialog, or `deny \(id)`.")
         }
-        switch scope {
-        case .unlock:
-            grants.append(Grant(kind: kind, name: name, claudePID: nil, claudeStart: nil))
-            return (true, "each:unlock", "")
-        case .session:
-            if let p = who.claudePID {
-                grants.append(Grant(kind: kind, name: name, claudePID: p, claudeStart: who.claudeStart))
-                return (true, "each:session", "")
+        let outcome = waitForDecision(p, prompt: prompt, name: name, timeout: t)
+        var how: String
+        switch outcome {
+        case .terminal(let scope):
+            switch scope {
+            case _ where identityProvider && scope != .use:
+                say("  (an identity provider's sign-in: allowed for this use only)")
+                how = "each:yes"
+            case .unlock:
+                grants.append(Grant(kind: kind, name: name, claudePID: nil, claudeStart: nil))
+                how = "each:unlock"
+            case .session:
+                if let cp = who.claudePID {
+                    grants.append(Grant(kind: kind, name: name, claudePID: cp, claudeStart: who.claudeStart))
+                    how = "each:session"
+                } else {
+                    say("  (not from a Claude Code session: allowed for this use only)")
+                    how = "each:yes"
+                }
+            case .use:
+                how = "each:yes"
             }
-            say("  (not from a Claude Code session: allowed for this use only)")
-            return (true, "each:yes", "")
-        case .use:
-            return (true, "each:yes", "")
+        case .localAuth:
+            say("          allowed with Touch ID or the login password (this use only)")
+            how = "each:local-auth"
+        case .passphrase:
+            say("          allowed with the vault passphrase (`approve \(id) --passphrase`; this use only)")
+            how = "each:passphrase"
+        case .terminalNo:
+            return ApprovalOutcome(yes: false, how: "each:no", why: "not allowed at the vault's terminal", requestID: id)
+        case .denied(let why):
+            return ApprovalOutcome(yes: false, how: "each:no", why: why, requestID: id)
         }
+        var auth: [String: Any] = ["op": "authorize", "result": "ok", "request_id": id, "use": use, "name": name, "vm": vm,
+                                   "approval": how, "requester": who.record]
+        if let s = site { auth["origin"] = s }
+        if let u = usernameHint { auth["username_hint"] = u }
+        if ["fill", "login"].contains(use) { auth["event"] = "login.authorize" }
+        record(auth)
+        return ApprovalOutcome(yes: true, how: how, why: "", requestID: id)
+    }
+
+    /// Wait for a decision on `p`: a line on the unlock terminal (when `prompt` is given), the Touch ID dialog
+    /// (`--touch-id`, or one `approve ID` asked for), a passphrase proof or `deny ID`. Meanwhile other
+    /// connections are served: status, list, tokens, requests, rule lists, approve and deny at once, the rest
+    /// once this one is decided. Returns .terminalNo for no answer in time, Ctrl-C or the terminal closing.
+    func waitForDecision(_ p: PendingRequest, prompt: String?, name: String, timeout: Int) -> Decision {
+        if let pr = prompt {
+            _ = tcflush(0, TCIFLUSH)
+            eprintRaw(pr)
+            promptOpen = true
+        }
+        if touchID {
+            p.localAuth = startLocalAuth("approve request \(p.id): \(p.summary)")
+            p.autoLocalAuth = true
+        }
+        let deadline = Date().addingTimeInterval(TimeInterval(timeout))
+        var line = [UInt8]()
+        var stdinOpen = prompt != nil
+        var result: Decision = .terminalNo
+        defer {
+            if promptOpen { eprint(""); promptOpen = false }
+            p.localAuth?.cancel()
+            let approved: Bool
+            if case .localAuth = result { approved = true } else { approved = false }
+            replyWaiters(p, approved ? ["ok": true, "status": "ok", "id": p.id]
+                                     : denied("request \(p.id) was decided another way, or not in time"))
+        }
+        while true {
+            if receivedSignal != 0 { return result }
+            if let d = p.decision { result = d; return d }
+            if Date() >= deadline {
+                if promptOpen { eprint("\n  (no answer in \(timeout) s: not allowed)"); promptOpen = false } else {
+                    say("  (no answer in \(timeout) s: not allowed)")
+                }
+                return result
+            }
+            if let la = p.localAuth, la.done {
+                if la.ok {
+                    p.decision = .localAuth
+                    continue
+                }
+                replyWaiters(p, denied("not approved: \(la.why)"))
+                if p.autoLocalAuth && la.refused {
+                    p.decision = .denied("refused at the Touch ID dialog")
+                    continue
+                }
+                say("          Touch ID / login password: \(la.why)" + (stdinOpen ? "; you can still answer in this terminal" : ""))
+                p.localAuth = nil
+                p.autoLocalAuth = false
+            }
+            if let pr = prompt, !promptOpen, stdinOpen {
+                eprintRaw("  (still waiting) Type \(name) to allow (\(name) session / \(name) unlock); anything else refuses: ")
+                _ = pr
+                promptOpen = true
+            }
+            var fds = [pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)]
+            if stdinOpen { fds.append(pollfd(fd: 0, events: Int16(POLLIN), revents: 0)) }
+            let r = poll(&fds, nfds_t(fds.count), 200)
+            if r < 0 { if errno == EINTR { continue }; return result }
+            if r == 0 { continue }
+            if listenFD >= 0, fds[0].revents & Int16(POLLIN) != 0 {
+                let c = accept(listenFD, nil, nil)
+                if c >= 0 {
+                    _ = fcntl(c, F_SETFD, FD_CLOEXEC)
+                    serviceDuringWait(c)
+                }
+            }
+            if stdinOpen && fds.count > 1 {
+                let rv = fds[1].revents
+                if rv & Int16(POLLIN) != 0 {
+                    var ch: UInt8 = 0
+                    let n = read(0, &ch, 1)
+                    if n <= 0 { stdinOpen = false; if !touchID { return result } else { continue } }
+                    if ch == 0x0A {
+                        promptOpen = false
+                        let answer = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+                        result = approvalAnswer(answer, name: name).map { .terminal($0) } ?? .terminalNo
+                        return result
+                    }
+                    if line.count < 120 { line.append(ch) }
+                } else if rv & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                    stdinOpen = false
+                    if !touchID { return result }
+                }
+            }
+        }
+    }
+
+    /// Answer the `approve ID` clients waiting for a dialog.
+    func replyWaiters(_ p: PendingRequest, _ res: [String: Any]) {
+        for c in p.waiters {
+            reply(c, res)
+            close(c)
+        }
+        p.waiters = []
+    }
+
+    /// One connection that arrived while the unlock process waits for an answer.
+    func serviceDuringWait(_ c: Int32) {
+        setTimeouts(c, seconds: 10)
+        guard let uid = peerUID(c), uid == getuid() else {
+            record(["op": "connect", "result": "denied", "reason": "another user"])
+            say("\(clockTime())  refused a connection from another user")
+            close(c)
+            return
+        }
+        let pid = peerPID(c)
+        guard let msg = readMessage(c), let req = parseJSONObject(msg), let op = req["op"] as? String else {
+            reply(c, ["ok": false, "status": "error", "reason": "bad request"])
+            close(c)
+            return
+        }
+        let who = Requester.of(pid)
+        var res: [String: Any]?
+        switch op {
+        case "status": res = opStatus()
+        case "list": res = opList()
+        case "tokens": res = opTokens()
+        case "requests": res = opRequests()
+        case "rule_list": res = opRuleList()
+        case "deny": res = opDeny(req, who)
+        case "approve":
+            res = opApprove(c, req, who)
+            if res == nil { return }            // it waits for the dialog: replyWaiters answers it
+        default:
+            deferred.append(DeferredRequest(fd: c, req: req, op: op, pid: pid))
+            return
+        }
+        reply(c, res ?? failed("no answer"))
+        close(c)
+    }
+
+    // MARK: requests, approve, deny
+
+    func opRequests() -> [String: Any] {
+        ["ok": true, "status": "ok", "requests": pendingRequests.values.sorted { $0.created < $1.created }.map { $0.listing }]
+    }
+
+    /// nil: the client waits for the Touch ID dialog's answer (its connection stays open).
+    func opApprove(_ c: Int32, _ req: [String: Any], _ who: Requester) -> [String: Any]? {
+        guard let id = req["id"] as? String, validRequestID(id), let p = pendingRequests[id] else {
+            return failed("no request \(clean(req["id"] as? String ?? "", max: 12)) waits for approval (metacomputer secrets requests)")
+        }
+        guard p.decision == nil else { return failed("request \(id) is already decided") }
+        switch req["method"] as? String ?? "local-auth" {
+        case "passphrase":
+            var k = approvalProofKey(key)
+            defer { wipe(&k) }
+            guard let proof = req["proof"] as? String,
+                  constantTimeEqual(proof, approvalProof(k, id: id, challenge: p.challenge, summary: p.summary)) else {
+                record(["op": "approve", "result": "denied", "request_id": id, "method": "passphrase",
+                        "reason": "the passphrase proof doesn't check out", "requester": who.record])
+                say("\(clockTime())  an approval of request \(id) was refused: its passphrase proof doesn't check out (from \(who.describe))")
+                return denied("the passphrase proof doesn't check out")
+            }
+            p.decision = .passphrase
+            return ["ok": true, "status": "ok", "id": id]
+        case "local-auth":
+            if p.localAuth == nil || p.localAuth!.done {
+                say("\(clockTime())  request \(id): asking macOS for Touch ID or the login password (`approve` from \(who.describe))")
+                p.localAuth = startLocalAuth("approve request \(id): \(p.summary)")
+                p.autoLocalAuth = false
+            }
+            p.waiters.append(c)
+            return nil
+        default:
+            return failed("approve: the method is local-auth or passphrase")
+        }
+    }
+
+    func opDeny(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        guard let id = req["id"] as? String, validRequestID(id), let p = pendingRequests[id] else {
+            return failed("no request \(clean(req["id"] as? String ?? "", max: 12)) waits for approval (metacomputer secrets requests)")
+        }
+        guard p.decision == nil else { return failed("request \(id) is already decided") }
+        p.decision = .denied("refused with `deny \(id)`")
+        say("\(clockTime())  request \(id) refused with `deny` (from \(who.describe))")
+        return ["ok": true, "status": "ok", "id": id]
+    }
+
+    // MARK: unattended rules
+
+    func opRuleList() -> [String: Any] {
+        guard let p = try? load() else { return failed("cannot read the vault") }
+        return ["ok": true, "status": "ok", "rules": (p.rules ?? []).filter { $0.live }.map { $0.listing }]
+    }
+
+    /// A rule made with Touch ID or the login password: the unlock process asks macOS, then writes it.
+    func opRuleAdd(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        guard let project = req["project"] as? String, project.hasPrefix("/"), clean(project, max: 4096) == project,
+              let secs = (req["for_s"] as? NSNumber)?.intValue, secs > 0, secs <= maxRuleSeconds else {
+            return failed("bad request")
+        }
+        let secret = req["secret"] as? String, site = req["site"] as? String, session = req["session"] as? String
+        guard [secret, site, session].compactMap({ $0 }).count == 1, secret.map(validName) ?? true, session.map(validName) ?? true,
+              site.map({ canonicalOrigin($0) == $0 }) ?? true else { return failed("bad request") }
+        let p: Payload
+        do { p = try load() } catch { return failed("cannot read the vault") }
+        let (rule, why) = buildRule(p, use: "", secret: secret, site: site, session: session, project: project, seconds: secs, confirmed: "local-auth")
+        guard let rule else { return failed(why ?? "can't make that rule") }
+        let text = "allow \(rule.what) without asking, for Claude Code sessions in \(tildePath(project)), until \(rule.expires)"
+        say("\(clockTime())  rule asked for: \(text) (from \(who.describe)); asking macOS for Touch ID or the login password")
+        let la = startLocalAuth(text)
+        let deadline = Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining()))))
+        while !la.done {
+            if receivedSignal != 0 || Date() >= deadline { la.cancel(); break }
+            var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+            if poll(&pfd, 1, 200) > 0, pfd.revents & Int16(POLLIN) != 0 {
+                let c = accept(listenFD, nil, nil)
+                if c >= 0 { _ = fcntl(c, F_SETFD, FD_CLOEXEC); serviceDuringWait(c) }
+            }
+        }
+        guard la.ok else {
+            var rec = rule.record
+            rec["op"] = "rule_add"
+            rec["result"] = "denied"
+            rec["reason"] = la.why
+            rec["requester"] = who.record
+            record(rec)
+            say("          -> no rule (\(la.why))")
+            return denied("not confirmed: \(la.why). Add --passphrase to confirm with the vault passphrase in your own terminal instead")
+        }
+        do {
+            try updateVault(paths, key) { p in p.rules = (p.rules ?? []).filter { $0.live } + [rule] }
+        } catch { return failed("cannot write the vault") }
+        var rec = rule.record
+        rec["op"] = "rule_add"
+        rec["result"] = "ok"
+        rec["requester"] = who.record
+        record(rec)
+        say("          -> rule \(rule.id) made")
+        flushSinks(force: true)
+        var out = rule.listing
+        out["ok"] = true
+        out["status"] = "ok"
+        return out
+    }
+
+    func opRuleRemove(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        guard let id = req["id"] as? String, validRequestID(id) else { return failed("bad rule id") }
+        do {
+            var found = false
+            try updateVault(paths, key) { p in
+                found = (p.rules ?? []).contains { $0.id == id }
+                p.rules = (p.rules ?? []).filter { $0.id != id && $0.live }
+            }
+            guard found else { return failed("no rule \(id)") }
+        } catch { return failed("cannot write the vault") }
+        record(["op": "rule_remove", "result": "ok", "rule_id": id, "requester": who.record])
+        say("\(clockTime())  rule \(id) removed (from \(who.describe))")
+        flushSinks(force: true)
+        return ["ok": true, "status": "ok", "id": id]
     }
 
     /// The events hook (needs_you): one JSON file per event in the shared spool, if it exists.
@@ -448,6 +807,7 @@ final class UnlockServer {
         guard rc == 0 else { close(fd); throw VaultError("cannot listen on \(paths.socket): \(String(cString: strerror(errno)))") }
         chmod(paths.socket, 0o600)
         guard listen(fd, 8) == 0 else { close(fd); unlink(paths.socket); throw VaultError("cannot listen on \(paths.socket)") }
+        listenFD = fd
 
         let h: @convention(c) (Int32) -> Void = { sig in receivedSignal = sig }
         signal(SIGINT, h)
@@ -462,13 +822,19 @@ final class UnlockServer {
             say("  WARNING: this terminal runs inside \(m). Any program of yours can type into it (for example")
             say("  `tmux send-keys` or `screen -X stuff`), including the answer to a confirmation.")
             say(allowMultiplexer ? "  Confirmations are taken here anyway (--allow-multiplexer)."
-                : "  Uses that need a confirmation are refused here. For those, unlock in a terminal outside \(m).")
+                : (touchID ? "  Typed confirmations are refused here; each question shows the Touch ID / login password dialog instead."
+                   : "  Uses that need a confirmation are refused here. For those, unlock in a terminal outside \(m)."))
+        }
+        if touchID {
+            say("  Each question also shows macOS's Touch ID / login password dialog (--touch-id); either answer counts.")
         }
         #if MCOMP_VAULT_TESTING
         say("  TEST BUILD: honours MCOMP_VAULT_TEST_* settings; never use it for real secrets")
         #endif
-        record(["op": "unlock", "result": "ok", "until": isoTime(expires), "confirm": confirmEach ? "each" : "session",
-                      "multiplexer": multiplexer ?? "none", "pid": Int(getpid()), "enclave": key.usesEnclave])
+        var unlockRec: [String: Any] = ["op": "unlock", "result": "ok", "until": isoTime(expires), "confirm": confirmEach ? "each" : "session",
+                                        "multiplexer": multiplexer ?? "none", "pid": Int(getpid()), "enclave": key.usesEnclave]
+        if touchID { unlockRec["touch_id"] = true }
+        record(unlockRec)
         flushSinks(force: true)
 
         var why = "locked"
@@ -479,6 +845,13 @@ final class UnlockServer {
             }
             if let s = stopReason { why = s; break }
             if Date() >= expires { why = "time is up"; break }
+            // Requests that arrived while a question waited, in the order they came.
+            if !deferred.isEmpty {
+                let d = deferred.removeFirst()
+                dispatch(d.fd, d.req, d.op, d.pid)
+                close(d.fd)
+                continue
+            }
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let r = poll(&pfd, 1, 500)
             if r < 0 && errno != EINTR { why = "socket error"; break }
@@ -492,7 +865,13 @@ final class UnlockServer {
             }
             sinkTick()
         }
+        for d in deferred {
+            reply(d.fd, ["ok": false, "status": "locked", "reason": "the vault is locked"])
+            close(d.fd)
+        }
+        deferred = []
         close(fd)
+        listenFD = -1
         unlink(paths.socket)
         hub.shutdown()
         record(["op": "lock", "result": "ok", "reason": why])
@@ -515,16 +894,23 @@ final class UnlockServer {
             reply(c, ["ok": false, "status": "error", "reason": "bad request"])
             return
         }
-        if Date() >= expires || stopReason != nil {
+        dispatch(c, req, op, pid)
+    }
+
+    func dispatch(_ c: Int32, _ req: [String: Any], _ op: String, _ pid: Int32) {
+        if Date() >= expires || stopReason != nil || receivedSignal != 0 {
             reply(c, ["ok": false, "status": "locked", "reason": "the vault is locked"])
             return
         }
-        let who = Requester.of(pid)
+        // A program outside Claude Code may pass on a request for a Claude Code process (the hub does).
+        let onBehalf = (req["on_behalf_pid"] as? NSNumber).map { pid_t(truncatingIfNeeded: $0.intValue) }
+        let who = Requester.of(pid, onBehalf: onBehalf)
         var res: [String: Any]
         switch op {
         case "status": res = opStatus()
         case "list": res = opList()
         case "fill": res = opFill(req, who)
+        case "login": res = opLogin(req, who)
         case "session_save": res = opSessionSave(req, who)
         case "session_load": res = opSessionLoad(req, who)
         case "token": res = opToken(req, who)
@@ -533,6 +919,12 @@ final class UnlockServer {
         case "sinks": res = opSinks()
         case "sink_flush": res = opSinkFlush(req, who)
         case "audit_verify": res = opAuditVerify()
+        case "requests": res = opRequests()
+        case "approve": res = opApprove(c, req, who) ?? failed("no request waits for approval")
+        case "deny": res = opDeny(req, who)
+        case "rule_add": res = opRuleAdd(req, who)
+        case "rule_list": res = opRuleList()
+        case "rule_remove": res = opRuleRemove(req, who)
         default: res = ["ok": false, "status": "error", "reason": "unknown request \(clean(op, max: 40))"]
         }
         setTimeouts(c, seconds: 10)
@@ -561,7 +953,8 @@ final class UnlockServer {
     func opStatus() -> [String: Any] {
         ["ok": true, "status": "ok", "unlocked": true, "since": isoTime(started), "expires": isoTime(expires),
          "expires_in_s": remaining(), "confirm": confirmEach ? "each" : "session", "multiplexer": multiplexer ?? "none",
-         "pid": Int(getpid()), "build": Build.kind, "enclave": key.usesEnclave, "tokens": hub.live().count]
+         "pid": Int(getpid()), "build": Build.kind, "enclave": key.usesEnclave, "tokens": hub.live().count,
+         "touch_id": touchID, "requests": pendingRequests.count]
     }
 
     func opList() -> [String: Any] {
@@ -610,11 +1003,13 @@ final class UnlockServer {
 
     // MARK: results
 
-    func finish(_ op: String, _ fields: [String: Any], _ res: [String: Any], _ who: Requester, approval: String) -> [String: Any] {
+    func finish(_ op: String, _ fields: [String: Any], _ res: [String: Any], _ who: Requester, approval: String,
+                requestID: String? = nil) -> [String: Any] {
         var out = fields
         for k in ["ok", "status", "origin", "chars", "reason", "bytes"] { if let v = res[k] { out[k] = v } }
         // How the VM typed it: "element" (into the checked element) or "keyboard" (the fallback).
         if let r = res["route"] as? String, ["element", "keyboard"].contains(r) { out["route"] = r }
+        if let id = requestID { out["request_id"] = id }
         out = (cleanAll(out) as? [String: Any]) ?? fields
         let status = out["status"] as? String ?? "error"
         var rec = fields
@@ -622,7 +1017,11 @@ final class UnlockServer {
         rec["result"] = status
         rec["approval"] = approval
         rec["requester"] = who.record
-        for k in ["origin", "chars", "reason", "bytes", "route", "token_id", "ttl_s"] { if let v = out[k] ?? res[k] { rec[k] = v } }
+        for k in ["origin", "chars", "reason", "bytes", "route", "token_id", "ttl_s", "request_id"] { if let v = out[k] ?? res[k] { rec[k] = v } }
+        // The site-login event names other password vaults use, beside our own op.
+        if op == "fill" || op == "login" {
+            if status == "ok" { rec["event"] = "login.fill" } else if status == "denied" || status == "locked" { rec["event"] = "login.denied" }
+        }
         record(rec)
         var line = "          -> \(status)"
         if let o = out["origin"] as? String { line += ": \(o)" }
@@ -706,10 +1105,16 @@ final class UnlockServer {
         if let pr = profile { base["profile"] = pr }
         if let sel = selector { base["selector"] = sel }
         var origins = s.origins
+        let hint = s.kind == "password" ? s.username.map(maskUsername) : nil
+        if let h = hint { fields["username_hint"] = h }
+        let proposed = req["request_id"] as? String
+        var requestID: String?
 
+        // A secret with an identity provider among its sites is always checked first: a use on that site asks.
+        let hasIdP = s.origins.contains(where: isIdentityProviderOrigin)
         var approval = "session"
-        if confirmEach || s.approval == "each" {
-            if let g = granted("fill", name, who) {
+        if confirmEach || s.approval == "each" || hasIdP {
+            if !hasIdP, let g = granted("fill", name, who) {
                 approval = g
             } else {
                 var chk = base
@@ -723,15 +1128,23 @@ final class UnlockServer {
                 guard originOK(r, s.origins), let origin = r["origin"] as? String else {
                     return finish("fill", fields, failed("the VM reported a site outside this secret's sites; refusing"), who, approval: "each")
                 }
-                let (yes, how, why) = approve("fill", name, "  Fill \(name) (\(field)) into \(origin) on VM \(vm)"
-                                              + (profile.map { ", Chrome profile \($0)" } ?? "")
-                                              + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "")
-                                              + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin)
-                approval = how
-                if !yes { return finish("fill", fields, denied(why), who, approval: approval) }
-                if how == "each:yes" { origins = [origin] }   // only the site that was approved, this time
+                let idp = isIdentityProviderOrigin(origin)
+                if idp || confirmEach || s.approval == "each" {
+                    let o = approve("fill", name, "  Fill \(name) (\(field)) into \(origin) on VM \(vm)"
+                                    + (profile.map { ", Chrome profile \($0)" } ?? "")
+                                    + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "")
+                                    + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin,
+                                    use: "fill", summary: "fill \(name) (\(field)) into \(origin)", usernameHint: hint,
+                                    identityProvider: idp, proposedID: proposed, ruleUse: "fill")
+                    approval = o.how
+                    requestID = o.requestID
+                    if !o.yes { return finish("fill", fields, denied(o.why), who, approval: approval, requestID: requestID) }
+                    if o.thisUseOnly || idp { origins = [origin] }   // only the site that was approved, this time
+                } else {
+                    origins = [origin]          // no question: its other site, never the identity provider's
+                }
                 if let problem = runner.listenerProblem(t) {
-                    return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval)
+                    return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval, requestID: requestID)
                 }
             }
         }
@@ -741,7 +1154,7 @@ final class UnlockServer {
         case "username": value = Array((s.username ?? "").utf8)
         case "otp":
             guard let seed = base32Decode(s.value), !seed.isEmpty else {
-                return finish("fill", fields, failed("\(name)'s seed is damaged"), who, approval: approval)
+                return finish("fill", fields, failed("\(name)'s seed is damaged"), who, approval: approval, requestID: requestID)
             }
             // A code with under 3 s left could expire on its way; wait for the next one.
             let left = 30 - UInt64(Date().timeIntervalSince1970) % 30
@@ -751,20 +1164,20 @@ final class UnlockServer {
         }
         defer { wipe(&value) }
         guard Date() < expires, receivedSignal == 0 else {
-            return finish("fill", fields, lockedResult("the vault locked before the value was sent"), who, approval: approval)
+            return finish("fill", fields, lockedResult("the vault locked before the value was sent"), who, approval: approval, requestID: requestID)
         }
         var req2 = base
         req2["mode"] = "fill"
         req2["origins"] = origins
         let r: [String: Any]
         do { r = try runner.fill(t, request: req2, value: value, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
-            return finish("fill", fields, failed(e.message), who, approval: approval)
+            return finish("fill", fields, failed(e.message), who, approval: approval, requestID: requestID)
         } catch {
-            return finish("fill", fields, failed("the fill failed"), who, approval: approval)
+            return finish("fill", fields, failed("the fill failed"), who, approval: approval, requestID: requestID)
         }
         if r["ok"] as? Bool == true {
             guard originOK(r, origins) else {
-                return finish("fill", fields, failed("the VM reported a site outside this secret's sites"), who, approval: approval)
+                return finish("fill", fields, failed("the VM reported a site outside this secret's sites"), who, approval: approval, requestID: requestID)
             }
             do {
                 try updateVault(paths, key) { p in
@@ -773,7 +1186,128 @@ final class UnlockServer {
                 }
             } catch { say("          (couldn't record the use in the vault)") }
         }
-        return finish("fill", fields, r, who, approval: approval)
+        return finish("fill", fields, r, who, approval: approval, requestID: requestID)
+    }
+
+    // MARK: sign in (a username and a password under one approval)
+
+    /// Fill a saved login's username and password into the two fields the selectors name, with one approval
+    /// (fills through the same path as `fill`: each field checked in the VM, the value only on ssh's input).
+    /// Without a username selector, only the password. The site is the one the VM reports for the password
+    /// field, which must be one of the secret's; the username field must be on the same site.
+    func opLogin(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        var fields = echo(req, ["name", "vm", "profile"])
+        guard let name = req["name"] as? String, let vm = req["vm"] as? String, validName(name), validName(vm),
+              (req["profile"] as? String).map(validName) ?? (req["profile"] == nil),
+              let passSel = req["password_selector"] as? String, !passSel.isEmpty, passSel.count <= 300,
+              (req["username_selector"] as? String).map({ !$0.isEmpty && $0.count <= 300 }) ?? (req["username_selector"] == nil) else {
+            return finish("login", fields, failed("bad request"), who, approval: "-")
+        }
+        let profile = req["profile"] as? String
+        let userSel = req["username_selector"] as? String
+        fields["password_selector"] = clean(passSel, max: 300)
+        if let u = userSel { fields["username_selector"] = clean(u, max: 300) }
+        say("\(clockTime())  sign in with \(name) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
+            + ", password '\(promptText(passSel, max: 60))'" + (userSel.map { ", username '\(promptText($0, max: 60))'" } ?? "")
+            + ", asked by \(who.describe)")
+        let p: Payload
+        do { p = try load() } catch let e as VaultError { return finish("login", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
+            return finish("login", fields, failed("cannot read the vault"), who, approval: "-")
+        }
+        guard let s = p.secrets[name] else {
+            return finish("login", fields, failed("no secret named \(name) (metacomputer secrets list)"), who, approval: "-")
+        }
+        guard s.kind == "password" else {
+            return finish("login", fields, denied("\(name) is a \(s.kind) secret; signing in needs a password"), who, approval: "-")
+        }
+        if userSel != nil && (s.username ?? "").isEmpty {
+            return finish("login", fields, denied("\(name) has no username stored; leave out the username field"), who, approval: "-")
+        }
+        let hint = s.username.map(maskUsername)
+        if let h = hint { fields["username_hint"] = h }
+        if let why = projectProblem(name, s, who) { return finish("login", fields, denied(why), who, approval: "-") }
+        guard let t = target(p, vm) else {
+            return finish("login", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
+        }
+        if let why = requiredSinkProblem("login", fields, who) { return finish("login", fields, denied(why), who, approval: "-") }
+        if let problem = runner.listenerProblem(t) {
+            return finish("login", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
+        }
+        var base: [String: Any] = [:]
+        if let pr = profile { base["profile"] = pr }
+        // Check both fields, without the values: the password field names the site.
+        func check(_ field: String, _ sel: String, _ origins: [String]) -> ([String: Any], String?) {
+            var chk = base
+            chk["mode"] = "check"
+            chk["field"] = field
+            chk["selector"] = sel
+            chk["origins"] = origins
+            do {
+                let r = try runner.fill(t, request: chk, value: nil, timeout: TimeInterval(min(60, remaining())))
+                guard r["ok"] as? Bool == true else { return (r, nil) }
+                guard originOK(r, origins), let o = r["origin"] as? String else {
+                    return (failed("the VM reported a site outside this secret's sites; refusing"), nil)
+                }
+                return (r, o)
+            } catch let e as VaultError { return (failed(e.message), nil) } catch { return (failed("the check failed"), nil) }
+        }
+        let (pr, originOpt) = check("password", passSel, s.origins)
+        guard let origin = originOpt else { return finish("login", fields, pr, who, approval: "each") }
+        if let us = userSel {
+            let (ur, uo) = check("username", us, [origin])
+            guard uo == origin else { return finish("login", fields, ur, who, approval: "each") }
+        }
+        let idp = isIdentityProviderOrigin(origin)
+        var approval = "session"
+        var requestID: String?
+        if idp || confirmEach || s.approval == "each" {
+            let o = approve("fill", name, "  Sign in with \(name) (" + (userSel == nil ? "password" : "username and password") + ") on \(origin), VM \(vm)"
+                            + (profile.map { ", Chrome profile \($0)" } ?? "") + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin,
+                            use: "login", summary: "sign in with \(name) on \(origin)", usernameHint: hint, identityProvider: idp,
+                            proposedID: req["request_id"] as? String, ruleUse: "fill")
+            approval = o.how
+            requestID = o.requestID
+            if !o.yes { return finish("login", fields, denied(o.why), who, approval: approval, requestID: requestID) }
+            if let problem = runner.listenerProblem(t) {
+                return finish("login", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval, requestID: requestID)
+            }
+        }
+        guard Date() < expires, receivedSignal == 0 else {
+            return finish("login", fields, lockedResult("the vault locked before the value was sent"), who, approval: approval, requestID: requestID)
+        }
+        // Only the site that was checked (and approved), for both fields.
+        func put(_ field: String, _ sel: String, _ v: String) -> [String: Any] {
+            var value = Array(v.utf8)
+            defer { wipe(&value) }
+            var r2 = base
+            r2["mode"] = "fill"
+            r2["field"] = field
+            r2["selector"] = sel
+            r2["origins"] = [origin]
+            do {
+                let r = try runner.fill(t, request: r2, value: value, timeout: TimeInterval(min(60, remaining())))
+                if r["ok"] as? Bool == true && !originOK(r, [origin]) { return failed("the VM reported a site outside this secret's sites") }
+                return r
+            } catch let e as VaultError { return failed(e.message) } catch { return failed("the fill failed") }
+        }
+        var filled: [String] = []
+        if let us = userSel {
+            let r = put("username", us, s.username ?? "")
+            guard r["ok"] as? Bool == true else { return finish("login", fields, r, who, approval: approval, requestID: requestID) }
+            filled.append("username")
+        }
+        let r = put("password", passSel, s.value)
+        if r["ok"] as? Bool == true {
+            filled.append("password")
+            do {
+                try updateVault(paths, key) { p in
+                    p.secrets[name]?.uses += 1
+                    p.secrets[name]?.last_used = isoTime()
+                }
+            } catch { say("          (couldn't record the use in the vault)") }
+        }
+        fields["fields"] = filled
+        return finish("login", fields, r, who, approval: approval, requestID: requestID)
     }
 
     // MARK: api tokens
@@ -800,11 +1334,14 @@ final class UnlockServer {
             return finish("token", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
         }
         var approval = "session"
-        if confirmEach || s.approval == "each" {
-            let (yes, how, why) = approve("token", name, "  Give the VM \(vm) a \(max(1, min(ttlAsked, remaining()) / 60))-minute token for \(name) (\(host))?\n  Asked by \(who.describe).",
-                                          who, vm: vm, site: "https://\(host)")
-            approval = how
-            if !yes { return finish("token", fields, denied(why), who, approval: approval) }
+        let idp = isIdentityProviderHost(originHost(host))
+        if confirmEach || s.approval == "each" || idp {
+            let minutes = max(1, min(ttlAsked, remaining()) / 60)
+            let o = approve("token", name, "  Give the VM \(vm) a \(minutes)-minute token for \(name) (\(host))?\n  Asked by \(who.describe).",
+                            who, vm: vm, site: "https://\(host)", use: "token", summary: "a \(minutes)-minute API token for \(name) (\(host))",
+                            identityProvider: idp, proposedID: req["request_id"] as? String, ruleUse: "token")
+            approval = o.how
+            if !o.yes { return finish("token", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
         }
         let listener: ProxyListener
         do { listener = try hub.ensure(t) } catch let e as VaultError { return finish("token", fields, failed(e.message), who, approval: approval) } catch {
@@ -985,8 +1522,11 @@ final class UnlockServer {
         // Saving always asks (unless a standing approval covers it): the agent starts it, and a saved login is a credential.
         let question = old.map { "  Replace the sealed session \(name) (saved \($0.saved_at) from VM \($0.vm), profile \($0.profile)) with profile \(profile) from VM \(vm)?" }
             ?? "  Save Chrome profile \(profile) from VM \(vm) as the sealed session \(name)?"
-        let (yes, approval, why) = approve("session_save", name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil)
-        if !yes { return finish("session_save", fields, denied(why), who, approval: approval) }
+        let o = approve("session_save", name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil, use: "session_save",
+                        summary: (old == nil ? "save" : "replace the sealed session \(name) with") + " Chrome profile \(profile)" + (old == nil ? " as the sealed session \(name)" : ""),
+                        proposedID: req["request_id"] as? String)
+        let approval = o.how
+        if !o.yes { return finish("session_save", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
         if let problem = runner.listenerProblem(t) {
             return finish("session_save", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval)
         }
@@ -1049,15 +1589,18 @@ final class UnlockServer {
             return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
         }
         var approval = "session"
-        if confirmEach || meta.approval != "session" || meta.vm != vm {
+        let idp = meta.identity_provider == true
+        if confirmEach || meta.approval != "session" || meta.vm != vm || idp {
             let question = meta.vm != vm
                 ? "  Load the sealed session \(name), saved from VM \(meta.vm), into a different VM, \(vm) (profile \(profile); replaces it)?"
                 : "  Load the sealed session \(name) into profile \(profile) on VM \(vm) (replaces that profile)?"
-            // A load into another VM always asks this time, whatever was granted before.
+            // A load into another VM always asks this time, whatever was granted before (and no rule covers it).
             let kind = meta.vm != vm ? "session_load_elsewhere:\(vm)" : "session_load"
-            let (yes, how, why) = approve(kind, name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil)
-            approval = how
-            if !yes { return finish("session_load", fields, denied(why), who, approval: approval) }
+            let o = approve(kind, name, question + "\n  Asked by \(who.describe).", who, vm: vm, site: nil, use: "session_load",
+                            summary: "load the sealed session \(name) into profile \(profile)", identityProvider: idp,
+                            proposedID: req["request_id"] as? String, ruleUse: meta.vm == vm ? "session_load" : nil)
+            approval = o.how
+            if !o.yes { return finish("session_load", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
             if let problem = runner.listenerProblem(t) {
                 return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: approval)
             }

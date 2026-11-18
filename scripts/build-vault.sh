@@ -9,8 +9,10 @@
 #   scripts/build-vault.sh --out PATH   build a release binary at PATH; don't install
 #   scripts/build-vault.sh --test PATH  build a TEST binary at PATH, never in the install
 #                                       folder: it honours MCOMP_VAULT_TEST_SSH (a stub
-#                                       instead of /usr/bin/ssh), MCOMP_VAULT_TEST_LISTENERS
-#                                       and MCOMP_VAULT_TEST_PROMPT_TIMEOUT, and runs only with
+#                                       instead of /usr/bin/ssh), MCOMP_VAULT_TEST_LISTENERS,
+#                                       MCOMP_VAULT_TEST_PROMPT_TIMEOUT and MCOMP_VAULT_TEST_LOCAL_AUTH
+#                                       (a stand-in for the person at the Touch ID dialog, which a
+#                                       test build never shows), and runs only with
 #                                       MCOMP_VAULT_DIR outside ~/Library; tests/test_secrets.py
 #                                       uses it. Release builds don't contain that code.
 #
@@ -29,7 +31,7 @@ while [ $# -gt 0 ]; do
     --force) force=1 ;;
     --out) mode=out; out="${2:?--out needs a path}"; shift ;;
     --test) mode=test; out="${2:?--test needs a path}"; shift ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build-vault: unknown option $1" >&2; exit 2 ;;
   esac
   shift

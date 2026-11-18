@@ -65,9 +65,11 @@
 #   actions [list [--days N] | show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]]
 #                                  the signed action log (ACTION_LOG=on in config/local.env)
 #   secrets init | set NAME ... [--replace] | delete NAME | bind [VM] | session policy|delete NAME
-#           | unlock [--for 30m] [--confirm each] | rekey | recover | rotate-session-key
+#           | policy NAME --approval session|each | unlock [--for 30m] [--confirm each] [--touch-id]
+#           | rekey | recover | rotate-session-key | approve ID [--passphrase] | rule add ... --for 8h
 #           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
+#           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | tokens | revoke ID|--all   use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
@@ -1430,7 +1432,7 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
       exec "$VAULT_BIN" bind "$vm" --port "$SSH_PORT" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
         --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" --gateway "$NETGW_BIN" ${proxy[@]+"${proxy[@]}"} "$@" ;;
-    fill|session|token)
+    fill|login|session|token)
       local kind="secrets_$sub"
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
