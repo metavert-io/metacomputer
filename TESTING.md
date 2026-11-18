@@ -937,7 +937,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (109 checks, about 4 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (114 checks, about 4 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -980,7 +980,13 @@ person at it, and without it there is none. It covers:
   first; `rule add --passphrase` showing the rule and its expiry before the passphrase,
   and storing exactly that expiry however long the passphrase takes; a rule too long for
   the dialog to show whole refused there; a vault file put back to a copy from before
-  Touch ID was seen enrolled, caught through the audit log (presence mode stays on);
+  Touch ID was seen enrolled, caught through the audit log (presence mode stays on); on a
+  second vault, a file put back to a copy saying auto or off from before an audited
+  `presence on`, with a `presence off` record appended without the vault's MAC, still
+  keeping presence mode on, while a real `presence off` turns it off; a VM spelling the
+  value in every field it can answer with, for a fill and a sign-in, failed or "worked",
+  with nothing of it in the results, the audit log, `audit --json`, the unified log or the
+  sinks;
 - **the hub's fills name their Chrome:** one through the hub without `--profile` or
   `--browser-pid` is refused before anyone is asked;
 - **audit continuity:** after a last record of several megabytes, the next one still
@@ -995,7 +1001,7 @@ person at it, and without it there is none. It covers:
   inside a Claude Code session in a rule's project, has no session or project, so the rule
   doesn't cover it.
 
-`python3 tests/test_vault_import.py` (59 checks, about a minute) covers the imports with
+`python3 tests/test_vault_import.py` (60 checks, about a minute) covers the imports with
 synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
 their values encrypted as Chrome on macOS does with a test key. The test build reads them
 through `MCOMP_VAULT_TEST_CHROME_DIR` and takes the key from `MCOMP_VAULT_TEST_CHROME_KEY`;
@@ -1015,6 +1021,8 @@ release build contains neither switch. It covers:
   on a code keeping the login it belongs to; `set --replace` with another username
   untying the code (another account's import then makes its own); a code tied by name, as
   an earlier build did (a test-build command makes one), tied by id when the vault opens;
+  two such logins without ids getting one id each, so the import that opened the vault
+  replaces both codes;
 - **`import-session`:** `--site` required, a dry run, only the named site's cookies sealed,
   `--replace` (which keeps an identity provider's mark), an identity provider needing
   `--allow-identity-provider` and asking at every load whatever its policy, the load sending

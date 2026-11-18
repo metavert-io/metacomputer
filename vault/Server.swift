@@ -1117,7 +1117,10 @@ final class UnlockServer {
         rec["result"] = status
         rec["approval"] = approval
         rec["requester"] = who.record
-        for k in ["origin", "chars", "reason", "bytes", "route", "token_id", "ttl_s", "request_id"] { if let v = out[k] ?? res[k] { rec[k] = v } }
+        // The record takes the result as filtered above (never the raw answer, which a VM could fill with anything);
+        // a token's id and lifetime are this process's own.
+        for k in ["origin", "chars", "reason", "bytes", "route", "request_id"] { if let v = out[k] { rec[k] = v } }
+        for k in ["token_id", "ttl_s"] { if let v = res[k] { rec[k] = v } }
         // The site-login event names other password vaults use, beside our own op.
         if op == "fill" || op == "login" {
             if status == "ok" { rec["event"] = "login.fill" } else if status == "denied" || status == "locked" { rec["event"] = "login.denied" }

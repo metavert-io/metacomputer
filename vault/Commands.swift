@@ -146,14 +146,17 @@ func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
     defer { wipe(&pass) }
     let (key, opened) = try openWithPassphrase(paths, pass)
     var payload = opened
-    // 2FA codes an earlier build tied to their login by name are tied by the login's id from now on, once, here.
-    var probe = payload
-    if !migrateLegacyTOTPLinks(&probe).isEmpty {
+    // 2FA codes an earlier build tied to their login by name are tied by the login's id from now on: migrated once, in
+    // the one write below, and what's returned is exactly what was written (each legacy login gets one id, used by every
+    // reference to it).
+    if hasLegacyTOTPLinks(payload) {
         var notes: [String] = []
-        try updateVault(paths, key) { p in notes = migrateLegacyTOTPLinks(&p) }
-        payload = probe
+        try updateVault(paths, key) { p in
+            notes = migrateLegacyTOTPLinks(&p)
+            payload = p
+        }
         for n in notes { oprint(clean("2FA code \(n)", max: 300)) }
-        audit(paths, ["op": "totp_links", "result": "ok", "changes": notes], macKey: vaultAuditKey(paths, key))
+        if !notes.isEmpty { audit(paths, ["op": "totp_links", "result": "ok", "changes": notes], macKey: vaultAuditKey(paths, key)) }
     }
     return (key, payload)
 }
@@ -161,14 +164,18 @@ func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
 #if MCOMP_VAULT_TESTING
 /// Test builds only: tie a 2FA code to a login by name, as an earlier build did (tests/test_vault_import.py).
 func testLegacyTOTPLink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    guard argv.count == 2, validName(argv[0]), validName(argv[1]) else { throw usageError("usage: test-legacy-totp-link TOTP LOGIN") }
+    let noID = argv.count == 3 && argv[2] == "--no-id"
+    guard argv.count == 2 || noID, validName(argv[0]), validName(argv[1]) else { throw usageError("usage: test-legacy-totp-link TOTP LOGIN [--no-id]") }
     try requireTTY("test-legacy-totp-link")
     installPromptSignalHandlers()
     _ = try readHeader(paths)
     var pass = try readPassphrase(confirm: false)
     defer { wipe(&pass) }
     let (key, _) = try openWithPassphrase(paths, pass)
-    try updateVault(paths, key) { p in p.secrets[argv[0]]?.totp_for = argv[1] }
+    try updateVault(paths, key) { p in
+        p.secrets[argv[0]]?.totp_for = argv[1]
+        if noID { p.secrets[argv[1]]?.id = nil }      // a login saved by an earlier build had no id
+    }
     oprint("tied \(argv[0]) to \(argv[1]) by name")
     return Exit.ok
 }
@@ -177,6 +184,12 @@ func testLegacyTOTPLink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// Earlier builds tied a 2FA code to its login by the login's name, which a later login can take. Move each such tie to
 /// the login's id (giving the login one if it has none), or clear it when no login of that name is left. Returns what
 /// was done, one line each (empty: nothing to do).
+/// Whether any 2FA code is tied by something other than a secret's id (an earlier build's login name). Changes nothing.
+func hasLegacyTOTPLinks(_ p: Payload) -> Bool {
+    let ids = Set(p.secrets.values.compactMap(\.id))
+    return p.secrets.values.contains { $0.kind == "totp" && $0.totp_for.map { !ids.contains($0) } == true }
+}
+
 func migrateLegacyTOTPLinks(_ p: inout Payload) -> [String] {
     let ids = Set(p.secrets.values.compactMap(\.id))
     var notes: [String] = []
@@ -484,15 +497,18 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     // Touch ID enrolled, seen once, keeps presence mode on by default from then on (fail closed): kept in the vault.
     // The audit log keeps it too: a vault file put back to an older copy that lacks it (or that says `presence off`
     // where the log's last setting doesn't) is caught here, and the stricter of the two holds.
-    let history = auditPresenceHistory(paths)
+    let history = auditPresenceHistory(paths, macKey: vaultAuditKey(paths, key))
     var rollback: String?
     if history.seen && payload.biometry_seen == nil {
         rollback = "this vault file has no record of Touch ID being enrolled, but its audit log has: the file may have been put back to an older copy"
     }
+    // The stricter of the file's setting and the log's last authenticated one (on, then auto, then off): a file put back
+    // to a copy from before `presence on` (or `auto`) can't relax it, whether it says off or auto.
     var setting = payload.require_presence
-    if setting == "off", let lastMode = history.lastMode, lastMode != "off" {
+    if let lastMode = history.lastMode, presenceRank(lastMode) > presenceRank(setting) {
+        let was = setting ?? "auto"
         setting = lastMode == "on" ? "on" : nil
-        rollback = (rollback.map { $0 + "; and " } ?? "") + "this vault file says `presence off`, but the audit log's last setting is `presence \(lastMode)`: the file may have been put back to an older copy"
+        rollback = (rollback.map { $0 + "; and " } ?? "") + "this vault file says `presence \(was)`, but the audit log's last setting is `presence \(lastMode)`: the file may have been put back to an older copy"
     }
     if (bio == .touchID || history.seen) && payload.biometry_seen == nil {
         let now = isoTime()

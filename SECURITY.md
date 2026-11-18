@@ -902,8 +902,11 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    on, whether the fill worked or not: its words are replaced by the vault's own, `origin`
    is kept only as one of the sites the request named (the vault's own copy; otherwise
    none, since a VM could spell the value in a host name), `chars` is the vault's own count
-   of the value (and only when it worked), and `mode` and `field` are the request's. That
-   holds for the result, the audit log, the unlock terminal and the events alike.
+   of the value (and only when it worked), `mode` and `field` are the request's, `route`
+   is `element`, `keyboard` or nothing, and the reason is one of the vault's own sentences.
+   No field of the VM's free text is left, and the audit record is built from that filtered
+   result, never from the raw answer. That holds for the result, the audit log, the
+   unified log, the sinks, `audit --json`, the unlock terminal and the events alike.
 
 **The fill account** is always present on VMs built with this version. Nothing else
 can use it, so it's safe to leave on:
@@ -1038,10 +1041,14 @@ Unattended rules are made the same way, with the rule and its expiry in the dial
   vault file with a copy from before Touch ID was seen enrolled (or from when it said
   `presence off`); the file's encryption can't tell an older copy from the current one.
   The unlock checks the audit log too, which is appended to separately: if the log says
-  Touch ID was seen enrolled, or its last `presence` setting is stricter than the file's,
-  the stricter one holds, the unlock says the file may be an older copy, and that goes in
-  the log (`rollback_suspected`). A record added to the log can only make presence mode
-  stricter. What this doesn't stop: putting back both the vault file and the audit log
+  Touch ID was seen enrolled, or its last authenticated `presence` setting is stricter than
+  the file's (on, then auto, then off), the stricter one holds, the unlock says the file may
+  be an older copy, and that goes in the log (`rollback_suspected`). A setting in the log
+  counts only when it's authenticated: its creation MAC checks out under the vault's audit
+  key, which only a command that opened the vault with the passphrase has, and it sits
+  where the chain says (a genuine old record copied to the end doesn't count). A record any
+  program adds without that can only make presence mode stricter (a Touch ID record), never
+  looser. What this doesn't stop: putting back both the vault file and the audit log
   (cutting the log off before those records) to matching older copies. An audit sink, which
   received the records as they happened, still shows them. Keeping this state somewhere a
   program of yours can't rewrite (the Secure Enclave or a Keychain item with its own access
@@ -1201,7 +1208,8 @@ Deleting a login leaves its code tied to no login (`delete` says so); replacing 
 username, or other sites) is a new secret with a new id: any code tied to the old one is
 untied, and `set` says so (`totp_unlinked` in its record). A code an earlier build tied to
 its login by name is tied by that login's id the first time the vault is opened with the
-passphrase (or untied, when no login of that name is left), and the command says which;
+passphrase (or untied, when no login of that name is left), in one write that gives each
+such login one id for every reference to it, and the command says which;
 every code made or
 replaced has its own audit record (`set` or `rotate`, `kind: totp`), even when the password
 is unchanged. Bitwarden's non-login items are skipped; a login's URIs become its sites, at

@@ -956,6 +956,48 @@ def run(td, procs):
           json.loads(ra.stdout).get("biometry") == json.loads(rn.stdout).get("biometry") and b"MCOMP_VAULT_TEST_BIOMETRY" not in open(REL, "rb").read(),
           (ra.stdout, rn.stdout))
 
+    # --- 6c. presence settings and a vault file put back to an older copy (a second vault, never shown Touch ID) --------
+    v2 = os.path.join(td, "v2")
+    X = {"MCOMP_VAULT_DIR": v2}
+    tty([BIN, "init", "--no-enclave"], [("New vault passphrase", PASS + "\n"), ("same passphrase again", PASS + "\n")], extra=X)
+
+    def v2_unlocked_presence():
+        uu = start_unlock(["--for", "5m", *allow], dict(T, MCOMP_VAULT_TEST_BIOMETRY="none", **X))
+        st = json.loads(client("status", "--json", extra=X).stdout or "{}")
+        text = uu.text()
+        lock(uu)
+        return st.get("presence"), text
+
+    v2_auto = os.path.join(td, "v2-auto.json")
+    shutil.copy(os.path.join(v2, "vault.json"), v2_auto)              # its default setting: auto
+    tty([BIN, "presence", "on"], [("Vault passphrase", PASS + "\n")], extra=X)
+    shutil.copy(v2_auto, os.path.join(v2, "vault.json"))              # put back to the copy from before `presence on`
+    on_a, text_a = v2_unlocked_presence()
+    check("P2: a vault file put back to a copy that says auto, from before an audited `presence on`: presence mode stays on "
+          "(the stricter of the file and the log's authenticated setting), and the unlock says why", on_a is True and "older copy" in text_a,
+          text_a[-400:])
+    tty([BIN, "presence", "off"], [("Vault passphrase", PASS + "\n")], extra=X)
+    v2_off = os.path.join(td, "v2-off.json")
+    shutil.copy(os.path.join(v2, "vault.json"), v2_off)
+    tty([BIN, "presence", "on"], [("Vault passphrase", PASS + "\n")], extra=X)
+    shutil.copy(v2_off, os.path.join(v2, "vault.json"))
+    # ...and a `presence off` record appended to the log by a program of yours: it chains properly but has no valid MAC.
+    lines = open(os.path.join(v2, "audit.jsonl")).read().splitlines()
+    last = json.loads(lines[-1])
+
+    def canon(o):
+        return json.dumps(o, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    forged = {"op": "presence", "result": "ok", "mode": "off", "seq": last["seq"] + 1, "prev": last["hash"],
+              "ts": last["ts"], "id": "00000000-0000-4000-8000-00000000f0f0"}
+    forged["hash"] = hashlib.sha256(canon(forged).encode()).hexdigest()
+    open(os.path.join(v2, "audit.jsonl"), "a").write(canon(forged) + "\n")
+    on_b, text_b = v2_unlocked_presence()
+    check("P2: ...a file put back to a copy that says off, with a `presence off` record appended to the log without the vault's "
+          "MAC: the forged record relaxes nothing, presence mode stays on", on_b is True and "older copy" in text_b, text_b[-400:])
+    tty([BIN, "presence", "off"], [("Vault passphrase", PASS + "\n")], extra=X)
+    on_c, _ = v2_unlocked_presence()
+    check("...while a real `presence off` (with the passphrase) still turns it off", on_c is False, on_c)
+
     # --- 7. a release build goes to the real framework: the stand-in doesn't approve it --------------------------
     # `selftest --local-auth` asks LocalAuthentication once, through the same function every approval uses, and
     # touches no vault and no log. A release build runs it only with MCOMP_VAULT_LOCAL_AUTH=noninteractive, which
@@ -993,6 +1035,38 @@ def run(td, procs):
     check("otlp sink: metacomputer.event, request_id and username_hint attributes",
           any(a.get("metacomputer.event") == "login.fill" and a.get("metacomputer.request_id") == rid
               and a.get("metacomputer.username_hint") == USERNAME[0] + "***" for a in attrs), attrs[-3:])
+    # P1: a VM that has the value spells it in every field of its answer, for a fill and a sign-in, failed or "worked":
+    # none of it reaches the result, the audit log, `audit --json`, the unified log or the sinks.
+    since = time.time()
+    hx_pw, hx_user = PW_VALUE.encode().hex(), USERNAME.encode().hex()
+    two = str(int.from_bytes(PW_VALUE.encode()[:2], "big")), str(int.from_bytes(USERNAME.encode()[:2], "big"))
+    outs_p1 = []
+    for fl in ("all-fields-leak-next", "all-fields-leak-ok-next"):
+        for cmd in (fill, ["login", "web-each", "--vm", "avm", "--password-selector", "#pw", "--username-selector", "#user"]):
+            flag(fl)
+            proc = background(*cmd)
+            rid = next_request(u)
+            client("approve", rid)
+            rc, out, _ = finish(proc)
+            outs_p1.append((rc, out))
+    time.sleep(1)
+    alog_text = open(alog).read()
+    aj = client("audit", "--json")
+    sink_text = " ".join(g["body"] for g in rx.got)
+    ul = subprocess.run(["/usr/bin/log", "show", "--style", "compact", "--start", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since - 5)),
+                         "--predicate", 'subsystem == "io.metavert.metacomputer.vault.test"'], capture_output=True, text=True, timeout=120)
+    places = {"results": " ".join(o for _, o in outs_p1), "audit log": alog_text, "audit --json": aj.stdout, "sinks": sink_text,
+              "unified log": ul.stdout}
+    leaks = {k: [x for x in (hx_pw, hx_user) if x in v] for k, v in places.items()}
+    p1_recs = [json.loads(l) for l in alog_text.splitlines()][-40:]
+    counts = [x.get("chars") for x in p1_recs if x.get("op") in ("fill", "login") and x.get("result") != "ok"]
+    check("P1: a VM spelling the value in every field it can answer with (fill and sign-in, failed or 'worked'): nothing of it "
+          "in the results, the audit log, `audit --json`, the unified log or the sinks; no VM-chosen route or count either",
+          all(rc != 0 for rc, _ in outs_p1) and not any(leaks.values()) and not [c for c in counts if str(c) in two]
+          and not any(x.get("route") not in (None, "element", "keyboard") for x in p1_recs),
+          (leaks, [o[-200:] for _, o in outs_p1], counts))
+    check("...the unified log was read (it carries the vault's audit lines), so its check above means something",
+          ul.returncode == 0 and '"op":"fill"' in ul.stdout, (ul.returncode, ul.stderr[-300:]))
     r = client("audit", "--verify")
     check("audit --verify: every record (the new ones included) has a valid creation MAC and the chain holds", r.returncode == 0
           and "checks out" in r.stdout, r.stdout + r.stderr)
