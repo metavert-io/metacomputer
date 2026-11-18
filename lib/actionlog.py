@@ -7,6 +7,9 @@ log on, that command runs mcp_relay.py, which writes one JSON Lines file per
 connection under logs/actions/YYYY-MM-DD/: a start record (who connected,
 from which project), then every tool call exactly as it was sent to the VM,
 its result summary and timing, and the calls Claude Code's bridge refused.
+`metacomputer sh` (vm_shell.py) writes one file per run in the same form: a
+`vm_shell` call (the script's SHA-256 and size, cwd, timeout) and its result
+(exit code, and each output stream's size and SHA-256), unless SHELL_LOG=off.
 
 - Each record carries the hash of the one before it ("prev") and its own
   ("hash" = SHA-256 of the record without "hash"), so editing, inserting or
@@ -43,6 +46,9 @@ FORMAT = 1
 ZERO = "0" * 64
 TEXT_KEYS = {"text", "value", "script", "password", "secret", "token"}
 EVERY_N, EVERY_S = 20, 60
+# A signer that doesn't answer (an agent or hardware key waiting for a touch or a
+# passphrase) is stopped after this long, and that counts as a failed signature.
+SIGN_TIMEOUT_S = float(os.environ.get("MCOMP_SIGN_TIMEOUT_S") or 10)
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -150,10 +156,17 @@ class ActionLog:
             return
         covers = self.seq - 1
         msg = checkpoint_message(self.name, covers, self.head, final)
-        r = subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", self.key, "-n", NAMESPACE],
-                           input=msg, capture_output=True)
-        if r.returncode != 0:
-            self.sign_error = (r.stderr or b"").decode(errors="replace").strip()[:200] or "ssh-keygen failed"
+        try:   # run() kills and reaps a signer that times out
+            r = subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", self.key, "-n", NAMESPACE],
+                               input=msg, capture_output=True, timeout=SIGN_TIMEOUT_S)
+            err = None if r.returncode == 0 else (
+                (r.stderr or b"").decode(errors="replace").strip()[:200] or "ssh-keygen failed")
+        except subprocess.TimeoutExpired:
+            err = f"ssh-keygen didn't finish within {SIGN_TIMEOUT_S:g} s"
+        except OSError as e:
+            err = f"couldn't run ssh-keygen ({e.strerror or e})"
+        if err:
+            self.sign_error = err   # sticky: sign_now() and close() report it from then on
             self._append({"type": "sign_failed", "covers_seq": covers, "error": self.sign_error})
             return
         self._append({"type": "checkpoint", "covers_seq": covers, "head": self.head,
@@ -197,6 +210,13 @@ class ActionLog:
 
     def event(self, kind, **fields):
         self._add({"type": kind, **fields})
+
+    def sign_now(self):
+        """Sign the chain so far; True while every signature has worked."""
+        with self.lock:
+            if not self.closed:
+                self._sign()
+            return self.sign_error is None
 
     def close(self):
         with self.lock:
@@ -332,6 +352,11 @@ def main(argv):
             t, ts = r.get("type"), (r.get("ts") or "")[11:19]
             if t == "call":
                 print(f"{r['seq']:5} {ts} -> {r.get('tool')} {_fmt_args(r.get('args'))}")
+            elif t == "result" and r.get("tool") == "vm_shell":   # metacomputer sh (lib/vm_shell.py)
+                res = r.get("result") or {}
+                state = f"exit {res.get('exit_code')}" if res.get("status") == "exited" else str(res.get("status"))
+                sizes = ", ".join(f"{k} {(res.get(k) or {}).get('bytes', 0)} B" for k in ("stdout", "stderr") if k in res)
+                print(f"{r['seq']:5} {ts} <- vm_shell {state} ({r.get('ms')} ms" + (f"; {sizes})" if sizes else ")"))
             elif t == "result":
                 res = r.get("result") or {}
                 state = f"rpc error: {r['rpc_error']}" if r.get("rpc_error") else ("ERROR" if res.get("error") else "ok")

@@ -8,19 +8,26 @@ Two kinds of controller can drive the VM's desktop:
 - Direct connections (`metacomputer mcp`: the GUI tests, mcp_client.py, older
   configs). They are found as live SSH processes using the MCP key.
 
+The shell channel (`metacomputer sh`) acts too: each run (except --read-only)
+keeps .run/owners/<pid>.json up to date, where pid is its Claude Code process,
+or outside Claude Code the shell that ran it, since the command itself exits.
+
 "Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
-so a session never blocks itself.
+or a shell it runs under, so a session never blocks itself.
 
 CLI (used by bin/metacomputer):
   owners.py who [--json]      list controllers
   owners.py check             exit 3 (and explain) if another controller is active
   owners.py release           forget other sessions' claims (after the user agrees)
 """
+import contextlib
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,14 +116,63 @@ def claim_path(bridge_pid):
     return os.path.join(OWNERS_DIR, f"{bridge_pid}.json")
 
 
+@contextlib.contextmanager
+def lock(timeout=10.0):
+    """This VM's owners lock: hold it to check for other controllers and claim the
+    computer as one step (metacomputer sh does; an acting bridge can too).
+    TimeoutError if another process holds it for longer than timeout."""
+    os.makedirs(OWNERS_DIR, exist_ok=True)
+    fd = os.open(os.path.join(OWNERS_DIR, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("another process holds the owners lock")
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)   # releases the lock
+
+
 def write_claim(bridge_pid, claude_pid, cwd, tool, started):
     os.makedirs(OWNERS_DIR, exist_ok=True)
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
-    tmp = claim_path(bridge_pid) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(rec, f)
-    os.replace(tmp, claim_path(bridge_pid))
+    # A temporary file of its own: two writers for one claim (two runs under one session) don't collide.
+    fd, tmp = tempfile.mkstemp(dir=OWNERS_DIR, prefix=".claim-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, claim_path(bridge_pid))
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def claim_for_shell(tool, who=None):
+    """`metacomputer sh` acted. Its process ends with the run, so the claim lives
+    as long as the caller's Claude Code session, or else the shell that ran it.
+    Returns who holds it, (holder pid, claude pid); passing that back (a refresh
+    during a run) skips looking at the process table."""
+    if who is None:
+        table = ps_table()
+        claude = claude_of(os.getpid(), table)
+        who = (claude or os.getppid(), claude)
+    holder, claude = who
+    started = time.time()
+    try:
+        started = json.load(open(claim_path(holder))).get("started", started)
+    except (OSError, ValueError):
+        pass
+    write_claim(holder, claude, os.getcwd(), tool, started)
+    return who
 
 
 def drop_claim(bridge_pid):
@@ -162,8 +218,11 @@ def direct_connections(table):
         cmd = full_command(pid)
         if not MCP_KEY_RE.search(cmd) or "@127.0.0.1" not in cmd or not for_this_vm(cmd):
             continue
-        if "mcp_lazy.py" in full_command(ppid):
+        parent = full_command(ppid)
+        if "mcp_lazy.py" in parent:
             continue  # an on-demand bridge's own upstream: reported through its claim
+        if "mcp_relay.py" in parent and "mcp_lazy.py" in full_command(table.get(ppid, (0, ""))[0]):
+            continue  # the same, through the action-log relay (ACTION_LOG=on)
         chain = ancestors(pid, table)
         who = None
         for p in chain[1:]:
@@ -186,7 +245,8 @@ def others(self_pid=None, table=None):
     my_claude = claude_of(self_pid, table)
     found = []
     for c in claims():
-        if c.get("bridge_pid") == self_pid or (my_claude and c.get("claude_pid") == my_claude):
+        # mine: also a claim held by a shell above the caller (metacomputer sh outside Claude Code)
+        if c.get("bridge_pid") == self_pid or c.get("bridge_pid") in mine or (my_claude and c.get("claude_pid") == my_claude):
             continue
         found.append({"kind": "session", **c})
     for d in direct_connections(table):

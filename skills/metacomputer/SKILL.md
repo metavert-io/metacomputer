@@ -118,12 +118,13 @@ Do everything else directly with normal tools: code, builds, tests, git, files, 
 - **What's going on in the VM, without the GUI:** `metacomputer inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]`. It's read-only, so it's fine even while another session controls the computer.
 - **Renaming a file in the VM** (for example a download saved under its id): `metacomputer rename GUEST_PATH NEW_NAME`.
 - **Recovery:** `metacomputer input-reset` when Chrome ignores typing. `metacomputer desktop-restart` logs the desktop out and in again, which closes every app, so ask first if anything is open.
-- **Shell in the VM** (`metacomputer ssh ops 'cmd'`): use it for setup and for checking results, never to fake a GUI result.
+- **Shell in the VM** (`metacomputer sh`): for files no app holds open, setup and checking results, routed by where the state lives ([SHELL.md](SHELL.md)); never to fake a GUI result.
 - **Live view and takeover for the user:** `metacomputer view`.
 
 ## References
 
 - [DESKTOP.md](DESKTOP.md): rules for this desktop, verified on Cua Driver 0.52.1.
 - [BROWSER.md](BROWSER.md): choosing Firefox or Chrome and human, page or hybrid mode; profiles; `metacomputer web` checks.
+- [SHELL.md](SHELL.md): `metacomputer sh`, which work goes to the shell and which to the apps, and what the VM has for format-aware work.
 - `.claude/skills/cua-driver/` in the project folder (`metacomputer where`): Cua Driver's own skill (WORKFLOW.md, LINUX.md, RECORDING.md).
 - The project's `README.md` (usage) and `architecture.md` (design, network isolation).

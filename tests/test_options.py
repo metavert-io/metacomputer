@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks for the optional hardening (SECURITY.md) against a running VM.
 
-    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C]
+    MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_options.py [A] [B] [C] [F]
 
 Use a test VM: this switches the VM's SSH and driver settings (through the
 maintenance account) and puts them back to the defaults at the end. Variants
@@ -16,10 +16,19 @@ C  DRIVER_MODE=bounded: readonly refuses input; desktop launches listed apps
    (by name, mapped to their path) and refuses the terminal and page tools;
    browser opens only listed origins; an expired or tampered manifest and a
    standard request (the VM's floor) are refused; back to standard at the end.
+F  metacomputer sh: runs in the VM as the desktop user with the desktop's
+   environment; exit codes, stdin/--file/--cwd/arguments, a detached GUI app
+   the driver can read, background programs, --timeout, an interrupted run,
+   the output cap; VM_SHELL=off and the bounded driver refuse; another
+   session's claim refuses (--read-only and --override still run); the
+   action log records runs (SHELL_LOG), redacted unless ACTION_LOG_TEXT=keep,
+   and verifies.
 """
+import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -302,11 +311,184 @@ def test_c():
             check("a standard driver session works again", False, e)
 
 
+# --- F ---------------------------------------------------------------------------
+def run_dir(cfg):
+    return subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; printf "%s" "$RUN_DIR"'], capture_output=True,
+                          text=True, env=dict(os.environ, MCOMP_CONFIG=cfg)).stdout
+
+
+def sh(cfg, *args, stdin=None, timeout=180):
+    r = mcomp(cfg, "sh", *args, stdin=stdin, timeout=timeout)
+    try:
+        j = json.loads(r.stdout) if "--json" in args else {}
+    except ValueError:
+        j = {}
+    return r, j
+
+
+def action_logs(logs):
+    out = set()
+    for d, _, fs in os.walk(os.path.join(logs, "actions")):
+        out |= {os.path.join(d, f) for f in fs if f.endswith(".jsonl")}
+    return out
+
+
+def test_f():
+    print("F  shell channel (metacomputer sh)")
+    s = settings(BASE)
+    home = f"/home/{s['user']}"
+    marker = "/tmp/mcomp-optf-marker"
+    other = None
+    claim = None
+    try:
+        r, _ = sh(BASE, "-c", "uname -s; id -un; . /etc/os-release; echo $ID; test -e /Users && echo mac || echo no-mac; "
+                              "sudo -n true 2>/dev/null && echo sudo || echo no-sudo")
+        check("runs in the VM as the desktop user, without sudo", r.stdout.split() == ["Linux", s["user"], "ubuntu", "no-mac", "no-sudo"],
+              r.stdout + r.stderr)
+        r, _ = sh(BASE, "-c", "findmnt -rn -t virtiofs,9p,nfs,nfs4,cifs,fuse.sshfs | wc -l; "
+                              f"timeout 3 bash -c '</dev/tcp/{s['gw']}/22' 2>/dev/null && echo open || echo closed")
+        check("nothing of the Mac's is mounted, and the Mac's side of the network refuses it", r.stdout.split() == ["0", "closed"],
+              r.stdout + r.stderr)
+        r, _ = sh(BASE, "-c", "pwd; echo ~")
+        check("~ and the default folder are the VM's home", r.stdout.split() == [home, home], r.stdout)
+        r, _ = sh(BASE, "-c", "echo out; echo err >&2; exit 7")
+        check("exit status is the script's; stdout and stderr kept apart", r.returncode == 7 and r.stdout == "out\n" and "err" in r.stderr,
+              (r.returncode, r.stdout, r.stderr))
+        r, _ = sh(BASE, "-", "--cwd", "/tmp", "--", "a", "b c", stdin='echo "$(pwd) $1|$2"\n')
+        check("script on stdin, --cwd, arguments after --", r.stdout == "/tmp a|b c\n", r.stdout + r.stderr)
+        f = os.path.join(TMP, "check-f.sh")
+        open(f, "w").write('echo "$(basename "$0") ran"\n')
+        r, _ = sh(BASE, "--file", f)
+        check("--file sends a script from the Mac (run from a fixed path)", r.stdout == "script ran\n", r.stdout + r.stderr)
+        r, _ = sh(BASE, "-c", 'echo "$DISPLAY"; echo "$GTK_MODULES"; xset q >/dev/null 2>&1 && echo x-ok; '
+                              'dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.GetId >/dev/null && echo bus-ok')
+        out = r.stdout.split("\n")
+        check("the desktop session's environment: display, session bus, accessibility settings",
+              out[0].startswith(":") and "atk-bridge" in out[1] and "x-ok" in out and "bus-ok" in out, r.stdout + r.stderr)
+        r, _ = sh(BASE, "--read-only", "-c", 'echo "${DISPLAY:-none} ${DBUS_SESSION_BUS_ADDRESS:-none}"')
+        check("--read-only runs without it", r.stdout == "none none\n", r.stdout)
+
+        # A GUI app started detached outlives the run, and the driver can read it.
+        r, _ = sh(BASE, "-c", "pkill -x mousepad; setsid -f mousepad </dev/null >/tmp/mcomp-optf-mousepad.log 2>&1; echo started")
+        check("setsid -f starts a GUI app and returns", r.returncode == 0 and r.stdout == "started\n", r.stderr)
+        c = client(BASE)
+        wins = []
+        for _ in range(40):
+            wins = (c.call("list_windows", {"app": "mousepad"}).structured or {}).get("windows") or []
+            if wins:
+                break
+            time.sleep(0.5)
+        state = c.call("get_window_state", {"pid": wins[0]["pid"], "window_id": wins[0]["window_id"],
+                                            "include_screenshot": False}) if wins else None
+        c.close()
+        check("... it's still running, on the desktop, with an accessibility tree", wins and state and not state.is_error
+              and len(state.text) > 200, (wins, state.text[:200] if state else None))
+        sh(BASE, "-c", "pkill -x mousepad; rm -f /tmp/mcomp-optf-mousepad.log; true")
+
+        t = time.time()
+        r, _ = sh(BASE, "-c", "sleep 61.5 & echo started")
+        el = time.time() - t
+        r2, _ = sh(BASE, "-c", "pgrep -f 'sleep 61.5' >/dev/null && echo alive; pkill -f 'sleep 61.5'; true")
+        check("a program left running with & doesn't hold the result back, and keeps running", r.stdout == "started\n"
+              and el < 8 and r2.stdout == "alive\n", (el, r.stdout, r2.stdout))
+        t = time.time()
+        r, j = sh(BASE, "--json", "--timeout", "2", "-c", "sleep 62.5 & sleep 63.5; echo never")
+        el = time.time() - t
+        r2, _ = sh(BASE, "-c", "pgrep -f 'sleep 6[23].5' || echo none")
+        check("--timeout: exit 124 and the script's group is ended", r.returncode == 124 and j.get("status") == "timeout"
+              and "never" not in j.get("stdout", "") and el < 12 and r2.stdout == "none\n", (r.returncode, el, r2.stdout))
+        p = subprocess.Popen([BIN, "sh", "-c", "sleep 64.5; echo never"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=dict(os.environ, MCOMP_CONFIG=BASE))
+        time.sleep(2.5)
+        p.send_signal(signal.SIGTERM)
+        p.communicate(timeout=30)
+        time.sleep(1)
+        r2, _ = sh(BASE, "-c", "pgrep -f 'sleep 64.5' || echo none")
+        check("interrupted on the Mac: exit 130, and the VM stops the script", p.returncode == 130 and r2.stdout == "none\n",
+              (p.returncode, r2.stdout))
+        r, j = sh(BASE, "--json", "-c", "head -c 200000 /dev/zero | tr '\\0' a; printf '\\nEND'")
+        whole = b"a" * 200000 + b"\nEND"
+        check("output over the cap: start and end kept, size and hash of the whole stream",
+              j.get("stdout_truncated") and j.get("stdout_bytes") == len(whole)
+              and j.get("stdout_sha256") == hashlib.sha256(whole).hexdigest() and j.get("stdout", "").endswith("\nEND")
+              and len(j.get("stdout", "")) < 70000, {k: j.get(k) for k in ("stdout_bytes", "stdout_truncated")})
+
+        # settings
+        sh(BASE, "-c", f"rm -f {marker}")
+        r, _ = sh(variant("shoff", "VM_SHELL=off"), "-c", f"touch {marker}")
+        r2, _ = sh(variant("bnd", "DRIVER_MODE=bounded"), "-c", f"touch {marker}")
+        r3, _ = sh(BASE, "-c", f"test -e {marker} && echo ran || echo nothing-ran")
+        check("VM_SHELL=off and the bounded driver (VM_SHELL=auto) refuse (125); nothing runs",
+              r.returncode == 125 and r2.returncode == 125 and r3.stdout == "nothing-ran\n", (r.returncode, r2.returncode, r3.stdout))
+        r, _ = sh(variant("bndon", "DRIVER_MODE=bounded", "VM_SHELL=on"), "-c", "echo ok")
+        check("the bounded driver with VM_SHELL=on runs", r.returncode == 0 and r.stdout == "ok\n", r.stderr)
+        st = json.loads(mcomp(variant("bnd", "DRIVER_MODE=bounded"), "security", "--json").stdout or "{}").get("shell") or {}
+        check("metacomputer security shows the shell setting", st.get("effective") == "off" and "bounded" in st.get("why", ""), st)
+
+        # one controller at a time
+        owners_dir = os.path.join(run_dir(BASE), "owners")
+        os.makedirs(owners_dir, exist_ok=True)
+        other = subprocess.Popen(["sleep", "300"])
+        claim = os.path.join(owners_dir, f"{other.pid}.json")
+        now = time.time()
+        json.dump({"bridge_pid": other.pid, "claude_pid": None, "cwd": "/another/project", "started": now,
+                   "last_call": now, "last_tool": "click"}, open(claim, "w"))
+        r, _ = sh(BASE, "-c", f"touch {marker}")
+        r3, _ = sh(BASE, "--read-only", "-c", f"test -e {marker} && echo ran || echo nothing-ran")
+        check("another session acting: refused (125); --read-only still runs", r.returncode == 125 and "/another/project" in r.stderr
+              and r3.returncode == 0 and r3.stdout == "nothing-ran\n", (r.returncode, r3.stdout, r3.stderr[-200:]))
+        t = time.time()
+        r, _ = sh(BASE, "--override", "-c", "echo took-over")
+        who = json.loads(mcomp(BASE, "who", "--json").stdout or "{}")
+        mine = [x for x in who.get("sessions", []) if x.get("bridge_pid") != other.pid and x.get("last_tool") == "vm_shell"
+                and x.get("last_call", 0) >= t - 1]
+        check("--override runs, and the run claims the computer (metacomputer who)", r.stdout == "took-over\n" and mine,
+              (r.stdout, who.get("sessions")))
+
+        # the action log
+        before = action_logs(s["logs"])
+        sh(variant("alogoff", "ACTION_LOG=off"), "-c", "echo not-logged")   # the test VM's own config may log
+        sh(variant("slogoff", "ACTION_LOG=on", "SHELL_LOG=off"), "-c", "echo not-logged")
+        check("no log file with ACTION_LOG=off, nor with SHELL_LOG=off", action_logs(s["logs"]) == before)
+        alog = variant("slog", "ACTION_LOG=on")
+        body = "echo optf-secret-out; echo optf-secret-err >&2"
+        r, j = sh(alog, "--json", "--override", "-c", body, "--", "optf-secret-arg")
+        new = sorted(action_logs(s["logs"]) - before)
+        check("ACTION_LOG=on (SHELL_LOG=auto): one log file for the run", len(new) == 1 and j.get("logged"), new)
+        if new:
+            raw = open(new[0]).read()
+            recs = [json.loads(x) for x in raw.splitlines()]
+            call = next((x for x in recs if x["type"] == "call"), {})
+            res = next((x for x in recs if x["type"] == "result"), {}).get("result") or {}
+            check("it records a vm_shell call: script hash and size, cwd", call.get("tool") == "vm_shell"
+                  and (call.get("args") or {}).get("script_sha256") == hashlib.sha256(body.encode()).hexdigest()
+                  and (call.get("args") or {}).get("cwd") == home, call.get("args"))
+            check("... and its result: exit code, output sizes and hashes", res.get("exit_code") == 0
+                  and (res.get("stdout") or {}).get("sha256") == hashlib.sha256(b"optf-secret-out\n").hexdigest()
+                  and (res.get("stderr") or {}).get("bytes") == len("optf-secret-err\n"), res)
+            check("script, arguments and output text are redacted", "optf-secret" not in raw)
+            v = mcomp(alog, "actions", "verify", os.path.relpath(new[0], os.path.join(s["logs"], "actions")))
+            check("metacomputer actions verify: OK", v.returncode == 0 and v.stdout.startswith("OK "), v.stdout + v.stderr)
+        before = action_logs(s["logs"])
+        sh(variant("slogkeep", "ACTION_LOG=on", "ACTION_LOG_TEXT=keep"), "--override", "-c", body, "--", "optf-secret-arg")
+        new = sorted(action_logs(s["logs"]) - before)
+        raw = open(new[0]).read() if new else ""
+        check("ACTION_LOG_TEXT=keep keeps the script, arguments and output", all(
+            m in raw for m in ("echo optf-secret-out;", "optf-secret-arg", "optf-secret-out\\n", "optf-secret-err\\n")))
+    finally:
+        if other:
+            other.kill()
+            other.wait()
+        if claim and os.path.exists(claim):
+            os.remove(claim)
+        sh(BASE, "--override", "-c", f"pkill -x mousepad; pkill -f 'sleep 6[1-4].5'; rm -f {marker} /tmp/mcomp-optf-mousepad.log; true")
+
+
 def main(argv):
-    which = [a.upper() for a in argv] or ["A", "B", "C"]
+    which = [a.upper() for a in argv] or ["A", "B", "C", "F"]
     try:
         for k in which:
-            {"A": test_a, "B": test_b, "C": test_c}[k]()
+            {"A": test_a, "B": test_b, "C": test_c, "F": test_f}[k]()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} checks passed")

@@ -175,7 +175,8 @@ export_options() {
          MCOMP_ACTION_LOG_KEY="${ACTION_LOG_KEY:-$SSH_DIR/action-log}" MCOMP_SSH_DIR="$SSH_DIR" MCOMP_VM_NAME="$VM_NAME" \
          MCOMP_SSH_AUTH="$SSH_AUTH" MCOMP_SSH_CERT_TTL="$SSH_CERT_TTL" MCOMP_DRIVER_MODE="$DRIVER_MODE" MCOMP_DRIVER_PROFILE="$DRIVER_PROFILE" \
          MCOMP_DRIVER_MANIFEST="$DRIVER_MANIFEST" MCOMP_DRIVER_ORIGINS="$DRIVER_ORIGINS" MCOMP_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
-         MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER"
+         MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
+         MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}"
 }
 
 # --- SSH_AUTH=cert: a fresh key and a short-lived certificate per connection ---
@@ -229,8 +230,14 @@ ssh_base() { # ROLE(admin|ops|mcp) -> prints nothing; sets SSH_ARGS array
       ids+=(-o IdentityFile="$CERT_KEY" -o CertificateFile="$CERT_KEY-cert.pub")
     fi
   fi
-  SSH_ARGS=(-o BatchMode=yes -o IdentitiesOnly=yes "${ids[@]}"
+  # The VM is untrusted. No ssh config file applies (-F /dev/null: no Host blocks from
+  # ~/.ssh/config or /etc/ssh, so no ProxyCommand, forwards or multiplexing from there),
+  # and nothing of the Mac's is forwarded to it: no agent, no X11, no ports, no tunnel.
+  SSH_ARGS=(-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes "${ids[@]}"
             -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null
+            -o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no
+            -o ClearAllForwardings=yes -o Tunnel=no -o ControlMaster=no -o ControlPath=none
+            -o PermitLocalCommand=no -o ProxyCommand=none
             -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR
             -p "$SSH_PORT" "$user@127.0.0.1")
 }

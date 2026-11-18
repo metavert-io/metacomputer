@@ -140,6 +140,41 @@ carried end to end by SSH; each MCP connection owns one driver runtime.
 Nothing on the Mac drives the Mac's own desktop: Cua Driver is not
 installed on macOS at all.
 
+## Shell channel
+
+`metacomputer sh` (`lib/vm_shell.py` on the Mac, `lib/vm_shell_guest.py` in
+the VM; [docs/shell.md](docs/shell.md)) runs a bash script as `cua` over the
+`ops` connection, the same path, key or certificate as `metacomputer ssh ops`.
+The remote command is a fixed bootstrap: the VM's half of the program, a JSON
+header and the script arrive on SSH's stdin, so nothing is quoted or run by a
+shell on the Mac. In the VM:
+- the script gets the desktop session's environment (`session.env`, plus the
+  accessibility variables from `/etc/X11/Xsession.d/90metacomputer-env`), so
+  apps it starts with `setsid -f` open on the desktop and the driver reads them;
+- it runs from a fixed path (`/tmp/mcsh.*/script`) in its own process group;
+  its stdout and stderr are pipes the VM's half reads as they come, hashing
+  all of each and keeping only the first and last `max_output / 2` bytes (no
+  disk, bounded memory);
+- after the script's own process ends, its output is read for 0.5 s more; a
+  program it left running that still holds the output is handed to a `cat`
+  that discards it;
+- one JSON line comes back: status, exit code, duration, and each stream's
+  size, SHA-256 and kept bytes;
+- a timeout, or stdin closing early (the Mac's side interrupted), ends the
+  process group from the same loop that reads the output: SIGTERM, then
+  SIGKILL after 3 s to whatever is left; the answer waits until the group is
+  gone.
+
+On the Mac, `VM_SHELL` (`auto` is off while `DRIVER_MODE=bounded`) is checked
+first; then, under the owners lock, the one-controller rule, and the run
+claims the computer in `.run/owners/` like an acting tool call (held by the
+caller's Claude Code process). With `ACTION_LOG=on` and `SHELL_LOG=auto` each
+run is its own signed action-log file with a `vm_shell` call, signed before
+anything runs, and its result. The VM is untrusted: the Mac reads each stream
+up to a fixed limit under one deadline, accepts only an answer that fits a
+strict schema, and escapes control characters before they reach a terminal
+([docs/shell.md](docs/shell.md#a-vm-that-misbehaves)).
+
 ## Observation and accessibility
 
 AT-SPI2 runs on the session bus; `toolkit-accessibility` is on (dconf system
@@ -154,7 +189,7 @@ windows through X11/EWMH (+ XRes for pids) and trees through AT-SPI.
 | Credential | Where | Grants |
 | --- | --- | --- |
 | `$SSH_DIR/mcp` (default `~/.ssh/metacomputer`) | host, 0600 | `cua@guest`, forced command = Cua Driver MCP only |
-| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) |
+| `$SSH_DIR/ops` | host, 0600 | `cua@guest` shell (no sudo, no forwarding) for status, recordings, artifact checks, `metacomputer inspect` (read-only snapshot piped from `lib/guest_inspect.py`) and the shell channel, `metacomputer sh` |
 | `$SSH_DIR/admin` | host, 0600 | `cuaadmin@guest`; after build `sudo` only `/usr/local/sbin/metacomputer-admin` (fixed verbs) |
 | `$SSH_DIR/hostkey` | host, 0600 | the guest's SSH host key, generated on the host and pinned in `known_hosts` (strict checking from the first connection) |
 | VNC password | `$SSH_DIR/vnc-pass` (0600), or your own secret store (`VNC_PASSWORD_STORE=command`); guest `~cua/.config/metacomputer/vnc-pass` 0600 | live view / takeover |
@@ -170,7 +205,11 @@ certificate from `$SSH_DIR/ca` per connection (`scripts/lib.sh` `cert_for`):
 `metacomputer-admin ssh-auth cert|key` switches it, and `start` and `security apply` call it.
 
 Guest accounts have locked passwords; SSH is key-only with `AllowUsers cua cuaadmin`.
-No macOS credentials are used anywhere.
+No macOS credentials are used anywhere. On the Mac, every connection to the VM
+(`scripts/lib.sh` `ssh_base`) runs with `-F /dev/null`, so no `~/.ssh/config`
+`Host` block applies, and with agent, X11, port and tunnel forwarding,
+connection sharing, local commands and proxies turned off
+(`tests/test_ssh_options.py`).
 
 ## Network
 
