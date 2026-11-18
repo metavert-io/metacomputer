@@ -45,7 +45,7 @@ that takes the `needs_you` family.
 | `events sink test NAME` | Send a test event to that sink now (ignoring its backoff) and say whether it was accepted. |
 | `events sink remove NAME [--yes]` | Remove the sink and its backlog. Only from your own terminal. |
 | `events tail [N] [--json]` | The newest events in the local log. |
-| `events emit FAMILY TYPE --message TEXT [--severity S] [--action TEXT] [--data JSON] [--field K=V ...] [--debounce S]` | Emit an event from a script (origin `cli`). The same event again within 60 s is dropped; `--debounce 0` turns that off. |
+| `events emit FAMILY TYPE --message TEXT [--severity S] [--action TEXT] [--data JSON] [--field K=V ...] [--debounce S]` | Emit an event from a script. Its origin is `script`, and the types only metacomputer's own code makes (below) are refused. The same event again within 60 s is dropped; `--debounce 0` turns that off. |
 | `events status [--json\|--line]` | Sinks, watcher, total backlog, failing sinks. |
 | `events drain [--now]` | Take the spool and retry every backlog (what the watcher does every 30 s); `--now` ignores the backoff. |
 | `events watcher start\|stop\|status` | The watcher by hand (`start` and `stop` do it for you). |
@@ -60,12 +60,26 @@ the value set:
 **Adding, replacing or removing a sink needs your own terminal.** These decide
 what leaves this Mac, so `events sink add` and `remove` refuse when standard
 input isn't a terminal (an agent's shell, a script, a pipe). At a terminal they
-ask first; `--yes` skips the question but still needs the terminal. Every such
-change is also announced as `security.sink_added` or `security.sink_removed`
-(with the URL masked) to the local log and to every sink that existed before the
-change, whatever their families, so a sink you rely on hears about it, even the
-one being removed. A program that runs as you can still fake a terminal (with
-`script`, for example); the announcement is what tells you.
+ask first; `--yes` skips the question but still needs the terminal.
+
+That is friction, not protection: a program that runs as you can fake a
+terminal (with `script`, for example) and answer the question, or edit
+`events.json` directly. What metacomputer offers against that is **detection**:
+- every change made through `events sink` is announced as `security.sink_added`
+  or `security.sink_removed` (with the URL masked) to the local log and to every
+  sink that existed before the change, whatever their families, the removed or
+  replaced one included, at its old address;
+- these announcements don't go through the sinks' backlogs: each is kept, with
+  a copy of each target sink as it was, and retried (with backoff, up to 20
+  times) until that sink has it, so a sink that's down, busy or being removed
+  still hears about it later. Each outcome is written to
+  `events-state/admin.log`, and `events status` shows the ones still pending;
+- an edit to `events.json` made any other way is noticed the next time anything
+  emits or the watcher runs (metacomputer keeps a hash and a copy of the last
+  configuration `events sink` wrote), and announced as
+  `security.sink_config_changed` (sinks added, removed or changed, masked) to the
+  sinks of that last known configuration. The edited configuration is used from
+  then on: detection, not prevention.
 
 ## Families and what they emit
 
@@ -76,21 +90,22 @@ one being removed. A program that runs as you can still fake a terminal (with
 | --- | --- | --- | --- | --- |
 | `needs_you` | `login`, `captcha`, `2fa`, `dialog`, `approval`, `other` | warn | Claude ran `metacomputer notify --why …` | `why`, `declared_by: claude`; the event's `action` says what to do |
 | `needs_you` | `in_use` | warn | Claude asked for the VM while another controller had it (the bridge refused the call); once per session per 5 min | the tool, the other controllers (project folder, idle time, last tool) |
-| `needs_you` | `refused` | warn | With `DRIVER_MODE=bounded`, Cua Driver refused the same tool twice within 5 min; then at most once per tool per 5 min. The message is fixed and names only the tool, since the driver's text comes from inside the VM | tool, count, `driver_said` (the driver's text, cleaned) |
+| `needs_you` | `refused` | warn | With `DRIVER_MODE=bounded`, Cua Driver refused the same tool twice within 5 min; then at most once per tool per 5 min. The message is fixed and names only the tool, since the driver's text comes from inside the VM | tool, count, `limit`: which kind of manifest limit (`app`, `path`, `site`, `tool` or `other`). None of the driver's text is sent. |
 | `needs_you` | `vault_locked` | warn | `metacomputer secrets fill` or `secrets session save\|load` exited 3: the vault isn't unlocked, or doesn't exist yet (an exit hook in `bin/metacomputer`; it takes effect where the secrets vault is installed). Not when you ran the command at your own terminal; at most once in 5 min. The vault may also send its own events through the spool | the action says to run `metacomputer secrets unlock` (or `secrets init`) |
 | `needs_you` | `approval_waiting` (and others) | warn | The secrets vault drops these into the spool | whatever the vault puts in `data` |
 | `task` | `finished` | info; error when nothing could be copied | `metacomputer task finish` | task, duration, videos (path, seconds), contact sheets, file and screenshot counts, the results folder |
 | `task` | `recording_stopped` | info | `metacomputer record stop` saved a recording | name, duration, path, description file, key-moment count, audio yes/no, mode, size |
-| `task` | `recording_failed` | error | `record stop` couldn't save it | name, mode; the message says why |
+| `task` | `recording_failed` | error | `record stop` couldn't save it. The message is fixed text written on the Mac | name, mode, and `detail`: what the VM's recorder said, cleaned and cut short |
 | `security` | `blocked_connections` | warn | New lines in the gateway's `netgw-blocked.jsonl`, batched: at most one event a minute. When the same destinations come back each time, the wait doubles (2, 4, 8 minutes, up to an hour); a different set starts over | count; per destination: host, port, protocol, reason, count, first and last time; `same_as_before`. Never payloads. |
-| `security` | `sink_added`, `sink_removed` | warn | `events sink add`, `--replace` or `remove`, sent to the sinks that existed before the change (outside the rate limit) | the sink's name, kind, masked URL, families, minimum severity, `replaced` |
+| `security` | `sink_added`, `sink_removed` | warn | `events sink add`, `--replace` or `remove`, sent to the sinks that existed before the change, kept until each has it (outside the limits) | the sink's name, kind, masked URL, families, minimum severity, `replaced` |
+| `security` | `sink_config_changed` | warn | `events.json` was changed other than through `events sink` (or can't be read any more); sent to the sinks of the last configuration `events sink` wrote, kept until each has it | `added`, `removed`, `changed` (name, kind, masked URL, families each), `readable` |
 | `security` | `chrome_input_refused` | warn | The bridge's Chrome guard refused `set_value` or `run_script` aimed at Chrome; once per session and tool per 5 min | tool (never the value) |
 | `security` | `actions_verify_failed` | error | `metacomputer actions verify` found a changed log | files that failed, how many were checked |
-| `security` | `untrusted_link` | warn | `web open-untrusted` found a password field, a download, or that the link ended on another site | summary, start and final origin (scheme, host, port only), password fields, download count and names, origins passed through |
+| `security` | `untrusted_link` | warn | `web open-untrusted` found a password field, a download, or that the link ended on another site. The message is fixed words; hosts only in data | summary, start and final origin (scheme, host, port only, and only hosts made of letters, digits, dots and dashes, or IP addresses), password fields, the number of downloads, origins passed through |
 | `lifecycle` | `started`, `stopped`, `reset`, `restored`, `checkpoint`, `baseline`, `build_done`, `build_failed` | info (build_failed: error) | those commands | checkpoint name, what it was restored from |
 | `lifecycle` | `controller_connected`, `controller_released` | info | A Claude Code session's first acting call; the session ending; `metacomputer release` | bridge and Claude Code process ids |
 | `lifecycle` | `health` | warn or error; info when it clears | The watcher's probe every 5 min, one event per change. A condition that comes back within 30 min of being announced stays quiet (and so does its recovery), so a flapping one doesn't ping you every probe. Only numbers from inside the VM reach the message: a doctor result that isn't a number reads `rc=unknown` | `condition`: `vm_off`, `gateway`, `ssh`, `not_ready`, `doctor`, `disk_low` (under 3 GB), `recording_failed`; `state`: `problem` or `ok` |
-| any | `suppressed` | info | The rate limit held events of that family back (below); sent before the next one that goes through, or by the watcher | how many, the limit |
+| any | `suppressed` | info | A limit held events back (below): the family's, sent before its next event that goes through; or a phone's, sent after the next one that reaches that phone; or by the watcher | how many, the limit, the phone sink if it was a phone's |
 | `lifecycle` | `test` | info | `events sink test` | |
 | `actions` | `start`, `call`, `result`, `refused`, `checkpoint`, `end`, `sign_failed` | info (refused, sign_failed: warn) | Each record of the signed action log as it's written (`ACTION_LOG=on`) | record type, sequence number, hash and previous hash, file name, tool, error or refused, time taken. Never arguments or typed text. |
 
@@ -126,7 +141,7 @@ Every sink gets the same event, in its own wrapping:
 | `seq` | A number per user on this Mac, increasing. Each sink receives events in this order. |
 | `time` | UTC, RFC 3339 with microseconds. |
 | `family`, `type`, `severity` | As in the table above; severity is `info`, `warn` or `error`. |
-| `origin` | Which code path made it, set by that code and never by the caller: `cli` (a metacomputer command, including `notify` and `events emit`), `bridge` (Claude Code's bridge or the action-log relay), `watcher`, or `spool` (another program). A forged `security.blocked_connections` from `events emit` says `cli`; the real one says `watcher`. |
+| `origin` | Which code path made it, set by that code and never by the caller: `cli` (a metacomputer command or its hooks, including `notify`), `bridge` (Claude Code's bridge or the action-log relay), `watcher`, `spool` (another program), or `script` (`metacomputer events emit`, which anything that can run a command can call). Types that only metacomputer's own code makes are refused from `events emit` and the spool: `suppressed` in any family, the `actions` family, `needs_you.in_use` and `refused`, `security.chrome_input_refused`, `blocked_connections`, `sink_added`, `sink_removed` and `sink_config_changed`, `lifecycle.controller_connected`, `controller_released`, `health` and `test`. |
 | `vm` | The VM's name (`VM_NAME`). |
 | `project` | The folder of the Claude Code session that caused it, when known (its working folder); else the command's current folder. In real events this is the full path. |
 | `message` | One line for a person. |
@@ -138,9 +153,9 @@ Every sink gets the same event, in its own wrapping:
 
 Before anything is logged or sent:
 - control characters, terminal escape sequences, bidirectional-text controls, zero-width and invisible characters (U+00AD, U+061C, U+200B-U+200F, U+2028-U+202E, U+2060-U+2064, U+2066-U+2069, U+FEFF, tag characters) are removed, and lone surrogates replaced, in every string;
-- links lose any `user:password@`, `;path=parameters`, the query and the fragment, everywhere: from `?` or `#` to the next space whatever the characters, also without a scheme (`site.example/a?token=x`), protocol-relative (`//host/a?x`) or `mailto:`-style, and the words right after a cut query when they look like more of it (contain `=` or `&`). `https://site.example/a?token=x` becomes `https://site.example/a`;
-- keys in `data` that look secret are dropped: password, passphrase, passcode, pwd, secret, token, cookie, header(s), credential, session, jwt, bearer, api key, private key, anything ending in `key` or `_code`, sig/signature, auth/authorization, and the exact keys text, value, values, script, typed, otp, totp, code, pin, vnc…;
-- these are replaced by `[redacted]` wherever they appear: any sink's header values, webhook signing keys, the secret-looking parts of sink URLs (ntfy topics, webhook paths, query values), and the live-view password: from `$SSH_DIR/vnc-pass`, or, when it lives in your own secret store, matched by a tag that metacomputer remembers when it installs the password (its length and the first 3 bytes of a keyed HMAC, too short to recover it from; a rare innocent match is redacted too);
+- links lose any `user:password@`, `;path=parameters`, the query and the fragment, everywhere: every link in a word (`a.example/,https://b.example/...`), from `?` or `#` to the next space whatever the characters, also without a scheme (`site.example/a?token=x`, `127.0.0.1/x#y`, `[::1]:8080/x?y`, `localhost/x?y`), protocol-relative (`//host/a?x`) or `mailto:`-style, credentials before any host (`alice:pw@host`), and the words right after a cut query when they look like more of it (contain `=` or `&`). A word with `%XX` escapes is decoded once first, so an encoded link is cleaned too. `https://site.example/a?token=x` becomes `https://site.example/a`;
+- keys in `data` that look secret are dropped. Key names are compared in one form first (invisible characters removed, camelCase split, `-`, `.` and spaces as `_`, lowercase), so `signingKey`, `access-key` and `API.Key` count: password, passphrase, passcode, pwd, secret, token, cookie, header(s), credential, session, jwt, bearer, api key, private key, anything ending in `key` or `_code`, sig/signature, auth/authorization, and the exact keys text, value, values, script, typed, otp, totp, code, pin, vnc…;
+- these are replaced by `[redacted]` wherever they appear: any sink's header values, webhook signing keys, the secret-looking parts of sink URLs (ntfy topics, webhook paths, query values), and the live-view password when it's kept in `$SSH_DIR/vnc-pass`. When it lives in your own secret store (`VNC_PASSWORD_STORE=command`), the event code never fetches it and keeps nothing derived from it, and no code path puts it into an event; but the VM itself knows it (it runs the live view), so a hostile VM could still slip it into a name it controls, such as a file name in a task's data;
 - sizes are capped: message 500 characters, action 300, each string in `data` 300, 50 keys or list items, 4 levels deep, `data` 4 KB (in bytes) in all.
 
 Typed text, passwords, tokens and page contents are never part of an event in
@@ -308,8 +323,11 @@ Messages use octet counting (RFC 5425 / RFC 6587), up to 100 per connection:
   32473 is the enterprise number reserved for documentation (RFC 5612).
 - MSG is the event as JSON, without a byte-order mark.
 - Best effort: syslog over TCP has no acknowledgement, so "delivered" means TLS
-  took every byte and the connection closed without an error. A server that
-  drops messages after that isn't noticed.
+  took every byte and the connection closed without a transport or TLS error.
+  A reset or a TLS alert while closing counts as a failure, and the batch is
+  retried (so the server may get it twice); a server that just closes, or never
+  sends its close_notify back, is fine. A server that drops messages after
+  taking them isn't noticed.
 
 rsyslog (8.2108 or later, OpenSSL driver) receiving it into a file of JSON lines:
 
@@ -340,7 +358,9 @@ to the server's root (`{"topic", "title", "message", "priority", "tags"}`):
 - priority: 5 (max) for `needs_you`, 4 for warn and error, 3 for info;
 - tags: one per family (raising_hand, white_check_mark, shield, computer, memo), plus warning or rotating_light.
 
-A `?auth=` query on the topic URL is kept. `https://` only, except to this
+Events that anything could have sent say so at the start of the message:
+`[sent from the command line]` (from `events emit`) or `[from another program]`
+(from the spool). A `?auth=` query on the topic URL is kept. `https://` only, except to this
 Mac's loopback. On ntfy.sh anyone who knows a
 topic can read it, so use a long random topic, or your own server or account
 with an access token (`--header-env 'Authorization=Bearer $NTFY_TOKEN'`).
@@ -366,15 +386,26 @@ every sink whose filters it passes.
   that emitted. `events sink list` and `events status` show each sink's
   backlog and last error; problems in the event code itself go to
   `events-state/errors.log`, also shown by `events status`.
-- **Rate limit.** At most 10 events per family per 10 minutes reach the sinks
-  (a token bucket for each family). Events beyond that are still written to the
-  local log, marked `rate_limited`, and the next event that goes through is
-  preceded by one `<family>.suppressed` summary saying how many were held back;
-  the watcher sends that summary on its own if nothing else comes. Exempt: the
-  opt-in `actions` family, `sink test`, and the sink-change announcements.
-  `events status` shows what's being held back.
+- **Rate limit per family.** At most 10 events of a family in any 10 minutes
+  reach the sinks: a strict sliding window, so there's no burst after a quiet
+  spell. Events beyond that are still written to the local log, marked
+  `rate_limited`, and the next event that goes through is preceded by one
+  `<family>.suppressed` summary saying how many were held back; the watcher sends
+  that summary on its own if nothing else comes. Only metacomputer's own code can
+  put an event outside this limit (`sink test`, the relay's `actions` events, the
+  summaries); `events emit` and spool files can't.
+- **Phones have their own cap.** Each ntfy sink gets at most 10 events in any 10
+  minutes and 30 in any hour, whatever the family, tests and summaries
+  included. What it holds back is summed up after the next event that reaches
+  that phone (or by the watcher). Sink-change announcements aren't capped: they
+  need a terminal or a change to the file, so they're rare.
+  `events status` shows what each limit is holding back.
 - **Duplicates.** `notify` doesn't send the same message again within 5 minutes,
   and `events emit` drops the same event within 60 s.
+- **Replacing or removing a sink** waits until nothing is sending its backlog
+  (one lock per sink name), then switches to a new generation of it. A sender
+  that still holds the old one sends nothing more to the old address; the old
+  backlog is dropped (`--replace` says how many).
 - **The rules are checked again when sending,** so a URL edited by hand into
   `events.json` that `sink add` would refuse (plain http off this Mac, a bad port)
   isn't used; the sink shows the error.
@@ -414,7 +445,9 @@ the stream without calling metacomputer: it writes one JSON file per event
 into the spool folder, `~/Library/Application Support/metacomputer/events/spool/`
 (0700; `MCOMP_EVENTS_SPOOL` overrides). Every emission and every watcher cycle
 takes those files, checks and cleans them, numbers them and delivers them like
-any other event, then deletes them. The contract is in
+any other event, then deletes them. Files that aren't valid events (bad JSON,
+too deep, too big, a reserved type) go to `spool/.quarantine/` (the newest 50
+are kept), and never hold up the rest. The contract is in
 [architecture.md](../architecture.md#event-spool).
 
 ## Where things live
@@ -422,7 +455,7 @@ any other event, then deletes them. The contract is in
 | What | Where |
 | --- | --- |
 | Sinks (kinds, URLs, headers, filters, signing keys) | `~/.config/metacomputer/events.json` (0600; folder 0700). `MCOMP_EVENTS_DIR` moves the whole folder. |
-| Sequence numbers, backlogs and their counters, delivery status, debounce marks, rate-limit buckets (`ratelimit.json`), redaction tags (`redact.json`), the watcher's place in the gateway log | `~/.config/metacomputer/events-state/` (0700, files 0600). If the counter file is lost, numbering continues after the highest number in the log, the backlogs and the sinks' delivery status. |
+| Sequence numbers, each sink's backlog, count and delivery status per generation (`sinks/NAME.GENERATION.*`, a new generation each time a sink is added or replaced) and its lock (`sinks/NAME.lock`), debounce marks, the limits (`ratelimit.json`, `phonelimit.json`), pending sink-change announcements (`admin/`) and their outcomes (`admin.log`), the last configuration `events sink` wrote (`config.sha256`, `config.good.json`), the watcher's place in the gateway log | `~/.config/metacomputer/events-state/` (0700, files 0600). The next number is always one more than the highest anywhere (the counter, the log, the backlogs, what the sinks have), so a lost or restored counter doesn't go back. |
 | The spool | `~/Library/Application Support/metacomputer/events/spool/` (`MCOMP_EVENTS_SPOOL`) |
 | The local log of every event (except `actions`) | `$LOG_DIR/events.jsonl` (0600; `logs/` in the checkout by default); kept to 10 MB plus one older file |
 | The watcher | `$RUN_DIR/events-watcher.pid`, `$LOG_DIR/events-watcher.log` |
@@ -442,7 +475,9 @@ configuration.
   secret, but the file itself is plain JSON. So give sinks low-scope,
   ingest-only tokens that can't read anything back, and use a relay or a local
   Collector to keep stronger credentials elsewhere.
-- **Sink changes need your terminal and are announced** (Commands, above).
+- **Sink changes need your terminal and are announced; hand edits are noticed and announced too**
+  (Commands, above). Against a program running as you this is detection, not
+  prevention.
 - **Claude doesn't add or change sinks.** Those commands need your terminal,
   so when you ask, the skill has Claude give you the exact command to run there,
   with `--header-env` when a token is involved, so the token never passes
@@ -476,7 +511,7 @@ For every class: `time` ← `time` (as epoch milliseconds), `metadata.uid` ←
 io.metavert.metacomputer.needs_you.{login,captcha,2fa,dialog,approval,other,in_use,refused,vault_locked,approval_waiting}
 io.metavert.metacomputer.task.{finished,recording_stopped,recording_failed}
 io.metavert.metacomputer.security.{blocked_connections,chrome_input_refused,actions_verify_failed,untrusted_link,
-                                   sink_added,sink_removed}
+                                   sink_added,sink_removed,sink_config_changed}
 io.metavert.metacomputer.<family>.suppressed   (the rate limit's summary, in any family)
 io.metavert.metacomputer.lifecycle.{started,stopped,reset,restored,checkpoint,baseline,build_done,build_failed,
                                     controller_connected,controller_released,health,test}

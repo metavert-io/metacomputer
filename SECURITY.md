@@ -112,21 +112,37 @@ other programs hand in through the spool. Text that comes from inside the VM
 (the driver's refusals, its health report) never goes into a message, only into
 `data`, cleaned.
 
-**Changing where events go:** `events sink add` and `remove` (and `--replace`)
-work only from a terminal and ask first, so an agent or a script without one
-can't add a sink that sends your events elsewhere, or remove yours. Every change
-is announced as `security.sink_added` or `sink_removed` to the local log and to
-every sink that existed before it, the removed one included.
+**Changing where events go: detection, not prevention.** Against a program
+that runs as you (an agent included), nothing in metacomputer can stop it from
+changing where your events go: it can fake a terminal, or edit
+`~/.config/metacomputer/events.json` directly. What metacomputer does:
+- `events sink add` and `remove` (and `--replace`) work only from a terminal and
+  ask first. That stops a program without one and slows down one that has to
+  fake it.
+- Every change made that way is announced as `security.sink_added` or
+  `sink_removed` to the local log and to every sink that existed before it, the
+  removed or replaced one included, at its old address. Each announcement is
+  kept and retried (up to 20 times, with backoff) until that sink has it, so a
+  sink that's down or being removed still hears about it.
+- An edit to `events.json` made any other way is noticed (metacomputer keeps a
+  hash and a copy of the last configuration it wrote) and announced as
+  `security.sink_config_changed` to the sinks of that last known configuration.
 
-**Noise limits:** at most 10 events per family per 10 minutes reach the sinks;
-the rest are in the local log and summed up in one `suppressed` event. Repeated
-blocked-connection reports slow down (up to once an hour), a flapping health
-condition is announced once per 30 minutes, and `notify` doesn't repeat itself
-within 5 minutes.
+**Noise limits:** at most 10 events per family in any 10 minutes reach the
+sinks (a strict sliding window); the rest are in the local log and summed up in
+one `suppressed` event. Each phone (ntfy) sink also gets at most 10 in any 10
+minutes and 30 in any hour, whatever the family, tests and summaries included.
+Only metacomputer's own code paths can put an event outside the family limit;
+`events emit` and spool files can't. Repeated blocked-connection reports slow
+down (up to once an hour), a flapping health condition is announced once per 30
+minutes, and `notify` doesn't repeat itself within 5 minutes.
 
 **Telling real events from made-up ones:** each event's `origin` (`cli`,
-`bridge`, `watcher`, `spool`) is set by the code path that made it. Anything that
-runs as you can call `metacomputer events emit`, but those events say `cli`.
+`bridge`, `watcher`, `spool`, `script`) is set by the code path that made it.
+Anything that runs as you can call `metacomputer events emit`, but those events
+say `script` (and on a phone start with "[sent from the command line]"), and the
+types only metacomputer's own code makes (the watcher's, the bridge's, sink
+changes, summaries) are refused there and in the spool.
 
 **Where it ends:**
 - The sink configuration (`~/.config/metacomputer/events.json`, 0600) is
@@ -136,7 +152,14 @@ runs as you can call `metacomputer events emit`, but those events say `cli`.
   header values.
 - The terminal check stops a program that has no terminal. One running as you
   can fake a terminal (`script`, for example), or edit the configuration file
-  directly; the announcement to your existing sinks is what tells you.
+  directly; the announcements to your existing sinks are what tell you. A
+  program that also edits the state folder (the known-good copy, the pending
+  announcements) can hide its tracks: detection only works against changes made
+  without that.
+- The live-view password is redacted when it's kept in a file. When it lives in
+  your own secret store, the event code never fetches it and keeps nothing
+  derived from it; but the VM knows it, so a hostile VM could slip it into a name
+  it controls.
 - Claude doesn't add or remove sinks: when you ask, it gives you the command to
   run in your own terminal, with `--header-env` when a token is involved.
 - Webhook signatures cover the body, not the time of sending: drop repeated

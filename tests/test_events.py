@@ -27,6 +27,7 @@ import re
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -83,11 +84,26 @@ def sink_remove(name, **kw):
 
 
 def refill():
-    """Fresh rate-limit buckets, so one section's events don't hold back the next one's."""
-    try:
-        os.remove(os.path.join(events.state_dir(), "ratelimit.json"))
-    except OSError:
-        pass
+    """Fresh rate-limit windows (families and phones), so one section's events don't hold back the next one's."""
+    for f in ("ratelimit.json", "phonelimit.json"):
+        try:
+            os.remove(os.path.join(events.state_dir(), f))
+        except OSError:
+            pass
+
+
+def stat_of(name):
+    """A sink's delivery status (its current generation)."""
+    return events.load_status(name, events.gen_of(events.load_config()["sinks"].get(name)))
+
+
+def age_window(fname, key, seconds):
+    """Move a sliding window's recorded times back, as if `seconds` had passed."""
+    path = os.path.join(events.state_dir(), fname)
+    w = json.load(open(path))
+    if key in w:
+        w[key]["times"] = [t - seconds for t in w[key].get("times") or []]
+    events.write_private(path, json.dumps(w))
 
 
 def wait_for(fn, timeout=8.0):
@@ -108,7 +124,7 @@ def local_log():
 
 
 # --- receivers -----------------------------------------------------------------------
-SINK_CHANGE = (b'sink_added', b'sink_removed')
+SINK_CHANGE = (b'sink_added', b'sink_removed', b'sink_config_changed')
 
 
 class HTTPRx:
@@ -173,10 +189,11 @@ def make_certs(d):
 
 
 class SyslogRx:
-    """RFC 5425: TLS, then octet-counted RFC 5424 messages."""
+    """RFC 5425: TLS, then octet-counted RFC 5424 messages. `mode` "ok" closes politely (close_notify back);
+    "reset" resets the connection once the client has finished sending."""
 
     def __init__(self, cert, key):
-        self.frames, self.changes = [], []
+        self.frames, self.changes, self.mode = [], [], "ok"
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(cert, key)
         self.sock = socket.socket()
@@ -206,6 +223,14 @@ class SyslogRx:
                 if not d:
                     break
                 buf += d
+            try:
+                if self.mode == "reset":
+                    t.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                else:
+                    t.settimeout(1)
+                    t.unwrap()
+            except (ssl.SSLError, OSError, ValueError):
+                pass
             try:
                 t.close()
             except OSError:
@@ -417,7 +442,8 @@ def main():
         sv = web.bodies()[base]["data"]
         check("spool events are cleaned too (secret keys, URL queries) and numbered",
               "secret" not in sv["data"] and sv["data"]["site"] == "https://bank.example/login" and isinstance(sv["seq"], int), sv)
-        check("every spool file is deleted, invalid and oversized ones included", os.listdir(sp) == [], os.listdir(sp))
+        check("every spool file is taken; invalid and oversized ones are quarantined",
+              os.listdir(sp) == [".quarantine"] and len(os.listdir(os.path.join(sp, ".quarantine"))) == 2, os.listdir(sp))
         check("rejected files are counted", events.read_json(os.path.join(events.state_dir(), "spool.json"), {}).get("rejected") == 2)
 
         print("backlog and retry")
@@ -454,7 +480,7 @@ def main():
         ev = events.emit("task", "finished", "with a sink that never answers")
         dt = time.time() - t0
         check("a sink that never answers costs at most about 3 s", ev and dt < 4.5, dt)
-        hs, ds = events.load_status("hole"), events.load_status("dead")
+        hs, ds = stat_of("hole"), stat_of("dead")
         check("timeouts and refused connections are recorded", hs["last_error"] == "timed out"
               and ds["last_error"] == "connection refused", (hs["last_error"], ds["last_error"]))
         t0 = time.time()
@@ -464,11 +490,12 @@ def main():
         check("sink test reports a failure", r.returncode == 1 and "connection refused" in r.stdout, r.stdout)
         r = cli("sink", "test", "web")
         check("sink test reports success", r.returncode == 0 and r.stdout.startswith("OK"), r.stdout + r.stderr)
+        hole_gen = events.gen_of(events.load_config()["sinks"]["hole"])
         for n in ("hole", "dead"):
             sink_remove(n)
         hole.close()
         check("sink remove deletes the sink and its backlog", "hole" not in events.load_config()["sinks"]
-              and not os.path.exists(events.sink_file("hole", "queue")))
+              and not os.path.exists(events.sink_file("hole", hole_gen, "queue")))
 
         print("order with several processes at once")
         refill()
@@ -615,11 +642,10 @@ def main():
         check("bounded mode: once a tool is refused again, one event per tool per 5 min, whatever the reason says",
               [(e["type"], e["data"]["tool"]) for e in new] == [("refused", "launch_app"), ("refused", "click")]
               and new[0]["data"]["count"] == 2, new)
-        check("the driver's text never reaches the message (fixed text, tool name only); a cleaned copy is in data",
-              new and "evil" not in new[0]["message"] and "PRIORITY" not in new[0]["message"]
+        check("none of the driver's text reaches the event: a fixed message with the tool's name, the kind of limit in data",
+              new and "evil" not in json.dumps(new[0]) and "PRIORITY" not in json.dumps(new[0])
               and new[0]["message"].startswith("Cua Driver's bounded mode keeps refusing launch_app")
-              and "k=v" not in new[0]["data"]["driver_said"] and "\u202e" not in new[0]["data"]["driver_said"],
-              new[:1])
+              and new[0]["data"]["limit"] in ("app", "path", "site", "tool", "other"), new[:1])
         n0 = len(local_log())
         b.claim("click")
         b.claim("click")
@@ -726,10 +752,8 @@ def main():
         check("M5 at most 10 'needs you' events per 10 min reach a sink; all 12 are in the local log, 2 marked",
               len(ntfy.reqs) - base == 10 and len(logged) == 12 and sum(1 for e in logged if e.get("rate_limited")) == 2,
               (len(ntfy.reqs) - base, len(logged)))
-        rlp = os.path.join(events.state_dir(), "ratelimit.json")
-        rl = json.load(open(rlp))
-        rl["needs_you"]["at"] -= 600
-        events.write_private(rlp, json.dumps(rl))
+        age_window("ratelimit.json", "needs_you", 601)
+        age_window("phonelimit.json", "phone", 601)
         events.emit("needs_you", "other", "after the window")
         tail2 = ntfy.bodies()[base + 10:]
         check("M5 then one summary of what was held back, before the next event",
@@ -738,9 +762,7 @@ def main():
         refill()
         for i in range(11):
             events.emit("security", "chrome_input_refused", f"burst {i}", deliver_now=False)
-        rl = json.load(open(rlp))
-        rl["security"]["at"] -= 600
-        events.write_private(rlp, json.dumps(rl))
+        age_window("ratelimit.json", "security", 601)
         base = len(web.reqs)
         cli("drain", "--now")
         types = [b["data"]["type"] for b in web.bodies()[base:]]
@@ -812,14 +834,15 @@ def main():
         check("L2 passcode, pwd, *key, sig, jwt, session, bearer, *_code are dropped; key_moments, design stay",
               set(ev["data"]) == {"key_moments", "design", "assign"}, ev["data"])
         hk = events.load_config()["sinks"]["web"]["hmac_key"]
-        subprocess.run([PY, EV, "_remember-redaction", "vnc"], input="Rmb3rM3xQ\n", text=True, env=os.environ.copy())
         events._known["at"] = 0
-        ev = events.emit("task", "finished", f"leak {hk} test-topic Rmb3rM3xQ end")
-        check("L3 a webhook signing key, an ntfy topic and a remembered value are redacted",
-              hk not in ev["message"] and "test-topic" not in ev["message"] and "Rmb3rM3xQ" not in ev["message"]
-              and ev["message"].count("[redacted]") == 3, ev["message"])
-        check("L3 the remembered value isn't stored, only its length and a 3-byte tag",
-              "Rmb3rM3xQ" not in open(os.path.join(events.state_dir(), "redact.json")).read())
+        ev = events.emit("task", "finished", f"leak {hk} test-topic end")
+        check("L3 a webhook signing key and an ntfy topic are redacted",
+              hk not in ev["message"] and "test-topic" not in ev["message"]
+              and ev["message"].count("[redacted]") == 2, ev["message"])
+        r = cli("_remember-redaction", "vnc")
+        check("R7 no stored tag of the live-view password: the command is gone and nothing like it is kept",
+              r.returncode == 2 and not os.path.exists(os.path.join(events.state_dir(), "redact.json"))
+              and not hasattr(events, "remember_redaction") and not hasattr(events, "redact_tagged"), r.stderr)
 
         # L4, L5: a lone surrogate in a spool file; invisible characters; tail and line separators
         sp = events.spool_dir()
@@ -835,10 +858,11 @@ def main():
         check("L5 line and paragraph separators, U+061C, U+2060-2064, soft hyphens and tag characters are removed",
               ev["message"] == "a b c d e f g", repr(ev["message"]))
         with open(os.path.join(ENV["MCOMP_LOG_DIR"], "events.jsonl"), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"seq": 987654, "time": "x", "family": "task", "type": "x", "vm": "v",
-                                 "message": "one two"}, ensure_ascii=False) + "\n")
+            fh.write(json.dumps({"seq": 0, "time": "x", "family": "task", "type": "x", "vm": "v",
+                                 "message": "tail-marker-one" + chr(0x2028) + "two"}, ensure_ascii=False) + "\n")
         out = cli("tail", "1").stdout
-        check("L5 tail splits on newlines only, so a raw U+2028 inside a value doesn't hide the event", "987654" in out, out)
+        check("L5 tail splits on newlines only, so a raw U+2028 inside a value doesn't hide the event",
+              "tail-marker-one" in out, out)
 
         # L6: odd gateway records; one failing step doesn't stop the cycle
         st = {}
@@ -872,12 +896,12 @@ def main():
         check("L7 sink list still works with a hand-edited bad port", r.returncode == 0 and "(unreadable URL)" in r.stdout,
               r.stdout + r.stderr)
         check("nit: a hand-edited plain-http URL off this Mac is refused when sending",
-              "isn't allowed" in (events.load_status("plainhttp")["last_error"] or "")
-              and "isn't allowed" in (events.load_status("handbad")["last_error"] or ""),
-              (events.load_status("plainhttp"), events.load_status("handbad")))
+              "isn't allowed" in (stat_of("plainhttp")["last_error"] or "")
+              and "isn't allowed" in (stat_of("handbad")["last_error"] or ""),
+              (stat_of("plainhttp"), stat_of("handbad")))
         events.write_private(events.config_path(), good_cfg)
-        events.remove_sink_files("handbad")
-        events.remove_sink_files("plainhttp")
+        events.remove_sink_files("handbad", "g0")
+        events.remove_sink_files("plainhttp", "g0")
 
         # L8: one watcher per VM; its pidfile is private
         p1 = subprocess.Popen([PY, EV, "watch"], env=os.environ.copy(), stdout=subprocess.DEVNULL,
@@ -902,19 +926,30 @@ def main():
 
         # L10: events a bridge queued but couldn't send before exiting are recorded
         import queue as queue_mod
-        old_q = events._async["q"]
-        events._async["q"] = queue_mod.Queue()          # no worker: as if it were stuck
-        events._async["q"].put((("lifecycle", "controller_released", "left over at exit"), {"origin": "bridge"}))
+        saved = dict(events._async)
+        events._async.update(q=queue_mod.Queue(), thread=object(), items=[])   # a worker that never runs
+        e_new = events.emit_async("lifecycle", "controller_released", "left over at exit")
+        e_taken = events.emit_async("lifecycle", "controller_released", "taken but not finished")
+        events._async["items"][1]["state"] = "taken"                        # as if the worker was in the middle of it
+        t0 = time.time()
         events.flush_async(0.2)
-        events._async["q"] = old_q
-        left = [e for e in local_log() if e.get("message") == "left over at exit"]
-        check("L10 when the wait runs out, what's left is recorded (and sent later)", left and left[0]["origin"] == "bridge", left)
+        events._async.clear()
+        events._async.update(saved)
+        left = {e.get("message"): e for e in local_log() if e.get("message") in ("left over at exit", "taken but not finished")}
+        check("L10/R10 at exit, events the worker hadn't started and one it started but didn't finish are recorded, ids kept",
+              set(left) == {"left over at exit", "taken but not finished"} and left["left over at exit"]["id"] == e_new["id"]
+              and left["taken but not finished"]["id"] == e_taken["id"] and left["left over at exit"]["origin"] == "bridge"
+              and time.time() - t0 < 5, left)
 
         # L12: a lost counter file doesn't restart numbering
         last = max(e["seq"] for e in local_log() if isinstance(e.get("seq"), int) and e["seq"] < 900000)
-        sent = max(events.load_status(n)["sent_seq"] for n in events.load_config()["sinks"])
+        sent = max(stat_of(n)["sent_seq"] for n in events.load_config()["sinks"])
         os.remove(os.path.join(events.state_dir(), "seq"))
         ev = events.emit("task", "finished", "after the counter was lost")
+        events.write_private(os.path.join(events.state_dir(), "seq"), "3")     # an old copy put back
+        ev2 = events.emit("task", "finished", "after an old counter came back")
+        check("R11 a restored (older) counter: numbering still continues after the highest number anywhere",
+              ev2["seq"] == ev["seq"] + 1, (ev["seq"], ev2["seq"]))
         check("L12 a lost seq file: numbering continues after what the log, backlogs and sinks have",
               ev["seq"] == max(last, sent) + 1, (ev["seq"], last, sent))
 
@@ -942,7 +977,8 @@ def main():
         # L15: origin, set by the code path
         refill()
         n0 = len(local_log())
-        cli("emit", "lifecycle", "o_cli", "--message", "from the CLI")
+        cli("emit", "lifecycle", "o_script", "--message", "from a script")
+        cli("_emit", "lifecycle", "o_cli", "--message", "from metacomputer's own hook")
         with open(os.path.join(sp, "20261117T130003.000000Z-o.json"), "w") as fh:
             json.dump({"family": "lifecycle", "type": "o_spool", "message": "from the spool", "origin": "bridge"}, fh)
         cli("drain")
@@ -950,9 +986,10 @@ def main():
         events.emit("lifecycle", "o_watcher", "from the watcher", origin="watcher")
         org = {e["type"]: e.get("origin") for e in local_log()[n0:]}
         check("L15 origin is set by the code path (a spool file can't claim another)",
-              org.get("o_cli") == "cli" and org.get("o_spool") == "spool" and org.get("o_bridge") == "bridge"
+              org.get("o_script") == "script" and org.get("o_cli") == "cli" and org.get("o_spool") == "spool"
+              and org.get("o_bridge") == "bridge"
               and org.get("o_watcher") == "watcher", org)
-        out = cli("tail", "4").stdout
+        out = cli("tail", "5").stdout
         lr = [lr for b in otlp.bodies() for rl_ in b["resourceLogs"] for sl in rl_["scopeLogs"] for lr in sl["logRecords"]][-1]
         check("L15 origin shows in tail, OTLP attributes and syslog structured data",
               " watcher " in out and any(a["key"] == "metacomputer.origin" for a in lr["attributes"])
@@ -979,7 +1016,7 @@ def main():
         got = [json.loads(lr["body"]["stringValue"])["seq"] for b in orx.bodies() for rl_ in b["resourceLogs"]
                for sl in rl_["scopeLogs"] for lr in sl["logRecords"]]
         check("nit: one refused event in an OTLP batch costs only itself (retried one by one, then dropped)",
-              got == [good1["seq"], good3["seq"]] and events.load_status("otlp2")["dropped"] == 1, got)
+              got == [good1["seq"], good3["seq"]] and stat_of("otlp2")["dropped"] == 1, got)
         sink_remove("otlp2")
         orx.close()
         ev = events.emit("task", "finished", "bytes", data={f"k{i}": "é" * 300 for i in range(12)})
@@ -988,13 +1025,249 @@ def main():
         sink_add("slow", "--kind", "webhook", "--url", slow.url(), "--families", "lifecycle")
         slow.mode = "503"
         for i in range(44):
-            events.emit("lifecycle", "slow_fill", f"fill {i}", only_sinks={"slow"}, deliver_now=(i == 0))
+            events.emit("lifecycle", "slow_fill", f"fill {i}", only_sinks={"slow"}, deliver_now=(i == 0), exempt=True)
         slow.mode, slow.delay = "ok", 0.25
         r = cli("sink", "test", "slow", timeout=120)
         check("nit: sink test waits for an earlier backlog that takes more than 10 s", r.returncode == 0
               and r.stdout.startswith("OK") and len(slow.reqs) == 45, (r.stdout, len(slow.reqs)))
         sink_remove("slow")
         slow.close()
+
+        print("second review's fixes")
+        refill()
+        # R1: reserved types can't be emitted from outside; strict windows; the phone cap
+        rs = [cli("emit", "needs_you", "suppressed", "--message", "x", "--debounce", "0"),
+              cli("emit", "security", "blocked_connections", "--message", "x"),
+              cli("emit", "security", "sink_added", "--message", "x"),
+              cli("emit", "security", "sink_config_changed", "--message", "x"),
+              cli("emit", "lifecycle", "test", "--message", "x"),
+              cli("emit", "actions", "call", "--message", "x"),
+              cli("_emit", "needs_you", "in_use", "--message", "x")]
+        check("R1 events emit (and the hooks' _emit) refuse reserved types: summaries, the watcher's, the bridge's, "
+              "sink changes, sink tests, actions", all(r.returncode == 2 and "reserved" in r.stderr for r in rs),
+              [r.stderr for r in rs])
+        rej0 = int(events.read_json(os.path.join(events.state_dir(), "spool.json"), {}).get("rejected", 0))
+        for i, obj in enumerate([{"family": "security", "type": "sink_added", "message": "forged"},
+                                 {"family": "needs_you", "type": "suppressed", "message": "forged"},
+                                 {"family": "actions", "type": "call", "message": "forged"}]):
+            with open(os.path.join(sp, f"20261117T140000.00000{i}Z-res.json"), "w") as fh:
+                json.dump(obj, fh)
+        cli("drain")
+        rej1 = int(events.read_json(os.path.join(events.state_dir(), "spool.json"), {}).get("rejected", 0))
+        check("R1 spool files can't claim reserved types either (quarantined)", rej1 - rej0 == 3
+              and not any(e.get("message") == "forged" for e in local_log()), (rej0, rej1))
+        wp = os.path.join(events.state_dir(), "test-window.json")
+        t = 2_000_000.0
+        r10 = [events._window(wp, "k", ((10, 600),), t + i, True)[0] for i in range(10)]
+        w11 = events._window(wp, "k", ((10, 600),), t + 10, True)[0]
+        w300 = events._window(wp, "k", ((10, 600),), t + 300, True)[0]
+        w601 = events._window(wp, "k", ((10, 600),), t + 601, True)[0]
+        check("R1 a strict sliding window: 10 in any 10 minutes, and no new burst after a pause",
+              all(r10) and not w11 and not w300 and w601, (r10, w11, w300, w601))
+        t = 3_000_000.0
+        hour = [events._window(wp, "h", events.PHONE_LIMITS, t + 601 * (i // 10) + (i % 10), True)[0] for i in range(31)]
+        check("R1 phones: also at most 30 in any hour", hour[:30] == [True] * 30 and hour[30] is False, hour[-3:])
+        refill()
+        prx = HTTPRx()
+        sink_add("phone2", "--kind", "ntfy", "--url", prx.url("/p2-topic"))
+        for i in range(6):
+            events.emit("lifecycle", "r1_phone", f"phone {i}")
+        for i in range(6):
+            events.emit("task", "r1_phone", f"phone task {i}")
+        r = cli("sink", "test", "phone2")
+        check("R1 a phone sink gets at most 10 in 10 minutes whatever the family, sink tests included",
+              len(prx.reqs) == 10 and r.returncode == 1 and "phone limit" in r.stdout, (len(prx.reqs), r.stdout))
+        age_window("phonelimit.json", "phone2", 3601)
+        events.emit("lifecycle", "r1_phone", "after the hour")
+        last2 = [b["message"] for b in prx.bodies()[-2:]]
+        check("R1 then the next event, and one summary of what the phone missed", len(prx.reqs) == 12
+              and last2[0] == "after the hour" and "3 more" in last2[1] and "phone2" in last2[1], last2)
+        sink_remove("phone2")
+        prx.close()
+        base = len(act.reqs)
+        for i in range(12):
+            events.emit("actions", "call", f"tool {i}", data={"tool": "click"}, origin="bridge", exempt=True)
+        check("R1 the relay's actions events (code path only) stay outside the family limit", len(act.reqs) - base == 12,
+              len(act.reqs) - base)
+
+        # R2: hand edits to events.json are noticed and announced
+        refill()
+        srx = HTTPRx()
+        bw = len(web.changes)
+        cfg = json.loads(open(events.config_path()).read())
+        cfg["sinks"]["sneaky"] = {"kind": "webhook", "url": srx.url("/exfil-path-segment"), "headers": [],
+                                  "hmac_key": hk, "families": ["all"], "min_severity": "info"}
+        open(events.config_path(), "w").write(json.dumps(cfg))           # not through `events sink`
+        events.emit("task", "finished", "after a hand edit")
+        ch = [json.loads(x)["data"] for _, _, x in web.changes[bw:]]
+        check("R2 a hand edit is announced (security.sink_config_changed, masked) to the sinks from before; not the new one",
+              ch and ch[-1]["type"] == "sink_config_changed" and ch[-1]["data"]["added"][0]["sink"] == "sneaky"
+              and "exfil-path-segment" not in json.dumps(ch[-1]) and not srx.changes, ch[-1:])
+        events.emit("task", "finished", "after that")
+        check("R2 once: the same edit isn't announced again; detection, not prevention (the edited sink is used)",
+              len(web.changes) == bw + 1 and srx.reqs, (len(web.changes) - bw, len(srx.reqs)))
+        cfg["sinks"].pop("sneaky")
+        open(events.config_path(), "w").write(json.dumps(cfg))
+        events.emit("task", "finished", "after undoing it")
+        ch = [json.loads(x)["data"] for _, _, x in web.changes[bw:]]
+        check("R2 taking it out by hand is announced too", ch[-1]["data"]["removed"][0]["sink"] == "sneaky", ch[-1:])
+        events.remove_sink_files("sneaky", "g0")
+        srx.close()
+
+        # R3: a sink-change announcement outlives the change
+        drx = HTTPRx()
+        sink_add("gone", "--kind", "webhook", "--url", drx.url("/g"), "--families", "lifecycle")
+        drx.mode = "503"
+        r = sink_remove("gone")
+        pend = events.admin_pending()
+        check("R3 removing a sink that's down: its announcement is kept, with the old destination",
+              r.returncode == 0 and any(p_["sink"] == "gone" and p_["type"] == "sink_removed" for p_ in pend)
+              and "gone" not in events.load_config()["sinks"], pend)
+        drx.mode = "ok"
+        cli("drain", "--now")
+        alog = open(os.path.join(events.state_dir(), "admin.log")).read()
+        check("R3 it's delivered once the sink is back; nothing is left pending; the outcome is logged",
+              [json.loads(x)["data"]["type"] for _, _, x in drx.changes] == ["sink_removed"]
+              and not any(p_["sink"] == "gone" for p_ in events.admin_pending()) and "delivered to gone" in alog,
+              alog[-300:])
+        drx.close()
+        dead2 = socket.socket()
+        dead2.bind(("127.0.0.1", 0))
+        dport = dead2.getsockname()[1]
+        dead2.close()
+        sink_add("dead2", "--kind", "otlp", "--url", f"http://127.0.0.1:{dport}", "--families", "lifecycle")
+        sink_remove("dead2")
+        for _ in range(events.ADMIN_MAX_ATTEMPTS):
+            events.flush_admin(force=True)
+        alog = open(os.path.join(events.state_dir(), "admin.log")).read()
+        check("R3 a destination that never answers is given up after its attempts, and that's logged",
+              not any(p_["sink"] == "dead2" for p_ in events.admin_pending()) and "gave up on dead2" in alog, alog[-300:])
+
+        # R4: sink generations; replacing waits for a sender
+        refill()
+        orx, nrx = HTTPRx(), HTTPRx()
+        sink_add("gtest", "--kind", "webhook", "--url", orx.url("/old"), "--families", "lifecycle")
+        old_def = events.load_config()["sinks"]["gtest"]
+        orx.mode = "503"
+        events.emit("lifecycle", "g_one", "queued for the old one")
+        lk = events.Lock(events.sink_lock("gtest"), 1)
+        lk.__enter__()                              # as if a sender were busy with gtest's backlog
+        m_, s_ = pty.openpty()
+        pr = subprocess.Popen([PY, EV, "sink", "add", "gtest", "--kind", "webhook", "--url", nrx.url("/new"),
+                               "--families", "lifecycle", "--replace", "--yes"], stdin=s_, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=os.environ.copy())
+        time.sleep(1.5)
+        waited = events.gen_of(events.load_config()["sinks"]["gtest"]) == events.gen_of(old_def)
+        lk.__exit__()
+        pr.wait(timeout=60)
+        os.close(s_)
+        os.close(m_)
+        new_def = events.load_config()["sinks"]["gtest"]
+        check("R4 replacing a sink waits while a sender holds its lock, then makes a new generation",
+              waited and pr.returncode == 0 and events.gen_of(new_def) != events.gen_of(old_def), pr.returncode)
+        orx.mode = "ok"
+        st_old = events.flush_sink("gtest", old_def, force=True)
+        check("R4 a sender holding the retired generation sends nothing to the old URL; the old files are gone",
+              st_old is None and not orx.reqs and not os.path.exists(events.sink_file("gtest", events.gen_of(old_def), "queue"))
+              and os.path.exists(events.sink_lock("gtest")), (st_old, len(orx.reqs)))
+        events.emit("lifecycle", "g_two", "for the new one")
+        check("R4 the new generation gets new events at the new URL", [b["data"]["type"] for b in nrx.bodies()] == ["g_two"],
+              [b["data"]["type"] for b in nrx.bodies()])
+        sink_remove("gtest")
+        orx.close()
+        nrx.close()
+
+        # R5: text from inside the VM stays out of messages
+        src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+        fn = re.search(r"^      rec_fail\(\) \{.*?^      \}$", src, re.M | re.S).group(0)
+        n0 = len(local_log())
+        cfgf = os.path.join(TD, "test.env")
+        with open(cfgf, "w") as fh:
+            fh.write(f'VM_NAME=testvm\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{ENV["MCOMP_LOG_DIR"]}"\n'
+                     f'SSH_DIR="{ENV["MCOMP_SSH_DIR"]}"\n')
+        guest_said = "CALL +1 555 0100 now https://evil.example/x?token=abc"
+        rr = subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; die() {{ exit 1; }}; name=demo; mode=guest; '
+                             f'state=/nonexistent/x\n{fn}\nrec_fail "the VM\'s recorder didn\'t hand over a video" '
+                             '"the VM\'s recorder said: $1" "$1"', "x", guest_said],
+                            capture_output=True, text=True, env=dict(os.environ, MCOMP_CONFIG=cfgf), timeout=60,
+                            stdin=subprocess.DEVNULL)
+        new = [e for e in local_log()[n0:] if e["type"] == "recording_failed"]
+        check("R5 a failed recording: a fixed message; what the VM said only as cleaned data",
+              new and new[0]["message"] == "Recording 'demo' failed: the VM's recorder didn't hand over a video"
+              and "CALL" in new[0]["data"].get("detail", "") and "token=abc" not in json.dumps(new[0]), (rr.stderr, new))
+        f5 = untrusted_findings("https://start.example/", [], [{"tabs": [("https://call-555-now.evil.example/x", "t")],
+                                                                  "password_fields": 1}],
+                                "http://we ird.example/", 1, ["https://a.example/"], ["invoice.pdf.exe"])
+        check("R5 open-untrusted: the summary is fixed words, odd hosts aren't origins, download names aren't sent",
+              f5 and "example" not in f5["summary"] and "download_names" not in f5
+              and f5["final_origin"] is None and "invoice" not in json.dumps(f5), f5)
+        st5 = {}
+        events.add_blocked(st5, [{"dst": "evil-text.example:80", "reason": "say: call now!", "proto": "tcp"}])
+        b5 = events.blocked_event(st5, "testvm", now=time.time() + 10**6)
+        check("R5 a blocked destination that isn't an address, or an odd reason, stays out of the message",
+              "evil-text" not in b5["message"] and "call now" not in b5["message"] and "a destination" in b5["message"],
+              b5["message"])
+
+        # R6: more link shapes
+        cases6 = {"https://safe.example/,https://alice:SECRET@other.example/ x": "https://safe.example/,https://other.example/ x",
+                  "go 127.0.0.1/reset#SECRET now": "go 127.0.0.1/reset now",
+                  "go localhost/reset?SECRET now": "go localhost/reset now",
+                  "go [::1]:8080/x?SECRET now": "go [::1]:8080/x now",
+                  "alice:SECRET@other.example/x": "other.example/x",
+                  "url=alice:SECRET@h.example/p": "url=h.example/p",
+                  "see https%3A%2F%2Falice%3ASECRET%40h.example%2Fp%3Ftoken%3DSECRET2 end": "see https://h.example/p end",
+                  "mailto:bob@y.example": "mailto:bob@y.example"}
+        wrong = {c: events.clean_str(c, 500) for c in cases6 if events.clean_str(c, 500) != cases6[c]}
+        check("R6 every link in a word; bare IPv4, [IPv6] and localhost; credentials anywhere; encoded links",
+              not wrong, wrong)
+
+        # R8: key names in any style
+        ev = events.emit("task", "finished", "keys2", data={"signingKey": 1, "access-key": 2, "pa" + chr(0x200B) + "ssword": 3,
+                                                             "API.Key": 4, "x-auth-token": 5, "Session-ID": 6, "keyMoments": 7})
+        check("R8 camelCase, hyphenated, dotted and invisible-character key names are recognised",
+              set(ev["data"]) == {"keyMoments"}, ev["data"])
+
+        # R9: a spool file that can't be parsed (too deep) doesn't block the spool; folders don't count
+        for i in range(510):
+            os.mkdir(os.path.join(sp, f"0000{i:04d}.json"))
+        with open(os.path.join(sp, "0001-deep.json"), "w") as fh:
+            fh.write("[" * 30000 + "]" * 30000)
+        with open(os.path.join(sp, "0002-valid.json"), "w") as fh:
+            json.dump({"family": "lifecycle", "type": "r9_test", "message": "after the deep one"}, fh)
+        cli("drain")
+        check("R9 a RecursionError is caught and the file quarantined; 510 folders don't use up the 500",
+              any(e["type"] == "r9_test" for e in local_log()) and "0001-deep.json" in os.listdir(os.path.join(sp, ".quarantine"))
+              and not os.path.exists(os.path.join(sp, "0001-deep.json")))
+        for i in range(510):
+            os.rmdir(os.path.join(sp, f"0000{i:04d}.json"))
+
+        # R12: provenance on the phone
+        refill()
+        base = len(ntfy.reqs)
+        cli("emit", "needs_you", "other", "--message", "scripted ping")
+        with open(os.path.join(sp, "20261117T150000.000000Z-r12.json"), "w") as fh:
+            json.dump({"family": "needs_you", "type": "r12_spool", "message": "spooled ping"}, fh)
+        cli("drain")
+        msgs = [b["message"] for b in ntfy.bodies()[base:]]
+        check("R12 on the phone, events anything could have sent say where they came from",
+              any(m_.startswith("[sent from the command line] scripted ping") for m_ in msgs)
+              and any(m_.startswith("[from another program] spooled ping") for m_ in msgs), msgs)
+
+        # R13: syslog counts a reset or a TLS error at close as a failure
+        if sysrx:
+            s2 = SyslogRx(certs[1], certs[2])
+            s2.mode = "reset"
+            sink_add("siem2", "--kind", "syslog", "--url", f"syslog+tls://localhost:{s2.port}", "--ca", certs[0],
+                     "--families", "lifecycle")
+            e13 = events.emit("lifecycle", "r13", "over syslog")
+            st13 = stat_of("siem2")
+            check("R13 syslog: a connection reset at close is a failure, kept and retried",
+                  st13["last_error"] and st13["sent_seq"] < e13["seq"], st13)
+            s2.mode = "ok"
+            cli("drain", "--now")
+            check("R13 once the server closes cleanly, it's delivered", stat_of("siem2")["sent_seq"] >= e13["seq"],
+                  stat_of("siem2"))
+            sink_remove("siem2")
 
         print("CLI and the bash helper")
         refill()

@@ -296,20 +296,31 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
   background thread so a tool call never waits. A sink in its backoff isn't
   tried at all.
 - **State.** `~/.config/metacomputer/events.json` (sinks, 0600) and
-  `events-state/` beside it: the sequence counter and a global lock, per sink
-  an append-only backlog file, a count of what was queued, its delivery status
-  and its own lock, debounce marks, the rate-limit buckets, redaction tags, and
-  the watcher's place in the gateway log. Events are appended to backlogs under
-  the global lock, in sequence order; one process at a time sends a sink's
-  backlog, under that sink's lock. `MCOMP_EVENTS_DIR` moves all of it.
+  `events-state/` beside it: the sequence counter and a global lock; per sink
+  and generation an append-only backlog file, a count of what was queued and
+  its delivery status; one lock per sink name; debounce marks; the family and
+  phone windows; pending sink-change announcements; the last configuration
+  `events sink` wrote; and the watcher's place in the gateway log. Events are
+  appended to backlogs under the global lock (which also re-reads the
+  configuration), in sequence order; one process at a time sends a sink's
+  backlog, under that sink's lock, after checking its generation is still the
+  current one. `MCOMP_EVENTS_DIR` moves all of it.
 - **Origin and limits.** Each event records the code path that made it
-  (`cli`, `bridge`, `watcher`, `spool`). A token bucket per family lets at most
-  10 events in 10 minutes reach the sinks; the rest are logged locally and
-  summed up in one `suppressed` event (the `actions` family, sink tests and
-  sink-change announcements are exempt).
-- **Sink changes.** `events sink add` and `remove` need a terminal on stdin and
-  announce the change (`security.sink_added`/`sink_removed`) to every sink that
-  existed before it.
+  (`cli`, `bridge`, `watcher`, `spool`, `script`); `events emit` and the spool
+  can't use the types only metacomputer's own code makes. A strict sliding
+  window per family lets at most 10 events in any 10 minutes reach the sinks;
+  the rest are logged locally and summed up in one `suppressed` event (only code
+  paths can exempt an event: sink tests, the relay's `actions`). Each phone
+  (ntfy) sink also has its own cap: 10 in any 10 minutes, 30 in any hour.
+- **Sink changes.** `events sink add` and `remove` need a terminal on stdin.
+  Replacing or removing a sink happens under its lock, so nothing is sending it
+  meanwhile, and makes a new generation (the retired one's files go). The change
+  is announced (`security.sink_added`/`sink_removed`) to every sink that existed
+  before it: the announcement is stored with a copy of each target as it was and
+  retried until delivered (or given up after 20 attempts), outside the backlogs.
+  A change to `events.json` made any other way is noticed against the hash of
+  the last configuration `events sink` wrote, and announced the same way
+  (`security.sink_config_changed`) to that configuration's sinks.
 - **The watcher.** `events.py watch`, started by `start` when a sink exists
   (pid in `$RUN_DIR/events-watcher.pid`). Every 30 s: the spool, due
   backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
@@ -357,14 +368,20 @@ such as the secrets vault ("approval waiting", "vault locked"):
 
   Other fields are ignored (an `origin` in the file too: these events always
   say `spool`). The event's time is the file's modification time.
+- **Reserved types:** a file can't use the types only metacomputer's own code
+  makes (`suppressed`, the `actions` family, the bridge's, the watcher's, sink
+  changes and tests; docs/events.md lists them).
 - **Taking them:** on every emission and every watcher cycle, under the
   global lock, oldest name first (up to 500 per pass, counted after skipping
-  temporary names). Spool events count toward their family's rate limit. A valid file is
+  temporary names, folders, links and files that aren't yours). Spool events
+  count toward their family's rate limit. A valid file is
   cleaned like any event (so a producer can't leak a URL query or a
   secret-looking key through it), numbered, logged, queued for each matching
-  sink, then deleted; delivery then follows the sinks' backlogs. An invalid or
-  oversized file, or one that can't be recorded, is deleted and counted
-  (`events status --json`, `spool_rejected`) without stopping the others.
+  sink, then deleted; delivery then follows the sinks' backlogs. An invalid
+  (any parse failure, too deep included), oversized or reserved file, or one
+  that can't be recorded, is moved to `spool/.quarantine/` (the newest 50 kept)
+  and counted (`events status --json`, `spool_rejected`) without stopping the
+  others.
 - **Guarantees:** at least once to each sink, in order with everything else.
   Files wait in the spool while nothing runs (no command, no watcher). With no
   sink configured, taken events reach only the local log.

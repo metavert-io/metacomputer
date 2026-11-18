@@ -31,7 +31,7 @@ Run it the moment you stop to wait for a person, every time:
   - In an unattended run, do the parts of the task that don't depend on the blocked step, or end the run with a clear report of where you stopped. If you check back, wait minutes between checks, not seconds.
   - Never work around the block: no other sign-in route, no CAPTCHA services, no clicking through a dialog you wouldn't accept.
 - **Once per block.** Don't send the same notify again while you wait (the same text within 5 minutes isn't sent anyway). Send a new one only when something changes, for example the sign-in worked and a 2FA prompt followed.
-- **Limits.** At most 10 events of a family reach the sinks per 10 minutes; the rest wait in the local log and are summed up later. Another reason to notify only when it matters.
+- **Limits.** At most 10 events of a family reach the sinks in any 10 minutes, and a phone gets at most 10 in any 10 minutes and 30 in an hour; the rest wait in the local log and are summed up later. Another reason to notify only when it matters.
 
 ## Sent automatically: don't duplicate
 
@@ -50,7 +50,7 @@ metacomputer sends these itself, so don't call `notify` for them:
 - **You can't change sinks, and must not try.** `events sink add` and `remove` decide what leaves the Mac, so they work only from the user's own terminal and refuse without one. Never get around that (no `script`, no pseudo-terminals, no editing `events.json`).
 - **When the user asks** (for example "send my events to ntfy" or "set up Datadog"):
   1. Give them the exact command to run in their own terminal, and say which families it sends.
-  2. Every change is announced to their existing sinks as `security.sink_added` or `sink_removed`, so tell them to expect that.
+  2. Every change is announced to their existing sinks as `security.sink_added` or `sink_removed` (and an edit to the file by any other means as `security.sink_config_changed`), so tell them to expect that.
   3. Afterwards you may run `metacomputer events sink test NAME` and report the result.
 - **Tokens:**
   - Never put a token from the chat into a command.
@@ -63,3 +63,4 @@ metacomputer sends these itself, so don't call `notify` for them:
   - Datadog, Splunk, CloudWatch, Cloud Logging, Loki or S3: `otlp`, to an OpenTelemetry Collector on the Mac;
   - a SIEM that takes syslog: `syslog`, over TLS.
 - **Hands off the files.** Never edit `~/.config/metacomputer/events.json` or its `events-state` folder. Never remove a sink to quiet things down unless the user asks.
+- **Don't fake metacomputer's own events.** `metacomputer events emit` is for the user's scripts. Its events are marked as sent from the command line, and it refuses the types metacomputer itself sends (blocked connections, health, sink changes and so on). Use `notify` when you're blocked; let the rest come from where it comes.

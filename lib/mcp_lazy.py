@@ -65,6 +65,9 @@ DROPPED_MSG = (
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
 BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
 REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
+# Which kind of manifest limit a refusal hit, from words in the driver's text (the text itself never leaves).
+REFUSAL_KINDS = (("app", ("app", "launch", "executable", "bundle")), ("path", ("path", "folder", "file", "director")),
+                 ("site", ("origin", "url", "site", "domain")), ("tool", ("tool",)))
 BOUNDED_END = (
     "metacomputer bridge: Cua Driver's bounded session has ended (DRIVER_MODE=bounded; DRIVER_EXPIRES / "
     "DRIVER_IDLE in the virtual computer's config). Tell the user; they can start a new one by reconnecting the "
@@ -165,11 +168,13 @@ class Bridge:
 
     def bounded_refused(self, tool, res):
         """Cua Driver refused a call in bounded mode. Once the same tool is refused again within 5 minutes, the
-        user may need to allow it. The driver's text comes from inside the VM, so it never goes into the
-        message (only the tool's name does); a cleaned copy goes in data. One event per tool per 5 minutes."""
+        user may need to allow it. The driver's text comes from inside the VM, so none of it goes into the
+        event: the message names only the tool, and data says only which kind of limit it hit. One event per
+        tool per 5 minutes."""
         tool = re.sub(r"[^A-Za-z0-9_.-]", "", str(tool))[:40] or "a tool"
         texts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
-        reason = " ".join(" ".join(t for t in texts if isinstance(t, str)).split())[:200]
+        reason = " ".join(t for t in texts if isinstance(t, str)).lower()
+        kind = next((k for k, words in REFUSAL_KINDS if any(w in reason for w in words)), "other")
         now = time.time()
         hist = [t for t in self.refusals.get(tool, []) if now - t < REPEAT_S] + [now]
         self.refusals[tool] = hist
@@ -178,7 +183,7 @@ class Bridge:
                        f"Cua Driver's bounded mode keeps refusing {tool} (outside the capability manifest)",
                        action="Allow it (another DRIVER_PROFILE, or your own DRIVER_MANIFEST), or tell Claude another "
                               "way to do the task",
-                       data={"tool": tool, "driver_said": reason, "count": len(hist)},
+                       data={"tool": tool, "limit": kind, "count": len(hist)},
                        debounce=f"bridge{self.pid}:{tool}")
 
     # --- transport ---------------------------------------------------------
@@ -544,9 +549,10 @@ class Bridge:
                 note = "metacomputer bridge: " + launch_note + ("; " + note if note else "")
             if err:
                 self.refuse(msg, err)
+                tool = re.sub(r"[^A-Za-z0-9_.-]", "", str(name))[:40] or "a tool"
                 self.event("security", "chrome_input_refused",
-                           f"The bridge refused {name} aimed at Chrome (background input there would block "
-                           "Chrome's keyboard)", data={"tool": name}, debounce=f"bridge{self.pid}:{name}")
+                           f"The bridge refused {tool} aimed at Chrome (background input there would block "
+                           "Chrome's keyboard)", data={"tool": tool}, debounce=f"bridge{self.pid}:{tool}")
                 return
             if note:
                 self.annotate[json.dumps(msg["id"])] = note

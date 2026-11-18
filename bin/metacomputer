@@ -512,9 +512,11 @@ do_record() {
       fi ;;
     stop)
       local name mode dir pid started fps quality ended path i=0 out
-      rec_fail() { # MESSAGE: tell the event stream, then stop with the message
-        emit_event task recording_failed error "Recording '$name' failed: $1" "metacomputer record status" "name=$name" "mode=$mode"
-        rm -f "$state"; die "$1"
+      rec_fail() { # WHY MESSAGE [DETAIL]: tell the event stream (a fixed reason; anything from the VM only
+                   # as a cleaned detail in its data), then stop with the message
+        emit_event task recording_failed error "Recording '$name' failed: $1" "metacomputer record status" \
+          "name=$name" "mode=$mode" ${3:+"detail=$3"}
+        rm -f "$state"; die "$2"
       }
       if [ ! -s "$state" ]; then
         # A recording started some other way (or before this version): stop it and copy it.
@@ -533,7 +535,7 @@ do_record() {
       if [ "$mode" = host ]; then
         while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing (see $dir/$name.stream.log)"
+        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing" "the stream saved nothing (see $dir/$name.stream.log)"
         # Same video, in an MP4 that players and editors open at once (no re-encoding).
         if ffmpeg -hide_banner -loglevel error -nostdin -y -i "$dir/$name.mkv" -c copy -movflags +faststart "$out" \
            && [ -n "$("$PY" "$LAB_ROOT/lib/recording.py" probe "$out" 2>/dev/null)" ]; then
@@ -541,11 +543,11 @@ do_record() {
           [ -s "$dir/$name.stream.log" ] || rm -f "$dir/$name.stream.log"
         else
           rm -f "$out"
-          rec_fail "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
+          rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
         fi
       else
-        case "$path" in */"$name.mp4") ;; *) rec_fail "the VM's recorder said: $path" ;; esac
-        gssh ops "cat '$path'" > "$out" || rec_fail "copy failed (the file stays in the VM: $path)"
+        case "$path" in */"$name.mp4") ;; *) rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $path" "$path" ;; esac
+        gssh ops "cat '$path'" > "$out" || rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (the file stays in the VM: $path)" "$path"
       fi
       rm -f "$state"
       record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode"
@@ -922,9 +924,6 @@ do_vnc_push() {
   [ -n "${VNC_PASSWORD:-}" ] || die "_vnc-push needs VNC_PASSWORD"
   printf '%s\n' "$VNC_PASSWORD" | gssh ops 'umask 077; mkdir -p ~/.config/metacomputer; cat > ~/.config/metacomputer/vnc-pass; pkill -x x11vnc; /opt/metacomputer/bin/session-run /opt/metacomputer/bin/session-init' \
     || die "could not install the VNC password"
-  # The event stream redacts it wherever it appears, also when it lives in your own secret store
-  # (VNC_PASSWORD_STORE=command): only its length and a 3-byte keyed tag are kept (docs/events.md).
-  printf '%s\n' "$VNC_PASSWORD" | ( export_options; "$PY" "$LAB_ROOT/lib/events.py" _remember-redaction vnc ) >/dev/null 2>&1 || true
   ok "live view enabled on 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))"
 }
 

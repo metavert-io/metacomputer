@@ -72,7 +72,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (122 checks, about 40 s). It keeps
+`python3 tests/test_events.py` needs no VM (148 checks, about a minute). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -92,10 +92,21 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
   - the driver's and the VM's text kept out of messages;
   - the rate limit and its summary; slower repeats of blocked connections; quiet health flapping; repeated `notify` and `emit`;
   - sink changes refused without a terminal, asked at one, and announced to the existing sinks (the removed one included);
-  - more secret-looking keys; signing keys, topics and remembered values redacted; lone surrogates and invisible characters;
+  - more secret-looking keys; signing keys and topics redacted; lone surrogates and invisible characters;
   - odd gateway records; a failing watcher step; ports out of range; one watcher per VM;
   - temporary spool names; events left at a bridge's exit; a lost sequence counter; debounce only after recording;
   - what `--replace` says; `origin`; an ntfy `?auth=`; a refused event inside an OTLP batch; the byte cap; `sink test` behind a slow backlog.
+- the second review's fixes:
+  - reserved types refused from `events emit`, the hooks' `_emit` and the spool; strict sliding windows; the phone cap per sink (10 in 10 minutes, 30 an hour, tests included) and its summary; the relay's `actions` outside the family limit;
+  - a hand edit to `events.json` announced once to the previous sinks, and its removal too;
+  - a sink-change announcement kept for a sink that's down, delivered later, and given up (and logged) for one that never answers;
+  - replacing a sink waits for a sender holding its lock; a sender with the retired generation sends nothing;
+  - fixed messages for failed recordings, blocked destinations that aren't addresses and `open-untrusted`;
+  - every link in a word, bare IPv4, `[IPv6]` and `localhost`, credentials anywhere, encoded links;
+  - camelCase, hyphenated and invisible-character key names; no stored tag of the live-view password;
+  - a spool file too deep to parse, and folders that don't use up the 500;
+  - events started but not finished at a bridge's exit; a restored counter;
+  - provenance on the phone; a syslog reset at close counted as a failure.
 
 Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
 

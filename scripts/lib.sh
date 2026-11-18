@@ -186,7 +186,7 @@ emit_event() { # FAMILY TYPE SEVERITY MESSAGE ACTION [KEY=VALUE ...] (ACTION may
   shift 5
   for kv in "$@"; do f+=(--field "$kv"); done
   ( export_options
-    "$PY" "$LAB_ROOT/lib/events.py" emit "$fam" "$typ" --severity "$sev" --message "$msg" \
+    "$PY" "$LAB_ROOT/lib/events.py" _emit "$fam" "$typ" --severity "$sev" --message "$msg" \
       ${act:+--action "$act"} ${f[@]+"${f[@]}"} --quiet ) >/dev/null 2>&1 || true
 }
 # EVENTS HOOK (secrets): `metacomputer secrets` exits 3 when the vault isn't unlocked (or
@@ -196,7 +196,7 @@ events_hook_secrets_exit() { # RC
   [ "${1:-0}" = 3 ] || return 0
   [ -t 0 ] && return 0
   ( export_options
-    "$PY" "$LAB_ROOT/lib/events.py" emit needs_you vault_locked --severity warn --debounce 300 --quiet \
+    "$PY" "$LAB_ROOT/lib/events.py" _emit needs_you vault_locked --severity warn --debounce 300 --quiet \
       --message "The secrets vault isn't unlocked (or doesn't exist yet), so Claude can't fill a login" \
       --action "In your own terminal: metacomputer secrets unlock (or secrets init, if there's no vault yet)" \
       --field exit=3 ) >/dev/null 2>&1 || true

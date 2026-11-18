@@ -436,13 +436,17 @@ def cmd_a11y(a):
     return run.finish(report, md)
 
 
+HOSTNAME_RE = re.compile(r"^(?:[A-Za-z0-9-]{1,63}\.)*[A-Za-z0-9-]{1,63}$|^[0-9A-Fa-f:.]{2,45}$")
+
+
 def origin(url):
-    """scheme://host[:port] of a URL: no path, query or credentials (what the event stream may carry)."""
+    """scheme://host[:port] of a URL: no path, query or credentials, and only a host made of letters, digits,
+    dots and dashes (or an IP address); anything else is None. This is what the event stream may carry."""
     if not isinstance(url, str):
         return None
     try:
         u = urlsplit(url or "")
-        if u.scheme not in ("http", "https") or not u.hostname:
+        if u.scheme not in ("http", "https") or not u.hostname or not HOSTNAME_RE.match(u.hostname):
             return None
         host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname
         return f"{u.scheme}://{host}" + (f":{u.port}" if u.port else "")
@@ -477,13 +481,13 @@ def untrusted_findings(start, chain, seen, final_url, password_fields, asked, do
         visited += [u for u, _ in st.get("tabs") or [] if isinstance(u, str) and u]
     final = final_url or (visited[-1] if visited else start)
     off_site = bool(origin(final)) and site(final) != site(start)
-    reasons = []
+    reasons = []                            # fixed words only: the hosts stay in the structured fields
     if password_fields or asked:
-        reasons.append("asked for a password" + (f" on {origin(asked[0])}" if asked and origin(asked[0]) else ""))
+        reasons.append("asked for a password")
     if downloads:
         reasons.append(f"started {len(downloads)} download(s)")
     if off_site:
-        reasons.append(f"ended on another site, {origin(final)}")
+        reasons.append("ended on another site")
     if not reasons:
         return None
     origins = []
@@ -493,7 +497,7 @@ def untrusted_findings(start, chain, seen, final_url, password_fields, asked, do
             origins.append(o)
     return {"summary": "; ".join(reasons), "start_origin": origin(start), "final_origin": origin(final),
             "password_fields": password_fields, "asked_for_password_on": sorted({origin(u) for u in asked if origin(u)}),
-            "downloads": len(downloads), "download_names": downloads[:5], "redirected_off_site": off_site,
+            "downloads": len(downloads), "redirected_off_site": off_site,
             "origins": origins[:10]}
 
 
@@ -556,7 +560,7 @@ def cmd_open_untrusted(a):
     if findings:
         try:   # the optional event stream (docs/events.md): origins and counts only, never full URLs
             import events
-            events.emit("security", "untrusted_link", f"Untrusted link on {findings['start_origin']}: {findings['summary']}",
+            events.emit("security", "untrusted_link", f"An untrusted link {findings['summary']}",
                         "warn", f"Don't open it on your Mac; the report is in {out['folder']}", findings,
                         project=events.caller_project())
         except Exception:

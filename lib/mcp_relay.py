@@ -55,7 +55,7 @@ def actions_listener():
     def listener(rec, path):
         e = events.action_record_event(rec, path)
         events.emit_async(e["family"], e["type"], e["message"], e["severity"], None, e["data"], project=cwd,
-                          origin="bridge")
+                          origin="bridge", exempt=True)      # every tool call: the family limit doesn't apply
     return listener
 
 
