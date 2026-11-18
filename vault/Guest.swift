@@ -259,9 +259,10 @@ final class GuestRunner {
         }
         let last = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
         guard let raw = parseJSONObject(Array(last.utf8)), raw["ok"] is Bool else {
-            // Once the VM has the value, nothing it writes is passed on (it could hold the value in any form).
-            let why = (stderr.isEmpty || valueString != nil) ? "exit \(r.status)" : oneLine(stderr, max: 200)
-            return ["ok": false, "status": "error", "reason": "the VM side failed (\(why))"]
+            // Nothing the VM wrote is passed on, not even its exit status: it knows every value it was ever given and
+            // could spell one in any of it, on this request or a later one (a check sends no value, but the VM still has
+            // the last one).
+            return ["ok": false, "status": "error", "reason": "the VM side failed (its own output isn't passed on)"]
         }
         // Never pass the value on, whatever came back: anything holding it, at any depth or length.
         if let v = valueString, !v.isEmpty, containsString(raw, v) {
@@ -275,31 +276,26 @@ final class GuestRunner {
         let ok = out["ok"] as? Bool ?? false
         out["status"] = ok ? "ok" : ((out["denied"] as? Bool ?? false) ? "denied" : "error")
         out["denied"] = nil
-        if let reason = out["reason"] as? String {
-            // With the value sent, the VM's words are replaced by this process's own (secret-fill's known reasons).
-            out["reason"] = valueString != nil ? fillReasonAfterValue(reason) : oneLine(reason)
-        }
-        if let v = valueString {
-            // Once the VM has the value, nothing it chose goes on, failed or not: the site only as one of the sites this
-            // request named (this process's own copy, else none: a VM could spell the value in a host name), the count
-            // of characters as this process counts the value, and the rest from the request itself.
-            let allowed = request["origins"] as? [String] ?? []
-            out["origin"] = (out["origin"] as? String).flatMap { o in allowed.first { $0 == o } }
-            out["chars"] = ok ? v.utf16.count : nil
-            out["mode"] = request["mode"] as? String
-            out["field"] = request["field"] as? String
-            out["profile"] = nil
-            // Every field is now either the request's, this process's, or one of a fixed few words: no text of the VM's.
-            if let r = out["route"] as? String, r != "element" && r != "keyboard" { out["route"] = nil }
-            out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
-        }
+        // Every answer, a check's as much as a fill's: the VM knows every value it was ever given, so nothing it chose
+        // goes on. Its reason becomes one of this process's own sentences; the site only as one of the sites this request
+        // named (this process's own copy, else none: a VM could spell a value in a host name); the count of characters
+        // as this process counts the value (a fill that worked); mode and field the request's; the route one of two words.
+        if let reason = out["reason"] as? String { out["reason"] = fillReason(reason) }
+        let allowed = request["origins"] as? [String] ?? []
+        out["origin"] = (out["origin"] as? String).flatMap { o in allowed.first { $0 == o } }
+        out["chars"] = (ok && valueString != nil) ? valueString!.utf16.count : nil
+        out["mode"] = request["mode"] as? String
+        out["field"] = request["field"] as? String
+        out["profile"] = nil
+        if let r = out["route"] as? String, r != "element" && r != "keyboard" { out["route"] = nil }
+        out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
         return out
     }
 }
 
-/// Why a fill that carried the value failed, in this process's words: the reasons secret-fill gives, matched by
-/// how they start, never copied, since the VM had the value and could put it in any form into its answer.
-func fillReasonAfterValue(_ guest: String) -> String {
+/// Why a fill or a check failed, in this process's words: the reasons secret-fill gives, matched by what they say,
+/// never copied, since the VM has every value it was ever given and could put one in any form into its answer.
+func fillReason(_ guest: String) -> String {
     let known: [(String, String)] = [
         ("the page changed during the fill", "the page changed during the fill; the value may have gone elsewhere (check the page)"),
         ("the focus moved while filling", "the focus moved while filling; the text may have gone to another field (check the page)"),
@@ -311,12 +307,28 @@ func fillReasonAfterValue(_ guest: String) -> String {
         ("the selector matches", "the selector doesn't match exactly one element"),
         ("no field is focused", "no field is focused in the page; click into the field first"),
         ("the focused field is read-only", "the focused field is read-only or disabled"),
+        ("the focused field is inside", "the focused field is inside a frame the fill can't look into"),
         ("the focused element is", "the focused element isn't the kind of field this fills"),
         ("tabs are open on the allowed sites", "several tabs are open on the allowed sites; close the others (a fill goes only to a tab that's alone on its site)"),
+        ("no chrome with browser process", "no Chrome with that browser process id has DevTools open"),
+        ("the field is inside too many nested frames", "the field is inside too many nested frames"),
+        ("the tab is on", "the tab isn't on one of the secret's sites; nothing was typed"),
+        ("the page changed after the check", "the page changed after the check; nothing was typed"),
+        ("the page changed before the fill", "the page changed before the fill; nothing was typed"),
+        ("the field lost the focus", "the field lost the focus before the fill; nothing was typed"),
+        ("the page refused", "the page refused a check (its own words aren't passed on)"),
+        ("bad profile name", "the VM refused the profile name"),
+        ("bad browser pid", "the VM refused the browser process id"),
+        ("bad request", "the VM refused the request's form"),
+        ("can't tell which user runs the desktop", "the VM can't tell which user runs the desktop; refusing"),
+        ("the tab has no page", "the tab has no page"),
+        ("ran out of time", "the VM side ran out of time"),
+        ("devtools", "Chrome's DevTools failed or refused a step (its own words aren't passed on)"),
+        ("result withheld", "result withheld (it contained the value)"),
     ]
     let g = guest.lowercased()
     for (prefix, text) in known where g.hasPrefix(prefix.lowercased()) || g.contains(prefix.lowercased()) { return text }
-    return "the VM reported that the fill didn't complete (its own words aren't passed on once it has the value); check the page and the focused field"
+    return "the VM reported that it didn't complete (its own words aren't passed on); check the page and the focused field"
 }
 
 

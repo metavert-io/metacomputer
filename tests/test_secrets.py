@@ -188,7 +188,22 @@ if rec["user"] == "mcfill":
     rec["stdin"] = raw.decode()
     req = json.loads(raw)
     rec["kind"] = "fill:" + req.get("mode", "?")
-    if req.get("value") and flag("slow-value-next"):
+    # A hostile VM keeps every password it's given and can spell the last one on any later request (remember-*-next).
+    mem = os.path.join(d, "remembered")
+    h = open(mem).read().strip() if os.path.exists(mem) else ""
+    if req.get("value") and req.get("field") == "password":
+        open(mem, "w").write(req["value"].encode().hex())
+    if flag("remember-reason-next"):
+        out = {{"ok": False, "denied": True, "mode": h, "field": h, "origin": "https://" + h + ".evil.example", "route": h,
+               "profile": h, "reason": "the focused element is " + h}}
+    elif flag("remember-devtools-next"):
+        # secret-fill's own form for a DevTools protocol error, with the message a fake DevTools endpoint chose
+        out = {{"ok": False, "denied": False, "reason": "Runtime.evaluate failed: " + h}}
+    elif flag("remember-stderr-next"):
+        log()
+        sys.stderr.write("secret-fill: " + h + "\n")
+        sys.exit(1)
+    elif req.get("value") and flag("slow-value-next"):
         # A step that takes a while in the VM (tests/test_vault_approvals.py, its requester going away meanwhile): it
         # says it started, and only if nobody ends it does it finish the fill and say so.
         import time
@@ -266,6 +281,14 @@ elif rec["user"] == "mcproxy":
     import time
     while True:
         time.sleep(60)
+elif flag("remember-session-next"):
+    # A sealed-session save or load (or a cookie check) that the VM answers with a remembered password on stderr, and an
+    # exit status no step uses.
+    rec["kind"] = "session:leak"
+    log()
+    mem = os.path.join(d, "remembered")
+    sys.stderr.write("tar: " + (open(mem).read().strip() if os.path.exists(mem) else "") + "\n")
+    sys.exit(9)
 elif flag("ops-refused-next"):
     # A VM on SSH certificates (SSH_AUTH=cert) refuses the static ops key.
     rec["kind"] = "ops:refused"
@@ -797,7 +820,8 @@ def run(td, procs):
     u2.send("s1\n")
     rc, out, _ = finish(proc)
     sealed = os.path.join(vdir, "sessions", "s1.sealed")
-    check("session save seals the profile after the name is typed", rc == 0 and json.loads(out).get("bytes") == len(archive)
+    check("session save seals the profile after the name is typed (its size, the VM's to choose, rounded up to whole MiB)",
+          rc == 0 and json.loads(out).get("bytes") == ((len(archive) + (1 << 20) - 1) >> 20) << 20
           and os.path.exists(sealed), out)
     blob = open(sealed, "rb").read() if os.path.exists(sealed) else b""
     check("the sealed file is encrypted", archive not in blob and b"dummy-cookie-jar" not in blob and (os.stat(sealed).st_mode & 0o777) == 0o600)
@@ -872,8 +896,8 @@ def run(td, procs):
     u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
     u2.send("s1\n")
     rc, out, err = finish(proc)
-    check("a VM that writes what it got to stderr and fails: its words reach neither the result nor the audit log",
-          rc == 4 and "SECRET-FROM-GUEST" not in out + err and "exit 7" in out
+    check("a VM that writes what it got to stderr and fails: its words, and its exit status, reach neither the result nor "
+          "the audit log", rc == 4 and "SECRET-FROM-GUEST" not in out + err and "isn't passed on" in out and "exit 7" not in out
           and "SECRET-FROM-GUEST" not in open(os.path.join(vdir, "audit.jsonl")).read(), out)
     proc = background("session", "load", "s1", "--vm", "testvm2")
     u2.expect("Load the sealed session s1, saved from VM testvm, into a different VM, testvm2")

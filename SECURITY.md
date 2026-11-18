@@ -899,15 +899,23 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
    `reason`, `profile` as strings or booleans, `chars` a number): anything else is
    dropped, a field of the wrong type makes it an error, and an answer holding the value
-   anywhere, at any depth, is withheld. Once the VM has the value, nothing it chose goes
-   on, whether the fill worked or not: its words are replaced by the vault's own, `origin`
-   is kept only as one of the sites the request named (the vault's own copy; otherwise
-   none, since a VM could spell the value in a host name), `chars` is the vault's own count
-   of the value (and only when it worked), `mode` and `field` are the request's, `route`
-   is `element`, `keyboard` or nothing, and the reason is one of the vault's own sentences.
-   No field of the VM's free text is left, and the audit record is built from that filtered
-   result, never from the raw answer. That holds for the result, the audit log, the
-   unified log, the sinks, `audit --json`, the unlock terminal and the events alike.
+   anywhere, at any depth, is withheld.
+
+   The VM knows every value it was ever given, so nothing it chose goes on, for any answer.
+   That covers a check that carries no value, a fill that worked and a fill that failed.
+   - Its words are replaced by the vault's own: the reason is one of the vault's own
+     sentences, picked by what the VM said.
+   - Its error output and exit status aren't passed on.
+   - `origin` is kept only as one of the sites the request named (the vault's own copy;
+     otherwise none, since a VM could spell a value in a host name).
+   - `chars` is the vault's own count of the value, and only when the fill worked.
+   - `mode` and `field` are the request's, and `route` is `element`, `keyboard` or nothing.
+
+   No field of the VM's free text is left, and the audit record is built from that
+   filtered result, never from the raw answer. That holds for the result, the audit log,
+   the unified log, the sinks, `audit --json`, the unlock terminal and the events alike.
+   What's left to a hostile VM is which of those few fixed outcomes it reports, a few bits
+   per request.
 
 **The fill account** is always present on VMs built with this version. Nothing else
 can use it, so it's safe to leave on:
@@ -935,8 +943,10 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
   unlock` answer covers only that load, and no unattended rule can cover it. Loading
   into a VM other than the one it was saved from names both.
 - When a save or load fails, the result and the audit log say why in the vault's own
-  words, from the VM's exit status: once the VM has the session it could write its
-  cookies into its error output, so that output is never passed on.
+  words, from the VM's exit status (one of a few known meanings; any other status isn't
+  shown). The VM knows every value it was ever given, so its error output is never
+  passed on. A saved session's size is the VM's to choose too, so it's kept, shown and
+  recorded rounded up to whole MiB.
 - Save and load refuse while a Chrome is using that profile. A load unpacks with
   Python's safe tar filter: no absolute paths, no `..`, no links leading outside, no
   special files.
@@ -1329,8 +1339,11 @@ it expires.
    - checks again, just before forwarding, that the token is still live (not revoked,
      not expired, the vault not locking) and the secret unchanged, and uses the value
      read then: a request that waited on delivery can't outlive its token;
-   - audits it: method, host, path without the query, status, bytes, token id and how
-     many copies were withheld. Never bodies or headers.
+   - audits it: the method (one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, else
+     `other`), host, status, bytes, token id, the secret's path prefix if it has one, and
+     how many copies were withheld. The request's own path and the name it asked for are
+     the VM's to choose, so they're never recorded: the name only once it's a stored api
+     secret's. Never bodies or headers.
 5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
    when the vault locks: the proxy and its SSH forwards stop. `tokens` lists the live
    ones (id, secret, VM, time left, requests, requester).
@@ -1428,7 +1441,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
-| `method`, `host`, `path`, `status`, `token_id`, `key_withheld` | a proxied API request (the path without its query) |
+| `method`, `host`, `path_within`, `status`, `token_id`, `key_withheld` | a proxied API request (never its path, which the VM chose; `path_within` is the secret's own prefix) |
 
 **What each check proves.** Claude Code runs as you, so it can edit any file of yours,
 this log included. What it can't reach is the vault's **audit key**: 32 random bytes

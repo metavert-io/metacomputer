@@ -1747,7 +1747,9 @@ final class UnlockServer {
         }
         do {
             try ensurePrivateDir(paths.sessions)
-            let bytes = archive.count
+            // The archive's size is the VM's to choose (a number it could spell something in): it's kept, shown and
+            // recorded only rounded up to whole MiB.
+            let bytes = sizeInWholeMiB(archive.count)
             let a = archive
             // Sealed and recorded under the vault's lock, with whatever session key is current then.
             try updateVault(paths, key) { p in
@@ -1890,7 +1892,7 @@ final class UnlockServer {
                 p.sessions[name]?.last_loaded = isoTime()
             }
         } catch { say("          (couldn't record the use in the vault)") }
-        return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": archive.count], who, approval: approval)
+        return finish("session_load", fields, ["ok": true, "status": "ok", "bytes": sizeInWholeMiB(archive.count)], who, approval: approval)
     }
 }
 
@@ -1905,6 +1907,9 @@ func browserBindingProblem(_ req: [String: Any], profile: String?, _ who: Reques
     return nil
 }
 
+/// A size the VM chose (a sealed session's archive), rounded up to whole MiB before it's kept, shown or recorded.
+func sizeInWholeMiB(_ n: Int) -> Int { ((max(0, n) + (1 << 20) - 1) >> 20) << 20 }
+
 /// Why a sealed-session save or load failed, from its exit status alone: the VM's stderr is never passed on,
 /// since after a load the VM holds the session's cookies and could write them there.
 func sessionFailure(_ status: Int32, profile: String, saving: Bool) -> String {
@@ -1913,7 +1918,7 @@ func sessionFailure(_ status: Int32, profile: String, saving: Bool) -> String {
     case 4: return "Chrome is using profile \(profile); end its browser session first"
     case 5: return "the VM refused to " + (saving ? "pack" : "unpack") + " it safely (a symbolic link, an entry outside the profile, a special file, or a cookie store it can't use)"
     case 6: return "the VM has no driver profile \(profile) with a cookie store yet: open it once in page-mode Chrome (browser_prepare, profile isolated_named \(profile)), end that session, then load again"
-    default: return "the VM couldn't " + (saving ? "save" : "load") + " it (exit \(status))"
+    default: return "the VM couldn't " + (saving ? "save" : "load") + " it (its own output isn't passed on)"
     }
 }
 
