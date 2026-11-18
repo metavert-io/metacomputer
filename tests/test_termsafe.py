@@ -125,9 +125,88 @@ def main():
     check("record moments: the description's words escaped", r.returncode == 0 and raw_controls(r.stdout) == []
           and "\\x1b]52" in r.stdout, (r.stdout, r.stderr))
     shutil.rmtree(td, ignore_errors=True)
+    stream_checks()
+    cli_checks()
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0
+
+
+def stream_checks():
+    # termsafe.py as a filter (the shell's way to show the VM's stderr): escaped, line by line, capped
+    data = ("ok line\n" + HOSTILE + "\n" + "z" * 5000 + "\n").encode() * 3
+    r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "termsafe.py"), "--max", "2000"], input=data,
+                       capture_output=True, timeout=30)
+    out = r.stdout.decode()
+    check("termsafe.py filter: escapes as it goes, and past --max says the rest was left out (and reads it all)",
+          r.returncode == 0 and raw_controls(out) == [] and "\\x1b]52" in out and "the rest was left out" in out
+          and len(out) < 4000, (r.returncode, len(out)))
+
+
+def on_pty(argv, env, timeout=60):
+    """Run argv with stdout and stderr on a terminal; everything it printed."""
+    import pty
+    m, s = pty.openpty()
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=s, stderr=s, env=env, close_fds=True)
+    os.close(s)
+    got = b""
+    while True:
+        try:
+            chunk = os.read(m, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        got += chunk
+    p.wait(timeout)
+    os.close(m)
+    return p.returncode, got.decode("utf-8", "replace")
+
+
+FAKE_SSH = r'''#!/bin/sh
+printf 'ssh says \033]52;c;SGk=\007\033[2J\n' >&2
+case "$*" in
+  *desktop-record*) printf 'recording stream:x \033]52;c;SGk=\007\033[2J\n' ;;
+  *python3*) cat >/dev/null; printf '{"note": "n\\u001b]52;c;SGk=\\u0007 \342\200\256"}\n' ;;
+  *input-reset*) printf '0\033[2J\n' ;;
+  *) exit 0 ;;
+esac
+'''
+
+
+def cli_checks():
+    # bin/metacomputer on a terminal: what the VM writes to SSH's stderr or stdout arrives escaped
+    td = tempfile.mkdtemp(prefix="mcomp-termsafe-cli-")
+    try:
+        bindir = os.path.join(td, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "ssh"), "w") as f:
+            f.write(FAKE_SSH)
+        with open(os.path.join(bindir, "lume"), "w") as f:
+            f.write("#!/bin/sh\ncase \"$1\" in get) echo '{\"status\": \"running\"}' ;; ls) echo '[]' ;; esac\n")
+        for n in ("ssh", "lume"):
+            os.chmod(os.path.join(bindir, n), 0o755)
+        cfg = os.path.join(td, "test.env")
+        with open(cfg, "w") as f:
+            f.write(f'VM_NAME=fake-termsafe-vm\nLUME="{bindir}/lume"\nSSH_DIR="{td}/ssh"\nSSH_PORT=1\n'
+                    f'RUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\nACTION_LOG=off\n')
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""), MCOMP_CONFIG=cfg,
+                   MCOMP_EVENTS_DIR=os.path.join(td, "events"))
+        cli = os.path.join(LAB, "bin", "metacomputer")
+        rc, out = on_pty([cli, "record", "status"], env)
+        check("record status on a terminal: the recorder's words and SSH's stderr are escaped",
+              rc == 0 and "\x1b]52" not in out and "\x1b[2J" not in out and out.count("\\x1b]52") >= 2, (rc, out[-300:]))
+        rc, out = on_pty([cli, "inspect", "--json"], env)
+        check("inspect --json on a terminal: the VM's JSON written again as ASCII-only JSON; stderr escaped",
+              rc == 0 and "\x1b" not in out and "‮" not in out and "\\u001b]52" in out and "\\u202e" in out
+              and "\\x1b]52" in out, (rc, out[-300:]))
+        rc, out = on_pty([cli, "input-reset"], env)
+        check("input-reset prints the VM's answer escaped on a terminal", "\x1b[2J" not in out and "\\x1b[2J" in out,
+              out[-200:])
+        r = subprocess.run([cli, "input-reset"], env=env, capture_output=True, text=True, timeout=60)
+        check("…and exactly in a pipe (the hub reads it)", r.stdout == "0\x1b[2J\n", repr(r.stdout))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
 
 
 if __name__ == "__main__":

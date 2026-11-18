@@ -29,3 +29,41 @@ def escape_for_terminal(text):
     if isinstance(text, (bytes, bytearray)):
         text = bytes(text).decode("utf-8", "backslashreplace")
     return UNSAFE.sub(_escaped, str(text))
+
+
+def filter_stream(src, dst, limit=1 << 20):
+    """Copy src to dst (binary files) escaped, line by line, as it arrives: the shell's way to put text from the
+    VM (an SSH command's stderr, a recorder's log) on a terminal. After `limit` bytes one line says the rest was
+    left out, and the rest is read and dropped, so the writer never blocks and nothing grows."""
+    sent = 0
+    cut = False
+    while True:
+        line = src.readline(65536)
+        if not line:
+            break
+        if cut:
+            continue
+        if sent + len(line) > limit:
+            dst.write(f"[metacomputer: more than {limit} bytes; the rest was left out]\n".encode())
+            dst.flush()
+            cut = True
+            continue
+        sent += len(line)
+        end = b"\n" if line.endswith(b"\n") else b""
+        dst.write(escape_for_terminal(line[:len(line) - len(end)]).encode() + end)
+        dst.flush()
+
+
+if __name__ == "__main__":
+    # ... | termsafe.py [--max BYTES]   (bin/metacomputer and scripts/lib.sh: the VM's stderr on a terminal)
+    import sys
+    lim = 1 << 20
+    if len(sys.argv) > 2 and sys.argv[1] == "--max":
+        try:
+            lim = int(sys.argv[2])
+        except ValueError:
+            pass
+    try:
+        filter_stream(sys.stdin.buffer, sys.stdout.buffer, lim)
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass

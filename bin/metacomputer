@@ -41,7 +41,7 @@
 #                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
 #   mcp-lazy                       on-demand MCP bridge (what Claude Code sessions use; through the hub)
 #   mcp                            the same as mcp-lazy; with MCOMP_DIRECT_BRIDGE=1 the hub's own SSH
-#                                  connection to the driver (the hub, the GUI tests, web)
+#                                  connection to the driver (the hub; the transport tests)
 #   build [--replace]              build the VM + baseline from scratch
 #   baseline [--yes]               re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
@@ -220,7 +220,10 @@ print(json.dumps({"vm": vm, "gateway": gw == "true", "ssh": ssh == "true",
 EOF
 }
 
-mcp_probe() { "$PY" "$LAB_ROOT/lib/mcp_client.py" --probe; }
+# Text the VM wrote, on its way to this terminal: escaped there (lib/termsafe.py), exact in a pipe or file.
+term_safe() { if [ -t 1 ]; then "$PY" "$LAB_ROOT/lib/termsafe.py"; else cat; fi; }
+esc_text() { printf '%s' "$1" | "$PY" "$LAB_ROOT/lib/termsafe.py"; }   # one value from the VM, for a message
+mcp_probe() { ( export_options; "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" probe ); }   # through the hub, like every client
 
 # --- the hub (lib/mcp_hub.py): one process per VM holds the connection to the driver -----
 hub_stop() { ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) || true; }
@@ -570,7 +573,7 @@ do_record() {
         done
         if ! gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$"; then
           kill "$pid" 2>/dev/null; sleep 1
-          cat "$dir/$name.stream.log" >&2 2>/dev/null; rm -f "$dir/$name.mkv"
+          "$PY" "$LAB_ROOT/lib/termsafe.py" < "$dir/$name.stream.log" >&2 2>/dev/null; rm -f "$dir/$name.mkv"
           die "could not start streaming the recording"
         fi
         printf 'name=%s\nmode=host\ndir=%s\npid=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
@@ -621,8 +624,8 @@ do_record() {
           rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
         fi
       else
-        case "$path" in */"$name.mp4") ;; *) rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $path" "$path" ;; esac
-        gssh ops "cat '$path'" > "$out" || rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (the file stays in the VM: $path)" "$path"
+        case "$path" in */"$name.mp4") ;; *) rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $(esc_text "$path")" "$path" ;; esac
+        gssh ops "cat '$path'" > "$out" || rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (the file stays in the VM: $(esc_text "$path"))" "$path"
       fi
       rm -f "$state"
       record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode"
@@ -632,7 +635,7 @@ do_record() {
       if [ -s "$state" ]; then
         echo "recording $(sed -n 's/^name=//p' "$state") ($(sed -n 's/^mode=//p' "$state"), to $(sed -n 's/^dir=//p' "$state"))"
       else
-        gssh ops /opt/metacomputer/bin/desktop-record status
+        gssh ops /opt/metacomputer/bin/desktop-record status | term_safe
       fi ;;
     moments)
       local f="${1:-}"; [ -n "$f" ] || die "usage: metacomputer record moments RECORDING.mp4|.json"
@@ -643,7 +646,9 @@ do_record() {
 
 do_record_pipe() { # NAME FPS QUALITY OUT.mkv [AUDIO] (internal: the detached half of RECORD_TO=host)
   ssh_base ops
-  exec ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" > "$4"
+  # The VM's stderr goes to the stream log escaped and capped (1 MB), so it can't fill the disk.
+  exec ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" > "$4" \
+    2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
 }
 
 do_recordings() {
@@ -704,7 +709,9 @@ do_inspect() { # [system|windows|processes|ports|files ...] [--minutes N] [--top
   local out
   out="$(gssh ops "python3 -I - ${args[*]+${args[*]}}" < "$LAB_ROOT/lib/guest_inspect.py")" \
     || die "inspect failed (is the guest up? metacomputer status)"
-  if [ "$json" = 1 ]; then printf '%s\n' "$out"; else printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render; fi
+  # Either way the VM's words reach this terminal written by the Mac: ASCII-only JSON, or the escaped summary.
+  if [ "$json" = 1 ]; then printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --json-out
+  else printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render; fi
 }
 
 browser_get() { # KEY DEFAULT: the value after config/defaults.env + config/local.env
@@ -763,7 +770,7 @@ do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download sa
 do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (Chrome's keyboard)
   need_running
   local n; n="$(gssh ops "/opt/metacomputer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
-  echo "$n"
+  printf '%s\n' "$n" | term_safe
 }
 
 do_desktop_restart() { # [--override]: log the desktop session out and back in (closes every app)
@@ -787,7 +794,7 @@ do_who() {
   if [ "${1:-}" = "--json" ]; then exec "$PY" "$LAB_ROOT/lib/owners.py" who --json; fi
   echo "virtual computer: $st"
   if [ "$st" = running ]; then
-    gssh ops 'pgrep -u "$(id -u)" -x ffmpeg >/dev/null && echo "recording: yes (a screen recording is running)" || echo "recording: no"' 2>/dev/null
+    gssh ops 'pgrep -u "$(id -u)" -x ffmpeg >/dev/null && echo "recording: yes (a screen recording is running)" || echo "recording: no"' 2>/dev/null | term_safe
   fi
   "$PY" "$LAB_ROOT/lib/owners.py" who
 }
@@ -1106,7 +1113,7 @@ case "$cmd" in
   reset)      do_reset "$@" ;;
   baseline)   do_baseline "$@" ;;
   test)       parse_flags "$@"; owners_check
-              exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
+              export_options; exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
   who)        do_who "$@" ;;
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
   events)     export_options
@@ -1126,7 +1133,7 @@ case "$cmd" in
   desktop-restart) do_desktop_restart "$@" ;;
   input-reset) do_input_reset "$@" ;;
   rename)     do_rename "$@" ;;
-  web)        exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
+  web)        export_options; exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
   release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;
   get)        do_get "$@" ;;
@@ -1143,8 +1150,8 @@ case "$cmd" in
   sh)         do_sh "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
-  mcp)        # With the hub on, an MCP client here gets the guarded bridge (through the hub); only the hub itself,
-              # the GUI tests and web (MCOMP_DIRECT_BRIDGE=1) get the raw connection to the driver.
+  mcp)        # With the hub on, an MCP client here gets the guarded bridge (through the hub); only the hub itself
+              # and the transport tests (MCOMP_DIRECT_BRIDGE=1) get the raw connection to the driver.
               if [ "${MCOMP_DIRECT_BRIDGE:-}" != 1 ] && [ "${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" = on ]; then
                 export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py"
               fi
@@ -1160,8 +1167,9 @@ case "$cmd" in
   security)   do_security "$@" ;;
   secrets)    do_secrets "$@"; exit $? ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
-  logs)       n="${1:-40}"; tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
-              gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null ;;
+  logs)       n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"
+              { tail -n "$n" "$LOG_DIR/lume-$VM_NAME.log" "$LOG_DIR/netgw.log" 2>/dev/null
+                gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null; } | term_safe ;;
   _vnc-install) do_vnc_install ;;
   _vnc-push)  do_vnc_push ;;
   help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
