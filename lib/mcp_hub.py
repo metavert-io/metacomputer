@@ -142,9 +142,10 @@ LIMIT_MSG = ("The call reached the virtual computer, but its answer was too comp
              "its outcome with a small read. Ask for less: a query or a smaller region instead of the whole tree, or "
              "read a file through `metacomputer sh`.").format(
                  wirelimits.MAX_JSON_NODES, wirelimits.MAX_JSON_DEPTH)
-# The id of an answer to one of the hub's own requests (forward: c<client>.<n>; ask_up: mcomp-hub-<n>), found in a
-# message too complex to parse, so that request is answered with LIMIT_MSG instead of waiting until it times out.
-ANSWER_ID_RE = re.compile(rb'"id"\s*:\s*"(c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12})"')
+# The ids the hub gives its own requests (forward: c<client>.<n>; ask_up: mcomp-hub-<n>). A message too complex to
+# parse answers the request its top-level "id" names (wirelimits.top_level_id), which then gets LIMIT_MSG instead of
+# waiting until it times out; ids anywhere else in it (a page's element ids, say) never count.
+HUB_ID_RE = re.compile(r"c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12}")
 BOUNDED_END_RE = re.compile(r"capability manifest (?:expired|idle)|idle lease", re.I)
 BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
 REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
@@ -1338,7 +1339,7 @@ class Hub:
                     msg = wirelimits.loads(line)       # too deep, too many values or not JSON: never a dead reader
                 except wirelimits.LimitError:
                     msg = None
-                    bad = "over the value or depth limit, no call of ours named"
+                    bad = "over the value or depth limit, with no call of ours as its top-level id"
                     if self._answer_refused(line, gen):
                         continue                       # too complex for the hub, and answered: not a broken driver
                 except ValueError:
@@ -1370,43 +1371,42 @@ class Hub:
             self._upstream_closed(proc, gen, why)
 
     def _answer_refused(self, line, gen):
-        """A message over the hub's content limits (wirelimits.LimitError) answers a request of this connection: that
-        request gets LIMIT_MSG now, instead of waiting until its client gives up. True when one was answered."""
-        answered = False
-        for m in ANSWER_ID_RE.finditer(line):
-            key = m.group(1).decode()
-            slot = self.internal.get(key)
-            if slot is not None and slot[3] == gen:
-                self.internal.pop(key, None)
-                if slot[0] is not None:
-                    slot[0].set()                    # ask_up: no answer (None)
-                elif slot[2] is not None:
-                    try:
-                        slot[2](None)
-                    except Exception:
-                        pass
-                answered = True
-                continue
+        """A message over the hub's content limits (wirelimits.LimitError) answers a request of this connection when
+        its top-level "id" (wirelimits.top_level_id: one linear pass, nested ids never count) is one of ours: that
+        request gets LIMIT_MSG now, instead of waiting until its client gives up. True when it was answered; else
+        (no such id, or an ambiguous one) the caller counts the message as unusable and no call is touched."""
+        key = wirelimits.top_level_id(line)
+        if not isinstance(key, str) or not HUB_ID_RE.fullmatch(key):
+            return False
+        slot = self.internal.get(key)
+        if slot is not None and slot[3] == gen:
+            self.internal.pop(key, None)
+            if slot[0] is not None:
+                slot[0].set()                        # ask_up: no answer (None)
+            elif slot[2] is not None:
+                try:
+                    slot[2](None)
+                except Exception:
+                    pass
+        else:
             with self.lease_lock:
                 pend = self.pending.get(key)
                 if pend is None or pend.get("gen") != gen:
-                    continue
+                    return False
                 self.pending.pop(key, None)
             self.layout_pending.pop(key, None)
             self._pend_finished(key, pend)
-            answered = True
-            if pend.get("orphan"):
-                continue
-            if pend.get("method") == "tools/call":
-                pend["client"].send({"jsonrpc": "2.0", "id": pend["id"], "result": {
-                    "content": [{"type": "text", "text": LIMIT_MSG}], "isError": True,
-                    "structuredContent": {"code": "answer_too_complex", "effect": "unknown"}}})
-            else:
-                pend["client"].send({"jsonrpc": "2.0", "id": pend["id"], "error": {"code": -32603, "message": LIMIT_MSG}})
-        if answered:
-            self.note("an answer from the driver was over the hub's limits (values or depth); its call got an error",
-                      kind="driver answer over limits")
-        return answered
+            if not pend.get("orphan"):
+                if pend.get("method") == "tools/call":
+                    pend["client"].send({"jsonrpc": "2.0", "id": pend["id"], "result": {
+                        "content": [{"type": "text", "text": LIMIT_MSG}], "isError": True,
+                        "structuredContent": {"code": "answer_too_complex", "effect": "unknown"}}})
+                else:
+                    pend["client"].send({"jsonrpc": "2.0", "id": pend["id"],
+                                         "error": {"code": -32603, "message": LIMIT_MSG}})
+        self.note("an answer from the driver was over the hub's limits (values or depth); its call got an error",
+                  kind="driver answer over limits")
+        return True
 
     def _bad_upstream_message(self, gen, why="unusable"):
         """One more unusable message from this driver connection (not JSON, the wrong shape, one the hub couldn't

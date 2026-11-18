@@ -37,8 +37,9 @@ CLIENT = "notifications/metacomputer/client"
 OURS = "notifications/metacomputer/"
 DROPPED = "the connection to the VM closed before this call finished"
 TOO_COMPLEX = "the VM's answer was over the hub's value or depth limit; the hub answered the call with an error"
-# The ids the hub gives its requests (mcp_hub.ANSWER_ID_RE), found in an answer too complex to parse.
-ANSWER_ID_RE = re.compile(rb'"id"\s*:\s*"(c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12})"')
+# The ids the hub gives its requests (mcp_hub.HUB_ID_RE): an answer too complex to parse is recorded for the request
+# its top-level "id" names (wirelimits.top_level_id), the one the hub answers; nested ids never count.
+HUB_ID_RE = re.compile(r"c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12}")
 
 
 def session_info():
@@ -120,12 +121,13 @@ def main(cmd):
                 try:
                     msg = wirelimits.loads(line)     # not JSON or nested too deeply: passed on unlogged (the hub skips it)
                 except wirelimits.LimitError:
-                    msg = None                       # too complex: the hub answers the call it names with an error,
-                    for m in ANSWER_ID_RE.finditer(line):            # and the log says so
+                    msg = None                       # too complex: the hub answers the call its top-level id names
+                    key = wirelimits.top_level_id(line)              # with an error, and the log says so
+                    if isinstance(key, str) and HUB_ID_RE.fullmatch(key):
                         with plock:
-                            tool = pending.pop(json.dumps(m.group(1).decode()), None)
+                            tool = pending.pop(json.dumps(key), None)
                         if tool:
-                            log.result(m.group(1).decode(), tool, {"error": {"message": TOO_COMPLEX}})
+                            log.result(key, tool, {"error": {"message": TOO_COMPLEX}})
                 except ValueError:
                     msg = None
                 if isinstance(msg, dict) and "method" not in msg and "id" in msg:

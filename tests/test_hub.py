@@ -2123,6 +2123,70 @@ def linear_scan_checks():
           (n, took))
 
 
+def answer_id_checks():
+    print("#36: an over-limit answer completes only the call its top-level id names")
+    clear_claims()
+    r = Running()
+    hb = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=4).connect()
+    box = {}
+    held = os.path.join(STATE, "held")
+    if os.path.exists(held):
+        os.remove(held)
+    th = threading.Thread(target=lambda: box.setdefault("b", hb.call("hold", {})), daemon=True)
+    th.start()
+    wait_until(lambda: os.path.exists(held), 5)
+    key = json.load(open(held))
+    ha = client(r)
+    res = ha.call("nestedid", {"size": 1_100_000})
+    still = key in r.hub.pending
+    check("an over-limit answer for one call with another pending call's id nested inside it completes only its own",
+          res.is_error and res.structured.get("code") == "answer_too_complex" and still, (res.text[:80], still))
+    log = mcp_hub.paths(r.env)["log"]
+    noted = lambda: open(log).read().count("with no call of ours as its top-level id")  # noqa: E731
+    bad0 = noted()
+    res = ha.call("nestedonly", {"size": 1_100_000})
+    still = key in r.hub.pending
+    check("…and one with no top-level id completes no call: it counts as an unusable message",
+          not res.is_error and still and noted() == bad0 + 1, (res.text[:80], still, bad0, noted()))
+    th.join(8)
+    b = box.get("b")
+    check("…while the held call is left to end normally (here its client's own timeout), not 'too complex'",
+          b is not None and b.is_error and "answer_too_complex" not in json.dumps(b.structured or {}), b and b.text[:80])
+    ha.close()
+    hb.close()
+    r.stop()
+    clear_claims()
+    # the action-log relay records a result only for the call the top-level id names, too
+    adir = os.path.join(TD, "actions-nested")
+    r = Running(MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=adir, MCOMP_ACTION_LOG_KEY=os.path.join(TD, "keys", "alog2"))
+    r.hub.spawn = lambda: subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_relay.py"), PY, FAKE, STATE],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           env=dict(r.env, MCOMP_ACTION_LOG="on"), start_new_session=True)
+    os.remove(held)
+    hb = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=2).connect()
+    threading.Thread(target=lambda: hb.call("hold", {}), daemon=True).start()
+    wait_until(lambda: os.path.exists(held), 5)
+    ha = client(r)
+    ha.call("nestedid", {"size": 1_100_000})
+    time.sleep(0.3)
+    import actionlog
+    files = actionlog.files(adir)
+    recs = [json.loads(x) for x in open(files[-1])] if files else []
+    results = {x.get("tool"): x for x in recs if x.get("type") == "result"}
+    check("…and the action-log relay records a result for that call only (the held one is still running)",
+          "nestedid" in results and "hold" not in results, sorted(results))
+    ha.close()
+    hb.close()
+    r.stop()
+    clear_claims()
+    ids = (wirelimits.top_level_id(b'{"jsonrpc":"2.0","id":"c1.2","result":{"rows":[{"id":"c2.2"}]}}'),
+           wirelimits.top_level_id(b'{"jsonrpc":"2.0","result":{"rows":[{"id":"c2.2"}]}}'),
+           wirelimits.top_level_id(b'{"id":"c1.2","id":"c2.2"}'), wirelimits.top_level_id(b'[{"id":"c1.2"}]'),
+           wirelimits.top_level_id(b'{"a":"\\"id\\":\\"c2.2\\"","id":"c1.3"}'))
+    check("top_level_id takes only the top-level object's id: never a nested one or one in a string, and not two",
+          ids == ("c1.2", None, None, None, "c1.3"), ids)
+
+
 def main():
     setup_driver()
     try:
@@ -2164,6 +2228,7 @@ def main():
         batch3_checks()
         notes_checks()
         linear_scan_checks()
+        answer_id_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)

@@ -85,6 +85,85 @@ def _nodes(data, limit=None):
     return 1 + sum(_structural(data, s, e) for in_str, s, e in _spans(data) if not in_str)
 
 
+_BRACKETS_B = re.compile(rb"[\[\]{}]")
+_BRACKETS_S = re.compile(r"[\[\]{}]")
+_INT_B = re.compile(rb"-?(?:0|[1-9][0-9]{0,17})(?=[ \t\r\n,}]|$)")
+_INT_S = re.compile(r"-?(?:0|[1-9][0-9]{0,17})(?=[ \t\r\n,}]|$)")
+
+
+def top_level_id(data, max_len=200):
+    """The "id" member of the top-level JSON object in data, found without parsing it (for a message too big to
+    parse, so the request it answers can be answered): a str (a plain string value: no escapes, at most max_len
+    characters) or an int. None when the text isn't one object, has no such member, has it twice, or its value is
+    anything else. Members of nested objects never count. One linear pass (_spans); nesting is followed by
+    counting brackets outside strings, exactly wherever the top level could close."""
+    b = isinstance(data, (bytes, bytearray))
+    ws, colon, comma, lbrace, opens, shuts = (b" \t\r\n", b":", b",", b"{", (b"[", b"{"), (b"]", b"}")) if b else \
+        (" \t\r\n", ":", ",", "{", ("[", "{"), ("]", "}"))
+    idkey, bs, q = (b"id", b"\\", b'"') if b else ("id", "\\", '"')
+    brackets, integer = (_BRACKETS_B, _INT_B) if b else (_BRACKETS_S, _INT_S)
+    found = []
+    depth, started, closed = 0, False, False
+    last = None              # the last character before this string outside strings ('{' or ',': a key may follow)
+    key = want_value = False
+    for in_str, s, e in _spans(data):
+        if closed:                                   # after the top-level object: nothing but whitespace
+            if in_str or data[s:e].strip(ws):
+                return None
+            continue
+        if in_str:
+            if not started or e - s < 2 or data[e - 1:e] != q:
+                return None
+            if want_value:
+                v = data[s + 1:e - 1]
+                if len(v) > max_len or bs in v:
+                    return None
+                found.append(v.decode("utf-8", "replace") if b else v)
+                want_value = False
+            else:
+                key = depth == 1 and last in (lbrace, comma) and data[s + 1:e - 1] == idkey
+            last = None
+            continue
+        seg = data[s:e]
+        if key:                                      # after the key "id": a colon, then its value
+            key = False
+            t = seg.lstrip(ws)
+            if not t.startswith(colon):
+                return None
+            rest = t[1:].lstrip(ws)
+            if not rest:
+                want_value = True                    # a string comes next
+            else:
+                m = integer.match(rest)
+                if not m:
+                    return None                      # an object, array, float or literal: no request of ours
+                found.append(int(m.group()))
+        elif want_value:
+            return None
+        if not started:
+            t = seg.lstrip(ws)
+            if t:
+                if t[:1] != lbrace:
+                    return None                      # not an object (an array, a batch, a scalar)
+                started = True
+        closes = seg.count(shuts[0]) + seg.count(shuts[1])
+        if closes and depth - closes <= 0:           # the top level may close in here: follow it bracket by bracket
+            for m in brackets.finditer(seg):
+                depth += 1 if m.group() in opens else -1
+                if depth < 0:
+                    return None
+                if depth == 0 and started:
+                    if seg[m.end():].strip(ws):
+                        return None
+                    closed = True
+                    break
+        else:
+            depth += seg.count(opens[0]) + seg.count(opens[1]) - closes
+        tail = seg.rstrip(ws)
+        last = tail[-1:] if tail else None
+    return found[0] if closed and len(found) == 1 else None
+
+
 def _children(o):
     return iter(o.values()) if isinstance(o, dict) else iter(o)
 
