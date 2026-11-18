@@ -759,26 +759,28 @@ class Hub:
             self.ask_up_async("tools/call", {"name": "end_session", "arguments": {"session": client.auto_session}},
                               lambda _m: None)
             self.recordings.pop(client.auto_session, None)
-        if client.holder == client.peer_pid:
-            leased = self.hand_over_claim(client, running)
-            if client.has_claim and not leased:
-                self.event(client, "lifecycle", "controller_released",
-                           f"The Claude Code session in {owners.short(client.cwd)} let go of the virtual computer",
-                           data={"bridge_pid": client.peer_pid, "claude_pid": client.claude})
+        # Every kind of client: calls still running keep the computer held (a lease). The client's own claim goes
+        # when it was held in the client's name; a one-shot `call` held by its Claude Code session or shell keeps it.
+        leased = self.hand_over_claim(client, running, drop_own=client.holder == client.peer_pid)
+        if client.holder == client.peer_pid and client.has_claim and not leased:
+            self.event(client, "lifecycle", "controller_released",
+                       f"The Claude Code session in {owners.short(client.cwd)} let go of the virtual computer",
+                       data={"bridge_pid": client.peer_pid, "claude_pid": client.claude})
         self.note(f"client {client.cid} detached ({client.close_reason or 'closed'})")
         if self.local and not self.active_clients():
             self.shutdown()
 
     # --- a claim outliving its client's calls ----------------------------------------------
-    def hand_over_claim(self, client, running):
-        """The client is gone. Its claim goes with it, unless acting calls it made are still running in the driver
-        (a script that timed out, a session that closed mid-call): then the hub holds the computer for them, in a
-        claim of its own (kind "lease"), until they finish or the driver connection ends, and at most the activity
-        window (owners.ACTIVE_S). The lease is written before the client's claim goes, both under the owners lock, so
-        no other controller can claim in between. True when a lease was taken."""
+    def hand_over_claim(self, client, running, drop_own=True):
+        """The client is gone. If acting calls it made are still running in the driver (a script that timed out, a
+        session that closed mid-call), the hub holds the computer for them in a claim of its own (kind "lease"),
+        kept fresh until they finish or the driver connection ends; past LEASE_MAX_S the hub ends the driver runtime
+        first and only then lets go (_lease_keeper). With drop_own, the client's own claim goes: after the lease is
+        written, under the owners lock, so no other controller can claim in between, and not at all if the lease
+        couldn't be written. True when a lease was taken."""
         with self.owner_lock:
             lease = None
-            with self.lease_lock:
+            with self.lease_lock:                    # the same lock as removing a pending request (on_upstream)
                 keys = set()
                 for key, _tool in running:
                     pend = self.pending.get(key)
@@ -788,11 +790,18 @@ class Hub:
                 if keys:
                     tools = sorted({str(t) for k, t in running if k in keys and t})
                     lease = {"keys": keys, "tool": ", ".join(tools)[:60] or "a call", "claude": client.claude,
-                             "cwd": client.cwd, "client_pid": client.peer_pid, "kind": client.kind}
+                             "cwd": client.cwd, "client_pid": client.peer_pid, "kind": client.kind,
+                             "t0": time.monotonic(), "written": False, "refreshed": 0.0,
+                             "drop_pid": client.peer_pid if drop_own and client.peer_pid != self.pid else None}
                     self.leases[client.cid] = lease
+
             def swap():
-                self._write_lease(lease)            # first, so there's no moment without a claim
-                if not lease or client.peer_pid != self.pid:   # (the same file when the hub runs in the client's process)
+                if lease:
+                    self._write_lease(lease)        # first, so there's no moment without a claim
+                    if lease["written"] and lease["drop_pid"]:
+                        owners.drop_claim(lease["drop_pid"])
+                        lease["drop_pid"] = None    # else kept, and dropped once a later write works
+                elif drop_own:
                     owners.drop_claim(client.peer_pid)
             try:
                 with owners.lock():
@@ -803,26 +812,82 @@ class Hub:
         if lease:
             self.note(f"client {client.cid} left {len(lease['keys'])} acting call(s) running ({lease['tool']}); "
                       "the hub holds the computer until they end")
+            self._start_lease_keeper()
         return bool(lease)
 
     def _write_lease(self, lease):
-        if not lease:
-            return
+        """Write (or refresh) the hub's lease claim. Caller holds the owners lock. Sets lease["written"]."""
         try:
             owners.write_claim(self.pid, lease["claude"], lease["cwd"] or os.getcwd(), lease["tool"], time.time(),
                                kind="lease", extra={"client_pid": lease["client_pid"], "via": lease["kind"]})
+            lease["written"], lease["refreshed"] = True, time.monotonic()
         except OSError as e:
-            self.note(f"could not write the lease: {e!r}")
+            lease["written"] = False             # the keeper tries again; a claim it would replace stays
+            self.note(f"could not write the lease: {e!r}", kind="lease write failed")
+        return lease["written"]
+
+    def _start_lease_keeper(self):
+        with self.lease_lock:
+            if self._lease_keeper is not None and self._lease_keeper.is_alive():
+                return
+            self._lease_keeper = threading.Thread(target=self._lease_keeper_run, daemon=True, name="hub-lease-keeper")
+            self._lease_keeper.start()
+
+    def _lease_keeper_run(self):
+        """While leases exist: keep their claim fresh (and retry a failed write); past LEASE_MAX_S, end the driver
+        runtime the calls run in. The lease itself ends only when those calls are gone (_pend_finished)."""
+        ended = None
+        while True:
+            time.sleep(LEASE_TICK_S)
+            with self.lease_lock:
+                if not self.leases:
+                    self._lease_keeper = None
+                    return
+                leases = list(self.leases.values())
+            now = time.monotonic()
+            every = min(LEASE_REFRESH_S, max(1.0, owners.ACTIVE_S / 3))    # well inside the activity window
+            if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for l in leases):
+                with self.owner_lock:
+                    try:
+                        with owners.lock():
+                            self._refresh_leases()
+                    except (OSError, TimeoutError):
+                        self._refresh_leases()
+            oldest = min(l["t0"] for l in leases)
+            proc = self.up
+            if now - oldest > LEASE_MAX_S and proc is not None and proc is not ended:
+                ended = proc
+                self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending the driver "
+                          "runtime before letting the computer go")
+                try:
+                    proc.kill()                      # the reader sees the end: those calls fail, the lease ends
+                except OSError:
+                    pass
+
+    def _refresh_leases(self):
+        with self.lease_lock:
+            leases = list(self.leases.values())
+        if not leases:
+            return
+        newest = max(leases, key=lambda l: l["t0"])
+        if self._write_lease(newest):
+            for l in leases:
+                l["written"], l["refreshed"] = True, newest["refreshed"]
+                if l["drop_pid"]:
+                    owners.drop_claim(l["drop_pid"])
+                    l["drop_pid"] = None
 
     def _pend_finished(self, key, pend):
         """A request is done (answered, failed, or its connection ended): forget its progress token, and end the
-        lease it belonged to once that lease has no call left."""
+        lease it belonged to once that lease has no call left. Whether it had a lease is read under the lease lock,
+        the lock hand_over_claim assigns it under, so a call that finishes during a hand-over can't leave a lease
+        waiting for it."""
         if pend.get("ptok"):
             self.progress.pop(pend["ptok"], None)
-        cid = pend.get("lease")
-        if cid is None:
-            return
         with self.lease_lock:
+            cid = pend.get("lease")
+            if cid is None:
+                return
             lease = self.leases.get(cid)
             if lease is None:
                 return
@@ -842,6 +907,8 @@ class Hub:
                     if self.leases:
                         return False
                 owners.drop_claim(self.pid)
+                if lease.get("drop_pid"):
+                    owners.drop_claim(lease["drop_pid"])
                 return True
             try:
                 with owners.lock():
@@ -1142,7 +1209,8 @@ class Hub:
         text = OVERSIZE_MSG if why == "oversize" else PROTOCOL_MSG if why == "protocol" else DROPPED_MSG
         for key, pend in list(self.pending.items()):
             if pend.get("gen") == gen:
-                self.pending.pop(key, None)
+                with self.lease_lock:
+                    self.pending.pop(key, None)
                 self.layout_pending.pop(key, None)
                 self._pend_finished(key, pend)      # the connection ended: so did its calls (and their lease)
                 if not pend.get("orphan"):
@@ -1338,7 +1406,8 @@ class Hub:
             pre(key)
         msgs.append(out)
         if not self.send_up(*msgs):
-            self.pending.pop(key, None)
+            with self.lease_lock:
+                self.pending.pop(key, None)
             self.layout_pending.pop(key, None)
             self._pend_finished(key, pend)
             if out.get("method") == "tools/call":
@@ -1458,8 +1527,20 @@ class Hub:
         mine = set(client.mine) | {client.peer_pid}
         # A lease is the hub holding the computer for calls a client left running: not another controller to
         # that same client process (a script that reconnects), nor (through owners) to its Claude Code session.
-        return [o for o in others if o["active"] and not (o["kind"] == "session" and o.get("bridge_pid") == client.holder)
+        busy = [o for o in others if o["active"] and not (o["kind"] == "session" and o.get("bridge_pid") == client.holder)
                 and not (o.get("claim") == "lease" and o.get("client_pid") in mine)]
+        # Ownership follows the actions themselves too: an acting call another controller still has running in the
+        # driver counts even when its claim file is gone (its Claude Code session or shell exited meanwhile).
+        for pend in list(self.pending.values()):
+            c = pend.get("client")
+            if (not pend.get("acting") or c is None or c is client or pend.get("lease") is not None
+                    or c.holder == client.holder or c.peer_pid in mine or client.peer_pid in c.mine
+                    or (client.claude and c.claude == client.claude)):
+                continue
+            busy.append({"kind": "session", "claim": "pending", "active": True, "bridge_pid": c.holder,
+                         "claude_pid": c.claude, "cwd": c.cwd, "last_tool": pend.get("tool"),
+                         "idle_s": int(time.time() - pend.get("t0", time.time()))})
+        return busy
 
     def check_and_claim(self, client, tool):
         """[] after claiming the computer for this client; the other controllers when it's in use; None when the

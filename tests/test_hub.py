@@ -1570,6 +1570,118 @@ def log_checks():
         mcp_hub.BAD_UPSTREAM_MAX, mcp_hub.LOG_MAX = saved
 
 
+def lease2_checks():
+    print("N4/N5: a lease lasts as long as the calls it holds the computer for")
+    clear_claims()
+    saved = (owners.ACTIVE_S, mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S)
+    owners.ACTIVE_S, mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S = 2, 0.2, 30
+    try:
+        r = Running()
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        h.call("slow", {"s": 5})
+        h.close()
+        time.sleep(3.5)                              # past the activity window (2 s here)
+        leases = [c for c in owners.claims() if c.get("kind") == "lease"]
+        check("a lease stays active past the activity window while its call runs (it's kept fresh)",
+              leases and leases[0]["active"], leases)
+        end = time.time() + 6
+        while time.time() < end and r.hub.leases:
+            time.sleep(0.1)
+        mcp_hub.LEASE_MAX_S = 2
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        drv = h.call("whoami", {}).structured["driver_pid"]
+        h.call("slow", {"s": 60})
+        h.close()
+        end = time.time() + 5
+        while time.time() < end and not [c for c in owners.claims() if c.get("kind") == "lease"]:
+            time.sleep(0.05)
+        t0 = time.time()
+        while time.time() - t0 < 10 and [c for c in owners.claims() if c.get("kind") == "lease"]:
+            time.sleep(0.1)
+        gone_at = time.time() - t0
+        check("past the lease's longest life the hub ends the driver runtime first, then lets the computer go",
+              1 < gone_at < 8 and not owners.alive(drv), (gone_at, owners.alive(drv)))
+        mcp_hub.LEASE_MAX_S = 30
+        h = mcomp_sdk.Hub(env=r.env, kind="call", timeout=1).connect()
+        h.call("slow", {"s": 3})
+        h.close()
+        time.sleep(0.4)
+        leases = [c for c in owners.claims() if c.get("kind") == "lease"]
+        check("a one-shot `call` held by its Claude Code session or shell gets a lease for a call it left running too",
+              leases and leases[0].get("via") == "call", leases)
+        end = time.time() + 6
+        while time.time() < end and r.hub.leases:
+            time.sleep(0.1)
+        # the decision about a lease is made under the lock the hand-over assigns it under
+        pend = {"client": None}
+        done = threading.Event()
+        r.hub.lease_lock.acquire()
+        th = threading.Thread(target=lambda: (r.hub._pend_finished("k-race", pend), done.set()), daemon=True)
+        th.start()
+        time.sleep(0.3)
+        waited = not done.is_set()
+        pend["lease"] = 4242                         # the hand-over assigns it in that window
+        r.hub.leases[4242] = {"keys": {"k-race"}, "tool": "slow", "claude": None, "cwd": "/", "client_pid": 1,
+                              "kind": "sdk", "t0": time.monotonic(), "written": True, "refreshed": time.monotonic(),
+                              "drop_pid": None}
+        r.hub.lease_lock.release()
+        th.join(3)
+        time.sleep(0.5)
+        check("a call finishing during a hand-over can't leave a lease waiting for it", waited and 4242 not in r.hub.leases,
+              (waited, list(r.hub.leases)))
+        # ownership follows the action even when the claim file is gone
+        h = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=20).connect()
+        box = {}
+        th = threading.Thread(target=lambda: box.setdefault("r", h.call("slow", {"s": 2})), daemon=True)
+        th.start()
+        time.sleep(0.4)
+        clear_claims()                               # as if its holder had exited
+        stranger = mcp_hub.Client(r.hub, None, 99999)
+        stranger.mine, stranger.claude, stranger.holder = set(), None, 99999
+        busy = r.hub.busy_others(stranger)
+        check("an acting call another controller has running counts as busy even without its claim file",
+              any(o.get("claim") == "pending" for o in busy) and "still running" in owners.describe(
+                  next(o for o in busy if o.get("claim") == "pending")), busy)
+        th.join(5)
+        h.close()
+        r.stop()
+    finally:
+        owners.ACTIVE_S, mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S = saved
+        clear_claims()
+
+
+def lease_write_checks():
+    print("N4: a lease that can't be written keeps the client's claim")
+    clear_claims()
+    proc = subprocess.Popen([PY, "-c", (
+        "import json, os, sys, time; sys.path.insert(0, sys.argv[1]); import mcomp_sdk, mcp_hub\n"
+        "h = mcomp_sdk.Hub(env=json.loads(sys.argv[2]), kind='sdk', timeout=1).connect()\n"
+        "h.call('slow', {'s': 4}); h.close(); print('closed', flush=True); time.sleep(6)\n"),
+        os.path.join(LAB, "lib"), json.dumps(env())], stdout=subprocess.PIPE, text=True)
+    r = None
+    real = owners.write_claim
+    try:
+        r = Running()
+        # (the client's claim is its own; only the hub's lease write fails)
+        owners.write_claim = lambda pid, *a, **k: (_ for _ in ()).throw(OSError("disk full")) if k.get("kind") == "lease" \
+            else real(pid, *a, **k)
+        proc.stdout.readline()
+        time.sleep(0.5)
+        kept = os.path.exists(owners.claim_path(proc.pid))
+        owners.write_claim = real
+        time.sleep(2.0)                              # the keeper writes the lease, then the old claim goes
+        leases = [c for c in owners.claims() if c.get("kind") == "lease"]
+        check("the client's claim stays while the lease can't be written, and is replaced once it can",
+              kept and leases and not os.path.exists(owners.claim_path(proc.pid)), (kept, leases))
+    finally:
+        owners.write_claim = real
+        proc.kill()
+        proc.wait()
+        if r:
+            r.stop()
+        clear_claims()
+
+
 def main():
     setup_driver()
     try:
@@ -1598,6 +1710,8 @@ def main():
         who_checks()
         memory_checks()
         log_checks()
+        lease2_checks()
+        lease_write_checks()
     finally:
         mcp_hub.stop_hub(env())
         shutil.rmtree(TD, ignore_errors=True)

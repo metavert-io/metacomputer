@@ -333,6 +333,10 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
 def describe(o):
     if o["kind"] == "session":
         state = "ACTIVE" if o["active"] else "idle"
+        if o.get("claim") == "pending":
+            src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (holder pid {o.get('bridge_pid')})"
+            return (f"an unfinished {o.get('last_tool')} call from a {src}, still running in the driver, in "
+                    f"{short(o.get('cwd'))}: started {o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [ACTIVE]")
         if o.get("claim") == "lease":
             src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (pid {o.get('client_pid')})"
             return (f"unfinished call(s) ({o.get('last_tool')}) that a {src} left running when it disconnected, held by "
