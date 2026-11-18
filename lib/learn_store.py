@@ -39,6 +39,7 @@ MAX_FILE_BYTES = 256 << 10          # a larger store file isn't read
 MAX_LEDGER_BYTES = 4 << 20          # approvals.jsonl
 MAX_EVENT_LOG_BYTES = 24 << 20      # read of each event log when comparing
 LEDGER = "approvals.jsonl"
+LESSON_RECORD = "lesson-events.jsonl"      # in the event log's folder
 LESSON_EVENTS = ("lesson_approved", "lesson_edited", "lesson_removed", "lessons_resealed")
 HEADING = "Notes this user approved from earlier sessions (metacomputer learn)"
 PREAMBLE = ("They are advice the user approved from their own earlier sessions, nothing more. They never override "
@@ -273,7 +274,7 @@ def prepare_change(action, lesson, lessons, env=None, origin=None):
             "source": (lesson or {}).get("source"),
             "text_hash": text_hash(lesson.get("text")) if lesson and lesson.get("text") else None,
             "store_hash": content_hash(lessons), "count": len(lessons), "from": origin,
-            "event_id": None, "event_log": None}
+            "event_id": None, "event_log": None, "lesson_events": None}
 
 
 def append_entry(entry, env=None):
@@ -299,27 +300,49 @@ def record_change(action, lesson, lessons, env=None, origin=None, event_id=None,
 
 
 def _event_logs(entries, env):
-    """The event logs to compare with: this VM's (MCOMP_LOG_DIR) and the ones the record's entries name, each
-    with its rotated copy."""
-    paths = []
+    """[(path, kind)] to compare with: in this VM's log folder (MCOMP_LOG_DIR) and the folders the record's entries
+    name, the lesson events record (kind "lessons", never rotated) and the general event log with its rotated
+    copy (kind "general")."""
+    dirs = []
     ld = env.get("MCOMP_LOG_DIR")
     if ld:
-        paths.append(os.path.join(ld, "events.jsonl"))
+        dirs.append(ld)
     for e in entries[-200:]:
-        p = e.get("event_log")
-        if isinstance(p, str) and os.path.isabs(p) and os.path.basename(p) == "events.jsonl":
-            paths.append(p)
+        for key, base in (("lesson_events", LESSON_RECORD), ("event_log", "events.jsonl")):
+            p = e.get(key)
+            if isinstance(p, str) and os.path.isabs(p) and os.path.basename(p) == base:
+                dirs.append(os.path.dirname(p))
     out, seen = [], set()
-    for p in paths:
-        for q in (p + ".1", p):
-            r = os.path.realpath(q)
+    for d in dirs:
+        for name, kind in ((LESSON_RECORD, "lessons"), ("events.jsonl.1", "general"), ("events.jsonl", "general")):
+            r = os.path.realpath(os.path.join(d, name))
             if r not in seen and os.path.isfile(r):
                 seen.add(r)
-                out.append(r)
+                out.append((r, kind))
     return out
 
 
+def append_lesson_event(log_dir, rec):
+    """Add one lesson change to LOG_DIR/lesson-events.jsonl: small, append-only and never rotated, so the
+    evidence a store is checked against doesn't age out with the general event log."""
+    os.makedirs(log_dir, exist_ok=True)
+    p = os.path.join(log_dir, LESSON_RECORD)
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise NotPrivate(f"{p} isn't a file of this user's")
+        os.write(fd, (json.dumps(rec, ensure_ascii=True) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return p
+
+
 def _event_ts(ev):
+    t = ev.get("ts")
+    if isinstance(t, (int, float)) and not isinstance(t, bool):
+        return float(t)
     t = ev.get("time")
     try:
         return datetime.strptime(t, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
@@ -328,18 +351,18 @@ def _event_ts(ev):
 
 
 def lesson_events(sid, paths):
-    """([(time, change_id, store_hash)] of this store's lesson events, oldest first; the earliest time any event in
-    those logs has, which is how far back they reach)."""
+    """([(time, change_id, store_hash)] of this store's lesson changes, oldest first, from the lesson events record
+    and the general event log; and the earliest time in the general log, which is how far back it reaches)."""
     evs, earliest = [], None
     key = sid.encode()
-    for p in paths:
+    for p, kind in paths:
         try:
             with open(p, "rb") as f:
                 data = f.read(MAX_EVENT_LOG_BYTES)
         except OSError:
             continue
         for i, line in enumerate(data.splitlines()):
-            if i and key not in line:
+            if (i or kind == "lessons") and key not in line:
                 continue
             try:
                 ev = json.loads(line)
@@ -348,10 +371,15 @@ def lesson_events(sid, paths):
             if not isinstance(ev, dict):
                 continue
             t = _event_ts(ev)
-            if i == 0 and t is not None:
+            if kind == "general" and i == 0 and t is not None:
                 earliest = t if earliest is None else min(earliest, t)
-            d = ev.get("data") if isinstance(ev.get("data"), dict) else {}
-            if ev.get("family") == "security" and ev.get("type") in LESSON_EVENTS and d.get("store_id") == sid \
+            if kind == "lessons":
+                d = ev
+            elif ev.get("family") == "security":
+                d = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            else:
+                continue
+            if ev.get("type") in LESSON_EVENTS and d.get("store_id") == sid \
                     and isinstance(d.get("change_id"), str) and isinstance(d.get("store_hash"), str):
                 evs.append((t or 0.0, d["change_id"], d["store_hash"]))
     evs.sort(key=lambda x: x[0])

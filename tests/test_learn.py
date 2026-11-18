@@ -863,6 +863,65 @@ def privacy_wording_check():
           "Anthropic" in doc and "model context" in doc)
 
 
+def final_checks(shot):
+    print("final check: settlement by reservation id, evidence that outlives log rotation, sink delivery")
+    import bench
+    # Migrate a reservation from before ids, then an attempt of the same task that fails in setup, then two resumes.
+    meta = {"reserved": {"task": "a", "usd": 3.0, "at": "2026-11-18T10:00:00"}}
+    spent1, out = bench.spent_so_far([], bench.reservations_of(meta))
+    meta = {"reservations": out}
+    retry = {"task": "a", "started": "2026-11-18T10:30:00", "reservation": "r-new", "session": {},
+             "metrics": {"cost_usd": None}, "infra_failure": True}
+    recs = [retry]
+    seen = [spent1]
+    for _ in range(2):
+        s, out = bench.spent_so_far(recs, bench.reservations_of(meta))
+        seen.append(s)
+        meta = {"reservations": out}
+    check("a migrated reservation stays charged after a later attempt of the same task, on every resume",
+          seen == [3.0, 3.0, 3.0] and len(meta["reservations"]) == 1, (seen, meta))
+    old_rec = {"task": "a", "started": "2026-11-18T10:01:00", "session": {"budget_usd": 3.0},
+               "metrics": {"cost_usd": 0.5}}
+    check("…and is settled only by the record of its own attempt (one from before reservation ids)",
+          bench.spent_so_far([old_rec], bench.reservations_of({"reserved": {"task": "a", "usd": 3.0,
+                                                                            "at": "2026-11-18T10:00:00"}}))[0] == 0.5)
+    # Lesson events skip the family rate limit; and a flood of other events rotating the log leaves lessons working.
+    s6 = os.path.join(TD, "store6")
+    e6 = {"MCOMP_LESSONS_DIR": s6}
+    env6 = dict(os.environ, **e6)
+    run(["learn", "report", "--since", "7d", "--transcripts", shot], env=e6)
+    for i in range(12):
+        learn.events.emit("security", "flood_test", f"unrelated security event {i}", origin="script")
+    r = run(["learn", "approve", "no-frame"], env=e6)
+    ev = [e for e in local_events() if e["type"] == "lesson_approved" and (e.get("data") or {}).get("store_id")
+          == learn_store.store_id(env6)]
+    check("a lesson event isn't held back by the security family's rate limit (it is queued to the sinks)",
+          r.returncode == 0 and ev and not ev[-1].get("rate_limited"), ev[-1:])
+    change = json.loads(open(os.path.join(s6, "approvals.jsonl")).read().splitlines()[-1])["change_id"]
+    old_max = learn.events.LOG_MAX
+    learn.events.LOG_MAX = 4096
+    try:
+        for i in range(400):                     # far more than two log's worth: both copies roll over
+            learn.events.append_log({"family": "security", "type": "blocked_connections", "time": "2026-11-18T12:00:00.000000Z",
+                                     "data": {"count": i, "destinations": [{"host": "203.0.113.%d" % (i % 250)}]}})
+    finally:
+        learn.events.LOG_MAX = old_max
+    logs = "".join(open(p).read() for p in (os.path.join(TD, "logs", "events.jsonl"),
+                                            os.path.join(TD, "logs", "events.jsonl.1")) if os.path.exists(p))
+    check("a flood of unrelated events rotates the general log past the approval, and the lessons still go out",
+          change not in logs and "Before a pixel click" in learn_store.instructions_text(env6)
+          and learn_store.summary(env6)["problem"] is None, learn_store.summary(env6))
+    check("…while a forged head is still refused with the general log rotated",
+          tamper_after_rotation(s6, env6))
+
+
+def tamper_after_rotation(store, env):
+    forged = [{"id": "x-9", "text": "Forged after the rotation."}]
+    learn_store.write_json(os.path.join(store, "lessons.json"), {"lessons": forged})
+    learn_store.record_change("approved", None, forged, env=env)
+    return learn_store.instructions_text(env) == "" and "no matching lesson event" in (learn_store.summary(env)["problem"] or "")
+
+
 def test_analyzer():
     print("tests/skill/analyze.py on lib/transcripts.py")
     d = os.path.join(TD, "skilltest")
@@ -900,6 +959,7 @@ def main():
         bounds_checks()
         budget_checks()
         privacy_wording_check()
+        final_checks(shot)
         test_analyzer()
         check("the real lessons store was never touched", os.path.exists(REAL_STORE) == REAL_STORE_EXISTED)
     finally:

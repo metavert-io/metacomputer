@@ -61,8 +61,10 @@ Checks never trust what the agent says. They read the VM's real state:
   at its timeout, crashed) is counted at its whole budget against the cap
   (`cost_unknown` in its record). Each task's budget is reserved in `run.json`
   (`reservations`, each with its own id) before its session starts, and only the
-  task's record settles it: a reservation left by a runner that died stays and is
-  charged on every later resume. `--budget` and `--cap` must be positive amounts.
+  record of that attempt (which names the id) settles it: a reservation left by a
+  runner that died stays and is charged on every later resume, and a later retry
+  of the same task never settles it, including one migrated from a run before
+  reservation ids. `--budget` and `--cap` must be positive amounts.
 - **A reset checks what it replaces.** The runner also sets `MCOMP_EXPECT_BASELINE`
   and `MCOMP_EXPECT_CONFIG_SHA`, and `metacomputer reset` compares them, and the VM
   name, with the values it is about to use, in its own process and again right

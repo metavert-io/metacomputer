@@ -429,11 +429,15 @@ def reservations_of(meta):
 
 
 def reconciled(res, recs):
-    """A reservation is settled once a record names it (its cost, or its budget when the cost is unknown, is then
-    charged through that record). Reservations from before ids match by task and time."""
+    """A reservation is settled only by the record of its own attempt (its cost, or its budget when the cost is
+    unknown, is then charged through that record): one that names its id. A reservation migrated from a run
+    before ids can be settled only by a record from before ids too (one with no `reservation`) for its task and
+    time; a later attempt's record names its own reservation and never settles an older one. Deterministic and
+    idempotent: records are only ever appended, so a settled reservation stays settled and an unsettled one is
+    charged on every resume."""
     if res.get("legacy"):
-        return any(r.get("task") == res.get("task") and str(r.get("started", "")) >= str(res.get("at", ""))
-                   for r in recs)
+        return any("reservation" not in r and r.get("task") == res.get("task")
+                   and str(r.get("started", "")) >= str(res.get("at", "")) for r in recs)
     return any(r.get("reservation") == res["id"] for r in recs)
 
 

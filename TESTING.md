@@ -347,7 +347,7 @@ Each of these needs no VM and takes seconds.
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (about 105 checks, 45 s) needs no VM and no network.
+`python3 tests/test_learn.py` (about 110 checks, 45 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -388,6 +388,11 @@ results, window titles, app names, typed text, errors and the model's own text.
   middle is a warning; a reservation the runner died holding is charged on every
   resume; `metacomputer reset` itself refuses another baseline or a changed settings
   file; and a corrupt gzip is counted as unreadable without stopping discovery.
+- From the final check: a migrated reservation stays charged after a later attempt of
+  the same task, on every resume; lesson events skip the security family's rate
+  limit; and a flood of unrelated events rotating the general event log leaves
+  approved lessons working (the never-rotated `lesson-events.jsonl` keeps the
+  evidence) while a forged head is still refused.
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 

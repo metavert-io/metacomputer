@@ -565,18 +565,20 @@ persistence that you can audit, not an approval you can prove.
   Every change made through `learn` emits a lesson event first, carrying a change
   id, the store's id, the store's hash and the lesson's text hash, then appends an
   entry with the same values (and which event log it went to) to
-  `approvals.jsonl`. Lessons are sent only while `lessons.json` matches the last
-  entry, and that entry has its own event, the latest lesson event for that store
-  in the event log (this VM's `events.jsonl`, its rotated copy, and the logs the
-  entries name). So a store edited by hand, an entry appended by hand (the
+  `approvals.jsonl`; the event's id and hashes also go into `lesson-events.jsonl`
+  beside the event log, a small file that's never rotated. Lessons are sent only
+  while `lessons.json` matches the last entry, and that entry has its own event,
+  the latest lesson event for that store (in `lesson-events.jsonl` or the event
+  log, in this VM's log folder and the folders the entries name). A flood of other
+  events rotating the general log doesn't touch that evidence. So a store edited by hand, an entry appended by hand (the
   record's head without a matching event), and a record cut back (a later event
   than its head) are all withheld: `status`, `security` and `learn list` say why,
   `learn` refuses further changes, and `learn reseal` (terminal) shows exactly what
   the file holds and accepts it on a yes, with a new event. Earlier entries
-  without an event are a warning. When the event log no longer reaches back to the
-  last change (it keeps about 20 MB), the lessons are withheld too, so that a
-  backdated entry can't pass: compare with your sink, then `learn reseal`. The hashes cover each lesson's id and cleaned text, not its
-  provenance (title, source, dates, evidence).
+  without an event are a warning. If neither file has the last change's event (for
+  example both were deleted), the lessons are withheld, so a backdated entry can't
+  pass: compare with your sink, then `learn reseal`. The hashes cover each lesson's
+  id and cleaned text, not its provenance (title, source, dates, evidence).
 - **Only a private store is loaded.** `lessons.json` is read only when it's a
   regular file (opened without following links) owned by you and not writable by
   the group or others, in a folder of yours the group and others can't write
@@ -616,12 +618,22 @@ persistence that you can audit, not an approval you can prove.
   event to the local event log as well as an entry to `approvals.jsonl`, open a
   pseudo-terminal to pass the terminal check, or change `lib/learn_store.py` or the
   hub in your checkout; the comparison above then passes. What it can't do is
-  change what an event sink off the Mac already received: the sink has every
-  change made through `learn`, with its hashes, as it happened. A change made
-  without `learn` sends nothing, so the sink won't have it: compare the sink's last
-  `store_hash` with `metacomputer learn list` (or `status --json`) when you're
-  unsure what your sessions are told. Without a sink there is no record your
-  account can't rewrite.
+  change what an event sink off the Mac already received. What a sink gets, and when (best effort): each lesson change's event (id, short
+  title, source, active count, `text_hash`, `store_hash`, `store_id`, `change_id`;
+  never the text), queued at the moment of the change to every sink whose families
+  include `security` and whose minimum severity is `warn` or lower. Lesson events
+  skip the security family's rate limit, so other security events can't hold one
+  back. Delivery is tried at once (about 3 s per sink); a sink that's down keeps the
+  event in its on-disk backlog, retried in order by later events and by the watcher
+  (`metacomputer start` runs it), so it arrives late rather than not at all. It is
+  lost if more than 10,000 events pile up for that sink first (the oldest are
+  dropped, and `events status` counts them), if the sink is removed or replaced
+  before it's delivered, or for a sink added after the change. A change made
+  without `learn` sends nothing.
+  So compare the sink's last `store_hash` for the store with `metacomputer learn
+  list` (or `status --json`) when you're unsure what your sessions are told, and
+  treat a missing event as something to look into, not proof of tampering.
+  Without a sink there is no record your account can't rewrite.
 - A follow-up, once the secrets vault's presence-based approvals (Touch ID through
   LocalAuthentication) are merged: `learn approve` could have the vault sign each
   record with a key that needs your presence, and the hub could send only signed

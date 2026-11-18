@@ -182,14 +182,19 @@ the hub reads them only to build that text (`learned_notes()` in
 Approving, editing, removing and resealing emit `security.lesson_approved`,
 `lesson_edited`, `lesson_removed` and `lessons_resealed` (docs/events.md): the
 id, a short title, the source, the text hash and the store hash, never the
-lesson's text. They go to this VM's local event log and to any sinks you added.
+lesson's text. They go to this VM's local event log and to any sinks you added,
+and the event's id and hashes also go into `lesson-events.jsonl` in the same
+folder: a small file that's never rotated, which the check below reads.
 
 ## Tampering
 
 Lessons are sent only when `lessons.json` matches the last `store_hash` that
 `learn` recorded in `approvals.jsonl`, and that entry has its own lesson event (the
-same change id and store hash), the latest one for this store in the event log.
-Each change emits its event before its entry is written. So a `lessons.json`
+same change id and store hash), the latest one for this store in
+`lesson-events.jsonl` or the event log. Each change emits its event before its
+entry is written. The general event log rotates (about 20 MB), but
+`lesson-events.jsonl` doesn't, so unrelated events can't push a valid approval's
+evidence out. So a `lessons.json`
 written some other way (by an editor, a script, or an agent that has your
 account), an entry appended to `approvals.jsonl` by hand, or a record cut back to
 an earlier state, isn't sent:
@@ -204,15 +209,24 @@ as your macOS user can approve a lesson**: it can append a matching event to the
 local event log too, type into a pseudo-terminal to pass the terminal check, or
 change the checkout's code that does the checking. What remains:
 - earlier entries without a matching event are a warning in `security`, `status`
-  and `learn list`; when the event log no longer reaches back to the last change (it
-  keeps about 20 MB), the lessons are withheld until you check your sink and
-  `learn reseal`;
+  and `learn list`; if the last change's event is in neither file, the lessons are
+  withheld until you check your sink and `learn reseal`;
 - the hub's status (`metacomputer hub status --json`) reports the hash of the
   store its own settings name, and the hash `learn` recorded (not each client's);
-- an event sink off the Mac (docs/events.md) keeps every change made through
-  `learn`, with its hashes, where nothing on the Mac can rewrite it. A change made
-  without `learn` sends nothing, so compare the sink's last `store_hash` with
-  `learn list`. That is the record to trust.
+- an event sink off the Mac (docs/events.md) is the one copy nothing on the Mac
+  can rewrite. What a sink gets, and when (best effort): each lesson change's event (id, short
+  title, source, active count, `text_hash`, `store_hash`, `store_id`, `change_id`;
+  never the text), queued at the moment of the change to every sink whose families
+  include `security` and whose minimum severity is `warn` or lower. Lesson events
+  skip the security family's rate limit, so other security events can't hold one
+  back. Delivery is tried at once (about 3 s per sink); a sink that's down keeps the
+  event in its on-disk backlog, retried in order by later events and by the watcher
+  (`metacomputer start` runs it), so it arrives late rather than not at all. It is
+  lost if more than 10,000 events pile up for that sink first (the oldest are
+  dropped, and `events status` counts them), if the sink is removed or replaced
+  before it's delivered, or for a sink added after the change. A change made
+  without `learn` sends nothing. Compare the
+  sink's last `store_hash` with `learn list`.
 
 The hashes cover each lesson's id and cleaned text (what is sent), not its
 provenance (title, source, dates, evidence).

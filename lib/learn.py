@@ -275,7 +275,10 @@ def emit(type_, lesson, active, entry=None):
                            data={"id": (lesson or {}).get("id"), "title": title, "source": (lesson or {}).get("source"),
                                  "active": active, "text_hash": e.get("text_hash"), "store_hash": e.get("store_hash"),
                                  "store_id": e.get("store_id"), "change_id": e.get("change_id")},
-                           origin="cli")
+                           # outside the security family's rate limit: a lesson change is rare and made by the
+                           # user, so it's queued to every matching sink (delayed while one is down, never
+                           # held back by other security events)
+                           origin="cli", exempt=True)
     except Exception:
         return None
 
@@ -293,9 +296,17 @@ def record(action, lesson, lessons_list, env=None):
     ev = emit(EVENT_OF[action], lesson, len(lessons_list), entry)
     entry["event_id"] = ev.get("id") if isinstance(ev, dict) else None
     try:
-        entry["event_log"] = events.log_path() if events is not None else None
+        log_dir = os.path.dirname(events.log_path()) if events is not None else None
     except Exception:
-        entry["event_log"] = None
+        log_dir = None
+    log_dir = log_dir or os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB, "logs")
+    # The lesson events record beside the event log: never rotated, so a quiet store's evidence doesn't age out
+    # with the general log (learn_store.event_check reads both).
+    entry["lesson_events"] = learn_store.append_lesson_event(log_dir, {
+        "time": ev.get("time") if isinstance(ev, dict) else None, "ts": round(time.time(), 3),
+        "type": EVENT_OF[action], "event_id": entry["event_id"], "store_id": entry["store_id"],
+        "change_id": entry["change_id"], "store_hash": entry["store_hash"]})
+    entry["event_log"] = os.path.join(log_dir, "events.jsonl")
     return learn_store.append_entry(entry, env)
 
 
