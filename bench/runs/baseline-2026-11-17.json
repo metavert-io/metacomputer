@@ -1,0 +1,163 @@
+{
+  "run_id": "baseline-2026-11-17",
+  "date": "2026-11-17",
+  "model": "claude-opus-5-5",
+  "cua_driver": "0.52.1",
+  "metacomputer": {
+    "commit": "a70dded3d729fb30eb86c52be3e05da2c4d03620",
+    "uncommitted_changes": false,
+    "on_main": true
+  },
+  "switches": {
+    "hub": "not in this version",
+    "coord_guard": "not in this version",
+    "shell": "allow",
+    "lessons": "not in this version"
+  },
+  "resumed": {
+    "note": "the run was resumed; these tasks' records come from before, at this commit",
+    "commit": "acf771625ed7173276ace6e955e15448df19ecc2",
+    "uncommitted_changes": false,
+    "on_main": true,
+    "tasks": [
+      "calc-formula",
+      "calc-arith",
+      "calc-chart",
+      "calc-csv",
+      "calc-sort",
+      "chrome-form",
+      "chrome-nav",
+      "data-transform",
+      "ff-canvas-code",
+      "ff-form"
+    ]
+  },
+  "tasks": [
+    {
+      "task": "calc-formula",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 15
+    },
+    {
+      "task": "calc-arith",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12
+    },
+    {
+      "task": "calc-chart",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 24
+    },
+    {
+      "task": "calc-csv",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 32
+    },
+    {
+      "task": "calc-sort",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 23
+    },
+    {
+      "task": "chrome-form",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 23
+    },
+    {
+      "task": "chrome-nav",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12
+    },
+    {
+      "task": "data-transform",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 8
+    },
+    {
+      "task": "ff-canvas-code",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 13
+    },
+    {
+      "task": "ff-form",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 18
+    },
+    {
+      "task": "ff-pick-color",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 16
+    },
+    {
+      "task": "ff-read",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 15
+    },
+    {
+      "task": "mousepad-edit",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 13
+    },
+    {
+      "task": "mousepad-new",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 16
+    },
+    {
+      "task": "mousepad-prefs",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 17
+    },
+    {
+      "task": "multi-calc-writer",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 33
+    },
+    {
+      "task": "thunar-copy",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 18
+    },
+    {
+      "task": "thunar-organize",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 30
+    },
+    {
+      "task": "writer-docx",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 46
+    },
+    {
+      "task": "writer-format",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 28
+    }
+  ],
+  "totals": {
+    "tasks": 20,
+    "passed": 20,
+    "invalid_calls": 0,
+    "mean_turns": 20.6
+  }
+}

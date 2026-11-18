@@ -1,0 +1,44 @@
+{
+  "run_id": "skill-v2b-2026-11-18",
+  "date": "2026-11-18",
+  "model": "claude-opus-5-5",
+  "cua_driver": "0.52.1",
+  "metacomputer": {
+    "commit": "773e1b3c7b6e375f56affb3b25b2bd6f5f482438",
+    "uncommitted_changes": false,
+    "on_main": false,
+    "merged_as": "b9b9685 (#18)"
+  },
+  "switches": {
+    "hub": "on",
+    "coord_guard": "on",
+    "shell": "allow",
+    "lessons": "not in this version"
+  },
+  "tasks": [
+    {
+      "task": "thunar-copy",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 28
+    },
+    {
+      "task": "thunar-organize",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 29
+    },
+    {
+      "task": "data-transform",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 10
+    }
+  ],
+  "totals": {
+    "tasks": 3,
+    "passed": 3,
+    "invalid_calls": 0,
+    "mean_turns": 22.33
+  }
+}

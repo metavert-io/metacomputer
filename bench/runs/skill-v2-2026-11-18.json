@@ -1,0 +1,146 @@
+{
+  "run_id": "skill-v2-2026-11-18",
+  "date": "2026-11-18",
+  "model": "claude-opus-5-5",
+  "cua_driver": "0.52.1",
+  "metacomputer": {
+    "commit": "7d78038ecbabd4ec41cecdcc05b6cd44216f5e16",
+    "uncommitted_changes": false,
+    "on_main": false,
+    "merged_as": "b9b9685 (#18)"
+  },
+  "switches": {
+    "hub": "on",
+    "coord_guard": "on",
+    "shell": "allow",
+    "lessons": "not in this version"
+  },
+  "tasks": [
+    {
+      "task": "calc-arith",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 9
+    },
+    {
+      "task": "calc-chart",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 22
+    },
+    {
+      "task": "calc-csv",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 24
+    },
+    {
+      "task": "calc-formula",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 14
+    },
+    {
+      "task": "calc-sort",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 22
+    },
+    {
+      "task": "chrome-form",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 21
+    },
+    {
+      "task": "chrome-nav",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 17
+    },
+    {
+      "task": "data-transform",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12
+    },
+    {
+      "task": "ff-canvas-code",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12
+    },
+    {
+      "task": "ff-form",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 15
+    },
+    {
+      "task": "ff-pick-color",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12
+    },
+    {
+      "task": "ff-read",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 14
+    },
+    {
+      "task": "mousepad-edit",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 14
+    },
+    {
+      "task": "mousepad-new",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 15
+    },
+    {
+      "task": "mousepad-prefs",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 17
+    },
+    {
+      "task": "multi-calc-writer",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 17
+    },
+    {
+      "task": "thunar-copy",
+      "pass": false,
+      "invalid_calls": 1,
+      "turns": 26
+    },
+    {
+      "task": "thunar-organize",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 37
+    },
+    {
+      "task": "writer-docx",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 29
+    },
+    {
+      "task": "writer-format",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 19
+    }
+  ],
+  "totals": {
+    "tasks": 20,
+    "passed": 19,
+    "invalid_calls": 1,
+    "mean_turns": 18.4
+  }
+}
