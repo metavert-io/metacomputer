@@ -59,18 +59,143 @@ v=d.get(sys.argv[1]); print("" if v is None else v)' "$2" 2>/dev/null
 vm_exists() { "$LUME" ls --format json 2>/dev/null | "$PY" -c 'import json,sys
 names=[v.get("name") for v in json.load(sys.stdin)]
 sys.exit(0 if sys.argv[1] in names else 1)' "$1"; }
+# NAME -> "present" or "absent"; status 1 (nothing printed) when Lume's list can't be had or read. Unlike
+# vm_exists, an error never looks like "absent": the build relies on this before it deletes or creates.
+vm_lookup() {
+  local out
+  out="$("$LUME" ls --format json 2>/dev/null)" || return 1
+  printf '%s' "$out" | "$PY" -c 'import json, sys
+try:
+    names = {v["name"] for v in json.load(sys.stdin)}
+except Exception:
+    sys.exit(1)
+print("present" if sys.argv[1] in names else "absent")' "$1"
+}
+# NAME FIELD -> FIELD of `lume get NAME`, which must succeed and describe exactly NAME; status 1 otherwise.
+vm_info() {
+  local out
+  out="$("$LUME" get "$1" --format json 2>/dev/null)" || return 1
+  printf '%s' "$out" | "$PY" -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+d = d if isinstance(d, list) else [d]
+if len(d) != 1 or not isinstance(d[0], dict) or d[0].get("name") != sys.argv[1]:
+    sys.exit(1)
+v = d[0].get(sys.argv[2])
+if v is None or v == "":
+    sys.exit(1)
+print(v)' "$1" "$2"
+}
 vm_status() { lume_field "$1" status; }
 vm_running() { [ "$(vm_status "$1")" = "running" ]; }
 vm_mac() { lume_field "$1" macAddress; }
+# NAME -> the VM's folder, from Lume itself: the storage location `lume get` names (locationName), looked up
+# in `lume config get` by its exact name, listed exactly once, and an existing absolute folder (canonical).
+# Nothing is guessed: any doubt is status 1, with the reason on stderr.
+vm_dir() {
+  local name="$1" loc cfg path home n
+  loc="$(vm_info "$name" locationName)" || { echo "Lume didn't say which storage location holds $name" >&2; return 1; }
+  cfg="$("$LUME" config get 2>/dev/null)" || { echo "'$LUME config get' failed" >&2; return 1; }
+  path="$(printf '%s\n' "$cfg" | MCOMP_LOC="$loc" awk '
+    /^Configured VM storage locations:/ { inlist = 1; next }
+    inlist && /^[[:space:]]*- / {
+      line = $0; sub(/^[[:space:]]*- /, "", line); i = index(line, ": ")
+      if (i > 0 && substr(line, 1, i - 1) == ENVIRON["MCOMP_LOC"]) { p = substr(line, i + 2); sub(/ \(default\)$/, "", p); print p }
+      next }
+    inlist && NF == 0 { inlist = 0 }')"
+  n="$(printf '%s' "$path" | grep -c '')"
+  [ "$n" = 1 ] || { echo "Lume's settings list the storage location '$loc' $n times (expected once)" >&2; return 1; }
+  # Lume expands ~ to the account's home folder, whatever $HOME says.
+  home="$("$PY" -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" || return 1
+  case "$path" in "~") path="$home" ;; "~/"*) path="$home/${path#\~/}" ;; esac
+  case "$path" in /*) ;; *) echo "the storage location '$loc' isn't an absolute folder: $path" >&2; return 1 ;; esac
+  path="$(cd "$path" 2>/dev/null && pwd -P)" || { echo "the storage location '$loc' isn't a folder" >&2; return 1; }
+  printf '%s/%s\n' "$path" "$name"
+}
+# DIR NAME: DIR is NAME's own folder: a real folder of yours (not a link) holding a disk.img and a config.json
+# of yours (not links), whose MAC address is the one Lume reports for NAME (random for each VM).
+vm_dir_is() {
+  local dir="$1" name="$2" mac f
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  for f in disk.img config.json; do [ -f "$dir/$f" ] && [ ! -L "$dir/$f" ] && [ -O "$dir/$f" ] || return 1; done
+  mac="$(vm_info "$name" macAddress)" || return 1
+  "$PY" -c 'import json, sys
+sys.exit(0 if str(json.load(open(sys.argv[1])).get("macAddress", "")).lower() == sys.argv[2].lower() else 1)' "$dir/config.json" "$mac" 2>/dev/null
+}
+
+# --- locks ------------------------------------------------------------------------
+# An exclusive flock on a file in a private per-user folder, taken on a file descriptor this shell keeps
+# open (7 for a VM's lock, 8 for the install lock). Every process this shell starts inherits that
+# descriptor, so the lock lasts as long as the last of them (killing the shell doesn't release it while its
+# children work), and the kernel drops it once they've all exited: no stale lock survives. daemonize()
+# closes inherited descriptors, so a long-lived daemon never keeps a lock. A process that inherited a held
+# lock's descriptor holds that lock already. perl (part of macOS) takes it. The folder doesn't depend on
+# $HOME, because Lume keeps VMs in the account's home whatever $HOME says; MCOMP_LOCK_DIR moves it (tests).
+mc_lock_dir() {
+  local d="${MCOMP_LOCK_DIR:-}"
+  if [ -z "$d" ]; then
+    d="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)"; d="${d%/}"; [ -n "$d" ] || d="/tmp/mcomp-$(id -u)"
+    d="$d/metacomputer-locks"
+  fi
+  ( umask 077; mkdir -p "$d" ) 2>/dev/null
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && chmod 700 "$d" 2>/dev/null || return 1
+  printf '%s' "$d"
+}
+# FD FILE: 0 when FD is already open on FILE and holds its lock (inherited from the process that took it).
+lock_fd_held() {
+  /usr/bin/perl -e 'use Fcntl qw(:flock); my ($fd, $file) = @ARGV;
+    open(my $fh, ">>&=", $fd) or exit 1; my @a = stat($fh); my @b = stat($file);
+    exit 1 unless @a && @b && $a[0] == $b[0] && $a[1] == $b[1];
+    exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1)' "$1" "$2" 2>/dev/null
+}
+# FD WAIT: take the lock on the file FD is open on, waiting up to WAIT seconds; 0 = taken.
+lock_fd_take() {
+  /usr/bin/perl -e 'use Fcntl qw(:flock); my ($fd, $wait) = @ARGV;
+    open(my $fh, ">>&=", $fd) or exit 2; my $end = time + $wait;
+    until (flock($fh, LOCK_EX | LOCK_NB)) { exit 1 if time >= $end; select(undef, undef, undef, 0.2); }
+    exit 0' "$1" "$2" 2>/dev/null
+}
+lock_hold() { # NAME WAIT_SECONDS WHAT [FD] -> 0 held; 1 another process holds it (LOCK_OWNER says which); 2 no lock folder
+  local name="$1" wait="$2" what="$3" fd="${4:-7}" dir file
+  LOCK_OWNER=""
+  case "$fd" in 7|8) ;; *) return 2 ;; esac
+  dir="$(mc_lock_dir)" || return 2
+  file="$dir/$name.lock"
+  lock_fd_held "$fd" "$file" && return 0
+  eval "exec $fd>>\"\$file\"" || return 2
+  if ! lock_fd_take "$fd" "$wait"; then
+    eval "exec $fd>&-"
+    LOCK_OWNER="$(sed -n 's/^what=//p' "$dir/$name.owner" 2>/dev/null), pid $(sed -n 's/^pid=//p' "$dir/$name.owner" 2>/dev/null), since $(sed -n 's/^since=//p' "$dir/$name.owner" 2>/dev/null)"
+    return 1
+  fi
+  printf 'pid=%s\nsince=%s\nwhat=%s\n' "$$" "$(date '+%H:%M:%S')" "$what" > "$dir/$name.owner"
+}
+vm_lock_name() { # VM NAME -> its lock's name
+  case "$1" in ''|*[!A-Za-z0-9._-]*) printf 'vm-%s' "$(printf '%s' "$1" | shasum | cut -c1-16)" ;; *) printf 'vm-%s' "$1" ;; esac
+}
+# The VM lock for a command that deletes, replaces, restores or snapshots VM_NAME, its baseline or its
+# checkpoints: the same lock as a build's, so none of them can run during a build or each other.
+vm_lock_or_die() { # WHAT
+  local rc=0
+  lock_hold "$(vm_lock_name "$VM_NAME")" "${MCOMP_LOCK_WAIT:-10}" "$1" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "another build or change of the VM $VM_NAME is running ($LOCK_OWNER); nothing was changed. Run this again when it's done" ;;
+    *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
+  esac
+}
 
 # --- detached processes (own session, so they outlive the calling shell) ----
-daemonize() { # LOGFILE CMD ARGS...
+daemonize() { # LOGFILE CMD ARGS...: in its own session, with no descriptors but 0-2 (so it never keeps a lock)
   local log="$1"; shift
   "$PY" -c 'import os,sys
 os.setsid()
 fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT|os.O_APPEND, 0o644)
 os.dup2(fd,1); os.dup2(fd,2)
 n=os.open("/dev/null", os.O_RDONLY); os.dup2(n,0)
+os.closerange(3, 4096)
 os.execvp(sys.argv[2], sys.argv[2:])' "$log" "$@" &
 }
 

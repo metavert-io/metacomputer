@@ -18,6 +18,10 @@ Mac's own Claude Code setup is never touched.
   $CLAUDE_CONFIG_DIR/plugins or ~/.claude/plugins) execs $MCOMP_HOME/bin/metacomputer, else
   ~/.local/bin/metacomputer, never a copy inside the plugin folder; with neither it prints how
   to set up and exits 1. Run from the checkout or through plugin/bin, it runs as always.
+- `metacomputer setup` in the plugin copy with no checkout runs only /bin/bash with the get.sh at
+  that copy's root (a regular file in the plugin folder, never a link, never one named by a
+  variable), always with --confirm, passing only --dir/--no-chrome/--no-build/--yes/--dry-run/--help;
+  with a checkout it hands over like any command. The real get.sh with no terminal explains and exits 3.
 - install.sh: plugin mode by default (marketplace + plugin at user scope; earlier installs'
   skill link and user-scope MCP server removed only when they are this checkout's), idempotent;
   --no-plugin keeps the skill link + server and removes this checkout's plugin; no `claude
@@ -55,7 +59,8 @@ def write(path, text, mode=None):
 
 
 def base_env(home, **extra):
-    env = {"HOME": home, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+           "MCOMP_LOCK_DIR": os.path.join(home, ".locks")}   # install.sh's lock: never the real per-user folder
     env.update(extra)
     return env
 
@@ -79,7 +84,8 @@ def test_layout():
           not os.path.exists(os.path.join(LAB, ".mcp.json")))
     links = {"plugin/skills/metacomputer": "skills/metacomputer",
              "plugin/.claude/skills/cua-driver": ".claude/skills/cua-driver",
-             "plugin/bin/metacomputer": "bin/metacomputer"}
+             "plugin/bin/metacomputer": "bin/metacomputer",
+             "plugin/get.sh": "get.sh"}
     for link, target in links.items():
         p = os.path.join(LAB, link)
         ok = os.path.islink(p) and not os.path.isabs(os.readlink(p)) \
@@ -143,8 +149,8 @@ def test_handoff():
         write(other, '#!/bin/bash\necho "OTHER $*"\n', 0o755)
         env = base_env(home)
         p = run([cached, "status"], env)
-        check("plugin copy, nothing set up: exit 1 and how to set up (on stderr)",
-              p.returncode == 1 and "./install.sh" in p.stderr and "git clone" in p.stderr and not p.stdout, p.stderr)
+        check("plugin copy, nothing set up: exit 1 and how to set up (on stderr): its own setup, or get.sh in Terminal",
+              p.returncode == 1 and f"{cached} setup" in p.stderr and "get.sh | bash" in p.stderr and not p.stdout, p.stderr)
         local = os.path.join(home, ".local", "bin", "metacomputer")
         os.makedirs(os.path.dirname(local))
         os.symlink(fake, local)
@@ -160,7 +166,7 @@ def test_handoff():
         os.remove(local)
         os.symlink(cached, local)
         p = run([cached, "who"], env)
-        check("never hands over to a copy inside the plugin folder (no loop)", p.returncode == 1 and "./install.sh" in p.stderr,
+        check("never hands over to a copy inside the plugin folder (no loop)", p.returncode == 1 and " setup" in p.stderr,
               p.stdout + p.stderr)
         os.remove(local)
         os.symlink(fake, local)
@@ -181,6 +187,95 @@ def test_handoff():
                   p.stdout[-200:] + p.stderr[-200:])
         p = run([CLI, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
         check("help doesn't show the hand-over block", "mc_" not in p.stdout and "plugin folder" not in p.stdout)
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+# --- `metacomputer setup` from the plugin copy, before any checkout exists ---------------------------
+def test_setup():
+    """The plugin copy's only way to run something other than a checkout's bin/metacomputer: `setup` runs
+    /bin/bash with the get.sh at that copy's own root (a regular file inside the plugin folder), always with
+    --confirm, and passes through only --dir DIR, --no-chrome, --no-build, --yes/-y, --dry-run, --help."""
+    t = tempfile.mkdtemp(prefix="mcomp-plugin-")
+    try:
+        home = os.path.join(t, "home")
+        root = os.path.join(home, ".claude", "plugins", "cache", "metacomputer", "metacomputer", "abc")
+        cached = os.path.join(root, "bin", "metacomputer")
+        os.makedirs(os.path.dirname(cached))
+        shutil.copy2(CLI, cached)
+        get = os.path.join(root, "get.sh")
+        argv_log = os.path.join(t, "get-argv")
+        stub = f'#!/bin/bash\nprintf "%s\\n" "$@" > {argv_log}\necho "GET.SH RAN"\n'
+        write(get, stub)    # not executable on purpose: it's run as `/bin/bash get.sh`
+        env = base_env(home)
+
+        def args():
+            return open(argv_log).read().splitlines() if os.path.exists(argv_log) else None
+
+        def fresh():
+            if os.path.exists(argv_log):
+                os.remove(argv_log)
+
+        p = run([cached, "setup"], env)
+        check("setup, no checkout: runs the plugin copy's own get.sh with --confirm",
+              p.returncode == 0 and "GET.SH RAN" in p.stdout and args() == ["--confirm"], (p.stdout, p.stderr, args()))
+        fresh()
+        p = run([cached, "setup", "--yes", "--no-chrome", "--no-build", "--dir", "/tmp/x y", "--dry-run"], env)
+        check("setup passes --yes --no-chrome --no-build --dir DIR --dry-run through, after --confirm",
+              args() == ["--confirm", "--yes", "--no-chrome", "--no-build", "--dir", "/tmp/x y", "--dry-run"], (p.stderr, args()))
+        for bad in (["--repo", "https://example.com/other.git"], ["--ref", "main"], ["--repo=x"], ["anything"]):
+            fresh()
+            p = run([cached, "setup", *bad], env)
+            check(f"setup refuses {bad[0]} (exit 2) and runs nothing", p.returncode == 2 and args() is None, (p.returncode, p.stderr))
+        fresh()
+        p = run([cached, "setup", "--dir"], env)
+        check("setup --dir without a folder: exit 2, nothing run", p.returncode == 2 and args() is None, p.stderr)
+        # Settings and variables can't point it elsewhere.
+        elsewhere = os.path.join(t, "elsewhere")
+        write(os.path.join(elsewhere, "get.sh"), '#!/bin/bash\necho "WRONG GET.SH"\n', 0o755)
+        fresh()
+        p = run([cached, "setup"], base_env(home, MCOMP_HOME=elsewhere, PATH=f"{elsewhere}:/usr/bin:/bin"))
+        check("setup ignores MCOMP_HOME and PATH: still the plugin copy's get.sh",
+              "WRONG" not in p.stdout and args() == ["--confirm"], (p.stdout, p.stderr))
+        # A get.sh that is a link (here: to a script outside the plugin folder) is refused.
+        os.remove(get)
+        os.symlink(os.path.join(elsewhere, "get.sh"), get)
+        fresh()
+        p = run([cached, "setup"], env)
+        check("setup refuses a get.sh that's a link out of the plugin folder (exit 1, says what to do)",
+              p.returncode == 1 and "WRONG" not in p.stdout and "get.sh | bash" in p.stderr, (p.stdout, p.stderr))
+        os.remove(get)
+        p = run([cached, "setup"], env)
+        check("setup without a get.sh in the plugin copy: exit 1, says to update the plugin or use get.sh in Terminal",
+              p.returncode == 1 and "claude plugin update" in p.stderr and "get.sh | bash" in p.stderr, p.stderr)
+        # A get.sh in bin/ (beside the command, not at the copy's root) isn't used either.
+        write(os.path.join(root, "bin", "get.sh"), stub)
+        fresh()
+        p = run([cached, "setup"], env)
+        check("setup never runs a get.sh from bin/ or anywhere but the copy's root", p.returncode == 1 and args() is None, p.stderr)
+        os.remove(os.path.join(root, "bin", "get.sh"))
+        # With a checkout set up, setup is that checkout's (its install.sh), not the plugin's get.sh.
+        write(get, stub)
+        fake = os.path.join(t, "checkout", "bin", "metacomputer")
+        write(fake, '#!/bin/bash\necho "CHECKOUT $*"\n', 0o755)
+        os.makedirs(os.path.join(home, ".local", "bin"))
+        os.symlink(fake, os.path.join(home, ".local", "bin", "metacomputer"))
+        fresh()
+        p = run([cached, "setup", "--yes"], env)
+        check("with a checkout, setup hands over to it (no get.sh)", p.stdout.strip() == "CHECKOUT setup --yes" and args() is None,
+              (p.stdout, p.stderr))
+        os.remove(os.path.join(home, ".local", "bin", "metacomputer"))
+        # The real get.sh through the plugin, with no terminal: explains, changes nothing, exit 3 (asks for --yes).
+        os.remove(get)
+        shutil.copy2(os.path.join(LAB, "get.sh"), get)
+        p = subprocess.run([cached, "setup"], env=env, capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL, start_new_session=True)
+        check("real get.sh via setup, no terminal: shows the plan, changes nothing, exit 3 with how to go ahead",
+              p.returncode == 3 and "will:" in p.stdout and "--yes" in p.stdout and "Nothing was changed" in p.stdout
+              and not os.path.exists(os.path.join(home, "metacomputer")), (p.returncode, p.stdout[-600:], p.stderr[-300:]))
+        p = run([cached, "setup", "--help"], env)
+        check("setup --help shows get.sh's options", p.returncode == 0 and "--no-build" in p.stdout and "--dry-run" in p.stdout,
+              p.stdout[-300:])
     finally:
         shutil.rmtree(t, ignore_errors=True)
 
@@ -530,6 +625,7 @@ def test_prefixes():
 test_layout()
 test_validate()
 test_handoff()
+test_setup()
 test_install()
 if REAL:
     if shutil.which("claude"):
