@@ -228,6 +228,18 @@ would misplace. Neither cost anything measurable in the benchmark (bench/README.
 "Costs": 20/20 tasks either way, $11.80 against $11.83, 20.1 against 20.2 turns,
 no refusals), and the GUI and option tests pass with both on.
 
+### Tools the hub serves itself
+
+Two tools in the tool list aren't Cua Driver's: `request_site_login` and
+`teleport_browser_session` (`lib/site_login.py`), named and shaped like Cua Spaces'
+Keyvault tools for agents written for Spaces. The hub adds them to the driver's
+list and serves them after its one-controller check. Their driver calls go
+through `Hub.call_for`, so the action log names the client and bounded mode's
+manifest applies. The values stay in the vault: they call `metacomputer secrets
+list|login|fill|session load` with the client's pid (`--on-behalf-pid`), and the
+unlock process asks and types (SECURITY.md, "Tools for agents written for Cua
+Spaces").
+
 ### Guards (in the hub, for every client)
 
 - **One controller at a time** (`lib/owners.py`). Acting calls are refused

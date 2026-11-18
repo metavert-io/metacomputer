@@ -954,6 +954,13 @@ and folder (its project) are the **requester**:
   false` in the audit log), and nothing more: any program of yours can name any live
   process, so the claim never satisfies a `--project` limit, an unattended rule or a
   grant. Those always see the client itself.
+- the metacomputer hub, which serves every Claude Code session from one process (and may
+  sit under the session that started it), asks as itself: a request from the hub or a
+  process it started has no Claude Code session and no project, whichever session started
+  the hub, so `--project` limits, unattended rules and `NAME session` grants never cover it.
+  It's recognised by its command line, which only takes standing away (a process copying it
+  gives up its own session). The session the hub names is shown as the unverified claim
+  above.
 
 When a use needs your approval, what you type decides how long it lasts:
 
@@ -1188,6 +1195,43 @@ Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME
 folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
 stand-in for the Safe Storage password) are required there, and release builds don't
 contain them (`tests/test_vault_import.py`).
+
+### Tools for agents written for Cua Spaces: `request_site_login`, `teleport_browser_session`
+
+The hub serves two MCP tools itself, with the names and parameters Cua Spaces' Keyvault
+documents (docs/moving-from-spaces.md maps the rest). They add no new way to a value:
+- **They go through the hub's guards.** The hub serves them after its one-controller
+  check, like any acting tool. The browser calls they make (`browser_prepare`,
+  `get_browser_state`, `browser_navigate`, `browser_click`) are the hub's own calls on
+  that client's behalf: the action log names the client, and bounded mode's manifest
+  applies to them as to any call. In bounded mode the vault behaves as it does for
+  `metacomputer secrets fill`: its fill path doesn't go through the driver, so a site
+  outside the manifest stops at the navigation, not at the fill.
+- **`request_site_login`** finds the saved login for the URL's exact origin (by name,
+  sites and username, from `list`). It opens page-mode Chrome on the page or uses the tab
+  given, and refuses if the tab is on any other site. It reads the page's fields from a
+  `dom_refs_v1` snapshot, then runs `metacomputer secrets login` (or `fill --field
+  username` on a username-only page) with those fields' selectors. The vault then checks
+  both fields in the VM, asks you as for any fill, and types the values through its fill
+  account to that site only. The hub clicks the submit button. The answer carries status,
+  the site, a masked username and the tab, never a value.
+- **`teleport_browser_session`** finds a session you imported with `import-session` that
+  covers the sites, and runs `metacomputer secrets session load` for it. If the profile has
+  no cookie store yet, the vault says so before asking you, and the hub has the driver open
+  and close the profile once.
+- **The requester is the calling session.** The hub passes on the client's process id
+  (`--on-behalf-pid`), so the unlock terminal shows the Claude Code session and project
+  that called the tool, "through metacomputer hub", and `--project` limits and rules apply
+  to it.
+- **Two steps, as Keyvault has them.** The first call starts the use and answers
+  `pending` (or `consent_required`) with the vault's own request id while you decide; the
+  use goes ahead the moment you approve, and a later call with that `request_id` collects
+  the outcome. Outcomes are kept in the hub for 10 minutes, for the session that asked only.
+
+`metacomputer secrets lock` ends the running unlock from any terminal (anyone may: it only
+restricts). `init --passphrase` and `unlock --passphrase` are accepted as other vaults
+spell them; `--passphrase-stdin` is refused, since a passphrase piped in by a script could
+be piped in by any program running as you.
 
 ### API keys: short-lived tokens through a proxy
 
@@ -1767,7 +1811,8 @@ something waits for you:
 | `audit-sink add\|remove NAME`, `audit-sink show NAME --key` | your terminal | Off-Mac copies of the audit log, and a sink's signing key |
 | `unlock [--for 30m] [--confirm each] [--allow-multiplexer] [--touch-id]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
 | `approve ID [--passphrase]`, `rule add ... --for D [--passphrase]` | you, any terminal (Touch ID / login password, or the passphrase) | Allow one waiting request; make an unattended rule |
-| `requests`, `deny ID`, `rule list`, `rule remove ID` | anywhere, while unlocked | What waits for you (ids, who asked, site, masked username, age); refuse one; the rules; remove one |
+| `requests`, `deny ID`, `rule list`, `rule remove ID`, `lock` | anywhere, while unlocked | What waits for you (ids, who asked, site, masked username, age); refuse one; the rules; remove one; lock now |
+| MCP `request_site_login`, `teleport_browser_session` | Claude, through the hub | Sign in to a site with a saved login; load an imported session ("Tools for agents written for Cua Spaces") |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |

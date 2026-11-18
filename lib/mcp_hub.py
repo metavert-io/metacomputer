@@ -60,6 +60,7 @@ import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
 import wirelimits  # noqa: E402
+import site_login  # noqa: E402  (request_site_login, teleport_browser_session: tools the hub serves itself)
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
 except Exception:  # never let it stop the hub
@@ -1288,6 +1289,7 @@ class Hub:
             if not cursor:
                 break
             seen.add(cursor)
+        tools = site_login.with_tools(tools)
         old = self.cache if self.cache.get("driver_version") == pinned_version() else {}
         inits = dict(old.get("initialize") or {})
         inits[params.get("protocolVersion") or "default"] = self.live_init
@@ -1326,6 +1328,31 @@ class Hub:
         ev.wait(timeout)
         self.internal.pop(iid, None)
         return box[0] if box else None
+
+    def call_for(self, client, tool, args, timeout=60):
+        """A driver tool call the hub makes on a client's behalf (site_login.py): the action log names the client,
+        as for the client's own calls. The answer message, or None."""
+        iid = f"mcomp-hub-{next(self.ids)}"
+        ev, box = threading.Event(), []
+        self.internal[iid] = (ev, box, None, self.up_gen)
+        msgs = []
+        if self.action_log:
+            msgs.append({"jsonrpc": "2.0", "method": "notifications/metacomputer/client",
+                         "params": {"id": iid, "client": self.client_info(client)}})
+        msgs.append({"jsonrpc": "2.0", "id": iid, "method": "tools/call", "params": {"name": tool, "arguments": args}})
+        if not self.connected() or not self.send_up(*msgs):
+            self.internal.pop(iid, None)
+            return None
+        self.last_activity = time.time()
+        ev.wait(timeout)
+        self.internal.pop(iid, None)
+        return box[0] if box else None
+
+    def note_driver_refusal(self, client, tool, res):
+        """A refusal of a call made with call_for: bounded mode's events, as for a client's own call."""
+        text = " ".join(c.get("text", "") for c in (res or {}).get("content") or [] if isinstance(c, dict))
+        if self.bounded_mode and BOUNDED_REFUSED_RE.search(text):
+            self.bounded_refused(client, tool, res)
 
     def ask_up_async(self, method, params, callback):
         """A request of the hub's own whose answer goes to callback(msg or None), on the reader thread."""
@@ -1579,7 +1606,8 @@ class Hub:
         elif method == "ping":
             self.reply(client, msg, {})
         elif method == "tools/list":
-            tools = self.live_tools if self.live_tools is not None else (self.cache.get("tools") or {}).get("tools") or []
+            tools = site_login.with_tools(self.live_tools if self.live_tools is not None
+                                          else (self.cache.get("tools") or {}).get("tools") or [])
             if client.tools_hash is not None:
                 client.tools_hash = tool_names_hash(tools)
             self.reply(client, msg, {"tools": tools})
@@ -1708,6 +1736,12 @@ class Hub:
                 return
         elif client.has_claim:
             self.claim(client, name)
+        if name in site_login.TOOL_NAMES:
+            # Served here, after the one-controller check; its driver calls go through call_for (bounded mode's
+            # manifest and the action log apply), and the vault does the approvals.
+            self.act_seq += 1
+            site_login.call(self, client, msg)
+            return
         sess = self.session_for(client, name, args)
         note = None
         if acting:

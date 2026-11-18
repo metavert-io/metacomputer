@@ -603,6 +603,8 @@ struct Requester {
     var claimedClaudePID: pid_t? = nil
     var claimedProject: String? = nil
     var claimedClientPID: pid_t? = nil
+    // The metacomputer hub this request came through (it was stripped of any session: see of(_:onBehalf:)).
+    var hubPID: pid_t? = nil
 
     static func of(_ pid: pid_t) -> Requester {
         let exe = pid > 0 ? (processPath(pid).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "?") : "?"
@@ -625,8 +627,18 @@ struct Requester {
     /// Who asked, with what the client says about whom it asks for (`on_behalf_pid`) kept beside it as an
     /// unverified claim. The claim is attribution only: anything running as you can name any live process,
     /// so it never satisfies a project limit, an unattended rule or a grant; those see the client itself.
+    ///
+    /// The metacomputer hub (`python3 .../lib/mcp_hub.py serve`) serves every Claude Code session from one
+    /// process, which may sit under the session that started it. A request from it, or from a process it
+    /// started, is the hub's own: no Claude Code session and no project, so the session that happened to start
+    /// the hub lends it nothing. The hub is recognised by its command line, which only takes standing away: a
+    /// process that copies that command line gives up its own session and project, and gains nothing.
     static func of(_ pid: pid_t, onBehalf: pid_t?) -> Requester {
         var direct = of(pid)
+        if let hub = hubAncestor(pid) {
+            direct = Requester(clientPID: pid, clientExe: direct.clientExe, claudePID: nil, claudeStart: nil, project: nil)
+            direct.hubPID = hub.pid
+        }
         guard let ob = onBehalf, ob > 1, ob != pid, procEntry(ob) != nil else { return direct }
         let c = of(ob)
         guard c.claudePID != nil, c.claudePID != direct.claudePID else { return direct }
@@ -634,6 +646,20 @@ struct Requester {
         direct.claimedProject = c.project
         direct.claimedClientPID = ob
         return direct
+    }
+
+    /// The metacomputer hub among a process's ancestors, below any Claude Code process (nil: none). Used only to
+    /// take a session's standing away, never to give any.
+    static func hubAncestor(_ pid: pid_t) -> ProcEntry? {
+        var p = pid
+        for _ in 0..<64 {
+            guard p > 1, let e = procEntry(p) else { return nil }
+            if e.name == "claude" { return nil }
+            let args = procArgs(p)
+            if let i = args.firstIndex(where: { $0.hasSuffix("/lib/mcp_hub.py") }), i + 1 < args.count, args[i + 1] == "serve" { return e }
+            p = e.ppid
+        }
+        return nil
     }
 
     /// Is that Claude Code process still the same one (same pid, same start)?
@@ -644,6 +670,7 @@ struct Requester {
 
     var record: [String: Any] {
         var d: [String: Any] = ["client_pid": Int(clientPID), "client": clientExe]
+        if let h = hubPID { d["hub_pid"] = Int(h) }
         if let p = claudePID { d["claude_pid"] = Int(p) }
         if let pr = project { d["project"] = pr }
         if let c = claimedClaudePID {
@@ -661,6 +688,7 @@ struct Requester {
         if let p = claudePID {
             return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
         }
+        if let h = hubPID { return clean("the metacomputer hub (pid \(h)), on no Claude Code session's behalf" + claim, max: 300) }
         return clean("\(clientExe) (pid \(clientPID)), not from Claude Code" + claim, max: 300)
     }
 }
