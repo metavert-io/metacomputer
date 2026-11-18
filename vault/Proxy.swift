@@ -286,8 +286,8 @@ final class ProxyHub: @unchecked Sendable {
                 if err.contains("remote port forwarding failed") {
                     throw VaultError("the VM refused the forward to 127.0.0.1:\(guestPort) (in use, or not the port its proxy account allows)", code: Exit.error)
                 }
-                let last = err.split(separator: "\n").last { !$0.hasPrefix("debug") }.map(String.init) ?? "exit"
-                throw VaultError("the tunnel to the VM failed: \(oneLine(last, max: 160))", code: Exit.error)
+                // The rest of ssh's error output can carry the VM's own words (its sshd's messages): not passed on.
+                throw VaultError("the tunnel to the VM failed (ssh's own output isn't passed on)", code: Exit.error)
             }
             usleep(100_000)
         }
@@ -384,13 +384,31 @@ final class ProxyHub: @unchecked Sendable {
         let name = String(parts[1].split(separator: "/", maxSplits: 1).first ?? "")
         let rest = "/" + (parts[1].split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first.map(String.init) ?? "")
         guard validName(name) else { respond(c, 404, "no such secret"); return }
-        func log(_ status: Int, _ bytes: Int, _ token: APIToken?, _ host: String, _ why: String? = nil, redacted: Int = 0) {
-            var rec: [String: Any] = ["op": "api", "name": name, "vm": l.vm, "method": clean(req.method, max: 16), "host": host,
-                                      "path": clean(rest, max: 200), "status": status, "bytes": bytes,
+        // What the VM sent (the secret's name it asked for, the method, the path) is the VM's to choose, and the VM knows
+        // every value it was ever given: the audit log and its sinks get only this process's own words for it. The name
+        // only once it's a stored api secret's, the method as one of the usual few, and the path not at all, only the
+        // prefix it's within when the secret limits paths (the secret's own setting).
+        var known: String? = nil
+        let methodWord = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].contains(req.method) ? req.method : "other"
+        func pathFields(_ token: APIToken?) -> [String: Any] {
+            var d: [String: Any] = [:]
+            if let pre = token?.prefix { d["path_within"] = pre }
+            return d
+        }
+        // The numbers the VM can steer are kept to a few values too: the answer's size as one of eight (sizeBound), whether
+        // the key was withheld (not how often), and an answer the API gave by its status class ("2xx"): an exact count or
+        // status could spell a value the VM was given, a few bytes per request. This process's own refusals keep theirs.
+        func log(_ status: Int, _ bytes: Int, _ token: APIToken?, _ host: String, _ why: String? = nil, redacted: Int = 0,
+                 upstream: Bool = false) {
+            var rec: [String: Any] = ["op": "api", "vm": l.vm, "method": methodWord, "host": host,
+                                      "status": upstream ? "\(min(9, max(1, status / 100)))xx" as Any : status as Any,
+                                      "bytes": sizeBound(bytes),
                                       "result": (200..<400).contains(status) ? "ok" : (status == 401 || status == 403 ? "denied" : "error")]
+            rec.merge(pathFields(token)) { a, _ in a }
+            if let n = known { rec["name"] = n }
             if let t = token { rec["token_id"] = t.id; rec["requester"] = t.requester }
             if let w = why { rec["reason"] = w }
-            if redacted > 0 { rec["key_withheld"] = redacted }
+            if redacted > 0 { rec["key_withheld"] = true }
             if let r = recorder { _ = r(rec) } else { audit(paths, rec) }
         }
         guard let p = try? loadPayload(paths, key), let s = p.secrets[name], s.kind == "api", let host = s.api_host,
@@ -399,6 +417,7 @@ final class ProxyHub: @unchecked Sendable {
             log(404, 0, nil, "-", "no api secret")
             return
         }
+        known = name
         // The token, from the secret's own header or X-Metacomputer-Token.
         var presented: String?
         if let v = req.header(hName), v.hasPrefix(hPrefix), v.hasSuffix(hSuffix), v.count > hPrefix.count + hSuffix.count {
@@ -434,8 +453,8 @@ final class ProxyHub: @unchecked Sendable {
             return
         }
         // With a required audit sink, this request's own record must reach it first.
-        if let gate = preUse, let why = gate(["name": name, "vm": l.vm, "method": clean(req.method, max: 16), "host": host,
-                                              "path": clean(rest, max: 200), "token_id": token.id], token.requester) {
+        if let gate = preUse, let why = gate(["name": name, "vm": l.vm, "method": methodWord, "host": host, "token_id": token.id]
+                                             .merging(pathFields(token)) { a, _ in a }, token.requester) {
             respond(c, 503, why)
             log(503, 0, token, host, "required audit sink: \(why)")
             return
@@ -480,7 +499,7 @@ final class ProxyHub: @unchecked Sendable {
         // ...and whatever it does, no callback writes to this connection from here on: the caller
         // closes the descriptor next, and its number could soon belong to another connection.
         stream.closeOutput()
-        log(stream.status, stream.bytes, token, host, stream.failure, redacted: stream.redactions)
+        log(stream.status, stream.bytes, token, host, stream.failure, redacted: stream.redactions, upstream: true)
     }
 }
 
@@ -818,8 +837,9 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             wipe(&tail)
         }
         if let e = error, failure == nil {
-            failure = oneLine(e.localizedDescription, max: 160)
-            if !headSent { writeError(502, "the API couldn't be reached: \(failure!)") }
+            // The system's description can name the URL, whose path is the VM's: only the error's code.
+            failure = "the API couldn't be reached (URL error \((e as NSError).code))"
+            if !headSent { writeError(502, failure!) }
         }
         done.signal()
     }

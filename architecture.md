@@ -528,6 +528,16 @@ The rest of the vault, briefly (details in SECURITY.md):
   MAC), and, for a required sink, waits for that sink to acknowledge the `begin` record
   of each use. `scripts/verify-audit.py` checks the log and sink captures;
   `audit --verify` checks the MACs.
+- **Withdrawn requests** (`vault/Server.swift`, `requesterGone`; `Commands.swift`,
+  `request`): while it serves a fill, sign-in, session or token request, the unlock
+  process watches the requester's connection.
+  - When the requester closes its side or dies, the vault stops the request. It
+    withdraws a question still waiting. It starts no further step: `runProcess` checks
+    `requesterProbe`. It kills a step in progress, the ssh's process group.
+  - It then answers `cancelled`, which is the requester's confirmation.
+  - The client withdraws on SIGINT, SIGTERM or SIGHUP, when its parent ends, or at its
+    deadline. With no confirmation it exits 5.
+  - `mcomp-vault settle` is answered only after everything sent before it has finished.
 - **Needs-you events**: while a question waits, the unlock process drops a
   `needs_you.approval_waiting` file into the event spool
   (`~/Library/Application Support/metacomputer/events/spool/`, under the "Event spool"

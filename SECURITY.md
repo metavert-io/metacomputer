@@ -775,7 +775,13 @@ from your own terminal. An API key never enters the VM at all: the VM gets a
 short-lived token for a proxy that adds the key on the way out.
 
 **The limit, up front.** This keeps values out of Claude's view in normal operation,
-and every use waits for you. It is not a wall against a deliberately hostile agent.
+and nothing is used until you unlock the vault in your own terminal.
+- Whether each use then asks depends on the secret. Imported secrets ask at every use
+  (`each`). A secret you add with `set` doesn't, once the vault is unlocked (`session`).
+- For per-use approval on such a secret, add `--approval each`, change it later with
+  `policy NAME --approval each`, or unlock with `--confirm each`.
+
+It is not a wall against a deliberately hostile agent.
 - By default Claude also has a shell in the VM as the desktop user, and Chrome runs as
   that user. Code running there can pose as Chrome's DevTools to receive a fill, or
   read a filled field back.
@@ -785,7 +791,8 @@ and every use waits for you. It is not a wall against a deliberately hostile age
 "What doesn't hold" below has the details and how to narrow them.
 
 It ships in this repository. It needs no password manager, no other secrets tool and
-not the macOS Keychain. It has two parts:
+not the macOS Keychain (only `import-passwords --browser chrome` and `import-session`
+read one Keychain item, Chrome's own, after macOS asks you). It has two parts:
 - **On the Mac:** the vault program, `vault/`, built by `scripts/build-vault.sh`
   (which `install.sh` runs). It needs macOS 15 and Apple's Command Line Tools
   (`swiftc`).
@@ -862,7 +869,9 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    `Fill x-login (password) into https://x.com on VM metacomputer?`
    `Asked by Claude Code in ~/Projects/foo (pid 4242).`
    - You type the secret's name to allow this use, `NAME session` for this Claude
-     Code session, or `NAME unlock` until the vault locks ("Who is asking" below).
+     Code session, or `NAME unlock` until the vault locks ("Who is asking" below). Or,
+     from any terminal, `metacomputer secrets approve ID` with Touch ID or your login
+     password, or the passphrase ("Approving from elsewhere" below).
    - No answer within 120 seconds, or before the unlock's time runs out, counts as no.
    - After you allow it, only that site is sent with the value.
    - The listener is checked again before the value goes.
@@ -891,11 +900,38 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    It gives up after 40 seconds.
 7. Claude gets back only the outcome, for example
    `{"ok":true,"field":"password","origin":"https://x.com","chars":16}`, or a refusal
-   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error. The VM's
-   answer is held to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
+   and its reason. The exit code is 0 for ok, 2 refused, 3 locked, 4 error, 5 no
+   answer (see "A request whose requester goes away stops"). The VM's answer is held
+   to a fixed form (`ok`, `denied`, `mode`, `field`, `origin`, `route`,
    `reason`, `profile` as strings or booleans, `chars` a number): anything else is
    dropped, a field of the wrong type makes it an error, and an answer holding the value
    anywhere, at any depth, is withheld.
+
+   The VM knows every value it was ever given, so nothing it chose goes on, for any answer.
+   That covers a check that carries no value, a fill that worked and a fill that failed.
+   - Its words are replaced by the vault's own: the reason is one of the vault's own
+     sentences, picked by what the VM said.
+   - Its error output and exit status aren't passed on.
+   - `origin` is kept only as one of the sites the request named (the vault's own copy;
+     otherwise none, since a VM could spell a value in a host name).
+   - `chars` is the vault's own count of the value, and only when the fill worked.
+   - `mode` and `field` are the request's, and `route` is `element`, `keyboard` or nothing.
+
+   No field of the VM's free text is left, and the audit record is built from that
+   filtered result, never from the raw answer. That holds for the result, the audit log,
+   the unified log, the sinks, `audit --json`, the unlock terminal and the events alike.
+   What's left to a hostile VM is a few bits per request:
+   - which of those few fixed outcomes it reports;
+   - which of a few size classes an answer falls into (below);
+   - how many requests it makes, and when. Every record is timestamped, and the VM can
+     delay its answer. macOS stamps the unified log too, so rounding the vault's own
+     timestamps wouldn't close this.
+
+   No number the VM can steer is recorded as it chose it. Sizes are one of 0, 1 KiB,
+   64 KiB, 1 MiB, 16 MiB, 256 MiB, 4 GiB or 1 TiB (the smallest that holds it). An API's
+   status is recorded by its class (`2xx`). Whether the key was withheld is a yes or no,
+   not a count, and a token's requests are counted in words (`none`, `1-9`, `10-99`,
+   `100 or more`).
 
 **The fill account** is always present on VMs built with this version. Nothing else
 can use it, so it's safe to leave on:
@@ -917,9 +953,16 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
 - `session load NAME` puts it back. It goes into a profile of the same name only:
   the driver records a profile's name inside it (`.cua-driver-owned-profile.json`),
   so it won't use a renamed copy.
-- Loading asks you every time unless you've run `session policy NAME --approval
-  session`, which asks for the passphrase. Even then, loading into a VM other than the
-  one it was saved from asks, naming both.
+- Loading asks you every time. A whole browser profile may hold any sign-in, an
+  identity provider's included, so it's treated as one: `session policy NAME
+  --approval session` doesn't stop the question, an earlier `NAME session` or `NAME
+  unlock` answer covers only that load, and no unattended rule can cover it. Loading
+  into a VM other than the one it was saved from names both.
+- When a save or load fails, the result and the audit log say why in the vault's own
+  words, from the VM's exit status (one of a few known meanings; any other status isn't
+  shown). The VM knows every value it was ever given, so its error output is never
+  passed on. A saved session's size is the VM's to choose too, so it's kept, shown and
+  recorded only as one of a few sizes (step 7 of "How a fill works").
 - Save and load refuse while a Chrome is using that profile. A load unpacks with
   Python's safe tar filter: no absolute paths, no `..`, no links leading outside, no
   special files.
@@ -933,12 +976,19 @@ It fills nothing unless it can tell which user runs the desktop, from the root-o
 
 The unlock process asks the kernel which process is on the other end of its socket
 (`LOCAL_PEERPID`) and walks up that process's parents to the nearest Claude Code
-process (one named `claude`, or `node` running Claude Code's script). That process's
-pid, start time and folder (its project) are the **requester**:
+process (one named `claude`, `node` running Claude Code's script, or the native
+installer's version file, `.../claude/versions/X.Y.Z`). That process's pid, start time
+and folder (its project) are the **requester**:
 - your terminal shows it: `Asked by Claude Code in ~/Projects/foo (pid 4242)`;
 - the audit log records it (`requester`: `client`, `client_pid`, `claude_pid`,
   `project`), and so does the waiting-for-you event;
-- a request from anything else says so: `python3 (pid 99), not from Claude Code`.
+- a request from anything else says so: `python3 (pid 99), not from Claude Code`;
+- a client may say which Claude Code process it asks for (`--on-behalf-pid`). That is
+  shown and recorded as an unverified claim (`..., for Claude Code in ~/Projects/foo
+  (pid 4242) as it says (unverified)`, and `requester.on_behalf` with `verified:
+  false` in the audit log), and nothing more: any program of yours can name any live
+  process, so the claim never satisfies a `--project` limit, an unattended rule or a
+  grant. Those always see the client itself.
 
 When a use needs your approval, what you type decides how long it lasts:
 
@@ -949,13 +999,319 @@ When a use needs your approval, what you type decides how long it lasts:
 | `NAME unlock` | every use of that secret, from anyone, until the vault locks |
 
 Anything else refuses. A grant covers the same kind of use of that one secret on its
-own sites; it never widens them. `--project DIR` on a secret refuses requests whose
-Claude Code process works outside DIR (or that come from no Claude Code process).
+own sites; it never widens them. A grant or a rule only decides whether to ask: a use
+that may ask is always checked in the VM first, and the value then goes only to the site
+the VM reported for that check, whatever covered it. `--project DIR` on a secret refuses
+requests whose Claude Code process works outside DIR (or that come from no Claude Code
+process).
 
 **This is attribution and scoping, not isolation.** Every process involved runs as
-you. Any program of yours can name itself `claude`, change folder, or run under a real
-Claude Code process. The requester keeps honest sessions apart and tells you which one
-asked; it doesn't stop a hostile process of yours.
+you. Any program of yours can name itself `claude`, change folder, run under a real
+Claude Code process, or pass a request on for one. The requester keeps honest sessions
+apart and tells you which one asked; it doesn't stop a hostile process of yours.
+
+### Approving from elsewhere: request ids, Touch ID, the passphrase
+
+Every use that waits for you is a **request** with an 8-digit id, shown in the unlock
+terminal (`Request 5f2c9a0e: ...`) and listed by `metacomputer secrets requests`: the
+id, what it would do, the secret, the site, the VM, a masked username (`a***@example.com`),
+who asked and how long it has waited. You can answer it in the unlock terminal as before,
+or from any terminal:
+
+| Command | What it takes | Allows |
+| --- | --- | --- |
+| `approve ID` | macOS's own dialog: Touch ID, or your login password on a Mac without it (LocalAuthentication, `deviceOwnerAuthentication`), shown by the unlock process | this one use |
+| `approve ID --passphrase` | the vault passphrase, typed on that terminal | this one use |
+| `approve ID [--passphrase] --scope session\|unlock` | the same, with the dialog or the passphrase prompt naming the wider scope | the rest of that Claude Code session, or until the vault locks |
+| `deny ID` | nothing | refuses it |
+
+How far an approval reaches is part of what's confirmed. The dialog's text names it ("for
+this one use", "for this use and the rest of this Claude Code session", "for every use of
+NAME until the vault locks"), the passphrase proof covers it, and the grant made is exactly
+that scope and never more: what's typed at the unlock terminal before or after can't
+widen an approval the dialog or the passphrase gave.
+
+`unlock --touch-id` shows that dialog for every question by itself, beside the terminal
+question; either answer counts, and cancelling the dialog refuses. Inside tmux or screen,
+where typed answers are refused, `--touch-id` is how you approve (and `--confirm each`
+starts there with it).
+
+**Presence mode** goes further: every approval, and every `NAME session` or `NAME
+unlock` grant, needs macOS's dialog (Touch ID, or your login password) or the passphrase
+(`approve ID --passphrase`). What you type at the unlock terminal only chooses how far an
+approval reaches (`NAME`, `NAME session`, `NAME unlock`); it never approves on its own,
+and anything else typed still refuses. Typing a wider scope while a dialog for one use is
+open withdraws that dialog and opens one that names the wider scope: only that one can
+allow it. Once a dialog has allowed a use, nothing typed afterwards changes its scope.
+Unattended rules are made the same way, with the rule and its expiry in the dialog.
+- **The default fails closed.** On a Mac with Touch ID and a finger enrolled, presence
+  mode is on: a typed line could come from any program that can type into that terminal
+  (a multiplexer, an editor's terminal, `script`, `expect`), and Touch ID can't. It stays
+  on when the check can't tell (a paired Touch ID keyboard that's disconnected, Touch ID
+  unavailable, any error), and the unlock says what the check answered. Once this vault
+  has seen Touch ID enrolled on this Mac (kept inside the vault), it stays on even if
+  Touch ID later reports no finger or no sensor, until you turn it off yourself
+  (`presence off`, or `--no-require-presence` for one unlock, both with the passphrase).
+  Only a clean answer, no sensor or no finger enrolled, on a vault that never saw Touch ID
+  enrolled leaves typed answers as the default, and `unlock` says so in one line with how
+  to turn presence mode on (your login password then confirms in the dialog). (macOS
+  answers "no finger enrolled" on a Mac with no sensor that could take a Touch ID
+  keyboard.)
+- **A vault file put back to an older copy.** Any program running as you can replace the
+  vault file with a copy from before Touch ID was seen enrolled (or from when it said
+  `presence off`); the file's encryption can't tell an older copy from the current one.
+  The unlock checks the audit log too, which is appended to separately: if the log says
+  Touch ID was seen enrolled, or its last authenticated `presence` setting is stricter than
+  the file's (on, then auto, then off), the stricter one holds, the unlock says the file may
+  be an older copy, and that goes in the log (`rollback_suspected`). A setting in the log
+  counts only when it's authenticated: its creation MAC checks out under the vault's audit
+  key, which only a command that opened the vault with the passphrase has, and it sits
+  where the chain says (a genuine old record copied to the end doesn't count). A record any
+  program adds without that can only make presence mode stricter (a Touch ID record), never
+  looser. What this doesn't stop: putting back both the vault file and the audit log
+  (cutting the log off before those records) to matching older copies. An audit sink, which
+  received the records as they happened, still shows them. Keeping this state somewhere a
+  program of yours can't rewrite (the Secure Enclave or a Keychain item with its own access
+  list) would close that; it isn't done here.
+- **Either way can be switched:** `unlock --require-presence` or
+  `--no-require-presence` for one unlock, and `metacomputer secrets presence on|off|auto`
+  (with the passphrase) for the vault's own default, kept inside the vault.
+- `metacomputer secrets status` and `metacomputer security` show which mode is in force
+  (while the vault is locked, the default for this Mac).
+- Where the dialog can't be shown (`MCOMP_VAULT_LOCAL_AUTH=noninteractive`, or an SSH
+  session with no window), presence-mode approvals come only from `approve ID
+  --passphrase` (one use, or `--scope session|unlock`).
+- **Its limit:** a program that controls the terminal you type into sees what you type
+  there, the passphrase included (the echo is off, but the program reads the keystrokes
+  themselves). Only the system dialog defends against that: macOS draws it and reads
+  Touch ID or your login password itself. If you can't trust the terminal, approve with
+  Touch ID.
+- Test builds decide "has Touch ID" from `MCOMP_VAULT_TEST_BIOMETRY` instead of asking
+  macOS, and release builds don't contain that switch.
+
+**What a program can and can't approve.** Claude Code runs as you and can run any
+`metacomputer` or `mcomp-vault` command, or write to the vault's socket directly, so a
+request on the socket proves nothing about who sent it.
+- **In presence mode** (the default on a Mac with Touch ID and a finger enrolled), nothing
+  a program does can approve. Only the system dialog or the passphrase does, as below.
+- **With typed approvals** (presence mode off, or a Mac without Touch ID), a line typed at
+  the unlock terminal approves. So a program that can type into that terminal could
+  approve a use: a multiplexer allowed with `--allow-multiplexer`, an editor's built-in
+  terminal, and the other cases under "Keystroke injection into the unlock terminal" in
+  "What doesn't hold".
+- In either mode, the dialog and the passphrase proof can't be produced by a program:
+- `approve ID` only asks the unlock process to show the system dialog. macOS draws it,
+  naming the program and what it allows (`approve request 5f2c9a0e, for this one use:
+  fill x-login (password) into https://x.com on VM metacomputer, asked by Claude Code in
+  ~/Projects/foo`), and only a finger or the login password answers it. An `approve`
+  for another scope withdraws an open dialog for a different one and shows its own.
+- `approve ID --passphrase` opens the vault with the passphrase on that terminal and
+  sends a proof: an HMAC, under a key derived from the vault's data key (which only the
+  passphrase or the running unlock gives), over the request's id, a one-time challenge,
+  the scope and the summary you were shown. The unlock process checks it; a forged
+  proof, one made for other text or another scope, or one kept from an earlier request
+  approves nothing.
+- A terminal of its own isn't the bar: `script` or `expect` can make one. The
+  passphrase, the dialog or (outside presence mode) a line typed at the unlock terminal
+  is.
+- `deny`, `requests` and listing or removing rules need nothing: they only restrict.
+- Test builds can't show the dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH` stands in for the
+  person there, and release builds don't contain it (`tests/test_vault_approvals.py`
+  checks both, by the binary's strings and by its behaviour).
+- `MCOMP_VAULT_LOCAL_AUTH=noninteractive` in the unlock's environment never shows the
+  dialog (for a Mac nobody sits at, or one you reach only over SSH): `approve ID` then
+  fails at once, and you use the terminal or `--passphrase`.
+
+Requests live only while the unlock process waits for an answer (at most 120 seconds,
+and never past the unlock's end); while one waits, `status`, `list`, `tokens`,
+`requests`, `approve`, `deny` and `rule list` are still answered, and other uses wait
+their turn. A client may choose its request's id (`--request-id`, 8 hex digits never
+used before in that unlock), so a program that passes requests on can report the id at once.
+
+### Unattended rules
+
+A rule lets one use happen without asking, for Claude Code sessions in one folder,
+until it expires:
+
+```
+metacomputer secrets rule add --secret x-login --project ~/Projects/foo --for 8h   # its fills (an api secret: its tokens)
+metacomputer secrets rule add --site https://x.com --project ~/Projects/foo --for 8h # any secret's fill into that site
+metacomputer secrets rule add --session s1 --project ~/Projects/foo --for 1d        # loading that sealed session (its own VM)
+metacomputer secrets rule list | rule remove ID
+```
+
+- Making one takes macOS's Touch ID / password dialog (shown by the unlock process),
+  or `--passphrase` on your terminal (also how you make one while the vault is
+  locked). `--for` is required, at most 30 days. Rules live inside the vault and apply
+  only while it's unlocked; expired ones are dropped.
+- A rule covers requests whose Claude Code process works in that folder or below it,
+  never one from outside Claude Code, and never a client's claim to ask for such a
+  process (`--on-behalf-pid`). It never covers an identity provider, a sealed-session
+  save, a load into another VM, or a whole browser profile (only imported sessions,
+  whose sites are known, can have one). It decides whether to ask, never where the value
+  goes: the fill is bound to the site checked.
+- What's confirmed is what's stored. The rule is built, with its absolute expiry, before
+  you're asked; macOS's dialog shows its secret, site or session, its project and that
+  expiry, and the rule is stored exactly as shown. A rule whose text is too long for the
+  dialog to show whole (over 400 characters, a very long project path) is refused there:
+  `rule add --passphrase` shows it in full in your terminal, with the expiry fixed when
+  it's shown, and refuses to store anything that differs.
+- The audit log records each use it covers as `approval: rule:ID`, and the rule's
+  making (`rule_add`, with how it was confirmed) and removal.
+- `metacomputer secrets policy NAME --approval session|each` (passphrase) changes
+  whether a secret's uses ask at all, without typing its value again.
+
+### Identity providers always ask
+
+A sign-in at an identity provider opens every site that trusts it, so a use there
+asks every time, whatever else is set: a secret's `--approval session`, the unlock's
+default `--confirm session`, an earlier `NAME session` or `NAME unlock` answer, and
+unattended rules never cover it, and `NAME session` or `NAME unlock` typed at such a
+question allows that one use only. This is a tightening: before, a secret set to
+`session` didn't ask on any of its sites. The built-in list (`vault/Approvals.swift`):
+
+| Provider | Sites |
+| --- | --- |
+| Google | `accounts.google.com`, `myaccount.google.com`, `accounts.youtube.com` |
+| Microsoft | `login.microsoftonline.com`, `login.microsoftonline.us`, `login.partner.microsoftonline.cn`, `login.microsoft.com`, `login.live.com`, `login.windows.net`, `account.live.com`, `account.microsoft.com` |
+| Apple | `appleid.apple.com`, `idmsa.apple.com`, `account.apple.com`, `iforgot.apple.com` |
+| Okta | any subdomain of `okta.com`, `oktapreview.com`, `okta-emea.com`, `okta-gov.com` |
+
+- A fill of a secret with one of these among its sites always checks the page first:
+  on the provider's site it asks; on its other sites it goes ahead as set, and the value
+  goes only to the site the VM reported.
+- An API secret whose host is on the list asks for every token.
+- A sealed session that holds a provider's sign-in asks at every load, and so does
+  every whole browser profile saved from the VM, since its contents aren't known.
+  Replacing a session keeps that mark.
+
+### Signing in with one approval (`login`)
+
+`metacomputer secrets login NAME --password-selector CSS [--username-selector CSS]`
+fills a saved login's username and password into the two fields the selectors name,
+under one approval. Each field is checked in the VM first (the password field names
+the site, which must be one of the secret's, and the username field must be on the same
+site), then both are typed through the same path as `fill`, to that site only. The
+answer lists the fields filled, the site and a masked username.
+
+### A request whose requester goes away stops
+
+While the unlock process serves a `fill`, `login`, `session save|load` or `token`
+request, it watches the requester's connection. If the requester closes its side or
+dies, the vault stops the request:
+
+- **What withdraws it.** The client closes its side when it gets SIGINT, SIGTERM or
+  SIGHUP, when the program that ran it ends (the `metacomputer secrets` wrapper killed
+  outright), or at its own deadline. A client killed outright simply disconnects.
+- **What the unlock process does.**
+  - A question still waiting is withdrawn: the dialog is cancelled and `approve ID` finds
+    nothing.
+  - No further step starts. A sign-in whose username is being typed never sends the
+    password.
+  - A step in progress, the ssh to the VM, is killed with its process group.
+  - A request still queued behind another's question never starts.
+- **The confirmation.** It then answers (`cancelled`), and records the request as
+  `cancelled` with its request id. That answer is the confirmation the client waits for
+  (up to 40 s; exit 4). With no answer the client exits 5, and `metacomputer secrets
+  settle` waits until the unlock process has finished everything it got before. It
+  answers only then, or says no unlock process runs.
+- **Limit.** A step the VM has already started may still finish there. Killing ssh ends
+  the connection, not the VM's side of it. No later step is sent, and nothing it does
+  afterwards can reach the vault.
+
+### Bringing logins in: Chrome, CSV exports, a site's cookies
+
+All of these run in your own terminal and ask for the vault passphrase, like `set`; the
+values go from their source into the encrypted vault and nowhere else. The output names
+sites, counts, proposed secret names and masked usernames (`a***@example.com`) only, and
+`--dry-run` shows that much without opening the vault (or, for Chrome, the passwords).
+Everything imported starts at `each`: every use asks until you relax it (`policy`, or a
+rule).
+
+**Saved passwords from Chrome**, `import-passwords --browser chrome [--profile NAME]
+[--site HOST ...]`:
+- It reads a copy of the profile's `Login Data` (with its `-wal` and `-journal`), made in a
+  private folder and removed afterwards; Chrome's own file is never opened.
+- The passwords are encrypted with Chrome's "Chrome Safe Storage" key, which Chrome keeps in
+  your login keychain. The vault asks the Keychain for it, and macOS asks you whether
+  `mcomp-vault` may use it: choose **Allow** (not Always Allow) to let it read the key this
+  once. Over SSH, with no window to ask in, macOS refuses and the import says so.
+- One secret per site and username, named after the host (`github.com`, `github.com-2`).
+  Importing again changes nothing that's the same, updates a changed password in place
+  (recorded as a rotation) and never duplicates. Skipped, and counted: sites that aren't
+  https (http only for `localhost` or `127.0.0.1` with a port), apps' logins, "never save"
+  entries, empty passwords, and passwords in a form other than Chrome's macOS one (`v10`).
+- The copy is read as a file someone else may have prepared: `logins` must be an ordinary
+  table (a view or a virtual table, which would run a query of the file's choosing, is
+  refused), no value may pass 16 MB, and reading stops with nothing imported after 200,000
+  rows, 256 MB of values or 60 seconds, or if the query ends early for any reason.
+
+**CSV exports**, `import-passwords --csv FILE`: Chrome's (`name,url,username,password,note`),
+the macOS Passwords app's (`Title,URL,Username,Password,Notes,OTPAuth`), 1Password's
+(`Title,Url,Username,Password,OTPAuth,...`) and Bitwarden's (`...,type,name,...,login_uri,
+login_username,login_password,login_totp`), recognized by their headers. A one-time-code
+column (`OTPAuth`, `login_totp`) becomes a TOTP secret beside the login (`NAME-otp`) when
+it's a SHA1, 6-digit, 30-second code; others are skipped and said. The code is recorded as
+that login's own by the login's id (`totp_for` in the vault, `totp_for_id` and the name in
+the audit record): a random id each secret gets once and keeps through `set --replace`,
+never reused, unlike a name. Importing again replaces only that one, never another
+account's code on the same site, not even one whose login had the same name before.
+Deleting a login leaves its code tied to no login (`delete` says so); replacing a code with
+`set --replace` keeps its login. A replacement for another account (another kind, another
+username, or other sites) is a new secret with a new id: any code tied to the old one is
+untied, and `set` says so (`totp_unlinked` in its record). A code an earlier build tied to
+its login by name is tied by that login's id the first time the vault is opened with the
+passphrase (or untied, when no login of that name is left), in one write that gives each
+such login one id for every reference to it, and the command says which;
+every code made or
+replaced has its own audit record (`set` or `rotate`, `kind: totp`), even when the password
+is unchanged. Bitwarden's non-login items are skipped; a login's URIs become its sites, at
+most its first 20 (the import says when it cut one). An export file holds every password in
+plain text: delete it once it's imported.
+
+**A site's session from your Chrome**, `import-session --browser chrome --site HOST [--site
+...] --name NAME --to-profile P`:
+- It reads a copy of the profile's cookie store and keeps the named sites' cookies: those of
+  the site itself, its subdomains, and domain cookies above it. There is no "every site".
+- The values are decrypted with the Safe Storage key (macOS asks, as above) and sealed in
+  the vault like a saved session, for profile `P` on the current VM. The session's approval
+  starts at `each`, also when `--replace` replaces one, and a replaced session that reached
+  an identity provider keeps that mark.
+- **Each value must name its own domain.** From version 24 of its cookie store (Chrome 130),
+  Chrome puts the SHA-256 of the cookie's domain before each encrypted value. The import
+  requires it: a store older than version 24 is refused (update Chrome), and a value whose
+  domain isn't the host it's filed under, as when someone relabels an identity provider's
+  cookie as one of your site's, stops the whole import. The table checks and limits of a
+  password import apply too (`cookies` and `meta` must be ordinary tables).
+- **localStorage and IndexedDB are not imported.** Chrome keeps them in LevelDB stores that
+  can't be merged into another profile reliably; a site that keeps its sign-in there needs a
+  fresh sign-in in the VM. Only cookies come along.
+- Cookies that reach an identity provider's sign-in pages (`.google.com` reaches
+  `accounts.google.com`) need `--allow-identity-provider`, and such a session asks at every
+  load, whatever its policy and whatever rules exist.
+- `session load NAME` puts them into the VM through the same guarded path as any sealed
+  session (the pinned VM and gateway, the desktop account, the approval). In the VM a loader
+  run as the desktop user merges them into profile `P`'s own cookie store: the profile must
+  exist (opened once by the driver in page-mode Chrome, then closed), no Chrome may be using
+  it, a store encrypted with a keyring is refused, and cookies with the same host, name and
+  path are replaced. Each value goes there encrypted with the VM's Chrome key (Chromium's
+  fixed key for a Linux machine without a keyring, as the VM is built), so the VM's Chrome
+  reads it as its own; the key on this Mac is never copied anywhere.
+- `session load NAME --site HOST` (repeatable) sends only the cookies a browser would send to
+  those sites, filtered on the Mac before anything goes to the VM. The question and the audit
+  record (`sites`) name that scope; an answer that reaches further (`NAME session`) covers
+  loads of exactly those sites; a site the session doesn't hold, and `--site` on a whole
+  browser profile (which loads whole), are refused.
+
+Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME_DIR` (a
+folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
+stand-in for the Safe Storage password) are required there, and release builds don't
+contain them (`tests/test_vault_import.py`).
+
+`metacomputer secrets lock` ends the running unlock from any terminal (anyone may: it only
+restricts). `init --passphrase` and `unlock --passphrase` are accepted as other vaults
+spell them; `--passphrase-stdin` is refused, since a passphrase piped in by a script could
+be piped in by any program running as you.
 
 ### API keys: short-lived tokens through a proxy
 
@@ -1007,11 +1363,20 @@ it expires.
    - checks again, just before forwarding, that the token is still live (not revoked,
      not expired, the vault not locking) and the secret unchanged, and uses the value
      read then: a request that waited on delivery can't outlive its token;
-   - audits it: method, host, path without the query, status, bytes, token id and how
-     many copies were withheld. Never bodies or headers.
+   - audits it:
+     - the method (one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, else `other`);
+     - the host, the token id, and the secret's path prefix if it has one;
+     - the API's status class (`2xx`), or the proxy's own status when it refused;
+     - the answer's size as one of a few classes;
+     - whether a copy of the key was withheld.
+
+     The VM chooses the request's path, the name it asked for, the answer's exact size
+     (through an API that echoes) and how many copies of the key the answer carried, so
+     none of those is recorded. The name is recorded only once it's a stored api secret's.
+     Never bodies or headers.
 5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
    when the vault locks: the proxy and its SSH forwards stop. `tokens` lists the live
-   ones (id, secret, VM, time left, requests, requester).
+   ones (id, secret, VM, time left, requests in words, requester).
 
 **The proxy account**, like the fill account, is always present on VMs built with this
 version, and does nothing else:
@@ -1090,14 +1455,23 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `set`, `rotate`, `delete`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
-| `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
+| `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
-| `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `grant:session` / `grant:unlock` (covered by one), `-` |
-| `requester` | `client`, `client_pid`, `claude_pid`, `project` |
+| `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
+| `request_id`, `use` | the request a use waited on (`request` when it was filed, `authorize` when you allowed it), and what it was for |
+| `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked) |
+| `username_hint` | a password secret's username, masked (`a***@example.com`) |
+| `totp_for`, `totp_for_id` | the login an imported 2FA code belongs to (its name, and its id) |
+| `totp_unlinked` | on `delete` or a `set --replace` of another kind: the 2FA codes no longer tied to that login |
+| `sites`, `cookies` | the sites a cookie session's load was narrowed to (`--site`), and how many cookies went |
+| `identity_provider` | `true` on a request for an identity provider's site |
+| `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted |
 | `reason` | why it was refused or failed |
+| `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
+| `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
-| `method`, `host`, `path`, `status`, `token_id`, `key_withheld` | a proxied API request (the path without its query) |
+| `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
 **What each check proves.** Claude Code runs as you, so it can edit any file of yours,
 this log included. What it can't reach is the vault's **audit key**: 32 random bytes
@@ -1154,8 +1528,8 @@ both:
 
 | Kind | Sends | URL |
 | --- | --- | --- |
-| `webhook` | one POST per event, a CloudEvents 1.0 JSON in structured mode (`Content-Type: application/cloudevents+json; charset=utf-8`): `id` the event's UUID, `source` `metacomputer/<host>`, `subject` the VM, `type` `io.metavert.metacomputer.vault.<op>`, `time`, `data` the event. Signed: `X-Metacomputer-Signature: sha256=<HMAC of the body>` | `https://...` |
-| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added unless the URL ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
+| `webhook` | one POST per event, a CloudEvents 1.0 JSON in structured mode (`Content-Type: application/cloudevents+json; charset=utf-8`): `id` the event's UUID, `source` `metacomputer/<host>`, `subject` the VM, `type` `io.metavert.metacomputer.vault.<op>`, `time`, `data` the event, and `mcompevent` its `event` name when it has one. Signed: `X-Metacomputer-Signature: sha256=<HMAC of the body>` | `https://...` |
+| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added unless the URL ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid`, `.event`, `.request_id`, `.username_hint` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
 | `syslog` | RFC 5424 over TLS, octet-counted (RFC 5425), up to 100 messages a connection: facility user, severity 6 info, 4 warn, 3 error; APP-NAME `metacomputer-vault`, PROCID `-`, MSGID the op; structured data `[metacomputer@32473 seq family vm id hash prev sig]` (32473 is the enterprise number for documentation, RFC 5612); MSG the event's line, no byte-order mark | `syslog+tls://host:6514` |
 | `ntfy` | ntfy's JSON publishing to the server's root: `topic` (the URL's last part), `title` `<vm> - vault: <op>`, `message` one line such as `#42 fill name=x-login field=password vm=metacomputer -> ok https://x.com [Claude in ~/Projects/foo]`, `priority` 4 for refusals and errors, 3 otherwise, `tags`. No signature | `https://ntfy.sh/<topic>` |
 
@@ -1330,11 +1704,17 @@ something waits for you:
     screenshots and recordings show them.
   - Values are never put on a command line or in an environment variable. A VM answer
     that contains the value (at any length, even a 6-digit code) is withheld.
-- **Every use waits for you.** The vault is locked until you unlock it in your own
-  terminal with its passphrase.
+- **Nothing is used until you unlock.** The vault is locked until you unlock it in your
+  own terminal with its passphrase. Imported secrets then ask at every use; secrets you
+  add with `set` ask only with `--approval each` (or `policy NAME --approval each`, or
+  `unlock --confirm each`).
   - It locks again on Ctrl-C, when its time is up, or when that terminal closes.
   - Your terminal shows every request and its outcome, never the values.
-  - With `each`, you confirm each use by typing its name.
+  - With `each`, you confirm each use by typing its name, or with Touch ID, your login
+    password or the passphrase through `approve ID`. In presence mode nothing a program
+    sends can confirm it for you. With typed approvals, a program that can type into the
+    unlock terminal could (see "Keystroke injection into the unlock terminal" below).
+    Identity providers' sign-in pages always ask.
   - Adding, changing or deleting a secret, binding a VM and relaxing a session's
     approval each need the passphrase again, even while the vault is unlocked.
 - **The request travels to a program Claude can't change or read from.** The value
@@ -1389,6 +1769,9 @@ something waits for you:
 
 ### What doesn't hold
 
+- **The unlock process killed outright (SIGKILL).** It ends its requests when told to
+  stop (Ctrl-C, `lock` or SIGTERM). SIGKILL, from you or a program running as you, skips
+  that: an ssh it started runs on until that step ends.
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
   sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:
@@ -1439,12 +1822,20 @@ something waits for you:
 - **A compromised guest kernel or root** can do anything in the VM, including
   replacing `secret-fill`. Values go only to the VM you bound, but what happens
   inside it is up to the VM.
+- **The keyboard route isn't atomic.** When a field takes no direct insertion, the fill
+  checks the document and the focus, then types with `Input.insertText`; a page that
+  navigates or moves the focus in between could receive the text elsewhere on the same
+  tab. The fill reads the page again afterwards and reports a change, but it can't undo
+  what was typed: same-site delivery isn't race-free on that route.
 - **A page on the allowed site sees what's typed.** A filled value is visible to the
   page's own scripts and to its extensions. A site you name is trusted with the value.
   Once typed, the value is the page's and Chrome's, as if typed by hand. Chrome may
   keep ordinary text fields (not password fields) in the profile's session files, and
   a sealed login carries those along.
-- **Keystroke injection into the unlock terminal.**
+- **Keystroke injection into the unlock terminal.** In presence mode (the default on
+  a Mac with Touch ID) a typed line only chooses how far an approval reaches, so this
+  can't approve anything; a program that controls the terminal still sees the
+  passphrase as you type it. Outside presence mode:
   - With `--allow-multiplexer`, a confirmation can be forged.
   - Detection is a list. It doesn't catch:
     - an editor's built-in terminal (VS Code and the like, which extensions can type
@@ -1455,6 +1846,13 @@ something waits for you:
   - On a Mac you sit at, apps with Accessibility or Automation access can type into
     windows. macOS asks the first time an app wants that access, not every time.
   - Unlock in a plain terminal window you watch.
+- **The Touch ID dialog can be asked for by anyone.** `approve ID` and `rule add` (and
+  `unlock --touch-id`) make the unlock process show macOS's dialog; any program of
+  yours can trigger that, Claude included. Only you can answer it, and it names what
+  it allows, but a dialog you didn't expect is a reason to say no. The password fallback
+  is a system dialog; whether an app with Accessibility access could type into it is
+  macOS's to enforce (not tested here). Where nobody sits at the Mac,
+  `MCOMP_VAULT_LOCAL_AUTH=noninteractive` keeps it from appearing at all.
 - **On the screen.** Password fields show dots. Usernames, one-time codes and text
   values are visible on the VM's screen, in screenshots and in recordings.
 - **Page-mode Chrome only.** Fills need Chrome that the driver started with
@@ -1464,8 +1862,9 @@ something waits for you:
   asks each DevTools for its browser's command line and reads `--user-data-dir` from
   it. It uses `SystemInfo.getInfo` first, then the browser's process id with
   `/proc/PID/cmdline`, then `Browser.getBrowserCommandLine`; a failure says what each
-  route answered. Without a profile, it matches tabs by site only, and refuses when
-  that's ambiguous.
+  route answered. Without a profile (or `--browser-pid`), it matches tabs by site only,
+  across every Chrome. Wherever it looks, two or more tabs on the site are refused, never
+  chosen between by which one is focused or visible.
 - **`SSH_AUTH=cert`.** Fills and API tokens use their own accounts and work. Sealed sessions sign in
   with the static `ops` key, which a VM on certificates refuses, so for now they need
   `SSH_AUTH=key`: `metacomputer secrets session save|load` refuses at once under `cert`
@@ -1481,9 +1880,12 @@ something waits for you:
   delivered before the file was rewritten, are simply missing: what an audit sink has
   received, a required sink's `begin` records and the signed action log are the
   records to rely on.
-- **Requesters can be faked by your own processes.** Who asked, `NAME session` grants
-  and `--project` rest on process names, parents and folders, all of which a program
-  running as you controls ("Who is asking").
+- **Requesters can be faked by your own processes.** Who asked, `NAME session` grants,
+  `--project` and unattended rules rest on process names, parents and folders, all of
+  which a program running as you controls ("Who is asking"). A client's
+  `--on-behalf-pid` claim is shown as unverified and never counts for any of them.
+  A rule is a standing approval for whatever can pose as a session in its folder: keep
+  its folder narrow and its time short.
 - **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac
   (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends. The
   key is withheld from answers only as an exact copy. Compressed answers are
@@ -1492,7 +1894,12 @@ something waits for you:
   a URL, inside a compressed file it serves as data) would hand it over. What the API
   itself does with your requests is up to the API.
 - **A sealed login is a login.** Anyone who loads it is signed in, so treat it like
-  the password.
+  the password. That includes cookies imported from your own Chrome: once loaded, the VM's
+  desktop account (and so Claude's shell) can read them, as with any sealed session.
+- **Importing from Chrome trusts this Mac's Chrome key to the vault for a moment.** While it
+  runs, `mcomp-vault` holds Chrome's Safe Storage key, which opens every password and cookie
+  Chrome keeps. If you choose Always Allow at macOS's question, `mcomp-vault` can read it
+  later without asking: choose Allow.
 - **Memory.** While unlocked, the unlock process holds the decrypted vault. When it
   locks, it overwrites the copies it controls and exits. Swift and Foundation make
   copies it can't reach.
@@ -1501,12 +1908,17 @@ something waits for you:
 
 | Command | Where | What it does |
 | --- | --- | --- |
-| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `policy NAME`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `import-passwords --browser chrome [--profile N] \| --csv FILE [--site H ...] [--dry-run]`, `import-session --browser chrome --site H ... --name N --to-profile P [--allow-identity-provider]` | your terminal | Bring saved logins in, or a site's cookies from your Chrome (macOS asks about Chrome's key; asks for the passphrase) |
 | `rekey [--enclave\|--no-enclave]`, `recover [--no-enclave]`, `rotate-session-key` | your terminal | New keys; open with the recovery key ("Keys, the Secure Enclave and rotation") |
 | `audit-sink add\|remove NAME`, `audit-sink show NAME --key` | your terminal | Off-Mac copies of the audit log, and a sink's signing key |
-| `unlock [--for 30m] [--confirm each] [--allow-multiplexer]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
+| `unlock [--for 30m] [--confirm each] [--allow-multiplexer] [--touch-id]` | your terminal | Serve requests until Ctrl-C, the time (at most 12h), a key change or the terminal closing |
+| `approve ID [--passphrase]`, `rule add ... --for D [--passphrase]` | you, any terminal (Touch ID / login password, or the passphrase) | Allow one waiting request; make an unattended rule |
+| `requests`, `deny ID`, `rule list`, `rule remove ID`, `lock` | anywhere, while unlocked | What waits for you (ids, who asked, site, masked username, age); refuse one; the rules; remove one; lock now |
+| `settle [--timeout S]` | anywhere | Return once the unlock process has finished every request it got before (or none runs); for a requester that got no confirmation (exit 5) |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
+| `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
 | `audit-sink list`, `audit-sink show NAME` | anywhere (while locked: each sink's delivery state only, not its settings) | Sinks, their backlog and last error (URLs masked) |

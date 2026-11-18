@@ -4,32 +4,38 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 
 ## Who runs what
 
-- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value.
+- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `import-passwords`, `import-session`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value (the imports also show macOS's question about Chrome's key).
+  - To bring saved logins in, suggest: `metacomputer secrets import-passwords --browser chrome` (or `--csv FILE` for a Chrome, Passwords app, 1Password or Bitwarden export; `--dry-run` first shows what would come in). To bring a signed-in session for one site from their Chrome: `metacomputer secrets import-session --browser chrome --site SITE --name NAME --to-profile PROFILE` (cookies only; localStorage doesn't come along). Then load it like any sealed session (below).
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
-- **You:** `list`, `fill`, `session save|load`, `token`, `tokens`, `revoke`, `status`, `audit`, `audit-sink list|test`.
+- **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
+- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`. `lock` only if the user asks you to lock the vault.
 
 ## First: what's stored
 
 `metacomputer secrets list` shows names, kinds, sites (or API hosts), usernames, which `--field`s each secret fills, its approval, any project limit and its age. Never values. It works only while the vault is unlocked.
 
-## Exit codes (fill, session, token) and what to tell the user
+## Exit codes (fill, login, session, token) and what to tell the user
 
 | Exit | Means | Do |
 | --- | --- | --- |
 | 0 | done | carry on; for a fill, `chars` is the check |
-| 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ...": this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
+| 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal", "refused with `deny`", "refused at the Touch ID dialog": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ...": this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
 | 3 | the vault is locked | ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. No vault yet: they run `metacomputer secrets init` and `set` |
 | 4 | error | VM off, no Chrome, no tab on that site. "Rebuild the VM": the VM predates the fill or proxy account; tell the user. "Bind again": the user runs `metacomputer secrets bind` |
+| 5 | sent, but the vault never answered | it may still be finishing. Run `metacomputer secrets settle` (it returns once the vault is done) before trying again or doing anything else on that page |
+
+A fill or sign-in you interrupt (Ctrl-C, a timeout that kills the command) is withdrawn: the vault stops it before its next step and answers with a "stopped" reason. Don't retry it in a loop.
 
 ## When the user has to approve
 
-A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save (and load, unless relaxed) and an `each` API token wait up to 2 minutes for the user. Their unlock terminal shows the question and "Asked by Claude Code in <this project>". Tell them which secret, what for, and that they type in the vault's terminal:
-- `NAME` to allow this use;
-- `NAME session` for the rest of this Claude Code session;
-- `NAME unlock` until the vault locks.
+A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save, every load of a whole browser profile, an `each` API token and every use on an identity provider's sign-in page (Google, Microsoft, Apple, Okta) wait up to 2 minutes for the user. Their unlock terminal shows the question, a request id and "Asked by Claude Code in <this project>"; `metacomputer secrets requests` lists what waits. Tell them which secret, what for, and how to answer:
+- in the vault's terminal: `NAME` to allow this use, `NAME session` for the rest of this Claude Code session, `NAME unlock` until the vault locks;
+- or from any terminal: `metacomputer secrets approve ID` (Touch ID or their login password; `--passphrase` for the vault passphrase), for this use only; `--scope session` or `--scope unlock` reaches further, and the dialog or the prompt names it.
 
-Inside tmux or screen these are refused unless the user unlocked with `--allow-multiplexer`; the reason says so.
+In presence mode (the default on a Mac with Touch ID; `metacomputer secrets status` says which) a typed answer only chooses `NAME` / `NAME session` / `NAME unlock`, and the user then confirms with Touch ID or the passphrase: tell them to expect that.
+
+On an identity provider's page, and for a whole-profile session load, every use asks and `session` / `unlock` cover only that use: don't suggest them there. Inside tmux or screen typed answers are refused unless the user unlocked with `--allow-multiplexer` or `--touch-id`; the reason says so. If the user set up an unattended rule for this project (`rule list`), covered uses don't ask. A rule or an earlier answer never changes where a value goes: each fill is still checked against the focused page's site.
 
 ## Signing in to a site (fill)
 
@@ -46,6 +52,8 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 
 `{"ok":true,...,"chars":N}` means it was typed and checked. That is the verification: don't read the field back.
 
+**One approval for username and password:** `metacomputer secrets login NAME --username-selector '#user' --password-selector '#pass' [--profile P]` (selectors from a `dom_refs_v1` snapshot, each matching exactly one field) fills both into the page's fields with one question instead of two. Leave out `--username-selector` on a password-only page. The answer lists `fields`, the `origin` and a masked `username_hint`. Then submit with a click and check the page. `--origin https://site` allows only that one of the login's sites, and `--browser-pid PID` only the Chrome you opened (its `prepared_pid`); either way the fill refuses when two or more tabs there are on the site: close the others.
+
 ## Keeping the user signed in (sealed sessions)
 
 1. Use a named profile (`isolated_named`, for example `x`).
@@ -53,6 +61,8 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 3. End the browser session (`end_session`): a profile Chrome is using can't be saved.
 4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
 5. Later, with no Chrome on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`. A session loads only under the profile name it was saved from.
+
+A session the user imported from their own Chrome (`list` shows it as cookies for its sites) loads into its profile's own cookie store: open that profile once first (`browser_prepare` with `{mode: "isolated_named", name: P}`, then `end_session`), then `session load NAME`, then `browser_prepare` with the same profile. If the reason says the profile has no cookie store yet, do that first step. One whose cookies reach an identity provider asks at every load. When you need only some of its sites, add `--site HOST` (repeatable): only the cookies those sites get go to the VM.
 
 ## Using an API key from the VM (tokens)
 

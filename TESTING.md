@@ -794,11 +794,11 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
-`python3 tests/test_secrets.py` (127 checks, about 50 s) builds two copies of
+`python3 tests/test_secrets.py` (131 checks, about 50 s) builds two copies of
 `mcomp-vault`:
 - a release build, which must not contain the test switches;
 - a test build that runs a stub instead of `ssh` (`scripts/build-vault.sh --test`).
@@ -829,6 +829,9 @@ person would. It checks that:
   - `y` and wrong words refuse, and send only a check without the value;
   - the question shows the Chrome profile and the selector (one line, at most 80 characters);
   - the secret's name allows, and only the approved site goes with the value;
+  - once the value has gone to the VM, a failure reason or error output that carries it
+    (a stand-in leaks it) is replaced by the vault's own words, and a site or count the VM
+    spells it in (for a failed fill or a "successful" one) reaches no result or log;
   - a check naming another site is refused;
   - the listener is checked again after approval;
   - no answer times out, and a question can't outlast the unlock;
@@ -837,8 +840,11 @@ person would. It checks that:
 - control and bidi characters from the VM or a hostile request reach no output,
   terminal or log, and a VM answer holding the value (even a 6-digit code) is withheld;
 - sealed sessions:
-  - save and replace always ask, and load asks unless the passphrase-gated policy
-    says otherwise;
+  - save, replace and load always ask, whatever the passphrase-gated policy says, and
+    no rule can be made for a whole profile;
+  - when a save or load fails after the session reached the VM, the reason is the
+    vault's own and the VM's error output (a stand-in writes a marker there) reaches no
+    result or log;
   - loading into another VM asks, naming both, and loading under another profile name
     is refused;
   - a changed file is refused;
@@ -853,7 +859,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (213 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (215 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
@@ -885,6 +891,14 @@ pseudo-terminal for the rest of the vault:
   isn't a record, or a record this unlock wrote that's gone;
 - **the VM's answer:** a fill answer hiding the value in a nested field is withheld, a
   field of the wrong type is an error, and unknown fields are dropped;
+- **a VM that remembers a password it was given:** it spells it (hex-encoded) into a later
+  check's reason and every other field, onto its stderr with no answer, into
+  secret-fill's DevTools-error form, into a sealed-session save's and load's stderr, and
+  into an API proxy request's path and name. None of it reaches the command's output,
+  the audit log (`audit --json` too) or any sink. The proxy records the method as one of
+  a few words and no path. Echoed answers 3000, 3001 and 3077 characters apart get one
+  size class, the API's status class and a yes/no for the withheld key, and `tokens`
+  counts requests in words;
 - **ssh:** the vault's own ssh options, replayed with the real `/usr/bin/ssh` against an
   sshd of the test's own on 127.0.0.1: it connects with the pinned key and refuses
   another (no known_hosts file takes part);
@@ -931,7 +945,132 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_secret_fill.py` (163 checks) covers the VM side,
+`python3 tests/test_vault_approvals.py` (123 checks, about 5 minutes) reuses the same stub
+and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
+macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
+person at it, and without it there is none. It covers:
+- **request ids:** `requests` (id, secret, site, VM, masked username, age, no challenge),
+  `approve ID` with the dialog, `deny ID`, the terminal still answering, a timeout, and
+  `status`/`list` answered while a question waits while another fill waits its turn;
+- **that no program can approve:** a raw `approve` with a forged passphrase proof, or
+  claiming any other method, or for a request that doesn't exist; `approve --passphrase`
+  without a terminal, and on a pseudo-terminal (as `script` makes one) with the wrong
+  passphrase; a proof made for other text by a stand-in on the socket, and one kept from
+  an earlier request; a cancelled dialog; a test build without the stand-in; a raw
+  `rule_add` without the dialog; and, by behaviour, that a release build ignores the
+  stand-in (`selftest --local-auth` with `MCOMP_VAULT_LOCAL_AUTH=noninteractive`, which
+  reaches the real framework without showing a dialog);
+- **identity providers:** a `session` secret asks on one; `NAME session` / `NAME unlock`
+  there cover one use; a secret with one among its sites goes ahead on its other site
+  with the value sent only there; an API token for one asks;
+- **`login`:** one question, then username and password into their own fields on the
+  checked site; a client-chosen request id, never reused;
+- **unattended rules:** `--for` required (at most 30 days), none for identity providers,
+  covering only sessions in the project (never a request that only claims one with
+  `--on-behalf-pid`, which is recorded as unverified), site rules, removal, expiry,
+  `--passphrase` with and without the right passphrase;
+- **binding:** a use covered by a grant or a rule is still checked in the VM and the
+  value goes only to the site checked, including a site rule on the secret's second
+  site;
+- **presence mode** (`MCOMP_VAULT_TEST_BIOMETRY=available|not-enrolled|none|unavailable`
+  stands in for macOS's Touch ID check): on by default with Touch ID, where a typed answer
+  only chooses the scope and the passphrase or the dialog approves; on when the check
+  can't tell, saying why; on for good once the vault has seen Touch ID enrolled, even when
+  it later reports no finger or no sensor, until `presence off`; the warning without Touch
+  ID or with no finger enrolled on a vault that never saw it; `--require-presence`,
+  `--no-require-presence` and `presence on|off|auto`; the mode in `status` (locked and
+  unlocked) and `metacomputer security`; and that a release build ignores the stand-in;
+- **the scope is confirmed:** `NAME unlock` typed and then a passphrase proof for one use
+  gives one use and no grant; `approve ID --passphrase --scope session|unlock` (its prompt
+  naming the scope) gives that grant; `NAME unlock` typed while the dialog for one use is
+  open withdraws that dialog (`MCOMP_VAULT_TEST_LOCAL_AUTH=allow-first-after:N` would have
+  allowed it) and opens one naming the wider scope, so no unlock-wide grant comes from the
+  first; `rule add --passphrase` showing the rule and its expiry before the passphrase,
+  and storing exactly that expiry however long the passphrase takes; a rule too long for
+  the dialog to show whole refused there; a vault file put back to a copy from before
+  Touch ID was seen enrolled, caught through the audit log (presence mode stays on); on a
+  second vault, a file put back to a copy saying auto or off from before an audited
+  `presence on`, with a `presence off` record appended without the vault's MAC, still
+  keeping presence mode on, while a real `presence off` turns it off; a VM spelling the
+  value in every field it can answer with, for a fill and a sign-in, failed or "worked",
+  with nothing of it in the results, the audit log, `audit --json`, the unified log or the
+  sinks;
+- **narrowing a fill:** `--origin` and `--browser-pid` reach every request to the VM (the
+  check and the fill), and an `--origin` outside the login's sites is refused before
+  anything reaches the VM;
+- **audit continuity:** after a last record of several megabytes, the next one still
+  links to it;
+- **`unlock --touch-id`:** the dialog allows or refuses; inside tmux a typed answer
+  doesn't approve;
+- **sinks:** `mcompevent` in webhook CloudEvents, `metacomputer.event` in OTLP; `audit
+  --verify` and `verify-audit.py` on the log with the new records;
+- **the verbs other vaults use:** `--passphrase-stdin` refused, `unlock --passphrase`,
+  `lock` from any program (also while a question waits), `lock` when already locked;
+- **a requester that goes away:**
+  - SIGTERM to a client waiting for its question withdraws it. The question is withdrawn,
+    the answer (the confirmation) comes within seconds, the audit records the request as
+    `cancelled`, and `approve ID` finds nothing.
+  - A client killed outright, and a wrapper killed outright while its client lives on, have
+    the same effect.
+  - A fill step in progress, a stand-in ssh that would finish after 6 s, is killed at once
+    and never completes.
+  - A sign-in withdrawn while its username is being typed never sends the password.
+  - The client's own deadline (`MCOMP_VAULT_TEST_CLIENT_TIMEOUT`, test builds only) does
+    the same.
+  - `settle` waits while a question is open and answers once it's decided. A request whose
+    requester left while it was queued never starts. With no unlock process, `settle` says
+    so.
+
+`python3 tests/test_vault_import.py` (60 checks, about a minute) covers the imports with
+synthetic Chrome profiles: a `Login Data` and a `Cookies` database built here with SQLite,
+their values encrypted as Chrome on macOS does with a test key. The test build reads them
+through `MCOMP_VAULT_TEST_CHROME_DIR` and takes the key from `MCOMP_VAULT_TEST_CHROME_KEY`;
+it never reads the real Chrome folder or asks the Keychain (both refusals are checked), and a
+release build contains neither switch. It covers:
+- **Chrome's passwords:** a dry run (no passphrase, no values, nothing saved), the import
+  (what's skipped and why), the decrypted value reaching a fill, a re-import that changes
+  nothing, a changed password updated as a rotation, `--site`, `--profile`, the wrong key, and
+  a `logins` that is a view over a recursive query (refused before any row is read);
+- **CSV exports** from Chrome (a password with a comma, quotes and a line break), the
+  Passwords app (OTPAuth becoming a TOTP secret that fills the current code, an unsupported
+  one skipped), 1Password and Bitwarden (several URIs, its TOTP, notes skipped); a login with
+  12,000 sites in one cell (cut to 20, and the audit chain still verifies); a 2FA seed for one
+  account never replacing another account's code on the same site, with its own audit record;
+  a login deleted and another imported under its name, which gets a code of its own while the
+  old code is left untouched (and `delete` says it's tied to no login now); `set --replace`
+  on a code keeping the login it belongs to; `set --replace` with another username
+  untying the code (another account's import then makes its own); a code tied by name, as
+  an earlier build did (a test-build command makes one), tied by id when the vault opens;
+  two such logins without ids getting one id each, so the import that opened the vault
+  replaces both codes;
+- **`import-session`:** `--site` required, a dry run, only the named site's cookies sealed,
+  `--replace` (which keeps an identity provider's mark), an identity provider needing
+  `--allow-identity-provider` and asking at every load whatever its policy, the load sending
+  each value encrypted with the VM's Chrome key (with and without the domain hash) to the
+  cookie loader; a store older than version 24 and a cookie relabeled from `.google.com` to
+  the site, both refused; `session load --site` sending only that site's cookies, and refusing
+  a site the session doesn't hold; a load that fails after the VM got the cookies reporting the
+  vault's own words, not the VM's error output (a stand-in writes a marker there);
+- **the VM-side cookie loader**, run here against a profile store made here: cookies merged
+  and replaced, a profile never opened (exit 6), a keyring-encrypted store and a symbolic
+  link refused;
+- the audit records, and no value or unmasked username in any output or the audit log.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (a test VM) signs in and loads a
+session end to end, the way Claude does (skills/metacomputer/SECRETS.md). It serves the
+fixture pages and a cookie-echo page in the VM, then:
+- **a sign-in:** page-mode Chrome opened through the hub, then `metacomputer secrets login`
+  with the page's selectors, `--origin` and `--browser-pid`. The test build's stand-in
+  approves through `approve ID`, the fill account types both fields, and the form is
+  submitted through the driver. The page's own result line shows the right lengths.
+- **a session load:** a session imported from a synthetic Chrome profile (a cookie for
+  localhost under a test key) loads with `secrets session load --site localhost` into a
+  driver profile opened once first, and the VM's Chrome sends that cookie: the page sees
+  its value's hash.
+
+It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
+
+`python3 tests/test_secret_fill.py` (169 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -945,7 +1084,8 @@ pseudo-terminal for the rest of the vault:
   - frames with loader ids, isolated worlds, `DOM.describeNode` and `SystemInfo`;
   - a tab list, or a page's own world, that disagrees with the frame tree;
   - cross-origin, srcdoc, sandboxed and out-of-process frames;
-  - several tabs;
+  - several tabs on the site, refused even when one is focused, and the Chrome chosen by
+    its browser process id (`browser_pid`);
   - profiles found from the browser's command line (`SystemInfo.getInfo`), from its
     pid and `/proc`, or from `Browser.getBrowserCommandLine`, and a failure that
     says what each route answered;

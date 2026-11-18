@@ -12,6 +12,13 @@ struct ProcResult {
     var timedOut = false
     var interrupted = false
     var tooLarge = false
+    var cancelled = false       // the program whose request this step serves went away (requesterProbe): ended
+}
+
+/// Whether the request this process is serving was withdrawn (only the unlock process's own thread asks).
+func requesterLeft() -> Bool {
+    guard Thread.isMainThread, let probe = requesterProbe else { return false }
+    return probe()
 }
 
 /// Run a program with the given stdin bytes, collecting stdout and stderr. The child
@@ -20,6 +27,8 @@ struct ProcResult {
 func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [UInt8],
                 timeout: TimeInterval, maxStdout: Int = 1 << 20) -> ProcResult {
     var res = ProcResult()
+    // A request whose requester went away starts no further step.
+    if requesterLeft() { res.cancelled = true; return res }
     var inPipe: [Int32] = [0, 0], outPipe: [Int32] = [0, 0], errPipe: [Int32] = [0, 0]
     guard pipe(&inPipe) == 0, pipe(&outPipe) == 0, pipe(&errPipe) == 0 else { return res }
 
@@ -67,6 +76,7 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     var buf = [UInt8](repeating: 0, count: 1 << 16)
     while outOpen || errOpen {
         if receivedSignal != 0 { res.interrupted = true; break }
+        if requesterLeft() { res.cancelled = true; break }
         if Date() > deadline { res.timedOut = true; break }
         var fds: [pollfd] = []
         if inFD >= 0 { fds.append(pollfd(fd: inFD, events: Int16(POLLOUT), revents: 0)) }
@@ -99,7 +109,10 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     if inFD >= 0 { close(inFD) }
     close(outPipe[0]); close(errPipe[0])
     wipe(&buf)
-    if res.timedOut || res.interrupted || res.tooLarge { kill(pid, SIGKILL) }
+    if res.timedOut || res.interrupted || res.tooLarge || res.cancelled {
+        kill(-pid, SIGKILL)         // its own process group (ssh and anything it started), then the child itself
+        kill(pid, SIGKILL)
+    }
     var status: Int32 = 0
     while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
     if (status & 0x7F) == 0 { res.status = (status >> 8) & 0xFF } else { res.status = 128 + (status & 0x7F) }
@@ -237,6 +250,7 @@ final class GuestRunner {
         let r = try ssh(t, user: user, key: key, remote: secretFillCommand, input: inputBytes, timeout: timeout)
         var stderr = String(decoding: r.stderr, as: UTF8.self)
         if let v = valueString, !v.isEmpty { stderr = stderr.replacingOccurrences(of: v, with: "[redacted]") }
+        if r.cancelled { return ["ok": false, "status": "cancelled", "reason": requesterLeftReason] }
         if r.interrupted { return ["ok": false, "status": "error", "reason": "interrupted (the vault is locking)"] }
         if r.timedOut { return ["ok": false, "status": "error", "reason": "the VM didn't answer in time"] }
         if r.status == 255 && stderr.contains("Permission denied") {
@@ -245,8 +259,10 @@ final class GuestRunner {
         }
         let last = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
         guard let raw = parseJSONObject(Array(last.utf8)), raw["ok"] is Bool else {
-            let why = stderr.isEmpty ? "exit \(r.status)" : oneLine(stderr, max: 200)
-            return ["ok": false, "status": "error", "reason": "the VM side failed (\(why))"]
+            // Nothing the VM wrote is passed on, not even its exit status: it knows every value it was ever given and
+            // could spell one in any of it, on this request or a later one (a check sends no value, but the VM still has
+            // the last one).
+            return ["ok": false, "status": "error", "reason": "the VM side failed (its own output isn't passed on)"]
         }
         // Never pass the value on, whatever came back: anything holding it, at any depth or length.
         if let v = valueString, !v.isEmpty, containsString(raw, v) {
@@ -260,9 +276,59 @@ final class GuestRunner {
         let ok = out["ok"] as? Bool ?? false
         out["status"] = ok ? "ok" : ((out["denied"] as? Bool ?? false) ? "denied" : "error")
         out["denied"] = nil
-        if let reason = out["reason"] as? String { out["reason"] = oneLine(reason) }
+        // Every answer, a check's as much as a fill's: the VM knows every value it was ever given, so nothing it chose
+        // goes on. Its reason becomes one of this process's own sentences; the site only as one of the sites this request
+        // named (this process's own copy, else none: a VM could spell a value in a host name); the count of characters
+        // as this process counts the value (a fill that worked); mode and field the request's; the route one of two words.
+        if let reason = out["reason"] as? String { out["reason"] = fillReason(reason) }
+        let allowed = request["origins"] as? [String] ?? []
+        out["origin"] = (out["origin"] as? String).flatMap { o in allowed.first { $0 == o } }
+        out["chars"] = (ok && valueString != nil) ? valueString!.utf16.count : nil
+        out["mode"] = request["mode"] as? String
+        out["field"] = request["field"] as? String
+        out["profile"] = nil
+        if let r = out["route"] as? String, r != "element" && r != "keyboard" { out["route"] = nil }
+        out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
         return out
     }
+}
+
+/// Why a fill or a check failed, in this process's words: the reasons secret-fill gives, matched by what they say,
+/// never copied, since the VM has every value it was ever given and could put one in any form into its answer.
+func fillReason(_ guest: String) -> String {
+    let known: [(String, String)] = [
+        ("the page changed during the fill", "the page changed during the fill; the value may have gone elsewhere (check the page)"),
+        ("the focus moved while filling", "the focus moved while filling; the text may have gone to another field (check the page)"),
+        ("the field holds", "the field doesn't hold as many characters as were typed (a length limit, or the page changed it)"),
+        ("no open tab on", "no open tab on the secret's sites in the driver's Chrome; open the site first"),
+        ("no Chrome with DevTools", "no Chrome with DevTools is running; fills need page-mode Chrome (browser_prepare)"),
+        ("no Chrome is running on profile", "no Chrome is running on that profile"),
+        ("the selector isn't valid CSS", "the selector isn't valid CSS (it searches the page itself, not frames or shadow roots)"),
+        ("the selector matches", "the selector doesn't match exactly one element"),
+        ("no field is focused", "no field is focused in the page; click into the field first"),
+        ("the focused field is read-only", "the focused field is read-only or disabled"),
+        ("the focused field is inside", "the focused field is inside a frame the fill can't look into"),
+        ("the focused element is", "the focused element isn't the kind of field this fills"),
+        ("tabs are open on the allowed sites", "several tabs are open on the allowed sites; close the others (a fill goes only to a tab that's alone on its site)"),
+        ("no chrome with browser process", "no Chrome with that browser process id has DevTools open"),
+        ("the field is inside too many nested frames", "the field is inside too many nested frames"),
+        ("the tab is on", "the tab isn't on one of the secret's sites; nothing was typed"),
+        ("the page changed after the check", "the page changed after the check; nothing was typed"),
+        ("the page changed before the fill", "the page changed before the fill; nothing was typed"),
+        ("the field lost the focus", "the field lost the focus before the fill; nothing was typed"),
+        ("the page refused", "the page refused a check (its own words aren't passed on)"),
+        ("bad profile name", "the VM refused the profile name"),
+        ("bad browser pid", "the VM refused the browser process id"),
+        ("bad request", "the VM refused the request's form"),
+        ("can't tell which user runs the desktop", "the VM can't tell which user runs the desktop; refusing"),
+        ("the tab has no page", "the tab has no page"),
+        ("ran out of time", "the VM side ran out of time"),
+        ("devtools", "Chrome's DevTools failed or refused a step (its own words aren't passed on)"),
+        ("result withheld", "result withheld (it contained the value)"),
+    ]
+    let g = guest.lowercased()
+    for (prefix, text) in known where g.hasPrefix(prefix.lowercased()) || g.contains(prefix.lowercased()) { return text }
+    return "the VM reported that it didn't complete (its own words aren't passed on); check the page and the focused field"
 }
 
 
@@ -271,11 +337,17 @@ func fillResultSchema(_ raw: [String: Any]) -> [String: Any]? {
     let bools: Set<String> = ["ok", "denied"]
     let strings: Set<String> = ["mode", "field", "origin", "route", "reason", "profile"]
     let ints: Set<String> = ["chars"]
+    // The fields that name one of a few things take only those: anything else is dropped, here, before it's kept anywhere.
+    let enums: [String: Set<String>] = ["route": ["element", "keyboard"], "mode": ["fill", "check"],
+                                        "field": ["password", "username", "otp", "text"]]
     var out: [String: Any] = [:]
     for (k, v) in raw {
         if bools.contains(k) {
             guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
             out[k] = n.boolValue
+        } else if let allowed = enums[k] {
+            guard let s = v as? String else { return nil }
+            if allowed.contains(s) { out[k] = s }
         } else if strings.contains(k) {
             guard let s = v as? String else { return nil }
             out[k] = clean(s, max: 300)

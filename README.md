@@ -110,7 +110,7 @@ what goes where, updating, uninstalling and troubleshooting.
 | Control | What it gives you |
 | --- | --- |
 | **Isolation, always on** | No clipboard, audio or Rosetta sharing with your Mac ([mcomp-vm](https://github.com/metavert-io/metacomputer-vm), metacomputer's build of Lume). A network gateway on the Mac lets the VM reach the public internet and nothing else. A firewall in the VM, SSH by role with a pinned host key, and every download checked against a pinned checksum or signing key. |
-| **A secrets vault** | Passwords, 2FA codes, browser logins and API keys that Claude uses without the values passing through the chat. You approve a use by typing the secret's name in your own terminal. The vault is bound to your Mac's Secure Enclave. API keys never enter the VM: a proxy on the Mac adds them. Every use goes into a hash-chained audit log you can send off the Mac. |
+| **A secrets vault** | Passwords, 2FA codes, browser logins and API keys that Claude uses without the values passing through the chat. You unlock it in your own terminal; imported secrets ask before each use (Touch ID, or the secret's name typed there), and ones you add can too (`--approval each`). The vault is bound to your Mac's Secure Enclave. API keys never enter the VM: a proxy on the Mac adds them. Every use goes into a hash-chained audit log you can send off the Mac. |
 | **A signed record (opt-in)** | Every tool call and shell run in a hash-chained log, signed with an SSH key. `metacomputer actions verify` finds any edit. |
 | **Restricted mode (opt-in)** | Cua Driver's bounded mode: every call must fit a manifest of apps, folders and sites. The shell channel turns itself off. |
 | **Events (opt-in)** | Blocked connections, guard refusals, "Claude needs you" and finished tasks, sent to your phone, a webhook, an OpenTelemetry Collector or a SIEM. |
@@ -718,6 +718,22 @@ Values are typed with the echo off, never on a command line. Write the recovery 
 down and keep it away from this Mac. `set` on a name that already exists refuses unless
 you add `--replace` (see [Rotate keys and keep an audit trail](#rotate-keys-and-keep-an-audit-trail)).
 
+Or bring the logins you already have, in your own terminal:
+
+```bash
+metacomputer secrets import-passwords --browser chrome --dry-run   # what would come in: sites, masked usernames
+metacomputer secrets import-passwords --browser chrome             # macOS asks about Chrome's key: Allow (once)
+metacomputer secrets import-passwords --csv ~/Downloads/passwords.csv   # Chrome, Passwords app, 1Password or Bitwarden export
+metacomputer secrets import-session --browser chrome --site github.com --name gh --to-profile work   # one site's cookies
+```
+
+Imported logins ask before every use until you relax them (`policy NAME --approval session`).
+A Passwords app or 1Password export's one-time-code column comes in as a 2FA secret too.
+`import-session` brings a site's cookies, not its localStorage, sealed for a page-mode Chrome
+profile in the VM; `session load NAME` puts them there (`--site HOST` sends only the cookies
+that site gets). It needs Chrome 130 or later, whose cookie values name their own domain, and
+stops if any value names another one. Delete a CSV export once it's in.
+
 Then Claude:
 1. opens the site in page-mode Chrome;
 2. clicks into the field;
@@ -729,15 +745,21 @@ How it works:
   - `NAME`: this use only;
   - `NAME session`: this use and later uses of that secret from the same Claude Code session;
   - `NAME unlock`: every use of that secret until the vault locks.
+- **Approving from elsewhere:** each waiting use has a request id. `metacomputer secrets requests` lists them (who asked, the site, a masked username, how long it has waited); `metacomputer secrets approve ID` allows one with Touch ID or your login password, `approve ID --passphrase` with the vault passphrase, and `deny ID` refuses it. `unlock --touch-id` shows the Touch ID dialog for every question by itself. In presence mode (below) nothing Claude can run approves: only your finger, your password or your passphrase does. With typed approvals, a program that can type into the unlock terminal could answer for you ([SECURITY.md](SECURITY.md#what-doesnt-hold), "Keystroke injection into the unlock terminal").
+- **Presence mode:** on a Mac with Touch ID (and a finger enrolled), every approval and every `NAME session` / `NAME unlock` grant needs Touch ID (or your login password in macOS's dialog) or the passphrase; what you type at the unlock terminal only chooses how far it reaches, since any program that can type into that terminal could type it too, and the dialog or the passphrase prompt names that scope (`approve ID --scope session|unlock` asks for a wider one explicitly). It stays on when Touch ID can't be checked, and once the vault has seen Touch ID enrolled, until you turn it off. On a Mac without Touch ID, typed answers stay the default and `unlock` warns once. Switch it for one unlock with `--require-presence` / `--no-require-presence`, or keep a setting with `metacomputer secrets presence on|off|auto`; `secrets status` and `metacomputer security` show which is in force. A program that controls your terminal still sees the passphrase as you type it: only the system dialog defends against that ([SECURITY.md](SECURITY.md#approving-from-elsewhere-request-ids-touch-id-the-passphrase)).
+- **Unattended rules:** `metacomputer secrets rule add --secret NAME --project DIR --for 8h` (or `--site https://...`, or `--session NAME`) lets that use happen without asking for Claude Code sessions in that folder, until it expires (at most 30 days). A rule only decides whether to ask: the value still goes only to the site checked in the VM. Making one takes Touch ID or the passphrase; `rule list` and `rule remove ID` manage them. `policy NAME --approval session|each` changes whether a secret asks at all.
+- **Identity providers always ask:** a fill on Google's, Microsoft's, Apple's or Okta's sign-in pages asks every time, whatever the secret, the unlock or a rule says (the list is in [SECURITY.md](SECURITY.md#identity-providers-always-ask)).
+- **One approval per sign-in:** `metacomputer secrets login NAME --username-selector CSS --password-selector CSS` fills both fields under one question.
+- **Coming from Cua Spaces?** The same verbs work (`status`, `init`, `unlock`, `lock`, `import-passwords`, `requests`, `approve`, `deny`), and the audit log carries its event names. Claude signs in with `metacomputer secrets login` (or `fill`), under the same approvals. [docs/moving-from-spaces.md](docs/moving-from-spaces.md) maps everything and says what differs.
 - **Limiting a secret to a project:** `set ... --project DIR` refuses requests from Claude Code sessions working outside that folder. Like the "who asked" line, this keeps honest sessions apart; it isn't a wall, since any program of yours can pose as a Claude Code session.
-- **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset. For now this needs `SSH_AUTH=key` (the default): the vault signs in with the VM's static desktop key, which `SSH_AUTH=cert` turns off, so both commands refuse at once under `cert`. Fills and API tokens use their own accounts and work either way.
+- **Keeping a login:** `metacomputer secrets session save NAME --profile P` seals a signed-in Chrome profile into the vault (it asks first), and `session load NAME` brings it back after a reset. A whole profile may hold any sign-in, so loading one asks every time and no rule covers it. For now this needs `SSH_AUTH=key` (the default): the vault signs in with the VM's static desktop key, which `SSH_AUTH=cert` turns off, so both commands refuse at once under `cert`. Fills and API tokens use their own accounts and work either way.
 - **What Claude can see:** `metacomputer secrets list` shows names, kinds, sites, usernames, approval, project limits, ages and use counts, never values. `metacomputer secrets audit` shows the history.
 
 Limits to know:
 - Fills need the page-mode Chrome that Cua Driver starts, not Firefox.
 - The VM needs to be built with this version, which adds the locked fill account. Older VMs say so and refuse.
 - Usernames and one-time codes are visible on the page once typed; passwords show as dots.
-- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so uses that need your answer are refused there unless you unlock with `--allow-multiplexer`.
+- Unlock in a plain terminal window. Inside tmux or screen, another program could answer for you, so uses that need your answer are refused there unless you unlock with `--touch-id` (answer with Touch ID instead) or `--allow-multiplexer`.
 
 The full model is in [SECURITY.md](SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
@@ -826,11 +848,12 @@ events happen are the record to rely on. There are four kinds of these
 | `ntfy` | Your phone, through ntfy |
 
 ```bash
-metacomputer secrets audit-sink add siem --kind syslog --url syslog+tls://siem.example:6514 --required
+metacomputer secrets audit-sink add otel --kind otlp --url http://127.0.0.1:4318 --required   # uses wait for it to accept their record
+metacomputer secrets audit-sink add siem --kind syslog --url syslog+tls://siem.example:6514     # best effort: syslog can't acknowledge a record
 metacomputer secrets audit-sink add phone --kind ntfy --url ask     # the topic is typed, not echoed
 ```
 
-- `--required` fails closed: each use is first recorded and must reach every required sink before it goes ahead. While one can't be reached, fills, tokens and session saves and loads are refused, and proxied API requests get 503.
+- `--required` (webhook and OTLP sinks only; syslog and ntfy can't acknowledge a record) fails closed: each use is first recorded and must reach every required sink before it goes ahead. While one can't be reached, fills, tokens and session saves and loads are refused, and proxied API requests get 503.
 - The vault signs a record for a sink only after it passes its own checks; a record that fails reaches the sinks as an `audit_tamper` notice instead, and the unlock terminal says `AUDIT LOG CHANGED`.
 - `scripts/verify-audit.py --key KEY FILE...` checks what a sink received: signatures, hashes, chain and gaps (`--require-verified` also fails on records a locked client wrote).
 - Adding or removing a sink needs your terminal and the passphrase. `audit-sink list` works from anywhere, though while the vault is locked it shows only each sink's delivery state, not its settings. `audit-sink test NAME` works from anywhere while the vault is unlocked; while it's locked, it asks for the passphrase in your terminal.
@@ -1559,6 +1582,7 @@ Recordings and results stay in the checkout until you delete it.
 - [docs/shell.md](docs/shell.md): `metacomputer sh`, its design and how it treats the VM.
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
 - [docs/learn.md](docs/learn.md): `metacomputer learn`, lessons from your own sessions: what it reads and reports, proposals, approval, delivery and measuring.
+- [docs/moving-from-spaces.md](docs/moving-from-spaces.md): coming from Cua Spaces' Keyvault: the command and event mapping, the sign-in flow, what differs, and how to bring your logins over.
 - [bench/README.md](bench/README.md): the benchmark.
 - [skills/metacomputer/](skills/metacomputer/): the skill itself. [DESKTOP.md](skills/metacomputer/DESKTOP.md) and [BROWSER.md](skills/metacomputer/BROWSER.md) hold the verified desktop and browser rules; [SHELL.md](skills/metacomputer/SHELL.md), [SECRETS.md](skills/metacomputer/SECRETS.md) and [EVENTS.md](skills/metacomputer/EVENTS.md) what Claude does with each.
 - [docs/chrome-investigation.md](docs/chrome-investigation.md): how Chrome was added and why the input guard exists.

@@ -33,7 +33,11 @@ struct Secret: Codable {
     var api_header: String?         // api: "Name: template with {value}"
     var api_path_prefix: String?    // api: only paths under this
     var gen: String? = nil          // random, new with every set: API tokens are bound to it
+    var totp_for: String? = nil     // totp: the `id` of the password secret whose account this code belongs to (import-passwords)
+    var id: String? = nil           // random, made once and kept through --replace: what a 2FA code's totp_for names
 }
+
+func newSecretID() -> String { randomBytes(8).map { String(format: "%02x", $0) }.joined() }
 
 /// A secret's generation: tokens made for an earlier value or policy don't fit a newer one.
 func secretGen(_ s: Secret) -> String { s.gen ?? "\(s.created)|\(s.rotated ?? "-")" }
@@ -61,6 +65,17 @@ struct SessionMeta: Codable {
     var last_loaded: String?
     var loads: Int
     var approval: String?           // "session": loads into the same VM don't ask. nil or "each": they do
+    var identity_provider: Bool? = nil   // holds an identity provider's sign-in: every load asks, whatever the policy
+    var kind: String? = nil         // nil: a Chrome profile saved from a VM (a tar.gz); "cookies": a site's cookies imported from this Mac's Chrome
+    var source: String? = nil       // cookies: where they came from ("chrome:Default")
+    var sites: [String]? = nil      // cookies: the sites named at import
+}
+
+extension SessionMeta {
+    /// Whether every load asks, whatever the policy, grants or rules: a session that holds an identity provider's
+    /// sign-in, and a whole Chrome profile saved from a VM, which may hold any sign-in (an identity provider's
+    /// included), so it's treated as one. Only imported cookies, whose sites are known, can be relaxed.
+    var alwaysAsks: Bool { identity_provider == true || kind != "cookies" }
 }
 
 /// Somewhere off this Mac that receives every audit event (Sinks.swift).
@@ -89,6 +104,9 @@ struct Payload: Codable {
     // The last audit seq written before the audit key existed (a vault from an earlier version,
     // or a log older than this vault): records up to it are legacy, unverified, not forgeries.
     var audit_key_since: Int? = nil
+    var rules: [UnattendedRule]? = nil      // unattended rules (Approvals.swift): uses that don't ask, until they expire
+    var require_presence: String? = nil     // "on" | "off": the unlock's presence mode when no flag says; nil: on where Touch ID is
+    var biometry_seen: String? = nil        // when an unlock first found Touch ID enrolled: presence mode then stays on by default
 
     /// A new vault. `boundary`: the audit log's last seq now (records before the vault are legacy).
     static func fresh(boundary: Int) -> Payload {

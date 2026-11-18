@@ -1209,7 +1209,7 @@ def run(td, procs):
     st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
     req_begins = [d for d in received("req") if d.get("op") == "begin" and d.get("use") == "api"]
     check("...and passes again once it's back, each request's own begin record having reached the sink first", st == 200
-          and req_begins and req_begins[-1].get("token_id") == tok.get("token_id") and req_begins[-1].get("path") == "/v1/echo",
+          and req_begins and req_begins[-1].get("token_id") == tok.get("token_id") and "path" not in req_begins[-1],
           (st, req_begins[-1:]))
 
     rx.slow.add("/req")
@@ -1391,9 +1391,10 @@ def run(td, procs):
     st, _, _ = vm_request("GET", "/api1/v1/echo", bearer)
     check("...and the proxy still serves", st == 200, st)
     apis = [x for x in audit_recs() if x.get("op") == "api"]
-    check("each proxied request is audited: method, host, path without the query, status, bytes, token id, key withheld",
-          any(x.get("method") == "GET" and x.get("host") == upstream and x.get("path") == "/v1/echo" and x.get("status") == 200
-              and x.get("bytes", 0) > 0 and x.get("token_id") == tok.get("token_id") and x.get("key_withheld", 0) >= 1 for x in apis)
+    check("each proxied request is audited: method, host, the path prefix it's within (never the path: it's the VM's), the "
+          "API's status class, a size class, token id, whether the key was withheld",
+          any(x.get("method") == "GET" and x.get("host") == upstream and "path" not in x and x.get("status") == "2xx"
+              and x.get("bytes", 0) > 0 and x.get("token_id") == tok.get("token_id") and x.get("key_withheld") is True for x in apis)
           and not any("dummy-query-77" in json.dumps(x) for x in apis) and any(x.get("status") == 401 for x in apis), apis[-3:])
     r = client("token", "api2", "--vm", "opsvm", "--ttl", "2s")
     tok2 = js(r.stdout)
@@ -1514,6 +1515,77 @@ def run(td, procs):
     os.chmod(sealed2, 0o600)
     check("a sealed session that can't be read stops rotate-session-key, with nothing changed", rc != 0 and "can't be read" in out
           and "nothing changed" in out and open(os.path.join(vdir, "vault.json")).read() == vault_before, out)
+
+    # --- 9b. a VM that remembers a password it was given: nothing it says reaches any output, ever -----------------
+    # It spells the last password, hex-encoded, into a later check's reason and every other field, onto its stderr with no
+    # answer, into secret-fill's DevTools-error form, into a sealed-session save's and load's stderr, and into the path and
+    # name of API proxy requests. None of it may reach the command's output, the audit log (`audit --json` too) or a sink.
+    def flagp(name):
+        open(os.path.join(stubdir, name), "w").close()
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    mem = os.path.join(stubdir, "remembered")
+    remembered = open(mem).read().strip() if os.path.exists(mem) else ""
+    leak_out = [r.stdout + r.stderr]
+    login = ["login", "web-login", "--vm", "opsvm", "--password-selector", "#pw"]
+    shapes = [("remember-reason-next", login), ("remember-stderr-next", login), ("remember-devtools-next", login),
+              ("remember-reason-next", ["fill", "web-login", "--vm", "opsvm", "--field", "username"]),
+              ("remember-stderr-next", ["fill", "web-login", "--vm", "opsvm", "--field", "password"]),
+              ("remember-devtools-next", ["fill", "web-login", "--vm", "opsvm", "--field", "password"])]
+    failed_ok = []
+    for fl, args in shapes:
+        flagp(fl)
+        r = client(*args)
+        leak_out.append(r.stdout + r.stderr)
+        failed_ok.append(r.returncode in (2, 4))
+    flagp("remember-session-next")
+    h = detached_start("session", "load", "s1", "--vm", "opsvm")
+    u.expect("Load the sealed session s1")
+    u.send("s1\n")
+    rc_l, out = detached_wait(h)
+    leak_out.append(out)
+    flagp("remember-session-next")
+    h = detached_start("session", "save", "s9", "--vm", "opsvm", "--profile", "prof1")
+    u.expect("as the sealed session s9?")
+    u.send("s9\n")
+    rc_s, out = detached_wait(h)
+    leak_out.append(out)
+    tokl = js(client("token", "api1", "--vm", "opsvm").stdout)
+    vm_request("GET", "/api1/" + remembered, {"Authorization": "Bearer " + tokl.get("token", "")})
+    vm_request("GET", "/" + remembered[:60] + "/x", {"Authorization": "Bearer " + tokl.get("token", "")})
+    vm_request("PROPFIND", "/api1/x", {"Authorization": "Bearer " + tokl.get("token", "")})
+    sinks_up = ["hook", "otel"] + (["sys"] if sl else [])
+    wait_for(lambda: caught_up(sinks_up), 30)
+    aj = client("audit", "--json", "--tail", "400")
+    raw_audit = open(os.path.join(vdir, "audit.jsonl"), errors="replace").read()
+    raw_sinks = " ".join(g.get("body", "") if isinstance(g.get("body"), str) else str(g.get("body")) for g in rx.got) \
+        + " ".join(sl.got if sl else [])
+    where = [w for w, text in (("outputs", " ".join(leak_out)), ("audit.jsonl", raw_audit), ("audit --json", aj.stdout),
+                               ("sinks", raw_sinks)) if remembered and remembered in text]
+    apis = [x for x in audit_recs() if x.get("op") == "api"][-3:]
+    check("a VM spelling a password it was given earlier into a check's reason (and every other field), its stderr, "
+          "secret-fill's DevTools-error form, a session save's and load's stderr, and an API path and name: it reaches no "
+          "command output, audit record (`audit --json` included) or sink; each use fails in the vault's own words",
+          len(remembered) >= 8 and all(failed_ok) and rc_l != 0 and rc_s != 0 and not where
+          and not os.path.exists(os.path.join(vdir, "sessions", "s9.sealed")), (len(remembered), failed_ok, rc_l, rc_s, where))
+    check("...the proxy records the method as one of a few words and no path: PROPFIND as 'other', the name only when it's "
+          "a stored api secret's", apis and all("path" not in x for x in apis) and any(x.get("method") == "other" for x in apis)
+          and any("name" not in x and x.get("status") == 404 for x in apis), apis)
+    # Sizes and counts it can steer: an echo API answers with what it got, so N characters of padding give an answer of
+    # C + N bytes. The audit keeps one of a few sizes, the API's status class and whether the key was withheld, never counts.
+    sizes = (0, 1 << 10, 1 << 16, 1 << 20, 1 << 24, 1 << 28, 1 << 32, 1 << 40)
+    n_api = len([x for x in audit_recs() if x.get("op") == "api"])
+    for pad in (3000, 3001, 3077):
+        vm_request("POST", "/api1/v1/echo", {"Authorization": "Bearer " + tokl.get("token", ""), "Content-Type": "text/plain"},
+                   body=("x" * pad).encode())
+    padded = [x for x in audit_recs() if x.get("op") == "api"][n_api:]
+    lst = client("tokens", "--json")
+    toks = (json.loads(lst.stdout or "{}").get("tokens") or []) if lst.returncode == 0 else []
+    mine = [t for t in toks if t.get("id") == tokl.get("token_id")]
+    check("...and nothing it can steer is recorded as a number it chose: answers 3000, 3001 and 3077 characters apart get the "
+          "same size class, the API's status as its class, whether the key was withheld (not how often), and the token list "
+          "counts requests in words", len(padded) == 3 and len({x.get("bytes") for x in padded}) == 1
+          and all(x.get("bytes") in sizes and x.get("status") == "2xx" and x.get("key_withheld") in (True, None) for x in padded)
+          and mine and mine[0].get("requests") in ("none", "1-9", "10-99", "100 or more"), (padded, mine))
 
     # --- 10. a rekey while unlocked locks the running unlock; tokens die with it ---------------------------
     rc, out = tty([BIN, "rekey"], [("Vault passphrase", current + "\n"), ("New vault passphrase", PASS + "\n"),

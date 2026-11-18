@@ -188,7 +188,31 @@ if rec["user"] == "mcfill":
     rec["stdin"] = raw.decode()
     req = json.loads(raw)
     rec["kind"] = "fill:" + req.get("mode", "?")
-    if flag("deny-next"):
+    # A hostile VM keeps every password it's given and can spell the last one on any later request (remember-*-next).
+    mem = os.path.join(d, "remembered")
+    h = open(mem).read().strip() if os.path.exists(mem) else ""
+    if req.get("value") and req.get("field") == "password":
+        open(mem, "w").write(req["value"].encode().hex())
+    if flag("remember-reason-next"):
+        out = {{"ok": False, "denied": True, "mode": h, "field": h, "origin": "https://" + h + ".evil.example", "route": h,
+               "profile": h, "reason": "the focused element is " + h}}
+    elif flag("remember-devtools-next"):
+        # secret-fill's own form for a DevTools protocol error, with the message a fake DevTools endpoint chose
+        out = {{"ok": False, "denied": False, "reason": "Runtime.evaluate failed: " + h}}
+    elif flag("remember-stderr-next"):
+        log()
+        sys.stderr.write("secret-fill: " + h + "\n")
+        sys.exit(1)
+    elif req.get("value") and flag("slow-value-next"):
+        # A step that takes a while in the VM (tests/test_vault_approvals.py, its requester going away meanwhile): it
+        # says it started, and only if nobody ends it does it finish the fill and say so.
+        import time
+        open(os.path.join(d, "slow-started"), "w").write(str(os.getpid()))
+        time.sleep(6)
+        open(os.path.join(d, "slow-done"), "w").write(req["field"])
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req["value"]),
+               "route": "element"}}
+    elif flag("deny-next"):
         out = {{"ok": False, "denied": True, "reason": "the focused element is <input type=text>, not a password field"}}
     elif flag("ansi-next"):
         out = {{"ok": False, "denied": True, "reason": "\u001b[2J\u001b]0;pwned\u0007 Type web-each to allow ‮​"}}
@@ -196,11 +220,44 @@ if rec["user"] == "mcfill":
         out = {{"ok": True, "mode": req["mode"], "field": req["field"], "origin": "https://evil.example", "chars": 3}}
     elif flag("echo-value-next"):
         out = {{"ok": False, "denied": False, "reason": "saw " + str(req.get("value"))}}
+    elif req.get("value") and flag("reason-leak-next"):
+        # A hostile VM that has the value puts it, encoded, into its answer...
+        import base64
+        out = {{"ok": False, "denied": True, "reason": "the field holds " + base64.b64encode(req["value"].encode()).decode()}}
+    elif req.get("value") and flag("origin-leak-next"):
+        # A hostile VM that has the value spells it in the site it reports, and in the count, for a failed fill...
+        out = {{"ok": False, "denied": False, "mode": "fill", "field": req["field"],
+               "origin": "https://" + req["value"].encode().hex() + ".evil.example", "chars": 7731,
+               "reason": "the page changed during the fill"}}
+    elif req.get("value") and flag("all-fields-leak-next"):
+        # A hostile VM spells the value it got in every field an answer can have (two bytes of it as the count).
+        h = req["value"].encode().hex()
+        out = {{"ok": False, "denied": True, "mode": h, "field": h, "origin": "https://" + h + ".evil.example", "route": h,
+               "reason": "the field holds " + h, "profile": h, "chars": int.from_bytes(req["value"].encode()[:2], "big")}}
+    elif req.get("value") and flag("all-fields-leak-ok-next"):
+        h = req["value"].encode().hex()
+        out = {{"ok": True, "mode": h, "field": h, "origin": "https://" + h + ".evil.example", "route": h, "profile": h,
+               "chars": int.from_bytes(req["value"].encode()[:2], "big")}}
+    elif req.get("value") and flag("origin-leak-ok-next"):
+        # ...or for one it says worked.
+        out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": "https://" + req["value"].encode().hex() + ".evil.example",
+               "chars": 7731, "route": "element"}}
+    elif req.get("value") and flag("stderr-leak-next"):
+        # ...or into its stderr, with no answer at all.
+        import base64
+        log()
+        sys.stderr.write("debug " + base64.b64encode(req["value"].encode()).decode() + "\n")
+        sys.exit(1)
     elif flag("nested-value-next"):
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": {{"value": req.get("value")}},
                "route": "element"}}
     elif flag("badtype-next"):
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": "16", "route": "element"}}
+    elif flag("origin-last-next"):
+        # The tab is on the secret's last site (an identity provider's, in tests/test_vault_approvals.py).
+        out = {{"ok": True, "mode": req["mode"], "field": req["field"], "origin": req["origins"][-1]}}
+        if req.get("mode") == "fill":
+            out.update({{"chars": len(req["value"]), "route": "element"}})
     elif flag("extra-next"):
         out = {{"ok": True, "mode": "fill", "field": req["field"], "origin": req["origins"][0], "chars": len(req.get("value") or ""),
                "route": "element", "extra": {{"note": "dropped"}}, "debug": [1, 2]}}
@@ -224,6 +281,14 @@ elif rec["user"] == "mcproxy":
     import time
     while True:
         time.sleep(60)
+elif flag("remember-session-next"):
+    # A sealed-session save or load (or a cookie check) that the VM answers with a remembered password on stderr, and an
+    # exit status no step uses.
+    rec["kind"] = "session:leak"
+    log()
+    mem = os.path.join(d, "remembered")
+    sys.stderr.write("tar: " + (open(mem).read().strip() if os.path.exists(mem) else "") + "\n")
+    sys.exit(9)
 elif flag("ops-refused-next"):
     # A VM on SSH certificates (SSH_AUTH=cert) refuses the static ops key.
     rec["kind"] = "ops:refused"
@@ -236,6 +301,28 @@ elif "-czf -" in remote:
 elif "mcomp-session-load" in remote:
     rec["kind"] = "session:load"
     open(os.path.join(d, "loaded.tgz"), "wb").write(sys.stdin.buffer.read())
+    if flag("load-leak-next"):
+        # A hostile VM that got the session writes part of it to stderr and fails.
+        log()
+        sys.stderr.write("SECRET-FROM-GUEST-7731\n")
+        sys.exit(7)
+elif "mcomp-cookie-check" in remote:
+    rec["kind"] = "cookies:check"
+    if flag("no-cookie-store-next"):
+        log()
+        sys.stderr.write("the VM has no driver profile with a cookie store yet: open it once in page-mode Chrome, end that session, then load again SECRET-FROM-GUEST-7731\n")
+        sys.exit(6)
+elif "mcomp-cookie-load" in remote:
+    # Imported cookies (tests/test_vault_import.py): what the VM's loader would get.
+    rec["kind"] = "cookies:load"
+    raw = sys.stdin.buffer.read()
+    open(os.path.join(d, "loaded-cookies.json"), "wb").write(raw)
+    if flag("load-leak-next"):
+        # A hostile VM that got the cookies writes one to stderr and fails as the loader's "no profile yet".
+        log()
+        sys.stderr.write("SECRET-FROM-GUEST-7731\n")
+        sys.exit(6)
+    print(json.dumps({{"ok": True, "cookies": len(json.loads(raw)["cookies"])}}))
 else:
     rec["kind"] = "other"
 log()
@@ -634,11 +721,34 @@ def run(td, procs):
 
     flag("deny-next")
     r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
-    check("a refusal from the VM side: exit 2 with its reason", r.returncode == 2 and "not a password field" in js(r).get("reason", ""))
+    check("a refusal from the VM side after it got the value: exit 2, its reason in the vault's own words",
+          r.returncode == 2 and "isn't the kind of field this fills" in js(r).get("reason", ""), r.stdout)
     flag("ansi-next")
     r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
-    check("control and bidi characters from the VM never reach the output", r.returncode == 2 and "pwned" in r.stdout
-          and not any(x in r.stdout + r.stderr for x in NASTY), repr(r.stdout))
+    check("control and bidi characters from the VM never reach the output (nor its words, once it has the value)",
+          r.returncode == 2 and "pwned" not in r.stdout and not any(x in r.stdout + r.stderr for x in NASTY), repr(r.stdout))
+    import base64 as b64
+    enc = b64.b64encode(PW_VALUE.encode()).decode()
+    flag("reason-leak-next")
+    r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    flag("stderr-leak-next")
+    r2 = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    alog_now = open(os.path.join(vdir, "audit.jsonl")).read()
+    check("a VM that encodes the value it got into its answer or its stderr: neither reaches the result or the audit log",
+          r.returncode in (2, 4) and r2.returncode == 4 and enc not in r.stdout + r.stderr + r2.stdout + r2.stderr and enc not in alog_now,
+          (r.stdout, r2.stdout))
+    hexed = PW_VALUE.encode().hex()
+    flag("origin-leak-next")
+    r = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    flag("origin-leak-ok-next")
+    r2 = client("fill", "web-login", "--vm", "testvm", "--field", "password")
+    alog_now = open(os.path.join(vdir, "audit.jsonl")).read()
+    last2 = [json.loads(l) for l in alog_now.splitlines()][-2:]
+    check("a VM that spells the value it got in the site (and the count) it reports, for a failed or a 'successful' fill: "
+          "neither reaches the result or the audit log; only one of the secret's own sites could",
+          r.returncode in (2, 4) and r2.returncode == 4 and hexed not in r.stdout + r.stderr + r2.stdout + r2.stderr
+          and hexed not in alog_now and js(r).get("chars") != 7731 and js(r2).get("chars") != 7731 and not any(x.get("chars") == 7731 for x in last2)
+          and js(r).get("origin") in (None, SITE) and js(r2).get("origin") in (None, SITE), (r.stdout, r2.stdout, last2))
     flag("echo-value-next")
     r = client("fill", "web-otp", "--vm", "testvm", "--field", "otp")
     check("a VM answer holding the value is withheld, even a 6-digit code", r.returncode == 4
@@ -710,7 +820,8 @@ def run(td, procs):
     u2.send("s1\n")
     rc, out, _ = finish(proc)
     sealed = os.path.join(vdir, "sessions", "s1.sealed")
-    check("session save seals the profile after the name is typed", rc == 0 and json.loads(out).get("bytes") == len(archive)
+    check("session save seals the profile after the name is typed (its size, the VM's to choose, as one of a few sizes)",
+          rc == 0 and json.loads(out).get("bytes") == next(b for b in (0, 1 << 10, 1 << 16, 1 << 20, 1 << 24) if len(archive) <= b)
           and os.path.exists(sealed), out)
     blob = open(sealed, "rb").read() if os.path.exists(sealed) else b""
     check("the sealed file is encrypted", archive not in blob and b"dummy-cookie-jar" not in blob and (os.stat(sealed).st_mode & 0o777) == 0o600)
@@ -763,11 +874,31 @@ def run(td, procs):
     r = subprocess.run([sys.executable, "-I", "-c", loader, root, "prof1"], input=archive, capture_output=True, timeout=60)
     check("loader refuses a profile folder that is a symbolic link", r.returncode == 5 and "symbolic link" in r.stderr.decode())
 
-    # a passphrase-gated policy: same-VM loads stop asking; other VMs still ask
+    # A whole browser profile may hold an identity provider's sign-in: every load asks, whatever its policy, and
+    # no rule or grant covers it.
     rc, out = tty([BIN, "session", "policy", "s1", "--approval", "session"], [("Vault passphrase", PASS + "\n")])
-    check("session policy (with the passphrase)", rc == 0 and "no longer asks" in out, out)
-    r = client("session", "load", "s1", "--vm", "testvm")
-    check("with policy 'session', loading into the same VM doesn't ask", r.returncode == 0, r.stdout)
+    check("session policy (with the passphrase) on a whole-profile session: saved, and says loading still asks", rc == 0
+          and "still asks every time" in out, out)
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.expect("identity provider")
+    u2.send("s1 unlock\n")
+    rc, out, _ = finish(proc)
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.send("s1\n")
+    rc2, out2, _ = finish(proc)
+    check("...a whole-profile load still asks with policy 'session', and `s1 unlock` covers only that one load", rc == 0 and rc2 == 0, (out, out2))
+    r = client("rule", "add", "--session", "s1", "--project", td, "--for", "1h")
+    check("...and no unattended rule can cover it", r.returncode != 0 and "asks at every load" in r.stderr, r.stderr)
+    flag("load-leak-next")
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.send("s1\n")
+    rc, out, err = finish(proc)
+    check("a VM that writes what it got to stderr and fails: its words, and its exit status, reach neither the result nor "
+          "the audit log", rc == 4 and "SECRET-FROM-GUEST" not in out + err and "isn't passed on" in out and "exit 7" not in out
+          and "SECRET-FROM-GUEST" not in open(os.path.join(vdir, "audit.jsonl")).read(), out)
     proc = background("session", "load", "s1", "--vm", "testvm2")
     u2.expect("Load the sealed session s1, saved from VM testvm, into a different VM, testvm2")
     u2.send("s1\n")
@@ -778,8 +909,11 @@ def run(td, procs):
         b = f.read(1)
         f.seek(40)
         f.write(bytes([b[0] ^ 1]))
-    r = client("session", "load", "s1", "--vm", "testvm")
-    check("a changed sealed file is refused", r.returncode == 4 and "changed" in js(r).get("reason", ""))
+    proc = background("session", "load", "s1", "--vm", "testvm")
+    u2.expect("Load the sealed session s1 into profile prof1 on VM testvm")
+    u2.send("s1\n")
+    rc, out, _ = finish(proc)
+    check("a changed sealed file is refused", rc == 4 and "changed" in (json.loads(out.strip().splitlines()[-1]) if out.strip() else {}).get("reason", ""), out)
 
     # changes while unlocked need the passphrase; the server sees them at once
     rc, out = tty([BIN, "delete", "web-text"], [("Vault passphrase", PASS + "\n")])

@@ -7,7 +7,7 @@ mcomp-vault: credentials for the metacomputer VM, used without passing through t
 (Usually run as `metacomputer secrets ...`, which fills in the current VM.)
 
 In your own terminal (these ask for the vault passphrase):
-  init [--no-enclave]                    create the vault (bound to this Mac's Secure Enclave when it has one;
+  init [--no-enclave] [--passphrase]     create the vault (bound to this Mac's Secure Enclave when it has one;
                                          prints a one-time recovery key)
   set NAME --kind password|totp|text --origin https://site [--origin ...]
       [--username U] [--approval session|each] [--project DIR ...] [--replace]
@@ -27,23 +27,53 @@ In your own terminal (these ask for the vault passphrase):
       [--ca FILE] [--required]           send every audit event off this Mac (prints its key once;
                                          `ask` and {ask} are typed with the echo off)
   audit-sink show NAME --key | remove NAME
-  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]
-                                         serve requests from this terminal until Ctrl-C or the time is up
+  policy NAME --approval session|each    whether a secret's uses ask first (without typing its value again)
+  presence on|off|auto                   presence mode by default (auto: on where this Mac has Touch ID)
+  import-passwords --browser chrome [--profile NAME] [--site HOST ...] [--dry-run]
+  import-passwords --csv FILE [--site HOST ...] [--dry-run]
+                                         bring saved logins in: Chrome's (macOS asks for its Safe Storage key),
+                                         or a Chrome, Passwords app, 1Password or Bitwarden export; they ask at each use
+  import-session --browser chrome --site HOST [--site ...] --name NAME --vm VM --to-profile P
+      [--profile NAME] [--allow-identity-provider] [--replace] [--dry-run]
+                                         seal a site's cookies from your Chrome as a session for the VM's
+                                         page-mode Chrome (cookies only, not localStorage); every load asks
+  unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]
+                                         serve requests from this terminal until Ctrl-C or the time is up;
+                                         --touch-id also shows macOS's Touch ID / login password dialog per question;
+                                         presence mode: every approval needs that dialog or the passphrase
+
+You, from any terminal (they need Touch ID / your login password, or the passphrase):
+  approve ID [--passphrase]              allow one waiting request, for this one use
+  rule add (--secret NAME | --site https://site | --session NAME) --project DIR --for 8h [--passphrase]
+                                         an unattended rule: that use by Claude Code sessions in DIR doesn't ask,
+                                         until it expires (at most 30d); never for an identity provider
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
-  fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]
+  fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin URL] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
+  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--origin URL] [--request-id ID]
+                                         sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
-  session load NAME --vm VM [--profile P]            put a sealed profile back, under its own name
+  session load NAME --vm VM [--profile P] [--site HOST ...]
+                                         put a sealed profile back, under its own name (--site: only those
+                                         sites' cookies, from an imported session)
   token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
   tokens [--json]   revoke ID|--all      live tokens; end them
+  requests [--json]                      uses waiting for your approval: id, who asked, site, masked username, age
+  settle [--timeout S]                   wait until the unlock process has finished every request it got before this
+  lock                                   end the running unlock now (anyone may: it only restricts)
+  deny ID                                refuse a waiting request
+  rule list [--json] | rule remove ID    unattended rules; remove one
   audit-sink list | show NAME | test NAME
 
 Any time:
   status [--json]    audit [--tail N] [--json] | --head | --verify    selftest    version [--json]
 
-fill, session and token: exit 0 ok, 2 refused, 3 locked, 4 error.
+fill, login, session and token: exit 0 ok, 2 refused, 3 locked, 4 error, 5 no confirmation (the request was sent and
+no answer came: run `settle` before relying on it having stopped). Ctrl-C, SIGTERM or SIGHUP withdraws one: the unlock
+process stops it (before its next step; a step in progress is ended) and confirms. A program outside Claude Code that
+passes a request on for a Claude Code process adds --on-behalf-pid PID (recorded, unverified).
 """
 
 func runMain(_ argv: [String]) -> Int32 {
@@ -74,8 +104,19 @@ func runMain(_ argv: [String]) -> Int32 {
         case "recover": return try cmdRecover(paths, rest)
         case "rotate-session-key": return try cmdRotateSessionKey(paths, rest)
         case "unlock": return try cmdUnlock(paths, rest)
+        case "lock": return try cmdLock(paths, rest)
         case "list": return try cmdList(paths, rest)
         case "fill": return try cmdFill(paths, rest)
+        case "login": return try cmdLogin(paths, rest)
+        case "requests": return try cmdRequests(paths, rest)
+        case "settle": return try cmdSettle(paths, rest)
+        case "approve": return try cmdApprove(paths, rest)
+        case "deny": return try cmdDeny(paths, rest)
+        case "rule": return try cmdRule(paths, rest)
+        case "policy": return try cmdPolicy(paths, rest)
+        case "presence": return try cmdPresence(paths, rest)
+        case "import-passwords": return try cmdImportPasswords(paths, rest)
+        case "import-session": return try cmdImportSession(paths, rest)
         case "session": return try cmdSession(paths, rest)
         case "token": return try cmdToken(paths, rest)
         case "tokens": return try cmdTokens(paths, rest)
@@ -83,7 +124,10 @@ func runMain(_ argv: [String]) -> Int32 {
         case "audit-sink": return try cmdAuditSink(paths, rest)
         case "status": return try cmdStatus(paths, rest)
         case "audit": return try cmdAudit(paths, rest)
-        case "selftest": return selftest()
+        case "selftest": return rest == ["--local-auth"] ? localAuthSelftest() : selftest()
+        #if MCOMP_VAULT_TESTING
+        case "test-legacy-totp-link": return try testLegacyTOTPLink(paths, rest)
+        #endif
         case "version": return cmdVersion(rest)
         case "help", "-h", "--help": oprint(usageText); return Exit.ok
         default: throw usageError("unknown command '\(cmd)' (mcomp-vault help)")
@@ -104,7 +148,68 @@ func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
     _ = try readHeader(paths)
     var pass = try readPassphrase(confirm: false)
     defer { wipe(&pass) }
-    return try openWithPassphrase(paths, pass)
+    let (key, opened) = try openWithPassphrase(paths, pass)
+    var payload = opened
+    // 2FA codes an earlier build tied to their login by name are tied by the login's id from now on: migrated once, in
+    // the one write below, and what's returned is exactly what was written (each legacy login gets one id, used by every
+    // reference to it).
+    if hasLegacyTOTPLinks(payload) {
+        var notes: [String] = []
+        try updateVault(paths, key) { p in
+            notes = migrateLegacyTOTPLinks(&p)
+            payload = p
+        }
+        for n in notes { oprint(clean("2FA code \(n)", max: 300)) }
+        if !notes.isEmpty { audit(paths, ["op": "totp_links", "result": "ok", "changes": notes], macKey: vaultAuditKey(paths, key)) }
+    }
+    return (key, payload)
+}
+
+#if MCOMP_VAULT_TESTING
+/// Test builds only: tie a 2FA code to a login by name, as an earlier build did (tests/test_vault_import.py).
+func testLegacyTOTPLink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let noID = argv.count == 3 && argv[2] == "--no-id"
+    guard argv.count == 2 || noID, validName(argv[0]), validName(argv[1]) else { throw usageError("usage: test-legacy-totp-link TOTP LOGIN [--no-id]") }
+    try requireTTY("test-legacy-totp-link")
+    installPromptSignalHandlers()
+    _ = try readHeader(paths)
+    var pass = try readPassphrase(confirm: false)
+    defer { wipe(&pass) }
+    let (key, _) = try openWithPassphrase(paths, pass)
+    try updateVault(paths, key) { p in
+        p.secrets[argv[0]]?.totp_for = argv[1]
+        if noID { p.secrets[argv[1]]?.id = nil }      // a login saved by an earlier build had no id
+    }
+    oprint("tied \(argv[0]) to \(argv[1]) by name")
+    return Exit.ok
+}
+#endif
+
+/// Earlier builds tied a 2FA code to its login by the login's name, which a later login can take. Move each such tie to
+/// the login's id (giving the login one if it has none), or clear it when no login of that name is left. Returns what
+/// was done, one line each (empty: nothing to do).
+/// Whether any 2FA code is tied by something other than a secret's id (an earlier build's login name). Changes nothing.
+func hasLegacyTOTPLinks(_ p: Payload) -> Bool {
+    let ids = Set(p.secrets.values.compactMap(\.id))
+    return p.secrets.values.contains { $0.kind == "totp" && $0.totp_for.map { !ids.contains($0) } == true }
+}
+
+func migrateLegacyTOTPLinks(_ p: inout Payload) -> [String] {
+    let ids = Set(p.secrets.values.compactMap(\.id))
+    var notes: [String] = []
+    for (k, v) in p.secrets.sorted(by: { $0.key < $1.key }) where v.kind == "totp" {
+        guard let link = v.totp_for, !ids.contains(link), p.secrets[link]?.id != link else { continue }
+        if let login = p.secrets[link], login.kind == "password" {
+            let lid = login.id ?? newSecretID()
+            p.secrets[link]?.id = lid
+            p.secrets[k]?.totp_for = lid
+            notes.append("\(k): tied to the login \(link) by its id now")
+        } else {
+            p.secrets[k]?.totp_for = nil
+            notes.append("\(k): no login named \(link) is left, so it's tied to no login now (a later import gives that site's login a code of its own)")
+        }
+    }
+    return notes
 }
 
 /// The age of an ISO time, like "12 days".
@@ -214,18 +319,31 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     let stored = String(decoding: value, as: UTF8.self)
     let now = isoTime()
+    // A replacement for the same account (same kind, same username, same sites) is the same secret: it keeps its id, and
+    // a 2FA code keeps the login it belongs to. Anything else is another account: a new id, and any 2FA code that
+    // belonged to the old one belongs to no login now (said, and recorded), so it can never pass to the new account.
+    let sameKind = old.map { o in o.kind == kind && (o.username ?? "") == (username ?? "") && Set(o.origins) == Set(origins) } ?? false
+    var unlinked: [String] = []
     try updateVault(paths, key) { p in
+        if let o = old, !sameKind, let oldID = o.id {
+            for (k, v) in p.secrets where v.totp_for == oldID { p.secrets[k]?.totp_for = nil; unlinked.append(k) }
+        }
         p.secrets[name] = Secret(kind: kind, value: stored, username: username, origins: origins, approval: approval,
                                  created: old?.created ?? now, rotated: old == nil ? nil : now, last_used: old?.last_used,
                                  uses: old?.uses ?? 0, projects: projects.isEmpty ? nil : projects,
                                  api_host: apiHost, api_header: apiHeader, api_path_prefix: apiPrefix,
-                                 gen: randomBytes(8).map { String(format: "%02x", $0) }.joined())
+                                 gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(),
+                                 totp_for: (sameKind && kind == "totp") ? old?.totp_for : nil,
+                                 id: sameKind ? (old?.id ?? newSecretID()) : newSecretID())
     }
+    unlinked.sort()
     var rec: [String: Any] = ["op": old == nil ? "set" : "rotate", "result": "ok", "name": name, "kind": kind, "approval_mode": approval]
     if !origins.isEmpty { rec["origins"] = origins }
     if let h = apiHost { rec["api_host"] = h }
     if !projects.isEmpty { rec["projects"] = projects }
+    if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
     audit(paths, rec, macKey: vaultAuditKey(paths, key))
+    if !unlinked.isEmpty { oprint("No longer tied to a login (\(name) now holds another account): \(unlinked.joined(separator: ", ")). A later import gives the new account a code of its own.") }
     let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
     oprint((old == nil ? "Saved" : "Rotated") + " \(name) (\(kind)) for \(where_)"
            + (projects.isEmpty ? "" : ", only for Claude Code sessions in \(projects.map(tildePath).joined(separator: ", "))")
@@ -241,9 +359,21 @@ func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     installPromptSignalHandlers()
     let (key, existing) = try unlockKey(paths)
     guard existing.secrets[name] != nil else { throw VaultError("no secret named \(name)") }
-    try updateVault(paths, key) { p in p.secrets[name] = nil }
-    audit(paths, ["op": "delete", "result": "ok", "name": name], macKey: vaultAuditKey(paths, key))
-    oprint("Deleted \(name).")
+    // A 2FA code that belonged to this login belongs to none now: a later login, even one given this name, never
+    // inherits it (codes are tied to a login's id, which is never reused).
+    var unlinked: [String] = []
+    try updateVault(paths, key) { p in
+        let gone = p.secrets[name]?.id
+        p.secrets[name] = nil
+        if let g = gone {
+            for (k, v) in p.secrets where v.totp_for == g { p.secrets[k]?.totp_for = nil; unlinked.append(k) }
+        }
+    }
+    unlinked.sort()
+    var rec: [String: Any] = ["op": "delete", "result": "ok", "name": name]
+    if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
+    audit(paths, rec, macKey: vaultAuditKey(paths, key))
+    oprint("Deleted \(name)." + (unlinked.isEmpty ? "" : " Its 2FA code (\(unlinked.joined(separator: ", "))) stays, tied to no login now; delete it too if it's no longer needed."))
     return Exit.ok
 }
 
@@ -332,16 +462,25 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 // MARK: - unlock
 
 func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer"])
-    guard a.positional.isEmpty else { throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer]") }
+    try refusePassphraseStdin(argv)
+    // --passphrase, as other vaults spell it: unlocking always asks for it here.
+    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id", "require-presence", "no-require-presence", "passphrase"])
+    guard a.positional.isEmpty else {
+        throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]")
+    }
+    guard !(a.has("require-presence") && a.has("no-require-presence")) else { throw usageError("--require-presence or --no-require-presence, not both") }
     let dur = a.last("for") ?? "30m"
     guard let seconds = parseDuration(dur), seconds <= 12 * 3600 else { throw usageError("--for: like 90s, 30m or 2h (at most 12h)") }
     let confirm = a.last("confirm") ?? "session"
     guard ["session", "each"].contains(confirm) else { throw usageError("--confirm session or each") }
     try requireTTY("unlock")
     let mux = terminalMultiplexer()
-    if let m = mux, confirm == "each", !a.has("allow-multiplexer") {
-        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), or add --allow-multiplexer if you accept that")
+    let flag: Bool? = a.has("require-presence") ? true : (a.has("no-require-presence") ? false : nil)
+    let (bio, bioDetail) = detectBiometry()
+    // With --touch-id or presence mode the confirmation is the system's dialog (or the passphrase), which nothing
+    // typed into the pane can give. (The vault's own setting is read after the passphrase; this uses what's known.)
+    if let m = mux, confirm == "each", !a.has("allow-multiplexer"), !a.has("touch-id"), !(flag ?? (bio == .touchID || bio == .unavailable)) {
+        throw VaultError("this terminal runs inside \(m), where any program of yours can type into it (including the answer to a confirmation), so --confirm each would protect nothing. Unlock in a terminal outside \(m), add --require-presence or --touch-id to confirm with Touch ID or your login password instead, or add --allow-multiplexer if you accept that")
     }
     try ensurePrivateDir(paths.dir)
     _ = try readHeader(paths)
@@ -357,21 +496,80 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     ftruncate(lfd, 0)
     _ = writeAll(lfd, Array("\(getpid())\n".utf8))
     installPromptSignalHandlers()
-    let (key, _) = try unlockKey(paths)
+    let (key, opened) = try unlockKey(paths)
+    var payload = opened
+    // Touch ID enrolled, seen once, keeps presence mode on by default from then on (fail closed): kept in the vault.
+    // The audit log keeps it too: a vault file put back to an older copy that lacks it (or that says `presence off`
+    // where the log's last setting doesn't) is caught here, and the stricter of the two holds.
+    let history = auditPresenceHistory(paths, macKey: vaultAuditKey(paths, key))
+    var rollback: String?
+    if history.seen && payload.biometry_seen == nil {
+        rollback = "this vault file has no record of Touch ID being enrolled, but its audit log has: the file may have been put back to an older copy"
+    }
+    // The stricter of the file's setting and the log's last authenticated one (on, then auto, then off): a file put back
+    // to a copy from before `presence on` (or `auto`) can't relax it, whether it says off or auto.
+    var setting = payload.require_presence
+    if let lastMode = history.lastMode, presenceRank(lastMode) > presenceRank(setting) {
+        let was = setting ?? "auto"
+        setting = lastMode == "on" ? "on" : nil
+        rollback = (rollback.map { $0 + "; and " } ?? "") + "this vault file says `presence \(was)`, but the audit log's last setting is `presence \(lastMode)`: the file may have been put back to an older copy"
+    }
+    if (bio == .touchID || history.seen) && payload.biometry_seen == nil {
+        let now = isoTime()
+        try updateVault(paths, key) { p in p.biometry_seen = now }
+        payload.biometry_seen = now
+        audit(paths, ["op": "presence", "result": "ok", "mode": "biometry_seen"] as [String: Any], macKey: vaultAuditKey(paths, key))
+    }
+    if let r = rollback {
+        audit(paths, ["op": "presence", "result": "ok", "mode": "rollback_suspected", "reason": r], macKey: vaultAuditKey(paths, key))
+    }
+    var presence = resolvePresence(flag: flag, setting: setting, biometry: bio, detail: bioDetail, seen: payload.biometry_seen != nil)
+    if let r = rollback {
+        presence.2 = r + "; presence mode keeps the stricter setting" + (presence.2.map { ". " + $0 } ?? "")
+    }
     let server = UnlockServer(paths: paths, key: key, seconds: seconds, confirmEach: confirm == "each",
-                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"))
+                              multiplexer: mux, allowMultiplexer: a.has("allow-multiplexer"), touchID: a.has("touch-id"),
+                              presence: presence)
     let rc = try server.serve()
     ftruncate(lfd, 0)
     close(lfd)
     return rc
 }
 
+/// `lock`: end the running unlock now. Anyone may (it only restricts); the unlock terminal says who asked.
+func cmdLock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: [], flags: ["json"])
+    guard a.positional.isEmpty else { throw usageError("usage: lock") }
+    do {
+        let res = try request(paths, ["op": "lock"], timeout: 15)
+        if a.has("json") { printResult(res, ["ok", "reason"]); return exitFor(res) }
+        if res["ok"] as? Bool == true { oprint("Locked: the unlock process is ending; tokens end with it.") } else {
+            eprint(clean("mcomp-vault: \(res["reason"] as? String ?? "no answer")", max: 300))
+        }
+        return exitFor(res)
+    } catch ClientError.locked {
+        if a.has("json") { oprint(jsonLine(["ok": true, "reason": "already locked"])) } else { oprint("The vault is already locked.") }
+        return Exit.ok
+    }
+}
+
 // MARK: - client side
 
 enum ClientError: Error { case locked }
 
+/// How long a withdrawn request waits for the unlock process to confirm that it stopped (it stops within a fraction
+/// of a second; recording the outcome and its audit sinks may take longer).
+let withdrawAckSeconds: TimeInterval = 40
+
 /// One request to the unlock process; .locked when nothing is serving.
-func request(_ paths: Paths, _ req: [String: Any], timeout: Int) throws -> [String: Any] {
+///
+/// cancellable (fill, login, session, token): the request is withdrawn when this process gets SIGINT, SIGTERM or
+/// SIGHUP, when its parent process ends (a wrapper killed), or at `timeout`. Withdrawing closes this side of the connection for writing; the unlock process takes that as
+/// "stop": it stops before its next step, ends a step in progress (its ssh's process group) and withdraws a question,
+/// then answers (status "cancelled", or the outcome if it had finished). That answer is the confirmation, waited for
+/// up to withdrawAckSeconds (a second signal ends the wait). With no answer the error is Exit.unconfirmed:
+/// `mcomp-vault settle` then waits until the unlock process has finished what it was doing.
+func request(_ paths: Paths, _ req: [String: Any], timeout: Int, cancellable: Bool = false) throws -> [String: Any] {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw VaultError("cannot make a socket", code: Exit.error) }
     defer { close(fd) }
@@ -382,12 +580,68 @@ func request(_ paths: Paths, _ req: [String: Any], timeout: Int) throws -> [Stri
     if rc != 0 { throw ClientError.locked }
     guard let uid = peerUID(fd), uid == getuid() else { throw VaultError("the vault socket belongs to another user; refusing", code: Exit.error) }
     setTimeouts(fd, seconds: timeout)
+    if cancellable { installCancelSignalHandlers() }
+    let parent = getppid()
     guard writeAll(fd, Array((jsonLine(req) + "\n").utf8)) else { throw ClientError.locked }
+    var limit = timeout
+    #if MCOMP_VAULT_TESTING
+    if cancellable, let s = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_CLIENT_TIMEOUT"], let n = Int(s), n > 0 { limit = n }
+    #endif
+    let deadline = Date().addingTimeInterval(TimeInterval(limit))
+    var withdrawn: Date? = nil
+    var signalsSeen: Int32 = 0
+    while cancellable {
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let r = poll(&pfd, 1, 200)
+        if r < 0 && errno != EINTR { break }
+        if r > 0 { break }                       // the answer (or the end of the connection): read below
+        if let w = withdrawn {
+            if Date().timeIntervalSince(w) >= withdrawAckSeconds || cancelSignals > signalsSeen {
+                throw VaultError("withdrew the request, but the unlock process didn't confirm that it stopped (`mcomp-vault settle` waits until it has)",
+                                 code: Exit.unconfirmed)
+            }
+            continue
+        }
+        var why: String? = nil
+        if cancelSignals > 0 { why = "stopped by a signal" }
+        else if getppid() != parent { why = "the program that ran it ended" }
+        else if Date() >= deadline { why = "no answer in \(limit) s" }
+        if let why {
+            signalsSeen = cancelSignals
+            withdrawn = Date()
+            _ = shutdown(fd, SHUT_WR)
+            eprint("mcomp-vault: withdrawing the request (\(why)); waiting for the unlock process to confirm that it stopped")
+        }
+    }
+    setTimeouts(fd, seconds: cancellable ? 15 : timeout)
     guard let msg = readMessage(fd), let res = parseJSONObject(msg) else {
-        throw VaultError("no answer from the unlock process", code: Exit.error)
+        // Sent, and no answer: the unlock process may still be working on it (or has ended).
+        throw VaultError("no answer from the unlock process" + (withdrawn != nil ? " after withdrawing the request" : "")
+                         + " (`mcomp-vault settle` waits until it has finished what it was doing)", code: Exit.unconfirmed)
     }
     if res["status"] as? String == "locked" { throw ClientError.locked }
     return res
+}
+
+/// settle: wait until the unlock process has finished every request it got before this one (it answers only then), or
+/// isn't running. A requester that couldn't confirm that its request stopped (exit 5) runs this before going on.
+func cmdSettle(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: ["timeout"], flags: ["json"])
+    guard a.positional.isEmpty, let t = Int(a.last("timeout") ?? "600"), t > 0, t <= 3600 else {
+        throw usageError("usage: settle [--timeout SECONDS] [--json]")
+    }
+    do {
+        let res = try request(paths, ["op": "settle"], timeout: t)
+        guard res["settled"] as? Bool == true else {
+            oprint(jsonLine(["ok": false, "settled": false, "reason": clean(res["reason"] as? String ?? "no answer", max: 200)]))
+            return Exit.error
+        }
+        oprint(jsonLine(["ok": true, "settled": true, "unlock": "running"]))
+    } catch ClientError.locked {
+        // Nothing serves: the unlock process ended (it ends only after the request it was serving has stopped).
+        oprint(jsonLine(["ok": true, "settled": true, "unlock": "none"]))
+    }
+    return Exit.ok
 }
 
 let lockedMessage = "the vault is locked. Ask the user to run `metacomputer secrets unlock` in their own terminal (never ask for the passphrase or the value in chat), then try again."
@@ -404,11 +658,32 @@ func exitFor(_ res: [String: Any]) -> Int32 {
     }
 }
 
-func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "reason"]) {
+func printResult(_ res: [String: Any], _ keys: [String] = ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route",
+                                                           "request_id", "reason"]) {
     var out: [String: Any] = [:]
     for k in keys { if let v = res[k] { out[k] = v } }
     if out["ok"] == nil { out["ok"] = false }
     oprint(jsonLine((cleanAll(out) as? [String: Any]) ?? ["ok": false]))
+}
+
+/// --browser-pid PID: the Chrome a fill or sign-in is for, by its browser process id (as it reports it).
+func browserPIDOption(_ a: Args, _ req: inout [String: Any]) throws {
+    guard let s = a.last("browser-pid") else { return }
+    guard let n = Int(s), n > 1, n < Int(Int32.max) else { throw usageError("--browser-pid: a process id") }
+    req["browser_pid"] = n
+}
+
+/// --request-id ID (the id the request gets if it has to wait for approval; 8 hex digits, unused) and
+/// --on-behalf-pid PID (the Claude Code process a client says it asks for: shown and recorded as unverified, never trusted).
+func useOptions(_ a: Args, _ req: inout [String: Any]) throws {
+    if let id = a.last("request-id") {
+        guard validRequestID(id) else { throw usageError("--request-id: 8 hex digits (0-9, a-f)") }
+        req["request_id"] = id
+    }
+    if let p = a.last("on-behalf-pid") {
+        guard let n = Int32(p), n > 1 else { throw usageError("--on-behalf-pid: a process id") }
+        req["on_behalf_pid"] = Int(n)
+    }
 }
 
 /// A use refused because the vault is locked: recorded, and said in the client's output.
@@ -416,6 +691,7 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
     var rec = fields
     rec["op"] = op
     rec["result"] = "locked"
+    if op == "fill" || op == "login" { rec["event"] = "login.denied" }
     audit(paths, rec)
     var out = fields
     out["ok"] = false
@@ -426,9 +702,9 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
-        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--selector CSS]")
+        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]")
     }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
@@ -442,23 +718,61 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard s.count <= 300 else { throw usageError("--selector: at most 300 characters") }
         req["selector"] = s
     }
+    if let o = a.last("origin") {
+        guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
+        req["origin"] = o
+    }
+    try browserPIDOption(a, &req)
+    try useOptions(a, &req)
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 300) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "fill", ["name": name, "vm": vm, "field": field])
     }
     printResult(res)
     return exitFor(res)
 }
 
+func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--request-id ID] [--origin https://site]"
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
+    guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
+    let name = a.positional[0]
+    guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
+    var req: [String: Any] = ["op": "login", "name": name, "vm": vm]
+    for (flag, key, v) in [("password-selector", "password_selector", Optional(ps)), ("username-selector", "username_selector", a.last("username-selector"))] {
+        guard let v else { continue }
+        guard !v.isEmpty, v.count <= 300 else { throw usageError("--\(flag): 1-300 characters of CSS that match exactly one field") }
+        req[key] = v
+    }
+    if let p = a.last("profile") {
+        guard validName(p) else { throw usageError("--profile: a driver profile name") }
+        req["profile"] = p
+    }
+    if let o = a.last("origin") {
+        guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
+        req["origin"] = o
+    }
+    try browserPIDOption(a, &req)
+    try useOptions(a, &req)
+    let res: [String: Any]
+    do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
+        return lockedUse(paths, "login", ["name": name, "vm": vm])
+    }
+    printResult(res, ["ok", "name", "vm", "profile", "origin", "chars", "fields", "username_hint", "request_id", "reason"])
+    return exitFor(res)
+}
+
 func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "ttl"])
+    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
         throw usageError("usage: token NAME --vm VM [--ttl 15m]")
     }
     guard let ttl = parseDuration(a.last("ttl") ?? "15m"), ttl <= 8 * 3600 else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }
     let name = a.positional[0]
+    var req: [String: Any] = ["op": "token", "name": name, "vm": vm, "ttl_s": ttl]
+    try useOptions(a, &req)
     let res: [String: Any]
-    do { res = try request(paths, ["op": "token", "name": name, "vm": vm, "ttl_s": ttl], timeout: 300) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "token", ["name": name, "vm": vm])
     }
     printResult(res, ["ok", "name", "vm", "token_id", "token", "base_url", "header", "api_host", "expires", "expires_in_s", "reason"])
@@ -476,7 +790,7 @@ func cmdTokens(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if a.has("json") { oprint(jsonPretty(["tokens": list])); return Exit.ok }
     oprint(list.isEmpty ? "No live tokens." : "Live tokens:")
     for t in list {
-        oprint(clean("  \(t["id"] ?? "")  \(t["name"] ?? "") on VM \(t["vm"] ?? ""), \(t["expires_in_s"] ?? 0) s left, \(t["requests"] ?? 0) requests"
+        oprint(clean("  \(t["id"] ?? "")  \(t["name"] ?? "") on VM \(t["vm"] ?? ""), \(t["expires_in_s"] ?? 0) s left, \(((t["requests"] as? String) ?? "none") == "none" ? "no" : (t["requests"] as? String ?? "no")) requests"
                      + ((t["project"] as? String).map { ", for Claude Code in \(tildePath($0))" } ?? ""), max: 300))
     }
     return Exit.ok
@@ -501,9 +815,9 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] | policy NAME --approval session|each | delete NAME"
+    let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] [--site HOST ...] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval"], flags: ["replace"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site"], flags: ["replace"])
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")
@@ -516,7 +830,9 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         try updateVault(paths, key) { p in p.sessions[name]?.approval = ap }
         audit(paths, ["op": "session_policy", "result": "ok", "name": name, "approval_mode": ap], macKey: vaultAuditKey(paths, key))
         oprint(ap == "session"
-               ? "Loading \(name) into the VM it was saved from no longer asks (other VMs and replacing it still do)."
+               ? (existing.sessions[name]!.alwaysAsks
+                  ? "Saved, but loading \(name) still asks every time: it holds, or as a whole browser profile may hold, an identity provider's sign-in."
+                  : "Loading \(name) into the VM it was saved from no longer asks (other VMs and replacing it still do).")
                : "Loading \(name) asks at the unlock terminal each time.")
         return Exit.ok
     }
@@ -537,17 +853,24 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let profile = a.last("profile")
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm),
           profile.map(validName) ?? (sub == "load") else {
-        throw usageError(sub == "save" ? "usage: session save NAME --vm VM --profile P [--replace]" : "usage: session load NAME --vm VM [--profile P]")
+        throw usageError(sub == "save" ? "usage: session save NAME --vm VM --profile P [--replace]" : "usage: session load NAME --vm VM [--profile P] [--site HOST ...]")
+    }
+    let sites = a.all("site")
+    if !sites.isEmpty {
+        guard sub == "load" else { throw usageError("--site goes with session load (an imported session: only the cookies those sites get)") }
+        guard sites.count <= 20, sites.allSatisfy(validSiteHost) else { throw usageError("--site: a host name like github.com (at most 20)") }
     }
     let name = a.positional[0]
     var req: [String: Any] = ["op": "session_\(sub)", "name": name, "vm": vm]
     if let p = profile { req["profile"] = p }
+    if !sites.isEmpty { req["sites"] = sites }
     if a.has("replace") { req["replace"] = true }
+    try useOptions(a, &req)
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 1800) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 1800, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "session_\(sub)", ["name": name, "vm": vm, "profile": profile ?? ""])
     }
-    printResult(res)
+    printResult(res, ["ok", "name", "vm", "profile", "sites", "bytes", "cookies", "request_id", "reason"])
     return exitFor(res)
 }
 
@@ -591,6 +914,12 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let sessions = res["sessions"] as? [[String: Any]] ?? []
     if !sessions.isEmpty { oprint("Sealed browser sessions:" + ((res["session_key_rotated"] as? String).flatMap { age($0) }.map { " (key rotated \($0))" } ?? "")) }
     for s in sessions {
+        if s["kind"] as? String == "cookies" {
+            oprint(clean("  \(s["name"] ?? "")  cookies for \((s["sites"] as? [String] ?? []).joined(separator: ", ")) from \(s["source"] ?? "Chrome"), "
+                         + "for profile \(s["profile"] ?? "") on VM \(s["vm"] ?? ""), imported \(s["saved_at"] ?? ""), loaded \(s["loads"] ?? 0)x, "
+                         + "approval \(s["approval"] ?? "each")" + ((s["identity_provider"] as? Bool == true) ? " (identity provider: always asks)" : ""), max: 400))
+            continue
+        }
         oprint(clean("  \(s["name"] ?? "")  profile \(s["profile"] ?? "") from VM \(s["vm"] ?? ""), saved \(s["saved_at"] ?? ""), \(s["bytes"] ?? 0) bytes, "
                      + "loaded \(s["loads"] ?? 0)x, approval \(s["approval"] ?? "each")", max: 400))
     }
@@ -606,9 +935,19 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         out["enclave"] = h.enclave != nil
         out["recovery_key"] = h.wraps?.contains { $0.kind == "recovery" } ?? false
     }
+    let (bio, bioDetail) = detectBiometry()
+    out["biometry"] = bio.rawValue
+    if !bioDetail.isEmpty { out["biometry_detail"] = bioDetail }
     if let res = try? request(paths, ["op": "status"], timeout: 10), res["ok"] as? Bool == true {
         out["unlocked"] = true
-        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer", "tokens"] { if let v = res[k] { out[k] = v } }
+        for k in ["expires", "expires_in_s", "confirm", "pid", "since", "multiplexer", "tokens", "presence", "presence_why"] { if let v = res[k] { out[k] = v } }
+    } else {
+        // Locked: the default here (the vault's own setting, inside it, and an unlock flag can change it).
+        // (The vault's own setting and whether it has seen Touch ID enrolled are inside it: either can only turn it on,
+        // except `presence off`.)
+        let (on, why, _) = resolvePresence(flag: nil, setting: nil, biometry: bio, detail: bioDetail)
+        out["presence_default"] = on
+        out["presence_why"] = on ? why : why + " (unless this vault has seen Touch ID enrolled, or says presence on)"
     }
     if a.has("json") { oprint(jsonLine(out)); return Exit.ok }
     if !(out["exists"] as? Bool ?? false) {
@@ -620,6 +959,13 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     if out["exists"] as? Bool == true {
         oprint("keys:     format \(out["format"] ?? "?"), " + ((out["enclave"] as? Bool == true) ? "bound to this Mac's Secure Enclave, with a recovery key" : "passphrase only (no Secure Enclave)"))
+    }
+    if let on = out["presence"] as? Bool {
+        oprint("approvals: " + (on ? "presence mode: Touch ID or the login password (or the passphrase) for every approval" : "typed at the unlock terminal")
+               + " (\(out["presence_why"] ?? "?"))")
+    } else if let on = out["presence_default"] as? Bool {
+        oprint("approvals: " + (on ? "presence mode by default here" : "typed by default here") + " (\(out["presence_why"] ?? "?"); "
+               + "`secrets presence on|off|auto` or an unlock flag changes it)")
     }
     oprint("file:     \(paths.vault)")
     oprint("socket:   \(paths.socket)")
@@ -772,3 +1118,22 @@ func selftest() -> Int32 {
 }
 
 func sha256HexRaw(_ b: [UInt8]) -> String { b.map { String(format: "%02x", $0) }.joined() }
+
+/// `selftest --local-auth`: one request to LocalAuthentication through the function every approval uses, with
+/// no vault and no log. A release build runs it only with MCOMP_VAULT_LOCAL_AUTH=noninteractive, so it never
+/// shows a dialog and can only report that nothing was allowed: tests use it to show that a release build
+/// ignores the test builds' stand-in for the person (MCOMP_VAULT_TEST_LOCAL_AUTH).
+func localAuthSelftest() -> Int32 {
+    #if !MCOMP_VAULT_TESTING
+    guard ProcessInfo.processInfo.environment["MCOMP_VAULT_LOCAL_AUTH"] == "noninteractive" else {
+        eprint("mcomp-vault: selftest --local-auth runs only with MCOMP_VAULT_LOCAL_AUTH=noninteractive (otherwise it would show the Touch ID dialog)")
+        return Exit.usage
+    }
+    #endif
+    let a = startLocalAuth("check that nothing is approved here")
+    let deadline = Date().addingTimeInterval(20)
+    while !a.done && Date() < deadline { usleep(50_000) }
+    if !a.done { a.cancel() }
+    oprint(a.ok ? "local-auth: allowed" : "local-auth: not allowed (\(a.why))")
+    return a.ok ? Exit.ok : Exit.failed
+}

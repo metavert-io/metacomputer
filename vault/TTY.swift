@@ -5,6 +5,12 @@ import Foundation
 
 // Set by the signal handlers; read by the loops that wait (unlock, prompts, ssh).
 nonisolated(unsafe) var receivedSignal: Int32 = 0
+// A client's request withdrawn by a signal (installCancelSignalHandlers): how many arrived.
+nonisolated(unsafe) var cancelSignals: Int32 = 0
+/// In the unlock process, while it serves a fill, sign-in, session or token request: whether the program that asked
+/// has gone away or withdrawn it (UnlockServer.requesterGone). runProcess checks it, so a step whose requester left is
+/// ended (its process group killed) and the next one never starts. nil outside such a request.
+nonisolated(unsafe) var requesterProbe: (() -> Bool)? = nil
 // The terminal settings to put back if a signal arrives while the echo is off.
 nonisolated(unsafe) var savedTermios = termios()
 nonisolated(unsafe) var termiosSaved: Int32 = 0
@@ -22,6 +28,15 @@ func installPromptSignalHandlers() {
         _ = write(2, "\n", 1)
         _exit(128 + sig)
     }
+    signal(SIGINT, h)
+    signal(SIGTERM, h)
+    signal(SIGHUP, h)
+}
+
+/// A request waiting for the unlock process: SIGINT, SIGTERM or SIGHUP withdraws it (request(), cancellable), and the
+/// process waits for the unlock process to confirm that it stopped; a second signal ends the wait.
+func installCancelSignalHandlers() {
+    let h: @convention(c) (Int32) -> Void = { _ in cancelSignals += 1 }
     signal(SIGINT, h)
     signal(SIGTERM, h)
     signal(SIGHUP, h)
@@ -98,13 +113,26 @@ func readPassphrase(confirm: Bool) throws -> [UInt8] {
 
 enum ApprovalScope { case use, session, unlock }
 
-/// An approval on the unlock terminal. The person types the secret's (or session's) name
-/// to allow this use, "NAME session" for this Claude Code session, or "NAME unlock" until
-/// the vault locks; anything else refuses. Anything typed before the question is
-/// discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
-func askApproval(_ question: String, name: String, timeout: Int) -> ApprovalScope? {
-    guard let answer = askLine(question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
-                               + "\(name) unlock: until the vault locks). Anything else refuses: ", timeout: timeout) else { return nil }
+/// The prompt of an approval on the unlock terminal. The person types the secret's (or session's)
+/// name to allow this use, "NAME session" for this Claude Code session, or "NAME unlock" until the
+/// vault locks; anything else refuses (approvalAnswer). The unlock process reads the answer while it
+/// also serves `approve ID` / `deny ID` (Server.swift, waitForDecision); anything typed before the
+/// question is discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
+func approvalPrompt(_ question: String, name: String) -> String {
+    question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
+        + "\(name) unlock: until the vault locks). Anything else refuses: "
+}
+
+/// The prompt in presence mode: what's typed chooses how far the approval reaches, and macOS's dialog (or a
+/// passphrase proof) confirms it; anything else refuses.
+func presencePrompt(_ question: String, name: String, id: String) -> String {
+    question + "\n  Confirm this one use with Touch ID or your login password in macOS's dialog (or `metacomputer secrets approve \(id) --passphrase`)."
+        + "\n  To reach further, type \(name) session (this Claude Code session) or \(name) unlock (until the vault locks): a new dialog"
+        + " then names that, and only it can allow it. Typing never approves on its own. Anything else refuses: "
+}
+
+/// What a line typed at an approval prompt allows (nil: it refuses).
+func approvalAnswer(_ answer: String, name: String) -> ApprovalScope? {
     let words = answer.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
     guard words.first == name else { return nil }
     switch words.count == 1 ? "" : words.dropFirst().joined(separator: " ") {
@@ -113,30 +141,6 @@ func askApproval(_ question: String, name: String, timeout: Int) -> ApprovalScop
     case "unlock": return .unlock
     default: return nil
     }
-}
-
-/// One answer typed on the terminal (nil: none in time, or interrupted).
-func askLine(_ question: String, timeout: Int) -> String? {
-    guard timeout > 0 else { return nil }
-    _ = tcflush(0, TCIFLUSH)
-    eprintRaw(question)
-    let deadline = Date().addingTimeInterval(TimeInterval(timeout))
-    var line = [UInt8]()
-    while Date() < deadline {
-        if receivedSignal != 0 { eprint(""); return nil }
-        var pfd = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
-        let r = poll(&pfd, 1, 500)
-        if r < 0 { if errno == EINTR { continue }; return nil }
-        if r == 0 { continue }
-        if pfd.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 && pfd.revents & Int16(POLLIN) == 0 { return nil }
-        var c: UInt8 = 0
-        let n = read(0, &c, 1)
-        if n <= 0 { return nil }
-        if c == 0x0A { return String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces) }
-        if line.count < 120 { line.append(c) }
-    }
-    eprint("\n  (no answer in \(timeout) s: not allowed)")
-    return nil
 }
 
 /// The name of the terminal multiplexer (or scriptable terminal) this process runs in, or

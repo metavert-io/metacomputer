@@ -441,8 +441,15 @@ def fake_suite(td):
              lambda r, c: r.get("denied") and "no field is focused" in r["reason"] and not c.inserted)
     scenario("read-only field refused", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": dict(PW, readonly=True)}}})], {},
              lambda r, c: r.get("denied") and "read-only" in r["reason"] and not c.inserted)
-    scenario("two tabs: the focused one", [page(pid="A", focus=False), page(pid="B", focus=True)], {},
-             lambda r, c: r.get("ok") and c.inserted == [("B", VALUE)])
+    scenario("two tabs, even with one focused: refused (focus or visibility never chooses where a value goes)",
+             [page(pid="A", focus=False), page(pid="B", focus=True)], {},
+             lambda r, c: r.get("denied") and "2 tabs" in r["reason"] and not c.inserted)
+    scenario("browser_pid: the Chrome whose browser process has that id", [page()], {"browser_pid": 4242},
+             lambda r, c: r.get("ok") and c.inserted == [("A", VALUE)])
+    scenario("browser_pid: another Chrome's id finds none, and nothing is typed", [page()], {"browser_pid": 5555},
+             lambda r, c: r.get("ok") is False and "browser process 5555" in r["reason"] and not c.inserted)
+    scenario("browser_pid: not a number is refused", [page()], {"browser_pid": "4242"},
+             lambda r, c: r.get("denied") and r["reason"] == "bad browser pid" and not c.inserted)
     scenario("two tabs, neither focused nor alone visible: refused", [page(pid="A"), page(pid="B")], {},
              lambda r, c: r.get("denied") and "2 tabs" in r["reason"] and not c.inserted)
     scenario("focus moved during the fill", [page(moves_focus=True)], {},
