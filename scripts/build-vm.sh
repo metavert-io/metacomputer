@@ -62,10 +62,10 @@ MAC="$(vm_mac "$VM_NAME")"
 SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"; mkdir -p "$SEED/payload"
 cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
-cp "$CACHE_DIR/mozilla/repo-signing-key.gpg" "$SEED/payload/mozilla-repo-signing-key.gpg"
+cp "$CACHE_DIR/mozilla/pinned-key.asc" "$SEED/payload/mozilla-repo-signing-key.gpg"   # only the pinned key (fetch-artifacts.sh)
 cp "$SSH_DIR/fill.pub" "$SEED/payload/fill.pub"   # the fill account's key (provision.sh installs it under /etc)
 cp "$SSH_DIR/proxy.pub" "$SEED/payload/proxy.pub" # the proxy account's key (likewise)
-case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/linux_signing_key.pub" "$SEED/payload/google-linux-signing-key.pub" ;; esac
+case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/pinned-key.asc" "$SEED/payload/google-linux-signing-key.pub" ;; esac
 {
   echo "GUEST_USER=$GUEST_USER"; echo "ADMIN_USER=$ADMIN_USER"
   echo "CUA_DRIVER_VERSION=$CUA_DRIVER_VERSION"; echo "CUA_DRIVER_TARBALL=$CUA_DRIVER_TARBALL"
