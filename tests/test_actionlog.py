@@ -113,6 +113,44 @@ def main():
         v = verify(cp, base, pub)
         check("a copied log still verifies", v["ok"] and v["final"])
 
+        # 7b. forged records added to a closed log, then a replay of its real final checkpoint
+        # (seq, prev and hash recomputed; covers_seq, head, final and the signature kept)
+        def chained(recs_in):
+            out, prev_h = [], None
+            for n, x in enumerate(recs_in):
+                x = dict(x, seq=n)
+                if prev_h is not None:
+                    x["prev"] = prev_h
+                x.pop("hash", None)
+                x["hash"] = actionlog.record_hash(x)
+                prev_h = x["hash"]
+                out.append(x)
+            return out
+        real = [json.loads(x) for x in ls]
+        final_cp = real[-1]
+        forged_calls = [{"ts": final_cp["ts"], "type": "call", "id": 900, "tool": "type_text",
+                         "args": {"pid": 42, "text": {"redacted": True, "chars": 9}}},
+                        {"ts": final_cp["ts"], "type": "result", "id": 900, "tool": "type_text", "ms": 5,
+                         "result": {"error": False, "sha256": "0" * 64, "images": 0, "text_chars": 2}}]
+        replay = {k: final_cp[k] for k in ("ts", "type", "covers_seq", "head", "final", "sig")}
+        t2 = os.path.join(base, "replayed.jsonl")
+        write_lines(t2, [json.dumps(x) for x in chained(real + forged_calls + [replay])])
+        v = verify(t2, base, pub)
+        check("forged records after the final checkpoint, then that checkpoint replayed: caught (not signed, not OK)",
+              not v["ok"] and any("right before it" in p for p in v["problems"]), json.dumps(v)[:400])
+        write_lines(t2, [json.dumps(x) for x in chained(real + forged_calls)])
+        v = verify(t2, base, pub)
+        check("records added after the final checkpoint (no replay): caught", not v["ok"]
+              and any("after the final checkpoint" in p for p in v["problems"]), json.dumps(v)[:400])
+        mid = max(i for i, x in enumerate(real) if x["type"] == "checkpoint" and not x["final"])
+        moved = {k: real[mid][k] for k in ("ts", "type", "covers_seq", "head", "final", "sig")}
+        write_lines(t2, [json.dumps(x) for x in chained(real[:mid + 1] + forged_calls + [moved])])
+        v = verify(t2, base, pub)
+        check("a copy of an earlier checkpoint after forged records (a cut-short log): caught", not v["ok"], json.dumps(v)[:400])
+        os.remove(t2)
+        v = verify(path, base, pub)
+        check("...while the real log still verifies under the stricter rule", v["ok"] and v["final"] and v["unsigned"] == 0)
+
         # 8. the CLI
         env = dict(os.environ, MCOMP_ACTION_LOG_DIR=base, MCOMP_ACTION_LOG_KEY=key)
         out = subprocess.run([sys.executable, os.path.join(LAB, "lib", "actionlog.py"), "verify", "--all"],

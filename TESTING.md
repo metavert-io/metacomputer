@@ -132,10 +132,12 @@ so your own sinks get nothing. It changes nothing in the VM (a test page in
 
 ## Optional hardening: `tests/test_actionlog.py`, `tests/test_options.py`
 
-`python3 tests/test_actionlog.py` needs no VM (16 checks). It writes logs to a
+`python3 tests/test_actionlog.py` needs no VM (20 checks). It writes logs to a
 temporary folder, then tampers with them: an edited record, an edited record
-with its hash recomputed, a deleted record, a cut-off end, and a log signed
-with another key. It also runs the relay against a fake driver and checks that
+with its hash recomputed, a deleted record, a cut-off end, a log signed
+with another key, and records added to a closed log, with and without a
+replayed copy of its final checkpoint (or an earlier one).
+It also runs the relay against a fake driver and checks that
 messages pass through unchanged.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_options.py [A] [B] [C] [F]` runs against

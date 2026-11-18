@@ -64,8 +64,12 @@ How it resists tampering:
 - **Signatures.** About every 20 records, every minute with new activity, and
   when the connection closes, the head of the chain is signed with an SSH key
   (`ssh-keygen -Y sign`).
+  Each signature covers the record right before it, so a signature copied to
+  another place in the file doesn't verify.
 - **Final signature.** A file whose last signature isn't marked final was cut
-  short, or its session crashed.
+  short, or its session crashed. The final signature is the file's last
+  record: anything after it was added once the log was closed, and fails
+  verification.
 
 Typed text, values and scripts are recorded as their length only.
 `ACTION_LOG_TEXT=keep` records them in full; only do that when you can keep
