@@ -52,7 +52,7 @@ From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
   fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin URL] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
-  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--origin URL] [--request-id ID] [--agent TEXT]
+  login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--origin URL] [--request-id ID]
                                          sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
   session load NAME --vm VM [--profile P] [--site HOST ...]
@@ -73,8 +73,7 @@ Any time:
 fill, login, session and token: exit 0 ok, 2 refused, 3 locked, 4 error, 5 no confirmation (the request was sent and
 no answer came: run `settle` before relying on it having stopped). Ctrl-C, SIGTERM or SIGHUP withdraws one: the unlock
 process stops it (before its next step; a step in progress is ended) and confirms. A program outside Claude Code that
-passes a request on for a Claude Code process adds --on-behalf-pid PID (the metacomputer hub does), and --while-pid PID
-to withdraw it when that process ends.
+passes a request on for a Claude Code process adds --on-behalf-pid PID (recorded, unverified).
 """
 
 func runMain(_ argv: [String]) -> Int32 {
@@ -565,13 +564,12 @@ let withdrawAckSeconds: TimeInterval = 40
 /// One request to the unlock process; .locked when nothing is serving.
 ///
 /// cancellable (fill, login, session, token): the request is withdrawn when this process gets SIGINT, SIGTERM or
-/// SIGHUP, when its parent process ends (a wrapper killed), when the process `whilePID` names ends (the hub that asked),
-/// or at `timeout`. Withdrawing closes this side of the connection for writing; the unlock process takes that as
+/// SIGHUP, when its parent process ends (a wrapper killed), or at `timeout`. Withdrawing closes this side of the connection for writing; the unlock process takes that as
 /// "stop": it stops before its next step, ends a step in progress (its ssh's process group) and withdraws a question,
 /// then answers (status "cancelled", or the outcome if it had finished). That answer is the confirmation, waited for
 /// up to withdrawAckSeconds (a second signal ends the wait). With no answer the error is Exit.unconfirmed:
 /// `mcomp-vault settle` then waits until the unlock process has finished what it was doing.
-func request(_ paths: Paths, _ req: [String: Any], timeout: Int, cancellable: Bool = false, whilePID: pid_t? = nil) throws -> [String: Any] {
+func request(_ paths: Paths, _ req: [String: Any], timeout: Int, cancellable: Bool = false) throws -> [String: Any] {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { throw VaultError("cannot make a socket", code: Exit.error) }
     defer { close(fd) }
@@ -607,7 +605,6 @@ func request(_ paths: Paths, _ req: [String: Any], timeout: Int, cancellable: Bo
         var why: String? = nil
         if cancelSignals > 0 { why = "stopped by a signal" }
         else if getppid() != parent { why = "the program that ran it ended" }
-        else if let w = whilePID, kill(w, 0) != 0 && errno == ESRCH { why = "process \(w) ended" }
         else if Date() >= deadline { why = "no answer in \(limit) s" }
         if let why {
             signalsSeen = cancelSignals
@@ -624,13 +621,6 @@ func request(_ paths: Paths, _ req: [String: Any], timeout: Int, cancellable: Bo
     }
     if res["status"] as? String == "locked" { throw ClientError.locked }
     return res
-}
-
-/// --while-pid PID: the request is withdrawn when that process ends (the hub passes its own pid).
-func whilePIDOption(_ a: Args) throws -> pid_t? {
-    guard let s = a.last("while-pid") else { return nil }
-    guard let n = Int32(s), n > 1 else { throw usageError("--while-pid: a process id") }
-    return n
 }
 
 /// settle: wait until the unlock process has finished every request it got before this one (it answers only then), or
@@ -712,7 +702,7 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid", "while-pid"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
         throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]")
     }
@@ -734,9 +724,8 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     try browserPIDOption(a, &req)
     try useOptions(a, &req)
-    let whilePID = try whilePIDOption(a)
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 300, cancellable: true, whilePID: whilePID) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "fill", ["name": name, "vm": vm, "field": field])
     }
     printResult(res)
@@ -745,11 +734,8 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--request-id ID] [--origin https://site]"
-    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent", "origin", "browser-pid", "while-pid"])
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
-    if let ag = a.last("agent") {
-        guard ag.count <= 200 else { throw usageError("--agent: at most 200 characters") }
-    }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
     var req: [String: Any] = ["op": "login", "name": name, "vm": vm]
@@ -762,16 +748,14 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard validName(p) else { throw usageError("--profile: a driver profile name") }
         req["profile"] = p
     }
-    if let ag = a.last("agent") { req["agent"] = ag }
     if let o = a.last("origin") {
         guard canonicalOrigin(o) == o else { throw usageError("--origin: one of the secret's sites, as list shows it (https://site)") }
         req["origin"] = o
     }
     try browserPIDOption(a, &req)
     try useOptions(a, &req)
-    let whilePID = try whilePIDOption(a)
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 300, cancellable: true, whilePID: whilePID) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "login", ["name": name, "vm": vm])
     }
     printResult(res, ["ok", "name", "vm", "profile", "origin", "chars", "fields", "username_hint", "request_id", "reason"])
@@ -779,7 +763,7 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid", "while-pid"])
+    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
         throw usageError("usage: token NAME --vm VM [--ttl 15m]")
     }
@@ -787,9 +771,8 @@ func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let name = a.positional[0]
     var req: [String: Any] = ["op": "token", "name": name, "vm": vm, "ttl_s": ttl]
     try useOptions(a, &req)
-    let whilePID = try whilePIDOption(a)
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 300, cancellable: true, whilePID: whilePID) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "token", ["name": name, "vm": vm])
     }
     printResult(res, ["ok", "name", "vm", "token_id", "token", "base_url", "header", "api_host", "expires", "expires_in_s", "reason"])
@@ -834,7 +817,7 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] [--site HOST ...] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site", "while-pid"], flags: ["replace"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site"], flags: ["replace"])
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")
@@ -883,9 +866,8 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if !sites.isEmpty { req["sites"] = sites }
     if a.has("replace") { req["replace"] = true }
     try useOptions(a, &req)
-    let whilePID = try whilePIDOption(a)
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 1800, cancellable: true, whilePID: whilePID) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 1800, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "session_\(sub)", ["name": name, "vm": vm, "profile": profile ?? ""])
     }
     printResult(res, ["ok", "name", "vm", "profile", "sites", "bytes", "cookies", "request_id", "reason"])

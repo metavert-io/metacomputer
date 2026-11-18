@@ -60,7 +60,6 @@ import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
 import wirelimits  # noqa: E402
-import site_login  # noqa: E402  (request_site_login, teleport_browser_session: tools the hub serves itself)
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
 except Exception:  # never let it stop the hub
@@ -87,9 +86,6 @@ LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub en
                                                                # lets the computer go
 TRANSPORT_GRACE_S = 3.0             # ending a driver connection: SIGTERM to its process group (the relay signs its log),
                                     # this long to exit, then SIGKILL to whatever of the group is left
-JOB_STOP_S = 60.0                   # the hub stopping: how long it waits for its sign-ins and session loads to stop
-                                    # (each vault call withdrawn and confirmed) before it ends anyway
-SECRET_WINDOW = "notifications/metacomputer/secret-window"     # to the action log's relay (lib/mcp_relay.py)
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
 LIVE_WINDOWS_TTL_S = 1.0            # list_windows reused within one batch, never across an action
 DIRECT_TTL_S = 3.0                  # direct SSH connections (owners.py) are looked up at most this often
@@ -669,7 +665,6 @@ class Hub:
         self.owner_lock = threading.Lock()
         self.chrome_lock = threading.Lock()
         self.leases = {}            # client id -> its acting calls still running after it disconnected (detach)
-        self.jobs = {}              # ("job", n) -> a tool the hub serves itself still at work (site_login.py), by client
         self.lease_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
         self._refreshing = False    # one tools/list refresh at a time (schedule_refresh)
@@ -678,11 +673,6 @@ class Hub:
         self._lease_keeper = None   # the thread that refreshes leases and ends a runtime past LEASE_MAX_S
         self.gen_procs = {}         # driver connection generation -> its process, until that connection's reader is done
                                     # (a lease's calls run in their own generation, which may no longer be self.up)
-        # The secret window (site_login.py): while any sign-in or session load runs, every message on every driver
-        # connection is secret-adjacent; a connection open during one has its stderr withheld until it ends.
-        self.window_lock = threading.Lock()
-        self._window = False
-        self.secret_gens = set()    # generations that were open while a sign-in or session load ran
         self._bad_upstream = {}     # driver connection generation -> times of its unusable messages (BAD_UPSTREAM_*)
         self.log_lock = threading.Lock()
         self._note_kinds = {}       # kind -> its window: start, written, left out, examples, timer (NOTE_REPEAT_MAX)
@@ -782,11 +772,6 @@ class Hub:
             self.log_bytes += len(data.encode())
         if self.log_bytes > LOG_MAX:
             self.rotate_log()
-
-    def why(self, e):
-        """An exception for hub.log: its repr, or only its type while a sign-in or session load runs or on a connection
-        that was open during one (an exception from handling a driver message can quote that message)."""
-        return type(e).__name__ if (self.jobs or self.secret_gens) else repr(e)
 
     def event(self, client, family, type_, message, severity=None, action=None, data=None, debounce=None):
         """The optional event stream (docs/events.md), on a background thread: never delays a call."""
@@ -893,17 +878,12 @@ class Hub:
                 pend["orphan"] = True       # its answer has nowhere to go; the call itself runs on
                 if pend.get("acting"):
                     running.append((key, pend.get("tool")))
-        with self.lease_lock:
-            # A sign-in or session load the hub runs for this client (site_login.py) holds the computer like a call.
-            running += [(key, job["tool"]) for key, job in self.jobs.items() if job["client"] is client]
         if self.server is not None and self.server.stopping:
             return                          # the hub is going away, not the client: its claim stays
         if client.auto_session and client.used_auto and self.connected():
             # The session's own driver session ends with it, as its own connection used to.
-            # A client that ever had a sign-in or session load (site_login.py): the VM may hold a value by now and could
-            # spell it in this call's answer, so the action log records it as secret-adjacent too.
             self.ask_up_async("tools/call", {"name": "end_session", "arguments": {"session": client.auto_session}},
-                              lambda _m: None, client=client if getattr(client, "secret_used", False) else None)
+                              lambda _m: None)
             self.recordings.pop(client.auto_session, None)
         # Every kind of client: calls still running keep the computer held (a lease). The client's own claim goes
         # when it was held in the client's name; a one-shot `call` held by its Claude Code session or shell keeps it.
@@ -929,7 +909,7 @@ class Hub:
             with self.lease_lock:                    # the same lock as removing a pending request (on_upstream)
                 keys = set()
                 for key, _tool in running:
-                    pend = self.pending.get(key) if key in self.pending else self.jobs.get(key)
+                    pend = self.pending.get(key)
                     if pend is not None and not self.local:     # in-process: the connection ends with the client
                         pend["lease"] = client.cid
                         keys.add(key)
@@ -1006,25 +986,11 @@ class Hub:
                     continue
                 with self.lease_lock:                # what is still running, looked at now (not at the snapshot)
                     gens = {self.pending[k].get("gen") for k in lease["keys"] if k in self.pending}
-                    jobs = [self.jobs[k] for k in lease["keys"] if k in self.jobs]
-                    gone = not gens and not jobs and self.leases.get(cid) is lease
+                    gone = not gens and self.leases.get(cid) is lease
                 if gone:                             # its calls ended meanwhile: nothing to stop
                     lease["keys"].clear()
                     self._end_lease(cid)
                     continue
-                if jobs:
-                    # A sign-in or session load the lease holds (site_login.py): the connections its driver calls went
-                    # on are ended like a call's own, and the job is stopped (its vault call ended, no further driver
-                    # call made). The lease ends when the job does (job_end), not before.
-                    for j in jobs:
-                        gens |= j["gens"]
-                    for j in jobs:
-                        if not j.get("stopping"):
-                            j["stopping"] = True
-                            try:
-                                j["stop"]()
-                            except Exception:
-                                pass
                 for gen in gens - ending:
                     proc = self.gen_procs.get(gen)
                     if proc is None:
@@ -1125,65 +1091,6 @@ class Hub:
                 return
         threading.Thread(target=self._end_lease, args=(cid,), daemon=True, name="hub-lease").start()
 
-    def job_start(self, client, tool, stop):
-        """A tool the hub serves itself (site_login.py) starts work for client that may outlive the call: until
-        job_end, it holds the computer like an acting call, under the client's lease if the client goes. stop() ends
-        the work early (past the lease's life). Returns the job's key."""
-        key = ("job", next(self.ids))
-        with self.lease_lock:
-            self.jobs[key] = {"client": client, "tool": str(tool)[:60], "stop": stop, "lease": None, "gens": set()}
-        try:
-            client.secret_used = True                # its session's end is secret-adjacent too (detach)
-        except AttributeError:
-            pass
-        self._sync_window()
-        return key
-
-    def job_end(self, key):
-        """The work is done (site_login.py calls this only once it has provably stopped: the vault answered or confirmed,
-        every driver call answered or its connection ended): forget it, and end the lease it belonged to once that lease
-        holds nothing else."""
-        end = None
-        with self.lease_lock:
-            job = self.jobs.pop(key, None)
-            cid = job.get("lease") if job else None
-            lease = self.leases.get(cid) if cid is not None else None
-            if lease is not None:
-                lease["keys"].discard(key)
-                if not lease["keys"]:
-                    end = cid
-        self._sync_window()
-        if end is not None:
-            threading.Thread(target=self._end_lease, args=(end,), daemon=True, name="hub-lease").start()
-
-    def _sync_window(self):
-        """Open the secret window with the first sign-in or session load, close it after the last. Open: every driver
-        connection now open is marked (its stderr withheld until it ends), and the action log's relay is told, so it
-        records every call and answer on it as secret-adjacent (the calls already under way included) until it's told the
-        window closed. One connection carries every client's calls, and the VM is one place: a value it got could come
-        back in any message, so it's the whole connection, not just the job's own calls."""
-        with self.window_lock:
-            want = bool(self.jobs)
-            if want == self._window:
-                return
-            self._window = want
-            if want:
-                for gen, proc in list(self.gen_procs.items()):
-                    self._taint(gen, proc)
-            if self.action_log:
-                note = {"jsonrpc": "2.0", "method": SECRET_WINDOW, "params": {"open": want}}
-                for proc in list(self.gen_procs.values()):
-                    if not getattr(proc, "mcomp_eof", False):
-                        self.send_up(note, proc=proc)
-
-    def _taint(self, gen, proc):
-        """A connection open while a sign-in or session load runs: its stderr is withheld from now until it ends (the
-        drain can't tell when the VM wrote a byte), and hub.log quotes no driver text while it lives (why())."""
-        self.secret_gens.add(gen)
-        tail = getattr(proc, "mcomp_stderr", None)
-        if tail is not None:
-            tail.withhold("a sign-in or session load ran while this connection was open")
-
     def _end_lease(self, cid):
         with self.owner_lock:
             def drop():
@@ -1224,7 +1131,7 @@ class Hub:
         proc.mcomp_pgid = proc.pid
         # SSH carries the VM's stderr: drained with a fixed memory tail and a capped log file, so a VM that writes
         # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail).
-        self.stderr_tail = proc.mcomp_stderr = wirelimits.StderrTail(proc.stderr, self._stderr_path())
+        self.stderr_tail = wirelimits.StderrTail(proc.stderr, self._stderr_path())
         return proc
 
     def _stderr_text(self):
@@ -1237,10 +1144,9 @@ class Hub:
         return (up is not None and self.ready and not getattr(up, "mcomp_eof", False)
                 and not getattr(up, "mcomp_ended", False) and up.returncode is None)
 
-    def send_up(self, *msgs, proc=None):
-        """Write messages to the driver (or to proc, another generation's connection) as one unit (a client note goes
-        right before its call)."""
-        proc = proc or self.up
+    def send_up(self, *msgs):
+        """Write messages to the driver as one unit (a client note goes right before its call)."""
+        proc = self.up
         if proc is None:
             return False
         data = memoryview(b"".join(json.dumps(m, separators=(",", ":")).encode() + b"\n" for m in msgs))
@@ -1298,9 +1204,6 @@ class Hub:
             self.up_gen += 1
             gen = self.up_gen
             self.gen_procs[gen] = proc               # until its reader is done (_upstream_closed)
-            with self.window_lock:
-                if self._window:
-                    self._taint(gen, proc)           # opened during a sign-in or session load: withheld from its start
             self.up, self.ready = proc, False
             self._reset_runtime()
             threading.Thread(target=self._reader, args=(proc, gen), daemon=True, name=f"hub-upstream-{gen}").start()
@@ -1321,9 +1224,6 @@ class Hub:
                 return ("Could not connect to the virtual computer (" + (err[-300:] or "no answer from Cua Driver")
                         + f"). Check `{CLI} status`.")
             self.live_init = r["result"]
-            with self.window_lock:
-                if self._window and self.action_log:
-                    self.send_up({"jsonrpc": "2.0", "method": SECRET_WINDOW, "params": {"open": True}}, proc=proc)
             self.send_up({"jsonrpc": "2.0", "method": "notifications/initialized"})
             self.ready = True
             self.up_since = time.time()
@@ -1352,7 +1252,7 @@ class Hub:
             try:
                 self.refresh_cache(DEFAULT_INIT)
             except Exception as e:  # never let it take the hub down
-                self.note(f"tools refresh failed: {self.why(e)}")
+                self.note(f"tools refresh failed: {e!r}")
             with self.refresh_lock:
                 if not self._refresh_again:
                     self._refreshing = False
@@ -1388,7 +1288,6 @@ class Hub:
             if not cursor:
                 break
             seen.add(cursor)
-        tools = site_login.with_tools(tools)
         old = self.cache if self.cache.get("driver_version") == pinned_version() else {}
         inits = dict(old.get("initialize") or {})
         inits[params.get("protocolVersion") or "default"] = self.live_init
@@ -1428,69 +1327,11 @@ class Hub:
         self.internal.pop(iid, None)
         return box[0] if box else None
 
-    def call_for(self, client, tool, args, timeout=60, job=None):
-        """A driver tool call the hub makes on a client's behalf (site_login.py): the action log names the client,
-        as for the client's own calls, and records it as secret-adjacent. It runs inside a job (job_start), which
-        holds the computer for the client. The answer message, or None."""
-        iid = f"mcomp-hub-{next(self.ids)}"
-        ev, box = threading.Event(), []
-        self.internal[iid] = (ev, box, None, self.up_gen)
-        msgs = []
-        if self.action_log:
-            # "secret": a call made for a sign-in or a session load; the action log keeps only its tool, argument names,
-            # sizes and whether it failed (the VM may have the value by now, and could put it anywhere in its answer).
-            msgs.append({"jsonrpc": "2.0", "method": "notifications/metacomputer/client",
-                         "params": {"id": iid, "client": self.client_info(client), "secret": True}})
-        msgs.append({"jsonrpc": "2.0", "id": iid, "method": "tools/call", "params": {"name": tool, "arguments": args}})
-        gen = self.up_gen
-        if job is not None:
-            with self.lease_lock:                    # the connection (generation) this job's calls went on
-                j = self.jobs.get(job)
-                if j is not None:
-                    j["gens"].add(gen)
-        if not self.connected():
-            self.internal.pop(iid, None)
-            return None
-        if not self.send_up(*msgs):
-            # Maybe written in part: the connection is ended (its whole process tree) before the job may go on.
-            self._end_gen(gen, f"{tool} couldn't be sent whole for a sign-in or session load")
-            self.internal.pop(iid, None)
-            return None
-        self.last_activity = time.time()
-        if not ev.wait(timeout) and not box:
-            # No answer in time: the call may still run in the driver. Its job keeps the computer while the connection
-            # it went on is ended, its whole process tree (as a lease past its life is), and only then gives up, so
-            # nothing it asked for can still act once the computer is let go.
-            self._end_gen(gen, f"{tool} made for a sign-in or session load didn't answer in {int(timeout)} s")
-            ev.wait(TRANSPORT_GRACE_S + 5)           # the reader fails the connection's calls once its output ends
-        self.internal.pop(iid, None)
-        return box[0] if box else None
-
-    def _end_gen(self, gen, why):
-        """End driver connection gen (its whole process tree, _end_transport) now, on this thread."""
-        proc = self.gen_procs.get(gen)
-        if proc is None:
-            return
-        self.note(f"{why}; ending driver connection {gen} (its whole process tree) before the computer is let go")
-        self._end_transport(proc, True)
-
-    def note_driver_refusal(self, client, tool, res):
-        """A refusal of a call made with call_for: bounded mode's events, as for a client's own call."""
-        text = " ".join(c.get("text", "") for c in (res or {}).get("content") or [] if isinstance(c, dict))
-        if self.bounded_mode and BOUNDED_REFUSED_RE.search(text):
-            self.bounded_refused(client, tool, res)
-
-    def ask_up_async(self, method, params, callback, client=None):
-        """A request of the hub's own whose answer goes to callback(msg or None), on the reader thread. client: one made
-        for that client after a sign-in or session load: the action log names it and records it as secret-adjacent."""
+    def ask_up_async(self, method, params, callback):
+        """A request of the hub's own whose answer goes to callback(msg or None), on the reader thread."""
         iid = f"mcomp-hub-{next(self.ids)}"
         self.internal[iid] = (None, None, callback, self.up_gen)
-        msgs = []
-        if client is not None and self.action_log:
-            msgs.append({"jsonrpc": "2.0", "method": "notifications/metacomputer/client",
-                         "params": {"id": iid, "client": self.client_info(client), "secret": True}})
-        msgs.append({"jsonrpc": "2.0", "id": iid, "method": method, "params": params})
-        if not self.send_up(*msgs):
+        if not self.send_up({"jsonrpc": "2.0", "id": iid, "method": method, "params": params}):
             self.internal.pop(iid, None)
             callback(None)
         return iid
@@ -1529,7 +1370,7 @@ class Hub:
                         bad = None if usable else "the wrong shape"
                     except Exception as e:
                         bad = f"an error handling it: {type(e).__name__}"
-                        self.note(f"error handling a message from the driver: {self.why(e)}"[:300],
+                        self.note(f"error handling a message from the driver: {e!r}"[:300],
                                   kind=f"driver message error ({type(e).__name__})")
                 elif msg is not None:
                     bad = "not a JSON object"
@@ -1540,7 +1381,7 @@ class Hub:
                     break
         except Exception as e:  # whatever ends the reading, the connection is closed and its calls fail
             if not isinstance(e, (OSError, ValueError)):
-                self.note(f"the driver connection's reader stopped: {self.why(e)}"[:300])
+                self.note(f"the driver connection's reader stopped: {e!r}"[:300])
         finally:
             proc.mcomp_eof = True                    # (connected() looks here, never at the process itself)
             self._upstream_closed(proc, gen, why)
@@ -1633,7 +1474,6 @@ class Hub:
         self.last_activity = time.time()
         self.gen_procs.pop(gen, None)
         self._bad_upstream.pop(gen, None)
-        self.secret_gens.discard(gen)
         self.flush_notes()                           # what was left out about this connection, counted, before it ends
         self.note(f"driver connection closed (generation {gen}{', ' + why if why else ''})")
 
@@ -1657,7 +1497,7 @@ class Hub:
                     try:
                         slot[2](msg)
                     except Exception as e:
-                        self.note(f"internal callback failed: {self.why(e)}"[:300], kind="internal callback failed")
+                        self.note(f"internal callback failed: {e!r}"[:300], kind="internal callback failed")
                 return True
             with self.lease_lock:                    # removed, leased and finished under one lock (_pend_finished)
                 pend = self.pending.pop(key, None)
@@ -1667,7 +1507,7 @@ class Hub:
             try:
                 self.observe(pend, msg, key)
             except Exception as e:  # never let bookkeeping break the relay
-                self.note(f"observe failed: {self.why(e)}")
+                self.note(f"observe failed: {e!r}")
             if pend.get("orphan"):
                 return True
             out = dict(msg)
@@ -1739,8 +1579,7 @@ class Hub:
         elif method == "ping":
             self.reply(client, msg, {})
         elif method == "tools/list":
-            tools = site_login.with_tools(self.live_tools if self.live_tools is not None
-                                          else (self.cache.get("tools") or {}).get("tools") or [])
+            tools = self.live_tools if self.live_tools is not None else (self.cache.get("tools") or {}).get("tools") or []
             if client.tools_hash is not None:
                 client.tools_hash = tool_names_hash(tools)
             self.reply(client, msg, {"tools": tools})
@@ -1869,12 +1708,6 @@ class Hub:
                 return
         elif client.has_claim:
             self.claim(client, name)
-        if name in site_login.TOOL_NAMES:
-            # Served here, after the one-controller check; its driver calls go through call_for (bounded mode's
-            # manifest and the action log apply), and the vault does the approvals.
-            self.act_seq += 1
-            site_login.call(self, client, msg)
-            return
         sess = self.session_for(client, name, args)
         note = None
         if acting:
@@ -2457,19 +2290,7 @@ class Hub:
                 "socket": None if self.local else self.paths["sock"], "lessons": lessons_status(self.env)}
 
     def shutdown(self):
-        """End the core: close the driver connection (the VM's driver runtime ends with it). Sign-ins and session loads
-        still running (site_login.py) are stopped first: each vault call is withdrawn and waited for until the vault
-        confirms it stopped, and their driver calls end with the connection. The hub's lease claim goes only once
-        they all have."""
-        with self.lease_lock:
-            jobs = list(self.jobs.values())
-        for j in jobs:
-            if not j.get("stopping"):
-                j["stopping"] = True
-                try:
-                    j["stop"]()
-                except Exception:
-                    pass
+        """End the core: close the driver connection (the VM's driver runtime ends with it)."""
         proc, self.up, self.ready = self.up, None, False
         if proc:
             try:
@@ -2480,18 +2301,11 @@ class Hub:
         for old in list(self.gen_procs.values()):    # earlier connections still finishing (a bounded session's end)
             if old is not proc:
                 self._end_transport(old, True)
-        end = time.monotonic() + JOB_STOP_S
-        while jobs and self.jobs and time.monotonic() < end:
-            time.sleep(0.1)
         self.flush_notes()
         with self.lease_lock:
             had_lease, self.leases = bool(self.leases), {}
-            jobs_left = len(self.jobs)
-        if jobs_left:
-            self.note(f"{jobs_left} sign-in(s) or session load(s) didn't confirm that they stopped within {int(JOB_STOP_S)} s; "
-                      "the hub's hold on the computer isn't let go (it ends with this process)")
-        elif had_lease and not self.local:
-            owners.drop_claim(self.pid)          # the driver connection is closed, the jobs confirmed stopped
+        if had_lease and not self.local:
+            owners.drop_claim(self.pid)          # the driver connection is closed: nothing it held is running
         if self.local:
             try:
                 os.remove(os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr"))
@@ -3108,9 +2922,8 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     raise HubError(f"the metacomputer hub didn't open its socket within {timeout:.0f} s (log: {p['log']})")
 
 
-def stop_hub(env=None, wait=JOB_STOP_S + 15):
-    """Stop this VM's hub, if one runs. True when one was stopped. The wait covers its sign-ins and session loads
-    stopping (JOB_STOP_S); a hub with none ends within seconds."""
+def stop_hub(env=None, wait=8.0):
+    """Stop this VM's hub, if one runs. True when one was stopped."""
     pid = hub_pid(env)
     if not pid:
         return False
@@ -3122,19 +2935,9 @@ def stop_hub(env=None, wait=JOB_STOP_S + 15):
     except OSError:
         return False
     end = time.monotonic() + wait
-    reaped = []
-
-    def running():
-        try:                                     # a hub this process started (tests, connect_or_start): reap it,
-            if os.waitpid(pid, os.WNOHANG)[0] == pid:      # or it lingers as a zombie that kill(pid, 0) still finds
-                reaped.append(pid)
-                return False
-        except (ChildProcessError, OSError):
-            pass
-        return owners.alive(pid)
-    while time.monotonic() < end and running():
+    while time.monotonic() < end and owners.alive(pid):
         time.sleep(0.1)
-    if not reaped and owners.alive(pid):
+    if owners.alive(pid):
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:

@@ -546,7 +546,7 @@ def run(td, procs):
     lst = json.loads(pending().stdout or "{}").get("requests", [])
     raw({"op": "deny", "id": "c0ffee01"})
     finish(proc)
-    check("a client may choose its request's id (the hub does, to report it at once)", rid == "c0ffee01" and lst and lst[0]["id"] == "c0ffee01", (rid, lst))
+    check("a client may choose its request's id (to report it at once)", rid == "c0ffee01" and lst and lst[0]["id"] == "c0ffee01", (rid, lst))
     proc = background("login", "web-each", "--vm", "avm", "--password-selector", "#pw", "--request-id", "c0ffee01")
     rc, out, _ = finish(proc)
     check("...but never one used before in this unlock", rc == 2 and "used already" in js(out).get("reason", ""), out)
@@ -605,41 +605,20 @@ def run(td, procs):
     u.send("no\n")
     res = claude_results(p, outs)
     check("...nor does a command from another Claude Code session that names one there", res[0][0] == 2, res)
-    # The metacomputer hub serves every session from one process, which may sit under the session that started it: a
-    # request from it (recognised by its command line, which only takes standing away) is the hub's own.
-    hubfile = os.path.join(td, "hubfake", "lib", "mcp_hub.py")
-    os.makedirs(os.path.dirname(hubfile), exist_ok=True)
-    open(hubfile, "w").write("import subprocess, sys\nsys.exit(subprocess.call(sys.argv[2:]))\n")
-    hp = subprocess.Popen([fake, proj1, sys.executable, hubfile, "serve", BIN, *fill, "--profile", "p1"], env=env,
-                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    procs.append(hp)
-    try:
-        asked = next_request(u, 10)
-        u.send("no\n")
-    except AssertionError:
-        asked = None
-    hp.wait(60)
-    rec = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-1]
-    req_ = rec.get("requester", {})
-    check("a request from the metacomputer hub started inside a Claude Code session in the rule's project: the hub asks as "
-          "itself (no session, no project), so the rule doesn't cover it", asked and req_.get("hub_pid")
-          and "claude_pid" not in req_ and "project" not in req_ and hp.returncode == 2, (req_, hp.returncode))
-    # N4: a fill through the hub names the Chrome the hub checked (--profile or --browser-pid), or it's refused.
-    hout = os.path.join(td, "hub-nobind.out")
-    hp = subprocess.Popen([fake, proj1, "/bin/sh", "-c", shlex.join([sys.executable, hubfile, "serve", BIN, *fill]) + " >" + shlex.quote(hout) + " 2>&1"],
-                          env=env, stdin=subprocess.DEVNULL)
-    procs.append(hp)
-    try:
-        asked_nb = next_request(u, 6)
-        u.send("no\n")
-    except AssertionError:
-        asked_nb = None
-    hp.wait(60)
-    nb = open(hout).read() if os.path.exists(hout) else ""
-    check("N4: a fill through the hub that doesn't name the Chrome it checked (--profile or --browser-pid) is refused before "
-          "anyone is asked", hp.returncode == 2 and not asked_nb and "must name the Chrome it checked" in nb, (nb[-300:], asked_nb))
     r = client(*fill, "--browser-pid", "notapid")
     check("...and --browser-pid takes a process id", r.returncode == 64 and "--browser-pid" in r.stderr, r.stderr)
+    # --origin and --browser-pid: the caller narrows where the value may go (one of the login's sites, one Chrome)
+    n = len(calls())
+    r = client("fill", "mixed", "--vm", "avm", "--field", "password", "--origin", SITE, "--browser-pid", "4242")
+    sent = [{k: v for k, v in json.loads(c["stdin"]).items() if k != "value"} for c in calls()[n:]
+            if c.get("kind", "").startswith("fill:") and c.get("stdin")]
+    check("fill --origin SITE --browser-pid PID: every request to the VM (the check and the fill) names only that site and "
+          "that Chrome", r.returncode == 0 and len(sent) == 2 and all(x.get("origins") == [SITE] and x.get("browser_pid") == 4242
+                                                                   for x in sent), (r.stdout, r.stderr[-200:], sent))
+    n = len(calls())
+    r = client("login", "mixed", "--vm", "avm", "--password-selector", "#pw", "--origin", "https://elsewhere.example")
+    check("...and --origin outside the login's sites is refused before anything reaches the VM",
+          r.returncode == 2 and "isn't one of" in js(r.stdout).get("reason", "") and not calls()[n:], (r.stdout, calls()[n:]))
     holder.kill()
     r = client("rule", "add", "--site", SITE2, "--project", proj1, "--for", "1h")
     site_rule = (re.findall(r"Rule ([0-9a-f]{8})", r.stdout) or [None])[0]
@@ -1115,9 +1094,9 @@ def run(td, procs):
 
     # --- 11. a request whose requester goes away stops, and the vault says so (the requester's confirmation) -----
     # The unlock process watches the requester's connection while it serves a fill, sign-in, session or token
-    # request: when the requester closes its side (withdraws it: a signal, its parent gone, --while-pid, its own
-    # deadline) or dies, the question is withdrawn, no further step starts and a step in progress (its ssh) is killed;
-    # then it answers, and that answer is what a requester (the hub) waits for before it lets the computer go.
+    # request: when the requester closes its side (withdraws it: a signal, its parent gone, its own deadline) or dies,
+    # the question is withdrawn, no further step starts and a step in progress (its ssh) is killed; then it answers,
+    # and that answer is the requester's confirmation that nothing more runs for it.
     u = start_unlock(["--for", "10m", *allow], dict(T, MCOMP_VAULT_TEST_PROMPT_TIMEOUT="30"))
 
     def cancel_recs(rid=None):
@@ -1208,20 +1187,6 @@ def run(td, procs):
     check("R6-B: killing the wrapper that ran the client (SIGKILL; the client itself lives on) withdraws the request too: "
           "the client sees its parent gone, and the unlock process withdraws the question", bool(wait_for(lambda: cancel_recs(rid), 8))
           and wait_for(no_pending, 5), (rid, open(sh_out).read()[-300:] if os.path.exists(sh_out) else ""))
-
-    sleeper = subprocess.Popen(["/bin/sleep", "60"])
-    procs.append(sleeper)
-    proc = background(*fill, "--while-pid", str(sleeper.pid))
-    rid = nreq(5)
-    sleeper.kill()
-    sleeper.wait()
-    try:
-        rc, out, err = finish(proc, timeout=20)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        rc, out, err = 999, "", "no exit"
-    check("R6-B: --while-pid PID (the hub passes its own): the request is withdrawn when that process ends, and confirmed",
-          rid is not None and rc == 4 and cancel_recs(rid) and wait_for(no_pending, 5), (rid, rc, out[-200:], err[-300:]))
 
     proc = background(*fill, extra={"MCOMP_VAULT_TEST_CLIENT_TIMEOUT": "2"})
     rid = nreq()

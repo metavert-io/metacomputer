@@ -228,65 +228,6 @@ would misplace. Neither cost anything measurable in the benchmark (bench/README.
 "Costs": 20/20 tasks either way, $11.80 against $11.83, 20.1 against 20.2 turns,
 no refusals), and the GUI and option tests pass with both on.
 
-### Tools the hub serves itself
-
-Two tools in the tool list aren't Cua Driver's: `request_site_login` and
-`teleport_browser_session` (`lib/site_login.py`), named and shaped like Cua Spaces'
-Keyvault tools for agents written for Spaces. The hub adds them to the driver's
-list and serves them after its one-controller check. Their driver calls go
-through `Hub.call_for`, so the action log names the client and bounded mode's
-manifest applies. The values stay in the vault: they call `metacomputer secrets
-list|login|fill|session load`, binding what the hub checked (`--origin` and the Chrome,
-`--browser-pid` or `--profile`, for a login; `--site` for a session load), and the unlock
-process asks and types. After a login only `same_site` comes back, no page address.
-Each call is a job (`Hub.job_start` / `job_end`) that holds the computer for its client
-like an acting call: a client that disconnects mid-job leaves it under the client's
-lease (`hand_over_claim`, `_lease_keeper`). The vault
-treats these requests as the hub's own, with no session or project; the client's
-pid (`--on-behalf-pid`) is recorded only as an unverified claim (SECURITY.md,
-"Tools for agents written for Cua Spaces").
-
-**The secret window.** While any job runs (from `job_start` to the last `job_end`),
-everything on the driver connection is secret-adjacent (`Hub._sync_window`):
-
-- The hub tells the logging relay (`notifications/metacomputer/secret-window`), and the
-  relay records every call, answer and refusal as secret-adjacent: no arguments, text or
-  error messages. That covers the calls already under way when the window opened, other
-  clients' calls, and the hub's own requests.
-- Every connection open during a job has its stderr withheld until it ends
-  (`StderrTail.withhold`), and hub.log names exceptions by type only.
-- A client that had a job gets its driver session's end (`end_session` on disconnect)
-  marked secret-adjacent, whenever it leaves.
-
-It's the whole connection, not a session of the job's own: the VM is one place. A value
-it got could come back in any message on any session, or on the connection's stderr.
-
-**Execution stops before ownership is released.** `job_end` is called only once the job's
-work has provably stopped:
-
-- **Driver calls.** `call_for` returns only with an answer, or after it has ended the
-  call's connection with its whole process tree (`_end_gen` → `_end_transport`), when the
-  call doesn't answer in time or couldn't be sent whole.
-- **Vault calls.** `site_login.vault` returns only with the unlock process's own answer,
-  which it writes after the request has stopped there, or after `mcomp-vault settle` (the
-  unlock process answers it only once everything sent before has finished, or no unlock
-  process runs).
-
-| How a job ends | How execution is proven stopped | When the computer is let go |
-|---|---|---|
-| Success | The vault answered `ok` (written after its last step). Every driver call answered. | At `job_end`. Under a lease (the client left), the lease ends then. |
-| Denied, or refused by the vault | The vault answered `denied` or `error`. No driver call follows. | At `job_end`. |
-| Vault call past its time (the client's 300 s, or the hub's 330 s) | The client withdraws the request (closes its side). The unlock process withdraws the question, starts no further step, kills a step in progress (its ssh's process group) and answers `cancelled`. With no answer within 40 s: `settle`. | After the answer, or after `settle`. |
-| Driver call past its time | `call_for` ends the call's connection: SIGTERM to its process group, TRANSPORT_GRACE_S, SIGKILL, the leader reaped last. | After `call_for` returns, at `job_end`. |
-| The client disconnects | Nothing stops: the job goes on under the client's lease and ends by one of the other rows. Past LEASE_MAX_S, the keeper stops it: the vault call is withdrawn (row 3), no further driver call is made, and its connections are ended. | When the job ends (the lease ends with it). |
-| The hub stops (SIGTERM, `metacomputer hub stop`) | `shutdown` stops every job (vault calls withdrawn and confirmed), ends the driver connections, and waits up to JOB_STOP_S. | The lease claim is dropped only if every job ended. Otherwise it goes when the hub process does. |
-| The vault locks (`lock`, Ctrl-C, its time up) | The unlock process ends the request (a question is denied, a step in progress is interrupted) and answers before it exits. A client with no answer gets `settle`, which finds no unlock process. | After the answer, or after `settle`. |
-| The driver crashes | The connection's reader ends its process tree before its calls fail (`_upstream_closed`). | When the job ends, right after. |
-| The vault client or its wrapper is killed | On SIGTERM, SIGINT or SIGHUP, or when its parent dies, the client withdraws the request (row 3). Killed outright, it disconnects, and the unlock process takes that as a withdrawal. The hub, with no answer, runs `settle`. | After `settle`. |
-
-One residual: a hub killed with SIGKILL lets go as it dies. Its vault clients withdraw
-when they see it gone (`--while-pid`), within half a second.
-
 ### Guards (in the hub, for every client)
 
 - **One controller at a time** (`lib/owners.py`). Acting calls are refused
@@ -587,6 +528,16 @@ The rest of the vault, briefly (details in SECURITY.md):
   MAC), and, for a required sink, waits for that sink to acknowledge the `begin` record
   of each use. `scripts/verify-audit.py` checks the log and sink captures;
   `audit --verify` checks the MACs.
+- **Withdrawn requests** (`vault/Server.swift`, `requesterGone`; `Commands.swift`,
+  `request`): while it serves a fill, sign-in, session or token request, the unlock
+  process watches the requester's connection.
+  - When the requester closes its side or dies, the vault stops the request. It
+    withdraws a question still waiting. It starts no further step: `runProcess` checks
+    `requesterProbe`. It kills a step in progress, the ssh's process group.
+  - It then answers `cancelled`, which is the requester's confirmation.
+  - The client withdraws on SIGINT, SIGTERM or SIGHUP, when its parent ends, or at its
+    deadline. With no confirmation it exits 5.
+  - `mcomp-vault settle` is answered only after everything sent before it has finished.
 - **Needs-you events**: while a question waits, the unlock process drops a
   `needs_you.approval_waiting` file into the event spool
   (`~/Library/Application Support/metacomputer/events/spool/`, under the "Event spool"

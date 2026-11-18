@@ -794,7 +794,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_site_login.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -937,7 +937,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_approvals.py` (124 checks, about 5 minutes) reuses the same stub
+`python3 tests/test_vault_approvals.py` (123 checks, about 5 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
 macOS's Touch ID dialog: `MCOMP_VAULT_TEST_LOCAL_AUTH=allow|deny|wait` stands in for the
 person at it, and without it there is none. It covers:
@@ -987,8 +987,9 @@ person at it, and without it there is none. It covers:
   value in every field it can answer with, for a fill and a sign-in, failed or "worked",
   with nothing of it in the results, the audit log, `audit --json`, the unified log or the
   sinks;
-- **the hub's fills name their Chrome:** one through the hub without `--profile` or
-  `--browser-pid` is refused before anyone is asked;
+- **narrowing a fill:** `--origin` and `--browser-pid` reach every request to the VM (the
+  check and the fill), and an `--origin` outside the login's sites is refused before
+  anything reaches the VM;
 - **audit continuity:** after a last record of several megabytes, the next one still
   links to it;
 - **`unlock --touch-id`:** the dialog allows or refuses; inside tmux a typed answer
@@ -997,9 +998,6 @@ person at it, and without it there is none. It covers:
   --verify` and `verify-audit.py` on the log with the new records;
 - **the verbs other vaults use:** `--passphrase-stdin` refused, `unlock --passphrase`,
   `lock` from any program (also while a question waits), `lock` when already locked;
-- **the hub as requester:** a request from a process with the hub's command line, started
-  inside a Claude Code session in a rule's project, has no session or project, so the rule
-  doesn't cover it;
 - **a requester that goes away:**
   - SIGTERM to a client waiting for its question withdraws it. The question is withdrawn,
     the answer (the confirmation) comes within seconds, the audit records the request as
@@ -1009,7 +1007,6 @@ person at it, and without it there is none. It covers:
   - A fill step in progress, a stand-in ssh that would finish after 6 s, is killed at once
     and never completes.
   - A sign-in withdrawn while its username is being typed never sends the password.
-  - `--while-pid` withdraws a request when that process ends.
   - The client's own deadline (`MCOMP_VAULT_TEST_CLIENT_TIMEOUT`, test builds only) does
     the same.
   - `settle` waits while a question is open and answers once it's decided. A request whose
@@ -1051,59 +1048,17 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (45 checks, about two minutes) runs the hub with a stand-in
-driver (page-mode Chrome's tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver
-0.53 returns it) and a TEST build of the vault behind `metacomputer secrets`, the ssh stub
-standing in for the VM. It covers:
-- the two tools in `tools/list` with Keyvault's parameters;
-- `request_site_login`: locked, a bad url, no saved login (naming the import command),
-  several logins (a masked list); the main path (pending with the vault's own request id,
-  the question naming the agent as unverified, `approve ID`, then filled with a masked
-  username and the tab, the fields filled through the vault's path with the snapshot's
-  selectors, the submit click, the audit record naming the hub as the requester with the
-  calling session only as an unverified claim); a login limited to the session's project
-  refused through the hub; declined; an unknown request id; a tab on another site refused
-  before typing; a login saved for two sites filled only on the one asked for, even when the
-  VM reports the other; no page address returned after the sign-in, only `same_site` (true
-  when the page put a token in its URL, false and nothing more when it went to a host
-  spelling a value); every request to the VM naming the Chrome the hub opened by its
-  browser process id; a tab given without `pid`, or with another Chrome's `pid`, refused
-  before anything is typed; a VM spelling the username it got in the site it reports for a
-  failed fill, which reaches neither the answer nor the audit log; a client that
-  disconnects while its sign-in waits for the user, after which another controller is
-  refused until the job ends; with the action log on (the logging relay around the
-  stand-in driver), text redacted and kept, a VM spelling the value in the refs, the text
-  and an error message after the fill, which reaches neither the action log, hub.log, the
-  events nor the client; no submit when the tab
-  leaves the site after the fill; the SDK's
-  `request_site_login`; another controller refused by the hub;
-- every way a job ends (architecture.md, "Tools the hub serves itself"):
-  - A Claude Code client leaves while its sign-in waits. The hub's end of its driver
-    session is answered by a VM spelling the value, and the VM writes the value to stderr.
-    The end of the session is recorded as secret-adjacent, and stderr is withheld. Nothing
-    reaches the action log, hub.log, upstream.stderr or the events.
-  - The same holds for a client that leaves after its sign-in finished.
-  - A post-fill click that doesn't answer in its time (`MCOMP_SITE_LOGIN_CALL_S=3`; the
-    stand-in would act at 8 s). The driver's process is gone by the time the computer is
-    free, another controller then acts, and the delayed click never happens.
-  - A lease past its life (`MCOMP_ACTIVE_S=6`) withdraws the vault call. The vault records
-    it as cancelled before the computer is let go, and approving afterwards finds nothing.
-  - Stopping the hub while a sign-in waits withdraws the vault call, confirmed before the
-    hub exits.
-  - The driver dying at the post-fill click: the job ends, filled and not submitted.
-- `teleport_browser_session`: no imported session (naming `import-session`), Firefox
-  refused, a profile with no cookie store (the hub has the driver create it before the vault
-  asks, and the VM's words from that check reach no result or record), then moved, with only
-  the requested site's cookies sent though the session holds two sites'.
-
-`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (13 checks, a test VM) does both
-tools end to end. It serves the fixture pages and a cookie-echo page in the VM, then:
-- **`request_site_login`:** the hub opens page-mode Chrome, the test build's stand-in
-  approves through `approve ID`, and the fill account types both fields. The page's own
-  result line shows the right lengths.
-- **`teleport_browser_session`:** a session imported from a synthetic Chrome profile (a
-  cookie for localhost under a test key) loads into a new driver profile, and the VM's
-  Chrome sends that cookie: the page sees its value's hash.
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (a test VM) signs in and loads a
+session end to end, the way Claude does (skills/metacomputer/SECRETS.md). It serves the
+fixture pages and a cookie-echo page in the VM, then:
+- **a sign-in:** page-mode Chrome opened through the hub, then `metacomputer secrets login`
+  with the page's selectors, `--origin` and `--browser-pid`. The test build's stand-in
+  approves through `approve ID`, the fill account types both fields, and the form is
+  submitted through the driver. The page's own result line shows the right lengths.
+- **a session load:** a session imported from a synthetic Chrome profile (a cookie for
+  localhost under a test key) loads with `secrets session load --site localhost` into a
+  driver profile opened once first, and the VM's Chrome sends that cookie: the page sees
+  its value's hash.
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 

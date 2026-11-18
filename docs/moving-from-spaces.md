@@ -8,10 +8,13 @@ without the agent seeing it. `metacomputer secrets` does the same job for metaco
 VM, and this page maps one onto the other.
 
 metacomputer is MIT-licensed and shares no code with Spaces. Its vault is its own,
-written from scratch. The compatibility described here covers names only: command verbs,
-MCP tool names, parameters and audit event names, matched to Keyvault's public
-documentation so that your habits and agents carry over. Nothing here talks to Spaces,
-and nothing needs a Cua account.
+written from scratch. The compatibility described here covers names only: command verbs
+and audit event names, matched to Keyvault's public documentation so that your habits
+carry over. Nothing here talks to Spaces, and nothing needs a Cua account.
+
+**In v0.2.0 there are no `request_site_login` or `teleport_browser_session` MCP tools.**
+Claude signs in by running `metacomputer secrets login` or `fill` itself, under the same
+approvals (below, "Signing in"). A point release will add the two tools.
 
 ## At a glance
 
@@ -28,53 +31,39 @@ and nothing needs a Cua account.
 | `cua keyvault deny ID` | `metacomputer secrets deny ID` |
 | Unlocking an item (no prompt for it) | `metacomputer secrets policy NAME --approval session` |
 | An unattended rule for a site and an agent, with an expiry | `metacomputer secrets rule add --site https://S --project DIR --for 8h` (or `--secret NAME`, `--session NAME`); `rule list`, `rule remove ID` |
-| MCP `request_site_login` | the same tool name and parameters, served by metacomputer's hub (below) |
-| MCP `teleport_browser_session` | the same tool name and parameters; it loads a session you imported (below) |
+| MCP `request_site_login` | not in v0.2.0: Claude runs `metacomputer secrets login` (below, "Signing in"); a point release adds the tool |
+| MCP `teleport_browser_session` | not in v0.2.0: Claude runs `metacomputer secrets session load NAME --site S` (below); a point release adds the tool |
 | MCP `teleport_app` | not applicable (below) |
-| SDK `space.request_site_login(url, options)` | `Hub.request_site_login(url, options)` in `lib/mcomp_sdk.py` (synchronous), with `SiteLoginOptions` and `SiteLoginReport` |
+| SDK `space.request_site_login(url, options)` | not in v0.2.0; a script runs `metacomputer secrets login` the same way |
 | Audit `login.request`, `login.authorize`, `login.fill`, `login.denied` | the same names, in each record's `event` field beside metacomputer's own `op`; in webhook sinks as the CloudEvents extension `mcompevent`, in OTLP as `metacomputer.event` |
 | Recovery key | `metacomputer secrets recover` with the recovery key `init` printed |
 
-## The MCP tools
+## Signing in
 
-Both tools appear in the `metacomputer` MCP server's tool list beside Cua Driver's tools.
-Each is served by the hub, so each goes through the hub's guards like any acting call:
-- one controller at a time;
-- bounded mode's manifest, which applies to the browser calls the tool makes;
-- the action log, which names the client that asked;
-- events.
+Claude follows skills/metacomputer/SECRETS.md, which comes with the plugin:
 
-The vault types the values through its own fill path, so the agent gets status, a site
-and a masked username, never a password.
+1. It opens page-mode Chrome on the sign-in page (`browser_prepare`, then
+   `browser_navigate`) and reads the page to find the fields.
+2. It runs `metacomputer secrets login NAME --username-selector CSS --password-selector CSS`.
+   It can add `--origin https://site` to allow only one of a login's sites, and
+   `--browser-pid PID` to allow only the Chrome it opened. A page that asks only for the
+   username takes `fill NAME --field username`, and a 2FA code takes `fill NAME --field otp`.
+3. The vault checks both fields in the VM, on the login's exact origin, and asks you:
+   - in the unlock terminal;
+   - or with `metacomputer secrets approve ID` (Touch ID or your login password; the
+     request id is in the unlock terminal and in `secrets requests`).
 
-**`request_site_login`** takes `url` (required), `space`, `agent`, `session`, `target_id`,
-`tab_id`, `username`, `request_id`, `wait_secs` and `relay_plaintext_ack`, as Keyvault's
-does. It adds `profile` (a named driver profile to open) and `submit` (default true).
-1. The first call finds the saved login for the URL's exact origin.
-2. If you pass a tab (`session`, `target_id`, `tab_id` from `get_browser_state`), the tool
-   uses it. If not, it opens page-mode Chrome on `url`.
-3. It finds the password field and the username field before it.
-4. It asks the vault to sign in. The answer is `status: "pending"` with a `request_id` while
-   you decide.
-5. Call again with that `request_id` (and `wait_secs`, default 20, at most 120). The
-   answer is `status: "filled"` with `site`, `origin`, `username_hint` (`a***@example.com`),
-   `submitted`, `same_site` and the tab, or `status: "denied"`. There is no `page_url`: no
-   address of the page comes back after a sign-in, only whether it's still on the login's
-   origin (`same_site`). The vault fills only a tab on that one origin, in the Chrome the
-   tool read, and only when no other tab there is on the site; the form isn't submitted if
-   the tab has left it.
-   A tab you pass needs its Chrome's `pid` (the process you bound with `get_browser_state`),
-   and the tool checks that the tab is in that Chrome before anything is typed.
+   It then types the values through its own fill account. Claude gets back the site, a
+   masked username and the number of characters typed, never a value.
+4. Claude submits the form itself and checks the page.
 
-**`teleport_browser_session`** takes `sites` (required), `browser`, `name`, `reason`,
-`request_id` and `duration_minutes`. It adds `session` and `wait_secs`.
-- It finds a session you imported that covers those sites, and loads only the cookies
-  those sites get, even when the session holds more. The first call answers
-  `consent_required` with a `request_id`; once you approve, the retry answers `moved: true`
-  and names the driver profile to open with `browser_prepare`.
-- If the profile has no cookie store yet, the hub has the driver create one first.
-- If no imported session covers the sites, the error names the `import-session` command
-  you run in your own terminal.
+A session you imported with `import-session` loads the same way, as
+`metacomputer secrets session load NAME --site github.com`. Only the cookies that site
+gets go to the VM. A driver profile with no cookie store yet has to be opened once in
+page-mode Chrome first; the vault says so before it asks you.
+
+If Claude stops a `login` or `fill` (or it's killed), the vault withdraws the request: a
+question still waiting is withdrawn, and no further step starts.
 
 ## What's the same
 
@@ -108,27 +97,21 @@ does. It adds `profile` (a named driver profile to open) and `submit` (default t
   can't be opened on another Mac with the passphrase alone; the recovery key opens it.
 - **Who asked is a Claude Code session and its project folder**, taken from the process
   tree, not a signed app identity. Unattended rules are keyed on that project folder
-  (`--project DIR`) instead of an agent's name. Through these two tools, though, the
-  requester is the hub itself, with no session or project, since it serves every session
-  from one process: project limits and rules don't cover them, so they ask. The calling
-  session and the `agent` parameter are shown to you, marked as unverified.
-- **The use happens when you approve.** A `request_site_login` or
-  `teleport_browser_session` that waits for you goes ahead as soon as you allow it. The
-  retry with `request_id` collects the outcome rather than triggering the use. A request
-  waits for you for up to 2 minutes; after that, it's refused.
-- **One virtual computer per hub.** `space` (and `name` for the teleport tool) is
-  accepted and ignored: the tools act on the VM their MCP server serves.
-- **Saved logins can also be used directly.** Claude can run `metacomputer secrets fill
-  NAME --field password|username|otp` or `login NAME --password-selector ...`, with the
-  same approvals. TOTP codes and API keys (through a proxy with short-lived tokens) are
-  metacomputer's own features.
+  (`--project DIR`) instead of an agent's name.
+- **The use happens while Claude waits.** `secrets login` and `fill` wait while you
+  decide, and go ahead as soon as you allow them. A request waits for you for up to 2
+  minutes; after that, it's refused.
+- **Claude submits the form.** The vault types the values; Claude clicks the sign-in
+  button and checks the page.
+- TOTP codes and API keys (through a proxy with short-lived tokens) are metacomputer's own
+  features.
 
 ## Not supported
 
 - **`teleport_app`.** Spaces copies a Mac app's session into a macOS sandbox, but
   metacomputer's VM runs Ubuntu Linux, so a Mac app and its data can't run there. The
-  equivalent for the web is `teleport_browser_session`. For a Linux app, install it in the
-  VM (README, "Add apps") and sign in there.
+  equivalent for the web is `secrets session load` (a sealed browser session). For a Linux
+  app, install it in the VM (README, "Add apps") and sign in there.
 - **Firefox sessions and Firefox passwords.** Sessions load into Chrome only. For Firefox
   logins, export a CSV from a password manager and use `--csv`.
 - **localStorage and IndexedDB.** `import-session` brings cookies only. Chrome keeps
@@ -137,9 +120,9 @@ does. It adds `profile` (a named driver profile to open) and `submit` (default t
 - **Saved passwords delivered into the sandbox's browser.** As in Keyvault, an agent can
   only use a password to sign in, never have it delivered. metacomputer has no option to
   write passwords into the VM's Chrome.
-- **`duration_minutes`.** Loaded cookies stay in the driver profile until you delete it
+- **A session's lifetime.** Loaded cookies stay in the driver profile until you delete it
   (`metacomputer browser profiles --delete NAME`) or reset the VM.
-- **Relays and remote Spaces** (`relay_plaintext_ack`). Everything runs on your Mac.
+- **Relays and remote Spaces.** Everything runs on your Mac.
 - **The Keyvault page in the Spaces app** (items per app, site icons, "Disable Keyvault").
   `metacomputer secrets list`, `requests`, `rule list` and `audit` cover the same ground
   in a terminal.
@@ -164,9 +147,9 @@ metacomputer secrets unlock --for 2h           # keep this terminal open while C
   Relax one with `policy NAME --approval session`, or allow one project for a while with
   `rule add`.
 - A CSV export holds every password in plain text: delete it once it's imported.
-- Then ask Claude to "log me into github.com in the virtual computer". It uses
-  `request_site_login`, or `fill`/`login` directly, and you approve in the unlock terminal
-  or with `metacomputer secrets approve ID`.
+- Then ask Claude to "log me into github.com in the virtual computer". It runs
+  `metacomputer secrets login` (or `fill`), and you approve in the unlock terminal or with
+  `metacomputer secrets approve ID`.
 
 SECURITY.md, "Secrets and logins", has the full model: what each check holds and what it
 doesn't.

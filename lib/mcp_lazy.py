@@ -141,7 +141,7 @@ class Front:
         elif method == "ping":
             self.reply(msg, {})
         elif method == "tools/list" and not self.connected():
-            tools = mcp_hub.site_login.with_tools((self.cache.get("tools") or {}).get("tools") or [])
+            tools = (self.cache.get("tools") or {}).get("tools") or []
             self.served = mcp_hub.tool_names_hash(tools)
             self.reply(msg, {"tools": tools})
         elif method in ("resources/list", "resources/templates/list", "prompts/list") and not self.connected():

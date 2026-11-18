@@ -82,18 +82,7 @@ How it resists tampering:
 Typed text, values and scripts are recorded as their length only.
 `ACTION_LOG_TEXT=keep` records them in full; only do that when you can keep
 the log as safe as the passwords that might be typed. Results are never stored,
-only their hash, so a log doesn't copy what was on the screen. While a
-`request_site_login` or `teleport_browser_session` runs, every call on the driver
-connection and every answer is recorded as `secret_adjacent`: the hub's own calls for it,
-other clients' calls, the hub's own requests (such as ending a departing client's driver
-session) and calls already under way when it started. Such a record keeps the tool, its
-argument names and sizes, and whether it failed. It never keeps the arguments, the
-answer's text, an error message or a hash of them, whatever `ACTION_LOG_TEXT` says: the
-VM may hold a value by then and could spell it in any message. A client that ever had
-one of these sign-ins gets the end of its driver session recorded the same way, even
-after the sign-in is over. The connection's stderr is withheld from the moment such a
-job starts until that connection ends. upstream.stderr gets a fixed line saying so, and
-a count of the bytes left out.
+only their hash, so a log doesn't copy what was on the screen.
 
 ```
 metacomputer actions list            # recent sessions
@@ -974,13 +963,6 @@ and folder (its project) are the **requester**:
   false` in the audit log), and nothing more: any program of yours can name any live
   process, so the claim never satisfies a `--project` limit, an unattended rule or a
   grant. Those always see the client itself.
-- the metacomputer hub, which serves every Claude Code session from one process (and may
-  sit under the session that started it), asks as itself: a request from the hub or a
-  process it started has no Claude Code session and no project, whichever session started
-  the hub, so `--project` limits, unattended rules and `NAME session` grants never cover it.
-  It's recognised by its command line, which only takes standing away (a process copying it
-  gives up its own session). The session the hub names is shown as the unverified claim
-  above.
 
 When a use needs your approval, what you type decides how long it lasts:
 
@@ -1110,7 +1092,7 @@ Requests live only while the unlock process waits for an answer (at most 120 sec
 and never past the unlock's end); while one waits, `status`, `list`, `tokens`,
 `requests`, `approve`, `deny` and `rule list` are still answered, and other uses wait
 their turn. A client may choose its request's id (`--request-id`, 8 hex digits never
-used before in that unlock); the metacomputer hub does, so it can report the id at once.
+used before in that unlock), so a program that passes requests on can report the id at once.
 
 ### Unattended rules
 
@@ -1186,8 +1168,7 @@ dies, the vault stops the request:
 
 - **What withdraws it.** The client closes its side when it gets SIGINT, SIGTERM or
   SIGHUP, when the program that ran it ends (the `metacomputer secrets` wrapper killed
-  outright), when the process named by `--while-pid` ends (the hub passes its own), or at
-  its own deadline. A client killed outright simply disconnects.
+  outright), or at its own deadline. A client killed outright simply disconnects.
 - **What the unlock process does.**
   - A question still waiting is withdrawn: the dialog is cancelled and `approve ID` finds
     nothing.
@@ -1200,12 +1181,9 @@ dies, the vault stops the request:
   (up to 40 s; exit 4). With no answer the client exits 5, and `metacomputer secrets
   settle` waits until the unlock process has finished everything it got before. It
   answers only then, or says no unlock process runs.
-- **The hub waits for it.** The hub runs its vault calls in a process group of their own,
-  withdraws one with SIGTERM, and waits for that confirmation, or for `settle`, before it
-  lets the computer go.
 - **Limit.** A step the VM has already started may still finish there. Killing ssh ends
   the connection, not the VM's side of it. No later step is sent, and nothing it does
-  afterwards can reach the vault or the hub.
+  afterwards can reach the vault.
 
 ### Bringing logins in: Chrome, CSV exports, a site's cookies
 
@@ -1295,80 +1273,6 @@ Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME
 folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
 stand-in for the Safe Storage password) are required there, and release builds don't
 contain them (`tests/test_vault_import.py`).
-
-### Tools for agents written for Cua Spaces: `request_site_login`, `teleport_browser_session`
-
-The hub serves two MCP tools itself, with the names and parameters Cua Spaces' Keyvault
-documents (docs/moving-from-spaces.md maps the rest). They add no new way to a value:
-- **They go through the hub's guards.** The hub serves them after its one-controller
-  check, like any acting tool. The browser calls they make (`browser_prepare`,
-  `get_browser_state`, `browser_navigate`, `browser_click`) are the hub's own calls on
-  that client's behalf: the action log names the client, and bounded mode's manifest
-  applies to them as to any call. In bounded mode the vault behaves as it does for
-  `metacomputer secrets fill`: its fill path doesn't go through the driver, so a site
-  outside the manifest stops at the navigation, not at the fill.
-- **`request_site_login`** finds the saved login for the URL's exact origin (by name,
-  sites and username, from `list`). It opens page-mode Chrome on the page or uses the tab
-  given, and refuses if the tab is on any other site. It reads the page's fields from a
-  `dom_refs_v1` snapshot, then runs `metacomputer secrets login` (or `fill --field
-  username` on a username-only page) with those fields' selectors and that origin
-  (`--origin`). The vault then checks both fields in the VM against that one origin, not
-  the login's other sites, asks you as for any fill, and types the values through its fill
-  account to that site only. Before clicking the submit button the hub reads the tab
-  again, and doesn't submit if it has left the site. The answer carries status, the site,
-  a masked username, the tab and `same_site`: whether the page is still on the login's
-  origin. Nothing of the page's address comes back, not its path or query and not its
-  host: a page, or the VM, could spell the password or a token in any of them.
-- **The Chrome is bound, the tab isn't.** The hub tells the vault which Chrome it read,
-  by its browser process id (`--browser-pid`): the one it opened, or the one a tab passed
-  in belongs to. A tab passed in needs that pid, and the hub checks through the driver
-  that the tab is one of that Chrome's (it binds each of that process's windows and looks
-  for the target and tab); a tab elsewhere, or one passed with only a profile, is refused
-  before anything is typed. The vault refuses a request through the hub that names no
-  Chrome. In that Chrome, the fill goes only to a tab that's
-  alone on the site: two or more are refused outright, never chosen between by focus or
-  visibility (the pages' own answers). The tab itself can't be bound: the driver's tab ids
-  aren't the ones Chrome's DevTools uses. The process id and the profile are Chrome's own
-  answers, like everything secret-fill reads from DevTools.
-- **`teleport_browser_session`** finds a session you imported with `import-session` that
-  covers the sites, and runs `metacomputer secrets session load NAME --site ...` for it:
-  only the cookies a browser sends to those sites go to the VM, filtered on the Mac,
-  whatever else the session holds, and the question and the audit record name that scope.
-  If the profile has no cookie store yet, the vault says so before asking you (in its own
-  words, never the VM's), and the hub has the driver open and close the profile once.
-- **The requester is the hub, not the calling session.** The hub serves every session from
-  one process, so the vault sees these requests as the hub's own: no Claude Code session
-  and no project. A login limited with `--project`, an unattended rule and a `NAME session`
-  grant never cover them; they ask, or are refused. The hub passes on the client's process
-  id (`--on-behalf-pid`), which the unlock terminal and the audit log show as an unverified
-  claim (`for Claude Code in ~/Projects/foo (pid 4242) as it says (unverified)`), and
-  nothing more.
-- **Two steps, as Keyvault has them.** The first call starts the use and answers
-  `pending` (or `consent_required`) with the vault's own request id while you decide; the
-  use goes ahead the moment you approve, and a later call with that `request_id` collects
-  the outcome. Outcomes are kept in the hub for 10 minutes, for the session that asked only.
-- **The work holds the computer until it has provably stopped.** From the call until the
-  fill, the submit or the load is done, the work counts as the client's acting call. If
-  the client disconnects (a script that got `pending` and exited), the hub keeps the
-  computer for it under the client's lease, as for any call a client leaves running, so
-  no other controller can act on the page meanwhile.
-  - The computer is let go only once nothing the job started can still act. Its vault
-    call has answered (the unlock process answers only after the request has stopped
-    there), or `mcomp-vault settle` has said that everything sent before it finished.
-    Every driver call it made has answered, or the connection it went on has been ended
-    with its whole process tree.
-  - A driver call that doesn't answer in time ends that connection first. So does a
-    lease past its life.
-  - A job that's stopped (the lease past its life, the hub stopping) withdraws its vault
-    call. The vault withdraws the question, starts no further step and kills a step in
-    progress (its ssh), then confirms.
-  - architecture.md, "Tools the hub serves itself", lists every way a job ends and what
-    proves each one stopped.
-- **Nothing the VM says comes back or is kept.** The tools' errors are their own words. A
-  driver error or refusal, the page's address and an exception's text are never passed
-  to the client. They also stay out of the action log (above), hub.log (while a job runs,
-  and for the rest of a connection's life after one, exceptions are logged by type only),
-  upstream.stderr (withheld, above) and the events.
 
 `metacomputer secrets lock` ends the running unlock from any terminal (anyone may: it only
 restricts). `init --passphrase` and `unlock --passphrase` are accepted as other vaults
@@ -1519,7 +1423,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `totp_unlinked` | on `delete` or a `set --replace` of another kind: the 2FA codes no longer tied to that login |
 | `sites`, `cookies` | the sites a cookie session's load was narrowed to (`--site`), and how many cookies went |
 | `identity_provider` | `true` on a request for an identity provider's site |
-| `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted; `hub_pid` (and no `claude_pid` or `project`) for a request through the metacomputer hub |
+| `requester` | `client`, `client_pid`, `claude_pid`, `project`; `on_behalf` (`claude_pid`, `project`, `client_pid`, `verified: false`) when a client named a process with `--on-behalf-pid`, which is never trusted |
 | `reason` | why it was refused or failed |
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
@@ -1818,14 +1722,9 @@ something waits for you:
 
 ### What doesn't hold
 
-- **The hub or the unlock process killed outright (SIGKILL).** Each process ends its
-  requests when told to stop: the hub on SIGTERM, the unlock process on Ctrl-C, `lock` or
-  SIGTERM. SIGKILL, from you or a program running as you, skips that.
-  - A hub killed that way lets the computer go as it dies. Its vault calls withdraw
-    themselves within half a second (`--while-pid`), and a vault step already under way
-    in the VM may finish.
-  - An unlock process killed that way leaves an ssh it started running until that step
-    ends.
+- **The unlock process killed outright (SIGKILL).** It ends its requests when told to
+  stop (Ctrl-C, `lock` or SIGTERM). SIGKILL, from you or a program running as you, skips
+  that: an ssh it started runs on until that step ends.
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
   sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:
@@ -1970,7 +1869,6 @@ something waits for you:
 | `approve ID [--passphrase]`, `rule add ... --for D [--passphrase]` | you, any terminal (Touch ID / login password, or the passphrase) | Allow one waiting request; make an unattended rule |
 | `requests`, `deny ID`, `rule list`, `rule remove ID`, `lock` | anywhere, while unlocked | What waits for you (ids, who asked, site, masked username, age); refuse one; the rules; remove one; lock now |
 | `settle [--timeout S]` | anywhere | Return once the unlock process has finished every request it got before (or none runs); for a requester that got no confirmation (exit 5) |
-| MCP `request_site_login`, `teleport_browser_session` | Claude, through the hub | Sign in to a site with a saved login; load an imported session ("Tools for agents written for Cua Spaces") |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |

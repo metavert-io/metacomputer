@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""The vault's compatibility tools against a running test VM, end to end:
+"""The vault against a running test VM, end to end, the way Claude uses it (skills/metacomputer/SECRETS.md):
 
     MCOMP_CONFIG=path/to/test-vm.env python3 tests/test_vault_vm.py
 
-1. request_site_login through the hub: the hub opens page-mode Chrome on tests/fixtures/site/login.html (served in
-   the VM), the vault asks (a TEST build's stand-in for the Touch ID dialog approves through `approve ID`), then fills
-   the username and password through its fill account and the hub submits; the page's own result line shows the
-   lengths typed.
-2. teleport_browser_session: a session imported from a synthetic Chrome profile on the Mac (a cookie for localhost,
-   encrypted with a test key) is loaded into a driver profile's cookie store through the guarded session-load path;
-   the VM's Chrome then sends that cookie to a page served in the VM, which shows only a hash of its value.
+1. A sign-in: page-mode Chrome is opened on tests/fixtures/site/login.html (served in the VM) through the hub, then
+   `metacomputer secrets login` names the fields; the vault asks (a TEST build's stand-in for the Touch ID dialog
+   approves through `approve ID`), fills the username and password through its fill account into that Chrome, and the
+   form is submitted through the driver; the page's own result line shows the lengths typed.
+2. A session load: a session imported from a synthetic Chrome profile on the Mac (a cookie for localhost, encrypted
+   with a test key) is loaded with `metacomputer secrets session load --site localhost` into a driver profile's cookie
+   store (opened and closed once first, so it has one); the VM's Chrome then sends that cookie to a page served in the
+   VM, which shows only a hash of its value.
 
 It uses a TEST build of the vault (scripts/build-vault.sh --test) with its own vault folder in /tmp, binds it to the
 test VM from MCOMP_CONFIG, and never touches the installed vault, its data, or a real Chrome profile. A test VM only:
@@ -180,69 +181,99 @@ def run(td, procs):
         outputs.append(json.dumps(r.raw))
         return r
 
-    # --- 1. request_site_login ------------------------------------------------------------------------
-    r = call("request_site_login", {"url": SITE + "/login.html", "profile": "vmtest-login", "agent": "vm-test"})
-    rid = r.structured.get("request_id")
-    check("request_site_login: pending with a request id while the vault asks", not r.is_error and r.structured.get("status") == "pending"
-          and rid, r.raw)
-    u.expect("Request " + (rid or "none"), timeout=60)
-    ra = subprocess.run([BIN, "approve", rid], env=venv, capture_output=True, text=True, timeout=120)
-    r = call("request_site_login", {"url": SITE + "/login.html", "request_id": rid, "wait_secs": 90})
-    sc = r.structured
-    check("after `approve ID`: filled and submitted, on the test site, with a masked username; no value in the result",
-          ra.returncode == 0 and not r.is_error and sc.get("status") == "filled" and sc.get("origin") == SITE and sc.get("submitted") is True
-          and sc.get("username_hint") == "v***@example.com" and sc.get("same_site") is True and "page_url" not in sc
-          and not any(v in json.dumps(r.raw) for v in VALUES), (ra.stderr, r.raw))
-    tgt = {"target_id": sc.get("target_id"), "tab_id": sc.get("tab_id"), "session": sc.get("session")}
+    def open_chrome(sess, profile, url=None):
+        """Page-mode Chrome on a named driver profile, through the hub: its pid and the target of its tab."""
+        pid, prep = None, ""
+        for _ in range(10):
+            p = call("browser_prepare", {"session": sess, "allow_launch": True, "profile": {"mode": "isolated_named", "name": profile}})
+            pid, prep = p.structured.get("prepared_pid"), p.text
+            if pid:
+                break
+            time.sleep(2)
+        win = None
+        for _ in range(40):
+            ws = (call("list_windows", {"pid": pid, "session": sess}).structured.get("windows") or []) if pid else []
+            if ws:
+                win = ws[0]
+                break
+            time.sleep(0.25)
+        b = call("get_browser_state", {"pid": pid, "window_id": (win or {}).get("window_id"), "session": sess}).structured
+        tgt = {"target_id": b.get("target_id"), "tab_id": ((b.get("tabs") or [{}])[0]).get("tab_id"), "session": sess}
+        if url:
+            call("browser_navigate", dict(tgt, url=url))
+        return pid, tgt, prep
+
+    def secrets(*args):
+        """`metacomputer secrets ARGS` in the background (it waits while the vault asks)."""
+        return subprocess.Popen([MC, "secrets", *args], env=venv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                stdin=subprocess.DEVNULL)
+
+    # --- 1. a sign-in: `secrets login` into the Chrome opened through the hub -----------------------------
+    pid, tgt, prep = open_chrome("vmtest", "vmtest-login", SITE + "/login.html")
+    check("page-mode Chrome opens on the test site's login page (through the hub)", bool(pid) and tgt.get("target_id"), prep[-400:])
+    time.sleep(1.5)
+    p = secrets("login", "demo", "--password-selector", "#password", "--username-selector", "#username",
+                "--origin", SITE, "--browser-pid", str(pid))
+    u.expect("Request ", timeout=90)
+    rid = (re.findall(r"Request ([0-9a-f]{8}):", u.text()) or [None])[-1]
+    ra = subprocess.run([BIN, "approve", rid or "00000000"], env=venv, capture_output=True, text=True, timeout=120)
+    out, err = p.communicate(timeout=180)
+    outputs.append(out + err)
+    res = {}
+    try:
+        res = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        pass
+    check("`secrets login` waits while the vault asks; after `approve ID` both fields are filled on the test site, with a "
+          "masked username and the character count; no value in its output",
+          rid is not None and ra.returncode == 0 and p.returncode == 0 and res.get("ok") is True and res.get("origin") == SITE
+          and res.get("fields") == ["username", "password"] and res.get("username_hint") == "v***@example.com"
+          and not any(v in out + err for v in VALUES), (rid, ra.stderr[-200:], out[-300:], err[-300:]))
+    snap = call("get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")).structured
+    submit = next((r.get("ref") for r in snap.get("refs") or [] if "id=submit" in str(r.get("label") or "")), None)
+    if submit:
+        call("browser_click", dict(tgt, ref=submit, delivery_mode="foreground"))
     text = ""
     for _ in range(20):
-        s = h.call("get_browser_state", dict(tgt, snapshot_format="semantic_v2", query="Signed in"))
-        text = s.text + json.dumps(s.structured)
+        s_ = h.call("get_browser_state", dict(tgt, snapshot_format="semantic_v2", query="Signed in"))
+        text = s_.text + json.dumps(s_.structured)
         if "Signed in" in text:
             break
         time.sleep(0.5)
     m = re.search(r"username (\d+) characters, password (\d+) characters", text)
-    check("the page itself says it got a username and a password of the right lengths (the VM's Chrome, the fill account)",
-          m is not None and int(m.group(1)) == len(USER) and int(m.group(2)) == len(PW), text[-400:])
+    check("submitted through the driver, the page itself says it got a username and a password of the right lengths "
+          "(the VM's Chrome, the fill account)", bool(submit) and m is not None and int(m.group(1)) == len(USER)
+          and int(m.group(2)) == len(PW), text[-400:])
     term = u.text()
-    check("the unlock terminal asked once for the sign-in, named the agent as unverified, and showed no value",
-          term.count("Sign in with demo (username and password) on " + SITE) == 1 and '"vm-test" (unverified)' in term
-          and not any(v in term for v in VALUES), term[-800:])
-    h.call("end_session", {"session": sc.get("session") or "vmtest"})
+    check("the unlock terminal asked once for the sign-in and showed no value",
+          term.count("Sign in with demo (username and password) on " + SITE) == 1 and not any(v in term for v in VALUES), term[-800:])
+    h.call("end_session", {"session": "vmtest"})
 
-    # --- 2. teleport_browser_session -------------------------------------------------------------------
-    r = call("teleport_browser_session", {"sites": ["localhost"], "browser": "chrome"})
-    rid = r.structured.get("request_id")
-    check("teleport_browser_session: consent_required with a request id", not r.is_error and r.structured.get("consent_required") is True and rid,
-          r.raw)
-    u.expect("Request " + (rid or "none"), timeout=90)
-    ra = subprocess.run([BIN, "approve", rid], env=venv, capture_output=True, text=True, timeout=120)
-    r = call("teleport_browser_session", {"sites": ["localhost"], "request_id": rid, "wait_secs": 90})
-    check("after `approve ID`: moved into the driver profile (the hub had the driver create its cookie store first)",
-          ra.returncode == 0 and not r.is_error and r.structured.get("moved") is True and r.structured.get("profile") == "vmtest-cookies", r.raw)
-    pid, prep = None, ""
-    for _ in range(10):
-        p = h.call("browser_prepare", {"session": "vmcookie", "allow_launch": True, "profile": {"mode": "isolated_named", "name": "vmtest-cookies"}})
-        pid, prep = p.structured.get("prepared_pid"), p.text
-        if pid:
-            break
-        time.sleep(2)
+    # --- 2. a session load: `secrets session load --site` into a driver profile ------------------------------
+    pid0, _t0, prep0 = open_chrome("vmprep", "vmtest-cookies")          # once, so the profile has a cookie store
+    time.sleep(6)
+    h.call("end_session", {"session": "vmprep"})
+    time.sleep(1)
+    p = secrets("session", "load", "vmcookies", "--site", "localhost")
+    u.expect("Request ", timeout=90)
+    rid = (re.findall(r"Request ([0-9a-f]{8}):", u.text()) or [None])[-1]
+    ra = subprocess.run([BIN, "approve", rid or "00000000"], env=venv, capture_output=True, text=True, timeout=120)
+    out, err = p.communicate(timeout=300)
+    outputs.append(out + err)
+    try:
+        res = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res = {}
+    check("`secrets session load --site localhost` asks, and after `approve ID` loads the cookie into the driver profile",
+          bool(pid0) and ra.returncode == 0 and p.returncode == 0 and res.get("ok") is True and res.get("cookies") == 1,
+          (prep0[-200:], ra.stderr[-200:], out[-300:], err[-300:]))
+    pid, t2, prep = open_chrome("vmcookie", "vmtest-cookies", SITE + "/cookie-check")
     check("Chrome opens on that profile", bool(pid), prep[-400:])
-    win = None
-    for _ in range(40):
-        ws = h.call("list_windows", {"pid": pid, "session": "vmcookie"}).structured.get("windows") or []
-        if ws:
-            win = ws[0]
-            break
-        time.sleep(0.25)
-    b = h.call("get_browser_state", {"pid": pid, "window_id": (win or {}).get("window_id"), "session": "vmcookie"}).structured
-    t2 = {"target_id": b.get("target_id"), "tab_id": ((b.get("tabs") or [{}])[0]).get("tab_id"), "session": "vmcookie"}
-    h.call("browser_navigate", dict(t2, url=SITE + "/cookie-check"))
     want = "mc_session:" + hashlib.sha256(COOKIE.encode()).hexdigest()[:16]
     seen = ""
     for _ in range(20):
-        s = h.call("get_browser_state", dict(t2, snapshot_format="semantic_v2"))
-        seen = s.text + json.dumps(s.structured)
+        s_ = h.call("get_browser_state", dict(t2, snapshot_format="semantic_v2"))
+        seen = s_.text + json.dumps(s_.structured)
         if "end" in seen and "mc_session" in seen:
             break
         time.sleep(0.5)
@@ -254,7 +285,7 @@ def run(td, procs):
     u.wait(15)
     rc = subprocess.run([MC, "sh", "--override", "-c", "pkill -f echo_server.py; true"], env=venv, capture_output=True, text=True, timeout=60)
     leaked = [v for v in VALUES if any(v in o for o in outputs)]
-    check(f"no value in any of {len(outputs)} tool results", not leaked, leaked)
+    check(f"no value in any of {len(outputs)} tool results and command outputs", not leaked, leaked)
     return env
 
 

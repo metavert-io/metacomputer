@@ -66,10 +66,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   JSON and drain stderr with `lib/wirelimits.py`, and escape the VM's text on a
   terminal (`lib/termsafe.py`).
   `metacomputer call --session NAME` keeps element tokens and driver state
-  between calls. The hub serves two tools itself, `request_site_login` and
-  `teleport_browser_session` (`lib/site_login.py`, Spaces-compatible): their driver
-  calls go through `Hub.call_for`, and the vault does every approval and fill.
-  Tests: `python3 tests/test_hub.py`, `python3 tests/test_site_login.py` (no VM) and
+  between calls. Tests: `python3 tests/test_hub.py` (no VM) and
   `tests/test_options.py G` (VM).
 - Don't reset or rebuild the VM without being asked (`metacomputer reset` restores
   the baseline; host recordings/results are kept).
@@ -168,7 +165,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
-  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_site_login.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
+  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_vm_runner`, `test_vm_stop`, `test_plugin`, `test_learn`, `test_storage`, `test_install` (no VM),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),

@@ -200,48 +200,26 @@ class ActionLog:
                 if not self.closed and self.unsigned and time.time() - self.last_sign >= EVERY_S:
                     self._sign()
 
-    def call(self, call_id, tool, args, client=None, secret=False):
-        """client: the hub's note on whose call it is (kind, pid, Claude Code pid, project, driver session).
-        secret: a call the hub makes for a sign-in or a session load (secret-adjacent): its arguments may come from
-        the VM after it got a value, so only their names and size are recorded, whatever MCOMP_ACTION_LOG_TEXT says."""
+    def call(self, call_id, tool, args, client=None):
+        """client: the hub's note on whose call it is (kind, pid, Claude Code pid, project, driver session)."""
         self.started[call_id] = time.time()
-        if secret:
-            rec = {"type": "call", "id": call_id, "tool": tool, "secret_adjacent": True,
-                   "args": {"redacted": "secret-adjacent", "keys": sorted(str(k) for k in args)[:20] if isinstance(args, dict) else [],
-                            "chars": len(canonical(args))}}
-        else:
-            rec = {"type": "call", "id": call_id, "tool": tool, "args": args if self.keep_text else redact(args)}
+        rec = {"type": "call", "id": call_id, "tool": tool, "args": args if self.keep_text else redact(args)}
         if client:
             rec["client"] = client
         self._add(rec)
 
-    def result(self, call_id, tool, msg, secret=False):
-        """secret: the answer to a secret-adjacent call: whether it failed, how many images and how much text, and
-        nothing of the VM's own (no message, no text, no hash of it), whatever MCOMP_ACTION_LOG_TEXT says."""
+    def result(self, call_id, tool, msg):
         t0 = self.started.pop(call_id, None)
         rec = {"type": "result", "id": call_id, "tool": tool,
                "ms": int((time.time() - t0) * 1000) if t0 else None}
-        if secret:
-            rec["secret_adjacent"] = True
-            if "error" in msg:
-                rec["rpc_error"] = "error (the driver's words aren't recorded for a secret-adjacent call)"
-            else:
-                full = summarize_result(msg.get("result"), False)
-                rec["result"] = {k: full[k] for k in ("error", "images", "text_chars") if k in full}
-        elif "error" in msg:
+        if "error" in msg:
             rec["rpc_error"] = str((msg.get("error") or {}).get("message", ""))[:300]
         else:
             rec["result"] = summarize_result(msg.get("result"), self.keep_text)
         self._add(rec)
 
-    def refused(self, tool, args, reason, client=None, secret=False):
-        """secret: refused while a sign-in or session load ran (secret-adjacent): the arguments' names and size only."""
-        if secret:
-            rec = {"type": "refused", "tool": tool, "secret_adjacent": True, "reason": reason[:300],
-                   "args": {"redacted": "secret-adjacent", "keys": sorted(str(k) for k in args)[:20] if isinstance(args, dict) else [],
-                            "chars": len(canonical(args))}}
-        else:
-            rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
+    def refused(self, tool, args, reason, client=None):
+        rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
         if client:
             rec["client"] = client
         self._add(rec)

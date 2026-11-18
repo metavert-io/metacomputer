@@ -10,13 +10,7 @@ responses are recorded (actionlog.py). Notes from the hub (lib/mcp_hub.py) are
 recorded and never passed on to the driver:
 - `notifications/metacomputer/client` names the client (a Claude Code session,
   `metacomputer call`, a script) of the tools/call that follows it, since one hub
-  connection carries every client's calls; with `"secret": true` the call is one the
-  hub makes for a sign-in or a session load, and only its tool, its argument names and
-  sizes, and whether it failed are recorded (actionlog.py, "secret-adjacent");
-- `notifications/metacomputer/secret-window` ({"open": true|false}): while a sign-in or session load
-  runs, every call on this connection, every answer and every refusal is recorded as secret-adjacent,
-  the calls already under way when it opened included (the VM is one place: a value it got could come
-  back in any message, not only in the job's own calls);
+  connection carries every client's calls;
 - `notifications/metacomputer/refused` is a call the hub refused.
 """
 import json
@@ -40,7 +34,6 @@ REFUSED = "notifications/metacomputer/refused"
 CLOSING = "notifications/metacomputer/closing"     # to the client: why the relay is closing the connection
 MAX_MSG = 64 << 20          # one message either way (the VM is untrusted: a line must end within this)
 CLIENT = "notifications/metacomputer/client"
-WINDOW = "notifications/metacomputer/secret-window"
 OURS = "notifications/metacomputer/"
 DROPPED = "the connection to the VM closed before this call finished"
 TOO_COMPLEX = "the VM's answer was over the hub's value or depth limit; the hub answered the call with an error"
@@ -86,15 +79,13 @@ def main(cmd):
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     pending = {}            # json(id) -> tool
     clients = {}            # json(id) -> the hub's note on whose call it is
-    secret_ids = set()      # json(id) of the hub's secret-adjacent calls (sign-ins, session loads)
-    window = [False]        # a sign-in or session load runs: every call and answer is secret-adjacent
     plock = threading.Lock()
     out = sys.stdout.buffer
 
     def finish(*_):
         with plock:
             for key, tool in list(pending.items()):
-                log.result(json.loads(key), tool, {"error": {"message": DROPPED}}, secret=key in secret_ids or window[0])
+                log.result(json.loads(key), tool, {"error": {"message": DROPPED}})
             pending.clear()
         log.close()
         if events is not None:
@@ -135,20 +126,16 @@ def main(cmd):
                     if isinstance(key, str) and HUB_ID_RE.fullmatch(key):
                         with plock:
                             tool = pending.pop(json.dumps(key), None)
-                            secret = json.dumps(key) in secret_ids or window[0]
-                            secret_ids.discard(json.dumps(key))
                         if tool:
-                            log.result(key, tool, {"error": {"message": TOO_COMPLEX}}, secret=secret)
+                            log.result(key, tool, {"error": {"message": TOO_COMPLEX}})
                 except ValueError:
                     msg = None
                 if isinstance(msg, dict) and "method" not in msg and "id" in msg:
                     key = json.dumps(msg["id"])
                     with plock:
                         tool = pending.pop(key, None)
-                        secret = key in secret_ids or window[0]
-                        secret_ids.discard(key)
                     if tool:
-                        log.result(msg["id"], tool, msg, secret=secret)
+                        log.result(msg["id"], tool, msg)
                 try:
                     out.write(line)
                     out.flush()
@@ -198,25 +185,15 @@ def main(cmd):
             msg = None
         if isinstance(msg, dict):
             method = msg.get("method")
-            if method == WINDOW:
-                p = msg.get("params") or {}
-                with plock:
-                    window[0] = p.get("open") is True
-                    if window[0]:
-                        secret_ids.update(pending)      # calls under way: their answers come during the window
-                continue
             if method == REFUSED:
                 p = msg.get("params") or {}
                 log.refused(str(p.get("tool", "")), p.get("args") or {}, str(p.get("reason", "")),
-                            client=p.get("client") if isinstance(p.get("client"), dict) else None, secret=window[0])
+                            client=p.get("client") if isinstance(p.get("client"), dict) else None)
                 continue
             if method == CLIENT:
                 p = msg.get("params") or {}
                 if "id" in p and isinstance(p.get("client"), dict) and len(clients) < 10000:
                     clients[json.dumps(p["id"])] = p["client"]
-                if "id" in p and p.get("secret") is True and len(secret_ids) < 10000:
-                    with plock:
-                        secret_ids.add(json.dumps(p["id"]))
                 continue
             if isinstance(method, str) and method.startswith(OURS):
                 continue            # anything else of ours never reaches the driver
@@ -224,11 +201,8 @@ def main(cmd):
                 p = msg.get("params") or {}
                 with plock:
                     pending[json.dumps(msg["id"])] = p.get("name", "")
-                    secret = json.dumps(msg["id"]) in secret_ids or window[0]
-                    if secret:
-                        secret_ids.add(json.dumps(msg["id"]))
                 log.call(msg["id"], p.get("name", ""), p.get("arguments") or {},
-                         client=clients.pop(json.dumps(msg["id"]), None), secret=secret)
+                         client=clients.pop(json.dumps(msg["id"]), None))
         try:
             proc.stdin.write(line)
             proc.stdin.flush()
