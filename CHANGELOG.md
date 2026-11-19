@@ -28,6 +28,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - `metacomputer learn approve` prints its summary once (`Lessons: 1 active in the MCP instructions, ...`), not "active in the MCP instructions" twice.
 - A desktop recording's key moments (the description file `record stop` writes, and `record moments`) no longer list calls that didn't run as if they did: a call the action log records as refused is marked `refused` (a guard on the Mac, or a shell run refused after its call was logged), and one that came back as an error, Cua Driver's own refusals in bounded mode included, is marked `error`.
 - The proxy's 600-second answer limit: the HTTP client's own limit for a whole answer (480 seconds) cut longer answers first. It now sits past the proxy's limit, so the documented one decides.
+- Health events no longer carry numbers or text the VM chose. `metacomputer _health` and the event watcher reduce guest-status to fixed categories: the desktop's parts as yes or no, Cua Driver's doctor check as ok, failed or unknown, free disk as ok, low or unknown. The `doctor` and `disk_low` messages are fixed sentences ("failing, or didn't report a result"; "less than 3 GB free"). A VM that held a value could otherwise spell it in a doctor "exit code" (one event could carry a whole password) and have it sent to every sink.
 
 ## [0.2.0] - 2026-11-18
 

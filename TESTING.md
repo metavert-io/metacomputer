@@ -254,7 +254,10 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the review's fixes, one or more checks each:
   - malformed addresses in `open-untrusted`;
   - query redaction whatever the query holds, also without a scheme;
-  - the driver's and the VM's text kept out of messages;
+  - the driver's and the VM's text kept out of messages, and the VM's numbers too: a guest-status that spells a
+    value in Cua Driver's doctor "exit code" (`int.from_bytes` of it), its disk size and its strings yields only
+    fixed categories, in the health events and in `metacomputer _health`'s own answer (its real code, run with that
+    guest-status);
   - the rate limit and its summary; slower repeats of blocked connections; quiet health flapping; repeated `notify` and `emit`;
   - sink changes refused without a terminal, asked at one, and announced to the existing sinks (the removed one included);
   - more secret-looking keys; signing keys and topics redacted; lone surrogates and invisible characters;

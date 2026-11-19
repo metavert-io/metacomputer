@@ -319,9 +319,21 @@ except ValueError:
 rec = {"expected": bool(name), "name": name or None, "mode": mode or None, "running": None}
 if name and ssh == "true":
     rec["running"] = rstat.startswith("recording") and (mode != "host" or pid_alive != "0")
-keep = ("ready", "driver_doctor_rc", "disk_free_gb", "xorg_running", "xfce_session_running", "atspi_bus")
-print(json.dumps({"vm": vm, "gateway": gw == "true", "ssh": ssh == "true",
-                  "guest": {k: gs.get(k) for k in keep} if gs else {}, "recording": rec}))
+# The VM chooses everything guest-status says, and may hold a value from the vault: a number or a string of its
+# could spell one (a doctor "exit code" of int.from_bytes(password)). So only fixed categories leave here: yes/no
+# for the desktop's parts, the doctor's result as ok/failed/unknown, free disk as ok/low/unknown. Never its values.
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+def number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+guest = {}
+if isinstance(gs, dict) and gs:
+    rc = gs.get("driver_doctor_rc")
+    disk = gs.get("disk_free_gb")
+    guest = {k: gs.get(k) is True for k in ("ready", "xorg_running", "xfce_session_running", "atspi_bus")}
+    guest["driver_doctor"] = None if rc is None else ("ok" if is_int(rc) and rc == 0 else "failed" if is_int(rc) else "unknown")
+    guest["disk"] = ("unknown" if not number(disk) or disk < 0 else "low" if disk < 3 else "ok")
+print(json.dumps({"vm": vm, "gateway": gw == "true", "ssh": ssh == "true", "guest": guest, "recording": rec}))
 EOF
 }
 
