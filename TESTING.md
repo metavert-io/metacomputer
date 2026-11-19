@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (246 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (261 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
@@ -195,15 +195,26 @@ runner's does.
   vault folder (here the one under the box's `$HOME`) is a link into `.run-vms/x` (refused before anything is
   deleted; `rmtree_own` refuses the same with the account's home standing in; with nothing of anyone else's
   there, x and its runtime folder go).
+- The seventh final check's findings (failing on b97d4af): with `config/local.env` naming its own vault and
+  spool and the account's vault folder (here the box's, under `$HOME`) a link into the runner's folder of the
+  VM, `vm delete` of the main VM, `reset`, `restore`, `checkpoint --delete` and `baseline` (each refused before
+  the runner deletes anything, the vault kept); `runner_delete` itself (refused; with nothing of anyone's in the
+  folder, the VM goes); `mc_shared_records` (a VM with its own vault and spool still carries the account's);
+  and the event spool: another VM's vault a link to the spool, holding `vault.json`, with `.quarantine` a file
+  (`vault.json` kept, a valid event there not consumed either, the refusal said); a file that can't be
+  quarantined (left, counted in `spool.json`, said once; never deleted) while valid events are consumed; with
+  a `.quarantine` folder, the invalid file is moved there.
 - No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
-  `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS` (the runner's
-  own deletes, each checked to run after the identity rule; deletes inside the VM; printed hints). So does
-  every delete that walks a tree: a Python function that walks a folder (`os.walk`, `fwalk`, `listdir`,
-  `scandir`, `glob`, `rglob`, `iterdir`) and deletes what it finds itself is in `DELETE_WALK_EXCEPTIONS`
-  with why and the code that keeps it safe (each fragment must stay in the function), records go through
-  `safedelete.remove_records`, and no script has `find -delete`, `find -exec rm`, `xargs rm`,
-  `rsync --delete`, `tar --remove-files` or `ditto`. A new one, or an exception no longer in the code,
-  fails the test.
+  `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS`: the runner's
+  delete is one line, in `runner_delete` (which must call `safedelete.py check-runner` first, and whose every
+  caller must run after the identity rule), deletes inside the VM, printed hints. A Python function that
+  lists a folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`), itself or through
+  any function of its module it calls, and deletes, moves or rewrites files itself (`unlink`, `rmdir`,
+  `rmtree`, `os.remove`, `os.rename`, `os.replace`, `shutil.move`, the programs' file writers) is in
+  `DELETE_WALK_EXCEPTIONS` with why and the code that keeps it safe (each fragment must stay in the
+  function); records go through `safedelete.remove_records`; and no script has `find -delete`,
+  `find -exec rm`, `xargs rm`, `rsync --delete`, `tar --remove-files`, `ditto` or `rm` of a glob outside
+  `TREE_SHELL_EXCEPTIONS`. A new one, or an exception no longer in the code, fails the test.
 - `MCOMP_TEST_PY=PATH python3 tests/test_multi_vm.py` runs everything the tests start under another Python
   (3.11 or later: `scripts/lib.sh` refuses older). The helper itself must also work under macOS's own
   `/usr/bin/python3` (3.9), which `scripts/safe-rmtree.sh` may run it with: `final6_fixes` checks that.

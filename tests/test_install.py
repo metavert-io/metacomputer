@@ -682,10 +682,13 @@ if a[:1] == ["ls"]:
 if a[:1] == ["delete"]:
     sys.exit(0)
 if a[:2] == ["config", "get"]:                     # where it keeps VMs (build-vm.sh's identity check needs it)
+    os.makedirs(os.path.dirname(st) + "/vms", exist_ok=True)
     print("Configured VM storage locations:\\n  - home: " + os.path.dirname(st) + "/vms (default)"); sys.exit(0)
 if a[:1] == ["create"]:
     sys.exit(1)                                     # the test stops each build here
-if a[:1] in (["stop"], ["get"]):
+if a[:1] == ["get"]:                                # where a VM is (runner_delete checks its folder before a delete)
+    print(json.dumps([{{"name": a[1], "status": "stopped", "locationName": "home"}}])); sys.exit(0)
+if a[:1] == ["stop"]:
     sys.exit(1)
 sys.exit(0)
 """, 0o755)

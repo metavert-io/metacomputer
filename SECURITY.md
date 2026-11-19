@@ -1257,7 +1257,9 @@ another VM:
   VM's SSH keys, runtime, logs, vault and spool folders may not be another VM's folder, be
   inside one, or hold one, and no VM's folder may be in, or hold, the runner's VM storage
   (`~/.lume` and every storage location the runner or Lume's settings list), since the
-  runner's delete of a VM takes its whole folder there. Folders are compared as the folders
+  runner's delete of a VM takes its whole folder there. The account's own vault folder and
+  spools count as every VM's that shares them, even when `config/local.env` names folders
+  of its own. Folders are compared as the folders
   they physically are: every link at every level is followed (so a folder whose parent is a
   link counts as where it really is), then device and inode, with the part that doesn't exist
   yet compared without case. When the runner's storage can't be known (no runner, `config
@@ -1278,15 +1280,24 @@ another VM:
   points to, and not when it's on the way to such a folder. A cleanup that walks a folder
   checks that folder the same way first, then follows no link while it walks. A program's
   own records (dead claims, stale space claims, broken journal entries, old quarantined
-  files) are deleted only by their own names, in a folder that isn't a link and passes the
-  same check. `vm delete`'s delete of a VM's own folders goes through it too, against the
-  same list of protected folders less that VM's own; there is no second list. It fails
-  closed: when a settings file can't be read, or a VM's folder can't be resolved, nothing is
-  deleted. The only recursive deletes not made through it are the runner's own delete of a
-  VM, baseline or checkpoint (after the rule above) and those inside the VM; a test fails
-  when any other appears, a loop that deletes what it walks and `find -delete`, `xargs rm`
-  or `rsync --delete` included (the few loops left, over a staging folder's own entries,
-  are listed in the test with the code that keeps them safe).
+  files, settled vault markers, a VM's storage locks) are deleted only by their own names,
+  in a folder that isn't a link and passes the same check. `vm delete`'s delete of a VM's
+  own folders goes through it too, against the same list of protected folders less that
+  VM's own; there is no second list. The runner's own delete of a VM, baseline or
+  checkpoint (`vm delete`, `build --replace`, `reset`, `restore`, `checkpoint`, `baseline`)
+  is made in one place, after the rule above, and the helper checks that VM's folder first
+  (from Lume's own settings), the same way and against the same list: it may not be a link,
+  nor be, hold or reach a protected folder, or the runner isn't asked. The event spool is
+  consumed only after the same check (a spool that is, holds or reaches another protected
+  folder isn't read at all), and a spool file that can't be moved to its `.quarantine` is
+  left where it is, counted and reported once, never deleted. It fails closed: when a
+  settings file can't be read, or a VM's folder can't be resolved, nothing is deleted.
+  Deletes inside the VM are the only ones it doesn't see; a test fails when any other
+  appears, a function that deletes, moves or rewrites files found by listing a folder
+  (itself or through its module's functions) and `find -delete`, `xargs rm`,
+  `rsync --delete` or `rm` of a glob included (the rest, each writing files it names
+  itself or its own staging entries, are listed in the test with the code that keeps them
+  safe).
 - **Where the rule is checked.** A `config/vms/` VM's settings are refused when they're read
   if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it.
   Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks

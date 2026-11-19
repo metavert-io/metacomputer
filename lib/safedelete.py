@@ -8,6 +8,9 @@ only when that folder, as the folder it physically is, neither is nor holds a fo
     safedelete.py prune --older-than SECONDS [--] FOLDER...
                                                   delete the regular files older than that anywhere in each FOLDER
     safedelete.py check [--] PATH...              only the check
+    safedelete.py check-runner [--] VMFOLDER...   the check before the runner deletes a VM (scripts/lib.sh
+                                                  runner_delete): a real folder, neither being, holding nor reaching a
+                                                  protected folder
     safedelete.py own --base DIR --rel A/NAME --target-vm NAME [--own PATH]... [--check]
                                                   vm delete's delete of that VM's own folder (prints present|absent)
     scripts/safe-rmtree.sh PATH...                the same as rmtree, for shell scripts
@@ -32,8 +35,9 @@ A program's own records (claims, journals) go through remove_records: only names
 isn't a link and is checked like any delete's target. vm delete's delete of a VM's own folders goes through
 rmtree_own: the same protected folders (protected(), the one list), less that VM's own.
 
-The runner's own delete of a VM (its storage folder) is the one recursive delete on the Mac not made here: it runs after
-the identity rule (scripts/lib.sh vm_change_lock, vm delete's plan, build-vm.sh's check)."""
+The runner's own delete of a VM, baseline or checkpoint (its whole folder) isn't made here, but it's checked here
+first, the same way and against the same list (check_runner, through scripts/lib.sh runner_delete, after the identity
+rule). An event spool is checked before it's consumed (check_spool)."""
 import io
 import os
 import pwd
@@ -108,8 +112,8 @@ def links_on_the_way(path, home, what, limit=64):
 
 
 def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=()):
-    """[(what, value, identity, chain, links)]: every folder no delete may be or hold, with the links on the way to it
-    (links_on_the_way). Fails closed (Refused). The one list: every delete here, vm delete's included, uses it.
+    """[(what, value, identity, chain, links, key)]: every folder no delete may be or hold, with the links on the way to
+    it (links_on_the_way) and what kind of folder it is (key: VAULT_DIR, EVENTS_SPOOL, SHARED_*, HOME, CHECKOUT). Fails closed (Refused). The one list: every delete here, vm delete's included, uses it.
     exclude_vm (vm delete): that VM's own folders are left out (they're what it deletes), so are the environment's
     vault folder and spool when they're its own folders (own); the account's own vault and spools, the home folder and
     the checkout never are."""
@@ -118,9 +122,9 @@ def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=()):
     out = []
     mine = {os.path.normpath(v) for v in own if isinstance(v, str) and v}
 
-    def add(what, v):
+    def add(what, v, key):
         try:
-            out.append((what, v, *vms.physical(v, home, what), links_on_the_way(v, home, what)))
+            out.append((what, v, *vms.physical(v, home, what), links_on_the_way(v, home, what), key))
         except vms.Refused as e:
             raise Refused(f"{e}; so nothing is deleted that might be it")
     for owner, ids in owners.items():
@@ -135,16 +139,19 @@ def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=()):
                           "one of them; fix it first")
         for k in vms.FOLDER_KEYS:
             for v in ids.get(k, []):
-                add(f"{owner}'s {vms.shown(k)}", v)
+                add(f"{owner}'s {vms.shown(k)}", v, k)
     env_home = os.environ.get("HOME") or home
-    for what, v in (("this account's home folder", home), ("the home folder", env_home), ("this checkout", lab),
-                    # The account's own vault folder and spools, whatever any settings file says (a config that names
-                    # its own still leaves these where the vault's defaults put them).
-                    ("the account's vault folder", os.path.join(home, ACCOUNT_VAULT)),
-                    ("the account's event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool")),
-                    ("the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT)),
-                    ("the event spool of $HOME", os.path.join(env_home, ACCOUNT_VAULT, "events", "spool"))):
-        add(what, v)
+    for what, v, key in (("this account's home folder", home, "HOME"), ("the home folder", env_home, "HOME"),
+                         ("this checkout", lab, "CHECKOUT"),
+                         # The account's own vault folder and spools, whatever any settings file says (a config that
+                         # names its own still leaves these where the vault's defaults put them).
+                         ("the account's vault folder", os.path.join(home, ACCOUNT_VAULT), "SHARED_VAULT_DIR"),
+                         ("the account's event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool"),
+                          "SHARED_EVENTS_SPOOL"),
+                         ("the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT), "SHARED_VAULT_DIR"),
+                         ("the event spool of $HOME", os.path.join(env_home, ACCOUNT_VAULT, "events", "spool"),
+                          "SHARED_EVENTS_SPOOL")):
+        add(what, v, key)
     return out
 
 
@@ -192,12 +199,12 @@ def check_target(t, prot, home):
         return
     if t.is_link:
         where = vms.physical(t.parent, home, f"the folder of {t.spelled}")[0]
-        for what, v, _pid, _pchain, links in prot:
+        for what, v, _pid, _pchain, links, _key in prot:
             if any(lid == where and name == t.name.casefold() for lid, name, _l in links):
                 raise Refused(f"{t.spelled} is a link on the way to {what} ({v}); it wasn't deleted")
         return
     ident, _chain = vms.physical(t.path, home, f"the folder to delete ({t.spelled})")
-    for what, v, pid, pchain, links in prot:
+    for what, v, pid, pchain, links, _key in prot:
         if pid == ident:
             raise Refused(f"{t.spelled} is {what} ({v}); it wasn't deleted")
         if ident in pchain:
@@ -210,6 +217,39 @@ def check_target(t, prot, home):
 def check(path, prot, home=None):
     """check_target for a path (resolved once, as rmtree resolves it)."""
     check_target(Target(path), prot, home or account_home())
+
+
+def check_runner(path, lab=LAB):
+    """The runner's delete of a VM, baseline or checkpoint takes that VM's whole folder (path: from Lume's own
+    settings, scripts/lib.sh vm_dir). Refused unless it's a real folder (not a link: the runner might follow it) that
+    neither is, holds nor reaches a protected folder: the same check and the same list as every other delete. A
+    folder that isn't there is fine (nothing of anyone's goes with it)."""
+    home = account_home()
+    t = Target(path)
+    if t.st is None:
+        return
+    if t.is_link:
+        raise Refused(f"{path}, the VM's folder, is a link (the runner might delete what it points to); nothing was "
+                      "deleted")
+    check_target(t, protected(home, lab), home)
+
+
+SPOOL_KEYS = ("EVENTS_SPOOL", "SHARED_EVENTS_SPOOL")
+
+
+def check_spool(path, lab=LAB):
+    """An event spool about to be consumed (its files read, recorded and deleted, or moved aside): refused unless it's
+    a real folder (not a link) that neither is, holds nor reaches a protected folder, an event spool exactly there
+    aside (it may well be one: it's the spool). So a spool that is also another VM's vault, or holds one, isn't
+    consumed."""
+    home = account_home()
+    t = Target(path)
+    if t.st is None:
+        return
+    if not t.is_dir:
+        raise Refused(f"{path} isn't a folder (a link isn't followed)")
+    ident = vms.physical(t.path, home, f"the spool ({path})")[0]
+    check_target(t, [e for e in protected(home, lab) if not (e[5] in SPOOL_KEYS and e[2] == ident)], home)
 
 
 def _open_parent(t):
@@ -475,7 +515,7 @@ def _own_main(args):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("rmtree", "check", "prune", "own"):
+    if not argv or argv[0] not in ("rmtree", "check", "prune", "own", "check-runner"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
@@ -500,6 +540,9 @@ def main(argv=None):
             cut = time.time() - older
             for p in args:
                 prune_files(p, lambda files: [rel for mtime, _size, rel in files if mtime < cut])
+        elif cmd == "check-runner":
+            for p in args:
+                check_runner(p)
         elif cmd == "check":
             home = account_home()
             prot = protected(home)

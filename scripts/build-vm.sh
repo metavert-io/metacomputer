@@ -88,7 +88,7 @@ for vm in "$VM_NAME" "$BASELINE_NAME"; do
     [ $REPLACE -eq 1 ] || die "$vm appeared while this build was getting ready (made by something else); nothing was deleted"
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
-    "$LUME" delete "$vm" --force
+    runner_delete "$vm" || die "$vm wasn't deleted (above); nothing was replaced"
   fi
 done
 # Storage the old VM had attached (docs/storage.md): stop its watcher, sync S3 volumes once more, let go of

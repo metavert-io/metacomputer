@@ -875,7 +875,7 @@ def update_holder(vm, lab, pid):
     n = 0
     with GlobalLock():
         for rec in all_locks():
-            if same_holder(rec, vm, lab):
+            if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"]):
                 f = rec.pop("_file")
                 rec.update(pid=int(pid), pstart=pstart, state="running")
                 atomic_json(os.path.join(locks_dir(), f), rec)
@@ -883,25 +883,35 @@ def update_holder(vm, lab, pid):
     return n
 
 
+LOCK_NAME = re.compile(r"[a-z0-9]+-[0-9a-f]{24}(-ro-[0-9a-f]{12})?\.json")     # record_name's: lock_key, a shared holder's
+
+
 def release_locks(vm, lab):
-    n = 0
+    """This VM's locks go: only lock files of ours (LOCK_NAME) that name this VM and checkout, through
+    lib/safedelete.py (the locks folder may not be a link, nor be, hold or reach a folder some VM uses), and the
+    disk sidecars they name, when those say this computer and VM."""
     host = hostname()
     with GlobalLock():
-        for rec in all_locks():
-            if same_holder(rec, vm, lab):
-                try:
-                    os.unlink(os.path.join(locks_dir(), rec["_file"]))
-                    n += 1
-                except FileNotFoundError:
-                    pass
-                if rec.get("kind") == "disk":
-                    side = read_json(rec["path"] + ".lock")
-                    if isinstance(side, dict) and side.get("host") == host and side.get("vm") == vm:
-                        try:
-                            os.unlink(rec["path"] + ".lock")
-                        except OSError:
-                            pass
+        mine = [rec for rec in all_locks() if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"])]
+        try:
+            n = safedelete.remove_records(locks_dir(), [rec["_file"] for rec in mine], LOCK_NAME)
+        except (safedelete.Refused, OSError) as e:
+            print(f"storage: this VM's locks were kept: {esc(str(e))}", file=sys.stderr)
+            return 0
+        for rec in mine:
+            if rec.get("kind") == "disk":
+                drop_sidecar(rec["path"] + ".lock", host, vm)
     return n
+
+
+def drop_sidecar(path, host, vm):
+    """A disk's sidecar lock (one named file beside the disk), when it says this computer and VM."""
+    side = read_json(path)
+    if isinstance(side, dict) and side.get("host") == host and side.get("vm") == vm:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 @contextmanager

@@ -90,7 +90,8 @@ def write(path, text, mode=None):
 
 
 def vm(name, status="stopped", gb=5):
-    return {"name": name, "status": status, "diskSize": {"allocated": int(gb * 1e9), "total": 53687091200}}
+    return {"name": name, "status": status, "locationName": "home",
+            "diskSize": {"allocated": int(gb * 1e9), "total": 53687091200}}
 
 
 class Box:
@@ -1495,7 +1496,8 @@ def final5_fixes(td):
                             os.path.join(real_home, "Library", "Application Support")], env=b.env(),
                            capture_output=True, text=True, timeout=120)
         check("with config/local.env's own vault and spool, a folder holding the account's vault is still refused "
-              "(only checked: nothing deleted)", r.returncode == 1 and "the account's vault folder" in r.stderr, r.stderr[-300:])
+              "(only checked: nothing deleted)", r.returncode == 1 and ("the account's vault folder" in r.stderr or
+              os.path.join(real_home, "Library", "Application Support", "metacomputer") + ")" in r.stderr), r.stderr[-300:])
     finally:
         b.close()
 
@@ -1676,8 +1678,10 @@ def final6_fixes(td):
         r = b.run("vm", "delete", "x", "--confirm", "x")
         check("vm delete x, with the account's vault folder a link into .run-vms/x: refused before anything is deleted, "
               "the vault kept", r.returncode == 1 and os.path.exists(os.path.join(acct, "vault.json"))
-              and b.deletes() == [] and "vault folder" in r.stderr, (r.returncode, r.stderr[-400:], b.deletes()))
+              and b.deletes() == [] and ("vault folder" in r.stderr or "holds the main VM" in r.stderr),
+              (r.returncode, r.stderr[-400:], b.deletes()))
         # The same list with the account's own home (pwd) standing in for this box's: rmtree_own refuses too.
+        os.remove(av)
         h2 = os.path.join(root, "acct-home")
         os.makedirs(os.path.join(h2, "Library", "Application Support"))
         os.symlink(acct, os.path.join(h2, "Library", "Application Support", "metacomputer"))
@@ -1688,7 +1692,6 @@ def final6_fixes(td):
                             h2, os.path.realpath(co)], env=b.env(), capture_output=True, text=True, timeout=120)
         check("(the account's own vault folder, wherever its home is, is in the same list: refused)",
               "refused:" in r.stdout and "the account's vault folder" in r.stdout, (r.stdout + r.stderr)[-300:])
-        os.remove(av)
         r = b.run("vm", "delete", "x", "--confirm", "x")
         check("(with nothing of anyone else's in it, vm delete x deletes x and its runtime folder)", r.returncode == 0
               and not os.path.exists(os.path.join(co, ".run-vms", "x")) and "x" in b.deletes(), (r.returncode, r.stderr[-400:]))
@@ -1696,23 +1699,124 @@ def final6_fixes(td):
         b.close()
 
 
+def final7_fixes(td):
+    """The seventh check's findings (on b97d4af), each failing before its fix: the runner's delete of a VM took the
+    account's vault with the VM's folder when config/local.env named its own vault and spool (the identity records
+    left the account's defaults out, and nothing else checked that folder), and the event spool's consumer deleted a
+    file it couldn't quarantine, another VM's vault.json among them when that vault was the spool."""
+    b = Box(td, "final7")
+    try:
+        co, root, store = b.co, b.root, b.storage
+        b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{root}/main-vault"\nEVENTS_SPOOL="{root}/main-spool"\n')
+        av = os.path.join(b.home, "Library", "Application Support", "metacomputer")
+        os.makedirs(os.path.dirname(av), exist_ok=True)
+
+        def vault_in(vmname):
+            """The account's vault folder (this box's: the one under $HOME) a link into the runner's folder of vmname."""
+            acct = os.path.join(store, vmname, "account")
+            os.makedirs(acct, exist_ok=True)
+            write(os.path.join(acct, "vault.json"), "{}")
+            if os.path.lexists(av):
+                os.remove(av)
+            os.symlink(acct, av)
+            return os.path.join(acct, "vault.json")
+
+        main = [vm("metacomputer"), vm("metacomputer-baseline"), vm("metacomputer-baseline-prev"), vm("metacomputer-ckpt-one")]
+        for args, where, what in ((["vm", "delete", "metacomputer", "--confirm", "metacomputer", "--force"], "metacomputer", "vm delete"),
+                                  (["reset", "--yes"], "metacomputer", "reset"),
+                                  (["restore", "one", "--yes"], "metacomputer", "restore"),
+                                  (["checkpoint", "--delete", "one", "--yes"], "metacomputer-ckpt-one", "checkpoint --delete"),
+                                  (["baseline", "--yes"], "metacomputer-baseline-prev", "baseline")):
+            b.set_vms(main[:2] if what == "vm delete" else main)
+            kept = vault_in(where)
+            r = b.run(*args)
+            check(f"{what}, the account's vault folder a link into the runner's folder of {where}: refused before the "
+                  "runner deletes anything, the vault kept", r.returncode != 0 and os.path.exists(kept) and b.deletes() == [],
+                  (r.returncode, r.stderr[-300:], b.deletes()))
+        # The runner's delete itself (scripts/lib.sh runner_delete), whoever calls it: the VM's folder is checked with
+        # lib/safedelete.py first.
+        kept = vault_in("metacomputer")
+        b.set_vms(main)
+        script = '. "$1/scripts/lib.sh"; runner_delete metacomputer'
+        r = subprocess.run(["/bin/bash", "-c", script, "_", co], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("runner_delete: a VM folder holding the account's vault isn't deleted (the runner isn't even asked)",
+              r.returncode != 0 and os.path.exists(kept) and b.deletes() == [] and "wasn't deleted" in r.stderr,
+              (r.returncode, r.stderr[-300:], b.deletes()))
+        os.remove(av)
+        os.makedirs(os.path.join(store, "metacomputer-ckpt-one"), exist_ok=True)
+        script = '. "$1/scripts/lib.sh"; runner_delete metacomputer-ckpt-one'
+        r = subprocess.run(["/bin/bash", "-c", script, "_", co], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("(with nothing of anyone's in it, runner_delete deletes the VM)", r.returncode == 0
+              and b.deletes() == ["metacomputer-ckpt-one"], (r.returncode, r.stderr[-300:], b.deletes()))
+        # The identity records always carry the account's own vault and spools, even for a VM that names its own.
+        script = 'MC_LIB_DEFS_ONLY=1 . "$1/scripts/lib.sh"; mc_shared_records owner /x/vault /x/spool | tr "\\0" "\\n"'
+        r = subprocess.run(["/bin/bash", "-c", script, "_", co], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("mc_shared_records: a VM with its own vault and spool still counts the account's (SHARED_*), and its own",
+              "SHARED_VAULT_DIR" in r.stdout and "SHARED_EVENTS_SPOOL" in r.stdout and "VAULT_DIR\n/x/vault" in r.stdout
+              and "EVENTS_SPOOL\n/x/spool" in r.stdout, r.stdout[-300:])
+    finally:
+        b.close()
+
+    # P1 2: the event spool's consumer. Another VM's vault (x's) is a link to the spool, which holds its vault.json,
+    # and the spool's .quarantine is a file: vault.json was taken for an invalid event and deleted.
+    b = Box(td, "final7-spool")
+    try:
+        co = b.co
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        b.settings("config/vms/x.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
+        spool = os.path.join(b.home, "Library", "Application Support", "metacomputer", "events", "spool")
+        os.makedirs(spool)
+        write(os.path.join(spool, "vault.json"), "{}")
+        write(os.path.join(spool, ".quarantine"), "not a folder")
+        os.makedirs(b.app, exist_ok=True)
+        os.symlink(spool, os.path.join(b.app, "x"))
+        lib = os.path.join(co, "lib")
+        drain = "import sys; sys.path.insert(0, sys.argv[1]); import events; print(events.drain_spool(events.config_safe()))"
+        r = subprocess.run([PY, "-B", "-c", drain, lib], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("the spool is also VM x's vault (a link), its .quarantine a file: vault.json kept",
+              os.path.exists(os.path.join(spool, "vault.json")), (r.stdout + r.stderr)[-300:])
+        write(os.path.join(spool, "ev1.json"), json.dumps({"family": "needs_you", "type": "spool_test", "message": "m"}))
+        r = subprocess.run([PY, "-B", "-c", drain, lib], env=b.env(), capture_output=True, text=True, timeout=120)
+        state = os.path.join(b.root, "events", "events-state")          # MCOMP_EVENTS_DIR in the box
+        errs = os.path.join(state, "errors.log")
+        check("...and a valid event there isn't consumed either: the spool is refused as a whole, and that's said",
+              os.path.exists(os.path.join(spool, "ev1.json")) and os.path.exists(os.path.join(spool, "vault.json"))
+              and os.path.exists(errs) and "isn't consumed" in open(errs).read(), (r.stdout + r.stderr)[-300:])
+        # A spool that's nobody else's folder, whose .quarantine is a file: an invalid file is left, counted and said.
+        os.remove(os.path.join(b.app, "x"))
+        os.makedirs(os.path.join(b.app, "x"))
+        for f in (os.path.join(spool, "vault.json"), os.path.join(state, "spool-refused.json")):   # (the refusal is
+            if os.path.exists(f):                                                                # remembered a minute)
+                os.remove(f)
+        write(os.path.join(spool, "bad.json"), "not json")
+        r = subprocess.run([PY, "-B", "-c", drain, lib], env=b.env(), capture_output=True, text=True, timeout=120)
+        info = os.path.join(state, "spool.json")
+        check("a file that can't be quarantined (.quarantine isn't a folder of ours) is left where it is, counted and "
+              "said, never deleted", os.path.exists(os.path.join(spool, "bad.json"))
+              and os.path.exists(info) and json.load(open(info)).get("left", 0) >= 1
+              and "were left in" in open(errs).read(), (r.stdout + r.stderr)[-300:])
+        check("...while the valid event is consumed (recorded, then deleted)", not os.path.exists(os.path.join(spool, "ev1.json")),
+              (r.stdout + r.stderr)[-300:])
+        os.remove(os.path.join(spool, ".quarantine"))
+        r = subprocess.run([PY, "-B", "-c", drain, lib], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("(with a .quarantine folder, an invalid file is moved there, not deleted)",
+              not os.path.exists(os.path.join(spool, "bad.json")) and os.path.exists(os.path.join(spool, ".quarantine", "bad.json")),
+              (r.stdout + r.stderr)[-300:])
+    finally:
+        b.close()
+
+
 # The recursive deletes that aren't made through lib/safedelete.py (scripts/safe-rmtree.sh), each with why:
-#   runner   the runner's delete of a VM, baseline or checkpoint, after the identity rule (vm_change_lock, vm delete's
-#            plan, build-vm.sh's check); no VM's folder may be in its storage
+#   runner   the runner's delete of a VM, baseline or checkpoint: one place, scripts/lib.sh runner_delete, which checks
+#            the VM's folder with lib/safedelete.py first (check-runner); called only after the identity rule
+#            (vm_change_lock, vm delete's plan, build-vm.sh's check)
 #   guest    runs inside the VM, not on the Mac
 #   text     not a delete: a hint printed for the user
 DELETE_EXCEPTIONS = [
-    ("bin/metacomputer", 'if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force', "runner"),
-    ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$2" --force', "runner"),
-    ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die', "runner"),
-    ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null 2>&1', "runner"),
-    ("bin/metacomputer", 'vm_exists "$keep" && "$LUME" delete "$keep" --force', "runner"),
-    ("bin/metacomputer", '"$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null && "$LUME" delete "$BASELINE_NAME" --force', "runner"),
+    ("scripts/lib.sh", '"$LUME" delete "$1" --force', "runner"),     # runner_delete: its folder checked first
     ("bin/metacomputer", "gssh ops 'rm -rf ~/metacomputer-runs/*'", "guest"),
     ("bin/metacomputer", 'gssh ops "rm -rf -- \'$dir\'"', "guest"),
-    ("scripts/build-vm.sh", '"$LUME" delete "$vm" --force', "runner"),
     ("scripts/build-vm.sh", "gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'", "guest"),
-    ("scripts/vm-commands.sh", '"$LUME" delete "$v" --force', "runner"),
     ("lib/guest_put.py", "shutil.rmtree(target)", "guest"),
     ("lib/guest_put.py", "shutil.rmtree(tmp, ignore_errors=True)", "guest"),
     ("lib/guest_put.py", 'remote(ssh, f"rm -rf -- {shlex.quote(tmp)}"', "guest"),
@@ -1726,28 +1830,86 @@ DELETE_EXCEPTIONS = [
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),
 ]
 DELETE_HELPER = ("lib/safedelete.py", "scripts/safe-rmtree.sh")
-# Python functions that walk a folder (os.walk, fwalk, listdir, scandir, glob, rglob, iterdir) and delete what they
-# find (os.remove, unlink, rmdir, removedirs) themselves, not through lib/safedelete.py: each with why it can't reach
-# another VM's folder, and the code that keeps it so (pinned: each fragment must stay in the function). A program's
-# own records (claims, journals, quarantined files) go through safedelete.remove_records instead.
+# Python functions that list a folder (os.walk, fwalk, listdir, scandir, glob, rglob, iterdir: themselves or through a
+# function of their module) and delete, move or rewrite files themselves rather than through lib/safedelete.py: each
+# with why it can't change a file of another VM's, and the code that keeps it so (pinned: each fragment must stay in
+# the function). A program's own records go through safedelete.remove_records; an event spool through check_spool.
+NAMED = "only files it names itself (not ones it found by listing)"
 DELETE_WALK_EXCEPTIONS = {
-    ("lib/vm_shell_guest.py", "sweep"): ("runs inside the VM, not on the Mac", []),
-    ("lib/guest_import.py", "sweep"): ("the staging folder this import made (mkdtemp), by descriptor, following no link",
-                                       ["dir_fd="]),
-    ("lib/guest_import.py", "merge"): ("replaces one entry at a time in the destination (a file or link where the VM "
-                                       "sent a folder), by descriptor; never a folder's contents", ["dir_fd="]),
+    # Consuming or rewriting what a listing found, behind a guard:
+    ("lib/events.py", "drain_spool"): ("the event spool, consumed only after lib/safedelete.py check_spool passed (it "
+                                       "may not be, hold or reach another protected folder); a file that can't be "
+                                       "quarantined stays", ["why = spool_guard(dfd)", "if quarantine(dfd, qfd, f):"]),
+    ("lib/events.py", "quarantine"): ("moves a spool file into the spool's own .quarantine (opened without following "
+                                      "a link); never deletes one it can't move",
+                                      ["os.rename(f, f, src_dir_fd=dfd, dst_dir_fd=qfd)", "return False"]),
+    ("lib/events.py", "flush_admin"): ("rewrites or deletes journal entries _admin_records found: its own names only, "
+                                       "in a folder that isn't a link; deletes through safedelete.remove_records",
+                                       ["remove_records(admin_dir(), [os.path.basename(p)], ADMIN_NAME)"]),
+    ("lib/events.py", "recover_journal"): ("the same journal entries, the same way",
+                                           ["remove_records(admin_dir(), [os.path.basename(p)], ADMIN_NAME)"]),
+    ("lib/storage.py", "update_holder"): ("rewrites this VM's own lock records: lock names only (LOCK_NAME) that name "
+                                          "this VM and checkout",
+                                          ['same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"])']),
+    ("lib/storage.py", "protect_fd"): ("a read-write folder shared with the VM, by descriptor: only links that lead "
+                                       "out of it and special files, never a file or a folder",
+                                       ["link_escapes(r, target, rootcanon)", "os.unlink(n, dir_fd=dfd)"]),
+    ("lib/storage.py", "stage_scan"): ("a staging folder this program made: only plain files with its own session "
+                                       "prefixes, by descriptor", ["n.startswith(cleanup) and stat.S_ISREG(st.st_mode)"]),
     ("lib/storage.py", "clear_state"): ("storage's own fixed names only (its state files, storage-snap-*, "
                                         "storage-watch.json), never a folder",
                                         ['f.startswith("storage-snap-") or f == "storage-watch.json"']),
     ("lib/storage.py", "clean_stage"): ("only names of this program's own sessions, by descriptor, in a staging folder "
                                         "it made (its identity checked); folders only when empty",
                                         ["n.startswith(prefixes)", "os.rmdir(n, dir_fd=fd)", "S_ISREG"]),
+    ("lib/guest_import.py", "sweep"): ("the staging folder this import made (mkdtemp), by descriptor, following no link",
+                                       ["dir_fd="]),
+    ("lib/guest_import.py", "merge"): ("replaces one entry at a time in the destination (a file or link where the VM "
+                                       "sent a folder), by descriptor; never a folder's contents", ["dir_fd="]),
+    ("lib/vm_shell_guest.py", "sweep"): ("runs inside the VM, not on the Mac", []),
+    ("lib/vm_shell_guest.py", "main"): ("runs inside the VM, not on the Mac", []),
+    # Files it names itself; the listing elsewhere in the function (or a function it calls) only reads:
+    ("lib/events.py", "_config_drift"): (NAMED, ["write_private(hp, cur)", 'write_private(gp, raw.decode("utf-8", "replace"))']),
+    ("lib/events.py", "change_sink"): (NAMED + ": the journal entry it's writing", ["write_private(path, json.dumps(rec))"]),
+    ("lib/events.py", "journal_announcement"): (NAMED + ": a new journal entry", ["write_private(path, json.dumps(rec))"]),
+    ("lib/events.py", "next_seq"): (NAMED + ": the sequence counter", ["write_private(p, str(n))"]),
+    ("lib/events.py", "watch"): (NAMED + ": its state and its pid file", ["write_private(sp, json.dumps(st))", "os.remove(pf)"]),
+    ("lib/harness.py", "_collect"): ("moves the recordings it just downloaded (its own temporary folder) to names it "
+                                     "makes", ["os.replace(vids[0], self.video_host)"]),
+    ("lib/recording.py", "cmd_sidecar"): (NAMED + ": the description file, written atomically", ["os.replace(tmp, out)"]),
+    ("lib/storage.py", "acquire"): (NAMED + ": a new lock and the disk's sidecar",
+                                    ['atomic_json(os.path.join(locks_dir(), name + ".json"), rec)']),
+    ("lib/storage.py", "cmd_checkpoint"): (NAMED + ": a checkpoint's manifest", ["os.unlink(man_path)"]),
+    ("lib/storage.py", "cmd_prepare"): (NAMED + ": the VM's plan, state and snapshots",
+                                        ['atomic_json(f["plan"], guest_plan(items))']),
+    ("lib/storage.py", "cmd_refdisk_create"): (NAMED + ": its own temporary file, by descriptor",
+                                               ["os.unlink(tmp_name, dir_fd=dfd)"]),
+    ("lib/storage.py", "cmd_watch"): (NAMED + ": the watcher's pid file", ["os.unlink(watcher_pid_path())"]),
+    ("lib/storage.py", "create_s3"): (NAMED + ": the empty folder it just made, by descriptor", ["os.rmdir(leaf, dir_fd=dfd)"]),
+    ("lib/storage.py", "remove_stage"): (NAMED + ": its staging folder once empty, by descriptor",
+                                         ["os.rmdir(leaf, dir_fd=dfd)"]),
+    ("lib/storage.py", "s3_sync"): (NAMED + ": a volume's sync state", ['atomic_json(os.path.join(d, "last-sync.json"), out)']),
+    ("lib/storage.py", "space_claims"): (NAMED + ": the claim files it made in this call", ["files.append(f)", "os.unlink(f)"]),
+    ("lib/storage.py", "watch_loop"): (NAMED + ": the watcher's stats", ["atomic_json(watch_stats_path(), stats, mode=0o644)"]),
+    ("scripts/vendor-driver-skill.py", "main"): ("a developer tool: puts its own staging folder in place of the "
+                                                 "vendored pack in this checkout, after deleting that through the "
+                                                 "helper", ["safedelete.rmtree(DEST)", "os.replace(stage, DEST)"]),
 }
-WALK_CALLS = {"walk", "fwalk", "listdir", "scandir", "glob", "rglob", "iterdir"}
-DELETE_CALLS = {"remove", "unlink", "rmdir", "removedirs", "rmtree"}
+WALK_CALLS = {"walk", "fwalk", "listdir", "scandir", "glob", "iglob", "rglob", "iterdir"}
+# Deletes and overwrites: unlink/rmdir/removedirs/rmtree whatever they're called on; os.remove, os.rename, os.replace,
+# shutil.move (not list.remove or str.replace); and the programs' own file writers (an overwrite of a file found by
+# listing is as much a change of it as a delete).
+DELETE_CALLS = {"unlink", "rmdir", "removedirs", "rmtree", "remove", "rename", "replace", "move",
+                "write_private", "atomic_json", "write_json", "atomic_write"}
+OS_ONLY_CALLS = {"remove", "rename", "replace", "move"}
 # Shell forms that delete a tree: find -delete / -exec rm, xargs rm, rsync --delete, tar --remove-files, ditto.
 TREE_SHELL_PAT = (r'\bfind\b.*(-delete\b|-exec\s+rm\b)|\bxargs\b.*\brm\b|\brsync\b.*--delete|--remove-files|'
-                  r'^\s*[^#]*\bditto\b')
+                  r'^\s*[^#]*\bditto\b|\brm\b[^#|;&]*\*')
+TREE_SHELL_EXCEPTIONS = [
+    ("scripts/lib.sh", '"$SOCK_DIR"/lume-*.sock', "the runner's own sockets (lume-*.sock) in this checkout's socket folder"),
+    ("bin/metacomputer", "gssh ops 'rm -rf ~/metacomputer-runs/*'", "inside the VM"),
+    ("scripts/build-vm.sh", "gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'", "inside the VM"),
+]
 DELETE_PAT = (r'\brm +-[a-zA-Z]*r[a-zA-Z]*\b|shutil\.rmtree\(|(?<![\w.])rmtree\(|removedirs\(|'
               r'"\$LUME" delete|\$LUME delete|\blume delete')
 
@@ -1760,6 +1922,25 @@ def shell_function(text, line_no):
         if m:
             name = m.group(1)
     return name
+
+
+def change_calls(node):
+    """The names of the calls under node that list (WALK_CALLS) or change files (DELETE_CALLS): os.remove/rename/
+    replace and shutil.move only as such; calls made through lib/safedelete.py don't count."""
+    out = set()
+    import ast
+    for c in ast.walk(node):
+        if not isinstance(c, ast.Call):
+            continue
+        f = c.func
+        base = f.value.id if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else ""
+        if base == "safedelete":
+            continue
+        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+        if name in OS_ONLY_CALLS and base not in ("os", "shutil"):
+            continue
+        out.add(name)
+    return out
 
 
 def delete_inventory(td):
@@ -1794,7 +1975,7 @@ def delete_inventory(td):
     check("...and every listed exception is still in the code", not stale, stale)
     # Deletes that walk a tree: Python functions with a walk and a delete of their own, and shell tree-delete forms.
     import ast
-    walkers, seen, shell, unpinned = [], set(), [], []
+    walkers, seen, shell, unpinned, shell_used = [], set(), [], [], set()
     tpat = re.compile(TREE_SHELL_PAT)
     for rel in files:
         if rel in DELETE_HELPER:
@@ -1808,56 +1989,66 @@ def delete_inventory(td):
                 tree = ast.parse(text)
             except SyntaxError:
                 tree = None
+            fns, edges, nodes = {}, {}, {}
             for node in ast.walk(tree) if tree else ():
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fns.setdefault(node.name, set()).update(change_calls(node))
+                    edges.setdefault(node.name, set()).update(
+                        c.func.id for c in ast.walk(node) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name))
+                    nodes.setdefault(node.name, node)
+            lists = {k for k, v in fns.items() if v & WALK_CALLS}
+            grew = True
+            while grew:                              # through the module's own functions, however deep
+                grew = False
+                for k, v in edges.items():
+                    if k not in lists and v & lists:
+                        lists.add(k)
+                        grew = True
+            for k in sorted(fns):
+                if not (fns[k] & DELETE_CALLS and k in lists):
                     continue
-                names = set()
-                for c in ast.walk(node):
-                    if isinstance(c, ast.Call):
-                        f = c.func
-                        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "safedelete":
-                            continue                  # through the helper
-                        names.add(f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""))
-                if names & WALK_CALLS and names & DELETE_CALLS:
-                    if (rel, node.name) in DELETE_WALK_EXCEPTIONS:
-                        seen.add((rel, node.name))
-                        body = ast.get_source_segment(text, node) or ""
-                        unpinned += [f"{rel} {node.name}(): {frag}" for frag in DELETE_WALK_EXCEPTIONS[(rel, node.name)][1]
-                                     if frag not in body]
-                    else:
-                        walkers.append(f"{rel}:{node.lineno} {node.name}()")
+                if (rel, k) in DELETE_WALK_EXCEPTIONS:
+                    seen.add((rel, k))
+                    body = ast.get_source_segment(text, nodes[k]) or ""
+                    unpinned += [f"{rel} {k}(): {frag}" for frag in DELETE_WALK_EXCEPTIONS[(rel, k)][1] if frag not in body]
+                else:
+                    walkers.append(f"{rel}:{nodes[k].lineno} {k}()")
             # Code outside any function, too (a script's top level).
             top = set()
             for st in (tree.body if tree else ()):
-                if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    continue
-                for c in ast.walk(st):
-                    if isinstance(c, ast.Call) and not (isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name)
-                                                        and c.func.value.id == "safedelete"):
-                        top.add(c.func.attr if isinstance(c.func, ast.Attribute) else getattr(c.func, "id", ""))
+                if not isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    top |= change_calls(st)
             if top & WALK_CALLS and top & DELETE_CALLS:
                 walkers.append(f"{rel}: its top level")
         else:
             for i, ln in enumerate(text.splitlines(), 1):
                 if tpat.search(ln) and not ln.lstrip().startswith("#"):
-                    shell.append(f"{rel}:{i}: {ln.strip()[:120]}")
-    check("no Python function walks a folder and deletes what it finds outside lib/safedelete.py, but the listed ones",
-          not walkers, "\n".join(walkers))
+                    hit = [e for e in TREE_SHELL_EXCEPTIONS if e[0] == rel and e[1] in ln]
+                    shell_used.update(hit)
+                    if not hit:
+                        shell.append(f"{rel}:{i}: {ln.strip()[:120]}")
+    check("no Python function lists a folder (itself or through its module's functions) and deletes, moves or rewrites "
+          "files outside lib/safedelete.py, but the listed ones", not walkers, "\n".join(walkers))
     check("...and every listed one is still in the code", seen == set(DELETE_WALK_EXCEPTIONS),
           sorted(set(DELETE_WALK_EXCEPTIONS) - seen))
     check("...and each still keeps the guard it's listed for", not unpinned, "\n".join(unpinned))
     recs = {("lib/owners.py", "drop_dead_claims"): "safedelete.remove_records(OWNERS_DIR, names, CLAIM_NAME)",
             ("lib/storage.py", "claims_on"): "safedelete.remove_records(d, stale, SPACE_NAME)",
-            ("lib/events.py", "remove_records"): "safedelete.remove_records(folder, names, pattern)"}
+            ("lib/events.py", "remove_records"): "safedelete.remove_records(folder, names, pattern)",
+            ("lib/events.py", "_admin_records"): "if not stat.S_ISDIR(os.lstat(admin_dir()).st_mode):",
+            ("lib/handoff.py", "drop_marks"): "safedelete.remove_records(owners.OWNERS_DIR, marks, VAULT_MARK_NAME)",
+            ("lib/storage.py", "release_locks"): 'safedelete.remove_records(locks_dir(), [rec["_file"] for rec in mine], LOCK_NAME)'}
     missing = [f"{r} {fn}" for (r, fn), frag in recs.items()
                if not any(isinstance(n, ast.FunctionDef) and n.name == fn and frag in (ast.get_source_segment(src, n) or "")
                           for src in [open(os.path.join(LAB, r)).read()] for n in ast.walk(ast.parse(src)))]
-    check("records (dead claims, stale space claims, broken journal entries, old quarantined files) go through "
-          "safedelete.remove_records", not missing and "remove_records(admin_dir(), broken, ADMIN_NAME)"
+    check("records (dead claims, stale space claims, broken journal entries, old quarantined files, settled vault "
+          "markers, this VM's storage locks) go through safedelete.remove_records", not missing and "remove_records(admin_dir(), broken, ADMIN_NAME)"
           in open(os.path.join(LAB, "lib", "events.py")).read() and "QUARANTINED)" in open(os.path.join(LAB, "lib", "events.py")).read(),
           missing)
-    check("no shell tree delete (find -delete, -exec rm, xargs rm, rsync --delete, tar --remove-files, ditto)",
-          not shell, "\n".join(shell))
+    check("no shell tree delete (find -delete, -exec rm, xargs rm, rsync --delete, tar --remove-files, ditto, rm of a "
+          "glob), but the listed ones", not shell, "\n".join(shell))
+    check("...and every listed one is still in the code", set(TREE_SHELL_EXCEPTIONS) == shell_used,
+          sorted(set(TREE_SHELL_EXCEPTIONS) - shell_used))
     hp = os.path.join(LAB, "lib", "safedelete.py")
     helper = open(hp).read() if os.path.exists(hp) else ""
     sr = os.path.join(LAB, "scripts", "safe-rmtree.sh")
@@ -1867,26 +2058,38 @@ def delete_inventory(td):
           and "def rmtree_own(" in helper and "exclude_vm=target_vm" in helper and "mc_all_identity_records" in helper
           and 'if ids.get("UNREADABLE"):' in helper and 'MC_LIB_DEFS_ONLY=1' in helper
           and "safedelete.py\" rmtree" in open(sr).read())
+    lib_sh = open(os.path.join(LAB, "scripts", "lib.sh")).read()
+    rd = re.search(r"^runner_delete\(\) \{.*?^\}$", lib_sh, re.S | re.M)
+    rd = rd.group(0) if rd else ""
+    check("the runner's delete is one function, which checks the VM's folder with lib/safedelete.py first",
+          'd="$(vm_dir "$1")" || {' in rd and 'safedelete.py" check-runner -- "$d" || return 1' in rd
+          and rd.index("check-runner") < rd.index('"$LUME" delete "$1" --force') and len(runner_lines) == 1, rd)
     checked = []
-    for rel, i, text in runner_lines:
-        fn = shell_function(text, i) if rel != "scripts/build-vm.sh" else None
-        if rel == "bin/metacomputer":
-            ok = fn in ("do_checkpoint", "do_baseline", "restore_from")
-            if fn == "restore_from":
-                callers = [shell_function(text, j) for j, ln in enumerate(text.splitlines(), 1)
-                           if re.search(r"\brestore_from \"", ln)]
-                bodies = [re.search(r"^%s\(\) \{.*?^\}$" % c, text, re.S | re.M).group(0) for c in callers]
-                ok = ok and set(callers) <= {"do_reset", "do_restore"} and all("vm_change_lock" in body for body in bodies)
-            elif ok:
-                ok = "vm_change_lock" in re.search(r"^%s\(\) \{.*?^\}$" % fn, text, re.S | re.M).group(0)
-        elif rel == "scripts/vm-commands.sh":
-            plan = re.search(r"^vm_delete_plan\(\) \{.*?^\}$", text, re.S | re.M).group(0)
-            ok = fn == "vm_delete" and "mc_identity_check --no-ports" in plan and "vm_other_identities" in plan
-        else:
-            lines = text.splitlines()
-            last_check = max(j for j, ln in enumerate(lines, 1) if ln.startswith("build_identity_check"))
-            ok = last_check < i
-        checked.append((rel, i, fn, ok))
+    for rel in ("bin/metacomputer", "scripts/build-vm.sh", "scripts/vm-commands.sh", "install.sh"):
+        text = open(os.path.join(LAB, rel)).read()
+        for i, ln in enumerate(text.splitlines(), 1):
+            if not re.search(r'\brunner_delete "', ln) or ln.lstrip().startswith("#"):
+                continue
+            fn = shell_function(text, i) if rel != "scripts/build-vm.sh" else None
+            if rel == "bin/metacomputer":
+                ok = fn in ("do_checkpoint", "do_baseline", "restore_from")
+                if fn == "restore_from":
+                    callers = [shell_function(text, j) for j, l2 in enumerate(text.splitlines(), 1)
+                               if re.search(r"\brestore_from \"", l2)]
+                    bodies = [re.search(r"^%s\(\) \{.*?^\}$" % c, text, re.S | re.M).group(0) for c in callers]
+                    ok = ok and set(callers) <= {"do_reset", "do_restore"} and all("vm_change_lock" in body for body in bodies)
+                elif ok:
+                    ok = "vm_change_lock" in re.search(r"^%s\(\) \{.*?^\}$" % fn, text, re.S | re.M).group(0)
+            elif rel == "scripts/vm-commands.sh":
+                plan = re.search(r"^vm_delete_plan\(\) \{.*?^\}$", text, re.S | re.M).group(0)
+                ok = fn == "vm_delete" and "mc_identity_check --no-ports" in plan and "vm_other_identities" in plan
+            elif rel == "scripts/build-vm.sh":
+                lines = text.splitlines()
+                last_check = max(j for j, l2 in enumerate(lines, 1) if l2.startswith("build_identity_check"))
+                ok = last_check < i
+            else:
+                ok = False
+            checked.append((rel, i, fn, ok))
     check("every runner delete runs after the identity rule (vm_change_lock, vm delete's plan, build-vm.sh's check)",
           checked and all(c[3] for c in checked), [c for c in checked if not c[3]])
 
@@ -2016,6 +2219,7 @@ def main():
         final4_fixes(td)
         final5_fixes(td)
         final6_fixes(td)
+        final7_fixes(td)
         delete_inventory(td)
         claude_flow(td)
         hub_pin(td)

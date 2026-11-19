@@ -930,38 +930,89 @@ def _prune_quarantine(qfd):
         remove_records(os.path.join(spool_dir(), ".quarantine"), old[:len(old) - QUARANTINE_KEEP], QUARANTINED)
 
 
-def quarantine(dfd, f):
-    """Move a spool file that isn't a valid event aside (spool/.quarantine/, newest QUARANTINE_KEEP kept),
-    relative to the pinned spool descriptor; if .quarantine isn't a folder of ours, just remove the file."""
-    qfd = _open_dir(".quarantine", dir_fd=dfd, create=True)
+def quarantine(dfd, qfd, f):
+    """Move a spool file that isn't a valid event aside, into spool/.quarantine/ (qfd: opened without following a
+    link, a folder of ours; the newest QUARANTINE_KEEP are kept). True when it was moved; False when it couldn't be,
+    and then it stays where it is: a file that can't be quarantined is never deleted."""
+    if qfd is None:
+        return False
     try:
-        if qfd is None:
-            os.unlink(f, dir_fd=dfd)
-            return
         os.rename(f, f, src_dir_fd=dfd, dst_dir_fd=qfd)
-        _prune_quarantine(qfd)
     except OSError:
+        return False
+    _prune_quarantine(qfd)
+    return True
+
+
+_SPOOL_LEFT = {}            # name -> (device, inode): files this process left in the spool (said once, then skipped)
+SPOOL_REFUSED_S = 60        # a spool refused by the guard isn't checked again for this long
+
+
+def _spool_refused_path():
+    return os.path.join(state_dir(), "spool-refused.json")
+
+
+def spool_guard(dfd):
+    """None when the spool may be consumed, else why not: it's checked with lib/safedelete.py (check_spool) before a
+    sweep that would delete or move anything (it may not be, hold or reach a folder some VM uses, an event spool there
+    aside). A refusal is remembered for SPOOL_REFUSED_S, so emitters don't pay for the check again and again."""
+    try:
+        st = os.fstat(dfd)
+        ident = [st.st_dev, st.st_ino]
+        r = read_json(_spool_refused_path(), {})
+        if isinstance(r, dict) and r.get("ident") == ident and float(r.get("until", 0)) > time.time():
+            return str(r.get("why") or "refused")
+    except (OSError, TypeError, ValueError):
+        ident = None
+    try:
+        import safedelete
+        safedelete.check_spool(spool_dir())
+        return None
+    except Exception as e:                      # Refused, or no helper: not consumed (never fails its caller)
+        why = str(e) or type(e).__name__
         try:
-            os.unlink(f, dir_fd=dfd)
-        except OSError:
+            write_private(_spool_refused_path(), json.dumps({"ident": ident, "why": why[:300],
+                                                             "until": time.time() + SPOOL_REFUSED_S}))
+        except Exception:
             pass
-    finally:
-        if qfd is not None:
-            os.close(qfd)
+        return why
 
 
 def drain_spool(cfg):
     """Turn spool files into events (oldest name first, at most 500 a pass) and delete them. Hold the global
-    lock. Everything happens relative to a pinned descriptor of the spool folder; a file that isn't a valid
-    event, or can't be recorded, is quarantined and counted; it never stops (or blocks) the others."""
+    lock. Everything happens relative to a pinned descriptor of the spool folder. Before anything is deleted or moved,
+    the spool is checked (spool_guard): one that is, holds or reaches a folder some VM uses isn't consumed at all. A
+    file that isn't a valid event, or can't be recorded, is moved to .quarantine and counted; one that can't be moved
+    there (no .quarantine folder of ours) is left where it is, counted and said once, never deleted. It never stops
+    (or blocks) the others."""
     dfd = _open_dir(spool_dir())
     if dfd is None:
         if os.path.lexists(spool_dir()):
             note_error(f"spool {spool_dir()} is a link, not a folder, or not yours; not reading it")
         return 0, 0
     done = rejected = 0
+    left = []
+    qfd = None
     try:
-        for f in _spool_entries(dfd)[:500]:
+        names = []
+        for f in _spool_entries(dfd):
+            try:
+                st = os.stat(f, dir_fd=dfd, follow_symlinks=False)
+                key = (st.st_dev, st.st_ino)
+            except OSError:
+                continue
+            if _SPOOL_LEFT.get(f) == key:
+                continue                        # left here before (said once): not read again
+            names.append(f)
+        names = names[:500]
+        if not names:
+            return 0, 0
+        why = spool_guard(dfd)
+        if why:
+            note_once(f"spool-guard:{why}", f"spool {spool_dir()} isn't consumed: {why}")
+            return 0, 0
+        qfd = _open_dir(".quarantine", dir_fd=dfd, create=True)
+        for f in names:
             raw = _read_spool_file(dfd, f)
             ev = None
             if raw is not None:
@@ -978,19 +1029,46 @@ def drain_spool(cfg):
                     continue
                 except Exception as e:
                     note_error(f"spool {f}: {e!r}")
-            quarantine(dfd, f)
-            rejected += 1
+            if quarantine(dfd, qfd, f):
+                rejected += 1
+            else:
+                left.append(f)
+                try:
+                    st = os.stat(f, dir_fd=dfd, follow_symlinks=False)
+                    _SPOOL_LEFT[f] = (st.st_dev, st.st_ino)
+                except OSError:
+                    pass
     finally:
+        if qfd is not None:
+            os.close(qfd)
         os.close(dfd)
-    if rejected:
+    if rejected or left:
         s = os.path.join(state_dir(), "spool.json")
         info = read_json(s, {})
         info = info if isinstance(info, dict) else {}
-        info["rejected"] = int(info.get("rejected", 0)) + rejected
-        info["last_rejected_at"] = now_iso()
+        if rejected:
+            info["rejected"] = int(info.get("rejected", 0)) + rejected
+            info["last_rejected_at"] = now_iso()
+        if left:
+            info["left"] = int(info.get("left", 0)) + len(left)
+            info["last_left_at"] = now_iso()
         write_private(s, json.dumps(info))
+    if rejected:
         note_error(f"spool: {rejected} file(s) were not valid events; moved to {os.path.join(spool_dir(), '.quarantine')}")
+    if left:
+        note_error(f"spool: {len(left)} file(s) that aren't valid events were left in {spool_dir()} (its .quarantine "
+                   "isn't a folder of yours, so they couldn't be moved aside; nothing was deleted)")
     return done, rejected
+
+
+_NOTED = set()
+
+
+def note_once(key, msg):
+    """note_error, once per process for the same key."""
+    if key not in _NOTED:
+        _NOTED.add(key)
+        note_error(msg)
 
 
 # --- formats ---------------------------------------------------------------------------------
@@ -1470,10 +1548,13 @@ def remove_records(folder, names, pattern):
 
 
 def _admin_records():
-    """(path, record) for each journaled announcement, oldest first. A broken one is removed only when it has
-    journal_announcement's kind of name (ADMIN_NAME); any other is left alone."""
+    """(path, record) for each journaled announcement, oldest first: only journal_announcement's names (ADMIN_NAME),
+    and none when the journal folder is a link or isn't a folder (it's read, rewritten and deleted from). A broken
+    one is removed, through lib/safedelete.py."""
     try:
-        files = sorted(f for f in os.listdir(admin_dir()) if f.endswith(".json"))
+        if not stat.S_ISDIR(os.lstat(admin_dir()).st_mode):
+            return []
+        files = sorted(f for f in os.listdir(admin_dir()) if ADMIN_NAME.fullmatch(f))
     except OSError:
         return []
     out, broken = [], []
@@ -1481,8 +1562,7 @@ def _admin_records():
         p = os.path.join(admin_dir(), f)
         rec = read_json(p, None)
         if not isinstance(rec, dict) or not isinstance(rec.get("targets"), dict) or not isinstance(rec.get("event"), dict):
-            if ADMIN_NAME.fullmatch(f):
-                broken.append(f)
+            broken.append(f)
             continue
         out.append((p, rec))
     if broken:
@@ -1536,7 +1616,7 @@ def recover_journal():
                 write_private(p, json.dumps(fresh))
                 admin_log(f"{ev.get('type')} {ev.get('seq')}: its change was written; announcing it")
             else:
-                os.remove(p)
+                remove_records(admin_dir(), [os.path.basename(p)], ADMIN_NAME)
                 admin_log(f"{ev.get('type')} {ev.get('seq')}: its change was never written; dropped")
 
 
@@ -1622,7 +1702,7 @@ def flush_admin(budget=EMIT_BUDGET, force=False):
         for p in changed:
             rec = recs[p]
             if all(t.get("state") != "pending" for t in rec["targets"].values()):
-                os.remove(p)
+                remove_records(admin_dir(), [os.path.basename(p)], ADMIN_NAME)
             else:
                 write_private(p, json.dumps(rec))
     finally:
@@ -2269,6 +2349,15 @@ def watch(once=False, health=False):
         signal.signal(signal.SIGTERM, on_signal)
         signal.signal(signal.SIGINT, on_signal)
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} watcher started for {vm} (pid {os.getpid()})", flush=True)
+        sfd = _open_dir(spool_dir())             # the spool it consumes, checked as it starts (and before each sweep)
+        if sfd is not None:
+            try:
+                why = spool_guard(sfd)
+            finally:
+                os.close(sfd)
+            if why:
+                note_once(f"spool-guard:{why}", f"spool {spool_dir()} isn't consumed: {why}")
+                print(f"the spool {spool_dir()} won't be consumed: {why}", flush=True)
     sp = watch_state_path(vm)
     st = read_json(sp, {})
     st = st if isinstance(st, dict) else {}

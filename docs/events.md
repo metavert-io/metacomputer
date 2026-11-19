@@ -515,7 +515,12 @@ into the spool folder, `~/Library/Application Support/metacomputer/events/spool/
 takes those files, checks and cleans them, numbers them and delivers them like
 any other event, then deletes them. Files that aren't valid events (bad JSON,
 too deep, too big, a reserved type) go to `spool/.quarantine/` (the newest 50
-are kept), and never hold up the rest. The spool is read through a pinned folder
+are kept), and never hold up the rest; one that can't be moved there (no
+`.quarantine` folder of yours) stays in the spool, counted (`spool.json`'s
+`left`) and reported once, and is never deleted. Before any file is taken, the
+spool folder is checked like every delete (`lib/safedelete.py`): a spool that is,
+holds or reaches another protected folder, such as another VM's vault, isn't
+consumed at all (said once; checked again after a minute). The spool is read through a pinned folder
 descriptor, files are opened without following links or waiting (so a pipe or
 link swapped in can't block or redirect it), checked on the open file and read
 only up to the size limit. The contract is in

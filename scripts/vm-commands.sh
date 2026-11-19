@@ -291,7 +291,7 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   for v in "$VM_NAME" "$BASELINE_NAME" "$BASELINE_NAME-prev"; do
     a="$(vm_lookup "$v")" || die "couldn't list the VMs with $LUME before deleting $v; deleted so far: ${gone[*]:-nothing}"
     [ "$a" = present ] || continue
-    "$LUME" delete "$v" --force >/dev/null || die "couldn't delete $v; deleted so far: ${gone[*]:-nothing}"
+    runner_delete "$v" >/dev/null || die "couldn't delete $v (above); deleted so far: ${gone[*]:-nothing}"
     gone+=("$v")
   done
   if [ -n "$settings_file" ]; then

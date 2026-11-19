@@ -963,7 +963,11 @@ such as the secrets vault ("approval waiting", "vault locked"):
   (any parse failure, too deep included), oversized or reserved file, or one
   that can't be recorded, is moved to `spool/.quarantine/` (the newest 50 kept)
   and counted (`events status --json`, `spool_rejected`) without stopping the
-  others.
+  others. One that can't be moved there (`.quarantine` isn't a folder of yours)
+  is left in the spool, counted (`left`) and reported once: nothing is deleted
+  that couldn't be quarantined. Before a pass takes any file, and when the
+  watcher starts, the spool is checked with `lib/safedelete.py` (`check_spool`):
+  one that is, holds or reaches another protected folder isn't consumed.
 - **Guarantees:** at least once to each sink, in order with everything else.
   Files wait in the spool while nothing runs (no command, no watcher). With no
   sink configured, taken events reach only the local log.

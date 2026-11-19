@@ -93,16 +93,17 @@ mc_vm_default() { # KEY NAME
     EVENTS_SPOOL) printf '%s' "$MC_VMS_APP_DIR/$2/events/spool" ;;
   esac
 }
-# VAULT_DIR EVENTS_SPOOL (as loaded) of a VM that isn't a config/vms/ one: OWNER KEY VALUE records, the account's
-# shared vault and spool (SHARED_*: the vault's and the event stream's own defaults, the latter from $HOME and from
-# the system's home) when it doesn't set its own.
+# VAULT_DIR EVENTS_SPOOL (as loaded) of a VM that isn't a config/vms/ one: OWNER KEY VALUE records. The account's
+# shared vault and spools (SHARED_*: the vault's and the event stream's own defaults, the latter from $HOME and from
+# the system's home) always: they're the account's whatever a settings file names, so they're kept out of every
+# other VM's folders and out of the runner's storage even when this VM uses folders of its own (VAULT_DIR,
+# EVENTS_SPOOL, which are added then).
 mc_shared_records() { # OWNER VAULT_DIR EVENTS_SPOOL
-  if [ -z "$2" ] || [ "$2" = "$MC_SHARED_VAULT" ]; then printf '%s\0' "$1" SHARED_VAULT_DIR "$MC_SHARED_VAULT"
-  else printf '%s\0' "$1" VAULT_DIR "$2"; fi
-  if [ -z "$3" ] || [ "$3" = "$MC_SHARED_VAULT/events/spool" ]; then
-    printf '%s\0' "$1" SHARED_EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool" \
-      "$1" SHARED_EVENTS_SPOOL "$MC_SHARED_VAULT/events/spool"
-  else printf '%s\0' "$1" EVENTS_SPOOL "$3"; fi
+  printf '%s\0' "$1" SHARED_VAULT_DIR "$MC_SHARED_VAULT" \
+    "$1" SHARED_EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool" \
+    "$1" SHARED_EVENTS_SPOOL "$MC_SHARED_VAULT/events/spool"
+  [ -z "$2" ] || [ "$2" = "$MC_SHARED_VAULT" ] || printf '%s\0' "$1" VAULT_DIR "$2"
+  [ -z "$3" ] || [ "$3" = "$MC_SHARED_VAULT/events/spool" ] || printf '%s\0' "$1" EVENTS_SPOOL "$3"
 }
 # The runner's VM storage, where no VM's folder may be or be held (the runner's own delete of a VM, baseline or
 # checkpoint takes its whole folder there; every other recursive delete checks its own target: lib/safedelete.py), as
@@ -555,6 +556,19 @@ vm_dir() {
   case "$path" in /*) ;; *) echo "the storage location '$loc' isn't an absolute folder: $path" >&2; return 1 ;; esac
   path="$(cd "$path" 2>/dev/null && pwd -P)" || { echo "the storage location '$loc' isn't a folder" >&2; return 1; }
   printf '%s/%s\n' "$path" "$name"
+}
+# NAME: the runner's delete of a VM, a baseline or a checkpoint; the only way any of them is deleted. Its folder (vm_dir:
+# from Lume's own settings, nothing guessed) is checked first like every other delete on the Mac (lib/safedelete.py
+# check-runner, against the one list of protected folders: every VM's keys, runtime, logs, vault and spool, the
+# account's own vault and spools, the home folder and the checkout): it may not be a link, nor be, hold or reach (a
+# link in it) a protected folder. When it can't be found or doesn't pass, nothing is deleted (status 1, the reason
+# on stderr). The caller holds the VM's lock and has run the identity rule (vm_change_lock, vm delete's plan,
+# build-vm.sh's check).
+runner_delete() {
+  local d
+  d="$(vm_dir "$1")" || { echo "metacomputer: couldn't tell which folder holds $1, so it wasn't deleted" >&2; return 1; }
+  "$PY" -B "$LAB_ROOT/lib/safedelete.py" check-runner -- "$d" || return 1
+  "$LUME" delete "$1" --force
 }
 # DIR NAME: DIR is NAME's own folder: a real folder of yours (not a link) holding a disk.img and a config.json
 # of yours (not links), whose MAC address is the one Lume reports for NAME (random for each VM).

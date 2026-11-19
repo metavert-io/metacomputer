@@ -1830,9 +1830,11 @@ def main():
         with open(os.path.join(sp4, "zz-bad.json"), "w") as fh:
             fh.write("not json")
         cli("drain")
-        check("B4 a .quarantine that is a link isn't used: the bad file is removed, nothing lands outside",
-              sorted(os.listdir(outside)) == ["real.json"] and not os.path.exists(os.path.join(sp4, "zz-bad.json")),
+        check("B4 a .quarantine that is a link isn't used: the bad file stays in the spool (a file that can't be "
+              "quarantined is never deleted), nothing lands outside",
+              sorted(os.listdir(outside)) == ["real.json"] and os.path.exists(os.path.join(sp4, "zz-bad.json")),
               os.listdir(outside))
+        os.remove(os.path.join(sp4, "zz-bad.json"))
         os.remove(qd)
 
         # B5: a trailing newline can't slip past the checks; Claude's own messages say so on a phone
@@ -1854,7 +1856,7 @@ def main():
         wpr = subprocess.Popen([PY, EV, "watch"], env=iso, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         exited = wpr.wait(timeout=20) is not None
         os.makedirs(os.path.join(TD, "iso", "events-state", "admin"), exist_ok=True)
-        with open(os.path.join(TD, "iso", "events-state", "admin", "000000000000001-x.json"), "w") as fh:
+        with open(os.path.join(TD, "iso", "events-state", "admin", "000000000000001-00000000-0000-4000-8000-000000000001.json"), "w") as fh:
             json.dump({"event": {"type": "sink_removed", "seq": 1, "id": "x", "message": "m", "family": "security",
                                  "severity": "warn", "vm": "v", "host": "h", "time": events.now_iso(), "origin": "cli"},
                        "state": "committed", "targets": {"gone": {"sink": {"kind": "otlp", "url": f"http://127.0.0.1:{dport}"},

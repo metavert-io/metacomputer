@@ -366,15 +366,26 @@ def cmd_open(a):
 
 
 VAULT_MARK = "vault-inflight."     # bin/metacomputer's marker: a vault request not yet known to have ended
+VAULT_MARK_NAME = re.compile(r"vault-inflight\.[1-9][0-9]*")   # its whole name: the marker and the shell's pid
 
 
 def vault_unsettled():
     """The markers of vault fills and session loads whose end the unlock process didn't confirm. Found under the
     exclusive dispatch lock, so none belongs to a command that's still running (those hold it shared)."""
     try:
-        return sorted(f for f in os.listdir(owners.OWNERS_DIR) if f.startswith(VAULT_MARK))
+        return sorted(f for f in os.listdir(owners.OWNERS_DIR) if VAULT_MARK_NAME.fullmatch(f))
     except OSError:
         return []
+
+
+def drop_marks(marks):
+    """The settled vault markers go, through lib/safedelete.py (only marker names, in an owners folder that isn't a
+    link and neither is, holds nor reaches a folder some VM uses). Best effort: one kept is settled again next time."""
+    try:
+        import safedelete
+        safedelete.remove_records(owners.OWNERS_DIR, marks, VAULT_MARK_NAME)
+    except Exception:
+        pass
 
 
 def settle_vault(budget):
@@ -415,11 +426,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
                 f"`metacomputer secrets settle`, then the handoff again. (Marked by {', '.join(marks)} in "
                 f"{owners.short(owners.OWNERS_DIR)}.)")
             return EXIT_REFUSED
-        for m in marks:
-            try:
-                os.remove(os.path.join(owners.OWNERS_DIR, m))
-            except OSError:
-                pass
+        drop_marks(marks)
         with owners.lock():
             cur = owners.open_handoff()
             if cur:

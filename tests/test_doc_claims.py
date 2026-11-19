@@ -357,7 +357,7 @@ def sync_before_delete():
     stop = function_text("sync_or_stop")
     return ('sync_or_stop "$evtype"' in function_text("restore_from")
             and function_text("restore_from").index('sync_or_stop "$evtype"')
-            < function_text("restore_from").index('"$LUME" delete "$VM_NAME"')
+            < function_text("restore_from").index('runner_delete "$VM_NAME"')
             and "sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*'" in function_text("do_baseline")
             and "do_recordings --sync >/dev/null && whole=1" in stop and '[ $whole = 1 ] && [ $rc = 0 ] && return 0' in stop
             and stop.count("$whole = 1") == 1   # both checks every time: no way out on the copy alone
@@ -1109,8 +1109,8 @@ CLAIMS = [
      lambda m: all(x in raw("lib/safedelete.py") for x in (
          "def check(path, prot", "vms.physical(t.path", "def links_on_the_way(", "mc_all_identity_records",
          'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(t.name, dir_fd=fd)", "remove_tree_at(fd, t.name, t.st, t.spelled)",
-         '("this checkout", lab)', "a link on the way to", '("the account\'s vault folder", os.path.join(home, ACCOUNT_VAULT))',
-         '("the account\'s event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool"))'))
+         '("this checkout", lab, "CHECKOUT")', "a link on the way to", '"the account\'s vault folder", os.path.join(home, ACCOUNT_VAULT), "SHARED_VAULT_DIR"',
+         '"the account\'s event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool")'))
      and "mc_all_identity_records() {" in raw("scripts/lib.sh") and '[ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0' in raw("scripts/lib.sh")
      and 'safedelete.py" rmtree' in raw("scripts/safe-rmtree.sh")),
     ("SECURITY.md", r"It resolves a path once \(its folder physically, its last part as it is; a path ending in `/`, `/\.` or `/\.\.` is refused\) and deletes exactly that entry, through a descriptor of its folder, following no link inside \(descriptors only, so it works on the Python 3\.9 macOS ships too\)",
@@ -1119,16 +1119,32 @@ CLAIMS = [
          "def _open_parent(t):", "remove_tree_at(fd, t.name, t.st, t.spelled)", "def remove_tree_at(parent_fd, name",
          "os.rmdir(n, dir_fd=", "os.scandir(fd)", "changed while it was being checked"))
      and "shutil.rmtree(" not in raw("lib/safedelete.py")),
-    ("SECURITY.md", r"A program's own records \(dead claims, stale space claims, broken journal entries, old quarantined files\) are deleted only by their own names, in a folder that isn't a link and passes the same check",
+    ("SECURITY.md", r"A program's own records \(dead claims, stale space claims, broken journal entries, old quarantined files, settled vault markers, a VM's storage locks\) are deleted only by their own names, in a folder that isn't a link and passes the same check",
      lambda m: "def remove_records(folder, names, pattern" in raw("lib/safedelete.py")
      and "pattern.fullmatch(n)" in raw("lib/safedelete.py")
      and "safedelete.remove_records(OWNERS_DIR, names, CLAIM_NAME)" in raw("lib/owners.py")
      and "safedelete.remove_records(d, stale, SPACE_NAME)" in raw("lib/storage.py")
-     and "remove_records(admin_dir(), broken, ADMIN_NAME)" in raw("lib/events.py") and "QUARANTINED)" in raw("lib/events.py")),
-    ("SECURITY.md", r"`vm delete`'s delete of a VM's own folders goes through it too, against the same list of protected folders less that VM's own; there is no second list\. It fails closed",
+     and "remove_records(admin_dir(), broken, ADMIN_NAME)" in raw("lib/events.py") and "QUARANTINED)" in raw("lib/events.py")
+     and "safedelete.remove_records(owners.OWNERS_DIR, marks, VAULT_MARK_NAME)" in raw("lib/handoff.py")
+     and 'safedelete.remove_records(locks_dir(), [rec["_file"] for rec in mine], LOCK_NAME)' in raw("lib/storage.py")),
+    ("SECURITY.md", r"The runner's own delete of a VM, baseline or checkpoint \(`vm delete`, `build --replace`, `reset`, `restore`, `checkpoint`, `baseline`\) is made in one place, after the rule above, and the helper checks that VM's folder first \(from Lume's own settings\), the same way and against the same list: it may not be a link, nor be, hold or reach a protected folder, or the runner isn't asked",
+     lambda m: 'safedelete.py" check-runner -- "$d" || return 1' in fn_src("scripts/lib.sh", "runner_delete")
+     and 'd="$(vm_dir "$1")" ||' in fn_src("scripts/lib.sh", "runner_delete")
+     and "def check_runner(path" in raw("lib/safedelete.py") and "check_target(t, protected(home, lab), home)" in raw("lib/safedelete.py")
+     and not any('"$LUME" delete' in raw(f) for f in ("bin/metacomputer", "scripts/build-vm.sh", "scripts/vm-commands.sh", "install.sh"))
+     and 'runner_delete "$vm"' in raw("scripts/build-vm.sh") and 'runner_delete "$v"' in raw("scripts/vm-commands.sh")),
+    ("SECURITY.md", r"The event spool is consumed only after the same check \(a spool that is, holds or reaches another protected folder isn't read at all\), and a spool file that can't be moved to its `\.quarantine` is left where it is, counted and reported once, never deleted\. It fails closed",
+     lambda m: "def check_spool(path" in raw("lib/safedelete.py") and "why = spool_guard(dfd)" in raw("lib/events.py")
+     and "safedelete.check_spool(spool_dir())" in raw("lib/events.py") and "if quarantine(dfd, qfd, f):" in raw("lib/events.py")
+     and "os.unlink(f, dir_fd=dfd)\n            return" not in raw("lib/events.py")
+     and 'info["left"] = int(info.get("left", 0)) + len(left)' in raw("lib/events.py")),
+    ("SECURITY.md", r"The account's own vault folder and spools count as every VM's that shares them, even when `config/local.env` names folders of its own",
+     lambda m: "printf '%s\\0' \"$1\" SHARED_VAULT_DIR \"$MC_SHARED_VAULT\"" in fn_src("scripts/lib.sh", "mc_shared_records")
+     and '[ -z "$2" ] || [ "$2" = "$MC_SHARED_VAULT" ] || printf' in fn_src("scripts/lib.sh", "mc_shared_records")),
+    ("SECURITY.md", r"`vm delete`'s delete of a VM's own folders goes through it too, against the same list of protected folders less that VM's own; there is no second list",
      lambda m: "def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=())" in raw("lib/safedelete.py")
      and "def protected(" not in raw("lib/vms.py") and "def rmtree_own(" not in raw("lib/vms.py")
-     and '("the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT))' in raw("lib/safedelete.py")),
+     and '"the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT), "SHARED_VAULT_DIR"' in raw("lib/safedelete.py")),
     ("SECURITY.md", r"A cleanup that walks a folder checks that folder the same way first, then follows no link while it walks",
      lambda m: all(x in raw("lib/safedelete.py") for x in (
          "def prune_files(root, choose", "check_target(t, protected(home, lab), home)", "follow_symlinks=False",
@@ -1136,7 +1152,7 @@ CLAIMS = [
      and "safedelete.prune_files(folder, choose)" in raw("lib/storage.py")
      and 'safedelete.py" prune --older-than 3600 -- "$dir"' in raw("scripts/lib.sh")
      and "-mmin +60 -delete" not in raw("scripts/lib.sh")),
-    ("SECURITY.md", r"The only recursive deletes not made through it are the runner's own delete of a VM, baseline or checkpoint \(after the rule above\) and those inside the VM; a test fails when any other appears, a loop that deletes what it walks and `find -delete`, `xargs rm` or `rsync --delete` included",
+    ("SECURITY.md", r"Deletes inside the VM are the only ones it doesn't see; a test fails when any other appears, a function that deletes, moves or rewrites files found by listing a folder \(itself or through its module's functions\) and `find -delete`, `xargs rm`, `rsync --delete` or `rm` of a glob included",
      lambda m: "DELETE_EXCEPTIONS = [" in raw("tests/test_multi_vm.py") and "def delete_inventory(td):" in raw("tests/test_multi_vm.py")
      and "DELETE_WALK_EXCEPTIONS = {" in raw("tests/test_multi_vm.py") and "TREE_SHELL_PAT = (" in raw("tests/test_multi_vm.py")
      and "        delete_inventory(td)\n" in raw("tests/test_multi_vm.py")
@@ -1167,7 +1183,7 @@ CLAIMS = [
      lambda m: 'build_identity_check() { mc_identity_check --no-ports || die "not building' in raw("scripts/build-vm.sh")
      and 0 < raw("scripts/build-vm.sh").find("\nbuild_identity_check\n") < raw("scripts/build-vm.sh").find('st="$(vm_lookup "$vm")"')
      < raw("scripts/build-vm.sh").find('/build-tools.sh"\nbuild_identity_check') < raw("scripts/build-vm.sh").find('/fetch-artifacts.sh"\nbuild_identity_check')
-     < raw("scripts/build-vm.sh").find("BUILD_MARKER=") < raw("scripts/build-vm.sh").find('"$LUME" delete') < raw("scripts/build-vm.sh").find('safe-rmtree.sh" "$SEED"')),
+     < raw("scripts/build-vm.sh").find("BUILD_MARKER=") < raw("scripts/build-vm.sh").find('runner_delete "$vm"') < raw("scripts/build-vm.sh").find('safe-rmtree.sh" "$SEED"')),
     ("docs/commands.md", r"once you type its name \(no terminal: `--confirm NAME`; `--yes` never counts\)",
      lambda m: "ASSUME_YES" not in vm_delete_src() and "confirm \"" not in vm_delete_src()
      and '[ "$v" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
@@ -1213,7 +1229,7 @@ CLAIMS = [
      < fn_src("scripts/vm-commands.sh", "vm_delete_plan").find("\n  mc_identity_check --no-ports || die")
      < fn_src("scripts/vm-commands.sh", "vm_delete_plan").find("delete-check --target")
      and 0 < fn_src("scripts/vm-commands.sh", "vm_delete").find("\n  vm_delete_plan\n")
-     < fn_src("scripts/vm-commands.sh", "vm_delete").find("events_watcher_stop") < fn_src("scripts/vm-commands.sh", "vm_delete").find('"$LUME" delete')),
+     < fn_src("scripts/vm-commands.sh", "vm_delete").find("events_watcher_stop") < fn_src("scripts/vm-commands.sh", "vm_delete").find('runner_delete "$v"')),
     ("SECURITY.md", r"one whose names can't be read refuses \(never its file name alone\)",
      lambda m: re.search(r'if not r\.get\("known"\):\n(\s+#.*\n)*\s+raise Refused', raw("lib/vms.py")) is not None),
     ("SECURITY.md", r"Only then does it stop what runs for the VM \(its event watcher, its hub\)",

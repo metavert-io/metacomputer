@@ -185,7 +185,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `vm delete` deletes folders only through `lib/safedelete.py own` (no-link walk, the same protected
   list as every delete, less that VM's own) and checks everything again after its prompt, under the
   owners lock. A program's own records go through `safedelete.remove_records` (own names only, the
-  folder checked). `lib/safedelete.py` must work under any python3, macOS's 3.9 included
+  folder checked). The runner's delete of a VM, baseline or checkpoint is only ever `runner_delete`
+  (`scripts/lib.sh`), which checks the VM's folder with `safedelete.py check-runner` first; an event
+  spool is consumed only after `check_spool`, and a file that can't be quarantined is never deleted. `lib/safedelete.py` must work under any python3, macOS's 3.9 included
   (`scripts/safe-rmtree.sh` may run it there; `final6_fixes` checks it). A VM chosen
   by name is passed on to children as `MCOMP_CONFIG`. Its vault folder and spool
   (`VAULT_DIR`, `EVENTS_SPOOL`) follow it; the main VM keeps the vault's own defaults.
