@@ -98,14 +98,18 @@ Checks never trust what the agent says. They read the VM's real state:
 
 ```bash
 export MCOMP_CONFIG=/path/to/test-vm.env        # the test VM's settings
-bench/bench.py list                             # the tasks
+bench/bench.py list [--set lessons|all]         # the tasks (the standard set by default)
 bench/bench.py run --tasks ff-form --run-id try-1          # one task
 bench/bench.py run --run-id baseline-2026-11-17            # all 20
+bench/bench.py run --tasks lessons --run-id lx-1           # the lessons set (below)
 bench/bench.py report baseline-2026-11-17                  # rewrite summary.md
 bench/bench.py compare baseline-2026-11-17 shell-forbid-1  # A vs B, per task and in total
 bench/bench.py check ff-form [--setup]          # run a task's setup and/or check alone, no model
 bench/bench.py remetric baseline-2026-11-17     # recompute metrics from the saved transcripts
+bench/bench.py export lx-1 > bench/runs/lx-1.json          # a run's public summary (no paths or costs)
 ```
+
+`--tasks` takes task ids and set names, mixed (`--tasks ff-form,lessons`).
 
 `run` stops the VM at the end unless you pass `--keep-running`.
 
@@ -215,6 +219,48 @@ The web pages are served from inside the VM on `127.0.0.1:8000` by
 `guest/server.py`, so no task needs the internet. The server and its log live in
 `~/.cache/bench-srv` in the VM, away from the task folders in `~/bench`.
 
+## The lessons set
+
+The 20 tasks above rarely bring up what `metacomputer learn`'s lessons are about:
+the first `learn bench` comparison found almost none of those stumbles with or
+without lessons (docs/learn.md). `bench/tasks-lessons/` holds eight tasks built so
+they come up in ordinary desktop work. Run them with `--tasks lessons`, or measure
+lessons on them with `metacomputer learn bench --tasks lessons`.
+
+How they were chosen:
+- **From real evidence.** The patterns are the failure classes `learn report`
+  found in recorded sessions (pixel actions without a screenshot frame were the
+  largest class, then elements not found, failed checks, `foreground_unavailable`,
+  elements with no extents and stale windows), the built-in lessons that answer
+  them (`lib/learn.py`), and the app quirks in the skill's DESKTOP.md.
+- **Fair, ordinary work.** No task needs a lesson to pass: each one can be done
+  by following the skill, which both sides of a comparison have, and by checking
+  the outcome. The prompts read like a user's request and never mention the quirk.
+- **Scored the same way.** Each check reads the VM's real state (`guest/checklib.py`),
+  and `tests/test_bench_checks.py` runs every check on its starting state (it must
+  fail) and on a made-up correct outcome (it must pass), with no VM.
+
+Each task file names the patterns it targets (`targets`: failure classes from
+`lib/learn_mine.py`, plus `churn`, `repeat` and `acted_without_check`), the built-in
+lessons that answer them (`lessons`) and where the pattern was seen (`evidence`).
+Reports run learn's own classifier over every task's transcript and count those
+patterns (below, "Comparing runs").
+
+| Task | App | What the user asks | What it targets | Where the pattern was seen |
+| --- | --- | --- | --- | --- |
+| ff-seat-map | Firefox | Pick seats 3B and 5D on a seat map drawn on a canvas, add the passenger's name, confirm | `no_frame`, `repeat`, `churn` | The largest failure class in `learn report`: pixel clicks after a tree-only read, where pixel work alternates with reads (DESKTOP.md, Pixels) |
+| calc-cross-sheet | Calc | Totals on a Summary sheet as formulas over three other sheets | `no_frame`, `no_extents`, `not_found`, `repeat` | Recorded Calc sessions: a sheet tab clicked by name dropped the frame the Name Box clicks after it needed; cells have no extents (DESKTOP.md, Calc) |
+| calc-chart-size | Calc | A column chart of monthly rainfall, 16 cm by 9 cm | `menu_path`, `churn`, `no_frame`, `foreground_unavailable`, `focus_not_restored` | Recorded sessions: "Format › Position and Size..." isn't there while a chart is in edit mode, and one session spent 25 calls on routes to that dialog (DESKTOP.md, Charts) |
+| calc-save-xlsx | Calc | Save a copy in Excel format for a colleague | `no_extents`, `foreground_unavailable`, `stale_window`, `acted_without_check` | The Save dialog's file-type list has no positions; dialogs that close leave stale window ids; a name ending in .xlsx doesn't change the format (DESKTOP.md, Calc and File dialogs) |
+| ff-renew-loans | Firefox | Renew the two books by one author; the page's buttons say "Extend" | `not_found`, `check_failed`, `repeat` | Elements not found and failed checks in `learn report`, most from names and wording guessed before reading (DESKTOP.md, Checks) |
+| ff-article-links | Firefox | Two facts from a long article, both of them link text | `check_failed`, `not_found` | Paragraph text shows inline links as a placeholder, so a check on a sentence fails (a recorded session's did; DESKTOP.md, Firefox) |
+| mousepad-replace | Mousepad | Two find-and-replace passes, then save | `menu_foreground`, `stale_window`, `repeat` | An `invoke_menu` that opens a Mousepad dialog leaves it not answering; menus that publish items only when open (DESKTOP.md, Other apps) |
+| calc-arrows | Calc | Route labels joined by a plain `->` | none: a control | Calc's AutoCorrect turns a typed `->` into an arrow character (seen in a recorded session, and checked on the test VM). It's not in DESKTOP.md and no built-in lesson answers it, so lessons shouldn't move this task; a lesson of your own (`learn add`) could |
+
+The web pages are new fixtures (`site/seats.html`, `site/library/`, `site/wiki/`),
+and the server takes `/book` and `/extend` too. The multi-sheet workbook is a flat
+ODS file (`files/sheets/regions.fods`), readable XML, converted at setup like the CSVs.
+
 ## Adding a task
 
 Add `bench/tasks/<id>.toml`:
@@ -246,8 +292,8 @@ passes when every item is met; its partial score is the weighted share met.
 `guest/checklib.py` has the readers:
 - files and numbers: `read`, `num`;
 - the server log: `requests_log`, `field`;
-- ODF: `odt_blocks`, `bold_runs` (what shows in bold, span overrides included; tested by `tests/test_bench_checks.py`), `ods_rows`, `cell`, `cval`, `ods_charts`;
-- other files: `docx_text`, `csv_rows`;
+- ODF: `odt_blocks`, `bold_runs` (what shows in bold, span overrides included; tested by `tests/test_bench_checks.py`), `ods_rows` (a sheet by index or name), `ods_sheet_names`, `cell`, `cval`, `ods_charts`, `ods_chart_frames` (each chart with its frame's size in cm), `length_cm`;
+- other files: `docx_text`, `csv_rows`, `xlsx_rows`, `zip_names`;
 - the desktop: `gsetting`, `windows`, `copy_from_window`.
 
 It reaches the VM only after the session has ended.
@@ -261,8 +307,19 @@ the expected change in the VM by hand (`metacomputer view`), then run
 `compare A B` names what changed between the two runs (switches and git sha),
 then gives:
 - a table per task: pass, partial score, cost, turns, minutes, screenshots,
-  tree reads, shell calls, refused and invalid calls;
-- totals over the tasks both runs have.
+  tree reads, shell calls, refused and invalid calls, and the targeted count;
+- totals over the tasks both runs have;
+- the failure patterns: `metacomputer learn`'s classifier (`lib/learn_mine.py`)
+  run over each task's saved transcript, counting failed driver calls by class
+  (`no_frame`, `not_found`, `check_failed`, ...), `churn` (three or more routes
+  tried after a failure, switched without looking), `repeat` (times a failure
+  class came back within the session) and `acted_without_check` (an unverified
+  result acted on without a check). For each pattern: how many tasks target it,
+  and the count in each run. "Targeted" sums each task's own targets, which is
+  the number a lesson aimed at those patterns should lower. When B's sessions got
+  lessons, it names them.
+
+`summary.md` lists the same patterns for one run.
 
 A single run of each task is noisy. For a decision, run the same switch two or
 three times and compare the totals.
@@ -352,6 +409,31 @@ commit 3a55a77 plus the uncommitted `learn` work, merged as d58f9c2;
 The same task (writer-format) failed at the same check in both. The two
 lessons' patterns didn't come up without them either, so the differences are
 noise; see docs/learn.md.
+
+Lessons on [the lessons set](#the-lessons-set) (2026-11-18, the same test VM,
+`learn bench --tasks lessons`, the default switches; three built-in lessons approved
+in a throwaway store: `no-frame`, `repeat-class` and `not-found`, the three
+proposals with the most sessions behind them in `learn report`; commit 1cceb9b,
+rebased as 266d57e;
+[runs/learn-lessons-2026-11-18-without.json](runs/learn-lessons-2026-11-18-without.json),
+[runs/learn-lessons-2026-11-18-with.json](runs/learn-lessons-2026-11-18-with.json)):
+
+| Run | Passed | Invalid | Mean turns | Mean minutes | Targeted patterns | Failed driver calls | `no_frame` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `learn-lessons-2026-11-18-without` | 8/8 | 1 | 19.0 | 1.07 | 3 | 7 | 3 |
+| `learn-lessons-2026-11-18-with` | 8/8 | 0 | 18.4 | 0.92 | 2 | 3 | 0 |
+
+Every task passed both ways, so passes can't tell the two apart. Without lessons,
+the set did bring up stumbles the standard tasks hadn't: three pixel actions
+without a screenshot frame (one in calc-chart-size, two in calc-save-xlsx), the
+chart's menu path not found in edit mode, an element not found and one with no
+extents. With the lessons, the no-frame failures didn't happen and failed driver
+calls fell from 7 to 3, but two stale-token errors appeared in mousepad-replace,
+and every count is small: one run of each, with differences of the size one run's
+noise makes. **This run shows no measurable effect;** the direction of the
+no-frame count is worth a repeat, not a conclusion. The control task didn't meet
+its quirk either way: both sessions wrote the routes as formulas
+(`=A2&" -> "&B2`), which AutoCorrect leaves alone.
 
 A session's claims go with that session: Claude Code is recognized however it's
 installed, including the native installer's `~/.local/share/claude/versions/X.Y.Z`

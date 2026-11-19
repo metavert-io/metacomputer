@@ -1,0 +1,32 @@
+id = "calc-save-xlsx"
+title = "Calc: save a copy in Excel format"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "mixed"
+timeout_s = 720
+files = ["sheets/orders.csv"]
+setup = """
+to_odf ods ~/bench/orders.csv ~/bench/sheets && rm ~/bench/orders.csv
+"""
+targets = ["no_extents", "foreground_unavailable", "stale_window", "acted_without_check"]
+lessons = ["no-extents", "foreground", "stale-window", "unverified"]
+evidence = "learn report: foreground_unavailable (one session in a file dialog), elements with no extents (file-type lists) and stale window ids after a dialog closed; DESKTOP.md, LibreOffice Calc (the Save dialog's file type) and File dialogs"
+prompt = """
+Open ~/bench/sheets/orders.ods in LibreOffice Calc and save a copy of it in Excel format as
+~/bench/out/orders.xlsx, for a colleague who uses Excel. Keep orders.ods as it is.
+"""
+check = """
+import os
+p = "~/bench/out/orders.xlsx"
+names = zip_names(p)
+C.add("orders.xlsx saved", 0.1, os.path.exists(path(p)))
+ooxml = "xl/workbook.xml" in names
+C.add("in Excel format, not an .ods under another name", 0.4, ooxml, "ODF" if "content.xml" in names else names[:3])
+rows = [r for r in (xlsx_rows(p) if ooxml else []) if any(str(x).strip() for x in r)]
+want = [["A-3101", "Brightwater Cafe", 12, 186.4], ["A-3102", "Hollis and Gray", 3, 54.75],
+        ["A-3103", "Juniper Studio", 7, 129.1], ["A-3104", "Northfield Bakery", 20, 342],
+        ["A-3105", "Quayside Books", 5, 88.25]]
+got = [[r[0].strip(), r[1].strip(), num(r[2]), num(r[3])] for r in rows[1:] if len(r) >= 4]
+C.add("the header and the five orders", 0.4, bool(rows) and [x.strip() for x in rows[0][:4]] == ["Order", "Customer", "Items", "Total"] and got == want, (rows[:1], got[:2]))
+C.add("orders.ods kept as an .ods", 0.1, "content.xml" in zip_names("~/bench/sheets/orders.ods"))
+"""

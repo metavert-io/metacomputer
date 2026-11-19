@@ -457,10 +457,19 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run.
+- `python3 tests/test_bench_checks.py` (96 checks, a few seconds): the benchmark's check
+  readers on made-up ODF and OOXML files (what shows in bold, sheets by name, a chart
+  frame's size from LibreOffice's inches, a chart object that doesn't parse, `.xlsx`
+  cells), and the lessons task set (`bench/tasks-lessons/`): each task's fields, targets
+  (patterns learn's classifier counts), lessons (built-in ids), evidence, fixtures and
+  pages, prompts that name no quirk or lesson, and its own check run in a temporary home
+  folder, failing on the starting state and passing on a correct outcome, plus the near
+  misses each task is about (an AutoCorrected arrow, an `.ods` saved under an `.xlsx`
+  name, the wrong chart height, an extra seat, a third renewal).
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (116 checks, about 45 s) needs no VM and no network.
+`python3 tests/test_learn.py` (125 checks, about 45 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -512,6 +521,12 @@ results, window titles, app names, typed text, errors and the model's own text.
   another controller uses the VM) ends with the reason and how to pick it up again,
   without starting the run with the lessons or printing a comparison; and two runs with
   no task in common print no table.
+- The lessons task set: `--tasks lessons` loads its eight tasks (and mixes with task
+  ids); `learn bench --tasks lessons` names the set and still asks first; learn's
+  classifier over a saved benchmark transcript; the written comparison's targeted
+  column and failure-pattern table, `learn bench`'s printed rows and the lessons the
+  with-run got; a run's summary; and `bench.py export`'s public summary without costs
+  or paths.
 
 ## Storage: `tests/test_storage.py`, `tests/test_storage_vm.py`
 
@@ -1293,6 +1308,8 @@ session on a test VM that is reset to its baseline first. A check reads the VM's
 real state afterwards. Each task records pass, partial score, cost, turns,
 time, tokens and the tool-call mix. Switches (skill, shell channel,
 coordinate guard, screen size, model) change one thing at a time, and
-`bench/bench.py compare A B` puts two runs side by side. See
+`bench/bench.py compare A B` puts two runs side by side. A second set of eight
+tasks, `--tasks lessons`, is built to bring up what `metacomputer learn`'s lessons
+address; reports count those failure patterns with learn's own classifier. See
 [bench/README.md](bench/README.md). Each run costs real API usage: about $1 per
 task, and it needs a test VM (`MCOMP_CONFIG`).

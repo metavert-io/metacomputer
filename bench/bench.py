@@ -2,12 +2,16 @@
 """metacomputer task benchmark: the same tasks, model, harness and budgets, one
 switch changed at a time (HCU-style). See bench/README.md.
 
-  bench/bench.py list
-  bench/bench.py run [--tasks a,b] [--run-id ID] [switches...]     one headless session per task
+  bench/bench.py list [--set standard|lessons|all]
+  bench/bench.py run [--tasks a,b|lessons] [--run-id ID] [switches...]     one headless session per task
   bench/bench.py check TASK [--setup]       (re)run a task's setup and/or check, no model
   bench/bench.py report RUN_ID              write results/bench/RUN_ID/summary.md
   bench/bench.py compare RUN_A RUN_B        per-task and total differences
   bench/bench.py remetric RUN_ID            recompute metrics from the saved transcripts
+  bench/bench.py export RUN_ID              the run's public summary (bench/runs/): no paths, costs or transcripts
+
+Task sets: `standard` (bench/tasks/, the default) and `lessons` (bench/tasks-lessons/: tasks that bring up
+the stumbles `metacomputer learn`'s lessons are about). --tasks takes task ids and set names.
 
 The VM comes from MCOMP_CONFIG (required: the benchmark resets that VM to its
 baseline before every task). Switches (flag or environment variable):
@@ -51,6 +55,8 @@ import report  # noqa: E402
 
 RESULTS = os.environ.get("BENCH_RESULTS") or os.path.join(LAB, "results", "bench")
 TASKS = os.path.join(BENCH, "tasks")
+# Task sets, by name: the default set, and the one built to bring up what the lessons address (bench/README.md).
+TASK_SETS = {"standard": TASKS, "lessons": os.path.join(BENCH, "tasks-lessons")}
 FIX = os.path.join(BENCH, "fixtures")
 GUEST = os.path.join(BENCH, "guest")
 SRV = "~/.cache/bench-srv"          # in the VM: fixture server, its log and helpers (hidden from ~/bench)
@@ -119,21 +125,34 @@ def set_screen(size):
 
 
 # --- tasks ----------------------------------------------------------------------------------
-def load_tasks(ids=None):
+def load_set(name):
+    """The tasks of one set, in file order, each marked with its set."""
     tasks = []
-    for p in sorted(glob.glob(os.path.join(TASKS, "*.toml"))):
+    for p in sorted(glob.glob(os.path.join(TASK_SETS[name], "*.toml"))):
         with open(p, "rb") as f:
             t = tomllib.load(f)
         t.setdefault("id", os.path.basename(p)[:-5])
+        t["set"] = name
         tasks.append(t)
-    if ids:
-        want = [i.strip() for i in ids.split(",") if i.strip()]
-        by = {t["id"]: t for t in tasks}
-        missing = [i for i in want if i not in by]
-        if missing:
-            sys.exit(f"unknown task(s): {', '.join(missing)} (bench/bench.py list)")
-        tasks = [by[i] for i in want]
     return tasks
+
+
+def load_tasks(ids=None):
+    """The tasks to run: the standard set when `ids` is empty; otherwise a comma list of task ids and set names
+    (`lessons`, `standard`), in that order, each task once."""
+    if not ids:
+        return load_set("standard")
+    by = {t["id"]: t for s in TASK_SETS for t in load_set(s)}
+    out, missing = [], []
+    for i in [x.strip() for x in ids.split(",") if x.strip()]:
+        picked = load_set(i) if i in TASK_SETS else [by[i]] if i in by else None
+        if picked is None:
+            missing.append(i)
+            continue
+        out += [t for t in picked if t["id"] not in {x["id"] for x in out}]
+    if missing:
+        sys.exit(f"unknown task(s): {', '.join(missing)} (bench/bench.py list --set all)")
+    return out
 
 
 SETUP_LIB = r"""
@@ -300,8 +319,13 @@ def lessons_record(sw):
     env = dict(os.environ, **lessons_env(sw))
     text = learn_store.instructions_text(env)
     s = learn_store.summary(env)
+    try:
+        ids = [x.get("id") for x in learn_store.approved(env)[0][:s["delivered"]]] if text else []
+    except Exception:
+        ids = []
     return {"lessons_count": s["delivered"] if text else 0,
             "lessons_hash": hashlib.sha256(text.encode()).hexdigest()[:12] if text else None,
+            "lessons_ids": ids,             # which lessons (a comparison names the tasks whose targets they answer)
             "lessons_problem": s["problem"]}
 
 
@@ -531,6 +555,7 @@ def cmd_run(a):
                              coord_guard_in_bridge=os.path.exists(os.path.join(LAB, "lib", "mcp_hub.py"))
                              and "MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_hub.py")).read()),
             "tasks": [t["id"] for t in tasks],
+            "task_sets": sorted({t.get("set", "standard") for t in tasks}),
             "vm_options": status().get("options")}   # the optional hardening (action log, SSH, driver mode)
     # Resuming: keep the first start time, and count what the run has spent already against the cap.
     old = json.load(open(os.path.join(rdir, "run.json"))) if os.path.exists(os.path.join(rdir, "run.json")) else None
@@ -614,6 +639,8 @@ def run_task(t, sw, rdir, work, cfg, shim):
     shutil.rmtree(tdir, ignore_errors=True)
     os.makedirs(tdir)
     rec = {"task": t["id"], "title": t.get("title"), "route": t.get("route"), "apps": t.get("apps", []),
+           "set": t.get("set", "standard"), "targets": list(t.get("targets") or []),
+           "task_lessons": list(t.get("lessons") or []),
            "started": datetime.datetime.now().isoformat(timespec="seconds"), "infra_retries": 0}
     st = {}
     for attempt in range(2):
@@ -691,15 +718,30 @@ def cmd_check(a):
 
 
 def cmd_list(a):
-    for t in load_tasks():
-        req = f"  needs {','.join(t['requires'])}" if t.get("requires") else ""
-        print(f"{t['id']:<18} {t.get('route', ''):<7} {t.get('title', '')}{req}")
+    sets = list(TASK_SETS) if a.set == "all" else [a.set or "standard"]
+    for s in sets:
+        if s not in TASK_SETS:
+            sys.exit(f"no task set {s!r} (sets: {', '.join(TASK_SETS)}, all)")
+        if len(sets) > 1:
+            print(f"[{s}]")
+        for t in load_set(s):
+            req = f"  needs {','.join(t['requires'])}" if t.get("requires") else ""
+            tg = f"  targets: {', '.join(t['targets'])}" if t.get("targets") else (
+                "  (control: no built-in lesson)" if s == "lessons" else "")
+            print(f"{t['id']:<18} {t.get('route', ''):<7} {t.get('title', '')}{req}{tg}")
+
+
+def cmd_export(a):
+    print(json.dumps(report.public_summary(os.path.join(RESULTS, a.run_id)), indent=2))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
+    ls = sub.add_parser("list")
+    ls.add_argument("--set", default="standard", help="standard, lessons or all")
+    ex = sub.add_parser("export")
+    ex.add_argument("run_id")
     r = sub.add_parser("run")
     r.add_argument("--tasks")
     r.add_argument("--run-id")
@@ -727,6 +769,8 @@ def main():
         cmd_check(a)
     elif a.cmd == "list":
         cmd_list(a)
+    elif a.cmd == "export":
+        cmd_export(a)
     elif a.cmd == "report":
         print(open(report.write_summary(os.path.join(RESULTS, a.run_id))).read())
     elif a.cmd == "compare":

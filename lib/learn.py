@@ -14,9 +14,10 @@
   learn edit ID          change a lesson's or a proposal's text (your terminal only)
   learn add              write a lesson of your own (your terminal only)
   learn reseal           accept lessons.json after it changed outside learn (your terminal only)
-  learn bench [--config TEST_ENV] [--tasks a,b] [--budget USD] [--cap USD] [--run-id ID] [--yes]
+  learn bench [--config TEST_ENV] [--tasks a,b|lessons] [--budget USD] [--cap USD] [--run-id ID] [--yes]
                          run the benchmark without and with the approved lessons and compare
-                         (a test VM; it spends your Claude usage and asks first)
+                         (a test VM; it spends your Claude usage and asks first). `--tasks lessons`
+                         runs the task set built to bring up what lessons address (bench/README.md)
 
 Proposals are built only from structured data (lib/learn_mine.py): failure classes, counts, the
 driver's own tool names, app names from a fixed list, durations. Their wording comes from the
@@ -62,6 +63,9 @@ DRAFT_BUDGET_USD = "0.50"
 DRAFT_TIMEOUT_S = 240
 BENCH_EST_PER_TASK = 0.55          # USD per task and run, from the benchmark's recent runs (bench/README.md)
 BENCH_MIN_PER_TASK = 1.7           # minutes per task, reset and setup included
+# Per set, per task and run: (USD, minutes with reset and setup). The lessons set's from its first comparison
+# (2026-11-18: 0.60-0.64 USD a task, 12 minutes for eight tasks).
+BENCH_EST_BY_SET = {"standard": (BENCH_EST_PER_TASK, BENCH_MIN_PER_TASK), "lessons": (0.65, 1.6)}
 # Words a drafted lesson may not use: it must not talk about secrets, or about switching off, getting
 # around or overriding the user's controls. Defense in depth; a draft still needs the user at a terminal.
 DRAFT_DENY = re.compile(r"passphrase|password|secret|token|api[ _-]?key|credential|vault|disable|turn(?:ing)? off|"
@@ -931,9 +935,11 @@ def cmd_bench(a):
     vm = ident["vm"]
     if not vm or vm in ("metacomputer", main_vm):
         die(f"{config} names your main VM ({vm or 'unknown'}); learn bench needs a test VM (bench/README.md)")
-    est, mins = 2 * n * BENCH_EST_PER_TASK, 2 * n * BENCH_MIN_PER_TASK
+    per = [BENCH_EST_BY_SET.get(t.get("set"), BENCH_EST_BY_SET["standard"]) for t in tasks]
+    est, mins = 2 * sum(p[0] for p in per), 2 * sum(p[1] for p in per)
+    sets = sorted({t.get("set") or "standard" for t in tasks})
     print(f"learn bench runs the benchmark twice on the test VM {esc(vm)} (baseline {esc(ident['baseline'])}, "
-          f"settings {esc(config)}, sha256 {ident['sha'][:12]}): {n} tasks without your "
+          f"settings {esc(config)}, sha256 {ident['sha'][:12]}): {n} tasks ({esc(', '.join(sets))} set) without your "
           f"{s['approved']} approved lessons, then the same {n} with them.")
     print(f"  That is {2 * n} headless Claude Code sessions on your own Claude account: about ${est:.0f} and "
           f"{mins:.0f} minutes (each run capped at ${cap:.2f}, each task at ${budget:.2f}).")
@@ -1059,9 +1065,28 @@ def print_bench_comparison(report, runs, path):
             ("mean minutes", f"{ta['min_mean']:.2f}", f"{tb['min_mean']:.2f}", f"{tb['min_mean'] - ta['min_mean']:+.2f}"),
             ("screenshots", ta["shots"], tb["shots"], f"{tb['shots'] - ta['shots']:+d}"),
             ("cost", f"${ta['cost']:.2f}", f"${tb['cost']:.2f}", f"{tb['cost'] - ta['cost']:+.2f}")]
-    print(f"  {'':24} {'without':>10} {'with':>10} {'change':>8}")
+    # learn's own classifier over each task's transcript: the patterns the tasks were built to bring up
+    # (the lessons set's `targets`), then any other failure class that came up
+    pa, tga = report.pattern_totals([A[k] for k in common])
+    pb, tgb = report.pattern_totals([B[k] for k in common])
+    tg = dict(tga, **tgb)
+    if tg:
+        rows.append(("targeted patterns", ta["targeted"], tb["targeted"], f"{tb['targeted'] - ta['targeted']:+d}"))
+    for k in sorted(set(pa) | set(pb) | set(tg), key=lambda k: (-tg.get(k, 0), k)):
+        a, b = pa.get(k, 0), pb.get(k, 0)
+        label = f"  {k}" + (f" ({tg[k]} task{'s' if tg[k] != 1 else ''})" if tg.get(k) else "")
+        rows.append((label[:48], a, b, f"{b - a:+d}"))
+    w = max([24] + [len(r[0]) for r in rows])
+    print(f"  {'':{w}} {'without':>10} {'with':>10} {'change':>8}")
     for label, x, y, d in rows:
-        print(f"  {label:24} {str(x):>10} {str(y):>10} {d:>8}")
+        print(f"  {esc(label):{w}} {str(x):>10} {str(y):>10} {d:>8}")
+    ids = (mb.get("switches") or {}).get("lessons_ids") or []
+    if ids:
+        hit = [k for k in common if set(B[k]["targets"]) and set(ids) & set(next(
+            (r.get("task_lessons") or [] for r in xb if r["task"] == k), []))]
+        print(f"Lessons the with-run's sessions got: {esc(', '.join(ids))}"
+              + (f"; tasks whose targets they answer: {esc(', '.join(hit))}" if hit else
+                 "; none of them answers a task's targets"))
     spent = (ma.get("spent_usd") or 0) + (mb.get("spent_usd") or 0)
     unknown = sum(1 for r in xa + xb if r.get("cost_unknown"))
     print(f"Spent on this comparison: ${spent:.2f}"
@@ -1099,7 +1124,7 @@ def main(argv=None):
     li.add_argument("--proposals", action="store_true")
     b = sub.add_parser("bench")
     b.add_argument("--config", help="the test VM's settings file (MCOMP_CONFIG)")
-    b.add_argument("--tasks")
+    b.add_argument("--tasks", help="task ids and set names (lessons: the set built for measuring lessons)")
     b.add_argument("--budget")
     b.add_argument("--cap", help="each run's cap in USD (default: budget x tasks)")
     b.add_argument("--run-id")

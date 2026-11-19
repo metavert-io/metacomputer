@@ -563,6 +563,83 @@ def test_bench_switch():
     check("learn bench refuses the main VM", r.returncode != 0 and "main VM" in r.stderr, r.stderr[-200:])
 
 
+def lessons_set_checks():
+    """The lessons task set (bench/tasks-lessons/) through `learn bench`'s comparison: learn's classifier counts
+    the failure patterns in each task's transcript, the tasks' own targets are summed, and the printed and
+    written comparisons show both. The public summary keeps no costs or paths."""
+    print("the lessons task set: targeted failure patterns in the comparison")
+    import contextlib
+    import gzip
+    import io
+    import bench
+    import report
+    ls = bench.load_tasks("lessons")
+    check("--tasks lessons loads the lessons set (8 tasks), each marked with its set and targets",
+          len(ls) == 8 and all(t["set"] == "lessons" and isinstance(t.get("targets"), list) for t in ls), [t["id"] for t in ls])
+    check("no --tasks is still the standard 20; ids and set names mix",
+          len(bench.load_tasks()) == 20 and [t["id"] for t in bench.load_tasks("ff-form,lessons")][:2] == ["ff-form", "calc-arrows"])
+    r = run(["learn", "bench", "--config", CONFIG, "--tasks", "lessons"])
+    check("learn bench --tasks lessons states the set and still asks first",
+          r.returncode != 0 and "8 tasks (lessons set)" in r.stdout and "asks first" in r.stderr, (r.stdout[-300:], r.stderr[-200:]))
+    root = os.path.join(TD, "benchcmp")
+
+    def make_run(name, lessons, seat_calls, ids):
+        d = os.path.join(root, name)
+        os.makedirs(d)
+        json.dump({"run_id": name, "started": "2026-11-18T20:00:00", "tasks": ["ff-seat-map", "calc-arrows"],
+                   "task_sets": ["lessons"], "metacomputer": {"sha": "abc1234def", "dirty": False}, "spent_usd": 1.0,
+                   "switches": {"model": "m", "lessons": lessons, "lessons_count": len(ids), "lessons_ids": ids,
+                                "coord_guard": "off", "shell": "allow", "skill": os.path.join(TD, "skill")}},
+                  open(os.path.join(d, "run.json"), "w"))
+        recs = []
+        for task, targets, tl, calls, ok in (
+                ("ff-seat-map", ["no_frame", "repeat", "churn"], ["no-frame", "repeat-class", "route-churn"], seat_calls, True),
+                ("calc-arrows", [], [], [("run_steps", {"steps": []}, "1. click ERROR (find): no button \"Save\"", True)], False)):
+            os.makedirs(os.path.join(d, task))
+            with gzip.open(os.path.join(d, task, "transcript.jsonl.gz"), "wt") as f:
+                for k, e in enumerate(events_for(calls, P1, 0, True, f"{name[:4]}{task[:4]}-session", "/tmp/x")):
+                    e.pop("timestamp", None)
+                    f.write(json.dumps(dict(e, t=k * 2.0)) + "\n")
+            recs.append({"task": task, "set": "lessons", "targets": targets, "task_lessons": tl, "route": "mixed",
+                         "session": {"wall_s": 90, "budget_usd": 1.5}, "check": {"pass": ok, "score": 1.0 if ok else 0.5},
+                         "env": {"driver_version": "0.53.0"},
+                         "metrics": {"cost_usd": 0.5, "turns": 10, "invalid_args": 0, "result_subtype": "success"}})
+        with open(os.path.join(d, "results.jsonl"), "w") as f:
+            for x in recs:
+                f.write(json.dumps(x) + "\n")
+        return d
+    shot = {"pid": 50, "window_id": 11, "x": 10, "y": 10}
+    a = make_run("cmp-without", "off", [("click", shot, NOFRAME, True), ("click", shot, NOFRAME, True),
+                                        ("click", shot, "Clicked at (10, 10).", False)], [])
+    b = make_run("cmp-with", "on", [("click", shot, "Clicked at (10, 10).", False)], ["no-frame", "check-text"])
+    pats = report.patterns_of(a, "ff-seat-map")
+    check("learn's classifier over a task's transcript: two no-frame failures, one of them a repeat",
+          pats == {"no_frame": 2, "repeat": 1}, pats)
+    path = report.write_compare(a, b)
+    md = open(path).read()
+    check("the written comparison has a targeted column and the failure-pattern table",
+          "Targeted A / B" in md and "| no_frame: pixel action without a screenshot frame | 1 | 2 | 0 | -2 |" in md
+          and "Targeted (each task's own targets, summed): A 3, B 0 (-3)" in md
+          and "| not_found: element not found | 0 | 1 | 1 | +0 |" in md and "Lessons B's sessions got: no-frame, check-text" in md, md[-900:])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        learn.print_bench_comparison(report, {"without": a, "with": b}, path)
+    out = buf.getvalue()
+    check("learn bench prints the targeted patterns, each with how many tasks target it",
+          re.search(r"targeted patterns\s+3\s+0\s+-3", out) and re.search(r"no_frame \(1 task\)\s+2\s+0\s+-2", out)
+          and re.search(r"not_found\s+1\s+1\s+\+0", out), out)
+    check("…and which tasks the with-run's lessons answer",
+          "Lessons the with-run's sessions got: no-frame, check-text; tasks whose targets they answer: ff-seat-map" in out, out)
+    s = report.write_summary(a)
+    check("a run's summary lists the failure patterns", "Failure patterns" in open(s).read() and "ff-seat-map" in open(s).read())
+    pub = report.public_summary(b)
+    blob = json.dumps(pub)
+    check("the public summary (bench/runs/) has the patterns and targets but no costs or paths",
+          pub["totals"]["targeted"] == 0 and pub["totals"]["patterns"] == {"not_found": 1}
+          and pub["switches"]["lessons_ids"] == ["no-frame", "check-text"] and pub["task_set"] == "lessons"
+          and "cost" not in blob and "usd" not in blob.lower() and TD not in blob and "/tmp/x" not in blob, blob[:400])
+
+
 def tamper_checks(shot):
     print("audit P1 #1: a store written outside `learn` is caught, not sent, and needs a reseal")
     s2 = os.path.join(TD, "store2")
@@ -1017,6 +1094,7 @@ def main():
         test_store_permissions()
         test_escaping()
         test_bench_switch()
+        lessons_set_checks()
         tamper_checks(shot)
         bench_binding_checks()
         review_binding_check(shot)

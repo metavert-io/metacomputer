@@ -1,0 +1,31 @@
+id = "calc-chart-size"
+title = "Calc: a column chart set to an exact size"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "mixed"
+timeout_s = 840
+files = ["sheets/rainfall.csv"]
+setup = """
+to_odf ods ~/bench/rainfall.csv ~/bench/sheets && rm ~/bench/rainfall.csv
+"""
+targets = ["menu_path", "churn", "no_frame", "foreground_unavailable", "focus_not_restored"]
+lessons = ["menu-path", "route-churn", "no-frame", "foreground", "focus-restore"]
+evidence = "recorded sessions: Format > Position and Size... wasn't found with a chart in edit mode (two sessions), and one of them spent 25 calls trying routes to that dialog; DESKTOP.md, LibreOffice Calc, Charts"
+prompt = """
+Open ~/bench/sheets/rainfall.ods in LibreOffice Calc and insert a column chart of the monthly
+rainfall, with the months as the categories. Make the chart 16 cm wide and 9 cm high. Save the
+file, keeping the .ods format.
+"""
+check = """
+p = "~/bench/sheets/rainfall.ods"
+fr = ods_chart_frames(p)
+bars = [f for f in fr if f["class"] == "chart:bar"]
+sizes = [(f["width_cm"], f["height_cm"]) for f in fr]
+C.add("a chart is embedded", 0.15, bool(fr), [f["class"] for f in fr])
+C.add("a column (bar) chart of the Rainfall column", 0.15, any("B" in f["ranges"] for f in bars), [f["ranges"] for f in fr])
+wide = [f for f in bars if f["width_cm"] is not None and abs(f["width_cm"] - 16) <= 0.1]
+C.add("16 cm wide", 0.35, bool(wide), sizes)
+C.add("9 cm high", 0.35, any(f["height_cm"] is not None and abs(f["height_cm"] - 9) <= 0.1 for f in wide), sizes)
+rows = ods_rows(p)[0]
+C.add("data unchanged", 0.0, [cval(cell(rows, f"B{r}")) for r in range(2, 14)] == [78, 61, 55, 47, 52, 40, 38, 44, 59, 83, 91, 86])
+"""
