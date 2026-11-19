@@ -77,6 +77,151 @@ a fake `git`.
   that's the one installed, or standard Lume) and how to remove it, and mentions a
   lume-secure left beside mcomp-vm.
 
+## More than one VM: `tests/test_multi_vm.py`
+
+`python3 tests/test_multi_vm.py` (261 checks) needs no VM: a copy of the checkout
+in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
+runner in a temporary HOME that logs every delete, a stand-in for the vault, and
+private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
+folders in a storage location of its own (`config get`), and deleting a VM deletes its folder, as the
+runner's does.
+- Which settings: `config/local.env` alone (the vault's and the event stream's own
+  defaults, as before); `--vm NAME` and `MCOMP_VM` (`config/vms/NAME.env`, its own
+  baseline, keys, runtime folders, vault and spool, passed on as `MCOMP_CONFIG`);
+  `--vm` beats `MCOMP_VM`; `MCOMP_CONFIG` as before, `MCOMP_VAULT_DIR` and
+  `MCOMP_EVENTS_SPOOL` still override; `lib/labconfig.py` picks the same file.
+- Refused, with nothing run: a name with no settings, two files for one VM, `--vm` and
+  an `MCOMP_CONFIG` that disagree, a per-VM file naming another VM, without ports, or
+  borrowing the main VM's baseline or port, a vault folder that disagrees with
+  `MCOMP_VAULT_DIR`, a relative `VAULT_DIR`; in a checkout without
+  `config/local.env`: other VMs in the runner, `config/vms/` files, a runner list that
+  fails, a missing `MCOMP_CONFIG` file (`help`, `where` and `vm list` still work), and
+  `scripts/build-vm.sh` run directly; `setup` for a VM chosen by name, and `install.sh` with
+  `MCOMP_VM` set. Only the default VM and its copies, or no runner
+  yet: it goes ahead.
+- `secrets` reaches the vault with the VM's own folder and spool and says which VM and
+  vault in one line; the main VM's leaves the vault's defaults; the hub's environment and
+  `lib/events.py` use the VM's spool; changing commands name the VM once.
+- `vm list --json` and the table: state, disk, ports, baseline, checkpoints, refused
+  settings, the runner's other VMs, a shared port, and a runner that fails.
+- `vm create`: the file (0600; identity, vault and spool; this Mac's choices copied, never
+  `VOLUMES` or a password command), picked ports, and refusals (existing settings or VM,
+  the main VM's name, bad names, taken or half-given ports, a build with no terminal
+  and no `--yes`); with `--yes` the build runs with the new VM's settings.
+- `vm delete`: refused with only `--yes` or a wrong `--confirm`, for the main VM, a running
+  one, one with checkpoints, one with no settings here, `--delete-vault` for a vault that
+  isn't the VM's own, `--delete-volumes` for a volume another VM attaches, and while the
+  VM's lock is held; at a terminal a mistyped name deletes nothing and the right one
+  deletes the VM, baseline and `-prev`, its settings and runtime folder and keeps its
+  vault; `--delete-vault` removes only the VM's own folder; `--force` stops a running VM
+  first; the main VM keeps `config/local.env`. No other VM is ever deleted.
+- The independent audit's findings, each failing on the first version (797fbc6; checked by running
+  this file there): a per-VM baseline that is the main VM, an `MCOMP_CONFIG` baseline that is the
+  main VM or a previous baseline another file names, a file named like a baseline (each: refused,
+  nothing deleted); a per-VM `SSH_DIR` spelled `x/.` or `x//y`, a `RUN_DIR` through a link, a
+  `LOG_DIR` that is the main `RUN_DIR`, two per-VM files sharing a folder through a link (refused);
+  a runtime folder behind a linked `.run-vms`, `--delete-vault` of a vault folder that is a link, another
+  VM's vault inside the one to delete or equal to it (refused, the other folders kept); a per-VM
+  vault linked to the main one, a relative `MCOMP_VAULT_DIR` (refused), one through a link (the
+  vault gets the real folder); `start` while the VM's lock is held, the VM started or a checkpoint
+  made while the name was typed, the owners lock held (refused, nothing deleted); `vm create` while
+  another chooses ports (refused), two at once (different ports; on the first version they collided).
+- The hub (a real `Hub` from the copy, connecting through `bin/metacomputer mcp`): it pins the VM's
+  name, SSH port and host key; with its settings file deleted, or naming another VM, port or host
+  key, each reconnect is refused with the reason (on main it reached the default VM); with the
+  settings back, it connects again.
+- The re-check's findings (failing on 3998be6): a settings file refused for another reason whose
+  vault is inside the one `--delete-vault` would delete, or whose folder isn't absolute (refused,
+  kept); `MCOMP_VAULT_DIR` naming the main VM's vault for a `config/vms/` VM (refused); a delete
+  refused after its prompt leaves the VM's event watcher running; the hub's `input-reset` is
+  refused when the settings name another VM. A refused file naming `demo-baseline` as its own
+  blocks deleting demo (this one already held).
+- The second re-check's findings (failing on d25fd6c): `--delete-vault` beside a settings file that
+  can't be read, or that reads a file it can't, whose vault is inside demo's (refused, kept); an
+  unreadable `config/local.env` (refused, never the defaults' VM); `--delete-volumes` when a refused
+  file attaches the same volume (refused, nothing deleted).
+- The third re-check's finding (failing on 83bfcac): a readable settings file that sources one it
+  can't read is refused when loaded and shown refused by `vm list`; deleting the main VM with
+  `--force --delete-vault` beside it is refused and the other VM's vault inside the main one's is
+  kept; once that file reads cleanly, the same delete is refused as holding another VM's folder.
+- The final check's findings (failing on 351795f): deleting the main VM, or an `MCOMP_CONFIG` VM,
+  without flags beside a settings file that can't be read (refused, nothing deleted; before, the
+  runner deleted the VM's folder and another VM's vault in it); `vms.py delete-check` given a row
+  whose names can't be read (refused, never its file name); a `VAULT_DIR` in the runner's VM
+  storage (refused when loaded, and deleting the VM whose folder holds it refused); a per-VM folder
+  inside the main VM's `.run`, `logs` or `SSH_DIR`, or holding the checkout's `.run`; a vault inside
+  another VM's through a link, and the VM whose vault holds it; folders not made yet, spelled in
+  another case (all refused); the defaults of a `config/vms/` VM (in nobody's folder); and
+  `build-vm.sh` (stand-ins for the tools, the downloads and the disk converter) building the main
+  VM while another VM's vault is in its `RUN_DIR`'s seed folder, beside a file that can't be read,
+  or when that file appears while the tools are built (each refused before anything is created or
+  deleted, the vault kept; before, the seed folder went with it).
+- The third final check's findings (failing on 695cfdd): the alias probe (another VM's `SSH_DIR` a link
+  into the main `RUN_DIR`'s seed: refused when loaded, and the main VM's build refused before its seed is
+  deleted, the keys kept); the main VM's `reset`, `restore`, `checkpoint --delete`, `checkpoint --replace`
+  and `baseline`, and an `MCOMP_CONFIG` VM's `reset`, with another VM's vault in the runner's storage
+  (each refused, naming the file and folder, nothing deleted); the runner's `config get` failing (a per-VM
+  VM, `vm create`, `vm delete` and `reset` refused; the main VM's `stop` and `status` still work);
+  storage spelled with `..`, under a folder that can't be searched, and Lume's settings file unreadable
+  (refused, not skipped); a `config/vms/` file setting any of its five folders, and
+  `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` naming another folder for one (refused). The older scenarios
+  that set a per-VM folder now make it a link instead (the folders are fixed), and are compared as the
+  folders they physically are.
+- The fourth final check's findings (failing on cf6ad10): fetching rclone (scripts/fetch-artifacts.sh, with
+  stand-ins for curl, gpgv and shasum: no network) while `.cache/rclone-vVERSION` is a link to the per-VM
+  vaults' folder (VM x's vault kept, the delete refused, naming it); `volume delete` of an S3 volume whose
+  state folder holds VM x's vault through a link (in-process, with a stand-in for the Keychain tool: refused
+  before anything changes, the vault and the registration kept; with nothing of a VM's in it, deleted). And
+  the helper, `scripts/safe-rmtree.sh`: a plain folder goes; a folder holding a link to a VM's vault goes,
+  the vault stays; the main `RUN_DIR`, a path whose parent is a link to a VM's vault, a link on the way to a
+  VM's folder and a folder holding one are refused; a link itself goes, never what it points to; an
+  unreadable settings file deletes nothing.
+- The fifth final check's findings (failing on 3cf8be0): `scripts/safe-rmtree.sh` given a link to VM x's
+  vault spelled `alias/`, `alias/.`, `alias/..` and `alias/../x` (refused, the vault kept; the link itself
+  still goes), and links to the home folder and to the checkout (the box's own copies) spelled with `/`
+  and `/.` (refused, both kept); pruning S3 backups (`storage.prune_backups`, with nothing to keep) while
+  VM x's vault is a link into the backup folder (refused, nothing pruned, `vault.json` kept; with nothing
+  of a VM's there, the backups go and a linked folder in it is left alone); the SSH certificates' cleanup
+  (`cert_for`, with a stand-in CA) while VM x's vault is a link into `$SOCK_DIR/certs` with files over an
+  hour old (kept); and, with `config/local.env` naming its own vault and spool, the folder holding the
+  account's own vault (refused by `safedelete.py check`: only checked, nothing deleted).
+- The sixth final check's findings (failing on 96791f2): `RUN_DIR/owners`, storage's `space` folder and the
+  events admin journal each a link to VM x's vault (`owners.claims()`, `storage.claims_on()`,
+  `events._admin_records()` in-process: `vault.json` and files shaped like their records kept; in their own
+  folders, dead or broken records go and other files stay); deleting with `shutil.rmtree` made to refuse
+  `dir_fd` (as on Python 3.9), quiet or not, and with `scripts/safe-rmtree.sh` under macOS's own
+  `/usr/bin/python3` when it's here (a folder with a link inside goes, the link's target stays; `alias/`
+  still refused); and `vm delete x` while `config/local.env` names its own vault and spool and the account's
+  vault folder (here the one under the box's `$HOME`) is a link into `.run-vms/x` (refused before anything is
+  deleted; `rmtree_own` refuses the same with the account's home standing in; with nothing of anyone else's
+  there, x and its runtime folder go).
+- The seventh final check's findings (failing on b97d4af): with `config/local.env` naming its own vault and
+  spool and the account's vault folder (here the box's, under `$HOME`) a link into the runner's folder of the
+  VM, `vm delete` of the main VM, `reset`, `restore`, `checkpoint --delete` and `baseline` (each refused before
+  the runner deletes anything, the vault kept); `runner_delete` itself (refused; with nothing of anyone's in the
+  folder, the VM goes); `mc_shared_records` (a VM with its own vault and spool still carries the account's);
+  and the event spool: another VM's vault a link to the spool, holding `vault.json`, with `.quarantine` a file
+  (`vault.json` kept, a valid event there not consumed either, the refusal said); a file that can't be
+  quarantined (left, counted in `spool.json`, said once; never deleted) while valid events are consumed; with
+  a `.quarantine` folder, the invalid file is moved there.
+- No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
+  `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS`: the runner's
+  delete is one line, in `runner_delete` (which must call `safedelete.py check-runner` first, and whose every
+  caller must run after the identity rule), deletes inside the VM, printed hints. A Python function that
+  lists a folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`), itself or through
+  any function of its module it calls, and deletes, moves or rewrites files itself (`unlink`, `rmdir`,
+  `rmtree`, `os.remove`, `os.rename`, `os.replace`, `shutil.move`, the programs' file writers) is in
+  `DELETE_WALK_EXCEPTIONS` with why and the code that keeps it safe (each fragment must stay in the
+  function); records go through `safedelete.remove_records`; and no script has `find -delete`,
+  `find -exec rm`, `xargs rm`, `rsync --delete`, `tar --remove-files`, `ditto` or `rm` of a glob outside
+  `TREE_SHELL_EXCEPTIONS`. A new one, or an exception no longer in the code, fails the test.
+- `MCOMP_TEST_PY=PATH python3 tests/test_multi_vm.py` runs everything the tests start under another Python
+  (3.11 or later: `scripts/lib.sh` refuses older). The helper itself must also work under macOS's own
+  `/usr/bin/python3` (3.9), which `scripts/safe-rmtree.sh` may run it with: `final6_fixes` checks that.
+- `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
+  and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
+  and an acting subcommand prints the VM and vault first (`status` doesn't).
+
 ## The Claude Code plugin: `tests/test_plugin.py`
 
 `python3 tests/test_plugin.py` (85 checks) needs no VM. `install.sh` runs against a
@@ -1151,6 +1296,16 @@ update the row with the doc's new wording. What it pins:
   the Mac is reachable, and `scripts/lib.sh` starts the gateway with that file;
 - mcomp-vm's flags as the docs name them are the ones `host_sharing_args` passes, one per
   `SHARE_*` setting, all off by default;
+- more than one VM: a `vm create` VM's vault is its own folder (`scripts/lib.sh`, handed to
+  the vault by `bin/metacomputer`); `vm delete --delete-vault` deletes only that folder; `vm
+  delete` takes the VM's lock, wants the name typed or `--confirm` and never reads `--yes`,
+  and refuses the main, a running and a held VM without `--force`;
+- the rest of the separation between VMs: a per-VM baseline is always `NAME-baseline` and names are
+  checked against every VM's; folders are compared by device and inode; `start` takes the VM's
+  lock; folders are deleted along a no-link walk; after the prompt the owners lock is held and
+  everything checked again before anything stops; refused settings files keep their names and folders
+  protected; every command a hub runs is pinned to its VM; and the typed name is described as what it is (a
+  terminal read, not proof of a person);
 - pinned versions and digests: architecture.md's components table, the diagram, the guide
   and THIRD_PARTY_NOTICES.md against defaults.env; no doc names a newer Cua Driver than
   the pin; download names and URLs carry the pinned versions;

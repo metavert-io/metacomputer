@@ -156,6 +156,20 @@ def claim_path(bridge_pid):
     return os.path.join(OWNERS_DIR, f"{bridge_pid}.json")
 
 
+CLAIM_NAME = re.compile(r"[1-9][0-9]{0,9}\.json")   # claim_path's names: a pid, .json
+
+
+def drop_dead_claims(names):
+    """Delete dead claims (claims() found their holders gone): only claim files (CLAIM_NAME), through
+    lib/safedelete.py, which refuses when OWNERS_DIR is a link or is, holds or reaches a folder some VM uses. Best
+    effort: a refusal keeps them (they're not counted as claims either way)."""
+    try:
+        import safedelete
+        safedelete.remove_records(OWNERS_DIR, names, CLAIM_NAME)
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def lock(timeout=10.0):
     """This VM's owners lock: hold it to check for other controllers and claim the
@@ -280,7 +294,7 @@ def claims():
     """Live claims; files of dead bridges are removed. A shell claim made outside Claude
     Code (kind "shell") is kept for the activity window after its last run even when the
     shell that ran it has exited, and removed after that."""
-    out = []
+    out, dead = [], []
     if not os.path.isdir(OWNERS_DIR):
         return out
     for f in os.listdir(OWNERS_DIR):
@@ -301,14 +315,14 @@ def claims():
             if rec.get("kind") == "shell" and not rec.get("claude_pid") and idle < ACTIVE_S:
                 rec["holder_gone"] = True     # its shell exited; the claim holds by its time
             else:
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+                if CLAIM_NAME.fullmatch(f) and rec.get("bridge_pid") == int(f[:-5]):   # a claim file of ours
+                    dead.append(f)
                 continue
         rec["idle_s"] = idle
         rec["active"] = idle < ACTIVE_S
         out.append(rec)
+    if dead:
+        drop_dead_claims(dead)
     return out
 
 

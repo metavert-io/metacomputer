@@ -568,6 +568,7 @@ case "$1" in
   ls) echo '[{"name": "lctest", "status": "running"}, {"name": "lctest-baseline", "status": "stopped"}]' ;;
   get) case "$2" in lctest) echo '{"name": "lctest", "status": "running"}' ;;
                      *) echo "{\\"name\\": \\"$2\\", \\"status\\": \\"stopped\\"}" ;; esac ;;
+  config) printf 'Configured VM storage locations:\\n  - home: %s/vms (default)\\n' "$(dirname "$0")" ;;   # where it keeps VMs
 esac
 exit 0
 """

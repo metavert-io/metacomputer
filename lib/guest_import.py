@@ -67,6 +67,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from termsafe import UNSAFE, escape_for_terminal  # noqa: E402
+import safedelete  # noqa: E402  (every recursive delete: never a folder a VM uses)
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -528,7 +529,7 @@ def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None, only=None):
             os.close(stage_fd)
     finally:
         claim.release()
-        shutil.rmtree(stage, ignore_errors=True)
+        safedelete.rmtree(stage, quiet=True)
         os.close(dest_fd)
     return report
 

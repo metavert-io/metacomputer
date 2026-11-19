@@ -10,6 +10,8 @@
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
+vm_target_check   # which VM: never the defaults' VM on a guess (scripts/lib.sh)
+vm_notice
 # The optional event stream (docs/events.md): build_done or build_failed, however the build ends.
 # Refusing to overwrite an existing VM sends nothing; an interrupted build (Ctrl-C) is info.
 BUILD_QUIET_EXIT=0
@@ -20,7 +22,7 @@ REPLACE=0; [ "${1:-}" = "--replace" ] && REPLACE=1
 TS="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="$LOG_DIR/build-$TS.log"
 exec > >(tee -a "$BUILD_LOG") 2>&1
-say "build $TS (log: logs/build-$TS.log)"
+say "build $TS (log: ${BUILD_LOG#"$LAB_ROOT"/})"
 
 # --- 0. prerequisites -------------------------------------------------------
 # Every check that can refuse the build comes first: until the build is certain to go
@@ -39,16 +41,25 @@ case "$lock_rc" in
   1) BUILD_QUIET_EXIT=1; die "another build or change of the VM $VM_NAME is running ($LOCK_OWNER); nothing was changed. Wait for it to finish, then run this again" ;;
   *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
 esac
+# The identity rule, whichever VM this is (the main one too), before anything is deleted (the runner's VMs on
+# --replace, the seed under RUN_DIR): every other settings file of this checkout reads cleanly, no name or folder of
+# this VM's is another's, no folder of its is in another's or holds one, and no VM's folder is in the runner's VM
+# storage or another place that gets deleted on its own (scripts/lib.sh mc_identity_check; it fails closed when the
+# runner's storage can't be known). Checked here, again before the downloads, and again before the first deletion.
+build_identity_check() { mc_identity_check --no-ports || die "not building $VM_NAME: $MC_REFUSAL. Nothing was deleted"; }
+build_identity_check
 # A listing that fails is never "absent": nothing is created or deleted on a guess.
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME, so it can't tell whether $vm exists; nothing was changed"
   if [ "$st" = present ] && [ $REPLACE -ne 1 ]; then
-    BUILD_QUIET_EXIT=1; die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"
+    BUILD_QUIET_EXIT=1; die "$vm already exists; use '$(mc_cmd) reset' to restore it, or build --replace to rebuild"
   fi
 done
 command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
 "$(dirname "$0")/build-tools.sh"
+build_identity_check   # again before the downloads (fetch-artifacts.sh cleans up in .cache, a place no VM's folder is)
 "$(dirname "$0")/fetch-artifacts.sh"
+build_identity_check   # and before anything of the VM's is deleted: the settings may have changed meanwhile
 
 # The build goes ahead. Until it finishes, this marker says that $VM_NAME is a build in progress (install.sh
 # reads it: only then is a VM without its baseline an interrupted build, and even then it's replaced only on
@@ -67,6 +78,9 @@ echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN
 rm -f "$SSH_DIR/guest-features"
 
 # --- 1. VM shell --------------------------------------------------------------
+# A hub still serving the VM being replaced pinned its host key (lib/mcp_hub.py pin_identity) and would refuse the
+# new one: it ends here, and the next client starts a hub for the new VM.
+[ "$REPLACE" != 1 ] || ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) >/dev/null 2>&1 || true
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME before replacing them; nothing was deleted"
   if [ "$st" = present ]; then
@@ -74,7 +88,7 @@ for vm in "$VM_NAME" "$BASELINE_NAME"; do
     [ $REPLACE -eq 1 ] || die "$vm appeared while this build was getting ready (made by something else); nothing was deleted"
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
-    "$LUME" delete "$vm" --force
+    runner_delete "$vm" || die "$vm wasn't deleted (above); nothing was replaced"
   fi
 done
 # Storage the old VM had attached (docs/storage.md): stop its watcher, sync S3 volumes once more, let go of
@@ -95,7 +109,9 @@ ok "disk: Ubuntu $UBUNTU_RELEASE cloud image, $((size / 1024 / 1024 / 1024)) GiB
 MAC="$(vm_mac "$VM_NAME")"
 
 # --- 2. cloud-init seed (NoCloud, ISO9660 label cidata) ---------------------
-SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"; mkdir -p "$SEED/payload"
+# Every recursive delete goes through scripts/safe-rmtree.sh (lib/safedelete.py): never a folder another VM uses.
+SEED="$RUN_DIR/seed"; "$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED" "$RUN_DIR/seed.iso" || die "not deleting the old seed (above)"
+mkdir -p "$SEED/payload"
 cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$SEED/payload/mozilla-repo-signing-key.gpg"   # only the pinned key (fetch-artifacts.sh)
@@ -122,7 +138,7 @@ case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/pinned-key.asc" "$SEED
   echo "SECRETS_PROXY_PORT=${SECRETS_PROXY_PORT:-18765}"
 } > "$SEED/payload/versions.env"
 (cd "$SEED/payload" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 -czf ../payload.tgz .)
-rm -rf "$SEED/payload"
+"$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED/payload" || die "not deleting the seed's payload (above)"
 TZ_NAME="$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
 "$PY" - "$SEED" "$SSH_DIR" "$TS" "$TZ_NAME" "$VM_HOSTNAME" "$GUEST_USER" "$ADMIN_USER" <<'EOF'
 import json, sys, pathlib
@@ -178,7 +194,7 @@ p = pathlib.Path(seed)
 EOF
 chmod 600 "$SEED/user-data"
 hdiutil makehybrid -quiet -o "$RUN_DIR/seed.iso" "$SEED" -iso -joliet -iso-volume-name cidata -joliet-volume-name cidata
-rm -rf "$SEED"
+"$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED" || die "not deleting the seed (above)"
 chmod 600 "$RUN_DIR/seed.iso"
 ok "seed: $(du -h "$RUN_DIR/seed.iso" | cut -f1) (user-data, keys, payload)"
 
@@ -249,4 +265,4 @@ rm -f "$SSH_DIR/hostkey"
 # storage=1: storage-helper and `metacomputer-admin storage` (volumes, Mac folders, reference disks).
 printf 'storage=1\nbuild=%s\n' "$TS" > "$SSH_DIR/guest-features"
 ok "removed the VM's private host key from $SSH_DIR (the VM keeps it; a rebuild makes a new one)"
-say "build complete. Start it with: metacomputer start"
+say "build complete. Start it with: $(mc_cmd) start"

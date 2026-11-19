@@ -2,8 +2,16 @@
 # metacomputer: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
 # that Claude Code operates through Cua Driver's MCP server.
 #
-# Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
+# Usage: metacomputer [--vm NAME] COMMAND [ARGS]     (short alias: mcomp)
 #
+#   --vm NAME                      act on the VM NAME (its settings: config/vms/NAME.env); MCOMP_VM=NAME does the
+#                                  same. Without it: config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
+#   vm list [--json]               this checkout's VMs (settings files and the runner): state, disk, ports, baseline
+#   vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]
+#                                  a VM of its own: writes config/vms/NAME.env (ports, keys, folders, vault) and builds it
+#   vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
+#                                  delete a VM, its baseline and config/vms/NAME.env, after you type its name
+#                                  (--yes doesn't count); volumes and the vault folder stay unless their flag asks
 #   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes] [--discard-unsynced]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
@@ -135,16 +143,51 @@ if mc_in_plugins "$mc_self"; then
 fi
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
+# --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same).
+MCOMP_VM_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --vm) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --vm needs a VM name (metacomputer vm list)" >&2; exit 2; }
+          MCOMP_VM_ARG="$2"; shift 2 ;;
+    --vm=*) MCOMP_VM_ARG="${1#--vm=}"; [ -n "$MCOMP_VM_ARG" ] || { echo "metacomputer: --vm needs a VM name" >&2; exit 2; }; shift ;;
+    *) break ;;
+  esac
+done
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
-# A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM: settings that now name
-# another VM (they are shell code, and can change) stop every command here, before anything touches a VM.
+# A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM, and the hub pins the VM it
+# serves (MCOMP_EXPECT_VM, _SSH_PORT, _HOSTKEY, from when it started): settings that now name another VM (they are
+# shell code, and can change, or their file can be gone) stop every command here, before anything touches a VM.
+mc_hint=""
+[ -z "${MCOMP_HUB_PID:-}" ] || mc_hint=". This hub serves only the VM it started with (metacomputer hub stop ends it)"
 if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
-  echo "metacomputer: the settings now name the VM '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed (MCOMP_EXPECT_VM); refusing" >&2
+  if [ -n "${MC_MISSING_CONFIG:-}" ]; then
+    echo "metacomputer: the settings file for the VM '$MCOMP_EXPECT_VM' ($MC_MISSING_CONFIG) is gone, and without it the settings name '$VM_NAME'; refusing$mc_hint" >&2
+  else
+    echo "metacomputer: the settings now name the VM '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed (MCOMP_EXPECT_VM); refusing$mc_hint" >&2
+  fi
   exit 1
 fi
+if [ -n "${MCOMP_EXPECT_SSH_PORT:-}" ] && [ "$MCOMP_EXPECT_SSH_PORT" != "$SSH_PORT" ]; then
+  echo "metacomputer: the settings now give $VM_NAME the SSH port $SSH_PORT, not $MCOMP_EXPECT_SSH_PORT as when this started (MCOMP_EXPECT_SSH_PORT); refusing$mc_hint" >&2
+  exit 1
+fi
+if [ -n "${MCOMP_EXPECT_HOSTKEY:-}" ] && [ "$(grep -F "[127.0.0.1]:$SSH_PORT " "$KNOWN_HOSTS" 2>/dev/null | head -1)" != "$MCOMP_EXPECT_HOSTKEY" ]; then
+  echo "metacomputer: $VM_NAME's pinned host key (known_hosts in its SSH_DIR) isn't the one it had when this started (MCOMP_EXPECT_HOSTKEY); refusing$mc_hint" >&2
+  exit 1
+fi
+unset mc_hint
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
+# Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
+# for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
+case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions) ;; *) vm_target_check ;; esac
+case "$cmd" in
+  start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
+  security) [ "${1:-}" != apply ] || vm_notice ;;
+  secrets) vm_notice vault ;;
+  claude) case "${1:-}" in read|wait|status|_probe|_keeper|-h|--help|help) ;; *) vm_notice vault ;; esac ;;   # its token is the vault's
+esac
 
 # --- EVENTS HOOK (secrets) ---------------------------------------------------------
 # `metacomputer secrets` comes from another branch. When it exits 3 ("vault locked"),
@@ -217,6 +260,9 @@ need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (meta
 do_start() { # [--no-volumes]
   local novol=0 a
   for a in "$@"; do case "$a" in --no-volumes) novol=1 ;; *) die "usage: metacomputer start [--no-volumes]" ;; esac; done
+  # The VM's lock (held already by reset, restore and baseline, which start it): never during a build, a delete
+  # (`vm delete` holds it through its prompt) or another change of it.
+  vm_lock_or_die "metacomputer start"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
@@ -435,6 +481,7 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
   export_options
   local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
   record_env
+  [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"   # this VM's vault (its approvals line below)
   "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" "$stg" "$VAULT_BIN" <<'EOF'
 import json, os, subprocess, sys
 js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir, stg, vault_bin = sys.argv[1:]
@@ -724,7 +771,7 @@ expect_guard() {
 
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
   local src="$1" label="$2" evtype="${3:-restored}"
-  vm_lock_or_die "restoring $VM_NAME"   # held already by its callers; never a delete without it
+  vm_lock_or_die "restoring $VM_NAME"   # held already by its callers (vm_change_lock: the identity rule checked)
   expect_guard
   if [ -s "$RUN_DIR/manual-recording" ]; then
     # A reset often follows a run that went wrong; the recording of it is saved before the VM goes, whether or
@@ -744,7 +791,7 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
     storage_py checkpoint restore "$RESTORE_VOLUMES" || die "the volumes couldn't be rolled back; the VM wasn't replaced"
   fi
   expect_guard   # again, right before the working VM is deleted and replaced
-  if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force >/dev/null || die "lume delete failed"; fi
+  if vm_exists "$VM_NAME"; then runner_delete "$VM_NAME" >/dev/null || die "$VM_NAME wasn't deleted (above); it wasn't replaced"; fi
   say "cloning $src -> $VM_NAME"
   "$LUME" clone "$src" "$VM_NAME" >/dev/null || die "lume clone failed"
   ok "restored from $label"
@@ -754,7 +801,7 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
 
 do_reset() {
   parse_flags "$@"
-  vm_lock_or_die "metacomputer reset"
+  vm_change_lock "metacomputer reset"
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
@@ -769,12 +816,12 @@ ckpt_name() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "checkpoint nam
 do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
-  vm_lock_or_die "metacomputer checkpoint"
+  vm_change_lock "metacomputer checkpoint"
   if [ "${1:-}" = "--delete" ]; then
     ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     local vols; vols="$(storage_py checkpoint list "$2" 2>/dev/null)"
     confirm "Delete checkpoint '$2'${vols:+ (and its snapshot of volumes: $vols)}?"
-    "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
+    runner_delete "$CKPT_PREFIX$2" >/dev/null || die "checkpoint '$2' wasn't deleted (above)"
     storage_py checkpoint delete "$2" || warn "could not delete the volume snapshots of checkpoint '$2'"
     emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
     ok "checkpoint '$2' deleted"; return 0
@@ -788,12 +835,12 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
-    "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
+    runner_delete "$CKPT_PREFIX$name" >/dev/null || die "checkpoint '$name' wasn't deleted (above); it wasn't replaced"
     storage_py checkpoint delete "$name" || true
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
   if [ $withvol = 1 ] && ! storage_py checkpoint save "$name"; then
-    "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null 2>&1
+    runner_delete "$CKPT_PREFIX$name" >/dev/null 2>&1
     die "checkpoint '$name' not saved: its volumes couldn't be snapshotted (above)"
   fi
   emit_event lifecycle checkpoint info "Checkpoint '$name' of $VM_NAME saved" "" "name=$name" "change=saved"
@@ -814,7 +861,7 @@ pre = sys.argv[1]; print("\n".join(sorted(v["name"][len(pre):] for v in json.loa
 do_restore() { # NAME [--yes] [--override]
   parse_flags "$@"
   local name="${REST[0]:-}"; ckpt_name "$name"
-  vm_lock_or_die "metacomputer restore $name"
+  vm_change_lock "metacomputer restore $name"
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
@@ -825,7 +872,7 @@ do_restore() { # NAME [--yes] [--override]
 
 do_baseline() {
   parse_flags "$@"
-  vm_lock_or_die "metacomputer baseline"
+  vm_change_lock "metacomputer baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   handoff_hold_unless_override
@@ -834,8 +881,9 @@ do_baseline() {
   [ $was_running = 1 ] && { sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
-    vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
-    "$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null && "$LUME" delete "$BASELINE_NAME" --force >/dev/null
+    if vm_exists "$keep"; then runner_delete "$keep" >/dev/null || die "$keep wasn't deleted (above); the baseline wasn't replaced"; fi
+    "$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null || die "couldn't keep the baseline as $keep; it wasn't replaced"
+    runner_delete "$BASELINE_NAME" >/dev/null || die "$BASELINE_NAME wasn't deleted (above); it wasn't replaced (the copy $keep stays)"
     ok "previous baseline kept as $keep"
   fi
   "$LUME" clone "$VM_NAME" "$BASELINE_NAME" >/dev/null || die "clone failed"
@@ -1797,7 +1845,9 @@ do_where() { # paths a person or an agent may need
   echo "skill     $LAB_ROOT/skills/metacomputer"
   echo "docs      $LAB_ROOT/docs"
   echo "results   $LAB_ROOT/results"
-  echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
+  echo "vm        $VM_NAME (baseline $BASELINE_NAME; settings: $MC_SETTINGS_LABEL)$([ "${MC_IMPLICIT:-0}" = 1 ] && echo '; with other VMs in the runner, commands ask you to say which with --vm NAME')"
+  echo "vault     $(mc_vault_dir)"
+  echo "spool     ${EVENTS_SPOOL:-${HOME}/Library/Application Support/metacomputer/events/spool}"
 }
 
 # --- secrets: mcomp-vault (scripts/build-vault.sh) holds them; this only fills in the VM ---
@@ -1818,6 +1868,11 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
   esac
   local sub="${1:-status}" a has_vm=0 out rc
   [ $# -gt 0 ] && shift
+  # This VM's vault and spool (scripts/lib.sh): empty for the main VM, which leaves the vault's own defaults.
+  [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"
+  [ -z "${EVENTS_SPOOL:-}" ] || export MCOMP_EVENTS_SPOOL="$EVENTS_SPOOL"
+  # A per-VM vault folder's parent (the vault makes only the last folder, 0700).
+  case "${VAULT_DIR:-}" in "$MC_VMS_APP_DIR/"*) ( umask 077; mkdir -p "$MC_VMS_APP_DIR" ) || die "couldn't make $(mc_tilde "$MC_VMS_APP_DIR")" ;; esac
   for a in "$@"; do case "$a" in --vm|--vm=*) has_vm=1 ;; esac; done
   case "$sub" in
     bind)
@@ -1950,6 +2005,7 @@ case "$cmd" in
   task)       do_task "$@" ;;
   checkpoint) do_checkpoint "$@" ;;
   checkpoints) do_checkpoints ;;
+  vm)         . "$LAB_ROOT/scripts/vm-commands.sh"; do_vm "$@" ;;
   volume|refdisk) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/storage.py" "$cmd" "$@" ;;
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;
@@ -1980,6 +2036,7 @@ case "$cmd" in
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
+              [ "$MC_SETTINGS_KIND" != vm ] || die "setup sets up this checkout's main VM (config/local.env); for $VM_NAME: metacomputer --vm $VM_NAME build"
               case " $* " in *" --yes "*|*" -y "*) ;; *)
                 [ -t 0 ] || { printf '%s\n' "metacomputer setup runs $LAB_ROOT/install.sh, which asks before it changes anything." \
                   "There's no terminal here to ask on: to go ahead, run: metacomputer setup --yes" >&2; exit 3; } ;; esac

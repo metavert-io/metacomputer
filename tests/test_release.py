@@ -134,6 +134,8 @@ class World:
         write(os.path.join(self.work, "scripts", "release.sh"),
               open(os.path.join(LAB, "scripts", "release.sh")).read(), 0o755)
         write(os.path.join(self.work, "scripts", "check-public.sh"), CHECK_PUBLIC, 0o755)
+        for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):   # release.sh's temporary folder goes through it
+            write(os.path.join(self.work, f), open(os.path.join(LAB, f)).read(), 0o755 if f.endswith(".sh") else 0o644)
         write(os.path.join(self.work, "get.sh"), GET_SH, 0o755)
         for s in SUITES:
             write(os.path.join(self.work, "tests", s + ".py"), SUITE)

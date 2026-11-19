@@ -657,10 +657,11 @@ def build_root(t):
     """A copy of what scripts/build-vm.sh reads, with stand-ins for its downloads and tools, and a runner whose
     VMs live in a state file (its calls logged)."""
     root = os.path.join(t, "lab")
-    for d in ("scripts", "config"):
+    for d in ("scripts", "config", "lib"):
         os.makedirs(os.path.join(root, d))
-    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env"):
-        shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
+    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "lib/vms.py", "lib/termsafe.py",
+              "lib/safedelete.py", "scripts/safe-rmtree.sh"):
+        shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-tools.sh"), '#!/bin/bash\nsleep "${STUB_TOOLS_SLEEP:-0}"\n', 0o755)
     write(os.path.join(root, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)
     runner = os.path.join(t, "runner")
@@ -680,9 +681,14 @@ if a[:1] == ["ls"]:
     print(json.dumps([{{"name": v}} for v in shown])); sys.exit(0)
 if a[:1] == ["delete"]:
     sys.exit(0)
+if a[:2] == ["config", "get"]:                     # where it keeps VMs (build-vm.sh's identity check needs it)
+    os.makedirs(os.path.dirname(st) + "/vms", exist_ok=True)
+    print("Configured VM storage locations:\\n  - home: " + os.path.dirname(st) + "/vms (default)"); sys.exit(0)
 if a[:1] == ["create"]:
     sys.exit(1)                                     # the test stops each build here
-if a[:1] in (["stop"], ["get"]):
+if a[:1] == ["get"]:                                # where a VM is (runner_delete checks its folder before a delete)
+    print(json.dumps([{{"name": a[1], "status": "stopped", "locationName": "home"}}])); sys.exit(0)
+if a[:1] == ["stop"]:
     sys.exit(1)
 sys.exit(0)
 """, 0o755)
@@ -835,7 +841,7 @@ def test_build_tools_stamps():
     try:
         root = os.path.join(t, "lab")
         for f in ("scripts/build-tools.sh", "scripts/lib.sh", "config/defaults.env", "tools/qcow2raw/go.mod", "tools/qcow2raw/go.sum",
-                  "tools/qcow2raw/main.go"):
+                  "tools/qcow2raw/main.go", "scripts/safe-rmtree.sh", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):
             os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
             shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
         stubs = os.path.join(t, "stubs")
@@ -1101,6 +1107,9 @@ def install_root(b):
     shutil.copy(INSTALL, root)
     for f in ("defaults.env", "local.env.example"):
         shutil.copy(os.path.join(LAB, "config", f), os.path.join(root, "config"))
+    for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):   # every recursive delete goes through it
+        os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
+        shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
     write(os.path.join(root, "scripts", "build-tools.sh"),
           f'#!/bin/bash\nif [ "$1" = --check ]; then [ -z "${{STUB_TOOLS_STALE:-}}" ]; exit; fi\necho "tools${{*:+ $*}}" >> "{b.t}/tools.log"\n', 0o755)

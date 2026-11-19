@@ -1,6 +1,7 @@
 # VM disks, downloads, build tools, runtime state
 .cache/
 .run/
+.run-vms/
 vendor/
 *.img
 *.iso
@@ -9,6 +10,7 @@ vendor/
 recordings/*
 screenshots/*
 logs/*
+logs-vms/
 results/*
 !recordings/.gitkeep
 !screenshots/.gitkeep
@@ -24,3 +26,6 @@ config/*.local.env
 __pycache__/
 CLAUDE.local.md
 /local/
+
+# per-VM settings (metacomputer vm create)
+config/vms/

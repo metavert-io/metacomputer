@@ -120,8 +120,10 @@ package to add to `EXTRA_PACKAGES` (and the VM then needs a rebuild; see
 
 | You say | What happens |
 | --- | --- |
-| "Set up a second virtual computer called `staging`, Firefox only, beside the main one." | Claude writes a settings file with its own names, ports and folders, and builds it with `MCOMP_CONFIG`. About 5 GB more disk to start, growing as it's used. |
-| "Keep the main computer signed in to the CMS, and use the second one, with no logins at all, to check what a visitor sees." | Two VMs with separate browsers and profiles; the browser checks run against the second through `MCOMP_CONFIG`. |
+| "Set up a second virtual computer called `staging`, Firefox only, beside the main one." | `metacomputer vm create staging` writes its settings (its own names, ports, keys and vault) and builds it with your OK; Claude sets `BROWSERS="firefox"` in `config/vms/staging.env` first. About 5 GB more disk to start, growing as it's used. |
+| "Keep the main computer signed in to the CMS, and use the second one, with no logins at all, to check what a visitor sees." | Two VMs with separate browsers, profiles and vaults; the browser checks run against the second with `metacomputer --vm staging web ...`. |
+| "Which virtual computers do I have, and how much disk do they use?" | `metacomputer vm list`: each VM's state, disk use, baseline, ports and settings file. |
+| "Delete the `staging` computer." | `metacomputer vm delete staging` lists what goes (the VM, its baseline, its settings) and what stays (volumes, its vault folder), then waits for you to type the name. |
 | "Run the benchmark on the test computer while I keep working on the main one." | `bench/bench.py` resets and drives only the VM named in its `MCOMP_CONFIG`. |
 
 **Recordings and demos**
@@ -895,32 +897,78 @@ the VM has one.
 
 ### Run a second VM side by side
 
-`MCOMP_CONFIG` points the command at another settings file, used in place of
-`config/local.env` (the defaults still apply). Give that VM its own
-`VM_NAME`, `BASELINE_NAME`, `SSH_DIR`, `SSH_PORT`, `VNC_PORT`, `RUN_DIR` and
-`LOG_DIR`, so the two never share a gateway, a lock or logs.
-[config/local.env.example](../config/local.env.example) has a commented
-example.
+One command makes it. `vm create` writes `config/vms/staging.env` with the VM's own
+names, ports (the first free pair from 2300 unless you give `--ssh-port` and
+`--vnc-port`), SSH keys folder, vault folder and event spool, copies this Mac's
+choices (the runner, `BROWSERS`, memory, sharing and hardening settings) from
+`config/local.env`, and builds it after asking:
 
 ```bash
-MCOMP_CONFIG=~/second.env metacomputer build
-MCOMP_CONFIG=~/second.env metacomputer start
-MCOMP_CONFIG=~/second.env metacomputer web compare https://example.com
+metacomputer vm create staging
+metacomputer --vm staging start
+metacomputer --vm staging web compare https://example.com
 ```
 
-The `metacomputer` MCP server that `install.sh` registers drives the VM named
-in `config/local.env`. To give a Claude Code session the second VM instead,
-start it with `MCOMP_CONFIG` set and an MCP configuration whose `metacomputer`
-server passes the same variable. The benchmark runs its sessions this way.
+`--vm NAME` goes before the command; `export MCOMP_VM=staging` does the same for a
+whole shell. Everything follows the VM: its gateway, hub, locks, logs, live view,
+volumes, and its vault, so `metacomputer --vm staging secrets init` (then `bind`,
+`set`, `unlock`, in your own terminal) makes a vault for it alone, and its events
+come through its own spool. Commands that change a VM, and every `secrets`
+command, start with one line saying which VM (and vault) they act on:
+
+```
+metacomputer: VM staging (config/vms/staging.env), vault ~/Library/Application Support/metacomputer-vms/staging
+```
+
+Edit `config/vms/staging.env` like `config/local.env` (it's read on its own, after
+the defaults; `config/local.env` isn't read for it). Its folders are fixed by its
+name, beside the main VM's (`.run-vms/staging`, `logs-vms/staging`,
+`~/.ssh/metacomputer-staging`, `.../metacomputer-vms/staging`), and can't be set in the
+file; if one of them is a link into another VM's folder or into the runner's VM storage
+(`~/.lume`), the file is refused. `metacomputer vm list` shows
+every VM with its state, disk use, ports and baseline, and the runner's other VMs.
+[commands.md](commands.md#more-than-one-vm) has the whole scheme.
+
+When it isn't clear which VM is meant, commands refuse instead of guessing: a
+checkout with no `config/local.env` of its own (a second clone, a worktree) acts on
+a VM only when you say which with `--vm`, unless the runner has no VM but the
+default one. `MCOMP_CONFIG=FILE` still works as before, for settings files kept
+elsewhere.
+
+Deleting one:
+
+```bash
+metacomputer vm delete staging                  # says what goes and what stays, then you type the name
+metacomputer vm delete staging --delete-vault   # its vault folder too (only a VM's own folder)
+```
+
+It deletes the VM, its baseline and `config/vms/staging.env`; it keeps its volumes
+(`--delete-volumes` deletes the ones only it attaches, each asking again), its vault
+folder (`--delete-vault`), its logs and SSH keys. It refuses while the VM has
+checkpoints, and refuses the VM this checkout uses without `--vm`, a running VM or
+one a session holds unless you add `--force`. `--yes` never confirms it; without a
+terminal, `--confirm staging` does. The typed name guards against a slip, not
+against a program: anything that can run a command in a terminal can type it, so
+Claude passes `--confirm` only for a VM you named for deletion. It never deletes
+another VM's VM, baseline or copies, or a folder that is or holds another VM's; it
+refuses while any other settings file can't be read cleanly or any VM's folder is in
+the runner's VM storage (whichever VM is deleted, with or without flags), and it
+checks everything again after you confirm. `reset`, `restore`, `checkpoint` and
+`baseline` check the same before they delete or replace anything ([SECURITY.md](../SECURITY.md#more-than-one-vm---vm-name-metacomputer-vm)).
+
+The `metacomputer` MCP server drives the VM a bare `metacomputer` means. To give a
+Claude Code session the second VM instead, start it with `MCOMP_VM` set (for the
+commands it runs) and an MCP configuration whose `metacomputer` server passes the
+same variable (the benchmark runs its sessions this way):
 
 ```json
 {"mcpServers": {"metacomputer": {"type": "stdio",
   "command": "/path/to/metacomputer/bin/metacomputer", "args": ["mcp-lazy"],
-  "env": {"MCOMP_CONFIG": "/Users/you/second.env"}}}}
+  "env": {"MCOMP_VM": "staging"}}}}
 ```
 
 ```bash
-MCOMP_CONFIG=~/second.env claude --strict-mcp-config --mcp-config second-mcp.json
+MCOMP_VM=staging claude --strict-mcp-config --mcp-config staging-mcp.json
 ```
 
 `--strict-mcp-config` leaves your other MCP servers out of that session.
@@ -1114,7 +1162,7 @@ plain process that `start` and `stop` manage.
 
 **Platform:**
 - Apple-silicon Macs only, with an ARM64 guest.
-- One controller per VM at a time (see [Start it and check on it](#start-it-and-check-on-it)). A second VM needs its own settings file.
+- One controller per VM at a time (see [Start it and check on it](#start-it-and-check-on-it)). A second VM needs its own settings file (`metacomputer vm create NAME` writes it).
 - The VM can't reach your Mac or LAN, by design. Copy a local web app in as static files to test it.
 - No root for the desktop user: system packages are added with `EXTRA_PACKAGES` and a rebuild, which also replaces the baseline.
 - Unattended upgrades patch the working VM after each reset. Refresh the baseline now and then with `metacomputer baseline`, or rebuild, so resets start current.

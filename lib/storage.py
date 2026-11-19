@@ -58,6 +58,7 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import labconfig  # noqa: E402
+import safedelete  # noqa: E402  (every recursive delete: never a folder a VM uses)
 from termsafe import escape_for_terminal as esc  # noqa: E402
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -874,7 +875,7 @@ def update_holder(vm, lab, pid):
     n = 0
     with GlobalLock():
         for rec in all_locks():
-            if same_holder(rec, vm, lab):
+            if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"]):
                 f = rec.pop("_file")
                 rec.update(pid=int(pid), pstart=pstart, state="running")
                 atomic_json(os.path.join(locks_dir(), f), rec)
@@ -882,25 +883,35 @@ def update_holder(vm, lab, pid):
     return n
 
 
+LOCK_NAME = re.compile(r"[a-z0-9]+-[0-9a-f]{24}(-ro-[0-9a-f]{12})?\.json")     # record_name's: lock_key, a shared holder's
+
+
 def release_locks(vm, lab):
-    n = 0
+    """This VM's locks go: only lock files of ours (LOCK_NAME) that name this VM and checkout, through
+    lib/safedelete.py (the locks folder may not be a link, nor be, hold or reach a folder some VM uses), and the
+    disk sidecars they name, when those say this computer and VM."""
     host = hostname()
     with GlobalLock():
-        for rec in all_locks():
-            if same_holder(rec, vm, lab):
-                try:
-                    os.unlink(os.path.join(locks_dir(), rec["_file"]))
-                    n += 1
-                except FileNotFoundError:
-                    pass
-                if rec.get("kind") == "disk":
-                    side = read_json(rec["path"] + ".lock")
-                    if isinstance(side, dict) and side.get("host") == host and side.get("vm") == vm:
-                        try:
-                            os.unlink(rec["path"] + ".lock")
-                        except OSError:
-                            pass
+        mine = [rec for rec in all_locks() if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"])]
+        try:
+            n = safedelete.remove_records(locks_dir(), [rec["_file"] for rec in mine], LOCK_NAME)
+        except (safedelete.Refused, OSError) as e:
+            print(f"storage: this VM's locks were kept: {esc(str(e))}", file=sys.stderr)
+            return 0
+        for rec in mine:
+            if rec.get("kind") == "disk":
+                drop_sidecar(rec["path"] + ".lock", host, vm)
     return n
+
+
+def drop_sidecar(path, host, vm):
+    """A disk's sidecar lock (one named file beside the disk), when it says this computer and VM."""
+    side = read_json(path)
+    if isinstance(side, dict) and side.get("host") == host and side.get("vm") == vm:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 @contextmanager
@@ -1883,6 +1894,13 @@ def cmd_volume_delete(a):
             if h:
                 raise StorageError(f"volume '{a.name}' is kept in sync by {describe_holder(h)}; stop that VM first")
             d = s3_dir(a.name)
+            # Its state folder goes through lib/safedelete.py: never one that is, or holds, a folder a VM uses (a VM's
+            # vault reached through a link into it, say). Checked before anything else is changed, and as it's deleted.
+            if os.path.lexists(d):
+                try:
+                    safedelete.check(d, safedelete.protected())
+                except safedelete.Refused as e:
+                    raise StorageError(f"not deleting volume '{a.name}': {e}")
             lockf = None
             if os.path.isdir(d):
                 lockf = os.open(os.path.join(d, "sync.lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1897,7 +1915,12 @@ def cmd_volume_delete(a):
                 for what in ("access_key_id", "secret_access_key"):
                     subprocess.run([SECURITY, "delete-generic-password", "-s", keychain_service(a.name), "-a", what],
                                    capture_output=True)
-                shutil.rmtree(d, ignore_errors=True)
+                try:
+                    safedelete.rmtree(d)
+                except safedelete.Refused as e:
+                    raise StorageError(f"volume '{a.name}': its state folder was kept: {e}")
+                except OSError:
+                    pass
             finally:
                 if lockf is not None:
                     os.close(lockf)
@@ -2253,7 +2276,7 @@ def cmd_refdisk_create(a):
             reg_save("refdisk", rec)
     finally:
         if made:
-            shutil.rmtree(stage, ignore_errors=True)
+            safedelete.rmtree(stage, quiet=True)
         if dfd is not None:
             try:
                 os.unlink(tmp_name, dir_fd=dfd)
@@ -2726,24 +2749,20 @@ def backup_budget():
 
 
 def prune_backups(folder, budget):
-    """Keep the newest backups that fit in budget bytes (the folder is ours: the VM can't reach it)."""
-    files = []
-    for d, _, fs in os.walk(folder):
-        for f in fs:
-            p = os.path.join(d, f)
-            try:
-                st = os.lstat(p)
-            except OSError:
-                continue
-            files.append((st.st_mtime, st.st_size, p))
-    total = 0
-    for mtime, size, p in sorted(files, reverse=True):
-        total += size
-        if total > budget:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+    """Keep the newest backups that fit in budget bytes (the folder is ours: the VM can't reach it). A delete that
+    walks a tree, so it goes through lib/safedelete.py: the folder is checked first (never one that is, holds or has
+    a link on the way to a folder a VM uses) and walked without following a link."""
+    def choose(files):
+        total, out = 0, []
+        for _mtime, size, rel in sorted(files, reverse=True):
+            total += size
+            if total > budget:
+                out.append(rel)
+        return out
+    try:
+        safedelete.prune_files(folder, choose)
+    except safedelete.Refused as e:
+        print(f"storage: not pruning the backups in {esc(folder)}: {esc(str(e))}", file=sys.stderr)
 
 
 # --- free space: claims ------------------------------------------------------------------------
@@ -2758,21 +2777,30 @@ def space_dir():
     return d
 
 
+SPACE_NAME = re.compile(r"(?P<what>[A-Za-z0-9][A-Za-z0-9._-]*)-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8}\.json")
+
+
 def claims_on(pool):
-    """Bytes held by live claims on the pool (space_pool; stale claims are removed)."""
-    held = 0
-    for f in os.listdir(space_dir()):
-        p = os.path.join(space_dir(), f)
-        rec = read_json(p) if f.endswith(".json") else None
+    """Bytes held by live claims on the pool (space_pool; every *.json there counts). Stale claims are removed: only
+    space claim files of ours (SPACE_NAME, their pid in the name), through lib/safedelete.py (which refuses when the folder is a link or is,
+    holds or reaches a folder some VM uses; then they're kept)."""
+    held, stale = 0, []
+    d = space_dir()
+    for f in os.listdir(d):
+        rec = read_json(os.path.join(d, f)) if f.endswith(".json") else None
         if not isinstance(rec, dict):
             continue
         if not holder_alive(rec):
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+            m = SPACE_NAME.fullmatch(f)
+            if m and rec.get("pid") == int(m.group("pid")) and "pool" in rec:
+                stale.append(f)
         elif rec.get("pool") == pool:
             held += int(rec.get("bytes", 0))
+    if stale:
+        try:
+            safedelete.remove_records(d, stale, SPACE_NAME)
+        except (safedelete.Refused, OSError):
+            pass
     return held
 
 

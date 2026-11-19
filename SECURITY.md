@@ -1237,6 +1237,124 @@ Common to every kind:
   with a quota or a disk image of its own. Measurements and details:
   [docs/storage.md](docs/storage.md#folder-volumes).
 
+## More than one VM (`--vm NAME`, `metacomputer vm`)
+
+Each extra VM has its own settings file, `config/vms/NAME.env`
+([docs/commands.md](docs/commands.md#more-than-one-vm)). What keeps one VM's commands off
+another VM:
+
+- **Its identity is checked against every other VM's** each time its settings load: the
+  main VM's and every other `config/vms/` file's. Its name, baseline (always
+  `NAME-baseline`), previous baseline and checkpoint names may not be another VM's. Its
+  ports may not be another VM's.
+- **A `config/vms/` VM's folders are fixed by its name.** Its SSH keys
+  (`~/.ssh/metacomputer-NAME`), runtime and logs (`.run-vms/NAME`, `logs-vms/NAME` in the
+  checkout), vault and spool (`.../metacomputer-vms/NAME`) sit beside the main VM's, never in
+  them. Its file may not set `SSH_DIR`, `RUN_DIR`, `LOG_DIR`, `VAULT_DIR` or `EVENTS_SPOOL`
+  (one that does is refused, saying why), and `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` may
+  only name its own folders. Fewer settings: none can put one VM's folder in another's.
+- **The identity rule: no VM's folder is in another's, or in the runner's storage.** A
+  VM's SSH keys, runtime, logs, vault and spool folders may not be another VM's folder, be
+  inside one, or hold one, and no VM's folder may be in, or hold, the runner's VM storage
+  (`~/.lume` and every storage location the runner or Lume's settings list), since the
+  runner's delete of a VM takes its whole folder there. The account's own vault folder and
+  spools count as every VM's that shares them, even when `config/local.env` names folders
+  of its own. Folders are compared as the folders
+  they physically are: every link at every level is followed (so a folder whose parent is a
+  link counts as where it really is), then device and inode, with the part that doesn't exist
+  yet compared without case. When the runner's storage can't be known (no runner, `config
+  get` failing or listing none, a settings file of Lume's that can't be read, a location that
+  can't be read), the check refuses rather than skip it.
+- **Every other recursive delete checks its own target.** Each one on the Mac (a build's
+  seed folder, the downloads' cleanup, a volume's S3 state folder, temporary folders, the
+  installer's, and the cleanups that walk a folder: pruning S3 backups, old SSH
+  certificates) goes through one helper, `lib/safedelete.py` (`scripts/safe-rmtree.sh` for
+  scripts). It resolves a path once (its folder physically, its last part as it is; a path
+  ending in `/`, `/.` or `/..` is refused) and deletes exactly that entry, through a
+  descriptor of its folder, following no link inside (descriptors only, so it works on the
+  Python 3.9 macOS ships too). It deletes a folder only when that
+  folder, as it physically is, neither is nor holds a folder some VM of this checkout uses
+  (every VM's keys, runtime, logs, vault and spool, the account's own vault and spools
+  whatever the settings say, a vault folder the environment names, the home folder and the
+  checkout), nor holds a link on the way to one; a link is deleted itself, never what it
+  points to, and not when it's on the way to such a folder. A cleanup that walks a folder
+  checks that folder the same way first, then follows no link while it walks. A program's
+  own records (dead claims, stale space claims, broken journal entries, old quarantined
+  files, settled vault markers, a VM's storage locks) are deleted only by their own names,
+  in a folder that isn't a link and passes the same check. `vm delete`'s delete of a VM's
+  own folders goes through it too, against the same list of protected folders less that
+  VM's own; there is no second list. The runner's own delete of a VM, baseline or
+  checkpoint (`vm delete`, `build --replace`, `reset`, `restore`, `checkpoint`, `baseline`)
+  is made in one place, after the rule above, and the helper checks that VM's folder first
+  (from Lume's own settings), the same way and against the same list: it may not be a link,
+  nor be, hold or reach a protected folder, or the runner isn't asked. The event spool is
+  consumed only after the same check (a spool that is, holds or reaches another protected
+  folder isn't read at all), and a spool file that can't be moved to its `.quarantine` is
+  left where it is, counted and reported once, never deleted. It fails closed: when a
+  settings file can't be read, or a VM's folder can't be resolved, nothing is deleted.
+  Deletes inside the VM are the only ones it doesn't see; a test fails when any other
+  appears, a function that deletes, moves or rewrites files found by listing a folder
+  (itself or through its module's functions) and `find -delete`, `xargs rm`,
+  `rsync --delete` or `rm` of a glob included (the rest, each writing files it names
+  itself or its own staging entries, are listed in the test with the code that keeps them
+  safe).
+- **Where the rule is checked.** A `config/vms/` VM's settings are refused when they're read
+  if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it.
+  Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks
+  it after taking the VM's lock and before anything is deleted, for whichever VM it is,
+  the main one and an `MCOMP_CONFIG` one included: `build`, `vm delete`, `reset`, `restore`,
+  `checkpoint` (deleting or replacing one) and `baseline`. A refusal names the settings file
+  and the folder at fault. The one sharing allowed is the old one: the main VM and
+  `MCOMP_CONFIG` VMs may share the account's own vault folder and spool.
+- **The documented limit: your own settings are trusted where nothing is deleted.** Folders
+  you set yourself in `config/local.env` or an `MCOMP_CONFIG` file are used as they are by
+  `start`, `stop`, `status` and the other commands that delete nothing, as before there was
+  more than one VM; they aren't checked against the rule there, and a runner that can't be
+  read doesn't stop them. Every command above that deletes something checks them first.
+- **Every settings file is read one strict way:** it must be readable, parse, and
+  say nothing on stderr while it's read (a file it sources but can't read counts). One that
+  isn't is never taken for the defaults: the command refuses, and so does a per-VM command,
+  and every command that deletes, replaces or rotates a VM (above), while another VM's file
+  can't be read (it can't be checked against a guess).
+- **A command only goes ahead when it's clear which VM is meant.** A checkout with no
+  `config/local.env` and no `--vm` refuses to act on a VM while the runner has others, and
+  so does an `MCOMP_CONFIG` file that's gone. Vault folders reach the vault as the folders
+  they are, and `MCOMP_VAULT_DIR` must be absolute; for a `config/vms/` VM it must be that
+  VM's own vault folder, so it can't be another VM's vault either.
+- **A hub serves the VM it started with, and only it.** It pins that VM's name, SSH port and
+  host key, and every command it runs (its connection to the driver, `input-reset`) carries
+  them. If its settings file goes away, or comes to name another VM, port or host key,
+  each one is refused with the reason, never redirected to the defaults' VM
+  (`metacomputer hub stop` ends it). `build --replace` ends the VM's hub first.
+- **`vm delete` changes nothing it hasn't checked.**
+  - It holds the VM's lock throughout, and `start` takes the same lock, so the VM can't be
+    started, rebuilt or restored meanwhile.
+  - Every delete, with or without flags and whichever VM it is (the main one and an
+    `MCOMP_CONFIG` one included), first requires every other settings file to read cleanly
+    and the identity rule to hold, before anything is stopped or deleted (the runner's
+    delete of the VM's folder included), and again after you confirm.
+  - It refuses a set of names that touches any other VM's VM, baseline, previous baseline
+    or checkpoints, and a baseline not named `NAME-baseline`. A settings file that's refused
+    for any reason still counts, by the names, folders and volumes it says; one whose names
+    can't be read refuses (never its file name alone).
+  - It deletes folders only through a walk from `/` that follows no link, and only a
+    folder of this account's that neither is nor holds another VM's folder, the account's
+    own vault or spools, your home or the checkout (`lib/safedelete.py`, the same check as
+    every other delete). `--delete-vault` deletes only the VM's own folder under
+    `.../metacomputer-vms/`. When another settings file's folders can't be known (one it
+    can't read, one that reads a file it can't, one that isn't an absolute path or can't be
+    resolved), nothing is deleted, and `--delete-volumes` refuses while any file's volumes are
+    unknown.
+  - After you confirm, it holds the VM's owners lock (so no session can claim it), checks
+    everything again, and refuses if anything changed. Only then does it stop what runs for
+    the VM (its event watcher, its hub), so a refusal leaves a session that started meanwhile
+    alone.
+- **The typed name guards against a slip, not against a program.** It isn't proof that a
+  person is there: any program that can run a command in a terminal can type the name,
+  just as it can type a vault approval at the unlock terminal, and `--confirm NAME` does
+  the same without one. Claude's skill passes `--confirm` only for a VM you named for
+  deletion.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands
@@ -2606,14 +2724,22 @@ something waits for you:
 | `status`, `audit [--tail N]`, `audit --head`, `audit --verify`, `selftest` | anywhere (`--verify` while unlocked) | State; the audit log; its head as SEQ:HASH; every record's creation MAC and the chain checked by the vault; the program's own checks |
 
 `metacomputer secrets ...` fills in the current VM (`--vm`). `bind` takes its port,
-host key, keys, accounts and gateway from the config (`MCOMP_CONFIG` for another VM),
-and the proxy account too when `$SSH_DIR/proxy` exists.
+host key, keys, accounts and gateway from the config (`metacomputer --vm NAME secrets
+bind`, or `MCOMP_CONFIG`, for another VM), and the proxy account too when
+`$SSH_DIR/proxy` exists. Every `secrets` command first prints which VM and vault it
+uses, on stderr.
 
 - **Vault folder:** `~/Library/Application Support/metacomputer/` (0700), or
   `MCOMP_VAULT_DIR`. It holds `vault.json`, `vault.sock`, `audit.jsonl`,
-  `sessions/*.sealed` and `sinks/` (each sink's delivery state).
+  `sessions/*.sealed` and `sinks/` (each sink's delivery state). A VM made with
+  `metacomputer vm create NAME` has a vault of its own,
+  `.../metacomputer-vms/NAME/` (its `VAULT_DIR`, handed to the vault as
+  `MCOMP_VAULT_DIR`): its secrets, approvals, audit log and unlock are separate from
+  the main VM's. `metacomputer vm delete NAME` keeps it unless `--delete-vault` asks,
+  and that deletes only such a per-VM folder, never a shared one.
 - **Events spool:** `~/Library/Application Support/metacomputer/events/spool/` (made
-  0700 if missing; `MCOMP_EVENTS_SPOOL`), for the event stream to take.
+  0700 if missing; `MCOMP_EVENTS_SPOOL`), for the event stream to take; a per-VM vault
+  uses `.../metacomputer-vms/NAME/events/spool/` (`EVENTS_SPOOL`), which that VM's watcher takes.
 - **Program:** `~/.local/share/metacomputer/bin/mcomp-vault`, or `MCOMP_VAULT_BIN`.
   Rebuild it with `scripts/build-vault.sh`. `scripts/verify-audit.py` checks audit
   logs and sink captures.

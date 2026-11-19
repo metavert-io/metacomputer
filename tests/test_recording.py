@@ -578,6 +578,7 @@ def sync_guard_checks():
                  'vm_exists() { return 0; }\nvm_running() { return 0; }\nevents_watcher_stop() { :; }\n'
                  'storage_py() { :; }\nstorage_release() { :; }\nvm_stop() { echo "VMSTOP" >> "$TD/calls"; }\n'
                  'do_start() { echo STARTED; }\nowners_check() { :; }\nhandoff_hold_unless_override() { :; }\n'
+                 'runner_delete() { "$LUME" delete "$1" --force; }\n'
                  f'LUME="{bindir}/lume"\n')
         funcs = tuple(f for f in ("proc_tree", "run_until", "vm_answer", "guest_import", "vm_tar_copy", "do_recordings", "sync_or_stop",
                                   "unsynced_note", "parse_flags", "confirm", "restore_from", "do_baseline") if have(f))

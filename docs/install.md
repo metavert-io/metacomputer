@@ -263,8 +263,10 @@ end, a summary lists the time of each longer stage.
 | `--uninstall` | Remove the command, the plugin and the vault program (the VM stays) |
 
 `MCOMP_CONFIG=FILE ./install.sh` writes and reads that settings file instead of
-`config/local.env`, as every other command does. That's how you set up a
-second VM beside the first.
+`config/local.env`, as every other command does. For a second VM beside the
+first, `metacomputer vm create NAME` is simpler: it writes `config/vms/NAME.env`
+and builds it ([guide](guide.md#run-a-second-vm-side-by-side)). `install.sh`
+refuses to run with `MCOMP_VM` set, since it sets up `config/local.env`'s VM.
 
 **metacomputer setup**: in a checkout, the same as `./install.sh` (with its
 options). From the plugin with no checkout yet, get.sh with `--confirm` (see

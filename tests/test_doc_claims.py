@@ -357,7 +357,7 @@ def sync_before_delete():
     stop = function_text("sync_or_stop")
     return ('sync_or_stop "$evtype"' in function_text("restore_from")
             and function_text("restore_from").index('sync_or_stop "$evtype"')
-            < function_text("restore_from").index('"$LUME" delete "$VM_NAME"')
+            < function_text("restore_from").index('runner_delete "$VM_NAME"')
             and "sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*'" in function_text("do_baseline")
             and "do_recordings --sync >/dev/null && whole=1" in stop and '[ $whole = 1 ] && [ $rc = 0 ] && return 0' in stop
             and stop.count("$whole = 1") == 1   # both checks every time: no way out on the copy alone
@@ -1078,6 +1078,172 @@ CLAIMS = [
      lambda m: int(m[1]) * 3600 == owners.HANDOFF_MAX_S),
     ("docs/guide.md", r"\((\d+) minutes unless Claude chose another, at most (\d+) hours\)",
      lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
+    # More than one VM (scripts/lib.sh, scripts/vm-commands.sh, lib/vms.py, lib/mcp_hub.py)
+    ("SECURITY.md", r"A VM made with `metacomputer vm create NAME` has a vault of its own, `\.\.\./metacomputer-vms/NAME/`",
+     lambda m: 'VAULT_DIR) printf \'%s\' "$MC_VMS_APP_DIR/$2"' in raw("scripts/lib.sh")
+     and 'MC_VMS_APP_DIR="${MCOMP_VMS_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer-vms}"' in raw("scripts/lib.sh")
+     and 'export MCOMP_VAULT_DIR="$VAULT_DIR"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"keeps it unless `--delete-vault` asks, and that deletes only such a per-VM folder, never a shared one",
+     lambda m: '[ "$(mc_vault_dir)" = "$own_vault" ]' in vm_delete_src() and 'own_vault="$MC_VMS_APP_DIR/$VM_NAME"' in vm_delete_src()
+     and 'vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME"' in vm_delete_src()),
+    # The identity rule (lib/vms.py check_identity, scripts/lib.sh mc_identity_check), and where it runs.
+    ("SECURITY.md", r"Its file may not set `SSH_DIR`, `RUN_DIR`, `LOG_DIR`, `VAULT_DIR` or `EVENTS_SPOOL` \(one that does is refused, saying why\), and `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` may only name its own folders",
+     lambda m: "sets $k: a config/vms/ VM's folders are fixed by its name" in load_settings_src()
+     and "isn't the vault folder of config/vms/$name.env" in load_settings_src()
+     and "isn't the spool of config/vms/$name.env" in load_settings_src()
+     and 'eval "$k=\\"\\$(mc_vm_default $k \\"\\$iname\\")\\""' in raw("scripts/lib.sh")
+     and not any(f"vm_q {k} " in raw("scripts/vm-commands.sh") for k in ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL"))),
+    ("SECURITY.md", r"Its SSH keys \(`~/\.ssh/metacomputer-NAME`\), runtime and logs \(`\.run-vms/NAME`, `logs-vms/NAME` in the checkout\), vault and spool \(`\.\.\./metacomputer-vms/NAME`\) sit beside the main VM's, never in them",
+     lambda m: all(x in raw("scripts/lib.sh") for x in ('RUN_DIR) printf \'%s\' "$LAB_ROOT/.run-vms/$2"', 'LOG_DIR) printf \'%s\' "$LAB_ROOT/logs-vms/$2"',
+                                                        'SSH_DIR) printf \'%s\' "$HOME/.ssh/metacomputer-$2"',
+                                                        'VAULT_DIR) printf \'%s\' "$MC_VMS_APP_DIR/$2"'))
+     and 'MC_VMS_APP_DIR="${MCOMP_VMS_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer-vms}"' in raw("scripts/lib.sh")
+     and ".run-vms/" in raw(".gitignore") and "logs-vms/" in raw(".gitignore")),
+    ("SECURITY.md", r"may not be another VM's folder, be inside one, or hold one, and no VM's folder may be in, or hold, the runner's VM storage \(`~/\.lume` and every storage location the runner or Lume's settings list\), since the runner's delete of a VM takes its whole folder there",
+     lambda m: "def relation" in raw("lib/vms.py") and 'return "is inside"' in raw("lib/vms.py") and 'return "holds"' in raw("lib/vms.py")
+     and 'in_storage(f, "its")' in raw("lib/vms.py") and 'in_storage(t, f"{owner}\'s")' in raw("lib/vms.py")
+     and 'PLACES = {"@runner": "the runner\'s VM storage"}' in raw("lib/vms.py") and "@runner PATH" in raw("scripts/lib.sh")
+     and "printf '%s\\n' \"~/.lume\" \"$out\"" in raw("scripts/lib.sh") and '"$lb" config get' in raw("scripts/lib.sh")
+     and ".config/lume/config.yaml" in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"It deletes a folder only when that folder, as it physically is, neither is nor holds a folder some VM of this checkout uses \(every VM's keys, runtime, logs, vault and spool, the account's own vault and spools whatever the settings say, a vault folder the environment names, the home folder and the checkout\), nor holds a link on the way to one; a link is deleted itself, never what it points to, and not when it's on the way to such a folder\.",
+     lambda m: all(x in raw("lib/safedelete.py") for x in (
+         "def check(path, prot", "vms.physical(t.path", "def links_on_the_way(", "mc_all_identity_records",
+         'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(t.name, dir_fd=fd)", "remove_tree_at(fd, t.name, t.st, t.spelled)",
+         '("this checkout", lab, "CHECKOUT")', "a link on the way to", '"the account\'s vault folder", os.path.join(home, ACCOUNT_VAULT), "SHARED_VAULT_DIR"',
+         '"the account\'s event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool")'))
+     and "mc_all_identity_records() {" in raw("scripts/lib.sh") and '[ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0' in raw("scripts/lib.sh")
+     and 'safedelete.py" rmtree' in raw("scripts/safe-rmtree.sh")),
+    ("SECURITY.md", r"It resolves a path once \(its folder physically, its last part as it is; a path ending in `/`, `/\.` or `/\.\.` is refused\) and deletes exactly that entry, through a descriptor of its folder, following no link inside \(descriptors only, so it works on the Python 3\.9 macOS ships too\)",
+     lambda m: all(x in raw("lib/safedelete.py") for x in (
+         "class Target:", 'if path.endswith("/"):', 'if parts[-1] in (".", ".."):', "self.parent = os.path.realpath(",
+         "def _open_parent(t):", "remove_tree_at(fd, t.name, t.st, t.spelled)", "def remove_tree_at(parent_fd, name",
+         "os.rmdir(n, dir_fd=", "os.scandir(fd)", "changed while it was being checked"))
+     and "shutil.rmtree(" not in raw("lib/safedelete.py")),
+    ("SECURITY.md", r"A program's own records \(dead claims, stale space claims, broken journal entries, old quarantined files, settled vault markers, a VM's storage locks\) are deleted only by their own names, in a folder that isn't a link and passes the same check",
+     lambda m: "def remove_records(folder, names, pattern" in raw("lib/safedelete.py")
+     and "pattern.fullmatch(n)" in raw("lib/safedelete.py")
+     and "safedelete.remove_records(OWNERS_DIR, names, CLAIM_NAME)" in raw("lib/owners.py")
+     and "safedelete.remove_records(d, stale, SPACE_NAME)" in raw("lib/storage.py")
+     and "remove_records(admin_dir(), broken, ADMIN_NAME)" in raw("lib/events.py") and "QUARANTINED)" in raw("lib/events.py")
+     and "safedelete.remove_records(owners.OWNERS_DIR, marks, VAULT_MARK_NAME)" in raw("lib/handoff.py")
+     and 'safedelete.remove_records(locks_dir(), [rec["_file"] for rec in mine], LOCK_NAME)' in raw("lib/storage.py")),
+    ("SECURITY.md", r"The runner's own delete of a VM, baseline or checkpoint \(`vm delete`, `build --replace`, `reset`, `restore`, `checkpoint`, `baseline`\) is made in one place, after the rule above, and the helper checks that VM's folder first \(from Lume's own settings\), the same way and against the same list: it may not be a link, nor be, hold or reach a protected folder, or the runner isn't asked",
+     lambda m: 'safedelete.py" check-runner -- "$d" || return 1' in fn_src("scripts/lib.sh", "runner_delete")
+     and 'd="$(vm_dir "$1")" ||' in fn_src("scripts/lib.sh", "runner_delete")
+     and "def check_runner(path" in raw("lib/safedelete.py") and "check_target(t, protected(home, lab), home)" in raw("lib/safedelete.py")
+     and not any('"$LUME" delete' in raw(f) for f in ("bin/metacomputer", "scripts/build-vm.sh", "scripts/vm-commands.sh", "install.sh"))
+     and 'runner_delete "$vm"' in raw("scripts/build-vm.sh") and 'runner_delete "$v"' in raw("scripts/vm-commands.sh")),
+    ("SECURITY.md", r"The event spool is consumed only after the same check \(a spool that is, holds or reaches another protected folder isn't read at all\), and a spool file that can't be moved to its `\.quarantine` is left where it is, counted and reported once, never deleted\. It fails closed",
+     lambda m: "def check_spool(path" in raw("lib/safedelete.py") and "why = spool_guard(dfd)" in raw("lib/events.py")
+     and "safedelete.check_spool(spool_dir())" in raw("lib/events.py") and "if quarantine(dfd, qfd, f):" in raw("lib/events.py")
+     and "os.unlink(f, dir_fd=dfd)\n            return" not in raw("lib/events.py")
+     and 'info["left"] = int(info.get("left", 0)) + len(left)' in raw("lib/events.py")),
+    ("SECURITY.md", r"The account's own vault folder and spools count as every VM's that shares them, even when `config/local.env` names folders of its own",
+     lambda m: "printf '%s\\0' \"$1\" SHARED_VAULT_DIR \"$MC_SHARED_VAULT\"" in fn_src("scripts/lib.sh", "mc_shared_records")
+     and '[ -z "$2" ] || [ "$2" = "$MC_SHARED_VAULT" ] || printf' in fn_src("scripts/lib.sh", "mc_shared_records")),
+    ("SECURITY.md", r"`vm delete`'s delete of a VM's own folders goes through it too, against the same list of protected folders less that VM's own; there is no second list",
+     lambda m: "def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=())" in raw("lib/safedelete.py")
+     and "def protected(" not in raw("lib/vms.py") and "def rmtree_own(" not in raw("lib/vms.py")
+     and '"the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT), "SHARED_VAULT_DIR"' in raw("lib/safedelete.py")),
+    ("SECURITY.md", r"A cleanup that walks a folder checks that folder the same way first, then follows no link while it walks",
+     lambda m: all(x in raw("lib/safedelete.py") for x in (
+         "def prune_files(root, choose", "check_target(t, protected(home, lab), home)", "follow_symlinks=False",
+         "os.O_NOFOLLOW", "isn't a folder (a link isn't followed)"))
+     and "safedelete.prune_files(folder, choose)" in raw("lib/storage.py")
+     and 'safedelete.py" prune --older-than 3600 -- "$dir"' in raw("scripts/lib.sh")
+     and "-mmin +60 -delete" not in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"Deletes inside the VM are the only ones it doesn't see; a test fails when any other appears, a function that deletes, moves or rewrites files found by listing a folder \(itself or through its module's functions\) and `find -delete`, `xargs rm`, `rsync --delete` or `rm` of a glob included",
+     lambda m: "DELETE_EXCEPTIONS = [" in raw("tests/test_multi_vm.py") and "def delete_inventory(td):" in raw("tests/test_multi_vm.py")
+     and "DELETE_WALK_EXCEPTIONS = {" in raw("tests/test_multi_vm.py") and "TREE_SHELL_PAT = (" in raw("tests/test_multi_vm.py")
+     and "        delete_inventory(td)\n" in raw("tests/test_multi_vm.py")
+     and all(f in raw(p) for p, f in (("scripts/fetch-artifacts.sh", 'safe-rmtree.sh" "$R/x"'),
+                                      ("scripts/build-vm.sh", 'safe-rmtree.sh" "$SEED"'),
+                                      ("lib/storage.py", "safedelete.rmtree(d)"), ("install.sh", "safe-rmtree.sh")))),
+    ("SECURITY.md", r"Folders are compared as the folders they physically are: every link at every level is followed \(so a folder whose parent is a link counts as where it really is\), then device and inode, with the part that doesn't exist yet compared without case",
+     lambda m: "def physical(path, home" in raw("lib/vms.py") and "os.path.realpath(path)" in raw("lib/vms.py")
+     and "tuple(c.casefold() for c in parts[k:j])" in raw("lib/vms.py") and "*physical(v, home" in raw("lib/vms.py")),
+    ("SECURITY.md", r"When the runner's storage can't be known \(no runner, `config get` failing or listing none, a settings file of Lume's that can't be read, a location that can't be read\), the check refuses rather than skip it",
+     lambda m: "@runner ERROR" in raw("scripts/lib.sh") and "listed no VM storage location" in raw("scripts/lib.sh")
+     and "isn't installed" in fn_src("scripts/lib.sh", "mc_place_records") and "can't read $f" in fn_src("scripts/lib.sh", "mc_place_records")
+     and 'for reason in recs.get("ERROR", []):' in raw("lib/vms.py") and "the runner listed no storage location" in raw("lib/vms.py")
+     and "except Refused:\n            continue" not in raw("lib/vms.py")),
+    ("SECURITY.md", r"A `config/vms/` VM's settings are refused when they're read if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it",
+     lambda m: 'mc_identity_check || { MC_REFUSAL="config/vms/$name.env: $MC_REFUSAL"; return 1; }' in raw("scripts/lib.sh")
+     and '[ "$1" = "$VM_NAME" ] || mc_identity_records "$2" main' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks it after taking the VM's lock and before anything is deleted, for whichever VM it is, the main one and an `MCOMP_CONFIG` one included: `build`, `vm delete`, `reset`, `restore`, `checkpoint` \(deleting or replacing one\) and `baseline`\. A refusal names the settings file and the folder at fault",
+     lambda m: re.search(r'vm_change_lock\(\) \{ # WHAT\n  vm_lock_or_die "\$1"\n  mc_identity_check --no-ports \|\| die', raw("scripts/lib.sh")) is not None
+     and all(f'vm_change_lock "metacomputer {c}' in raw("bin/metacomputer") for c in ("reset", "checkpoint", "restore", "baseline"))
+     and all("vm_change_lock" in fn_src("bin/metacomputer", f) for f in ("do_reset", "do_restore", "do_checkpoint", "do_baseline"))
+     and "mc_identity_check --no-ports || die" in vm_delete_src() and "build_identity_check() { mc_identity_check --no-ports" in raw("scripts/build-vm.sh")
+     and "raise Refused(f\"its {shown(f[0])} ({f[1]}) {rel} {owner}'s {shown(t[0])} ({t[1]})" in raw("lib/vms.py")),
+    ("SECURITY.md", r"Folders you set yourself in `config/local.env` or an `MCOMP_CONFIG` file are used as they are by `start`, `stop`, `status` and the other commands that delete nothing, as before there was more than one VM; they aren't checked against the rule there",
+     lambda m: load_settings_src().count("mc_identity_check ||") == 1 and "MC_SETTINGS_KIND=vm\n    mc_identity_check ||" in load_settings_src()
+     and 'vm_lock_or_die "metacomputer start"' in raw("bin/metacomputer")),
+    ("docs/commands.md", r"Refuses, before anything is deleted, unless every other settings file reads cleanly and the identity rule holds for this VM \(below\); checked again before and after the downloads",
+     lambda m: 'build_identity_check() { mc_identity_check --no-ports || die "not building' in raw("scripts/build-vm.sh")
+     and 0 < raw("scripts/build-vm.sh").find("\nbuild_identity_check\n") < raw("scripts/build-vm.sh").find('st="$(vm_lookup "$vm")"')
+     < raw("scripts/build-vm.sh").find('/build-tools.sh"\nbuild_identity_check') < raw("scripts/build-vm.sh").find('/fetch-artifacts.sh"\nbuild_identity_check')
+     < raw("scripts/build-vm.sh").find("BUILD_MARKER=") < raw("scripts/build-vm.sh").find('runner_delete "$vm"') < raw("scripts/build-vm.sh").find('safe-rmtree.sh" "$SEED"')),
+    ("docs/commands.md", r"once you type its name \(no terminal: `--confirm NAME`; `--yes` never counts\)",
+     lambda m: "ASSUME_YES" not in vm_delete_src() and "confirm \"" not in vm_delete_src()
+     and '[ "$v" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
+    ("docs/commands.md", r"Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`",
+     lambda m: all(s in vm_delete_src() for s in ('[ "$(mc_main_identity | head -1)" != "$VM_NAME" ]', '[ "$DP_STATE" != running ]',
+                                                  'lib/owners.py" check', '[ "$force" != 1 ]'))),
+    ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
+     lambda m: 'BASELINE_NAME must be $VM_NAME-baseline' in raw("scripts/lib.sh") and "def check_identity" in raw("lib/vms.py")
+     and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),
+    ("SECURITY.md", r"It holds the VM's lock throughout, and `start` takes the same lock",
+     lambda m: 'vm_lock_or_die "metacomputer start"' in raw("bin/metacomputer") and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
+    ("SECURITY.md", r"It deletes folders only through a walk from `/` that follows no link, and only a folder of this account's that neither is nor holds another VM's folder, the account's own vault or spools, your home or the checkout \(`lib/safedelete\.py`, the same check as every other delete\)",
+     lambda m: "def rmtree_own(" in raw("lib/safedelete.py") and "nfd = _open_dir_at(c, fd)" in raw("lib/safedelete.py")
+     and "check_target(t, protected(home, lab, exclude_vm=target_vm, own=own), home)" in raw("lib/safedelete.py")
+     and "remove_tree_at(fd, leaf, st, target)" in raw("lib/safedelete.py")
+     and 'lib/safedelete.py" own --base "$1" --rel "$2" --target-vm "$VM_NAME"' in raw("scripts/vm-commands.sh")
+     and "def protected(" not in raw("lib/vms.py") and "rm -rf" not in vm_delete_src()),
+    ("SECURITY.md", r"After you confirm, it holds the VM's owners lock \(so no session can claim it\), checks everything again",
+     lambda m: 'exec 6>>"$RUN_DIR/owners/.lock"' in vm_delete_src() and '[ "$DP_SIG" = "$first" ] || die' in vm_delete_src()),
+    ("SECURITY.md", r"A hub serves the VM it started with, and only it\.\*\* It pins that VM's name, SSH port and host key",
+     lambda m: "def pin_identity" in raw("lib/mcp_hub.py") and "self.pin" in raw("lib/mcp_hub.py")
+     and all(k in raw("bin/metacomputer") for k in ("MCOMP_EXPECT_VM", "MCOMP_EXPECT_SSH_PORT", "MCOMP_EXPECT_HOSTKEY"))),
+    ("SECURITY.md", r"A settings file that's refused for any reason still counts, by the names, folders and volumes it says",
+     lambda m: "def error_row" in raw("lib/vms.py") and "mc_identity_records raw" in raw("scripts/vm-commands.sh")
+     and 'r.get("raw_vm")' in raw("lib/vms.py") and '"volumes": first("VOLUMES") if known else None' in raw("lib/vms.py")),
+    ("SECURITY.md", r"When another settings file's folders can't be known \(one it can't read, one that reads a file it can't, one that isn't an absolute path or can't be resolved\), nothing is deleted, and `--delete-volumes` refuses while any file's volumes are unknown",
+     lambda m: "can't be read, so its folders aren't known and nothing is deleted" in raw("lib/safedelete.py")
+     and "so nothing is deleted that might be it" in raw("lib/safedelete.py")
+     and 'raise Refused(f"{what} must be an absolute folder, not {path!r}")' in raw("lib/vms.py")
+     and "folders aren't known, so this VM can't be checked against them" in raw("lib/vms.py")
+     and 'known = bool(ids) and not ids.get("UNREADABLE")' in raw("lib/vms.py") and 'print("UNKNOWN "' in vm_delete_src()
+     and 'mc_source_strict "$ifile" >/dev/null || unreadable' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"Every settings file is read one strict way:\*\* it must be readable, parse, and say nothing on stderr while it's read \(a file it sources but can't read counts\)\. One that isn't is never taken for the defaults: the command refuses, and so does a per-VM command, and every command that deletes, replaces or rotates a VM \(above\), while another VM's file can't be read",
+     lambda m: "can't be read, so this VM can't be checked against it" in raw("lib/vms.py")
+     and "mc_identity_check --no-ports || die" in vm_delete_src() and "build_identity_check() { mc_identity_check --no-ports" in raw("scripts/build-vm.sh")
+     and "mc_identity_check --no-ports || die" in fn_src("scripts/lib.sh", "vm_change_lock")
+     and raw("scripts/lib.sh").count('mc_source_strict "$file" || return 1') == 2
+     and 'mc_source_strict "$ifile" >/dev/null || unreadable' in raw("scripts/lib.sh")
+     and '/bin/bash -n "$__mcss_f"' in raw("scripts/lib.sh") and 'if [ -s "$__mcss_e" ]; then' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"Every delete, with or without flags and whichever VM it is \(the main one and an `MCOMP_CONFIG` one included\), first requires every other settings file to read cleanly and the identity rule to hold, before anything is stopped or deleted",
+     lambda m: "local|defaults) ;; *) mc_identity_records" in raw("scripts/vm-commands.sh")
+     and 0 < fn_src("scripts/vm-commands.sh", "vm_delete_plan").find('\n  w="$(vm_other_identities | "$PY" "$LAB_ROOT/lib/vms.py" all-known)"')
+     < fn_src("scripts/vm-commands.sh", "vm_delete_plan").find("\n  mc_identity_check --no-ports || die")
+     < fn_src("scripts/vm-commands.sh", "vm_delete_plan").find("delete-check --target")
+     and 0 < fn_src("scripts/vm-commands.sh", "vm_delete").find("\n  vm_delete_plan\n")
+     < fn_src("scripts/vm-commands.sh", "vm_delete").find("events_watcher_stop") < fn_src("scripts/vm-commands.sh", "vm_delete").find('runner_delete "$v"')),
+    ("SECURITY.md", r"one whose names can't be read refuses \(never its file name alone\)",
+     lambda m: re.search(r'if not r\.get\("known"\):\n(\s+#.*\n)*\s+raise Refused', raw("lib/vms.py")) is not None),
+    ("SECURITY.md", r"Only then does it stop what runs for the VM \(its event watcher, its hub\)",
+     lambda m: 0 <= vm_delete_src().find('[ "$DP_SIG" = "$first" ] || die') < vm_delete_src().find("events_watcher_stop")
+     and vm_delete_src().find("lock_fd_take 6") < vm_delete_src().find("hub_stop")),
+    ("SECURITY.md", r"every command it runs \(its connection to the driver, `input-reset`\) carries them",
+     lambda m: "def cli_env" in raw("lib/mcp_hub.py") and 'env=self.cli_env(' in raw("lib/mcp_hub.py")
+     and "env=self.env)" not in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"for a `config/vms/` VM it must be that VM's own vault folder, so it can't be another VM's vault either",
+     lambda m: 0 < load_settings_src().find('mc_canon MCOMP_VAULT_DIR "$MCOMP_VAULT_DIR"') < load_settings_src().find("isn't the vault folder of config/vms/$name.env")
+     < load_settings_src().find("mc_identity_check ||")),
+    # An honest limit, kept honest: the typed name is a terminal read, not a person check.
+    ("SECURITY.md", r"The typed name guards against a slip, not against a program\.\*\* It isn't proof that a person is there",
+     lambda m: '[ -t 0 ] || die "deleting a VM needs its name typed' in vm_delete_src()),
 ]
 
 
@@ -1194,6 +1360,27 @@ def fills_guarded():
             and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4' in hold.group(1))
 
 
+def fn_src(path, name):
+    """One shell function's source (NAME() { ... } at the start of a line, to the first } alone on one)."""
+    m = re.search(r"^%s\(\) \{.*?^\}$" % re.escape(name), raw(path), re.S | re.M)
+    return m.group(0) if m else ""
+
+
+def load_settings_src():
+    """scripts/lib.sh's mc_load_settings."""
+    return fn_src("scripts/lib.sh", "mc_load_settings")
+
+
+def vm_delete_src():
+    """`vm delete`'s code (scripts/vm-commands.sh): vm_delete, the checks it runs twice and its folder deletion."""
+    src = raw("scripts/vm-commands.sh")
+    out = []
+    for fn in ("vm_delete", "vm_delete_plan", "vm_rmtree"):
+        m = re.search(r"^%s\(\) \{.*?^\}$" % fn, src, re.S | re.M)
+        out.append(m.group(0) if m else "")
+    return "\n".join(out)
+
+
 def fpr(full, head, tail):
     """An abbreviated fingerprint or digest (`D2EB4462…7C81`) is the pinned one's start and end."""
     return full.upper().startswith(head.upper()) and full.upper().endswith(tail.upper()) and len(head) >= 6
@@ -1302,7 +1489,10 @@ def run_claims():
 # The settings whose default is the doc's computed value (config/defaults.env leaves them empty).
 COMPUTED = {"RUN_DIR": ".run/", "LOG_DIR": "logs/", "STORAGE_DIR": "~/.local/share/metacomputer",
             "RECORD_DIR": "recordings/manual/", "ACTION_LOG_KEY": "$SSH_DIR/action-log", "SSH_CA_KEY": "$SSH_DIR/ca",
-            "LESSONS_DIR": "~/.local/share/metacomputer/lessons"}
+            "LESSONS_DIR": "~/.local/share/metacomputer/lessons",
+            # Empty for config/local.env: the vault's and the event stream's own folders (scripts/lib.sh)
+            "VAULT_DIR": "~/Library/Application Support/metacomputer",
+            "EVENTS_SPOOL": "~/Library/Application Support/metacomputer/events/spool"}
 TABLES = ("docs/commands.md", "docs/shell.md")
 
 
