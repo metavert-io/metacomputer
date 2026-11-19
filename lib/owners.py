@@ -20,6 +20,13 @@ or outside Claude Code the shell that ran it, since the command itself exits.
 Such a claim (kind "shell") lasts the activity window from its last run even after
 that shell exits, and runs from the same terminal session (sid) are the same controller.
 
+Claude Code inside the VM (`metacomputer claude`) keeps working after the command that
+started it returns, so a keeper process (vm_claude.py _keeper) holds a claim for it (kind
+"inner", .run/owners/<keeper pid>.json) in the name of the session that started it, while
+the inner session runs: refreshed each time its screen changes, so it is active while the
+inner Claude works and for the activity window after. It ends with `claude stop`, the
+inner session's end, `metacomputer release` (the keeper then exits) or the keeper's exit.
+
 The hub holds a claim of its own (kind "lease", .run/owners/<hub pid>.json) while
 acting calls that a client left running when it disconnected are still running in
 the driver: until they end or the driver connection closes, at most the activity
@@ -317,8 +324,9 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
         # mine: also a claim held by a shell above the caller (metacomputer sh outside Claude Code)
         if c.get("bridge_pid") == self_pid or c.get("bridge_pid") in mine or (my_claude and c.get("claude_pid") == my_claude):
             continue
-        # mine: a shell claim from this same terminal session, outside Claude Code (its shell may be gone)
-        if (not my_claude and c.get("kind") == "shell" and not c.get("claude_pid")
+        # mine: a shell claim (or an inner Claude started from a shell) from this same terminal session, outside
+        # Claude Code (its shell may be gone)
+        if (not my_claude and c.get("kind") in ("shell", "inner") and not c.get("claude_pid")
                 and c.get("sid") is not None and c.get("sid") == sid):
             continue
         found.append({**c, "kind": "session", "claim": c.get("kind") or "bridge"})
@@ -337,6 +345,14 @@ def describe(o):
             src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (holder pid {o.get('bridge_pid')})"
             return (f"an unfinished {o.get('last_tool')} call from a {src}, still running in the driver, in "
                     f"{short(o.get('cwd'))}: started {o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [ACTIVE]")
+        if o.get("claim") == "inner":
+            src = (f"a Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid")
+                   else f"a shell (terminal session {o.get('sid')})")
+            s = o.get("session") or "?"
+            return (f"Claude Code inside the VM (metacomputer claude, session {s}), started by {src} in "
+                    f"{short(o.get('cwd'))}, held by its keeper (pid {o.get('bridge_pid')}): its screen last changed "
+                    f"{o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [{state}]; metacomputer claude stop"
+                    f"{'' if s == 'claude' else ' --session ' + s} ends it")
         if o.get("claim") == "lease":
             src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (pid {o.get('client_pid')})"
             return (f"unfinished call(s) ({o.get('last_tool')}) that a {src} left running when it disconnected, held by "

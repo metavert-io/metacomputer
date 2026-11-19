@@ -103,6 +103,8 @@ class FakeAPI(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"input_tokens": 12}))
         if path != "/v1/messages":
             return self._send(404, json.dumps({"type": "error", "error": {"type": "not_found_error", "message": path}}))
+        if "SLOWSTREAM" in last and rec["stream"]:
+            return self._slow(req, rec)
         text = f"PONG-{NONCE}" if "PING" in last else "fake reply"
         if "PING" in last and "\n" in last:
             text += " lines=" + str(last.count("\n") + 1)
@@ -123,6 +125,34 @@ class FakeAPI(http.server.BaseHTTPRequestHandler):
             ("message_stop", {"type": "message_stop"})]
         data = "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in events).encode()
         self._send(200, data, "text/event-stream")
+
+    def _slow(self, req, rec):
+        """An answer streamed a word every half second for 40 s; rec["cut"] says whether the far end hung up first."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        def ev(e, d):
+            self.wfile.write(f"event: {e}\ndata: {json.dumps(d)}\n\n".encode())
+            self.wfile.flush()
+        rec["cut"], rec["chunks"] = False, 0
+        try:
+            ev("message_start", {"type": "message_start", "message": {"id": "msg_slow", "type": "message", "role": "assistant",
+                                                                       "model": req.get("model"), "content": [], "stop_reason": None,
+                                                                       "stop_sequence": None, "usage": {"input_tokens": 5, "output_tokens": 1}}})
+            ev("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+            for i in range(80):
+                ev("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": f"w{i} "}})
+                rec["chunks"] = i + 1
+                time.sleep(0.5)
+            ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+            ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                                 "usage": {"output_tokens": 80}})
+            ev("message_stop", {"type": "message_stop"})
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            rec["cut"] = True
 
     def log_message(self, *a):
         pass
@@ -295,10 +325,15 @@ def run(td, procs, port):
     d = json.loads(r.stdout or "{}")
     check("status: running, a terminal attached, the token live", r.returncode == 0 and d.get("state") == "running"
           and d.get("viewers") not in (None, "0") and (d.get("token") or {}).get("live") is True, r.stdout)
+    w = mc("who")
+    check("its keeper holds the computer while it works: status says so, and `metacomputer who` names it",
+          (d.get("keeper") or {}).get("running") is True and (d.get("keeper") or {}).get("active") is True
+          and "Claude Code inside the VM (metacomputer claude, session claude)" in w.stdout, (d.get("keeper"), w.stdout[-500:]))
 
     # --- renewing its token (a vault with `secrets token renew`; one without it is told so) ---
     r = mc("claude", "renew", "--ttl", "20m")
-    if "can't renew tokens" in r.stderr:
+    renewing = "can't renew tokens" not in r.stderr
+    if not renewing:
         check("renew with a vault that has no `token renew`: refused with the restart that works instead (255)",
               r.returncode == 255 and "--continue" in r.stderr, r.stderr)
     else:
@@ -362,6 +397,28 @@ def run(td, procs, port):
     check("the token and the dummy keys are in no output of a metacomputer command",
           not any(tok in o or DUMMY_SUB in o or DUMMY_KEY in o for _, o in outputs), [w for w, o in outputs if tok in o])
 
+    # --- a token that ends mid-answer cuts the answer (the vault's in-stream check, PR #51) ---
+    if renewing:
+        tid2 = (json.loads(mc("claude", "status", "--session", "two", "--json").stdout or "{}").get("token") or {}).get("id")
+        n6 = len(FakeAPI.got)
+        mc("claude", "send", "--session", "two", "SLOWSTREAM please")
+        slow = None
+        for _ in range(40):
+            slow = next((g for g in FakeAPI.got[n6:] if "SLOWSTREAM" in g.get("last", "") and "chunks" in g), None)
+            if slow and slow["chunks"] >= 4:
+                break
+            time.sleep(0.5)
+        rv = mc("secrets", "revoke", tid2 or "00000000")
+        for _ in range(30):
+            if slow and slow.get("cut"):
+                break
+            time.sleep(0.5)
+        check("revoking the token mid-answer cuts the answer: the proxy hangs up on the stand-in API within seconds",
+              bool(slow) and rv.returncode == 0 and slow.get("cut") is True and slow.get("chunks", 80) < 40,
+              (slow, rv.stdout[-200:]))
+    else:
+        print("SKIP  a token ending mid-answer cuts it (needs the vault's in-stream check, PR #51)")
+
     # --- stop, revoke ---
     r = mc("claude", "stop", "--session", "two", "--revoke")
     check("stop --revoke: the session ends and its token is revoked", r.returncode == 0 and "revoked" in r.stdout, r.stdout + r.stderr)
@@ -384,6 +441,8 @@ def run(td, procs, port):
           and r.stdout.strip().endswith("0"), r.stdout + r.stderr)
     r = mc("claude", "read")
     check("read with no session: exit 6", r.returncode == 6, r.stderr)
+    w = mc("who")
+    check("after stop, no keeper holds the computer", "Claude Code inside the VM" not in w.stdout, w.stdout[-400:])
 
     u.send("\x03")
     u.wait(15)

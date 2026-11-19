@@ -43,6 +43,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import owners  # noqa: E402
+import vm_shell_guest  # noqa: E402  (its header limits: the Mac checks the same before sending)
 from termsafe import UNSAFE, escape_for_terminal  # noqa: E402,F401
 
 LAB = owners.LAB
@@ -747,6 +748,14 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
     cwd = guest_cwd(o["cwd"], user)
     base = {"cwd": cwd, "read_only": o["read_only"], "max_output": o["max_output"], "logged": None}
     warnings = []
+    # The VM's half refuses these too; here they're refused before anything is claimed, logged or sent.
+    extra = dict(header_extra or {})
+    if set(extra) - {"env"} or ("env" in extra and not vm_shell_guest.env_ok(extra["env"])):
+        return {**base, "status": "error", "kind": "usage", "message":
+                "the request's env takes at most 16 MCOMP_CLAUDE_*, CLAUDE_* or ANTHROPIC_* names with text values"}, EXIT_USAGE
+    if len(json.dumps({"cwd": cwd, "args": o["args"], **extra}).encode()) > vm_shell_guest.MAX_HEADER - 4096:
+        return {**base, "status": "error", "kind": "usage", "message":
+                f"the request header would be over {vm_shell_guest.MAX_HEADER // 1024} KB (arguments, env)"}, EXIT_USAGE
 
     log_on = logging_on(s["shell_log"], s["action_log"])
     if log_on is None:

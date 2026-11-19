@@ -75,7 +75,7 @@ describe() { # fields for the Mac: the session's state
   else
     field state running
   fi
-  field viewers "$(T display-message -p -t "=$SESSION" '#{session_attached}' 2>/dev/null)"
+  field viewers "$(T display-message -p -t "=$SESSION:" '#{session_attached}' 2>/dev/null)"
   field size "$(pane '#{window_width}x#{window_height}')"
 }
 
@@ -95,7 +95,7 @@ wait_quiet() { # QUIET TIMEOUT: until the screen has not changed for QUIET secon
 
 show_terminal() { # AGAIN: a terminal on the desktop attached to the session (in the live view and recordings)
   local again="$1" n
-  n="$(T display-message -p -t "=$SESSION" '#{session_attached}' 2>/dev/null)"
+  n="$(T display-message -p -t "=$SESSION:" '#{session_attached}' 2>/dev/null)"
   if [ "${n:-0}" -gt 0 ] && [ "$again" != 1 ]; then field viewer already; return 0; fi
   [ -n "${DISPLAY:-}" ] || { field viewer no-desktop; return 10; }
   command -v xfce4-terminal >/dev/null 2>&1 || { field viewer no-terminal; return 10; }
@@ -174,17 +174,23 @@ write_launcher() {
   cat > "$STATE/launch.sh" <<'LAUNCH' || return 1
 #!/bin/bash
 # metacomputer claude: starts Claude Code in this tmux pane (written by lib/vm_claude_guest.sh).
-# The token comes from ./env, which this reads once and deletes.
+# The token comes from ./env (plain assignments), which this reads once into unexported variables and deletes.
+# It's exported only on the line before `exec claude`, so no other program this runs inherits it.
 d="$(cd "$(dirname "$0")" && pwd)"
+unset _mc_base _mc_var _mc_token
 if [ ! -f "$d/env" ]; then
   echo "metacomputer claude: no token here (each start's token is used once). Start it again from the Mac." >&2
   exit 78
 fi
 . "$d/env"
 rm -f "$d/env"
-export PATH="$HOME/.local/bin:$PATH"
+case "${_mc_var:-}" in CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY) ;; *) exit 78 ;; esac
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+export PATH="$HOME/.local/bin:$PATH" ANTHROPIC_BASE_URL="$_mc_base" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 cd "$1" || exit 78
 shift
+export "$_mc_var=$_mc_token"
+unset _mc_base _mc_var _mc_token
 exec claude "$@"
 LAUNCH
   chmod 700 "$STATE/launch.sh"
@@ -263,7 +269,6 @@ case "$ACTION" in
 
     mkdir -p "$WORKDIR" || exit 10
     WORKDIR="$(cd "$WORKDIR" && pwd -P)" || exit 10
-    field workdir "$WORKDIR"
     write_config "$WORKDIR" "$AUTH" "$SKIP" || exit 10
 
     rm -rf "$STATE"
@@ -271,14 +276,13 @@ case "$ACTION" in
     write_launcher || exit 10
     write_tmux_conf || exit 10
     # The token goes only into this file (0600, folder 0700), written by the shell itself (printf is a
-    # builtin: no command line holds it). The launcher reads it once and deletes it.
+    # builtin: no command line holds it), as plain assignments the launcher reads once and deletes.
     (
       umask 077
       {
-        echo 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN'
-        printf 'export ANTHROPIC_BASE_URL=%q\n' "$BASE_URL"
-        printf 'export %s=%q\n' "$VAR" "$TOKEN"
-        echo 'export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'
+        printf '_mc_base=%q\n' "$BASE_URL"
+        printf '_mc_var=%q\n' "$VAR"
+        printf '_mc_token=%q\n' "$TOKEN"
       } > "$STATE/env"
     ) || exit 10
     TOKEN=""
@@ -370,6 +374,13 @@ case "$ACTION" in
     find_tmux || exit 6
     alive || { describe; exit 6; }
     show_terminal "$1" || exit 10
+    ;;
+
+  probe)
+    # The Mac's keeper (vm_claude.py _keeper): is it still running, and has its screen changed since last time?
+    find_tmux || { field state missing; exit 0; }
+    describe
+    if alive; then field hash "$(T capture-pane -p -t "=$SESSION:" 2>/dev/null | cksum | cut -d' ' -f1)"; fi
     ;;
 
   stop)

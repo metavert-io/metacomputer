@@ -88,7 +88,9 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   the shell channel's refusals, claim and action log. The token comes from `secrets token` on a pipe
   and reaches the VM only in the request header's `env`; never put it in a script, an argument, a
   log record, an event, output or the session record (`RUN_DIR/claude/`, ids only), and keep the
-  guest script taking it out of the environment before tmux starts. Drive the inner Claude with
+  guest script taking it out of the environment before tmux starts (the shell channel's `env` takes only
+  `MCOMP_CLAUDE_*`, `CLAUDE_*`, `ANTHROPIC_*` names). Fields from the VM are matched against fixed shapes; none
+  is recorded. A keeper holds an owners claim (kind `inner`) while the inner session works. Drive the inner Claude with
   `send`/`read`/`keys` (tmux), never its window. Tests: `python3 tests/test_vm_claude.py` (no VM),
   `tests/test_vm_claude_vm.py` (test VM).
 - Storage (docs/storage.md; `lib/storage.py`, the guest's `storage-helper`): volumes, Mac folders,

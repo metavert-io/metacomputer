@@ -233,6 +233,9 @@ def setup(td, with_claude=True):
         shutil.copy(os.path.join(td, "fake-claude"), os.path.join(bin_, "claude"))
     put(os.path.join(bin_, "curl"), FAKE_CURL)
     put(os.path.join(bin_, "xfce4-terminal"), FAKE_TERMINAL)
+    # rm, as the launcher runs it right after reading the token: it records whether the token is in its environment
+    put(os.path.join(bin_, "rm"), '#!/bin/bash\nif env | grep -qE "^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|_mc_token)="; '
+        'then echo leaked >> "$HOME/rm-env.log"; else echo clean >> "$HOME/rm-env.log"; fi\nexec /bin/rm "$@"\n')
     real = tmux_real()
     if real:
         # Every tmux call is recorded: no token may be among its arguments. With td/hostile present, capture-pane
@@ -256,7 +259,7 @@ def env_for(td, **extra):
                MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions"), MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys", "action-log"),
                MCOMP_VM_NAME="testvm", MCOMP_GUEST_USER="cua", MCOMP_SSH_PORT="1", XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
                MCOMP_SELF=os.path.join(td, "fake-vault"), FAKE_VAULT_DIR=os.path.join(td, "vault"),
-               FAKE_CLAUDE_SRC=os.path.join(td, "fake-claude"), MCOMP_SH_GRACE_S="5")
+               FAKE_CLAUDE_SRC=os.path.join(td, "fake-claude"), MCOMP_SH_GRACE_S="5", MCOMP_KEEPER_POLL_S="1")
     env.update({k: str(v) for k, v in extra.items()})
     return env
 
@@ -427,8 +430,75 @@ def unit_checks():
     check("the VM's fields: known names with plain values only; field-like lines inside the screen stay screen text",
           f == {"state": "running", "size": "200x50", "sessions": ["one", "two"]} and "@mc state exited" in s
           and "\x1b]52" in s, (f, s))
+    raw = ("@mc workdir /srv/work/" + TOKEN + "\n@mc claude " + TOKEN + " (Claude Code)\n@mc claude 2.1.327 (Claude Code)\n"
+           "@mc viewer opened " + TOKEN + "\n@mc state running" + TOKEN + "\n@mc exit 0\n").encode()
+    f, _ = vc.parse_output(raw)
+    check("a hostile VM can't put text in a field: workdir isn't read at all, and each field takes only its own shape",
+          f == {"claude": "2.1.327 (Claude Code)", "exit": "0"} and TOKEN not in json.dumps(f), f)
     check("escaping: control characters, OSC 52 and bidi overrides are shown as escapes",
           vc.clean("a\x1b]52;c;QQ==\x07b\u202ec") == "a\\x1b]52;c;QQ==\\x07b\\u202ec")
+
+
+# --- the keeper ---------------------------------------------------------------------------------------------
+OTHERS = ("import json, sys; sys.path.insert(0, sys.argv[1]); import owners; "
+          "print(json.dumps(owners.others(self_pid=1, mine=set(), my_claude=1, direct=[], sid=-1), default=str))")
+
+
+def claim_of(td, pid):
+    p = os.path.join(td, "run", "owners", f"{pid}.json")
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return None
+
+
+def keeper_checks(td, srec):
+    """The session's keeper: a live process holding an owners claim (kind inner) that another session sees as active,
+    refreshed when the screen changes."""
+    kpid = srec.get("keeper_pid")
+    c = claim_of(td, kpid) or {}
+    check("a keeper holds the computer for the inner session: a live process, an owners claim of kind inner for it",
+          bool(kpid) and vc.owners.alive(kpid) and c.get("kind") == "inner" and c.get("session") == "claude"
+          and c.get("last_tool") == vc.KEEP_TOOL, (kpid, c))
+    r = subprocess.run([sys.executable, "-c", OTHERS, os.path.join(LAB, "lib")], capture_output=True, text=True,
+                       env=env_for(td), timeout=60)
+    others = json.loads(r.stdout or "[]")
+    mine = [o for o in others if o.get("bridge_pid") == kpid]
+    check("another session sees it as a controller, active: its acting calls are refused while the inner Claude works",
+          len(mine) == 1 and mine[0].get("active") is True and mine[0].get("claim") == "inner", (others, r.stderr[-300:]))
+    w = subprocess.run([sys.executable, os.path.join(LAB, "lib", "owners.py"), "who"], capture_output=True, text=True,
+                       env=env_for(td), timeout=60)
+    check("metacomputer who names it: Claude Code inside the VM, its session, how to end it",
+          "Claude Code inside the VM (metacomputer claude, session claude)" in w.stdout and "metacomputer claude stop" in w.stdout,
+          w.stdout[-600:])
+    before = c.get("last_call", 0)
+    time.sleep(1.2)
+    mc(td, "send", "keep me busy")
+    check("the keeper renews the claim when the inner Claude's screen changes",
+          wait_for(lambda: (claim_of(td, kpid) or {}).get("last_call", 0) > before, 10), (before, claim_of(td, kpid)))
+    r = mc(td, "status", "--json")
+    check("status shows the keeper holding the computer, active", (js(r).get("keeper") or {}).get("running") is True
+          and (js(r).get("keeper") or {}).get("active") is True, r.stdout)
+
+
+def keeper_end_checks(td):
+    """The keeper ends with the session: Claude Code quitting, `release` (its claim dropped), `stop`."""
+    for how in ("quits", "released", "stopped"):
+        s = "k" + how[:3]
+        r = mc(td, "--session", s)
+        rec = json.load(open(os.path.join(td, "run", "claude", s + ".json")))
+        kpid = rec.get("keeper_pid")
+        alive = bool(kpid) and vc.owners.alive(kpid) and claim_of(td, kpid) is not None
+        if how == "quits":
+            mc(td, "send", "quit", "--session", s)
+        elif how == "released":
+            os.remove(os.path.join(td, "run", "owners", f"{kpid}.json"))     # what `metacomputer release` does
+        else:
+            mc(td, "stop", "--session", s, "--revoke")
+        gone = wait_for(lambda: not vc.owners.alive(kpid) and claim_of(td, kpid) is None, 15)
+        check(f"the keeper ends, and its claim with it, when the session's Claude Code {how}",
+              r.returncode == 0 and alive and gone, (r.stderr[-300:], kpid, claim_of(td, kpid)))
+        mc(td, "stop", "--session", s, "--revoke")
 
 
 # --- checks with a session (tmux) ----------------------------------------------------------------
@@ -466,10 +536,14 @@ def session_checks(td):
           and stat.S_IMODE(os.stat(state).st_mode) == 0o700, os.listdir(state))
     st = os.path.join(td, "run", "claude", "claude.json")
     srec = json.load(open(st)) if os.path.exists(st) else {}
-    check("the Mac's record of the session: token id, secret, env var; never the token; 0600",
-          srec.get("token_id", "").startswith("a") and srec.get("secret") == "claude-sub"
-          and srec.get("env_var") == "CLAUDE_CODE_OAUTH_TOKEN" and TOKEN not in open(st).read()
-          and stat.S_IMODE(os.stat(st).st_mode) == 0o600, srec)
+    check("the Mac's record of the session: token id, secret, env var, the folder asked for (not the VM's word); never "
+          "the token; 0600", srec.get("token_id", "").startswith("a") and srec.get("secret") == "claude-sub"
+          and srec.get("env_var") == "CLAUDE_CODE_OAUTH_TOKEN" and srec.get("workdir") == "~/claude-work"
+          and TOKEN not in open(st).read() and stat.S_IMODE(os.stat(st).st_mode) == 0o600, srec)
+    rmlog = open(os.path.join(home, "rm-env.log")).read().split() if os.path.exists(os.path.join(home, "rm-env.log")) else []
+    check("the launcher's `rm` of the token's file runs without the token in its environment (exported only for "
+          "`exec claude`)", rmlog and "leaked" not in rmlog, rmlog)
+    keeper_checks(td, srec)
     calls = vault_calls(td)
     check("the vault was asked for a list, then one token, with the secret's name and --ttl 1h (never a token in its "
           "arguments)", calls[:2] == [["secrets", "list", "--json"], ["secrets", "token", "claude-sub", "--ttl", "1h"]]
@@ -485,12 +559,13 @@ def session_checks(td):
     r = mc(td, "send", "-", stdin=multi)
     check("send -: several lines arrive as one prompt (a bracketed paste), nothing in them expanded",
           r.returncode == 0 and wait_for(lambda: inbox(td)[-1:] == [multi]), (r.stderr, inbox(td)[-1:]))
+    k0 = len(inbox(td))
     r = mc(td, "send", "draft only", "--no-enter")
     time.sleep(1)
     n_before = len(inbox(td))
     r2 = mc(td, "keys", "Enter")
     check("send --no-enter types without submitting; keys Enter submits it", r.returncode == 0 and r2.returncode == 0
-          and n_before == 2 and wait_for(lambda: inbox(td)[-1:] == ["draft only"]), (n_before, inbox(td)))
+          and n_before == k0 and wait_for(lambda: inbox(td)[-1:] == ["draft only"]), (n_before, k0, inbox(td)))
     r = mc(td, "keys", "4", "2", "Enter")
     check("keys: digits are typed literally", r.returncode == 0 and wait_for(lambda: inbox(td)[-1:] == ["42"]), inbox(td)[-2:])
     r = mc(td, "send", "slow", "--wait", "--quiet", "2", "--timeout", "60")
@@ -522,7 +597,7 @@ def session_checks(td):
     r = mc(td, "status", "--json")
     d = js(r)
     check("status: running, the token live (the vault's list), Claude Code's version", r.returncode == 0
-          and d.get("state") == "running" and (d.get("token") or {}).get("live") is True and d.get("claude") == "9.9.9 (Claude Code)",
+          and d.get("state") == "running" and (d.get("token") or {}).get("live") is True and d.get("claude") == "9.9.9 (Claude Code)" and d.get("viewers") == "0",
           r.stdout)
     r = mc(td, "show")
     tfile = os.path.join(home, "terminal-argv.txt")
@@ -654,14 +729,28 @@ def refusal_checks(td):
     r = mc(td, "--session", "ref", MCOMP_VM_STATE="off")
     check("the VM off: exit 255, nothing asked", r.returncode == 255 and "off" in r.stderr and len(vault_calls(td)) == n, r.stderr)
 
+    rv = os.path.join(td, "run", "claude", "rv.json")
     r = mc(td, "--session", "rv")
+    tid_rv = json.load(open(rv)).get("token_id") if os.path.exists(rv) else None
     set_mode(td, "norevoke")
     r2 = mc(td, "stop", "--session", "rv", "--revoke", "--json")
     d = js(r2)
-    check("stop --revoke when the vault can't confirm the revocation: says so, with the command to end it",
-          r.returncode == 0 and r2.returncode == 0 and d.get("token_revoked") is False
-          and "metacomputer secrets revoke a" in d.get("message", ""), (r.stderr[-300:], r2.stdout))
+    check("stop --revoke when the vault can't confirm the revocation: exit 255, says so, and keeps the session's record "
+          "(with the token id) for a second try", r.returncode == 0 and r2.returncode == 255 and d.get("token_revoked") is False
+          and f"metacomputer secrets revoke {tid_rv}" in d.get("message", "") and os.path.exists(rv), (r.stderr[-300:], r2.stdout))
     set_mode(td, "oauth")
+    r3 = mc(td, "stop", "--session", "rv", "--revoke")
+    check("... and running it again revokes it and drops the record", r3.returncode == 0 and not os.path.exists(rv)
+          and tid_rv in open(os.path.join(td, "vault", "revoked")).read().split(), r3.stdout + r3.stderr)
+    r = mc(td, "--session", "rv2")
+    tid_rv2 = json.load(open(os.path.join(td, "run", "claude", "rv2.json"))).get("token_id")
+    r2 = mc(td, "stop", "--session", "rv2", "--revoke", MCOMP_VM_STATE="off")
+    check("stop --revoke with the VM unreachable: the token is revoked from the Mac all the same, the record kept, exit 255",
+          r.returncode == 0 and r2.returncode == 255 and tid_rv2 in open(os.path.join(td, "vault", "revoked")).read().split()
+          and "its token was revoked" in r2.stderr and os.path.exists(os.path.join(td, "run", "claude", "rv2.json")), r2.stderr)
+    r3 = mc(td, "stop", "--session", "rv2", "--revoke")
+    check("... and stop again (the VM back) ends the session and drops the record",
+          r3.returncode == 0 and not os.path.exists(os.path.join(td, "run", "claude", "rv2.json")), r3.stdout + r3.stderr)
     n = len(vault_calls(td))
 
     run_dir = os.path.join(td, "run", "owners")
@@ -706,21 +795,36 @@ def install_checks(td):
 
 
 ENV_PROBE = r'''
-import json, os, sys
+import json, os, sys, time
 sys.path.insert(0, sys.argv[1])
 import vm_shell
 o = {"cwd": "/", "timeout": 30, "max_output": 65536, "read_only": True, "override": False, "args": [],
      "source": "command"}
-out = {}
-for name, env in (("good", {"MCOMP_PROBE": "a value with spaces; $(x)"}), ("lower", {"bad_name": "x"}),
-                  ("nul", {"MCOMP_PROBE": "a\u0000b"}), ("many", {"V%d" % i: "x" for i in range(17)}),
-                  ("type", {"MCOMP_PROBE": 5})):
-    res, code = vm_shell.run_guarded(o, ["bash", "-c"], b'printf %s "${MCOMP_PROBE:-unset}"', tool="probe",
-                                     header_extra={"env": env})
+script = b'printf %s "${MCOMP_CLAUDE_PROBE:-unset}|${PATH:0:5}|${BASH_ENV:-none}"'
+cases = (("good", {"MCOMP_CLAUDE_PROBE": "a value with spaces; $(x)"}), ("path", {"PATH": "/evil"}),
+         ("bash_env", {"BASH_ENV": "/tmp/x"}), ("ld", {"LD_PRELOAD": "/tmp/x.so"}), ("lower", {"claude_x": "x"}),
+         ("nul", {"MCOMP_CLAUDE_PROBE": "a\u0000b"}), ("many", {"CLAUDE_V%d" % i: "x" for i in range(17)}),
+         ("type", {"MCOMP_CLAUDE_PROBE": 5}), ("huge", {"CLAUDE_B%d" % i: "y" * 65536 for i in range(16)}))
+out = {"mac": {}, "vm": {}}
+for name, env in cases:   # the Mac refuses before anything is sent
+    res, code = vm_shell.run_guarded(o, ["bash", "-c"], script, tool="probe", header_extra={"env": env})
     st = (res.get("_streams") or {}).get("stdout")
-    out[name] = [code, res.get("status"), res.get("kind"), st["head"].decode() if st else None]
+    out["mac"][name] = [code, res.get("status"), res.get("kind"), st["head"].decode() if st else None]
+for name, env in cases:   # ...and the VM's half refuses the same when a header gets past it
+    header = {"cwd": "/", "timeout": 30, "max_output": 65536, "desktop": False, "args": [], "script_bytes": len(script),
+              "env": env}
+    base = {"cwd": "/", "read_only": True, "max_output": 65536, "logged": None}
+    res, code = vm_shell.execute(o, ["bash", "-c"], header, script, time.monotonic() + 60, base, None)
+    st = (res.get("_streams") or {}).get("stdout")
+    out["vm"][name] = [code, res.get("status"), res.get("kind"), st["head"].decode() if st else None]
 print(json.dumps(out))
 '''
+
+
+def keeper_group(td):
+    setup(td)
+    set_mode(td, "oauth")
+    keeper_end_checks(td)
 
 
 def guest_checks(td):
@@ -733,10 +837,15 @@ def guest_checks(td):
         got = json.loads(r.stdout)
     except ValueError:
         got = {}
-    check("the shell channel's header env: the script gets the value in its environment, never on its command line",
-          got.get("good") == [0, "exited", None, "a value with spaces; $(x)"], (got, r.stderr[-300:]))
-    check("... and the VM's half refuses a lowercase name, a NUL, more than 16 values or a value that isn't text",
-          all((got.get(k) or [None, None, None])[2] == "guest" for k in ("lower", "nul", "many", "type")), got)
+    mac, vm = got.get("mac") or {}, got.get("vm") or {}
+    bad = ("path", "bash_env", "ld", "lower", "nul", "many", "type", "huge")
+    check("the shell channel's header env: an allowed name reaches the script's environment, never its command line",
+          (mac.get("good") or [None])[0] == 0 and (mac.get("good") or [None] * 4)[3].startswith("a value with spaces; $(x)|")
+          and (vm.get("good") or [None] * 4)[3].endswith("|none"), (got, r.stderr[-300:]))
+    check("... the Mac refuses PATH, BASH_ENV, LD_PRELOAD, a lowercase name, a NUL, more than 16, a non-text value and a "
+          "header over 1 MB before sending anything", all((mac.get(k) or [None, None, None])[2] == "usage" for k in bad), mac)
+    check("... and the VM's half refuses each of them too when a header gets past the Mac (the size before parsing)",
+          all((vm.get(k) or [None, None, None])[2] == "guest" for k in bad), vm)
     env = dict(os.environ, HOME=td)
     r = subprocess.run(["bash", GUEST, "status", "Bad Name"], capture_output=True, text=True, env=env)
     check("guest: a bad session name is refused (2)", r.returncode == 2, r.stderr)
@@ -746,8 +855,12 @@ def guest_checks(td):
     check("guest: the token and the prompt are taken out of the environment before anything runs",
           text.index("unset MCOMP_CLAUDE_TOKEN MCOMP_CLAUDE_TEXT") < text.index("find_tmux() {"))
     check("guest: the token is written only with printf (a builtin) into a 0077 file, never put on a command line",
-          re.search(r'printf .export %s=%q\\n. "\$VAR" "\$TOKEN"', text) is not None
+          re.search(r"printf '_mc_token=%q\\n' \"\$TOKEN\"", text) is not None
           and text.count("$TOKEN") == 3, [m.start() for m in re.finditer(r"\$TOKEN", text)])
+    launcher = text[text.index('cat > "$STATE/launch.sh"'):text.index("\nLAUNCH\n")]
+    check("guest: the launcher exports the token only on the line before `exec claude`",
+          launcher.count("_mc_token") == 3 and re.search(r'export "\$_mc_var=\$_mc_token"\nunset _mc_base _mc_var '
+                                                          r'_mc_token\nexec claude "\$@"$', launcher) is not None, launcher[-300:])
 
 
 def main():
@@ -755,7 +868,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="mcc-", dir="/tmp") as td:
         guest_checks(td)
     if tmux_real():
-        for fn in (session_checks, refusal_checks, install_checks):
+        for fn in (session_checks, refusal_checks, install_checks, keeper_group):
             td = tempfile.mkdtemp(prefix="mcc-", dir="/tmp")
             try:
                 fn(td)

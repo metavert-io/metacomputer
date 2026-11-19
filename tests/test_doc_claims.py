@@ -171,13 +171,48 @@ def claude_ttl(default_h, max_h):
 
 def claude_token_path():
     """The VM's half takes the token out of its environment before anything runs, writes it only with printf under
-    umask 077 into a 0700 folder, uses it nowhere else, and the launcher reads the file once and deletes it."""
+    umask 077 into a 0700 folder as a plain (unexported) assignment, uses it nowhere else; the launcher reads the file
+    once into unexported variables, deletes it, and exports the token only on the line before `exec claude`."""
     g = raw(VCG)
-    launcher = g[g.index('cat > "$STATE/launch.sh"'):]
+    launcher = g[g.index('cat > "$STATE/launch.sh"'):g.index("\nLAUNCH\n")]
     return (g.index("unset MCOMP_CLAUDE_TOKEN MCOMP_CLAUDE_TEXT") < g.index('ACTION="${1:-}"') < g.index("\nfield() {")
-            and re.search(r"\(\s*umask 077\s*\{[^()]*printf 'export %s=%q\\n' \"\$VAR\" \"\$TOKEN\"[^()]*\} > \"\$STATE/env\"\s*\)", g)
+            and re.search(r"\(\s*umask 077\s*\{[^()]*printf '_mc_token=%q\\n' \"\$TOKEN\"[^()]*\} > \"\$STATE/env\"\s*\)", g)
             is not None and 'chmod 700 "$STATE"' in g and g.count("$TOKEN") == 3
-            and re.search(r'\. "\$d/env"\nrm -f "\$d/env"', launcher) is not None)
+            and launcher.index("unset _mc_base _mc_var _mc_token") < launcher.index('. "$d/env"\nrm -f "$d/env"')
+            and re.search(r'export "\$_mc_var=\$_mc_token"\nunset _mc_base _mc_var _mc_token\nexec claude "\$@"$', launcher)
+            is not None and len(re.findall(r"(?m)^export ", launcher)) == 2)
+
+
+def claude_keeper():
+    """A keeper holds an owners claim of kind inner for the session that started it, renewed only when the screen
+    changed (the probe's hash), never logged; who/status show it; it ends with stop, the session's end, release."""
+    k, p, s = vc_fn("run_keeper"), vc_fn("probe"), vc_fn("start_keeper")
+    return ('kind="inner"' in s and "owners.claude_of(" in s and "start_new_session=True" in s and "close_fds=True" in s
+            and 'if fields.get("hash") != last:' in k and 'if fields.get("state") != "running":' in k
+            and "if not os.path.exists(owners.claim_path(me)):" in k and "owners.drop_claim(me)" in k
+            and "vm_shell.execute(" in p and "run_guarded" not in p and vm_claude.KEEP_S == 60
+            and 'if o.get("claim") == "inner":' in raw("lib/owners.py") and "stop_keeper(" in vc_fn("do_stop")
+            and "owners.ACTIVE_S" not in k and owners.ACTIVE_S == 600)
+
+
+def answer_cut_at_token_end():
+    """The proxy re-checks a token while an answer streams and cancels the upstream task when it ended (PR #51)."""
+    p = raw(PROXY)
+    if "if !stillLive(token) {" not in p:
+        return False, "the proxy doesn't check the token while an answer streams yet: this waits for PR #51"
+    loop = p[p.index("if !stillLive(token) {"):]
+    return "invalidateAndCancel()" in loop[:2000], "no cancel after the token check"
+
+
+def claude_env_allowlist():
+    import vm_shell_guest
+    ok = all(vm_shell_guest.env_ok({n: "x"}) for n in ("MCOMP_CLAUDE_TOKEN", "CLAUDE_CODE_X", "ANTHROPIC_BASE_URL"))
+    bad = not any(vm_shell_guest.env_ok({n: "x"}) for n in ("PATH", "BASH_ENV", "LD_PRELOAD", "PYTHONPATH", "HOME",
+                                                            "MCOMP_X", "claude_x", "CLAUDE_"))
+    g = raw("lib/vm_shell_guest.py")
+    return (ok and bad and vm_shell_guest.MAX_HEADER == 1 << 20 and "inp.readline(MAX_HEADER + 1)" in g
+            and g.index("inp.readline(MAX_HEADER + 1)") < g.index("json.loads(line)")
+            and "vm_shell_guest.env_ok(" in raw("lib/vm_shell.py"))
 
 
 def claude_header_unlogged():
@@ -194,7 +229,8 @@ def claude_record_without_token():
     st = vc_fn("do_start")
     rec = st[st.index('rec = {"session"'):st.index("save_state(")]
     keys = set(re.findall(r'"([a-z_]+)":', rec))
-    return "token_id" in keys and "token" not in keys and vm_claude.state_dir().endswith(os.sep + "claude")
+    return ("token_id" in keys and "token" not in keys and vm_claude.state_dir().endswith(os.sep + "claude")
+            and '"workdir": o["cwd"]' in rec and "fields.get(" not in rec and "workdir" not in vm_claude.FIELD_RULES)
 
 
 def claude_acting():
@@ -471,15 +507,38 @@ CLAIMS = [
     ("README.md", r"gets a (\d+)-hour token from the vault", lambda m: claude_ttl(int(m[1]), 8)),
     ("SECURITY.md", r"`ANTHROPIC_BASE_URL` is the proxy inside the VM \(`http://127\.0\.0\.1:(\d+)/NAME`\), and "
                     r"`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off",
-     lambda m: m[1] == D["SECRETS_PROXY_PORT"] and "echo 'export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'" in raw(VCG)
-     and "printf 'export ANTHROPIC_BASE_URL=%q\\n' \"$BASE_URL\"" in raw(VCG) and 'base.rstrip("/")' in vc_fn("get_token")),
+     lambda m: m[1] == D["SECRETS_PROXY_PORT"]
+     and 'export PATH="$HOME/.local/bin:$PATH" ANTHROPIC_BASE_URL="$_mc_base" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' in raw(VCG)
+     and "printf '_mc_base=%q\\n' \"$BASE_URL\"" in raw(VCG) and 'base.rstrip("/")' in vc_fn("get_token")),
     ("SECURITY.md", r"The script copies it into an unexported shell variable and takes it out of the environment before "
                     r"running anything", lambda m: claude_token_path()),
     ("SECURITY.md", r"The script writes it with `printf` \(a shell builtin\) into a file in a 0700 folder, under umask 077\. "
-                    r"Claude Code's launcher reads that file once and deletes it", lambda m: claude_token_path()),
+                    r"Claude Code's launcher reads that file once into unexported variables and deletes it, then exports "
+                    r"the token only on the line that starts Claude Code \(`exec`\), so no other program the launcher runs "
+                    r"inherits it", lambda m: claude_token_path()),
+    ("SECURITY.md", r"That field takes only `MCOMP_CLAUDE_\*`, `CLAUDE_\*` and `ANTHROPIC_\*` names, never `PATH`, `BASH_ENV`, "
+                    r"`LD_\*` or the like, checked on both sides, and the header is read with a 1 MB cap before it's parsed",
+     lambda m: claude_env_allowlist()),
+    ("docs/shell.md", r"The VM's half reads the header with a 1 MB cap before it parses it", lambda m: claude_env_allowlist()),
     ("SECURITY.md", r"the request header isn't logged, even with `ACTION_LOG_TEXT=keep`", lambda m: claude_header_unlogged()),
     ("SECURITY.md", r"never in the session record on the Mac \(`RUN_DIR/claude/NAME\.json`: the id, the secret's name, the "
-                    r"expiry\)", lambda m: claude_record_without_token()),
+                    r"expiry, the folder asked for\)\. What the VM's half reports back is checked field by field against "
+                    r"fixed shapes", lambda m: claude_record_without_token()),
+    ("SECURITY.md", r"The keeper looks once a minute \(read-only, and not in the action log, like `who`\)\. It renews the "
+                    r"claim whenever the inner Claude's screen has changed, so other sessions are refused while the inner "
+                    r"Claude works and for (\d+) minutes after", lambda m: int(m[1]) * 60 == owners.ACTIVE_S and claude_keeper()),
+    ("SECURITY.md", r"`stop --revoke` revokes the token from the Mac even when the VM can't be reached or refuses, and keeps "
+                    r"the session's record \(and exits non-zero\) until both are done",
+     lambda m: vc_fn("do_stop").index("revoke_token(tid)") < vc_fn("do_stop").index("if stop_err is not None:")
+     and "if stop_err is None and (not (tid and o[\"revoke\"]) or revoked):" in vc_fn("do_stop")
+     and 'out["exit"] = EXIT_FAILED' in vc_fn("do_stop")),
+    # Expiry cuts an answer in progress: the vault's proxy (PR #51, which merges before this) checks the token while it
+    # streams (`if !stillLive(token)` in its wait loop) and cancels the answer when the token ends. Until #51 is on
+    # main, these two rows fail on purpose.
+    ("SECURITY.md", r"When it ends, new requests are refused, and an answer the proxy is still streaming is cut off",
+     lambda m: answer_cut_at_token_end()),
+    ("docs/guide.md", r"Claude Code can't reach the API, and an answer it's in the middle of stops",
+     lambda m: answer_cut_at_token_end()),
     ("SECURITY.md", r"`start`, `send`, `keys`, `show` and `stop` act, so the one-controller rule refuses them while another "
                     r"session uses the computer \(unless you agree to `--override`\)\. `read`, `wait` and `status` only look",
      lambda m: claude_acting()),

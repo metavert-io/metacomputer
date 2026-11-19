@@ -438,7 +438,15 @@ metacomputer claude stop --revoke                  # end it and its token
   conversation.
 - It runs through the shell channel, so `VM_SHELL=off` and bounded mode turn it off, and
   starting it, sending to it and stopping it count as using the computer (one session at a
-  time).
+  time). While the inner Claude works, a keeper on the Mac marks the computer as in use
+  for the session that started it, so other sessions are refused; `metacomputer who` shows
+  it, and `claude stop` (or the inner Claude's exit) releases it.
+- The hub's guards and the action log cover what goes through metacomputer: starting it,
+  what it's told, what's read back. What the inner Claude then does in the VM, through its
+  own tools, isn't seen by them; the VM's isolation is its limit.
+- `claude stop --revoke` revokes the token even if the VM can't be reached, and if
+  anything is left undone it says so, keeps the session's record and exits non-zero:
+  run it again.
 - What the inner Claude can and can't reach, and where the token goes:
   [SECURITY.md](../SECURITY.md#claude-inside-the-vm-metacomputer-claude). In short, it can do
   what the VM's desktop user can do, its token works only through the proxy until it ends,

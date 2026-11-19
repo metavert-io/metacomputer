@@ -407,7 +407,7 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 
 ## Claude inside the VM: `tests/test_vm_claude.py`, `tests/test_vm_claude_vm.py`
 
-`python3 tests/test_vm_claude.py` needs no VM (117 checks). `bash -c` stands in
+`python3 tests/test_vm_claude.py` needs no VM (132 checks). `bash -c` stands in
 for SSH, so the shell channel's VM half and `lib/vm_claude_guest.sh` run locally,
 with a temp folder as the VM's home. A fake `metacomputer` answers `secrets
 list|token|token renew|tokens|revoke` with a dummy token (or, as a vault from before
@@ -438,16 +438,28 @@ checks:
   back OSC 52, a screen clear or a bidi override has them shown escaped, plain and
   `--json`;
 - the token is in no command line (`ps`, tmux's arguments), no file but the fake
-  vault's (the signed action log with `ACTION_LOG_TEXT=keep` included), no output;
+  vault's (the signed action log with `ACTION_LOG_TEXT=keep` included), no output, and
+  not in the environment of the `rm` the launcher runs (a recording `rm`);
+- the VM's fields: each takes only its own shape, and `workdir` isn't read at all (the
+  Mac's record holds the folder asked for);
+- the keeper: a live process with an owners claim of kind `inner` that another session
+  sees as active, `who` naming it, renewed when the screen changes, `status` showing
+  it; it ends, with its claim, when Claude Code quits, when its claim is released, and
+  at `stop`;
+- `stop --revoke` when the vault doesn't confirm (255, record kept, then a second run
+  finishes) and with the VM unreachable (revoked from the Mac all the same, record
+  kept);
 - refusals before any token: a locked vault (3), no usable secret, two candidates,
   an unbound VM, the vault's refusal, `VM_SHELL=off`, the bounded driver, the VM
   off, another session acting (while `status` still answers); Claude Code ending at
   once (6, its token revoked); installing Claude Code once with the native
-  installer; the shell channel's header `env` (accepted values, and the VM's half
-  refusing bad names, NUL, too many, non-text).
+  installer; the shell channel's header `env`: an allowed name reaches the script,
+  and `PATH`, `BASH_ENV`, `LD_PRELOAD`, a lowercase name, NUL, more than 16, a
+  non-text value and a header over 1 MB are refused by the Mac before sending and,
+  in crafted headers, by the VM's half.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (29 checks with a vault
-that has `secrets token renew`, 28 without; `MCOMP_VAULT_TEST_BIN` picks the build) runs it
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (32 checks with a vault
+from PR #51, which renews tokens and cuts an answer when its token ends; 30 and a skip without; `MCOMP_VAULT_TEST_BIN` picks the build) runs it
 for real on a test VM, with no real key: a TEST build of the vault in a temp folder,
 bound to the VM, whose proxy goes to a stand-in Anthropic API on the Mac
 (`MCOMP_VAULT_TEST_API_HTTP=1`). It removes Claude Code and its settings from the VM
@@ -455,7 +467,7 @@ first, then checks the native install, no first-run screen, the terminal on the
 desktop, both header kinds reaching the stand-in API with the dummy keys the proxy
 put in (and the oauth beta for Bearer), one-line and three-line prompts arriving
 whole, `--no-enter` + `keys Enter`, `read`, `status`, `renew` (the same token lives
-longer and the same Claude Code keeps answering; or, with an older vault, the refusal), `--model` and
+longer and the same Claude Code keeps answering; or, with an older vault, the refusal), the keeper (`status` and `who` while it runs, gone after `stop`), a token revoked mid-answer cutting a slow streamed answer off (with #51), `--model` and
 `--skip-permissions`, that neither dummy key is anywhere in the VM (files, any
 process's environment or command line), that the token is on no command line on the
 Mac or in the VM and in no file written on the Mac during the test (the signed action

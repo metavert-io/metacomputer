@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -59,9 +60,16 @@ MAX_TEXT = 60000            # the prompt's UTF-8 bytes (the VM's half takes head
 MAX_TTL_S = 8 * 3600
 DEFAULT_TTL = "1h"
 DEFAULT_WORKDIR = "~/claude-work"
-FIELD_NAMES = {"tmux", "claude", "state", "exit", "viewers", "size", "session", "installing", "workdir", "sent",
-               "viewer", "stopped"}
-FIELD_VALUE_RE = re.compile(r"[\x20-\x7e]{0,200}")
+# The VM's fields, each with the only values taken from it. Nothing free-form: a hostile VM can't use a field to put
+# text (a token, say) into this command's output or the Mac's session record. The screen is the one free text, shown
+# escaped and marked as the VM's, never recorded.
+FIELD_RULES = {"tmux": re.compile(r"none|/[A-Za-z0-9._/-]{1,120}"),
+               "claude": re.compile(r"none|[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,6}(?:-[0-9A-Za-z.]{1,12})? \(Claude Code\)"),
+               "state": re.compile(r"running|exited|missing"), "exit": re.compile(r"-?[0-9]{1,3}"),
+               "viewers": re.compile(r"[0-9]{1,3}"), "size": re.compile(r"[0-9]{1,4}x[0-9]{1,4}"),
+               "session": re.compile(r"[a-z0-9][a-z0-9-]{0,29}"), "installing": re.compile(r"claude-code"),
+               "sent": re.compile(r"yes"), "viewer": re.compile(r"opened|already|no-desktop|no-terminal"),
+               "stopped": re.compile(r"yes|no"), "hash": re.compile(r"[0-9]{1,12}")}
 
 USAGE = """usage: metacomputer claude [start] [--token NAME] [--ttl 1h] [--model M] [--skip-permissions]
                                 [--session NAME] [--cwd DIR] [--show] [--no-install] [--override] [-- CLAUDE_ARGS...]
@@ -149,7 +157,7 @@ def parse(argv):
          "token": None, "ttl": None, "model": None, "skip": False, "cwd": DEFAULT_WORKDIR, "show": False,
          "install": True, "claude_args": [], "text": None, "text_source": None, "enter": True, "wait": False,
          "timeout": 600, "quiet": 5, "lines": 40, "all": False, "keys": [], "again": False, "revoke": False}
-    if argv and argv[0] in ACTIONS:
+    if argv and (argv[0] in ACTIONS or argv[0] == "_keeper"):
         o["action"] = argv[0]
         argv = argv[1:]
     elif argv and argv[0] in ("-h", "--help", "help"):
@@ -162,7 +170,8 @@ def parse(argv):
                "send": {"--file", "--no-enter", "--wait", "--timeout", "--quiet", "--lines"},
                "read": {"--lines", "--all"},
                "wait": {"--timeout", "--quiet", "--lines"},
-               "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"}}[act]
+               "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"},
+               "_keeper": set()}[act]
     allowed |= {"--session", "--json", "--override", "-h", "--help"}
     positional = []
     i = 0
@@ -544,7 +553,7 @@ def parse_output(raw):
             continue
         if line.startswith("@mc "):
             name, _, value = line[4:].partition(" ")
-            if name in FIELD_NAMES and FIELD_VALUE_RE.fullmatch(value):
+            if name in FIELD_RULES and FIELD_RULES[name].fullmatch(value):
                 if name == "session":
                     fields.setdefault("sessions", []).append(value)
                 else:
@@ -657,13 +666,23 @@ def do_start(transport, o):
         raise f
     if old and old.get("token_id") and old.get("token_id") != tok["token_id"]:
         revoke_token(old["token_id"])        # the ended session this one replaced
+    if old:
+        stop_keeper(o["session"], old)
     rec = {"session": o["session"], "vm": os.environ.get("MCOMP_VM_NAME", ""), "secret": name,
            "token_id": tok["token_id"], "expires": tok["expires"], "ttl_s": o["ttl_s"], "auth": tok["auth"],
            "env_var": env_var_for(tok["auth"]), "base_url": tok["base_url"], "api_host": tok["api_host"],
-           "workdir": fields.get("workdir") or o["cwd"], "model": o["model"], "skip_permissions": o["skip"],
+           "workdir": o["cwd"], "model": o["model"], "skip_permissions": o["skip"],
            "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     try:
         save_state(o["session"], rec)
+        # It goes on working after this command returns: a keeper holds the computer for it (one controller at a time).
+        kpid = start_keeper(transport, o, rec)
+        if kpid:
+            rec["keeper_pid"] = kpid
+            save_state(o["session"], rec)
+        else:
+            warnings.append("couldn't start the keeper that marks the computer as in use while it works: other "
+                            "sessions see it as in use only while this session acts (metacomputer who)")
     except OSError as e:     # it runs either way: say how to end its token without the record
         warnings.append(f"couldn't record the session on the Mac ({e.strerror or e}): `claude stop --revoke` won't find "
                         f"its token; end it with metacomputer secrets revoke {tok['token_id']}")
@@ -758,7 +777,7 @@ def do_status(transport, o):
     rec = load_state(o["session"])
     out = {"ok": True, "action": "status", "session": o["session"], "state": fields.get("state"),
            "exit_status": fields.get("exit"), "viewers": fields.get("viewers"), "size": fields.get("size"),
-           "claude": fields.get("claude"), "tmux": fields.get("tmux"),
+           "claude": fields.get("claude"), "tmux": "none" if fields.get("tmux") in (None, "none") else "yes",
            "sessions": [s for s in fields.get("sessions") or [] if SESSION_RE.fullmatch(s)]}
     if rec:
         live = live_tokens()
@@ -774,9 +793,20 @@ def do_status(transport, o):
         out["workdir"] = rec.get("workdir")
         out["model"] = rec.get("model")
         out["skip_permissions"] = rec.get("skip_permissions")
+        out["keeper"] = keeper_state(o["session"], rec)
         if out["state"] == "running":
             out["warnings"] = token_warnings(o["session"], rec, live)
     return out
+
+
+def keeper_state(session, rec):
+    """The keeper's view for status: running, and whether its claim makes the computer in use (active) now."""
+    pid = rec.get("keeper_pid")
+    if not keeper_matches(pid, session):
+        return {"running": False}
+    c = next((x for x in owners.claims() if x.get("bridge_pid") == int(pid)), None)
+    return {"running": True, "pid": int(pid), "active": bool(c and c.get("active")),
+            "idle_s": c.get("idle_s") if c else None}
 
 
 def token_warnings(session, rec=None, live=False):
@@ -840,23 +870,163 @@ def do_renew(transport, o):
 
 
 def do_stop(transport, o):
-    fields, _, code, res = run_step(transport, o, "stop", [], read_only=False, timeout=60)
-    if code != 0:
-        raise step_failure(code, res, fields, "stop")
-    rec = load_state(o["session"])
-    out = {"ok": True, "action": "stop", "session": o["session"], "stopped": fields.get("stopped") == "yes"}
-    tid = (rec or {}).get("token_id")
-    if tid and TOKEN_ID_RE.fullmatch(str(tid)):
-        if o["revoke"]:
-            out["token_revoked"] = revoke_token(tid)
-            if not out["token_revoked"]:
-                out["message"] = (f"the vault didn't confirm that token {tid} ended: check with metacomputer secrets "
-                                  f"tokens, and end it with metacomputer secrets revoke {tid}")
-        else:
-            out["token_id"] = tid
-            out["revoke_with"] = f"metacomputer secrets revoke {tid}"
-    drop_state(o["session"])
+    """End the session in the VM, and with --revoke its token. The token is revoked from the Mac whether or not the
+    VM's half could stop the session (a VM that's off, unreachable or refused can't keep it alive), and the Mac's
+    record is kept until everything asked for is done, so running stop again finishes the job. Anything left
+    undone exits non-zero."""
+    rec = load_state(o["session"]) or {}
+    tid = rec.get("token_id") if TOKEN_ID_RE.fullmatch(str(rec.get("token_id") or "")) else None
+    stop_err, fields = None, {}
+    try:
+        fields, _, code, res = run_step(transport, o, "stop", [], read_only=False, timeout=60)
+        if code != 0:
+            stop_err = step_failure(code, res, fields, "stop")
+    except Failed as f:
+        stop_err = f
+    revoked = revoke_token(tid) if (tid and o["revoke"]) else None
+    if stop_err is None:
+        stop_keeper(o["session"], rec)
+    out = {"ok": stop_err is None, "action": "stop", "session": o["session"],
+           "stopped": stop_err is None and fields.get("stopped") == "yes"}
+    if tid and o["revoke"]:
+        out["token_revoked"] = revoked
+    elif tid:
+        out["token_id"] = tid
+        out["revoke_with"] = f"metacomputer secrets revoke {tid}"
+    if stop_err is None and (not (tid and o["revoke"]) or revoked):
+        drop_state(o["session"])
+    if stop_err is not None:
+        note = ("" if not (tid and o["revoke"]) else "; its token was revoked" if revoked
+                else f"; the vault didn't confirm that its token {tid} ended")
+        stop_err.message += f"{note}. The session's record is kept: run this again to finish"
+        stop_err.extra["token_revoked"] = tid if revoked else None
+        raise stop_err
+    if tid and o["revoke"] and not revoked:
+        out["ok"] = False
+        out["exit"] = EXIT_FAILED
+        out["message"] = (f"the session stopped, but the vault didn't confirm that its token {tid} ended. The record is "
+                          f"kept: run claude stop --revoke again, or metacomputer secrets revoke {tid}")
     return out
+
+
+# --- the keeper: the inner session holds the computer while it works ----------------------------------------
+KEEP_S = max(1, int(os.environ.get("MCOMP_KEEPER_POLL_S") or 60))    # how often it looks (tests set it lower)
+KEEP_MAX_S = 12 * 3600                                                 # it never outlives this
+KEEP_FAILS = 3                                                         # probes that fail in a row before it gives up
+KEEP_TOOL = "vm_claude (inner session)"
+
+
+def keeper_matches(pid, session):
+    """Is pid this session's keeper (so it's safe to signal)? Checked from its command line, never assumed."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1 or not owners.alive(pid):
+        return False
+    cmd = owners.full_command(pid)
+    return "vm_claude.py" in cmd and cmd.endswith(f" _keeper --session {session}")
+
+
+def start_keeper(transport, o, rec):
+    """A detached process that holds the computer for the inner session (an owners claim of kind "inner", in the
+    name of the Claude Code session that started it) and ends with it. None when it couldn't start: the session
+    runs anyway, and the output says so."""
+    try:
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--transport", str(len(transport)), *transport,
+                              "_keeper", "--session", o["session"]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError:
+        return None
+    try:
+        claude = owners.claude_of(os.getpid(), owners.ps_table())
+        with owners.lock():
+            owners.write_claim(p.pid, claude, os.getcwd(), KEEP_TOOL, time.time(), kind="inner", sid=owners.my_sid(),
+                               extra={"session": o["session"], "vm": rec.get("vm", "")})
+    except (OSError, TimeoutError):
+        p.terminate()
+        return None
+    return p.pid
+
+
+def stop_keeper(session, rec):
+    pid = rec.get("keeper_pid")
+    if keeper_matches(pid, session):
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except OSError:
+            pass
+    if pid:
+        try:
+            owners.drop_claim(int(pid))
+        except (OSError, ValueError, TypeError):
+            pass
+
+
+def probe(transport, session):
+    """The session's state and a hash of its screen, read-only and not logged (the Mac's plumbing, like `who`):
+    (fields, True) or ({}, False) when the VM couldn't be asked."""
+    script = guest_script()
+    so = {"timeout": 30, "max_output": 4096, "read_only": True}
+    header = {"cwd": "/", "timeout": 30, "max_output": 4096, "desktop": False, "args": ["probe", session],
+              "script_bytes": len(script)}
+    base = {"cwd": "/", "read_only": True, "max_output": 4096, "logged": None}
+    try:
+        res, _ = vm_shell.execute(so, transport, header, script, time.monotonic() + 30 + vm_shell.GRACE_S, base, None)
+    except Exception:
+        return {}, False
+    st = (res.get("_streams") or {}).get("stdout")
+    if res.get("status") != "exited" or res.get("exit_code") != 0 or not st:
+        return {}, False
+    return parse_output(vm_shell.shown_bytes(st, "stdout"))[0], True
+
+
+def run_keeper(transport, o):
+    """Every KEEP_S: the session's record must still name this keeper and its claim must still exist (`claude stop`,
+    a newer start or `metacomputer release` end it), and the VM must say the session still runs. A changed screen
+    is the inner Claude working: the claim's time is renewed then, so it stays active while it works and for the
+    activity window after."""
+    me, session = os.getpid(), o["session"]
+
+    def leave(_signum=None, _frame=None):
+        raise SystemExit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, leave)
+    t0, last, fails = time.monotonic(), None, 0
+    try:
+        while time.monotonic() - t0 < KEEP_MAX_S:
+            time.sleep(KEEP_S)
+            rec = load_state(session)
+            if rec is None or rec.get("keeper_pid") not in (None, me):
+                return 0
+            if not os.path.exists(owners.claim_path(me)):
+                return 0
+            fields, ok = probe(transport, session)
+            if not ok:
+                fails += 1
+                if fails >= KEEP_FAILS:
+                    return 0
+                continue
+            fails = 0
+            if fields.get("state") != "running":
+                return 0
+            if fields.get("hash") != last:
+                try:
+                    with owners.lock():
+                        try:
+                            c = json.load(open(owners.claim_path(me)))
+                        except (OSError, ValueError):
+                            return 0          # released meanwhile
+                        owners.write_claim(me, c.get("claude_pid"), c.get("cwd"), KEEP_TOOL, c.get("started"),
+                                           kind="inner", sid=c.get("sid"),
+                                           extra={"session": session, "vm": c.get("vm", "")})
+                    last = fields.get("hash")
+                except (OSError, TimeoutError):
+                    pass                      # the lock or the write failed: try again next time
+        return 0
+    finally:
+        owners.drop_claim(me)
 
 
 # --- printing -------------------------------------------------------------------------------------------
@@ -903,6 +1073,11 @@ def show_result(o, out, code):
             live = {True: f"live, {int(t.get('seconds_left') or 0) // 60} min left", False: "ended (expired, revoked "
                     "or the vault locked)", None: "unknown (the vault didn't say)"}[t.get("live")]
             p(f"  token {t.get('id')} for {t.get('secret')}: {live}")
+        k = out.get("keeper")
+        if k is not None and out.get("state") == "running":
+            p("  the computer: " + ("in use by it (its screen changed in the last 10 min; other sessions are refused)"
+                                    if k.get("active") else "held for it, idle (its screen hasn't changed for 10 min)"
+                                    if k.get("running") else "not marked as in use for it (no keeper; metacomputer who)"))
         others = [s for s in out.get("sessions") or [] if s != out["session"]]
         if others:
             p(f"  other sessions: {', '.join(others)}")
@@ -972,6 +1147,8 @@ def main(argv):
         return EXIT_USAGE
     if not transport:
         return show_failure(o, Failed(EXIT_FAILED, "no way to reach the VM (run it as metacomputer claude)"))
+    if o["action"] == "_keeper":
+        return run_keeper(transport, o)
     try:
         if o["action"] == "start":
             out = do_start(transport, o)

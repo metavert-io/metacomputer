@@ -76,11 +76,14 @@ VM:  python3 -I -c '<read a length, then that much Python, and run it>'   ◀─
 
 - **No quoting anywhere.** The remote command is a fixed one-line bootstrap.
   The VM's half of the program, a JSON header (folder, timeout, cap,
-  arguments) and the script all travel on SSH's stdin. The header can also
-  carry `env`, up to 16 more variables for the script's environment (names in
-  capitals, text values): `metacomputer claude` hands its token over that way,
-  so it's in no script, argument or command line, and not in the action log
-  (`sh` itself never sets it). The Mac's side of `sh` is also
+  arguments) and the script all travel on SSH's stdin. The VM's half reads the
+  header with a 1 MB cap before it parses it. The header can also carry `env`,
+  up to 16 more variables for the script's environment, with names only from an
+  allowlist (`MCOMP_CLAUDE_*`, `CLAUDE_*`, `ANTHROPIC_*`, so never `PATH`,
+  `BASH_ENV`, `LD_*` or the like) and text values. Both halves check it.
+  `metacomputer claude` hands its token over that way, so it's in no script,
+  argument or command line, and not in the action log (`sh` itself never sets
+  it). The Mac's side of `sh` is also
   `vm_shell.run_guarded()`, which `metacomputer claude` runs its steps through.
 - **The desktop's environment.** The script gets `DISPLAY`, `XAUTHORITY`, the
   session bus and the XDG variables from the session file the desktop

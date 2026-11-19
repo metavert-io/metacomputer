@@ -1479,7 +1479,9 @@ lib/vm_claude_guest.sh).
   log records it.
 - It works only through the proxy, only for that secret's host (api.anthropic.com) and
   path prefix, and only until it expires, is revoked (`claude stop --revoke`,
-  `secrets revoke ID`), the vault locks, or the secret is replaced or deleted.
+  `secrets revoke ID`), the vault locks, or the secret is replaced or deleted. When it
+  ends, new requests are refused, and an answer the proxy is still streaming is cut
+  off.
 - `claude renew [--ttl D]` asks the vault to move that same token's expiry later
   (`metacomputer secrets token renew ID`), so Claude Code keeps running. A renewal goes
   through the vault like a new token: an `each` secret asks you again. It's made only
@@ -1498,19 +1500,26 @@ lib/vm_claude_guest.sh).
 1. The vault's answer comes to `vm_claude.py` on a pipe.
 2. From there it goes in the request header that the shell channel's VM half reads from
    SSH's stdin (`env` in that header), which puts it in the environment of the start script.
+   That field takes only `MCOMP_CLAUDE_*`, `CLAUDE_*` and `ANTHROPIC_*` names, never
+   `PATH`, `BASH_ENV`, `LD_*` or the like, checked on both sides, and the header is read
+   with a 1 MB cap before it's parsed.
 3. The script copies it into an unexported shell variable and takes it out of the
    environment before running anything, so tmux's server and the programs it starts never
    inherit it.
 4. The script writes it with `printf` (a shell builtin) into a file in a 0700 folder,
-   under umask 077. Claude Code's launcher reads that file once and deletes it as Claude
-   Code starts.
+   under umask 077. Claude Code's launcher reads that file once into unexported variables
+   and deletes it, then exports the token only on the line that starts Claude Code
+   (`exec`), so no other program the launcher runs inherits it.
 
 So the token is never on a command line on the Mac or in the VM (`ps`), never in tmux's
 arguments or environment, and never in the action log. The call record holds the secret's
 name, the token's id and the kind of header; the request header isn't logged, even with
 `ACTION_LOG_TEXT=keep`. It's never in an event, never in the command's output (that names
 the token's id), and never in the session record on the Mac (`RUN_DIR/claude/NAME.json`:
-the id, the secret's name, the expiry). `tests/test_vm_claude.py` and
+the id, the secret's name, the expiry, the folder asked for). What the VM's half reports
+back is checked field by field against fixed shapes (a state, a version, a count), so
+nothing it says reaches that record or the output, except the screen itself (below).
+`tests/test_vm_claude.py` and
 `tests/test_vm_claude_vm.py` check each of these. For an API key, Claude Code's own record
 of the key it was told to trust, the token's last 20 characters, goes in the VM's
 `~/.claude.json`, as it does for any key Claude Code accepts.
@@ -1536,12 +1545,29 @@ what that user can:
 - `start`, `send`, `keys`, `show` and `stop` act, so the one-controller rule refuses them
   while another session uses the computer (unless you agree to `--override`). `read`,
   `wait` and `status` only look;
+- the inner Claude keeps working after those commands return, so a **keeper** on the Mac
+  holds the computer for it. That's an owners claim of kind `inner`, in the name of the
+  session that started it. The keeper looks once a minute (read-only, and not in the
+  action log, like `who`). It renews the claim whenever the inner Claude's screen has
+  changed, so other sessions are refused while the inner Claude works and for 10 minutes
+  after. `metacomputer who` and `claude status` show it. It ends with `claude stop`, the
+  inner Claude's exit, `metacomputer release` or the VM going away;
+- `stop --revoke` revokes the token from the Mac even when the VM can't be reached or
+  refuses, and keeps the session's record (and exits non-zero) until both are done, so
+  running it again finishes the job;
 - with `ACTION_LOG=on`, each step is a signed `vm_claude` record. The prompt text and the
   screens read back are kept only with `ACTION_LOG_TEXT=keep`;
 - what comes back from the VM (its screen, its fields) is parsed strictly and escaped
   before it is printed, on a terminal or not.
 
 **Where it ends:**
+- **The guards cover what goes through metacomputer, not what the inner Claude does.**
+  The hub's guards (the Chrome guard, the coordinate guard, the bounded driver's manifest),
+  the shell channel's settings and the action log apply to the commands the outer Claude
+  sends: starting the inner Claude, what it's told, what's read back. The inner Claude's
+  own actions run as a program in the VM, through its own tools, not through the hub, so
+  none of those guards or records see them. The VM's isolation is what limits it. The
+  keeper keeps other sessions out while it works, and nothing more.
 - **The token is in the VM for its whole life.** It sits in Claude Code's environment,
   readable by anything running as the desktop user: the inner Claude itself, its tools, a
   script it was tricked into running. Whoever copies it can call the API as you, through
