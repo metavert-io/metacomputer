@@ -134,11 +134,11 @@ print(prs[0]["mergeCommit"]["oid"] + " " + prs[0]["url"] if prs else "")' "$prs"
 
   url_origin="$(git remote get-url "$REMOTE")" || die "no remote $REMOTE"
   slug="$(printf '%s' "$url_origin" | sed -E 's#^(https://|ssh://git@|git@)github\.com[:/]##; s#\.git$##; s#/$##')"
-  repo_arg=(); [ "$slug" = "$CANONICAL_SLUG" ] || repo_arg=(--repo "$url_origin")
+  repo_arg=(); [ "$slug" = "$CANONICAL_SLUG" ] || repo_arg=(--repo "$url_origin")   # empty for the real repository (bash 3.2: guard it)
   git show "$REMOTE/$MAIN:get.sh" > "$TMP/get.sh" 2>/dev/null || die "no get.sh on $REMOTE/$MAIN"
   getsh_check() { # the release get.sh's dry run picks, from a temporary HOME
     mkdir -p "$TMP/home"
-    HOME="$TMP/home" bash "$TMP/get.sh" --dry-run "${repo_arg[@]}" < /dev/null > "$TMP/get.log" 2>&1
+    HOME="$TMP/home" bash "$TMP/get.sh" --dry-run ${repo_arg[@]+"${repo_arg[@]}"} < /dev/null > "$TMP/get.log" 2>&1
   }
 
   if [ "$DRY" = 1 ]; then
@@ -221,7 +221,7 @@ if [ "$SKIP_TESTS" = 1 ]; then
 else
   step "No-VM test suites (${#NO_VM_SUITES[@]}; logs in $TMP/tests until this ends)"
   mkdir -p "$TMP/tests"; failed=()
-  for s in "${NO_VM_SUITES[@]}"; do
+  for s in ${NO_VM_SUITES[@]+"${NO_VM_SUITES[@]}"}; do
     t0=$SECONDS
     if [ ! -f "tests/$s.py" ]; then failed+=("$s (missing)"); printf '  %s %s: missing\n' "${r}✗${o}" "$s"; continue; fi
     # standalone, each gated on its own exit status; its output goes to a file, not through a pipe
