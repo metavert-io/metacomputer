@@ -1004,7 +1004,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (256 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (268 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1089,6 +1089,13 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   `type_text_chars` and `run_actions` are guarded as type_text and run_steps, typing pauses written as `{type: ...}`
   or a string count in pacing's budget, a mixed batch of shorthand forms is paced and guarded step by step, and
   `triple_click` and pixels sent as strings reach the coordinate guard. (Against the hub of dba0af9 these fail.)
+  Rewrites chain to a fixed point (a key name, hotkey or press alias with a symbol key ends as type_text: 1,007
+  cases); 200,000-digit near-numbers are read in linear time and strings over 64 characters aren't tried; a batch over
+  64 items is refused on the list as sent, before folding, by the normaliser and by the hub.
+- the window a batch step inherits, as the driver decides it: a read of Mousepad between a Chrome action and an
+  untargeted set_value changes nothing (refused), a check-only wait_for or expect naming Chrome moves later steps
+  there (set_value refused, typing in the foreground), a wait_for on the step itself moves that step, a nested
+  target on Mousepad isn't passed on, and an expect on an action step changes nothing.
   (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;

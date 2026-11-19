@@ -50,8 +50,57 @@ OBSERVATION_TOOLS = ("get_window_state", "get_desktop_state", "get_accessibility
 STEP_KEYS = ("tool", "args", "wait_for", "expect", "timeout_ms")
 TOOL_RENAMES = {"type_text_chars": "type_text", "run_actions": "run_steps"}   # dispatch's old names
 SELECTOR_KEYS = ("role", "name", "label", "nth", "app", "window")
-INT_RE = re.compile(r"^[+-]?[0-9]+$")
-FLOAT_RE = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?)$")
+MAX_STEPS = 64                  # the driver refuses a batch of more items than this, before anything else
+MAX_SCALAR = 64                 # a longer string isn't tried as a number: the driver refuses it as the wrong type
+DIGITS = frozenset("0123456789")
+
+
+class Refused(ValueError):
+    """A call the driver refuses before running anything; the hub refuses it the same way, with this text."""
+
+
+def _int_text(t):
+    """The integer a string spells as Rust's i64/u64 parse reads it (an optional sign, then digits), or None. One
+    linear scan, no regular expression."""
+    body = t[1:] if t[:1] in ("+", "-") else t
+    if not body or any(c not in DIGITS for c in body):
+        return None
+    n = int(t)
+    return n if -(1 << 63) <= n < (1 << 64) else None
+
+
+def _float_text(t):
+    """The finite number a string spells as Rust's f64 parse reads a decimal (sign, digits, an optional point and
+    digits, an optional exponent), or None. One linear scan; inf and nan aren't finite, so they stay strings."""
+    i, n = 0, len(t)
+    if i < n and t[i] in "+-":
+        i += 1
+    start = i
+    while i < n and t[i] in DIGITS:
+        i += 1
+    whole = i - start
+    frac = 0
+    if i < n and t[i] == ".":
+        i += 1
+        f0 = i
+        while i < n and t[i] in DIGITS:
+            i += 1
+        frac = i - f0
+    if whole + frac == 0:
+        return None
+    if i < n and t[i] in "eE":
+        i += 1
+        if i < n and t[i] in "+-":
+            i += 1
+        e0 = i
+        while i < n and t[i] in DIGITS:
+            i += 1
+        if i == e0:
+            return None
+    if i != n:
+        return None
+    f = float(t)
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
 def schemas_of(tools):
@@ -94,21 +143,17 @@ def coerce_scalars(schema, args):
         if not types or "string" in types:
             continue
         text = value.strip()
+        if len(text) > MAX_SCALAR:
+            continue                            # no number or boolean is this long: left for the driver to refuse
         new = None
         if "boolean" in types and text.lower() == "true":
             new = True
         elif "boolean" in types and text.lower() == "false":
             new = False
         elif "integer" in types:
-            if INT_RE.match(text):
-                n = int(text)
-                if -(1 << 63) <= n < (1 << 64):
-                    new = n
+            new = _int_text(text)
         elif "number" in types:
-            if FLOAT_RE.match(text):
-                f = float(text)
-                if f not in (float("inf"), float("-inf")) and f == f:
-                    new = f
+            new = _float_text(text)
         if new is not None:
             args[name] = new
     return args
@@ -223,7 +268,14 @@ def normalize_step(step, schemas):
         name = "click"
     else:
         name = TOOL_ALIASES.get(name, name)
-    name = rewrite_step(name, args)
+    # The driver rewrites once per pass, and runs its pass again on what the hub sends: rewrite until nothing changes,
+    # so the result is a fixed point (a key name as the tool with a symbol key ends as type_text, as a second pass
+    # would make it). Each rewrite only moves toward press_key and type_text, so this ends within a few rounds.
+    for _ in range(8):
+        before = (name, repr(sorted(args.items(), key=lambda kv: kv[0])))
+        name = rewrite_step(name, args)
+        if (name, repr(sorted(args.items(), key=lambda kv: kv[0]))) == before:
+            break
     if name not in BATCHABLE_TOOLS:
         return copy.deepcopy(step)                  # the driver refuses it, and with it the whole batch
     coerce_scalars(schemas.get(name) or {}, args)
@@ -242,23 +294,26 @@ def normalize_batch(args, schemas):
         return args
     coerce_scalars(schemas.get("run_steps") or {}, args)
     steps = args.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return args
-    steps = list(steps)
+    if not isinstance(steps, list) or not steps or len(steps) > MAX_STEPS:
+        # The driver's first check, on the list as sent (before it folds trailing reads): refused the same way.
+        raise Refused(f"`steps` must hold 1 to {MAX_STEPS} items, got "
+                      f"{len(steps) if isinstance(steps, list) else 'none'}")
+    reads = [read_step(st) for st in steps]
+    last_act = max((i for i, rd in enumerate(reads) if rd is None), default=-1)
     trailing, zooms = None, []
-    while len(steps) > 1 and any(read_step(s) is None for s in steps[:-1]):
-        rd = read_step(steps[-1])
-        if rd is None:
-            break
-        tool, rargs = rd
-        last = steps.pop()
-        if tool in ("get_window_state", "screenshot"):
-            if trailing is None:                    # the latest trailing read wins
-                trailing = {"include_screenshot": True} if tool == "screenshot" else rargs
-        elif tool == "zoom":
-            zooms.insert(0, last)                   # kept at the end: the driver runs them after the observation
-        # other trailing reads add nothing the observation doesn't show: the driver drops them too
-    steps += zooms
+    if last_act >= 0:
+        # Reads after the last action, latest first, as the driver's loop takes them (one pass).
+        for i in range(len(steps) - 1, last_act, -1):
+            tool, rargs = reads[i]
+            if tool in ("get_window_state", "screenshot"):
+                if trailing is None:                # the latest trailing read wins
+                    trailing = {"include_screenshot": True} if tool == "screenshot" else rargs
+            elif tool == "zoom":
+                zooms.insert(0, steps[i])           # kept at the end: the driver runs them after the observation
+            # other trailing reads add nothing the observation doesn't show: the driver drops them too
+        steps = list(steps[:last_act + 1]) + zooms
+    else:
+        steps = list(steps)
     if trailing is not None:
         explicit = args.get("observe")
         if explicit is None or explicit is False:

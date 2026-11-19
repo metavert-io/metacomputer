@@ -346,9 +346,12 @@ past with the others (a `{"type": …}` step aimed at Chrome went out as backgro
 skipped the coordinate guard). So the hub normalises each call once, as it arrives, with a copy of the driver's own
 rules for the pinned version (`lib/batch_steps.py`), before any guard; every guard and human pacing read that
 normalised call, and it's what the hub sends the driver. The canonical forms are a fixed point of the driver's own
-normalisation, so what the guards checked is what runs. A step the driver would refuse is left as it came (the driver
-then refuses the whole batch before running any of it), and argument spellings no guard reads (key names, scroll
-deltas) are left to the driver. A call the hub can't normalise isn't passed on.
+normalisation, so what the guards checked is what runs (rewrites are applied until nothing changes, as the driver's
+own second pass would). A step the driver would refuse is left as it came (the driver then refuses the whole batch
+before running any of it), and argument spellings no guard reads (key names, scroll deltas) are left to the driver.
+A batch over the driver's 64 items is refused on the list as sent, before trailing reads are folded, as the driver
+does. Numbers in strings are read in one linear pass, and a string over 64 characters isn't tried (it can't be a
+number the driver takes). A call the hub can't normalise isn't passed on.
 
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
 the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
@@ -374,11 +377,16 @@ the hub, and the hub applies, to each one:
   hub doesn't have is refused whatever else the call names (a non-Chrome window or
   app name next to it proves nothing about the token), and so are a window id the
   driver doesn't list (`window_unknown`) and a pid, window id and token that
-  don't all belong to one app (`target_conflict`). A `run_steps` step that names
-  no window is judged by the window it inherits from the last step that named one
-  (or the batch's), as the driver runs it. A nested `target: {kind: "window", pid,
-  window_id}` names the window as pid and window_id do, on a call or a step (`set_value`
-  doesn't take a nested target, and `run_script` can't run inside `run_steps`);
+  don't all belong to one app (`target_conflict`). A `run_steps` step is judged by
+  the window the driver runs it in, by the driver's own rules (`step_targets`): the
+  batch's window, then the last window a step's own pid, window_id, app or window
+  named, or a `wait_for` named (or an `expect` on a step that is only a check); a read
+  written as a step between actions changes nothing, an `expect` on an action step
+  changes nothing, and a nested `target: {kind: "window", pid, window_id}` counts for
+  its own step (with the inherited window beside it, which the driver adds) but isn't
+  passed on. Where a step could run in more than one window, Chrome among them counts
+  (`set_value` doesn't take a nested target, and `run_script` can't run inside
+  `run_steps`);
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);

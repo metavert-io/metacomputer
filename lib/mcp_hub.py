@@ -1890,6 +1890,10 @@ class Hub:
             name = params["name"] = batch_steps.tool_name(name)
         try:
             batch_steps.normalize_call(name, args, self.tool_schemas())
+        except batch_steps.Refused as e:         # what the driver refuses before running anything
+            self.tool_error(client, msg, f"Refused by the metacomputer hub: {name}: {e} (Cua Driver's own limit; "
+                                         "nothing was sent).")
+            return
         except Exception as e:                   # fail closed: a call the guards can't read isn't passed on
             self.note(f"normalising a {clean(name, 40)} call failed: {type(e).__name__}", kind="normalise failed")
             self.tool_error(client, msg, "The metacomputer hub couldn't read this call's arguments the way the driver "
@@ -2267,23 +2271,14 @@ class Hub:
                 notes.append("sent in the foreground (background input to Chrome is ignored)")
             keyboard = name in KEY_TOOLS
         elif name == "run_steps":
-            # The driver runs a step that names no window in the window the last step that named one acted in, and
-            # before any, in the batch's default. The hub follows the steps the same way; where both could apply,
-            # the stricter verdict counts (Chrome over unknown over not Chrome).
+            # Each step's window by the driver's own rules (step_targets); where more than one window could be the
+            # one, the stricter verdict counts (Chrome over unknown over not Chrome). A batch whose default is Chrome
+            # counts every step as Chrome.
             default = self.chrome_verdict(args) if names_target(args) else (False, None)
             top_chrome = default[0] is True
-            inherited = default
             chrome_steps = []
-            for t, a in steps_of(args):
-                own = names_target(a)
-                if top_chrome:
-                    target, why = True, None
-                elif own:
-                    target, why = self.chrome_verdict(a)
-                else:
-                    target, why = stricter(inherited, default)
-                if own:
-                    inherited = (target, why)
+            for _i, t, a, cands in self.step_targets(args, CHROME_RE):
+                target, why = (True, None) if top_chrome else strictest(cands)
                 if target is None and (t in INPUT_TOOLS or t == "set_value"):
                     return UNKNOWN_TARGET[why][0], None
                 if target:
@@ -2339,52 +2334,74 @@ class Hub:
         self.note(pacing.describe(plan), kind="pacing")
         return pacing.note_of(plan)
 
-    def browser_steps(self, args):
-        """(indexes of the run_steps steps aimed at a Firefox or Chrome window, the first index from which nothing
-        may be split or added). Targets follow the driver: a step that names none runs in the window the last one
-        that did named, or in the batch's default, and a step's `target: {kind: "window", pid, window_id}` counts as
-        its pid and window_id. A step aimed elsewhere (another app, the desktop, a target that can't be told) and a
-        check naming another app or window (wait_for, expect, or a step that is only a check) end what may be added
-        from there on: a check can only take pacing away, never bring it."""
-        def elsewhere(checks):
-            """Does a check name an app or window that isn't a browser (by app name or title, or by pid and
-            window_id, which the driver then also uses as the window for the steps after it)?"""
-            for c in checks:
-                if not isinstance(c, dict):
-                    continue
-                for k in ("app", "window"):
-                    v = c.get(k)
-                    if isinstance(v, str) and v and not BROWSER_RE.search(v):
-                        return True
-                ids = {k: c[k] for k in ("pid", "window_id") if k in c}
-                if ids and self.app_verdict(ids, None, BROWSER_RE)[0] is not True:
-                    return True
-            return False
-
-        inherited = names_target(args) and self.app_verdict(args, None, BROWSER_RE)[0] is True
-        out, limit = set(), None
+    def step_targets(self, args, rx):
+        """[(index, tool, args, verdicts)] for each action step of a run_steps batch: the verdicts (app_verdict with rx)
+        of every window the step could run in, by Cua Driver 0.53.0's own rules for the window a step inherits
+        (batch_tools.rs run, run_step):
+        - the inherited window starts as the batch's own pid, window_id, app or window, else none;
+        - a read written as a step between actions (get_window_state and the like) is skipped: it changes nothing;
+        - a wait_for that names a window (pid, window_id, app or window) makes it the inherited window;
+        - an action whose own args name a window (pid, window_id, app or window) makes it the inherited window and runs
+          there; a nested `target` doesn't change the inherited window, and when there is one the driver adds its
+          pid and window_id beside the target (both count); an element token runs in its own read's window (and, with
+          an inherited window, that one counts too), and when nothing is inherited yet, later steps inherit it;
+        - an expect that names a window makes it the inherited window only on a step with no action.
+        A step with no window at all (nothing named, nothing inherited) counts as not matching."""
         steps = args.get("steps") or []
-        for i, st in enumerate(steps):
-            if not isinstance(st, dict):
-                continue
-            before = [st["wait_for"]] if isinstance(st.get("wait_for"), dict) else []
-            after = [c for c in st.get("expect") or [] if isinstance(c, dict)] if isinstance(st.get("expect"), list) \
-                else ([st["expect"]] if isinstance(st.get("expect"), dict) else [])
-            if elsewhere(before):
-                inherited, limit = False, i if limit is None else limit
+        reads = [batch_steps.read_step(st) for st in steps] if isinstance(steps, list) else []
+        acts = any(rd is None for rd in reads)
+        win_keys = ("pid", "window_id", "app", "window")
+
+        def window(d):
+            return {k: d[k] for k in win_keys if isinstance(d, dict) and d.get(k) not in (None, "")}
+
+        ctx = self.app_verdict(args, None, rx) if window(args) else None      # None: no inherited window yet
+        out = []
+        for i, st in enumerate(steps if isinstance(steps, list) else []):
+            if not isinstance(st, dict) or (acts and reads[i] is not None):
+                continue                                                      # a read between actions: skipped
+            wf = st.get("wait_for")
+            if window(wf):
+                ctx = self.app_verdict(window(wf), None, rx)
             tool, a = pacing.step_parts(st)
             if tool is not None:
-                v = target_view(a)
-                if v is None:                            # the desktop: not a window this step is paced for
-                    limit = i if limit is None else limit
-                elif names_target(v):
-                    inherited = self.app_verdict(v, None, BROWSER_RE)[0] is True
-                    if not inherited:
-                        limit = i if limit is None else limit
-                if v is not None and inherited:
-                    out.add(i)
-            if elsewhere(after):
-                inherited, limit = False, i + 1 if limit is None else limit
+                own = window(a)
+                if own:
+                    ctx = self.app_verdict(own, None, rx)
+                tok = a.get("element_token")
+                t = a.get("target") if isinstance(a.get("target"), dict) else None
+                if tok not in (None, ""):
+                    tv = self.app_verdict(dict(own, element_token=tok), None, rx)
+                    cands = [tv] + ([ctx] if ctx is not None and not own else [])
+                    if ctx is None:
+                        ctx = tv
+                elif own:
+                    cands = [ctx]
+                elif t is not None and t.get("kind") == "window" and window(t):
+                    cands = [self.app_verdict(window(t), None, rx)] + ([ctx] if ctx is not None else [])
+                else:
+                    cands = [ctx] if ctx is not None else [(False, None)]
+                out.append((i, tool, a, cands))
+            ex = st.get("expect")
+            checks = ex if isinstance(ex, list) else [ex] if isinstance(ex, dict) else []
+            if tool is None:
+                for c in checks:
+                    if window(c):
+                        ctx = self.app_verdict(window(c), None, rx)
+        return out
+
+    def browser_steps(self, args):
+        """(indexes of the run_steps steps aimed at a Firefox or Chrome window, the first index from which nothing
+        may be split or added), from step_targets: a step counts only when every window it could run in is a
+        browser, and one aimed at the desktop (a desktop target, or scope "desktop" with no window) never counts.
+        The first action step that doesn't count ends what may be added."""
+        out, limit = set(), None
+        for i, tool, a, cands in self.step_targets(args, BROWSER_RE):
+            if target_view(a) is not None and all(v[0] is True for v in cands):
+                out.add(i)
+            elif limit is None:
+                limit = i
+        steps = args.get("steps") or []
         return out, len(steps) if limit is None else limit
 
     def pointer_targets(self, args, browser, sess):
@@ -2811,6 +2828,14 @@ def target_view(a):
     if t is None and a.get("scope") == "desktop" and not names_target(a):
         return None
     return window_keys(a)
+
+
+def strictest(verdicts):
+    """Of several Chrome verdicts, the one that asks for the most care (stricter, over all of them)."""
+    out = (False, None)
+    for v in verdicts:
+        out = stricter(out, v)
+    return out
 
 
 def stricter(v1, v2):

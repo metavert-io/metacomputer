@@ -598,6 +598,27 @@ def caller_pause_counted():
     return none is None and json.dumps(b) == keep and bool(plain and plain["moves"])
 
 
+def normaliser():
+    import batch_steps
+    return batch_steps
+
+
+def function_src(rel, name):
+    text = raw(rel)
+    i = text.index(f"\ndef {name}(")
+    j = text.find("\ndef ", i + 1)
+    return text[i:j if j > 0 else len(text)]
+
+
+def refuses_over_limit():
+    b = normaliser()
+    try:
+        b.normalize_batch({"steps": [{"type": {"text": "x"}}] + [{"tool": "screenshot"}] * b.MAX_STEPS}, {})
+    except b.Refused:
+        return True
+    return False
+
+
 def normalised_first():
     """The hub normalises a call (lib/batch_steps.py, for the pinned driver) before every guard and sends that call;
     one it can't normalise isn't passed on."""
@@ -637,6 +658,19 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
+    ("SECURITY.md", r"A `run_steps` step is judged by the window the driver runs it in, by the driver's own rules "
+                    r"\(`step_targets`\)",
+     lambda m: "self.step_targets(args, CHROME_RE)" in raw("lib/mcp_hub.py")
+     and "self.step_targets(args, BROWSER_RE)" in raw("lib/mcp_hub.py")
+     and "(acts and reads[i] is not None)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A batch over the driver's (\d+) items is refused on the list as sent, before trailing reads are folded",
+     lambda m: int(m[1]) == normaliser().MAX_STEPS and refuses_over_limit()),
+    ("SECURITY.md", r"Numbers in strings are read in one linear pass, and a string over (\d+) characters isn't tried",
+     lambda m: int(m[1]) == normaliser().MAX_SCALAR and "re.compile" not in function_src("lib/batch_steps.py", "_float_text")
+     and "re.compile" not in function_src("lib/batch_steps.py", "_int_text")),
+    ("SECURITY.md", r"rewrites are applied until nothing changes, as the driver's own second pass would",
+     lambda m: normaliser().normalize_step({"tool": "enter", "args": {"key": "*"}}, {})
+     == {"tool": "type_text", "args": {"text": "*"}}),
     ("SECURITY.md", r"So the hub normalises each call once, as it arrives, with a copy of the driver's own rules for the "
                     r"pinned version \(`lib/batch_steps\.py`\), before any guard",
      lambda m: normalised_first()),
@@ -654,13 +688,16 @@ CLAIMS = [
     ("SECURITY.md", r"never a step that names its field, by role and name or label, token or x,y, or its window by app or title",
      lambda m: {"role", "name", "label", "element_token", "x", "y", "app", "window"} <= set(pacing.ELEMENT_TARGET_KEYS)),
     ("SECURITY.md", r"or a check naming another app \(by name, title, or pid and window_id\), nothing more is split or added",
-     lambda m: 'ids = {k: c[k] for k in ("pid", "window_id") if k in c}' in raw("lib/mcp_hub.py")),
+     lambda m: 'if window(wf):' in raw("lib/mcp_hub.py") and "elif limit is None:" in raw("lib/mcp_hub.py")
+     and '"pid", "window_id", "app", "window"' in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"a relative path counted from that browser's own working folder\) isn't deleted",
      lambda m: 'os.readlink(os.path.join(proc, pid, "cwd"))' in raw("lib/guest_profiles.py")),
-    ("SECURITY.md", r"A nested `target: \{kind: \"window\", pid, window_id\}` names the window as pid and window_id do",
+    ("SECURITY.md", r"a nested `target: \{kind: \"window\", pid, window_id\}` counts for its own step \(with the inherited "
+                    r"window beside it, which the driver adds\) but isn't passed on",
      lambda m: mcp_hub.names_target({"target": {"kind": "window", "pid": 7, "window_id": 9}})
      and mcp_hub.window_keys({"target": {"kind": "window", "pid": 7, "window_id": 9}})["pid"] == 7
      and "args = window_keys(args)" in raw("lib/mcp_hub.py")
+     and 'elif t is not None and t.get("kind") == "window" and window(t):' in raw("lib/mcp_hub.py")
      and not mcp_hub.names_target({"target": {"kind": "desktop", "display_id": "primary"}})),
     ("SECURITY.md", r"`hub\.log` gets each plan as counts and milliseconds, never text",
      lambda m: pacing_keeps_text_and_own_delay()),

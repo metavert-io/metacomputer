@@ -1373,9 +1373,10 @@ def pacing_checks():
         {"tool": "type_text", "args": {"text": "inherits it"}}]})
     t1 = sent_args("type_text", n0)
     typed = typed_steps((sent_args("run_steps", n0) or [{}])[-1].get("steps") or [])
-    check("a nested target {kind: window, pid, window_id} counts as that window (alone and in a batch, inherited too)",
+    check("a nested target {kind: window, pid, window_id} counts as that window for its own step (alone and in a "
+          "batch); like the driver, the hub doesn't pass it on to later steps",
           t1 and pacing.KEY_MS[0] <= (t1[-1].get("delay_ms") or 0) <= pacing.KEY_MS[1] and len(typed) == 2
-          and all(d for _, d in typed), (t1, typed))
+          and typed[0][1] and typed[1][1] is None, (t1, typed))
     n0 = len(calls())
     h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
         {"tool": "type_text", "args": {"text": "short"}},
@@ -1535,6 +1536,38 @@ def normalize_checks():
           not bad, bad[:3])
     fixed = [st for st, _ in cases if N(N(st, sch), sch) != N(st, sch)]
     check("…and the canonical form is a fixed point (the driver's own pass changes nothing more)", not fixed, fixed[:3])
+    chain = []
+    for k in DRIVER_KEY_TOOL_NAMES:
+        for key in [n for n, _ in DRIVER_SYMBOL_KEY_NAMES] + list(DRIVER_SHIFTED_SYMBOLS):
+            chain.append({"tool": k, "args": {"key": key}})
+    for key in [n for n, _ in DRIVER_SYMBOL_KEY_NAMES] + list(DRIVER_SHIFTED_SYMBOLS):
+        chain += [{"hotkey": {"keys": [key]}}, {"press": {"key": key}}, {"key": {"key": key}}, {"keypress": {"key": key}}]
+    unfixed = [st for st in chain if N(N(st, sch), sch) != N(st, sch) or N(st, sch)["tool"] != "type_text"]
+    check(f"rewrites chain to a fixed point: a key name, hotkey or press alias with a symbol key ends as type_text, as "
+          f"the driver's second pass would make it ({len(chain)} cases, e.g. {{tool: enter, args: {{key: '*'}}}})",
+          not unfixed, unfixed[:3])
+    t0 = time.time()
+    for bad in ("1" * 200000 + "!", "1" * 200000 + ".", "1." + "1" * 200000 + "e", "+" + "9" * 200000 + "x"):
+        batch_steps.coerce_scalars(sch["click"], {"x": bad, "y": bad, "pid": bad})
+    took = time.time() - t0
+    check("numbers in strings are read in one linear pass with a length cap (200,000-digit near misses: no "
+          "backtracking)", took < 0.2, round(took, 3))
+    check("…a number longer than 64 characters isn't tried (the driver refuses it as the wrong type)",
+          batch_steps.coerce_scalars(sch["click"], {"x": "1" * 65})["x"] == "1" * 65
+          and batch_steps.coerce_scalars(sch["click"], {"x": "1" * 64})["x"] == float("1" * 64))
+    try:
+        batch_steps.normalize_batch({"steps": [{"type": {"text": "x"}}] + [{"tool": "screenshot"}] * 64}, sch)
+        over = None
+    except batch_steps.Refused as e:
+        over = str(e)
+    t0 = time.time()
+    try:
+        batch_steps.normalize_batch({"steps": [{"type": {"text": "x"}}, {"tool": "screenshot"}] * 2000}, sch)
+    except batch_steps.Refused:
+        pass
+    check("the driver's 64-item limit holds on the list as sent, before trailing reads are folded (65 items: refused, "
+          "4,000: refused at once)", over == "`steps` must hold 1 to 64 items, got 65" and time.time() - t0 < 0.1,
+          (over, round(time.time() - t0, 3)))
     left = [{"tool": "nope", "args": {}}, {"click": {}, "type": {"text": "x"}}, {"tool": "click", "args": {}, "x": 1},
             {"wait_for": {"text": "x"}}, {"get_window_state": {"pid": 1}}]
     check("steps the driver refuses, checks and reads come back as they were",
@@ -1610,6 +1643,14 @@ def normalize_checks():
           len(typed) >= 3 and all(d for _, d in typed[:-1]) and typed[-1] == ("after Mousepad: long text, not to be paced",
                                                                              None)
           and chrome and chrome[0]["args"].get("delivery_mode") == "foreground", st)
+    n0 = len(calls())
+    res = h.call("run_steps", {"steps": [{"type": {"text": "x"}}] + [{"tool": "screenshot"}] * 64})
+    check("the hub refuses a batch over the driver's 64 items before anything is sent (as the driver would)",
+          res.is_error and "64" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    t0 = time.time()
+    h.call("click", {"pid": 50, "window_id": W, "x": "1" * 300000 + "!", "y": 1})
+    check("…and a call with a huge near-number string goes through the normaliser at once",
+          time.time() - t0 < 2, round(time.time() - t0, 2))
     h.call("get_window_state", {"pid": 50, "window_id": W})
     res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [{"triple_click": {"x": 10, "y": 10}},
                                                                       {"click": {"x": "400", "y": "300"}}]})
@@ -1626,6 +1667,64 @@ def normalize_checks():
     clear_claims()
     r.stop()
     set_windows(BASE_WINDOWS)
+
+
+def inheritance_checks():
+    """The window a batch step runs in, as the driver decides it (step_targets): a read between actions changes
+    nothing, a wait_for (and a check-only expect) naming a window changes it, a nested target doesn't pass on, and an
+    expect on an action step doesn't change it. The Chrome guard follows that one model."""
+    print("the window a batch step inherits, as the driver decides it")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running(MCOMP_BROWSER_PACING="fast")
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="inh")
+    h.call("list_windows", {})
+    chrome_click = {"click": {"app": "Google-chrome", "role": "button", "name": "Go"}}
+    n0 = len(calls())
+    res = h.call("run_steps", {"steps": [chrome_click, {"get_window_state": {"pid": 50, "window_id": W}},
+                                         {"set_value": {"role": "textfield", "name": "q", "value": "x"}}]})
+    check("Chrome action, then a read of Mousepad, then an untargeted set_value: the driver skips the read and runs "
+          "set_value in Chrome, so it's refused", res.is_error and "set_value" in res.text
+          and not sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"wait_for": {"app": "Google-chrome", "text": "Go"}},
+        {"set_value": {"role": "textfield", "name": "q", "value": "x"}}]})
+    check("a check-only wait_for naming Chrome makes Chrome the window later steps inherit: set_value there is refused",
+          res.is_error and "set_value" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"wait_for": {"pid": 77, "window_id": CHROME, "text": "Go"}, "type_text": {"text": "abc"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("…and a wait_for naming Chrome on the step itself moves that step's typing to Chrome: foreground",
+          (fwd.get("steps") or [{}])[0].get("args", {}).get("delivery_mode") == "foreground", fwd.get("steps"))
+    n0 = len(calls())
+    res = h.call("run_steps", {"steps": [chrome_click,
+                                         {"type_text": {"target": {"kind": "window", "pid": 50, "window_id": W},
+                                                        "text": "x"}},
+                                         {"set_value": {"role": "textfield", "name": "q", "value": "x"}}]})
+    check("a nested target on Mousepad doesn't change the inherited window: the set_value after it runs in Chrome, "
+          "refused", res.is_error and "set_value" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    h.call("run_steps", {"steps": [chrome_click,
+                                   {"click": {"pid": 50, "window_id": W, "role": "button", "name": "B"},
+                                    "expect": [{"app": "Google-chrome", "text": "Go"}]},
+                                   {"type_text": {"text": "to mousepad"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    st = fwd.get("steps") or []
+    check("an expect naming Chrome on an action step doesn't move the inherited window (the step named Mousepad)",
+          len(st) == 3 and "delivery_mode" not in st[2].get("args", {}), st)
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"expect": [{"pid": 77, "window_id": CHROME, "text": "Go"}]}, {"type_text": {"text": "to chrome"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    st = fwd.get("steps") or []
+    check("…while a check-only expect naming Chrome does: the typing after it goes in the foreground",
+          len(st) == 2 and st[1].get("args", {}).get("delivery_mode") == "foreground", st)
+    h.close()
+    clear_claims()
+    r.stop()
 
 
 def bounded_checks():
@@ -3141,6 +3240,7 @@ def main():
         pacing_checks()
         chrome_nested_checks()
         normalize_checks()
+        inheritance_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()
