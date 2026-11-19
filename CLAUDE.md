@@ -227,7 +227,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
   `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm` (no VM;
-  `scripts/release.sh` runs exactly these; `test_multi_vm` uses a fake runner, never this Mac's VMs),
+  `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
   `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vm_claude_vm.py` and

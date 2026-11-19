@@ -1188,6 +1188,10 @@ update the row with the doc's new wording. What it pins:
   the Mac is reachable, and `scripts/lib.sh` starts the gateway with that file;
 - mcomp-vm's flags as the docs name them are the ones `host_sharing_args` passes, one per
   `SHARE_*` setting, all off by default;
+- more than one VM: a `vm create` VM's vault is its own folder (`scripts/lib.sh`, handed to
+  the vault by `bin/metacomputer`); `vm delete --delete-vault` deletes only that folder; `vm
+  delete` takes the VM's lock, wants the name typed or `--confirm` and never reads `--yes`,
+  and refuses the main, a running and a held VM without `--force`;
 - pinned versions and digests: architecture.md's components table, the diagram, the guide
   and THIRD_PARTY_NOTICES.md against defaults.env; no doc names a newer Cua Driver than
   the pin; download names and URLs carry the pinned versions;

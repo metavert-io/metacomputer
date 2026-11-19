@@ -115,7 +115,7 @@ Mac's choices into the file once).
 | Key | Default | |
 | --- | --- | --- |
 | `VAULT_DIR` | the vault's own folder, `~/Library/Application Support/metacomputer` (the account's home, whatever `$HOME` says); for a `config/vms/` VM, `.../metacomputer/vms/NAME` | This VM's secrets vault, handed to `mcomp-vault` as `MCOMP_VAULT_DIR` |
-| `EVENTS_SPOOL` | the event stream's own spool, `.../metacomputer/events/spool`; for a `config/vms/` VM, `.../vms/NAME/events/spool` | Where this VM's vault drops events, and where its event watcher takes them from |
+| `EVENTS_SPOOL` | the event stream's own spool, `~/Library/Application Support/metacomputer/events/spool`; for a `config/vms/` VM, `.../vms/NAME/events/spool` | Where this VM's vault drops events, and where its event watcher takes them from |
 
 `MCOMP_VAULT_DIR` and `MCOMP_EVENTS_SPOOL` in the environment still override these
 for every VM; one that disagrees with a file's own `VAULT_DIR` or `EVENTS_SPOOL` is

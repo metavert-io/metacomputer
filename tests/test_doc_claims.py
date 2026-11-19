@@ -1078,6 +1078,18 @@ CLAIMS = [
      lambda m: int(m[1]) * 3600 == owners.HANDOFF_MAX_S),
     ("docs/guide.md", r"\((\d+) minutes unless Claude chose another, at most (\d+) hours\)",
      lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
+    # More than one VM (scripts/lib.sh, scripts/vm-commands.sh): a per-VM vault, and what `vm delete` needs
+    ("SECURITY.md", r"A VM made with `metacomputer vm create NAME` has a vault of its own, `\.\.\./metacomputer/vms/NAME/`",
+     lambda m: '[ -n "$VAULT_DIR" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"' in raw("scripts/lib.sh")
+     and 'export MCOMP_VAULT_DIR="$VAULT_DIR"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"keeps it unless `--delete-vault` asks, and that deletes only such a per-VM folder, never a shared one",
+     lambda m: '[ "$(mc_vault_dir)" = "$own_vault" ]' in vm_delete_src() and 'local own_vault="$MC_APP_DIR/vms/$VM_NAME"' in vm_delete_src()),
+    ("docs/commands.md", r"once you type its name \(no terminal: `--confirm NAME`; `--yes` never counts\)",
+     lambda m: "ASSUME_YES" not in vm_delete_src() and "confirm \"" not in vm_delete_src()
+     and '[ "$a" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
+    ("docs/commands.md", r"Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`",
+     lambda m: all(s in vm_delete_src() for s in ('[ "$main_id" != "$VM_NAME" ]', '[ "$vm_state" != running ]',
+                                                  'lib/owners.py" check', '[ "$force" != 1 ]'))),
 ]
 
 
@@ -1194,6 +1206,12 @@ def fills_guarded():
             and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4' in hold.group(1))
 
 
+def vm_delete_src():
+    """The body of `vm delete` (scripts/vm-commands.sh)."""
+    m = re.search(r"^vm_delete\(\) \{.*?^\}$", raw("scripts/vm-commands.sh"), re.S | re.M)
+    return m.group(0) if m else ""
+
+
 def fpr(full, head, tail):
     """An abbreviated fingerprint or digest (`D2EB4462…7C81`) is the pinned one's start and end."""
     return full.upper().startswith(head.upper()) and full.upper().endswith(tail.upper()) and len(head) >= 6
@@ -1302,7 +1320,10 @@ def run_claims():
 # The settings whose default is the doc's computed value (config/defaults.env leaves them empty).
 COMPUTED = {"RUN_DIR": ".run/", "LOG_DIR": "logs/", "STORAGE_DIR": "~/.local/share/metacomputer",
             "RECORD_DIR": "recordings/manual/", "ACTION_LOG_KEY": "$SSH_DIR/action-log", "SSH_CA_KEY": "$SSH_DIR/ca",
-            "LESSONS_DIR": "~/.local/share/metacomputer/lessons"}
+            "LESSONS_DIR": "~/.local/share/metacomputer/lessons",
+            # Empty for config/local.env: the vault's and the event stream's own folders (scripts/lib.sh)
+            "VAULT_DIR": "~/Library/Application Support/metacomputer",
+            "EVENTS_SPOOL": "~/Library/Application Support/metacomputer/events/spool"}
 TABLES = ("docs/commands.md", "docs/shell.md")
 
 
