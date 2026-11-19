@@ -124,7 +124,7 @@ you about changes:
 | `task` | `finished` | info; error when nothing could be copied | `metacomputer task finish` | task, duration, videos (path, seconds), contact sheets, file and screenshot counts, the results folder |
 | `task` | `recording_stopped` | info | `metacomputer record stop` saved a recording | name, duration, path, description file, key-moment count, audio yes/no, mode, size |
 | `task` | `recording_failed` | error | `record stop` couldn't save it. The message is fixed text written on the Mac | name, mode, and `detail`: what the VM's recorder said, cleaned and cut short |
-| `security` | `blocked_connections` | warn | New lines in the gateway's `netgw-blocked.jsonl`, batched: at most one event a minute. When the same destinations come back each time, the wait doubles (2, 4, 8 minutes, up to an hour); a different set starts over | count; per destination: host, port, protocol, reason, count, first and last time; `same_as_before`. Never payloads. |
+| `security` | `blocked_connections` | warn | New lines in the gateway's `netgw-blocked.jsonl`. The first blocked connection after 5 minutes with none goes out at once (the watcher looks every 2 seconds), at most 6 times in any hour. What follows it is batched: at most one event a minute, and when the same destinations come back each time, the wait doubles (2, 4, 8 minutes, up to an hour); a different set starts over | count; per destination: host, port, protocol, reason, count, first and last time; `same_as_before`; `first` (true for the one sent at once). Never payloads. |
 | `security` | `sink_added`, `sink_removed` | warn | `events sink add`, `--replace` or `remove`, sent to the sinks that existed before the change, kept until each has it (outside the family limit; a phone gets them under its cap, several at once as one `sink_changes` message) | the sink's name, kind, masked URL, families, minimum severity, `replaced` |
 | `security` | `sink_config_changed` | warn | `events.json` was changed other than through `events sink` (or can't be read any more); sent to the sinks of the last configuration `events sink` wrote, kept until each has it | `added`, `removed`, `changed` (name, kind, masked URL, families each), `readable` |
 | `security` | `chrome_input_refused` | warn | The bridge's Chrome guard refused `set_value` or `run_script` aimed at Chrome; once per session and tool per 5 min | tool (never the value) |
@@ -476,7 +476,16 @@ its log is `$LOG_DIR/events-watcher.log`. Adding the first sink while the VM
 runs starts it too. Every 30 seconds it:
 - takes new files from the spool;
 - retries backlogs whose backoff has passed;
-- reads new lines of `$LOG_DIR/netgw-blocked.jsonl` (where it got to is kept in its state, so nothing is reported twice, and the log's earlier history is never reported) and sends at most one `blocked_connections` event a minute.
+- reads new lines of `$LOG_DIR/netgw-blocked.jsonl` (where it got to is kept in its state, so nothing is reported twice, and the log's earlier history is never reported) and sends what's due of the `blocked_connections` events.
+
+Between those cycles it also looks at the gateway's log every 2 seconds (one `stat`; the file is read
+only when it grew). The first blocked connection after 5 minutes with none is sent from there at once,
+so it reaches the sinks within a few seconds of the gateway refusing it. Only that first one: the
+follow-ups wait for their batch (at most one event a minute, slowing down for the same destinations),
+the 5 quiet minutes are measured on this Mac's clock from when the watcher last saw a blocked
+connection, and at most 6 such first reports go out in any hour (more wait like follow-ups). The family
+limit and each phone's cap apply to them like to any other event, so a VM that floods or keeps going
+quiet and starting again can't spam the sinks.
 
 Its pidfile stays locked while it runs, so a second watcher for the same VM
 exits at once; the pidfile and the log are private (0600). `stop` signals its

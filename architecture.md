@@ -739,7 +739,7 @@ lib/mcp_relay.py (action-log records)  │     else retry with backoff, in order
 actionlog verify, web open-untrusted   │
 metacomputer notify (Claude)           ┘
 spool files (the secrets vault, …)  ──▶ taken on every emission and by the watcher
-events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
+events watcher (30 s): spool, backlogs, netgw-blocked.jsonl (checked every 2 s), health every 5 min
 ```
 
 - **Where it runs.** In the process that emits: commands emit before they
@@ -792,8 +792,10 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
   neither holds), pid in `$RUN_DIR/events-watcher.pid`. Every 30 s: the
   configuration check, the spool, pending announcements, due
   backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
-  (destination, port, protocol, reason; batched to one event a minute, slowing
-  to once an hour for the same destinations). Every 5 min: `metacomputer
+  (destination, port, protocol, reason). Between cycles it stats that log every
+  2 s: the first blocked connection after 5 quiet minutes is sent at once (at
+  most 6 an hour); the follow-ups are batched to one event a minute, slowing
+  to once an hour for the same destinations. Every 5 min: `metacomputer
   _health` (Lume state, gateway, SSH, `guest-status`, the desktop recording),
   with one event per change and a 30-minute quiet period for a condition that
   comes back. Each step runs on its own, so one failing doesn't stop the others.

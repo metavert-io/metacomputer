@@ -168,9 +168,10 @@ one `suppressed` event. Each phone (ntfy) sink gets at most 10 messages in any
 sink-change announcements included), checked right before each send; what has
 to wait isn't dropped, it goes as slots free up. Only metacomputer's own code
 paths can put an event outside the family limit; `events emit` and spool files
-can't. Repeated blocked-connection reports slow down (up to once an hour), a
-flapping health condition is announced once per 30 minutes, and `notify`
-doesn't repeat itself within 5 minutes.
+can't. The first blocked connection after 5 quiet minutes is reported at once (within a few
+seconds; at most 6 such reports in any hour); what follows it is batched, at most once a minute, and
+repeated reports of the same destinations slow down (up to once an hour). A flapping health condition
+is announced once per 30 minutes, and `notify` doesn't repeat itself within 5 minutes.
 
 **Telling metacomputer's events apart:** each event's `origin` (`cli`,
 `bridge`, `watcher`, `spool`, `claude`, `script`) is set by the code path that
