@@ -29,6 +29,8 @@ NS = {
     "xlink": "http://www.w3.org/1999/xlink",
     "chart": "urn:oasis:names:tc:opendocument:xmlns:chart:1.0",
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "svg": "urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0",
 }
 
 
@@ -194,11 +196,24 @@ def bold_runs(p):
     return out
 
 
+def ods_sheet_names(p):
+    root = odf_xml(p)
+    return [t.get(q("table:name")) for t in
+            root.find(q("office:body")).find(q("office:spreadsheet")).findall(q("table:table"))]
+
+
 def ods_rows(p, sheet=0, max_rows=500, max_cols=40):
-    """First sheet of an .ods as rows of dicts {text, value, formula, type}."""
+    """A sheet of an .ods (by index, or by name) as rows of dicts {text, value, formula, type}, and its name.
+    A sheet name that isn't there raises KeyError."""
     root = odf_xml(p)
     tables = root.find(q("office:body")).find(q("office:spreadsheet")).findall(q("table:table"))
-    t = tables[sheet]
+    if isinstance(sheet, str):
+        named = [x for x in tables if x.get(q("table:name")) == sheet]
+        if not named:
+            raise KeyError(f"no sheet {sheet!r}")
+        t = named[0]
+    else:
+        t = tables[sheet]
     rows = []
     for row in t.iter(q("table:table-row")):
         rrep = min(int(row.get(q("table:number-rows-repeated"), "1")), max_rows)
@@ -266,6 +281,94 @@ def ods_charts(p):
                                             pa.get(q("table:cell-range-address")) if pa is not None else None]))
             out.append((href, ch.get(q("chart:class")), ranges))
     return out
+
+
+UNITS_CM = {"cm": 1.0, "mm": 0.1, "in": 2.54, "pt": 2.54 / 72, "pc": 2.54 / 6, "px": 2.54 / 96}
+
+
+def length_cm(s):
+    """An ODF length ('16cm', '6.2992in', '160mm', '453.5pt') in centimetres, or None."""
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*(cm|mm|in|pt|pc|px)\s*$", str(s or ""))
+    return round(float(m.group(1)) * UNITS_CM[m.group(2)], 4) if m else None
+
+
+def ods_chart_frames(p):
+    """The charts embedded in an .ods with the size of the frame that holds each, as dicts
+    {object, class, ranges, width_cm, height_cm} (a size the file doesn't give is None). An embedded object
+    whose XML can't be parsed is listed with class "unreadable" rather than failing the whole check."""
+    out = []
+    with zipfile.ZipFile(path(p)) as z:
+        names = set(z.namelist())
+        root = ET.fromstring(z.read("content.xml"))
+        for frame in root.iter(q("draw:frame")):
+            for obj in frame.findall(q("draw:object")):
+                href = (obj.get(q("xlink:href")) or "").lstrip("./")
+                member = href + "/content.xml"
+                if member not in names:
+                    continue
+                try:
+                    cr = ET.fromstring(z.read(member))
+                except ET.ParseError:
+                    cr = None
+                ch = cr.find(".//" + q("chart:chart")) if cr is not None else None
+                if cr is not None and ch is None:
+                    continue
+                pa = cr.find(".//" + q("chart:plot-area")) if cr is not None else None
+                series = [s.get(q("chart:values-cell-range-address")) for s in cr.iter(q("chart:series"))] \
+                    if cr is not None else []
+                ranges = " ".join(filter(None, [obj.get(q("draw:notify-on-update-of-ranges")),
+                                                pa.get(q("table:cell-range-address")) if pa is not None else None]
+                                         + series))
+                out.append({"object": href, "class": ch.get(q("chart:class")) if ch is not None else "unreadable",
+                            "ranges": ranges,
+                            "width_cm": length_cm(frame.get(q("svg:width"))),
+                            "height_cm": length_cm(frame.get(q("svg:height")))})
+    return out
+
+
+def zip_names(p):
+    """The members of a zip file (an ODF or OOXML document), or [] when it isn't one."""
+    try:
+        with zipfile.ZipFile(path(p)) as z:
+            return z.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return []
+
+
+def _col_index(ref):
+    col = 0
+    for ch in re.match(r"([A-Z]+)", ref).group(1):
+        col = col * 26 + ord(ch) - 64
+    return col - 1
+
+
+def xlsx_rows(p, sheet=1):
+    """A sheet of an .xlsx (Office Open XML; sheet N in workbook order, from 1) as rows of cell texts: shared and
+    inline strings as text, numbers as LibreOffice or Excel wrote them. No formulas, no formatting."""
+    with zipfile.ZipFile(path(p)) as z:
+        names = set(z.namelist())
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall(q("x:si")):
+                shared.append("".join(t.text or "" for t in si.iter(q("x:t"))))
+        member = f"xl/worksheets/sheet{sheet}.xml"
+        root = ET.fromstring(z.read(member))
+    rows = []
+    for r in root.iter(q("x:row")):
+        cells = []
+        for c in r.findall(q("x:c")):
+            i = _col_index(c.get("r") or "A")
+            while len(cells) < i:
+                cells.append("")
+            t, v = c.get("t"), c.find(q("x:v"))
+            if t == "s" and v is not None:
+                cells.append(shared[int(v.text)])
+            elif t == "inlineStr":
+                cells.append("".join(x.text or "" for x in c.iter(q("x:t"))))
+            else:
+                cells.append(v.text if v is not None and v.text is not None else "")
+        rows.append(cells)
+    return rows
 
 
 def docx_text(p):

@@ -1,0 +1,22 @@
+id = "ff-seat-map"
+title = "Firefox: pick two seats on a seat map drawn on a canvas, then book"
+apps = ["firefox"]
+route = "mixed"
+serve = true
+timeout_s = 600
+targets = ["no_frame", "repeat", "churn"]
+lessons = ["no-frame", "repeat-class", "route-churn"]
+evidence = "learn report: pixel actions without a screenshot frame were the top failure class in recorded sessions, mostly where pixel clicks alternate with tree reads; DESKTOP.md, Pixels"
+prompt = """
+In Firefox, open http://localhost:8000/seats.html and book seats 3B and 5D for Rosa Lind: pick the
+two seats on the seat map, put her name in the passenger field, and confirm the booking.
+"""
+check = """
+subs = [r for r in requests_log() if r["path"] == "/book"]
+r = subs[-1] if subs else {}
+C.add("booking confirmed", 0.1, bool(subs), len(subs))
+seats = sorted(s.strip().upper() for s in (field(r, "seats") or "").split(",") if s.strip())
+C.add("seats 3B and 5D, no others", 0.5, seats == ["3B", "5D"], seats)
+C.add("passenger Rosa Lind", 0.3, " ".join((field(r, "passenger") or "").split()) == "Rosa Lind", field(r, "passenger"))
+C.add("from Firefox", 0.1, "Firefox" in r.get("agent", ""), r.get("agent", "")[:40])
+"""

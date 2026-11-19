@@ -1,0 +1,26 @@
+id = "mousepad-replace"
+title = "Mousepad: two find-and-replace passes, then save"
+apps = ["mousepad"]
+route = "ax"
+files = ["recipes"]
+targets = ["menu_foreground", "stale_window", "repeat"]
+lessons = ["menu-foreground", "stale-window", "repeat-class"]
+evidence = "DESKTOP.md, Other apps (an invoke_menu that opened a Mousepad or Thunar dialog left the app not answering; open dialogs with shortcuts) and the error table (menus that publish their items only when open); menu-foreground errors in the first learn comparison's Thunar and Writer tasks"
+prompt = """
+Open ~/bench/recipes/soup.txt in Mousepad. Replace every "teaspoon" with "tsp" and every
+"tablespoon" with "tbsp", then save the file.
+"""
+check = """
+orig = ["Winter lentil soup (serves 4)", "", "Ingredients", "- 1 tablespoon olive oil", "- 1 onion, chopped",
+        "- 2 carrots, diced", "- 1 teaspoon ground cumin", "- 1/2 teaspoon smoked paprika", "- 200 g red lentils",
+        "- 1 litre vegetable stock", "- 1 tablespoon tomato paste", "- 1/2 teaspoon salt", "- 1 tablespoon lemon juice",
+        "", "Method", "Warm the oil, soften the onion and carrots, then stir in the cumin and paprika.",
+        "Add the lentils, stock and tomato paste and simmer for 20 minutes.",
+        "Season with the salt, then finish with the lemon juice and a teaspoon of chopped parsley."]
+want = [l.replace("tablespoon", "tbsp").replace("teaspoon", "tsp") for l in orig]
+t = read("~/bench/recipes/soup.txt", "")
+lines = [l.rstrip() for l in t.rstrip("\\n").split("\\n")]
+C.add("every teaspoon is tsp", 0.25, "teaspoon" not in t and t.count("tsp") == 4, t.count("tsp"))
+C.add("every tablespoon is tbsp", 0.25, "tablespoon" not in t and t.count("tbsp") == 3, t.count("tbsp"))
+C.add("everything else unchanged", 0.5, lines == want, f"{len(lines)} lines")
+"""

@@ -19,7 +19,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT, LOG = sys.argv[1], sys.argv[2]
 PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 8000
-ACCEPT = ("/submit", "/answer", "/reserve", "/pick", "/ship", "/code")
+ACCEPT = ("/submit", "/answer", "/reserve", "/pick", "/ship", "/code", "/book", "/extend")
 THANKS = (b"<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Received</title></head>"
           b"<body><h1>Thank you</h1><p>Your submission was received.</p>"
           b"<p><a href='/'>Back to the start page</a></p></body></html>")

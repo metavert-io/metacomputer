@@ -1,0 +1,19 @@
+id = "ff-renew-loans"
+title = "Firefox: renew two library loans (the page calls it Extend)"
+apps = ["firefox"]
+route = "ax"
+serve = true
+targets = ["not_found", "check_failed", "repeat"]
+lessons = ["not-found", "check-text", "repeat-class"]
+evidence = "learn report: elements not found and failed expect/wait_for checks, most of them from names and wording guessed before reading the window; DESKTOP.md, Checks inside the batch"
+prompt = """
+In Firefox, go to http://localhost:8000/library/loans.html and renew the two books by Ama Osei that
+I have on loan. Leave my other loans as they are.
+"""
+check = """
+ext = [r for r in requests_log() if r["path"] == "/extend"]
+loans = [field(r, "loan") for r in ext]
+C.add("both of Ama Osei's loans renewed", 0.6, {"L-2207", "L-2231"} <= set(loans), loans)
+C.add("no other loan renewed", 0.3, bool(ext) and set(loans) <= {"L-2207", "L-2231"}, loans)
+C.add("from Firefox", 0.1, bool(ext) and all("Firefox" in r.get("agent", "") for r in ext), [r.get("agent", "")[:30] for r in ext])
+"""

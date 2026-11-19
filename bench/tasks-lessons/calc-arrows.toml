@@ -1,0 +1,30 @@
+id = "calc-arrows"
+title = "Calc: route labels joined by a plain -> (AutoCorrect would make it an arrow)"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "ax"
+timeout_s = 720
+files = ["sheets/routes.csv"]
+setup = """
+to_odf ods ~/bench/routes.csv ~/bench/sheets && rm ~/bench/routes.csv
+"""
+targets = []
+lessons = []
+quirk = "LibreOffice's AutoCorrect replaces a typed -> with an arrow character (seen in a recorded Calc session; not in DESKTOP.md). No built-in lesson answers it, so this task is a control; a lesson of your own (learn add) could"
+prompt = """
+Open ~/bench/sheets/routes.ods in LibreOffice Calc. In column C, under the heading Route, write each
+row's route as its two cities joined by "->" (a hyphen and a greater-than sign), for example
+"Oslo -> Bergen" for Oslo and Bergen: a script reads this file later and splits on those two
+characters. Save the file, keeping the .ods format.
+"""
+check = """
+rows = ods_rows("~/bench/sheets/routes.ods")[0]
+pairs = [("Lisbon", "Porto"), ("Lyon", "Geneva"), ("Leeds", "York"), ("Turin", "Milan"), ("Ghent", "Bruges")]
+texts = [cell(rows, f"C{r}")["text"] for r in range(2, 7)]
+C.add("Route heading kept", 0.1, cell(rows, "C1")["text"].strip() == "Route", cell(rows, "C1")["text"])
+C.add("five routes filled in", 0.2, all(t.strip() for t in texts), texts)
+C.add("no -> turned into an arrow character", 0.3, all(t.strip() for t in texts) and not any("→" in t for t in texts), texts)
+norm = [" ".join(t.replace("->", " -> ").split()) for t in texts]
+C.add("each row reads FROM -> TO", 0.4, norm == [f"{a} -> {b}" for a, b in pairs], norm)
+C.add("cities unchanged", 0.0, [(cell(rows, f"A{r}")["text"], cell(rows, f"B{r}")["text"]) for r in range(2, 7)] == pairs)
+"""

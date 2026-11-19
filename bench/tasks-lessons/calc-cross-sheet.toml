@@ -1,0 +1,30 @@
+id = "calc-cross-sheet"
+title = "Calc: totals on a Summary sheet from three other sheets"
+apps = ["libreoffice-calc"]
+requires = ["calc"]
+route = "ax"
+timeout_s = 780
+files = ["sheets/regions.fods"]
+setup = """
+to_odf ods ~/bench/regions.fods ~/bench/sheets && rm ~/bench/regions.fods
+"""
+targets = ["no_frame", "no_extents", "not_found", "repeat"]
+lessons = ["no-frame", "no-extents", "not-found", "repeat-class"]
+evidence = "recorded Calc sessions: a role/name step (a sheet tab) dropped the screenshot frame that the Name Box pixel clicks after it needed; DESKTOP.md, LibreOffice Calc (cells need pixels or the keyboard)"
+prompt = """
+Open ~/bench/sheets/regions.ods in LibreOffice Calc. On its Summary sheet, fill in the Total for
+each region: a formula that adds up the Sales column on that region's own sheet. Save the file,
+keeping the .ods format.
+"""
+check = """
+p = "~/bench/sheets/regions.ods"
+names = ods_sheet_names(p)
+C.add("the four sheets kept, in order", 0.1, names == ["North", "South", "East", "Summary"], names)
+rows = ods_rows(p, "Summary")[0] if "Summary" in names else []
+want = [("North", 8402), ("South", 6842), ("East", 9828)]
+for r, (name, total) in enumerate(want, start=2):
+    c, label = cell(rows, f"B{r}"), cell(rows, f"A{r}")["text"].strip()
+    v = cval(c)
+    C.add(f"{name}: total {total}", 0.2, label == name and isinstance(v, float) and abs(v - total) < 0.005, (label, v))
+    C.add(f"{name}: a formula on the {name} sheet", 0.1, label == name and name in (c["formula"] or ""), c["formula"])
+"""

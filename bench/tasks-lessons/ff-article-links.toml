@@ -1,0 +1,21 @@
+id = "ff-article-links"
+title = "Firefox: two facts from a long article, both of them link text"
+apps = ["firefox"]
+route = "ax"
+serve = true
+targets = ["check_failed", "not_found"]
+lessons = ["check-text", "not-found"]
+evidence = "DESKTOP.md, Firefox: paragraph text shows inline links as a placeholder, so a check on a sentence fails (a recorded session's expect did), and a broad query on a long page overflows"
+prompt = """
+In Firefox, open http://localhost:8000/wiki/harbor-light.html and find the year the Merrow Point
+Harbor Light was first lit and the name of its first keeper. Then enter both on
+http://localhost:8000/wiki/answer.html and submit it.
+"""
+check = """
+ans = [r for r in requests_log() if r["path"] == "/answer"]
+r = ans[-1] if ans else {}
+C.add("answer submitted", 0.2, bool(ans), len(ans))
+C.add("year 1874", 0.35, (field(r, "year") or "").strip() == "1874", field(r, "year"))
+C.add("first keeper Edda Marsh", 0.35, " ".join((field(r, "keeper") or "").split()).lower() == "edda marsh", field(r, "keeper"))
+C.add("from Firefox", 0.1, "Firefox" in r.get("agent", ""), r.get("agent", "")[:40])
+"""
