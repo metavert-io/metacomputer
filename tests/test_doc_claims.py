@@ -292,6 +292,9 @@ CLAIMS = [
     # The event stream's limits (lib/events.py)
     ("SECURITY.md", r"at most (\d+) events per family in any (\d+) minutes",
      lambda m: (int(m[1]), int(m[2]) * 60) == (events.RATE_CAP, events.RATE_WINDOW)),
+    ("docs/events.md", r"Nothing from inside the VM reaches the message or data, not even a number",
+     lambda m: health_categories_only()),
+    ("SECURITY.md", r"The health report's numbers don't either", lambda m: health_categories_only()),
     ("docs/events.md", r"At most (\d+) events of a family in any (\d+) minutes",
      lambda m: (int(m[1]), int(m[2]) * 60) == (events.RATE_CAP, events.RATE_WINDOW)),
     ("docs/guide.md", r"\(10 per family in 10 minutes; a phone also (\d+) an hour\)",
@@ -360,6 +363,17 @@ CLAIMS = [
     ("THIRD_PARTY_NOTICES.md", r"trycua/cua release `cua-driver-rs-v([\d.]+)`", lambda m: m[1] == D["CUA_DRIVER_VERSION"]),
     ("THIRD_PARTY_NOTICES.md", r"rclone/rclone release `v([\d.]+)`", lambda m: m[1] == D["RCLONE_VERSION"]),
 ]
+
+
+def health_categories_only():
+    """lib/events.py's health messages have no slot for a VM value, and its categories hold none: an "exit code" or
+    disk size that spells something yields fixed words only."""
+    big = int.from_bytes(b"doc-claims-check", "big")
+    slots = all(set(re.findall(r"\{(\w+)\}", msg)) <= {"vm", "rec"} for _sev, msg, _act in events.HEALTH_TEXT.values())
+    g = events.guest_health({"ready": "yes", "driver_doctor_rc": big, "disk_free_gb": 1.234567})
+    msgs = json.dumps(events.health_conditions({"vm": "running", "gateway": True, "ssh": True,
+                                                "guest": {"ready": True, "driver_doctor_rc": big, "disk_free_gb": 1.234567}}))
+    return slots and g == {"ready": False, "doctor": "failed", "disk": "low"} and str(big) not in msgs and "1.2" not in msgs
 
 
 def fpr(full, head, tail):

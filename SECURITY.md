@@ -141,7 +141,10 @@ screenshots, URL queries and fragments, the live-view password, or sink header
 values. Every string is cleaned before it is logged or sent, including events
 other programs hand in through the spool. Text that comes from inside the VM
 (the driver's refusals, its health report) never goes into a message, only into
-`data`, cleaned.
+`data`, cleaned. The health report's numbers don't either: Cua Driver's doctor result
+and the free disk go out only as fixed categories (`metacomputer _health` and the
+watcher both reduce them), since a VM could spell a value it was given in an "exit
+code".
 
 **Sink changes are announced:**
 - `events sink add` and `remove` (and `--replace`) work only from a terminal and

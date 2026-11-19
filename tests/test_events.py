@@ -847,16 +847,55 @@ def main():
         check("M2 queries go whatever they hold, also schemeless, //host, mailto:, ;params, and words after a space",
               not wrong, wrong)
 
-        # M4: values from inside the VM in health messages
+        # M4: values from inside the VM in health messages: none of them, only fixed categories
         base_h = {"vm": "running", "gateway": True, "ssh": True}
         c1 = events.health_conditions({**base_h, "guest": {"ready": True, "driver_doctor_rc": "0; call +1 555 0100 now",
                                                             "disk_free_gb": True}})
         c2 = events.health_conditions({**base_h, "guest": {"ready": True, "driver_doctor_rc": True}})
         c3 = events.health_conditions({**base_h, "guest": {"ready": True, "driver_doctor_rc": 2, "disk_free_gb": 1.23}})
-        check("M4 a doctor rc that isn't an int (or is a bool) reads 'unknown'; guest text never reaches a message",
-              list(c1) == ["doctor"] and "rc=unknown" in c1["doctor"][1] and "call" not in c1["doctor"][1]
-              and "rc=unknown" in c2["doctor"][1] and "rc=2" in c3["doctor"][1] and "1.2 GB" in c3["disk_low"][1],
-              (c1, c2, c3))
+        check("M4 a doctor rc that isn't an int (or is a bool) counts as a failing check; guest text and numbers never "
+              "reach a message (the doctor's and the disk's are fixed sentences)",
+              list(c1) == ["doctor"] and "call" not in c1["doctor"][1] and list(c2) == ["doctor"]
+              and c3["doctor"][1] == events.HEALTH_TEXT["doctor"][1] and c3["disk_low"][1] == events.HEALTH_TEXT["disk_low"][1]
+              and "2" not in c3["doctor"][1] and "1.2" not in c3["disk_low"][1], (c1, c2, c3))
+
+        # H1 (the re-check of PR #53, finding 3): a VM that holds a value spells it as guest-status's integers and
+        # strings. Neither the watcher's events nor `metacomputer _health`'s answer carry any of it.
+        secret = b"Dummy-health-pass-77"
+        big = int.from_bytes(secret, "big")
+        hostile = {"ready": "yes " + secret.decode(), "driver_doctor_rc": big, "disk_free_gb": -float(big),
+                   "xorg_running": secret.decode(), "xfce_session_running": True, "atspi_bus": big,
+                   "driver_version": secret.decode(), "active_window_title": secret.decode()}
+        hst2 = {}
+        evs = events.health_events(hst2, {**base_h, "guest": hostile, "recording": {"expected": False}}, "testvm")
+        blob = json.dumps(evs)
+        disk_text = events.health_conditions({**base_h, "guest": {"ready": True, "disk_free_gb": 2.7182818284590452}})
+        src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+        m = re.search(r"^do_health\(\) \{.*?<<'EOF'\n(.*?)\nEOF\n", src, re.S | re.M)
+        out = {}
+        if m:
+            pr = subprocess.run([sys.executable, "-c", m.group(1), "running", "true", "true", json.dumps(hostile), "", "", "",
+                                 ""], capture_output=True, text=True, timeout=30)
+            try:
+                out = json.loads(pr.stdout or "{}")
+            except ValueError:
+                out = {"unparsed": pr.stdout[-300:], "err": pr.stderr[-300:]}
+        dumped = json.dumps(out)
+        check("H1 a doctor 'exit code' of int.from_bytes(a value), and guest-status strings spelling it: the health "
+              "events carry neither the number nor the text (a fixed sentence and categories), and `_health` itself "
+              "answers only categories (yes/no, ok/failed/unknown, ok/low/unknown)",
+              evs and str(big) not in blob and secret.decode() not in blob
+              and sorted(e["data"]["condition"] for e in evs) == ["doctor", "not_ready"]
+              and all(set(e["data"]) == {"condition", "state"} for e in evs)
+              and "2.7" not in json.dumps(disk_text)
+              and m is not None and str(big) not in dumped and secret.decode() not in dumped
+              and out.get("guest") == {"ready": False, "xorg_running": False, "xfce_session_running": True,
+                                       "atspi_bus": False, "driver_doctor": "failed", "disk": "unknown"},
+              (evs, out))
+        gh = getattr(events, "guest_health", lambda g: None)({"ready": True, "driver_doctor": "failed; " + secret.decode(),
+                                                              "disk": big})
+        check("H1 categories that come back out of range (an older or tampered `_health`) are read as unknown",
+              gh == {"ready": True, "doctor": "unknown", "disk": "unknown"}, gh)
 
         # M5: rate limit per family, with a summary
         refill()

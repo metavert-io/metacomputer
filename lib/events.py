@@ -2034,8 +2034,8 @@ HEALTH_TEXT = {
     "gateway": ("error", "The VM's network gateway (cua-netgw) is down.", "metacomputer restart"),
     "ssh": ("error", "The VM is running but doesn't answer SSH.", "metacomputer status; metacomputer restart if it stays down"),
     "not_ready": ("warn", "The VM's desktop session isn't ready (Xorg, XFCE or accessibility).", "metacomputer status"),
-    "doctor": ("warn", "Cua Driver's doctor check is failing (rc={rc}).", "metacomputer status"),
-    "disk_low": ("warn", "Only {disk} GB free on the VM's disk.", "free space in the VM (metacomputer inspect files), or reset it if you agree"),
+    "doctor": ("warn", "Cua Driver's doctor check is failing, or didn't report a result.", "metacomputer status"),
+    "disk_low": ("warn", "Less than 3 GB free on the VM's disk.", "free space in the VM (metacomputer inspect files), or reset it if you agree"),
     "recording_failed": ("error", "The desktop recording '{rec}' stopped on its own.", "metacomputer record stop, to save what it captured"),
 }
 
@@ -2044,11 +2044,33 @@ def _number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
 
 
+def guest_health(gs):
+    """guest-status's fields (from `metacomputer _health`) as fixed categories: the doctor's result 'ok', 'failed',
+    'unknown' or None (not reported), free disk 'ok', 'low' (under 3 GB) or 'unknown'. The VM chooses every value
+    there, and one that holds a value from the vault could spell it in a number or a string, so nothing it chose
+    reaches a message or data: only these words. Takes the categories `_health` sends, or guest-status's own fields."""
+    gs = gs if isinstance(gs, dict) else {}
+    doctor = gs.get("driver_doctor")
+    if doctor not in ("ok", "failed", "unknown", None):
+        doctor = "unknown"
+    if "driver_doctor" not in gs and "driver_doctor_rc" in gs:
+        rc = gs.get("driver_doctor_rc")
+        is_int = isinstance(rc, int) and not isinstance(rc, bool)
+        doctor = None if rc is None else ("ok" if is_int and rc == 0 else "failed" if is_int else "unknown")
+    disk = gs.get("disk")
+    if "disk" not in gs:
+        v = gs.get("disk_free_gb")
+        disk = "unknown" if not _number(v) or v < 0 else "low" if v < 3 else "ok"
+    elif disk not in ("ok", "low", "unknown"):
+        disk = "unknown"
+    return {"ready": gs.get("ready") is True, "doctor": doctor, "disk": disk}
+
+
 def health_conditions(h):
     """Problems in a `metacomputer _health` answer: {condition: (severity, message, action)}.
-    Values that come from inside the VM are checked: only numbers, never its text."""
+    Nothing that comes from inside the VM reaches a message: its report becomes fixed categories (guest_health)."""
     out = {}
-    fmt = {"vm": str(h.get("vm"))[:32], "rc": None, "disk": None, "rec": str((h.get("recording") or {}).get("name"))[:64]}
+    fmt = {"vm": str(h.get("vm"))[:32], "rec": str((h.get("recording") or {}).get("name"))[:64]}
 
     def put(k, **kv):
         sev, msg, act = HEALTH_TEXT[k]
@@ -2061,17 +2083,13 @@ def health_conditions(h):
         if not h.get("ssh"):
             put("ssh")
         else:
-            gs = h.get("guest") if isinstance(h.get("guest"), dict) else {}
-            if not gs.get("ready"):
+            g = guest_health(h.get("guest"))
+            if not g["ready"]:
                 put("not_ready")
-            rc = gs.get("driver_doctor_rc")
-            if rc is not None:
-                valid = isinstance(rc, int) and not isinstance(rc, bool)
-                if not valid or rc != 0:
-                    put("doctor", rc=rc if valid else "unknown")
-            disk = gs.get("disk_free_gb")
-            if _number(disk) and disk < 3:
-                put("disk_low", disk=round(float(disk), 1))
+            if g["doctor"] in ("failed", "unknown"):
+                put("doctor")
+            if g["disk"] == "low":
+                put("disk_low")
     rec = h.get("recording") if isinstance(h.get("recording"), dict) else {}
     if rec.get("expected") and rec.get("running") is False:
         put("recording_failed")
