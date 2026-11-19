@@ -1106,11 +1106,15 @@ CLAIMS = [
     ("SECURITY.md", r"A hub serves the VM it started with, and only it\.\*\* It pins that VM's name, SSH port and host key",
      lambda m: "def pin_identity" in raw("lib/mcp_hub.py") and "self.pin" in raw("lib/mcp_hub.py")
      and all(k in raw("bin/metacomputer") for k in ("MCOMP_EXPECT_VM", "MCOMP_EXPECT_SSH_PORT", "MCOMP_EXPECT_HOSTKEY"))),
-    ("SECURITY.md", r"A settings file that's refused for any reason still counts, by the names and folders it says",
+    ("SECURITY.md", r"A settings file that's refused for any reason still counts, by the names, folders and volumes it says",
      lambda m: "def error_row" in raw("lib/vms.py") and "mc_identity_records raw" in raw("scripts/vm-commands.sh")
-     and 'r.get("raw_vm")' in raw("lib/vms.py")),
-    ("SECURITY.md", r"When another settings file's folders can't be known \(one it can't read, or one that isn't an absolute path\), nothing is deleted recursively",
-     lambda m: "its folders can't be read" in raw("lib/vms.py") and "isn't an absolute path, so" in raw("lib/vms.py")),
+     and 'r.get("raw_vm")' in raw("lib/vms.py") and '"volumes": first("VOLUMES") if known else None' in raw("lib/vms.py")),
+    ("SECURITY.md", r"When another settings file's folders can't be known \(one it can't read, one that reads a file it can't, or one that isn't an absolute path\), nothing is deleted recursively, and `--delete-volumes` refuses while any file's volumes are unknown",
+     lambda m: "its folders can't be read" in raw("lib/vms.py") and "isn't an absolute path, so" in raw("lib/vms.py")
+     and 'known = bool(ids) and not ids.get("UNREADABLE")' in raw("lib/vms.py") and 'print("UNKNOWN "' in vm_delete_src()
+     and 'if [ -s "$ierr" ]; then rm -f "$ierr"; unreadable; fi' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"A settings file that can't be read is never taken for the defaults: the command refuses, and so does a per-VM command while another VM's file can't be read",
+     lambda m: "can't read the settings file" in raw("scripts/lib.sh") and "can't be read, so this VM can't be checked against it" in raw("lib/vms.py")),
     ("SECURITY.md", r"Only then does it stop what runs for the VM \(its event watcher, its hub\)",
      lambda m: 0 <= vm_delete_src().find('[ "$DP_SIG" = "$first" ] || die') < vm_delete_src().find("events_watcher_stop")
      and vm_delete_src().find("lock_fd_take 6") < vm_delete_src().find("hub_stop")),

@@ -119,6 +119,8 @@ def check_identity(owners, home):
         for v in me.get(k, []):
             mine.setdefault(identity(v, home, k), (k, v))
     for owner, ids in owners.items():
+        if ids.get("UNREADABLE"):
+            raise Refused(f"{owner} can't be read, so this VM can't be checked against it; fix it (or remove it) first")
         names, ckpt = names_of(ids)
         for n in sorted(my_names):
             if n in names or (ckpt and n.startswith(ckpt)):
@@ -163,9 +165,11 @@ def error_row(owners, file, vm, error):
     `mc_identity_records`), kept so `vm delete` still protects them."""
     ids = next(iter(owners.values()), {})
     first = lambda k: (ids.get(k) or [""])[0]     # noqa: E731
-    return {"file": file, "vm": vm or first("VM_NAME") or None, "ok": False, "error": error,
-            "raw_vm": first("VM_NAME"), "raw_baseline": first("BASELINE_NAME"),
-            "folders": [v for k in PATH_KEYS for v in ids.get(k, [])], "known": bool(ids)}
+    known = bool(ids) and not ids.get("UNREADABLE")     # an unreadable file says nothing: no guessed defaults
+    return {"file": file, "vm": vm or (first("VM_NAME") if known else "") or None, "ok": False, "error": error,
+            "raw_vm": first("VM_NAME") if known else "", "raw_baseline": first("BASELINE_NAME") if known else "",
+            "folders": [v for k in PATH_KEYS for v in ids.get(k, [])] if known else [],
+            "volumes": first("VOLUMES") if known else None, "known": known}
 
 
 def delete_check(rows, target, baseline):

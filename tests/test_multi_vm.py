@@ -859,6 +859,69 @@ def recheck_fixes(td):
         b.close()
 
 
+def recheck2_fixes(td):
+    """The second re-check's findings (on d25fd6c), each failing before its fix."""
+    b = Box(td, "recheck2")
+    try:
+        co, root = b.co, b.root
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        main = [vm("metacomputer"), vm("metacomputer-baseline")]
+        b.settings("config/vms/demo.env", 'SSH_PORT=2401\nVNC_PORT=6101\nVOLUMES="work"\n')
+        inner = os.path.join(b.app, "vms", "demo", "inner")
+
+        def fresh():
+            os.makedirs(inner, exist_ok=True)
+            write(os.path.join(inner, "vault.json"), "{}")
+            b.settings("config/vms/demo.env", 'SSH_PORT=2401\nVNC_PORT=6101\nVOLUMES="work"\n')
+            b.set_vms(main + [vm("demo"), vm("demo-baseline")])
+
+        # P1: an unreadable settings file is never read as the defaults: its folders are unknown, so nothing that
+        # might be one of them is deleted (and the VMs beside it can't be checked against it).
+        fresh()
+        other = b.settings("config/vms/other.env", f'SSH_PORT=2402\nVNC_PORT=6102\nVAULT_DIR="{inner}"\n')
+        os.chmod(other, 0)
+        try:
+            r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-vault")
+            check("vm delete --delete-vault beside an unreadable settings file (whose vault is inside demo's): refused, kept",
+                  r.returncode == 1 and "can't be read" in r.stderr and os.path.exists(os.path.join(inner, "vault.json"))
+                  and b.deletes() == [], (r.stderr[-300:], b.deletes()))
+        finally:
+            os.chmod(other, 0o600)
+        drop(other)
+        fresh()
+        helper = os.path.join(root, "helper.env")
+        write(helper, f'VAULT_DIR="{inner}"\n')
+        os.chmod(helper, 0)
+        b.settings("config/vms/other.env", f'. "{helper}"\nSSH_PORT=2402\nVNC_PORT=6102\n')
+        try:
+            r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-vault")
+            check("...or beside one that reads a file it can't (its folders unknown): refused, kept",
+                  r.returncode == 1 and "can't be read" in r.stderr and os.path.exists(os.path.join(inner, "vault.json"))
+                  and b.deletes() == [], (r.stderr[-300:], b.deletes()))
+        finally:
+            os.chmod(helper, 0o600)
+        drop(os.path.join(co, "config/vms/other.env"))
+        mainf = os.path.join(co, "config", "local.env")
+        os.chmod(mainf, 0)
+        try:
+            r = b.run("checkpoints")
+            check("an unreadable config/local.env: refused, never the defaults' VM", r.returncode == 1
+                  and "can't read the settings file" in r.stderr, r.stderr[-300:])
+        finally:
+            os.chmod(mainf, 0o600)
+
+        # P2: a refused settings file's volumes still count for --delete-volumes.
+        fresh()
+        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=not-a-port\nVOLUMES="work:/mnt/w"\n')
+        r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-volumes")
+        check("--delete-volumes when a refused settings file attaches the same volume: refused, nothing deleted",
+              r.returncode == 1 and "attach some of the same volumes" in r.stderr and "work" in r.stderr and b.deletes() == [],
+              (r.stderr[-300:], b.deletes()))
+        drop(os.path.join(co, "config/vms/other.env"))
+    finally:
+        b.close()
+
+
 HUB_SCRIPT = r'''
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -940,6 +1003,7 @@ def main():
         deleting(td)
         audit_fixes(td)
         recheck_fixes(td)
+        recheck2_fixes(td)
         hub_pin(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)

@@ -68,9 +68,21 @@ mc_canon() {
 mc_identity_records() {
   ( owner="$1"; ikind="$2"; iname="${3:-}"
     . "$LAB_ROOT/config/defaults.env"
+    ifile="$MC_MAIN_CONFIG"
+    [ "$ikind" != file ] || ifile="$iname"
+    [ "$ikind" != vm ] || ifile="$MC_VMS_DIR/$iname.env"
+    # A file that should be read and can't be, completely and without complaint, has no known identity: say so
+    # (UNREADABLE) instead of the defaults, which would only be guesses. (The main VM's config/local.env may be
+    # absent: then the defaults are what it is.)
+    unreadable() { printf '%s\0' "$owner" UNREADABLE 1; exit 0; }
+    ierr=""
+    if [ -e "$ifile" ] || [ "$ikind" != main ]; then
+      { [ -f "$ifile" ] && [ -r "$ifile" ] && /bin/bash -n "$ifile"; } >/dev/null 2>&1 || unreadable
+      ierr="$(mktemp "${TMPDIR:-/tmp}/mcomp-ident.XXXXXX" 2>/dev/null)" || unreadable
+    fi
     if [ "$ikind" = vm ]; then
       VM_NAME=""; BASELINE_NAME=""; SSH_DIR=""; SSH_PORT=""; VNC_PORT=""; RUN_DIR=""; LOG_DIR=""
-      . "$MC_VMS_DIR/$iname.env" >/dev/null 2>&1
+      . "$ifile" >/dev/null 2>"$ierr"
       [ -n "$VM_NAME" ] || VM_NAME="$iname"
       [ -n "$BASELINE_NAME" ] || BASELINE_NAME="$VM_NAME-baseline"
       [ -n "$SSH_DIR" ] || SSH_DIR="$HOME/.ssh/metacomputer-$VM_NAME"
@@ -79,16 +91,20 @@ mc_identity_records() {
       [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
       [ -n "${EVENTS_SPOOL:-}" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
     else
-      ifile="$MC_MAIN_CONFIG"; [ "$ikind" != file ] || ifile="$iname"
-      [ ! -f "$ifile" ] || . "$ifile" >/dev/null 2>&1
+      [ -z "$ierr" ] || . "$ifile" >/dev/null 2>"$ierr"
       RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"; LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
       [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_SYS_HOME/Library/Application Support/metacomputer"
-      if [ -z "${EVENTS_SPOOL:-}" ]; then
-        printf '%s\0' "$owner" EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool"
-        EVENTS_SPOOL="$MC_SYS_HOME/Library/Application Support/metacomputer/events/spool"
-      fi
     fi
-    for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL; do
+    # Anything it said on stderr while being read (a file it reads that can't be, a command that failed): unknown.
+    if [ -n "$ierr" ]; then
+      if [ -s "$ierr" ]; then rm -f "$ierr"; unreadable; fi
+      rm -f "$ierr"
+    fi
+    if [ "$ikind" != vm ] && [ -z "${EVENTS_SPOOL:-}" ]; then
+      printf '%s\0' "$owner" EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool"
+      EVENTS_SPOOL="$MC_SYS_HOME/Library/Application Support/metacomputer/events/spool"
+    fi
+    for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL VOLUMES; do
       eval "printf '%s\0' \"\$owner\" \"\$k\" \"\${$k:-}\""
     done ) 2>/dev/null
 }
@@ -142,6 +158,8 @@ mc_load_settings() {
   else
     MC_IMPLICIT=1    # the defaults, unasked for: vm_target_check decides whether that's clear enough
   fi
+  # A settings file that can't be read is refused, never replaced by the defaults (which would name another VM).
+  if [ -n "$file" ] && [ ! -r "$file" ]; then MC_REFUSAL="can't read the settings file $(mc_tilde "$file"); nothing was done"; return 1; fi
   # A file in config/vms/ (however it was chosen) is one VM's own settings.
   kind=defaults; [ -n "$file" ] && kind=config
   [ "$file" = "$MC_MAIN_CONFIG" ] && kind=local

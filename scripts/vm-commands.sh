@@ -364,14 +364,20 @@ vm_delete_plan() {
   fi
   if [ "$del_vols" = 1 ]; then
     DP_VOLS="$(printf '%s' "${VOLUMES:-}" | tr ',' '\n' | sed 's/:.*//; s/^ *//; s/ *$//' | grep -v '^$' | tr '\n' ' ' || true)"
+    # Every other settings file counts, refused ones by the VOLUMES they say; one whose volumes can't be read refuses.
     w="$(printf '%s\n' "$DP_ROWS" | "$PY" -c 'import json, sys
 me, mine = sys.argv[1], set(sys.argv[2].split())
 for line in sys.stdin:
     try: d = json.loads(line)
     except ValueError: continue
-    if d.get("ok") and d.get("vm") != me:
-        shared = mine & {e.split(":")[0].strip() for e in (d.get("volumes") or "").split(",") if e.strip()}
-        if shared: print(d.get("vm") + ": " + " ".join(sorted(shared)))' "$VM_NAME" "$DP_VOLS")"
+    if d.get("ok") and d.get("vm") == me:
+        continue
+    if not d.get("ok") and not d.get("known"):
+        print("UNKNOWN " + str(d.get("file")))
+        continue
+    shared = mine & {e.split(":")[0].strip() for e in (d.get("volumes") or "").split(",") if e.strip()}
+    if shared: print((d.get("vm") or str(d.get("file"))) + ": " + " ".join(sorted(shared)))' "$VM_NAME" "$DP_VOLS")"
+    case "$w" in *UNKNOWN*) die "--delete-volumes: $(printf '%s' "$w" | sed -n 's/^UNKNOWN //p' | head -1) can't be read, so it isn't known which volumes it attaches; nothing was deleted" ;; esac
     [ -z "$w" ] || die "--delete-volumes: other VMs here attach some of the same volumes ($w); delete those yourself with metacomputer volume delete NAME. Nothing was deleted"
   fi
   # Never the VM in use without --force: the one this checkout's settings choose, one that runs, or one a session holds.

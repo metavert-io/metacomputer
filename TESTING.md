@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (147 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (151 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
@@ -134,6 +134,10 @@ private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
   refused after its prompt leaves the VM's event watcher running; the hub's `input-reset` is
   refused when the settings name another VM. A refused file naming `demo-baseline` as its own
   blocks deleting demo (this one already held).
+- The second re-check's findings (failing on d25fd6c): `--delete-vault` beside a settings file that
+  can't be read, or that reads a file it can't, whose vault is inside demo's (refused, kept); an
+  unreadable `config/local.env` (refused, never the defaults' VM); `--delete-volumes` when a refused
+  file attaches the same volume (refused, nothing deleted).
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
