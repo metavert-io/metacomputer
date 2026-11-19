@@ -136,12 +136,35 @@ def real_reads():
           note.startswith(hidden_text.NOTE_PREFIX + " 7 item(s)") and "possible prompt injection" in note
           and "tell the user" in note and s["hidden"] == 7 and s["instruction_like"] == 3 and s["host"] == "127.0.0.1"
           and s["signals"] == {"tiny": 2, "off_left": 1, "no_size": 3, "off_above": 1}, (note[:200], s))
+    sc = res["structuredContent"]
+    check("the structured result (what Claude Code shows the model) leads with the field, and the field with the note",
+          next(iter(sc)) == hidden_text.FIELD and next(iter(sc[hidden_text.FIELD])) == "note"
+          and sc[hidden_text.FIELD]["note"].startswith(hidden_text.NOTE_PREFIX + " 7 item(s)")
+          and "\u27e6hub #1" in sc["tree_markdown"], list(sc)[:3])
     rows = [ln for ln in res["content"][1]["text"].split("\n") if "\u27e6hub" in ln]
     check("each marked row carries a tag at its end, numbered as in the note",
           len(rows) == 8 and all(re.search(r"\u27e6hub #\d+: (hidden|instruction-like|hidden, instruction-like)\u27e7$", ln)
                                  for ln in rows), rows[:2])
     check("the element list the hub asked for is gone again and the format is the client's",
           "elements" not in res["structuredContent"] and res["structuredContent"]["tree_format"] == "markdown")
+
+    res = fixture("firefox-cold-both.json")
+    s = hidden_text.apply("get_window_state", res, {"added_elements": True})
+    m = marked(res)
+    check("a read right after the page opened (no frame yet for its document and some visible rows): those rows "
+          "aren't marked, the rows with frames and the off-screen ones are",
+          not ({"VISIBLE", "GOLF", "FOXTROT"} & set(m)) and m.get("ALPHA", {}).get("hidden") == []
+          and "exfil" in m["ALPHA"]["instruction_like"] and "off_left" in m.get("BRAVO", {}).get("hidden", [])
+          and "tiny" in m.get("JULIET", {}).get("hidden", []) and "off_above" in m.get("MIKE", {}).get("hidden", [])
+          and all("no_size" in m.get(k, {}).get("hidden", []) for k in ("HOTEL", "INDIA", "NOVEMBER")), (s, sorted(m)))
+    res = fixture("firefox-full-both.json")
+    for e in res["structuredContent"]["elements"]:
+        if (e.get("label") or "").startswith("VISIBLE-ONE"):
+            e.pop("frame", None)                # a row in view whose frame the driver didn't get (no off-screen note)
+    hidden_text.apply("get_window_state", res, {"added_elements": True})
+    m = marked(res)
+    check("a frameless row is marked 'no size' only when the driver also calls it off-screen",
+          "VISIBLE" not in m and "no_size" in m.get("HOTEL", {}).get("hidden", []), sorted(m))
 
     res = fixture("firefox-scrolled-run-steps-both.json")
     s = hidden_text.apply("run_steps", res, {"added_elements": True})
@@ -310,6 +333,13 @@ def limit_checks():
     burst = [lim.allow(f"h{i}.example", 500) for i in range(20)]
     check("events: once per host per 5 minutes, at most 10 in 10 minutes", seq == [True, False, True, True]
           and sum(burst) == 7, (seq, sum(burst)))
+    lim = hidden_text.Limiter()
+    a, b, c = {"host": "a.example"}, {"host": None}, {"host": None}
+    lim.fill_host(a, 5)
+    lim.fill_host(b, 5)
+    lim.fill_host(c, 6)
+    check("a read that shows no address (a query, a diff) counts as the site its window last showed",
+          b["host"] == "a.example" and c["host"] is None, (b, c))
 
 
 # --- through the hub ------------------------------------------------------------------------------------------------

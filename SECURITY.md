@@ -19,7 +19,8 @@ Each one is independent; turn on any of them in `config/local.env`. It also
 covers the shell channel, `metacomputer sh`: what it can reach, how bounded
 mode turns it off, and its optional logging; the hub, which applies the
 guards (one controller at a time, the Chrome guard, bounded mode, the coordinate
-guard) to every way in, through a socket only you can use; the live view and
+guard) to every way in, through a socket only you can use, and marks page text a
+person likely can't see ([Hidden page text](#hidden-page-text)); the live view and
 handoffs, where Claude gives the computer to you and waits; and the lessons
 channel (`metacomputer learn`), which can't carry text from the VM into future
 sessions.
@@ -47,8 +48,11 @@ Secrets Manager and HashiCorp Vault); and what that does and doesn't protect aga
 The main risk with a computer-use agent is **prompt injection**. A web page, a
 document or a window title tells the agent to do something you didn't ask for.
 The skill treats everything on the VM's screen as data, not instructions, but
-no model is immune. The options below are about the next two questions: what
-did the agent actually do, and how much could it have done?
+no model is immune. The hub marks page text a person likely can't see, and text
+that addresses AI agents, so Claude can tell you about it
+([Hidden page text](#hidden-page-text)); that's a label, not a barrier. The
+options below are about the next two questions: what did the agent actually do,
+and how much could it have done?
 
 They do not protect against someone who already controls your Mac account.
 That person can change the config, read the keys and drive the VM directly.
@@ -604,6 +608,116 @@ are accepted, not oversights:
   way, or have Claude run `claude stop` before it hands over.
 - Two settings files that name the same VM with different `RUN_DIR`s don't see
   each other's handoff (the same holds for the one-controller rule).
+
+## Hidden page text
+
+**Hidden page text (`HIDDEN_TEXT=on`, the default).** In a test, a web page in the
+VM carried a paragraph in white 1-pixel type: an instruction to AI assistants to pack
+up `~/.ssh`, `~/.claude.json` and `~/.config`, send them to an outside host, and not
+tell the user. Claude read the page through the accessibility tree, and the paragraph
+reached it word for word, looking like any other. Claude ran nothing, but its first
+answer didn't mention the attempt; it did only when asked.
+
+So the hub now labels such text in the results that carry page or accessibility text
+(`get_window_state`, `run_steps` observations, `get_browser_state`, `page`,
+`run_script`, `list_windows` and the like), from what the driver itself reports. A
+result with something to mark gets:
+- a note in front, starting `metacomputer hub: hidden-text:`, that counts the items,
+  quotes them (at most 20 items, 160 characters each, escaped), says which signals
+  marked each, and tells Claude not to follow them and to tell you what they say
+  before doing anything else on that page (the skill and the hub's instructions say
+  the same);
+- a tag at the end of each marked row of the tree, `⟦hub #N: hidden⟧`,
+  `⟦hub #N: instruction-like⟧` or both, numbered as in the note;
+- a `metacomputer_hidden_text` field first in the structured result, with the same note
+  and items. Claude Code gives the model a result's structured part instead of its text
+  when there is one (seen in a headless session's transcript), so this field is what
+  Claude reads there.
+
+Nothing is removed, no visible text changes, and nothing in the page is followed or
+run: the hub measures and matches, and Claude decides. With `HIDDEN_TEXT=off` results
+pass as the driver sends them.
+
+**What marks a row as hidden.** Only signals the driver's data carries (checked
+against real reads of [tests/fixtures/site/hidden.html](tests/fixtures/site/hidden.html)
+in Firefox and Chrome on Cua Driver 0.53.0), and only for text of at least 40
+characters (shorter hidden text is mostly screen-reader labels such as "Skip to
+content"):
+
+| Route | Signal | Catches |
+| --- | --- | --- |
+| Accessibility trees (Firefox; Chrome started with `launch_app`) | a web row's frame under 6 px tall or wide | 1- and 2-pixel type |
+| | a web row with no usable size that the driver also reports off-screen | text clipped to nothing (screen-reader-only CSS), a zero-height box, a block transformed far away |
+| | a frame wholly left of the page | `left:-10000px` |
+| | a frame above the view and more than 1,000 px above the median of the page's first 5 rows | `top:-10000px` (text you scrolled past stays unmarked) |
+| Chrome page snapshots (`get_browser_state`, `semantic_v2`) | text Chrome reports with no layout box | text that isn't laid out |
+| | text Chrome reports off-screen while text before and after it, in the page's own order, is in view | an off-screen block in the middle of the page |
+
+Rows inside a marked row are covered by it. Right after a page opens, rows in plain view
+can lack frames for a moment; the driver doesn't call those off-screen, so they aren't
+marked, while the frames that are there are already right. Text hidden with `display:none`,
+`visibility:hidden` or `aria-hidden` never reached either browser's tree in our
+tests, and Chrome's page snapshots leave out CSS-hidden text themselves, so Claude
+doesn't read it and there is nothing to mark.
+
+The accessibility frames come only with the driver's element list, which a read
+returns when asked (`tree_format` `elements` or `both`). Where a client asks for the
+default markdown, the hub asks for both, takes the list out of the answer again and
+puts back the one line the driver prints only for markdown (how to form element
+tokens), so the client gets the answer it asked for plus the marks;
+`tests/test_hidden_text.py` compares the two on real reads. The action log records the
+request as the hub sent it. Windows of apps known to hold no web page (LibreOffice,
+Mousepad, Thunar, the calculator, the terminal and others) and reads that ask for more
+than 2,000 elements keep their own format, and get the wording check only.
+
+**What marks text as instruction-like,** visible or not: a short, conservative list of
+patterns, matched after removing invisible characters and folding look-alike forms
+(fullwidth letters): text that addresses AI agents ("AI assistants reading this
+page", "Note to AI agents", "If you are an AI"), tries to override instructions
+("ignore all previous instructions", "new instructions:"), asks to keep something from
+the user ("do not tell the user"), uses chat-prompt markup (`<|im_start|>`, `[INST]`),
+names a key or credential file together with a word for sending it (`~/.ssh`,
+`~/.claude.json`, `~/.aws/credentials` with POST, upload, curl), or imitates the hub's
+own notes (`metacomputer hub:`, `⟦hub`). It was tuned on ordinary text too (news about
+AI rules, game rules, setup guides that show `~/.ssh/id_ed25519.pub`, API docs that
+say "send your API key in the header"), which it leaves alone; pages about prompt
+injection, this one included, get marked.
+
+**Limits.** Each result is checked within at most 5,000 pieces of text, 2,000,000
+characters and 0.5 s; past that the note says only part was checked. Long text is read
+in pieces of 4,096 characters that overlap, so filler in front of an instruction
+doesn't hide it, and the note quotes the part around the first instruction-like words.
+The patterns have no nested repeats; `tests/test_hidden_text.py` runs them on 2 MB
+hostile texts. What the hub keeps and sends stays within its frame limits.
+
+**The event.** A result with marks sends `security.hidden_text` (warn when something is
+instruction-like, else info; [docs/events.md](docs/events.md)) with counts, the signals
+and pattern kinds, the tool, and the site's host when the driver reports the address
+(Firefox's address bar, a Chrome snapshot's URL; Chrome's own address bar gives none
+through the accessibility tree), and never page text. At most once per host every 5
+minutes and 10 in 10 minutes from one hub, on top of the event stream's own limits;
+only the hub can make one (`events emit` and the spool refuse the type). `hub.log`
+notes the counts.
+
+**Where it ends:**
+- It's a label for Claude, not a filter, and no model is immune: a model can still be
+  steered by text the hub marked, and by text it couldn't mark. What limits the damage
+  is the rest of this page: the VM holds none of your data unless you put it there,
+  and reaches only the public internet.
+- The driver's data has no colours or opacity, so text in the background's colour or
+  close to it, and transparent text, isn't marked as hidden; both reached Firefox's
+  tree with ordinary frames. Neither is a hidden word inside a visible paragraph (the
+  browsers merge inline text into its paragraph), `text-indent` off the page, or text
+  in images and screenshots.
+- Chrome started with `launch_app` reports a zero-height box's text at its own size,
+  and puts screen-reader-only text on lines without positions; Chrome's page snapshots
+  give no sizes (1-pixel type reads as in view) and can't tell text placed far below
+  the page from text below the fold. Those are left to the wording check.
+- The patterns miss paraphrases, other languages and look-alike letters from other
+  alphabets, and can mark an honest page that talks about AI agents.
+- A page can't remove or forge the hub's note (it's the first block of the result, from
+  the hub), but it can put tag-like text in its own rows; such text is marked as
+  imitating the hub.
 
 ## The shell channel (`metacomputer sh`)
 

@@ -957,6 +957,35 @@ Chrome profile and closes them again, and changes no VM settings (it turns
   since covered the point, and passes a point that window doesn't cover;
 - `hub stop` stops it and the next call starts a new one.
 
+## Hidden page text: `tests/test_hidden_text.py`, `tests/test_hidden_text_vm.py`
+
+`python3 tests/test_hidden_text.py` (no VM, about 2 s) checks the hub's marks (SECURITY.md, "Hidden page
+text") against Cua Driver's real answers for `tests/fixtures/site/hidden.html`, a page like the
+prompt-injection finding's (a white 1-px paragraph, a block at `left:-10000px`, an `aria-hidden` block, and
+the other usual ways of hiding text, beside visible text), kept in `tests/fixtures/hidden_text/`:
+- Firefox and Chrome (`launch_app`) accessibility trees, a run_steps observation scrolled to the end, a read
+  right after the page opened, Chrome's page snapshot and `page get_text`: the hidden and instruction-like
+  rows are marked with the right signals, visible text, text below the fold, short screen-reader labels and
+  rows in view without a frame yet aren't, and colour and opacity (not in the driver's data) aren't claimed;
+- markdown and element reads of the same page, taken both ways on a test VM: with the marks taken out, the
+  hub's answer is the driver's own markdown answer (the element list removed, the token line rebuilt), for a
+  full, a query, a cut-short, a since-fallback and a one-row read;
+- the patterns on examples of each kind (zero-width and fullwidth tricks included) and on ordinary text that
+  mustn't match (AI policy news, game rules, setup guides, API docs);
+- limits: 5,000 rows of 4 KB trigger words within the time budget, the note under 8 KB with at most 20
+  quotes, nothing dropped, 2 MB pathological texts, wording after filler found and quoted, control and
+  direction characters out of the quotes, the event limiter;
+- through a hub with a stand-in driver: the request asks for the element list only where it helps (not for
+  `elements`, `full_output`, more than 2,000 elements or Mousepad), the client gets the note, tags and field,
+  `HIDDEN_TEXT=off` changes nothing, one `security.hidden_text` event per host with counts and no page text,
+  `hub.log` with counts only, and the type is reserved.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_hidden_text_vm.py` (22 checks, a test VM: it serves the page on
+the VM's 127.0.0.1:8000, opens and closes Firefox and Chrome, and restarts the VM's hub) does the same with
+live answers: Firefox's marks, the same answers with `HIDDEN_TEXT` off and on (three kinds of read), the
+structured field Claude Code shows the model, a scrolled observation, `page get_text`, Chrome's page snapshot
+and accessibility tree, and the event, in an events folder of its own (never your sinks).
+
 ## The docs' security promises: `tests/test_doc_claims.py`
 
 `python3 tests/test_doc_claims.py` needs no VM and takes about a second. It pins each

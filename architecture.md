@@ -313,6 +313,13 @@ against 20.2 turns, no refusals; per-task records in
   that connects later gets a new driver connection (each connection used to
   have its own session).
 - **The coordinate guard** (`COORD_GUARD=on`, below).
+- **Hidden page text** (`HIDDEN_TEXT=on`; `lib/hidden_text.py`, SECURITY.md "Hidden page text"): for a
+  window read whose client wants markdown, the hub asks the driver for the element list too
+  (`tree_format` `both`), reads hidden rows off their frames (and Chrome snapshots' visibility),
+  matches wording aimed at AI agents, then takes the list out again: the client gets its own
+  answer plus a note in front, a tag on each marked row and a `metacomputer_hidden_text` field,
+  and the event stream gets `security.hidden_text` (counts and host only). It runs on the
+  driver connection's reader thread, bounded per result (pieces of text, characters, 0.5 s).
 - **The action log** (`ACTION_LOG=on`): one log file per driver connection, so
   the hub's connection is one file; before each `tools/call` the hub sends the
   relay a note naming the client (kind, pid, Claude Code pid, folder, driver
