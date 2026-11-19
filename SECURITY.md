@@ -1246,14 +1246,30 @@ another VM:
 - **Its identity is checked against every other VM's** each time its settings load: the
   main VM's and every other `config/vms/` file's. Its name, baseline (always
   `NAME-baseline`), previous baseline and checkpoint names may not be another VM's. Its
-  ports may not be another VM's. Its SSH keys, runtime, logs, vault and spool folders may
-  not be another VM's folder, however spelled: they're compared as the folders they are
-  (device and inode, with links, `.` and `//` resolved), so a link or another spelling
-  can't reach the main VM's keys, gateway or vault. Anything that clashes is refused, and
-  nothing runs. Every settings file is read one strict way: it must be readable, parse, and
+  ports may not be another VM's.
+- **The identity rule: no VM's folder is in another's.** A VM's SSH keys, runtime, logs,
+  vault and spool folders may not be another VM's folder, be inside one, or hold one, and
+  no VM's folder may be in the runner's VM storage (`~/.lume` and every storage location
+  the runner or Lume's settings list) or hold it, since deleting a VM there deletes its
+  whole folder. Folders are compared as the folders they are (device and inode, with
+  links, `.` and `//` resolved; the part that doesn't exist yet without case), so a link
+  or another spelling can't reach the main VM's keys, gateway or vault. A `config/vms/`
+  VM's own folders (its defaults: `.run-vms/NAME`, `logs-vms/NAME`,
+  `~/.ssh/metacomputer-NAME`, `.../metacomputer-vms/NAME`) sit beside the main VM's,
+  never in them. A `config/vms/` file that breaks the rule is refused when it's read, and
+  every `config/vms/` VM is refused while the main VM's settings break it, so no VM can run
+  with a vault nested in another VM's folder. The main VM's own commands read only its own
+  file (as before there was more than one VM), so `vm delete` and `build`, the commands
+  that delete folders or VMs, check the rule again for whichever VM they change (the main
+  one too) before they delete anything, against every settings file as it reads then. The
+  one sharing allowed is the old one: the main
+  VM and `MCOMP_CONFIG` VMs may share the account's own vault folder and spool. Anything
+  that clashes is refused, and nothing runs.
+- **Every settings file is read one strict way:** it must be readable, parse, and
   say nothing on stderr while it's read (a file it sources but can't read counts). One that
-  isn't is never taken for the defaults: the command refuses, and so does a per-VM command
-  while another VM's file can't be read (it can't be checked against a guess).
+  isn't is never taken for the defaults: the command refuses, and so does a per-VM command,
+  a `vm delete` or a `build` while another VM's file can't be read (it can't be checked
+  against a guess).
 - **A command only goes ahead when it's clear which VM is meant.** A checkout with no
   `config/local.env` and no `--vm` refuses to act on a VM while the runner has others, and
   so does an `MCOMP_CONFIG` file that's gone. Vault folders reach the vault as the folders
@@ -1267,17 +1283,20 @@ another VM:
 - **`vm delete` changes nothing it hasn't checked.**
   - It holds the VM's lock throughout, and `start` takes the same lock, so the VM can't be
     started, rebuilt or restored meanwhile.
+  - Every delete, with or without flags and whichever VM it is (the main one and an
+    `MCOMP_CONFIG` one included), first requires every other settings file to read cleanly
+    and the identity rule to hold, before anything is stopped or deleted (the runner's
+    delete of the VM's folder included).
   - It refuses a set of names that touches any other VM's VM, baseline, previous baseline
     or checkpoints, and a baseline not named `NAME-baseline`. A settings file that's refused
-    for any reason still counts, by the names, folders and volumes it says.
+    for any reason still counts, by the names, folders and volumes it says; one whose names
+    can't be read refuses (never its file name alone).
   - It deletes folders only through a walk from `/` that follows no link, and only a
     folder of this account's that neither is nor holds another VM's folder, your home or
     the checkout. `--delete-vault` deletes only the VM's own folder under
-    `.../metacomputer/vms/`. When another settings file's folders can't be known (one it
+    `.../metacomputer-vms/`. When another settings file's folders can't be known (one it
     can't read, one that reads a file it can't, or one that isn't an absolute path), nothing
-    is deleted recursively, and `--delete-volumes` refuses while any file's volumes are unknown.
-    Before any folder is deleted, every other settings file must read cleanly, whichever VM is
-    being deleted (the main one included).
+    is deleted, and `--delete-volumes` refuses while any file's volumes are unknown.
   - After you confirm, it holds the VM's owners lock (so no session can claim it), checks
     everything again, and refuses if anything changed. Only then does it stop what runs for
     the VM (its event watcher, its hub), so a refusal leaves a session that started meanwhile
@@ -2666,13 +2685,13 @@ uses, on stderr.
   `MCOMP_VAULT_DIR`. It holds `vault.json`, `vault.sock`, `audit.jsonl`,
   `sessions/*.sealed` and `sinks/` (each sink's delivery state). A VM made with
   `metacomputer vm create NAME` has a vault of its own,
-  `.../metacomputer/vms/NAME/` (its `VAULT_DIR`, handed to the vault as
+  `.../metacomputer-vms/NAME/` (its `VAULT_DIR`, handed to the vault as
   `MCOMP_VAULT_DIR`): its secrets, approvals, audit log and unlock are separate from
   the main VM's. `metacomputer vm delete NAME` keeps it unless `--delete-vault` asks,
   and that deletes only such a per-VM folder, never a shared one.
 - **Events spool:** `~/Library/Application Support/metacomputer/events/spool/` (made
   0700 if missing; `MCOMP_EVENTS_SPOOL`), for the event stream to take; a per-VM vault
-  uses `.../vms/NAME/events/spool/` (`EVENTS_SPOOL`), which that VM's watcher takes.
+  uses `.../metacomputer-vms/NAME/events/spool/` (`EVENTS_SPOOL`), which that VM's watcher takes.
 - **Program:** `~/.local/share/metacomputer/bin/mcomp-vault`, or `MCOMP_VAULT_BIN`.
   Rebuild it with `scripts/build-vault.sh`. `scripts/verify-audit.py` checks audit
   logs and sink captures.

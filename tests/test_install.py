@@ -657,9 +657,9 @@ def build_root(t):
     """A copy of what scripts/build-vm.sh reads, with stand-ins for its downloads and tools, and a runner whose
     VMs live in a state file (its calls logged)."""
     root = os.path.join(t, "lab")
-    for d in ("scripts", "config"):
+    for d in ("scripts", "config", "lib"):
         os.makedirs(os.path.join(root, d))
-    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env"):
+    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "lib/vms.py", "lib/termsafe.py"):
         shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-tools.sh"), '#!/bin/bash\nsleep "${STUB_TOOLS_SLEEP:-0}"\n', 0o755)
     write(os.path.join(root, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)

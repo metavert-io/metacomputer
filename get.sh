@@ -427,7 +427,7 @@ confirm_problems() {
   bad=""
   while IFS= read -r e; do
     case "$e" in
-      ''|logs/*|results/*|recordings/*|screenshots/*|.run/*|local/*) ;;
+      ''|logs/*|results/*|recordings/*|screenshots/*|.run/*|local/*|.run-vms/*|logs-vms/*) ;;
       .cache/ubuntu-*/*|.cache/cua-driver-*/*|.cache/mozilla/*|.cache/google/*) ;;
       .cache/rclone-v*/*) rclone_download "${e#.cache/rclone-v*/}" || bad="$bad$e"$'\n' ;;
       .DS_Store|*/.DS_Store|*.pem|*vnc-pass*|CLAUDE.local.md) ;;

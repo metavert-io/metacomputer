@@ -1,6 +1,7 @@
 # VM disks, downloads, build tools, runtime state
 .cache/
 .run/
+.run-vms/
 vendor/
 *.img
 *.iso
@@ -9,6 +10,7 @@ vendor/
 recordings/*
 screenshots/*
 logs/*
+logs-vms/
 results/*
 !recordings/.gitkeep
 !screenshots/.gitkeep

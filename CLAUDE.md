@@ -167,8 +167,11 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
-  whose names, ports or folders are another VM's: `lib/vms.py identity`, folders by device
-  and inode; a settings-less checkout with other VMs in the runner: `vm_target_check`);
+  whose names, ports or folders are another VM's; a settings-less checkout with other VMs in
+  the runner: `vm_target_check`). The identity rule (`mc_identity_check` -> `lib/vms.py identity`,
+  folders by device and inode): no VM's folder is another's, inside one or holding one, or in
+  the runner's VM storage; per-VM loads, every `vm delete` and `build-vm.sh` (before anything
+  is deleted) run it. Per-VM defaults (`mc_vm_default`) sit beside the main VM's folders;
   `lib/labconfig.py` must pick the same file. A hub pins the VM it started with
   (`pin_identity`: name, SSH port, host key) and refuses a reconnect to anything else.
   `vm delete` deletes folders only through `lib/vms.py rmtree` (no-link walk, never another

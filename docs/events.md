@@ -527,7 +527,7 @@ only up to the size limit. The contract is in
 | --- | --- |
 | Sinks (kinds, URLs, headers, filters, signing keys) | `~/.config/metacomputer/events.json` (0600; folder 0700). `MCOMP_EVENTS_DIR` moves the whole folder. |
 | Sequence numbers, each sink's backlog, count and delivery status per generation (`sinks/NAME.GENERATION.*`, a new generation each time a sink is added or replaced) and its lock (`sinks/NAME.lock`), debounce marks, the limits (`ratelimit.json`, `phonelimit.json`), pending sink-change announcements (`admin/`) and their outcomes (`admin.log`), the last configuration `events sink` wrote (`config.sha256`, `config.good.json`), the watcher's place in the gateway log | `~/.config/metacomputer/events-state/` (0700, files 0600). The next number is always one more than the highest anywhere (the counter, the log, the backlogs, what the sinks have), so a lost or restored counter doesn't go back. |
-| The spool | `~/Library/Application Support/metacomputer/events/spool/` (`MCOMP_EVENTS_SPOOL`); a VM made with `metacomputer vm create NAME` has its own, `.../metacomputer/vms/NAME/events/spool/` (its `EVENTS_SPOOL`), which its vault writes to and its watcher takes |
+| The spool | `~/Library/Application Support/metacomputer/events/spool/` (`MCOMP_EVENTS_SPOOL`); a VM made with `metacomputer vm create NAME` has its own, `.../metacomputer-vms/NAME/events/spool/` (its `EVENTS_SPOOL`), which its vault writes to and its watcher takes |
 | The local log of every event (except `actions`) | `$LOG_DIR/events.jsonl` (0600; `logs/` in the checkout by default); kept to 10 MB plus one older file |
 | The watcher | `$RUN_DIR/events-watcher.pid`, `$LOG_DIR/events-watcher.log` |
 

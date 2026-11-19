@@ -5,7 +5,9 @@ command resolves them (scripts/lib.sh), and the runner's list (`lume ls --format
 
     vms.py list --settings ROWS.jsonl (--runner LIST.json | --runner-failed) [--selected NAME] [--json]
     vms.py facts NAME BASELINE < LIST.json      KEY=VALUE lines: the VM, its baseline, its previous one, checkpoints
-    vms.py identity --home HOME < RECORDS      one VM's names, ports and folders against every other VM's
+    vms.py identity --home HOME [--no-ports] < RECORDS
+                                               the identity rule: one VM's names, ports and folders against every
+                                               other VM's, and every VM's folders against the runner's VM storage
     vms.py delete-check --target NAME --baseline B --home HOME < ROWS.jsonl
                                                what `vm delete` would delete, against every other VM's names
     vms.py rmtree --base DIR --rel A/NAME --target-vm NAME --home HOME [--guard PATH]... [--check] < ROWS.jsonl
@@ -26,6 +28,11 @@ from termsafe import escape_for_terminal as esc  # noqa: E402
 COPY = re.compile(r"^(?P<owner>.+?)(?:-baseline(?:-prev)?|-ckpt-(?P<ckpt>.+))$")
 SAFE = re.compile(r"[A-Za-z0-9._-]{1,128}")
 PATH_KEYS = ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL")
+# The account's own vault folder and event spool, which the main VM and MCOMP_CONFIG VMs share unless their settings
+# give them their own (as before there was more than one VM): each such VM's folder, but not one they keep apart.
+SHARED_KEYS = ("SHARED_VAULT_DIR", "SHARED_EVENTS_SPOOL")
+FOLDER_KEYS = PATH_KEYS + SHARED_KEYS
+RUNNER = "@runner"           # the owner of the STORAGE records: where the runner keeps VMs (scripts/lib.sh)
 
 
 class Refused(Exception):
@@ -51,21 +58,28 @@ def absolute(path, home, what="a folder"):
 
 def identity(path, home, what="a folder"):
     """What the folder at path is, whatever spells it: (device, inode) of the path when it exists (links followed),
-    else of its nearest existing ancestor plus the rest of the path. Two spellings of one folder (a link, a firmlink,
-    `x/.`, `x//y`) get the same identity."""
+    else of its nearest existing ancestor plus the rest of the path (compared without case, as macOS's volumes
+    compare names). Two spellings of one folder (a link, a firmlink, `x/.`, `x//y`) get the same identity."""
     p = absolute(path, home, what)
     parts = [c for c in p.split("/") if c]
     rest = []
     while True:
         try:
             st = os.stat("/" + "/".join(parts))
-            return (st.st_dev, st.st_ino, tuple(rest))
+            return (st.st_dev, st.st_ino, tuple(c.casefold() for c in rest))
         except (FileNotFoundError, NotADirectoryError):
             if not parts:
                 raise Refused(f"can't read {what} ({path})")
             rest.insert(0, parts.pop())
         except OSError as e:
             raise Refused(f"can't read {what} ({path}): {e.strerror}")
+
+
+def chain(path, home, what="a folder"):
+    """The identities of path and of every folder above it: B's identity is in A's chain when A is B or is inside
+    it, however either is spelled (links and firmlinks in the part that exists, and in the part that doesn't yet)."""
+    parts = [c for c in absolute(path, home, what).split("/") if c]
+    return {identity("/" + "/".join(parts[:i]), home, what) for i in range(len(parts), -1, -1)}
 
 
 def canonical(path, home, what="a folder"):
@@ -105,19 +119,62 @@ def names_of(ids):
     return {n for n in (vm, base, base + "-prev" if base else "") if n}, (vm + "-ckpt-" if vm else None)
 
 
-def check_identity(owners, home):
-    """One VM ("self") against every other: no name of one is a name or checkpoint of another, no port is shared,
-    and no folder (SSH_DIR, RUN_DIR, LOG_DIR, VAULT_DIR, EVENTS_SPOOL) is another's, whatever spells it.
-    Returns self's vault folder and spool as their canonical paths."""
+def shown(k):
+    return k.replace("SHARED_", "")
+
+
+def folders_of(ids, home, who):
+    """[(KEY, value, identity, chain)] for an owner's folders."""
+    out = []
+    for k in FOLDER_KEYS:
+        for v in ids.get(k, []):
+            what = f"{who} {shown(k)}"
+            out.append((k, v, identity(v, home, what), chain(v, home, what)))
+    return out
+
+
+def relation(a, b):
+    """'is' when folder a is folder b, 'is inside' when a is in b, 'holds' when b is in a, else None
+    (a and b are (KEY, value, identity, chain))."""
+    if a[2] == b[2]:
+        return "is"
+    if b[2] in a[3]:
+        return "is inside"
+    if a[2] in b[3]:
+        return "holds"
+    return None
+
+
+def check_identity(owners, home, ports=True):
+    """The identity rule, for one VM ("self") against every other: no name of one is a name or checkpoint of another,
+    no port is shared (unless ports=False: deleting a VM ends a clash), no folder of its (SSH_DIR, RUN_DIR, LOG_DIR,
+    VAULT_DIR, EVENTS_SPOOL) is, is inside or holds another's, whatever spells them, and no VM's folder (its own or
+    another's) is in the runner's VM storage or holds it (the "@runner" STORAGE records). The account's shared vault
+    and spool (SHARED_*) may be shared by the VMs that use them, and nothing else. Another VM whose settings can't be
+    read refuses: its folders aren't known. Returns self's vault folder and spool as their canonical paths."""
+    storage = [v for v in owners.pop(RUNNER, {}).get("STORAGE", []) if v]
     me = owners.pop("self", None)
     if not me:
         raise Refused("nothing to check")
     my_names, my_ckpt = names_of(me)
-    my_ports = {p for k in ("SSH_PORT", "VNC_PORT") for p in me.get(k, []) if p}
-    mine = {}
-    for k in PATH_KEYS:
-        for v in me.get(k, []):
-            mine.setdefault(identity(v, home, k), (k, v))
+    my_ports = {p for k in ("SSH_PORT", "VNC_PORT") for p in me.get(k, []) if p} if ports else set()
+    mine = folders_of(me, home, "its")
+    places = []
+    for v in storage:
+        try:
+            places.append(("STORAGE", v, identity(v, home, "the runner's VM storage"),
+                           chain(v, home, "the runner's VM storage")))
+        except Refused:
+            continue                          # not a place that could hold anything (lib.sh lists every candidate)
+
+    def in_storage(f, who):
+        for p in places:
+            rel = relation(f, p)
+            if rel:
+                raise Refused(f"{who} {shown(f[0])} ({f[1]}) {rel} the runner's VM storage ({p[1]}); no VM's folder "
+                              "may be in it or hold it (deleting a VM there deletes what's in its folder)")
+    for f in mine:
+        in_storage(f, "its")
     for owner, ids in owners.items():
         if ids.get("UNREADABLE"):
             raise Refused(f"{owner} can't be read, so this VM can't be checked against it; fix it (or remove it) first")
@@ -132,15 +189,22 @@ def check_identity(owners, home):
             for p in ids.get(k, []):
                 if p and p in my_ports:
                     raise Refused(f"port {p} is {owner}'s {k}; every VM needs its own ports")
-        for k in PATH_KEYS:
-            for v in ids.get(k, []):
-                try:
-                    theirs = identity(v, home, k)
-                except Refused:
-                    continue                  # theirs can't be read: it can't be the folder ours is
-                if theirs in mine:
-                    mk, mv = mine[theirs]
-                    raise Refused(f"its {mk} ({mv}) is the same folder as {owner}'s {k} ({v}); every VM needs its own")
+        try:
+            theirs = folders_of(ids, home, f"{owner}'s")
+        except Refused as e:
+            raise Refused(f"{e}: {owner}'s folders aren't known, so this VM can't be checked against them; fix it first")
+        for t in theirs:
+            in_storage(t, f"{owner}'s")
+            for f in mine:
+                if f[0] in SHARED_KEYS and t[0] in SHARED_KEYS:
+                    continue                  # the account's own vault and spool, which both use (as before)
+                rel = relation(f, t)
+                if rel == "is":
+                    raise Refused(f"its {shown(f[0])} ({f[1]}) is the same folder as {owner}'s {shown(t[0])} ({t[1]}); "
+                                  "every VM needs its own")
+                if rel:
+                    raise Refused(f"its {shown(f[0])} ({f[1]}) {rel} {owner}'s {shown(t[0])} ({t[1]}); no VM's folder "
+                                  "may be in another's or hold one")
     return {k: canonical(me[k][0], home, k) for k in ("VAULT_DIR", "EVENTS_SPOOL") if me.get(k)}
 
 
@@ -168,7 +232,7 @@ def error_row(owners, file, vm, error):
     known = bool(ids) and not ids.get("UNREADABLE")     # an unreadable file says nothing: no guessed defaults
     return {"file": file, "vm": vm or (first("VM_NAME") if known else "") or None, "ok": False, "error": error,
             "raw_vm": first("VM_NAME") if known else "", "raw_baseline": first("BASELINE_NAME") if known else "",
-            "folders": [v for k in PATH_KEYS for v in ids.get(k, [])] if known else [],
+            "folders": [v for k in FOLDER_KEYS for v in ids.get(k, [])] if known else [],
             "volumes": first("VOLUMES") if known else None, "known": known}
 
 
@@ -187,6 +251,10 @@ def delete_check(rows, target, baseline):
                 continue
             groups = [names_of({"VM_NAME": [r.get("vm") or ""], "BASELINE_NAME": [r.get("baseline") or ""]})]
         else:
+            if not r.get("known"):
+                # Its names can't be read, and the file's own name isn't enough (it could set any VM's): nothing that
+                # might be one of them is deleted. (vm delete has checked that every file reads cleanly by now.)
+                raise Refused(f"{owner} can't be read ({r.get('error')}), so its VMs aren't known; fix it first")
             m = VMS_FILE.match(r.get("file") or "")
             groups = []
             if m:
@@ -440,6 +508,7 @@ def main(argv=None):
     p.add_argument("baseline")
     p = sub.add_parser("identity")
     p.add_argument("--home", required=True)
+    p.add_argument("--no-ports", action="store_true")
     p = sub.add_parser("delete-check")
     p.add_argument("--target", required=True)
     p.add_argument("--baseline", required=True)
@@ -470,7 +539,7 @@ def main(argv=None):
     if a.cmd in ("identity", "delete-check", "rmtree"):
         try:
             if a.cmd == "identity":
-                for k, v in check_identity(read_records(sys.stdin), a.home).items():
+                for k, v in check_identity(read_records(sys.stdin), a.home, ports=not a.no_ports).items():
                     print(f"{k}={v}")
             elif a.cmd == "delete-check":
                 delete_check(rows_from(sys.stdin), a.target, a.baseline)

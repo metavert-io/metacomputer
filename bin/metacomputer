@@ -1870,7 +1870,7 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
   [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"
   [ -z "${EVENTS_SPOOL:-}" ] || export MCOMP_EVENTS_SPOOL="$EVENTS_SPOOL"
   # A per-VM vault folder's parent (the vault makes only the last folder, 0700).
-  case "${VAULT_DIR:-}" in "$MC_APP_DIR/vms/"*) ( umask 077; mkdir -p "$MC_APP_DIR/vms" ) || die "couldn't make $(mc_tilde "$MC_APP_DIR/vms")" ;; esac
+  case "${VAULT_DIR:-}" in "$MC_VMS_APP_DIR/"*) ( umask 077; mkdir -p "$MC_VMS_APP_DIR" ) || die "couldn't make $(mc_tilde "$MC_VMS_APP_DIR")" ;; esac
   for a in "$@"; do case "$a" in --vm|--vm=*) has_vm=1 ;; esac; done
   case "$sub" in
     bind)

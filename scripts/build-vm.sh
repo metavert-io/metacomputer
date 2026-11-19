@@ -41,6 +41,12 @@ case "$lock_rc" in
   1) BUILD_QUIET_EXIT=1; die "another build or change of the VM $VM_NAME is running ($LOCK_OWNER); nothing was changed. Wait for it to finish, then run this again" ;;
   *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
 esac
+# The identity rule, whichever VM this is (the main one too), before anything is deleted (the runner's VMs on
+# --replace, the seed under RUN_DIR): every other settings file of this checkout reads cleanly, no name or folder of
+# this VM's is another's, no folder of its is in another's or holds one, and no VM's folder is in the runner's VM
+# storage (scripts/lib.sh mc_identity_check). Checked here and again once the downloads are done.
+build_identity_check() { mc_identity_check --no-ports || die "not building $VM_NAME: $MC_REFUSAL. Nothing was deleted"; }
+build_identity_check
 # A listing that fails is never "absent": nothing is created or deleted on a guess.
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME, so it can't tell whether $vm exists; nothing was changed"
@@ -51,6 +57,7 @@ done
 command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
 "$(dirname "$0")/build-tools.sh"
 "$(dirname "$0")/fetch-artifacts.sh"
+build_identity_check   # again: the settings files may have changed while the tools were built
 
 # The build goes ahead. Until it finishes, this marker says that $VM_NAME is a build in progress (install.sh
 # reads it: only then is a VM without its baseline an interrupted build, and even then it's replaced only on

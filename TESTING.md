@@ -79,10 +79,12 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (155 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (172 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
-private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
+private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
+folders in a storage location of its own (`config get`), and deleting a VM deletes its folder, as the
+runner's does.
 - Which settings: `config/local.env` alone (the vault's and the event stream's own
   defaults, as before); `--vm NAME` and `MCOMP_VM` (`config/vms/NAME.env`, its own
   baseline, keys, runtime folders, vault and spool, passed on as `MCOMP_CONFIG`);
@@ -118,7 +120,7 @@ private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
   main VM or a previous baseline another file names, a file named like a baseline (each: refused,
   nothing deleted); a per-VM `SSH_DIR` spelled `x/.` or `x//y`, a `RUN_DIR` through a link, a
   `LOG_DIR` that is the main `RUN_DIR`, two per-VM files sharing a folder through a link (refused);
-  a runtime folder behind a linked `.run/vms`, `--delete-vault` behind a linked `vms/`, another
+  a runtime folder behind a linked `.run-vms`, `--delete-vault` of a vault folder that is a link, another
   VM's vault inside the one to delete or equal to it (refused, the other folders kept); a per-VM
   vault linked to the main one, a relative `MCOMP_VAULT_DIR` (refused), one through a link (the
   vault gets the real folder); `start` while the VM's lock is held, the VM started or a checkpoint
@@ -142,6 +144,18 @@ private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
   can't read is refused when loaded and shown refused by `vm list`; deleting the main VM with
   `--force --delete-vault` beside it is refused and the other VM's vault inside the main one's is
   kept; once that file reads cleanly, the same delete is refused as holding another VM's folder.
+- The final check's findings (failing on 351795f): deleting the main VM, or an `MCOMP_CONFIG` VM,
+  without flags beside a settings file that can't be read (refused, nothing deleted; before, the
+  runner deleted the VM's folder and another VM's vault in it); `vms.py delete-check` given a row
+  whose names can't be read (refused, never its file name); a `VAULT_DIR` in the runner's VM
+  storage (refused when loaded, and deleting the VM whose folder holds it refused); a per-VM folder
+  inside the main VM's `.run`, `logs` or `SSH_DIR`, or holding the checkout's `.run`; a vault inside
+  another VM's through a link, and the VM whose vault holds it; folders not made yet, spelled in
+  another case (all refused); the defaults of a `config/vms/` VM (in nobody's folder); and
+  `build-vm.sh` (stand-ins for the tools, the downloads and the disk converter) building the main
+  VM while another VM's vault is in its `RUN_DIR`'s seed folder, beside a file that can't be read,
+  or when that file appears while the tools are built (each refused before anything is created or
+  deleted, the vault kept; before, the seed folder went with it).
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

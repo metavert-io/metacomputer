@@ -146,7 +146,7 @@ print(" ".join(out))') "
     ssh="$p"; vnc="$((p + 3700))"
   fi
   [ "$ssh" != "$vnc" ] || die "--ssh-port and --vnc-port must differ"
-  vault="$MC_APP_DIR/vms/$name"; spool="$vault/events/spool"
+  vault="$(mc_vm_default VAULT_DIR "$name")"; spool="$(mc_vm_default EVENTS_SPOOL "$name")"
   [ $(( ${#vault} + 11 )) -le 103 ] || die "the vault's socket path would be too long for macOS ($vault/vault.sock); choose a shorter name"
   if [ "$build" = 1 ] && [ "${ASSUME_YES:-0}" != 1 ] && [ ! -t 0 ]; then
     die "building the VM needs your OK, and there's no terminal to ask on: add --yes (or --no-build to write only its settings)"
@@ -159,10 +159,10 @@ print(" ".join(out))') "
       "# Used by: metacomputer --vm $name COMMAND (or MCOMP_VM=$name). Read after config/defaults.env, on its own:" \
       "# config/local.env isn't read for this VM. Bash syntax. Its own names, ports, keys, folders and vault:" \
       "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc"
-    vm_q SSH_DIR "$HOME/.ssh/metacomputer-$name"
+    vm_q SSH_DIR "$(mc_vm_default SSH_DIR "$name")"
     vm_q VAULT_DIR "$vault"
     vm_q EVENTS_SPOOL "$spool"
-    printf '%s\n' "# RUN_DIR and LOG_DIR: empty = .run/vms/$name and logs/vms/$name in this checkout."
+    printf '%s\n' "# RUN_DIR and LOG_DIR: empty = .run-vms/$name and logs-vms/$name in this checkout."
     def="$( . "$LAB_ROOT/config/defaults.env"; for k in $VM_COPY_KEYS; do eval "printf '%s=%s\n' \"\$k\" \"\${$k:-}\""; done )"
     a=0
     for k in $VM_COPY_KEYS; do
@@ -244,7 +244,7 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   # The VM's lock from here to the end: no build, reset, restore or start of it (start takes it too) meanwhile.
   vm_lock_or_die "metacomputer vm delete $VM_NAME"
   command -v "$LUME" >/dev/null 2>&1 || die "the VM runner $LUME isn't installed; nothing was deleted"
-  local settings_file="" own_vault="$MC_APP_DIR/vms/$VM_NAME" lab_p first v
+  local settings_file="" own_vault="$MC_VMS_APP_DIR/$VM_NAME" lab_p first v
   [ "$MC_SETTINGS_KIND" = vm ] && settings_file="$LOCAL_CONFIG"
   lab_p="$(cd "$LAB_ROOT" && pwd -P)" || die "can't read the checkout's folder; nothing was deleted"
   vm_delete_plan
@@ -298,13 +298,13 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   if [ -n "$settings_file" ]; then
     rm -f "$settings_file" && gone+=("config/vms/$VM_NAME.env")
     if [ "$DP_RUN" = 1 ]; then
-      a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run/vms/$VM_NAME")" || warn "kept its runtime folder: $a"
+      a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run-vms/$VM_NAME")" || warn "kept its runtime folder: $a"
     fi
   fi
   if [ "$del_vault" = 1 ]; then
     # End an unlocked vault's process first (anyone may lock: it only restricts), then remove the folder.
     [ ! -S "$own_vault/vault.sock" ] || [ ! -x "$VAULT_BIN" ] || MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 || true
-    if a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_APP_DIR" "vms/$VM_NAME")"; then
+    if a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME")"; then
       [ "$a" = absent ] || gone+=("the vault folder $(mc_tilde "$own_vault")")
     else
       warn "kept the vault folder: $a"
@@ -356,27 +356,29 @@ vm_delete_plan() {
   if [ "$DP_VM" = absent ] && [ "$DP_BASE" = absent ] && [ "$DP_PREV" = absent ] && [ -z "$settings_file" ]; then
     die "there's no VM $VM_NAME, no baseline $BASELINE_NAME and no settings file of its own to delete"
   fi
+  # Every delete, whichever VM this is (the main one included) and with or without --delete-vault/--delete-volumes:
+  # first, every other settings file must read cleanly, the strict way every command reads them (what can't be known
+  # can't be kept safe), and the identity rule must hold (scripts/lib.sh mc_identity_check): no folder of this VM's
+  # is another's, is in one or holds one, and no VM's folder is in the runner's VM storage, which the runner's delete
+  # below reaches. Ports don't count here: deleting a VM ends a clash.
+  w="$(vm_other_identities | "$PY" "$LAB_ROOT/lib/vms.py" all-known)" \
+    || die "not deleting $VM_NAME: ${w:-another settings file} can't be read cleanly, so its folders aren't known and none could be kept safe; fix it first. Nothing was deleted"
+  mc_identity_check --no-ports || die "not deleting $VM_NAME: $MC_REFUSAL. Nothing was deleted"
   # Nothing it would delete may be another VM's: not a VM, baseline, previous baseline or checkpoint of any VM this
   # checkout has settings for (config/local.env, config/vms/*).
   DP_ROWS="$(vm_all_settings)"
   w="$(printf '%s\n' "$DP_ROWS" | "$PY" "$LAB_ROOT/lib/vms.py" delete-check --target "$VM_NAME" --baseline "$BASELINE_NAME")" \
     || die "not deleting $VM_NAME: $w"
-  # Before any folder is deleted (whichever VM this is, the main one included): every other settings file must read
-  # cleanly, read the strict way every command reads them; a folder of one that can't be known can't be kept safe.
-  if { [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run/vms/$VM_NAME" ]; } || [ "$del_vault" = 1 ]; then
-    w="$(vm_other_identities | "$PY" "$LAB_ROOT/lib/vms.py" all-known)" \
-      || die "not deleting $VM_NAME: ${w:-another settings file} can't be read cleanly, so its folders aren't known and none could be kept safe; fix it first. Nothing was deleted"
-  fi
   # Its runtime folder (the default one in this checkout) and its vault folder (--delete-vault): only its own,
   # reached without links, holding no other VM's folder.
-  if [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run/vms/$VM_NAME" ]; then
-    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run/vms/$VM_NAME" --check)" || die "not deleting $VM_NAME: $w"
+  if [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run-vms/$VM_NAME" ]; then
+    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run-vms/$VM_NAME" --check)" || die "not deleting $VM_NAME: $w"
     [ "$w" = absent ] || DP_RUN=1
   fi
   if [ "$del_vault" = 1 ]; then
     [ "$(mc_vault_dir)" = "$own_vault" ] \
       || die "--delete-vault deletes only a VM's own vault folder ($(mc_tilde "$own_vault")); $VM_NAME's vault is $(mc_tilde "$(mc_vault_dir)"), which may be shared: delete it yourself if you mean to. Nothing was deleted"
-    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_APP_DIR" "vms/$VM_NAME" --check)" || die "--delete-vault: $w. Nothing was deleted"
+    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME" --check)" || die "--delete-vault: $w. Nothing was deleted"
   fi
   if [ "$del_vols" = 1 ]; then
     DP_VOLS="$(printf '%s' "${VOLUMES:-}" | tr ',' '\n' | sed 's/:.*//; s/^ *//; s/ *$//' | grep -v '^$' | tr '\n' ' ' || true)"

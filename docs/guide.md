@@ -917,11 +917,15 @@ come through its own spool. Commands that change a VM, and every `secrets`
 command, start with one line saying which VM (and vault) they act on:
 
 ```
-metacomputer: VM staging (config/vms/staging.env), vault ~/Library/Application Support/metacomputer/vms/staging
+metacomputer: VM staging (config/vms/staging.env), vault ~/Library/Application Support/metacomputer-vms/staging
 ```
 
 Edit `config/vms/staging.env` like `config/local.env` (it's read on its own, after
-the defaults; `config/local.env` isn't read for it). `metacomputer vm list` shows
+the defaults; `config/local.env` isn't read for it). Its folders are its own, beside
+the main VM's (`.run-vms/staging`, `logs-vms/staging`, `~/.ssh/metacomputer-staging`,
+`.../metacomputer-vms/staging`); a folder you set there may not be another VM's, be
+inside one or hold one, or be in the runner's VM storage (`~/.lume`), or the file is
+refused. `metacomputer vm list` shows
 every VM with its state, disk use, ports and baseline, and the runner's other VMs.
 [commands.md](commands.md#more-than-one-vm) has the whole scheme.
 
@@ -946,8 +950,10 @@ one a session holds unless you add `--force`. `--yes` never confirms it; without
 terminal, `--confirm staging` does. The typed name guards against a slip, not
 against a program: anything that can run a command in a terminal can type it, so
 Claude passes `--confirm` only for a VM you named for deletion. It never deletes
-another VM's VM, baseline or copies, or a folder that is or holds another VM's, and
-it checks everything again after you confirm ([SECURITY.md](../SECURITY.md#more-than-one-vm---vm-name-metacomputer-vm)).
+another VM's VM, baseline or copies, or a folder that is or holds another VM's; it
+refuses while any other settings file can't be read cleanly or any VM's folder is in
+the runner's VM storage (whichever VM is deleted, with or without flags), and it
+checks everything again after you confirm ([SECURITY.md](../SECURITY.md#more-than-one-vm---vm-name-metacomputer-vm)).
 
 The `metacomputer` MCP server drives the VM a bare `metacomputer` means. To give a
 Claude Code session the second VM instead, start it with `MCOMP_VM` set (for the

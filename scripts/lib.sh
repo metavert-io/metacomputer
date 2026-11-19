@@ -23,8 +23,11 @@ mc_sys_home() {
   case "$h" in /*) printf '%s' "$h" ;; *) printf '%s' "$HOME" ;; esac
 }
 MC_SYS_HOME="$(mc_sys_home)"
-# Where per-VM vault folders and event spools go (vms/NAME); MCOMP_APP_DIR moves it (tests).
-MC_APP_DIR="${MCOMP_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer}"
+# Where a config/vms/ VM's vault folder (NAME, its event spool inside) goes: beside the account's own vault folder
+# (.../metacomputer, the main VM's), never in it, so no VM's folder is inside another's. MCOMP_VMS_APP_DIR moves it
+# (tests). The account's own vault folder, which the main VM and MCOMP_CONFIG VMs share unless they set VAULT_DIR:
+MC_VMS_APP_DIR="${MCOMP_VMS_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer-vms}"
+MC_SHARED_VAULT="$MC_SYS_HOME/Library/Application Support/metacomputer"
 mc_valid_vm_name() { case "$1" in ''|[-.]*|*[!A-Za-z0-9._-]*) return 1 ;; esac; [ ${#1} -le 64 ]; }
 mc_realpath() { # PATH -> absolute, with its folder's links resolved (the file itself as named)
   local d; d="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || return 1
@@ -79,10 +82,53 @@ mc_canon() {
   head="$(cd "$head" 2>/dev/null && pwd -P)" || { MC_REFUSAL="$1: can't read $head"; return 1; }
   MC_CANON="${head%/}/$rest"; MC_CANON="${MC_CANON%/}"; [ -n "$MC_CANON" ] || MC_CANON=/
 }
+# A config/vms/ VM's own folders when its file doesn't set them (scripts/lib.sh and vm create): none is inside the
+# main VM's (.run, logs, the account's vault folder) or another VM's.
+mc_vm_default() { # KEY NAME
+  case "$1" in
+    SSH_DIR) printf '%s' "$HOME/.ssh/metacomputer-$2" ;;
+    RUN_DIR) printf '%s' "$LAB_ROOT/.run-vms/$2" ;;
+    LOG_DIR) printf '%s' "$LAB_ROOT/logs-vms/$2" ;;
+    VAULT_DIR) printf '%s' "$MC_VMS_APP_DIR/$2" ;;
+    EVENTS_SPOOL) printf '%s' "$MC_VMS_APP_DIR/$2/events/spool" ;;
+  esac
+}
+# VAULT_DIR EVENTS_SPOOL (as loaded) of a VM that isn't a config/vms/ one: OWNER KEY VALUE records, the account's
+# shared vault and spool (SHARED_*: the vault's and the event stream's own defaults, the latter from $HOME and from
+# the system's home) when it doesn't set its own.
+mc_shared_records() { # OWNER VAULT_DIR EVENTS_SPOOL
+  if [ -z "$2" ] || [ "$2" = "$MC_SHARED_VAULT" ]; then printf '%s\0' "$1" SHARED_VAULT_DIR "$MC_SHARED_VAULT"
+  else printf '%s\0' "$1" VAULT_DIR "$2"; fi
+  if [ -z "$3" ] || [ "$3" = "$MC_SHARED_VAULT/events/spool" ]; then
+    printf '%s\0' "$1" SHARED_EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool" \
+      "$1" SHARED_EVENTS_SPOOL "$MC_SHARED_VAULT/events/spool"
+  else printf '%s\0' "$1" EVENTS_SPOOL "$3"; fi
+}
+# Every place the runner keeps VMs, one absolute path a line: Lume's own default (~/.lume, ~ being the account's home
+# as Lume has it) always, the storage locations the runner reports (`config get`), and those in Lume's settings file.
+# More than there may be is fine: it's where no VM's folder may be (lib/vms.py identity).
+mc_runner_storage() {
+  local lb l h
+  lb="${LUME:-$HOME/.local/bin/mcomp-vm}"
+  command -v "$lb" >/dev/null 2>&1 || lb="$HOME/.local/bin/lume-secure"
+  {
+    printf '%s\n' "~/.lume"
+    if command -v "$lb" >/dev/null 2>&1; then
+      "$lb" config get 2>/dev/null </dev/null | awk '/^Configured VM storage locations:/ { f = 1; next } f && NF == 0 { f = 0 }
+        f && /^[[:space:]]*- / { l = $0; sub(/^[[:space:]]*- [^:]*: /, "", l); sub(/ \(default\)$/, "", l); print l }' || :
+    fi
+    for h in "$MC_SYS_HOME" "$HOME"; do
+      [ ! -f "$h/.config/lume/config.yaml" ] \
+        || awk '/^[[:space:]]+path:/ { v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/"/, "", v); print v }' "$h/.config/lume/config.yaml" 2>/dev/null || :
+    done
+  } | while IFS= read -r l; do
+    case "$l" in "~") printf '%s\n' "$MC_SYS_HOME" ;; "~/"*) printf '%s\n' "$MC_SYS_HOME/${l#\~/}" ;; /*) printf '%s\n' "$l" ;; esac
+  done
+}
 # OWNER KIND [NAME|FILE]: one VM's identity as its file says it (in a subshell, unchecked), NUL-separated OWNER KEY
 # VALUE records for `lib/vms.py identity` and error rows: names, ports and folders. KIND main: config/local.env (or the
-# defaults), with both default spools (the event stream's, from $HOME, and the vault's); file: that settings file,
-# the same way; vm: config/vms/NAME.env with its own defaults.
+# defaults), with the account's shared vault and spools unless it sets its own (mc_shared_records); file: that
+# settings file, the same way; vm: config/vms/NAME.env with its own defaults.
 mc_identity_records() {
   ( owner="$1"; ikind="$2"; iname="${3:-}"
     . "$LAB_ROOT/config/defaults.env"
@@ -98,38 +144,60 @@ mc_identity_records() {
       mc_source_strict "$ifile" >/dev/null || unreadable
       [ -n "$VM_NAME" ] || VM_NAME="$iname"
       [ -n "$BASELINE_NAME" ] || BASELINE_NAME="$VM_NAME-baseline"
-      [ -n "$SSH_DIR" ] || SSH_DIR="$HOME/.ssh/metacomputer-$VM_NAME"
-      [ -n "$RUN_DIR" ] || RUN_DIR="$LAB_ROOT/.run/vms/$VM_NAME"
-      [ -n "$LOG_DIR" ] || LOG_DIR="$LAB_ROOT/logs/vms/$VM_NAME"
-      [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
-      [ -n "${EVENTS_SPOOL:-}" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
+      for k in SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL; do
+        eval "[ -n \"\${$k:-}\" ] || $k=\"\$(mc_vm_default $k \"\$VM_NAME\")\""
+      done
+      ks="VAULT_DIR EVENTS_SPOOL"
     else
       if [ -e "$ifile" ] || [ "$ikind" != main ]; then mc_source_strict "$ifile" >/dev/null || unreadable; fi
       RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"; LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
-      [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_SYS_HOME/Library/Application Support/metacomputer"
-      if [ -z "${EVENTS_SPOOL:-}" ]; then
-        printf '%s\0' "$owner" EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool"
-        EVENTS_SPOOL="$MC_SYS_HOME/Library/Application Support/metacomputer/events/spool"
-      fi
+      mc_shared_records "$owner" "${VAULT_DIR:-}" "${EVENTS_SPOOL:-}"
+      ks=""
     fi
-    for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL VOLUMES; do
+    for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR RUN_DIR LOG_DIR $ks VOLUMES; do
       eval "printf '%s\0' \"\$owner\" \"\$k\" \"\${$k:-}\""
     done ) 2>/dev/null
 }
-# MAIN_VM MAIN_LABEL: the records for `lib/vms.py identity`: this VM's (self, from the variables just loaded), the
-# main VM's (unless this is the main VM's name with no config/local.env) and every other config/vms/ VM's.
+# MAIN_VM MAIN_LABEL: the records for `lib/vms.py identity`: this VM's (self, from the variables loaded, any kind), the
+# main VM's (unless this is the main VM), every other config/vms/ VM's and the runner's VM storage (@runner).
 mc_identity_input() {
   local k
-  for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL; do
-    eval "printf '%s\0' self \"\$k\" \"\${$k}\""
+  for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR; do
+    eval "printf '%s\0' self \"\$k\" \"\${$k:-}\""
   done
+  printf '%s\0' self RUN_DIR "${RUN_DIR:-$LAB_ROOT/.run}" self LOG_DIR "${LOG_DIR:-$LAB_ROOT/logs}"
+  if [ "${MC_SETTINGS_KIND:-}" = vm ]; then
+    printf '%s\0' self VAULT_DIR "$VAULT_DIR" self EVENTS_SPOOL "$EVENTS_SPOOL"
+  else
+    mc_shared_records self "${VAULT_DIR:-}" "${EVENTS_SPOOL:-}"
+  fi
   [ "$1" = "$VM_NAME" ] || mc_identity_records "$2" main
   for k in $(mc_vm_files); do [ "$k" = "$VM_NAME" ] || mc_identity_records "config/vms/$k.env" vm "$k"; done
+  mc_runner_storage | while IFS= read -r k; do printf '%s\0' @runner STORAGE "$k"; done
+}
+# [--no-ports]: the identity rule (lib/vms.py identity) for the VM these settings are, of any kind, against every other
+# VM this checkout has settings for (each must read cleanly) and the runner's VM storage: no name, port (unless
+# --no-ports) or folder of one is another's, no folder of one is inside another's or holds one, and no VM's folder
+# is in the runner's VM storage or holds it. 0 with lib/vms.py's output in MC_IDENTITY_OUT (the vault folder and
+# spool, canonical), or 1 with the reason in MC_REFUSAL. Every config/vms/ VM's settings pass it when they're loaded;
+# vm delete and build-vm.sh run it for whichever VM they change, before they delete anything.
+mc_identity_check() {
+  local main_vm label
+  main_vm="$MC_DEFAULT_VM"; [ ! -f "$MC_MAIN_CONFIG" ] || main_vm="$(mc_file_vm_name "$MC_MAIN_CONFIG")"
+  label="the main VM (the defaults)"; [ ! -f "$MC_MAIN_CONFIG" ] || label="the main VM (config/local.env)"
+  # The refusal is a marker, not a failing command, so an ERR trap (build-vm.sh's) doesn't fire in the subshell.
+  MC_IDENTITY_OUT="$(mc_identity_input "$main_vm" "$label" | "$MC_PY" "$LAB_ROOT/lib/vms.py" identity --home "$MC_SYS_HOME" "$@" 2>&1 \
+    || printf '\n@mc-refused')"
+  case "$MC_IDENTITY_OUT" in
+    *@mc-refused)
+      MC_IDENTITY_OUT="$(printf '%s' "${MC_IDENTITY_OUT%@mc-refused}")"   # without the trailing newlines
+      MC_REFUSAL="${MC_IDENTITY_OUT:-its identity could not be checked}"; return 1 ;;
+  esac
 }
 # The resolution's own Python (scripts/lib.sh sets PY again once the settings are read: a settings file may set it).
 MC_PY="${PY:-/opt/homebrew/bin/python3}"; [ -x "$MC_PY" ] || MC_PY=python3
 # The per-VM folders' root, as the folder it really is (so a per-VM vault's path is its canonical one).
-if mc_canon MCOMP_APP_DIR "$MC_APP_DIR"; then MC_APP_DIR="$MC_CANON"; fi
+if mc_canon MCOMP_VMS_APP_DIR "$MC_VMS_APP_DIR"; then MC_VMS_APP_DIR="$MC_CANON"; fi
 # NAME CONFIG: load the settings that NAME (--vm / MCOMP_VM) and CONFIG (MCOMP_CONFIG) select. 0 with them loaded
 # (LOCAL_CONFIG, MC_SETTINGS_KIND vm|local|config|defaults, MC_SETTINGS_LABEL, MC_IMPLICIT, VAULT_DIR, EVENTS_SPOOL),
 # or 1 with the reason in MC_REFUSAL.
@@ -195,13 +263,13 @@ mc_load_settings() {
         || { MC_REFUSAL="config/vms/$name.env must set $k to a port of its own (1024-65535)"; return 1; }
     done
     [ "$SSH_PORT" != "$VNC_PORT" ] || { MC_REFUSAL="config/vms/$name.env: SSH_PORT and VNC_PORT are the same"; return 1; }
-    [ -n "$SSH_DIR" ] || SSH_DIR="$HOME/.ssh/metacomputer-$VM_NAME"
-    [ -n "$RUN_DIR" ] || RUN_DIR="$LAB_ROOT/.run/vms/$VM_NAME"
-    [ -n "$LOG_DIR" ] || LOG_DIR="$LAB_ROOT/logs/vms/$VM_NAME"
     [ -z "${VAULT_DIR:-}" ] || x_vault=1
     [ -z "${EVENTS_SPOOL:-}" ] || x_spool=1
-    [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
-    [ -n "${EVENTS_SPOOL:-}" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
+    # Its own folders where the file doesn't say (mc_vm_default): .run-vms/NAME and logs-vms/NAME in this checkout,
+    # ~/.ssh/metacomputer-NAME, and .../metacomputer-vms/NAME for its vault (its spool in it).
+    for k in SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL; do
+      eval "[ -n \"\${$k:-}\" ] || $k=\"\$(mc_vm_default $k \"\$VM_NAME\")\""
+    done
     # MCOMP_VAULT_DIR / MCOMP_EVENTS_SPOOL from the environment come first, so the check below is of the folders this
     # VM will really use (one that isn't the folder the file itself sets is refused).
     if [ -n "${MCOMP_VAULT_DIR:-}" ]; then
@@ -220,16 +288,17 @@ mc_load_settings() {
       fi
       EVENTS_SPOOL="$v"
     fi
-    # Nothing that makes this VM may be another's: not the main VM's, not another config/vms/ VM's. Folders are
-    # compared as the folders they are (device and inode, links and . resolved), names with each VM's copies, and
-    # ports. lib/vms.py identity prints the vault folder and spool as their canonical paths.
+    # The identity rule (mc_identity_check): nothing that makes this VM may be another's, the main VM's or another
+    # config/vms/ VM's, and none of its folders may be in another's, hold one, or be in the runner's VM storage.
+    # Folders are compared as the folders they are (device and inode, links and . resolved), names with each VM's
+    # copies, and ports. lib/vms.py identity prints the vault folder and spool as their canonical paths.
     main_vm="$MC_DEFAULT_VM"; [ ! -f "$MC_MAIN_CONFIG" ] || main_vm="$(mc_file_vm_name "$MC_MAIN_CONFIG")"
     if [ "$main_vm" = "$VM_NAME" ] && [ -f "$MC_MAIN_CONFIG" ]; then
       MC_REFUSAL="config/local.env and config/vms/$name.env are both settings for the VM $name; keep one"; return 1
     fi
-    k="the main VM (the defaults)"; [ ! -f "$MC_MAIN_CONFIG" ] || k="the main VM (config/local.env)"
-    v="$(mc_identity_input "$main_vm" "$k" | "$MC_PY" "$LAB_ROOT/lib/vms.py" identity --home "$MC_SYS_HOME" 2>&1)" \
-      || { [ -n "$v" ] || v="its identity could not be checked"; MC_REFUSAL="config/vms/$name.env: $v"; return 1; }
+    MC_SETTINGS_KIND=vm
+    mc_identity_check || { MC_REFUSAL="config/vms/$name.env: $MC_REFUSAL"; return 1; }
+    v="$MC_IDENTITY_OUT"
     VAULT_DIR="$(printf '%s\n' "$v" | sed -n 's/^VAULT_DIR=//p')"; EVENTS_SPOOL="$(printf '%s\n' "$v" | sed -n 's/^EVENTS_SPOOL=//p')"
     [ -n "$VAULT_DIR" ] && [ -n "$EVENTS_SPOOL" ] || { MC_REFUSAL="config/vms/$name.env: its identity couldn't be checked"; return 1; }
   elif [ -n "$file" ]; then
