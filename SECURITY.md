@@ -1078,6 +1078,14 @@ say which mode is.
 - **It bounds what the VM says.** The VM's short answers (the recorder's replies, a
   task folder's listing) are read with a byte limit and a deadline, so a VM that
   answers without end, or never, can't grow or stall the command reading them.
+- **Its events carry nothing the VM chose.** A VM that holds a value from the vault
+  could spell it in a file name, a size, a video's own length or its recorder's
+  reply. So `task.recording_failed` gives a fixed reason category, never what the
+  recorder said; `task.recording_stopped` gives the length this Mac's clock measured
+  (record start to stop) and the size only as one of eight bounds; and
+  `task.finished` gives what the task made as count classes (`none`, `1-9`, `10-99`,
+  `100 or more`), with no file names or video lengths. The files themselves, their
+  description files and `artifacts.json` keep the exact values on your Mac.
 - **It describes what it saved.** The description file beside a desktop recording
   is written by the Mac, with the MP4's length and SHA-256.
 

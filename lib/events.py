@@ -2345,19 +2345,51 @@ def action_record_event(rec, path=None):
             "message": msg, "data": data}
 
 
+SIZE_BOUNDS = (0, 1 << 10, 1 << 16, 1 << 20, 1 << 24, 1 << 28, 1 << 32, 1 << 40)
+
+
+def size_bound(n):
+    """A size the VM can steer (a video it made or sent), as the smallest of 0, 1 KiB, 64 KiB, 1 MiB, 16 MiB,
+    256 MiB, 4 GiB and 1 TiB that holds it (as the vault's sizeBound): an exact count could spell a value the VM
+    was given; one of eight values carries three bits at most. None when it isn't a size."""
+    if not _number(n) or n < 0:
+        return None
+    return next((b for b in SIZE_BOUNDS if n <= b), SIZE_BOUNDS[-1])
+
+
+def parse_ts(ts):
+    """A description file's local time ("%Y-%m-%dT%H:%M:%S%z", written on this Mac) as epoch seconds, or None."""
+    from datetime import datetime
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S%z").timestamp() if isinstance(ts, str) else None
+    except ValueError:
+        return None
+
+
+def count_class(n):
+    """A count the VM can steer (folders it made, files it changed), as one of a few words (the vault's countClass)."""
+    if not _number(n) or n <= 0:
+        return "none"
+    return "1-9" if n < 10 else "10-99" if n < 100 else "100 or more"
+
+
 def recording_event(mp4):
-    """task.recording_stopped from a desktop recording and its description file."""
+    """task.recording_stopped from a desktop recording and its description file. The video's content, and so its
+    size and its own idea of its length, is the VM's: the event carries the length as this Mac's clock measured it
+    (record start to record stop) and the size only as a class, never the numbers the file holds."""
     side = read_json(mp4[:-4] + ".json" if mp4.endswith(".mp4") else mp4 + ".json", {})
-    dur = side.get("duration_s")
+    a, b = parse_ts(side.get("started_at")), parse_ts(side.get("ended_at"))
+    dur = round(b - a) if a is not None and b is not None and b >= a else None
     name = side.get("name") or os.path.basename(mp4)[:-4]
     early = bool(side.get("stream_ended_early"))    # the VM stopped sending before record stop
     return {"family": "task", "type": "recording_stopped", "severity": "warn" if early else "info",
-            "message": f"Recording '{name}' saved" + (f" ({dur:.0f} s)" if isinstance(dur, (int, float)) else "")
+            "message": f"Recording '{name}' saved" + (f" ({dur} s)" if dur is not None else "")
             + ("; the VM stopped sending before record stop" if early else ""),
             "data": {"name": name, "duration_s": dur, "path": mp4,
                      "description_file": (mp4[:-4] + ".json") if side else None,
                      "key_moments": len(side.get("moments") or []), "audio": bool(side.get("audio")),
-                     "mode": side.get("mode"), "bytes": side.get("bytes"), "ended_early": early}}
+                     "mode": side.get("mode") if side.get("mode") in ("host", "guest") else None,
+                     "size_bound": size_bound(side.get("bytes")), "ended_early": early}}
 
 
 # --- CLI ---------------------------------------------------------------------------------------

@@ -935,10 +935,12 @@ do_record() {
       fi ;;
     stop)
       local name mode dir pid started fps quality ended path i=0 out early=""
-      rec_fail() { # WHY MESSAGE [DETAIL]: tell the event stream (a fixed reason; anything from the VM only
-                   # as a cleaned detail in its data), then stop with the message
+      rec_fail() { # WHY MESSAGE [REASON]: tell the event stream (a fixed sentence and a fixed category: nothing the
+                   # VM said or chose, which could spell a value it was given), then stop with the message
+        local reason="${3:-other}"
+        case "$reason" in no_stream|no_room|not_converted|recorder_answer|copy_failed) ;; *) reason=other ;; esac
         emit_event task recording_failed error "Recording '$name' failed: $1" "metacomputer record status" \
-          "name=$name" "mode=$mode" ${3:+"detail=$3"}
+          "name=$name" "mode=$mode" "reason=$reason"
         rm -f "$state"; die "$2"
       }
       if [ ! -s "$state" ]; then
@@ -970,7 +972,7 @@ do_record() {
         local waits=60; [ "$path" = "(VM unreachable)" ] && waits=2
         while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt $waits ]; do sleep 0.5; i=$((i + 1)); done
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing" "the stream saved nothing (see $dir/$name.stream.log)"
+        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing" "the stream saved nothing (see $dir/$name.stream.log)" no_stream
         # Same video, in an MP4 that players and editors open at once (no re-encoding), made only if the copy
         # leaves this Mac its reserve, and held to a size limit (lib/recording.py finalize). Otherwise the .mkv,
         # which plays as it is, stays.
@@ -978,14 +980,14 @@ do_record() {
         "$PY" "$LAB_ROOT/lib/recording.py" finalize "$dir/$name.mkv" "$out" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" || frc=$?
         case "$frc" in
           0) rm -f "$dir/$name.mkv"; [ -s "$dir/$name.stream.log" ] || rm -f "$dir/$name.stream.log" ;;
-          3) rec_fail "there wasn't room to convert it to MP4 (the .mkv is kept)" "not converted to MP4: there isn't room above IMPORT_MIN_FREE_GB; $dir/$name.mkv is kept and plays as it is" ;;
-          *) rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is" ;;
+          3) rec_fail "there wasn't room to convert it to MP4 (the .mkv is kept)" "not converted to MP4: there isn't room above IMPORT_MIN_FREE_GB; $dir/$name.mkv is kept and plays as it is" no_room ;;
+          *) rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is" not_converted ;;
         esac
       else
         [ "$path" = "$GUEST_RUN_DIR/manual/$name.mp4" ] \
-          || rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $(esc_text "$path")" "$path"
+          || rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $(esc_text "$path")" recorder_answer
         vm_copy_video "$GUEST_RUN_DIR/manual/$name.mp4" "$out" || { [ -s "$out" ] || rm -f "$out"
-          rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (whatever arrived is kept; the file stays in the VM: $(esc_text "$path"))" "$path"; }
+          rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (whatever arrived is kept; the file stays in the VM: $(esc_text "$path"))" copy_failed; }
       fi
       rm -f "$state"
       record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode" "$early"
@@ -1427,23 +1429,25 @@ try:   # the optional event stream (docs/events.md); never fails the command
     name = os.path.basename(host)
     empty = not (items["videos"] or items["files"] or items["screenshots"] or items["recording_turns"])
     failed = empty and copied != "yes"
-    what = (f"{len(items['videos'])} video(s), {len(items['files'])} file(s), {len(items['screenshots'])} screenshot(s)"
-            + (f", {items['recording_turns']} recording turn(s)" if items["recording_turns"] else "")
-            if not empty else "no artifacts")
+    # What the VM made (file names, how many, a video's own length) is its choice and could spell a value it was
+    # given: the event carries counts as classes and no names or lengths from the VM (artifacts.json has them all).
+    cc = events.count_class
+    counts = {"videos": len(items["videos"]), "files": len(items["files"]), "screenshots": len(items["screenshots"]),
+              "recording turns": items["recording_turns"]}
+    what = (", ".join(f"{k}: {cc(v)}" for k, v in counts.items() if v) if not empty else "no artifacts")
     partial = copied == "no" and not empty     # the VM's folder was gone at finish; the copier's copies remain
     events.emit("task", "finished",
                 f"Task {name} finished after {secs // 60} min {secs % 60} s: {what}"
                 + (" (nothing could be copied from the VM)" if failed else
                    " (the copy from the VM failed at finish; this includes what was copied while the task ran)" if partial else "")
-                + (f"; the VM changed {changed} recording file(s) after they were copied (the Mac kept its copies)"
+                + (f"; the VM changed recording files after they were copied ({cc(changed)}; the Mac kept its copies)"
                    if changed else ""),
                 "error" if failed else "warn" if partial or changed else "info",
                 f"See {host}" if not failed else "metacomputer status",
                 {"task": name, "duration_s": secs, "host_dir": host, "copied_from_vm": copied,
-                 "videos": [{"path": v["path"], "seconds": v["seconds"]} for v in items["videos"][:10]],
-                 "contact_sheets": items["contact_sheets"][:10], "files": len(items["files"]),
-                 "screenshots": len(items["screenshots"]), "recording_turns": items["recording_turns"],
-                 "recording_changed_in_vm": changed},
+                 "videos": cc(len(items["videos"])), "contact_sheets": cc(len(items["contact_sheets"])),
+                 "files": cc(len(items["files"])), "screenshots": cc(len(items["screenshots"])),
+                 "recording_turns": cc(items["recording_turns"]), "recording_changed_in_vm": cc(changed)},
                 project=task.get("requested_from"))
 except Exception:
     pass

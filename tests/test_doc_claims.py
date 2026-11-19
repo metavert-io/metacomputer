@@ -330,6 +330,30 @@ def kept_any_spelling():
             and src.count("keep_existing(src_fd, dst_fd, name, rel + name, report)") == 2)
 
 
+def recording_events_fixed():
+    """task.recording_failed: a reason from a fixed list, no detail; task.recording_stopped: the Mac's duration and a
+    size bound; task.finished: count classes. A sidecar spelling a value in its numbers doesn't reach the event."""
+    rec = raw("bin/metacomputer")
+    fail = re.search(r"^      rec_fail\(\) \{.*?^      \}$", rec, re.M | re.S).group(0)
+    import tempfile
+    td = tempfile.mkdtemp()
+    try:
+        mp4 = os.path.join(td, "r.mp4")
+        open(mp4, "wb").close()
+        with open(os.path.join(td, "r.json"), "w") as f:
+            json.dump({"name": "r", "mode": "host", "duration_s": 4242.0, "bytes": 123456789,
+                       "started_at": "2026-11-18T20:00:00-0500", "ended_at": "2026-11-18T20:00:30-0500"}, f)
+        ev = events.recording_event(mp4)
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+    flat = json.dumps(ev)
+    return ("detail=" not in fail and '"reason=$reason"' in fail and "reason=other" in fail
+            and ev["data"]["duration_s"] == 30 and ev["data"]["size_bound"] == 1 << 28
+            and "4242" not in flat and "123456789" not in flat
+            and 'cc(items["recording_turns"])' in rec and '"seconds": v["seconds"]' not in rec), ev["data"]
+
+
 def keys_outside_home(path="/etc/ssh/metacomputer-keys/%u"):
     """sshd reads the key lists from PATH, set before any Match block; provision.sh installs them root-owned and
     read-only to the accounts; finalize.sh removes the homes' bootstrap copies after checking sshd reads the lists."""
@@ -581,6 +605,13 @@ CLAIMS = [
     ("docs/guide.md", r"A desktop recording streams to your Mac as it records \(`RECORD_TO=host`\)", lambda m: record_to_host()),
     ("docs/guide.md", r"each finished step is copied to the Mac every (\d+) s, once, and `task finish` never replaces it",
      lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
+    # Recording events carry nothing the VM chose (lib/events.py recording_event, bin/metacomputer rec_fail and task
+    # finish): fixed reasons, the Mac's own clock, size bounds and count classes.
+    ("SECURITY.md", r"`task.recording_failed` gives a fixed reason category, never what the recorder said",
+     lambda m: recording_events_fixed()),
+    ("docs/events.md", r"Nothing the VM's recorder said is sent", lambda m: recording_events_fixed()),
+    ("docs/events.md", r"duration \(this Mac's clock, record start to record stop, never the video's own\)",
+     lambda m: recording_events_fixed()),
     # The VM's SSH key lists: root-owned, outside every home (provisioning/guest; tests/test_ssh_options.py
     # resolves the config with sshd -T)
     ("SECURITY.md", r"the VM reads its SSH keys from root-owned files, so nothing running as the desktop user can add "

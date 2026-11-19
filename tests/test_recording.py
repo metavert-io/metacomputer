@@ -236,6 +236,23 @@ def where_checks():
         json.dump({"name": "cut", "mode": "host", "duration_s": 12.0}, open(os.path.join(td, "cut.json"), "w"))
         ev = events.recording_event(mp4)
         check("...a whole one stays info", ev["severity"] == "info" and ev["data"]["ended_early"] is False, ev)
+        # The video is the VM's: its size and its own length could spell a value it was given. The event carries the
+        # length this Mac's clock measured and the size only as a class.
+        secret = int.from_bytes(b"hunter2pass", "big")             # a "size" that spells a password
+        json.dump({"name": "cut", "mode": "host", "duration_s": 31337.25, "bytes": secret,
+                   "started_at": "2026-11-18T20:00:00-0500", "ended_at": "2026-11-18T20:01:05-0500"},
+                  open(os.path.join(td, "cut.json"), "w"))
+        ev = events.recording_event(mp4)
+        flat = json.dumps(ev)
+        check("recording_stopped: the duration is this Mac's (record start to stop), not the video's own",
+              ev["data"]["duration_s"] == 65 and "(65 s)" in ev["message"] and "31337" not in flat, ev)
+        check("...the size is one of eight bounds, never the VM's number", ev["data"]["size_bound"] == 1 << 40
+              and "bytes" not in ev["data"] and str(secret) not in flat and str(secret)[:8] not in flat, ev["data"])
+        check("...size bounds as the vault's: the smallest of 0, 1 KiB, 64 KiB, 1 MiB, 16 MiB, 256 MiB, 4 GiB, 1 TiB",
+              [events.size_bound(n) for n in (0, 1, 1024, 1025, 70000, 5 << 20, 300 << 20, 5 << 30, 1 << 50)]
+              == [0, 1024, 1024, 65536, 1 << 20, 1 << 24, 1 << 32, 1 << 40, 1 << 40] and events.size_bound("12") is None)
+        check("count classes as the vault's", [events.count_class(n) for n in (0, 1, 9, 10, 99, 100, 10 ** 9)]
+              == ["none", "1-9", "1-9", "10-99", "10-99", "100 or more", "100 or more"])
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -607,6 +624,30 @@ def task_sync_checks():
         check("copier: a task folder that's gone ends it after a few tries, and it cleans up its pid file",
               "EXIT 0" in out and "PIDFILE GONE" in out, (out, err))
         check("...what it copied before stays on the Mac", have() == ["turn-00001", "turn-00002", "turn-00003"], have())
+        # task.finished: what the VM made goes out only as classes, with no names and no video lengths.
+        tname = "mcomp-20261118-130000-evt"
+        thost = os.path.join(td, "lab", "results", tname)
+        for i in range(12):
+            os.makedirs(os.path.join(thost, "guest", "recording", f"turn-{i:05d}"), exist_ok=True)
+        os.makedirs(os.path.join(thost, "guest", "files"), exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10", "-t", "3",
+                        "-pix_fmt", "yuv420p", os.path.join(thost, "guest", "files", "CALL-555-0100-hunter2.mp4")],
+                       check=True, stdin=subprocess.DEVNULL)
+        json.dump({"name": tname, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "requested_from": td},
+                  open(os.path.join(thost, "task.json"), "w"))
+        logs = os.path.join(td, "evlogs")
+        r = run_bash(cli_script(td, ("task_sync_pidfile", "task_sync_stop", "do_task"),
+                                'vm_running() { return 1; }\ndo_contact_sheet() { :; }\n'
+                                f'do_task finish {tname}'),
+                     {"MCOMP_LOG_DIR": logs, "MCOMP_EVENTS_DIR": os.path.join(td, "evcfg"), "MCOMP_VM_NAME": "t"})
+        evs = [json.loads(x) for x in open(os.path.join(logs, "events.jsonl"))] \
+            if os.path.exists(os.path.join(logs, "events.jsonl")) else []
+        fin = [e for e in evs if e.get("type") == "finished"]
+        flat = json.dumps(fin)
+        check("task.finished: counts of what the VM made as classes, no file names, no video lengths",
+              fin and fin[-1]["data"].get("videos") == "1-9" and fin[-1]["data"].get("recording_turns") == "10-99"
+              and "CALL" not in flat and "hunter2" not in flat and "seconds" not in flat
+              and "12 recording" not in flat, (r.stderr[-300:], fin))
         r = run_bash(cli_script(td, ("task_sync_pidfile", "task_sync_on", "task_sync_start"),
                                 f'TASK_SYNC_INTERVAL=0 task_sync_start {name}; ls "$RUN_DIR"; cat "$TD/calls" 2>/dev/null'))
         check("TASK_SYNC_INTERVAL=0 starts no copier", "DAEMONIZE" not in r.stdout and "task-sync.mcomp" not in r.stdout,
