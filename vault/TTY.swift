@@ -11,6 +11,9 @@ nonisolated(unsafe) var cancelSignals: Int32 = 0
 /// has gone away or withdrawn it (UnlockServer.requesterGone). runProcess checks it, so a step whose requester left is
 /// ended (its process group killed) and the next one never starts. nil outside such a request.
 nonisolated(unsafe) var requesterProbe: (() -> Bool)? = nil
+/// In the unlock process: work that must go on while a step in the VM runs (one-time code requests expiring, their values
+/// wiped). runProcess calls it on every turn of its wait (a few times a second), on the main thread only, never nested.
+nonisolated(unsafe) var waitHook: (() -> Void)? = nil
 // The terminal settings to put back if a signal arrives while the echo is off.
 nonisolated(unsafe) var savedTermios = termios()
 nonisolated(unsafe) var termiosSaved: Int32 = 0

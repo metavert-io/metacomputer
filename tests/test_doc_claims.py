@@ -1330,16 +1330,32 @@ CLAIMS = [
     ("SECURITY.md", r"`--link-host H` covers `https://H` only: not another port, not http",
      lambda m: 'return link.origin.hasPrefix("https://") && link.origin == "https://" + link.host && extra.contains(link.host)' in raw(CODES)
      and "covering.first { linkHostAllowed((o, h), site: cr.site, extra: $0.link_hosts ?? []) }" in raw(CODES)),
-    ("SECURITY.md", r"the fill account waits \(up to (\d+) seconds\) for the tab to\s+commit and settle \(the same site for a second\)",
-     lambda m: int(m[1]) == int(re.search(r"LAND_WAIT = (\d+)", raw(FILL))[1]) and "if landed not in finals:" in raw(FILL)
+    ("SECURITY.md", r"For (\d+) seconds after the fill account opens a link, every request\s+for the tab's own page .{0,200}?is paused by the\s+browser before it's sent",
+     lambda m: int(m[1]) == int(re.search(r"LAND_WAIT = (\d+)", raw(FILL))[1])
+     and '"resourceType": "Document", "requestStage": "Request"' in raw(FILL)
+     and 'dt.send("Fetch.failRequest", {"requestId": p.get("requestId"), "errorReason": "BlockedByClient"})' in raw(FILL)
+     and 'end, last = time.monotonic() + opts["land_wait"], None' in raw(FILL)
      and 'rq["final_origins"] = lo == cr.site || lo.isEmpty ? [cr.site] : [cr.site, lo]' in raw(CODES)),
+    ("SECURITY.md", r"a site outside the list that shows there anyway \(a navigation the interception didn't\s+see\) refuses afterwards",
+     lambda m: "seen_off.append(True)" in raw(FILL) and "if seen_off or (last and last[1] not in finals):" in raw(FILL)),
+    ("SECURITY.md", r"An answer in the dialog gives\s+the value and, with your approval, approves it, but never fills by itself",
+     lambda m: 'codeGive(cr, value: v, source: "dialog", interactive: true, presentAtMac: true, act: false)' in raw(CODES)
+     and "guard act else {" in raw(CODES)),
+    ("SECURITY.md", r"bin/metacomputer reads `approve`'s id as the\s+vault does .{0,120}?an id the list doesn't show, or a list it can't read, counts as one that may fill",
+     lambda m: 'if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then' in raw("bin/metacomputer")
+     and 'listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1' in raw("bin/metacomputer")
+     and 'case "$a" in --scope) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"or on a step in the VM for another request\s+\(checked several times a second\): an expired request's value is wiped within about a second",
+     lambda m: "if Thread.isMainThread, let hook = waitHook {" in raw("vault/Guest.swift")
+     and "waitHook = { [unowned self] in self.codeExpirySweep(duringStep: true) }" in raw(SERVER)
+     and "poll(&fds, nfds_t(fds.count), 250)" in raw("vault/Guest.swift")),
     ("SECURITY.md", r"\*\*Once the value\s+is sent, the request is used\*\*, whatever the VM answers",
      lambda m: 'chk["mode"] = "check"' in raw(CODES) and "// The value went to the VM: the request is used, whatever came back." in raw(CODES)),
     ("SECURITY.md", r"an approval that came from a rule must still be covered by a live rule",
      lambda m: "if !approvalStillHolds(cr) {" in raw(CODES) and "guard cr.approval.hasPrefix(\"rule:\") else { return cr.approved }" in raw(CODES)),
     ("SECURITY.md", r"No step in the VM\s+may take longer than the request has left",
      lambda m: "let left = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)" in raw(CODES)),
-    ("SECURITY.md", r"requests expire on\s+time even while the unlock process waits on a question or a dialog",
+    ("SECURITY.md", r"requests expire on\s+time even while the unlock process waits on a question or a dialog, or on a step in the VM",
      lambda m: "codeExpirySweep()               // one-time code requests expire on time, even while this question waits" in raw(SERVER)),
     ("SECURITY.md", r"and stopping it \(Ctrl-C, a signal, its wrapper killed\) withdraws it",
      lambda m: '|| (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }' in raw(SERVER)

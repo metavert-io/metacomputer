@@ -568,7 +568,7 @@ notice (`--say` cleaned like every event) and writes a record,
   nothing, so its claim isn't kept fresh by what changes on its screen meanwhile;
 - `secrets fill`, `login` and `session load` refuse, and so does `input-reset`; so do the one-time code
   commands that fill (`secrets code`, `relay`, `give`, and `approve` of a waiting code request, which fills once
-  allowed). A fill that your answer in the code dialog completes is your own, and doesn't wait;
+  allowed; the code dialog never fills by itself, its value waits for `fill --request`);
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
@@ -1811,7 +1811,10 @@ none after a new unlock). A page in the VM can't make one: requests come only th
      fixed; the site's host, `why`, the id and the time left are passed to it as arguments (`on run argv`), so
      nothing in `why` can become AppleScript. The answer comes back on the dialog's own output, a pipe only the
      unlock process reads: never stdout, an argument or a log. Cancelling leaves the request pending. A command
-     without a terminal never prompts or opens a dialog itself, whatever the setting.
+     without a terminal never prompts or opens a dialog itself, whatever the setting. An answer in the dialog gives
+     the value and, with your approval, approves it, but never fills by itself: nothing there holds this VM's
+     dispatch lock or checks for an open handoff. The request waits, given, for `metacomputer secrets fill
+     --request ID` (Claude runs it when `ask --wait` says so), which bin/metacomputer runs like any fill.
 2. **From a script.** `fetch-code | metacomputer secrets code --site S --into TAB/FIELD [--kind link] [--json]`
    asks, gives and fills in one step, the value from stdin. The script gets `{"status": "filled"}` or a refusal and
    its reason, never the value.
@@ -1841,11 +1844,14 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   name the host. When you're asked about a link someone gave, the unlock terminal's question and macOS's dialog show
   its real host (`the link goes to H, not S`); `requests`, results, refusals, the audit log and events name a link's
   host only when it's the site's or one a rule lists.
-- **Where a link lands is checked too.** After opening it, the fill account waits (up to 8 seconds) for the tab to
-  commit and settle (the same site for a second), and the tab must land on the site or on the link's own origin, as
-  the browser's frame tree reports it. A redirect, by the server or by the page's script soon after it loads, to any
-  other site (an identity provider's included) is reported as a failure, the site not named. The navigation itself
-  has happened by then: nothing is undone, and the request is used. Human-mode browsers take codes only, for now.
+- **Where a link goes is held to the sites named.** For 8 seconds after the fill account opens a link, every request
+  for the tab's own page (the link, each redirect hop, a move the page's script makes after it loads) is paused by the
+  browser before it's sent (DevTools' `Fetch` domain, document requests), and one to any site but the request's site
+  or the link's own origin (an identity provider's included) is failed there: the tab never visits it, a hop through
+  another site and back is stopped at that hop, and the outcome is a failure that doesn't name the site. The frame
+  tree is read throughout too: a site outside the list that shows there anyway (a navigation the interception didn't
+  see) refuses afterwards. The request is used either way. After the 8 seconds nothing is watched. Human-mode
+  browsers take codes only, for now.
 - **A code is checked first, without the value**: the tab on the site and the field, as a fill's check. A refusal
   there (no tab on the site yet, no field focused) leaves the request `given`, since nothing reached the VM:
   `metacomputer secrets fill --request ID [--selector CSS | --human]` tries again until it expires. **Once the value
@@ -1856,7 +1862,9 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   request must not have expired, and an approval that came from a rule must still be covered by a live rule: a rule
   that expired or was removed while the request waited sends it back to waiting for `approve ID`. No step in the VM
   may take longer than the request has left (its ssh is ended then, and the request expires), and requests expire on
-  time even while the unlock process waits on a question or a dialog.
+  time even while the unlock process waits on a question or a dialog, or on a step in the VM for another request
+  (checked several times a second): an expired request's value is wiped within about a second. Only a delivery to a
+  slow audit sink, at most 20 seconds a round, can hold it longer.
 
 **Approvals.** Nothing a program does approves, here as anywhere in the vault.
 - A value given at a terminal (`give`, `code` typed at a prompt) or in the dialog follows the vault's approval path,
@@ -1881,7 +1889,9 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   fills it (or opens the link) and says how that went. Since it acts on the VM, that `approve` runs like a fill: it
   waits for an open handoff, keeps the in-flight marker and the dispatch lock until the unlock process is done (with
   `settle` when it ends unconfirmed), and stopping it (Ctrl-C, a signal, its wrapper killed) withdraws it: the unlock
-  process cancels the dialog, or ends the step in the VM, and confirms. The question and the dialog name the site, the kind, a
+  process cancels the dialog, or ends the step in the VM, and confirms. bin/metacomputer reads `approve`'s id as the
+  vault does (`--json` and `--scope` anywhere), and only an approval the vault's own list shows as another kind goes
+  straight on: an id the list doesn't show, or a list it can't read, counts as one that may fill. The question and the dialog name the site, the kind, a
   link's real host and where it was read from. `secrets requests` lists what waits, and the
   `needs_you.approval_waiting` event says so.
 - **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its

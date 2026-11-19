@@ -361,7 +361,8 @@ metacomputer secrets relay --from mail.example.net/#code --to example.com/#otp -
 - **`ask`** files a request and prints its id at once (`--wait 5m` waits for it). You get a
   `needs_you.code_requested` notice and run `give ID`; the value comes from stdin only, never the
   command line. With `INTERACTIVE_PROMPTS=on` in `config/local.env` (off by default), a dialog
-  on the Mac asks for it too, when the vault was unlocked after you set it.
+  on the Mac asks for it too, when the vault was unlocked after you set it; Claude then fills
+  what you gave there with `secrets fill --request ID`.
 - **Approvals.** A code you give at a terminal or in the dialog is approved like any use (Touch ID or
   your login password in presence mode, else the request id typed at the unlock terminal). One piped
   in with no terminal, and every relay, goes ahead without a question only under a rule you made:

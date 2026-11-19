@@ -1915,12 +1915,10 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       return $rc ;;
     approve)
       # Approving a waiting one-time code request fills it in the VM once you've allowed it: that waits for an open
-      # handoff like any fill. (Other approvals answer a fill that already holds this, so they go straight on.)
-      local id="${1:-}"
-      if [[ "$id" =~ ^[0-9a-f]{8}$ ]] && "$VAULT_BIN" requests --json 2>/dev/null | "$PY" -c 'import json,sys
-d = json.load(sys.stdin); want = sys.argv[1]
-sys.exit(0 if any(r.get("id") == want and r.get("kind") in ("code", "link") and r.get("needs_approval") for r in d.get("requests") or []) else 1)' "$id" 2>/dev/null; then
-        # ...and it's a request like a fill's: withdrawn if this is stopped, with its in-flight marker and `settle`.
+      # handoff like any fill, and runs like one (withdrawn if this is stopped, with its in-flight marker and `settle`).
+      # Only an approval the vault's own list shows as another kind (one that answers a fill already holding this)
+      # goes straight on; anything unclear (an id not listed, a list that can't be read) counts as one that may fill.
+      if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then
         handoff_hold
         secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"
         return $?
@@ -1952,6 +1950,25 @@ sys.exit(0 if any(r.get("id") == want and r.get("kind") in ("code", "link") and 
       return $? ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_approve_id() { # APPROVE_ARGS...: the request id, read as the vault reads `approve`'s arguments (vault/Approvals.swift:
+  # --scope takes a value, --scope=V and the other options don't; the id is the one argument left). Empty when unclear.
+  local a id="" n=0 skip=0
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in --scope) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac
+  done
+  [ "$n" = 1 ] && printf '%s' "$id"
+}
+secrets_plain_approval() { # ID: 0 only when the vault's own list (read now) shows ID as an approval that isn't a one-time
+  # code request's: those fill once allowed. A list that can't be read, or an id it doesn't show, is 1 (may fill).
+  [[ "${1:-}" =~ ^[0-9a-f]{8}$ ]] || return 1
+  local listing
+  listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1
+  printf '%s' "$listing" | "$PY" -c 'import json,sys
+want = sys.argv[1]
+rows = json.load(sys.stdin).get("requests")
+sys.exit(0 if isinstance(rows, list) and any(isinstance(r, dict) and r.get("id") == want and "kind" not in r for r in rows) else 1)' "$1" 2>/dev/null
 }
 secrets_run_acting() { # KIND INFLIGHT VAULT_ARGS...: the vault client for a request that may act on the VM (a fill, a
   # sign-in, a session load, a one-time code, an approval that fills), called with the dispatch lock held (handoff_hold)

@@ -883,6 +883,20 @@ def run(td, procs):
     q_.communicate(timeout=90)
     check("a request expires on time while a question waits at the unlock terminal (recorded before the question ended)",
           expired_meanwhile)
+    # ...and while an unrelated step in the VM runs: a waiting request's value is wiped at its expiry, not when the step ends.
+    clear_flags()
+    r = client("code", "--vm", "cvm", "--site", SITE2, "--into", SITE2 + "/#otp", "--ttl", "2s", "--json", stdin=CODE3 + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    sflag("slow-fill-next")
+    slow = subprocess.Popen([BIN, "fill", "web", "--vm", "cvm", "--field", "password"], env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
+    wait_for(lambda: os.path.exists(os.path.join(stubdir, "slow-started")), 10)
+    time.sleep(3.0)
+    during = slow.poll() is None
+    expired_during = any(x.get("op") == "code_expire" and x.get("request_id") == rid for x in audit_recs())
+    slow.communicate(timeout=60)
+    check("a waiting request expires (its value wiped) on time while an unrelated step in the VM runs, not when it ends",
+          r.returncode == 7 and during and expired_during, (r.returncode, during, expired_during))
     # Approving a waiting request fills it, and is withdrawn like a fill: stopping `approve` stops the fill.
     clear_flags()
     r = client("code", "--vm", "cvm", "--site", SITE2, "--into", SITE2 + "/#otp", "--json", stdin=CODE2 + "\n")
@@ -940,7 +954,13 @@ def run(td, procs):
                "--length", "4-16", "--json")
     rid = js(r.stdout).get("request_id")
     check("ask with INTERACTIVE_PROMPTS=on says a dialog asks", js(r.stdout).get("dialog") is True, r.stdout[-200:])
-    got = wait_for(lambda: [x for x in calls()[n6:] if x.get("mode") == "fill"], 15)
+    given = wait_for(lambda: (state(rid) or {}).get("state") == "given", 15)
+    time.sleep(1)
+    early = [x for x in calls()[n6:] if x.get("mode") in ("check", "fill")]
+    check("an answer in the dialog gives and approves the value but fills nothing by itself (no dispatch lock or handoff "
+          "check holds there): it waits for `fill --request`", given and not early, (given, early, state(rid)))
+    r2 = client("fill", "--request", rid or "00000000", "--vm", "cvm")
+    got = [x for x in calls()[n6:] if x.get("mode") == "fill"]
     oc = [json.loads(l) for l in open(os.path.join(osadir, "calls.jsonl"))] if os.path.exists(os.path.join(osadir, "calls.jsonl")) else []
     script_lines = [oc[0][i + 1] for i, x in enumerate(oc[0]) if x == "-e"] if oc else []
     words = [x for i, x in enumerate(oc[0]) if x != "-e" and (i == 0 or oc[0][i - 1] != "-e")] if oc else []
@@ -948,8 +968,9 @@ def run(td, procs):
           len(oc) == 1 and words[:2] == ["code", "127.0.0.1"] and words[3] == rid and "touch" in words[2] and "do shell script" in words[2]
           and not any(nasty[:10] in l or "touch" in l for l in script_lines), (words, script_lines[:3]))
     check("...nothing in `why` ran (no file made)", not os.path.exists(marker))
-    check("the value from the dialog went straight to the vault and, approved (Touch ID stand-in), was filled; never in the dialog's arguments",
-          len(got) == 1 and json.loads(got[0]["stdin"]).get("value") == DIALOG_CODE
+    check("the value from the dialog went straight to the vault and, approved (Touch ID stand-in), was filled by `fill --request` "
+          "(bin/metacomputer runs it like any fill); never in the dialog's arguments",
+          r2.returncode == 0 and len(got) == 1 and json.loads(got[0]["stdin"]).get("value") == DIALOG_CODE
           and not any(DIALOG_CODE in x for x in (oc[0] if oc else [])), got)
     os.remove(os.path.join(osadir, "answer"))
     r = client("ask", "--vm", "cvm", "--site", SITE2, "--kind", "code", "--why", "cancelled", "--json")

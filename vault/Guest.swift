@@ -75,6 +75,11 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     let deadline = Date().addingTimeInterval(timeout)
     var buf = [UInt8](repeating: 0, count: 1 << 16)
     while outOpen || errOpen {
+        if Thread.isMainThread, let hook = waitHook {
+            waitHook = nil              // never nested
+            hook()
+            waitHook = hook
+        }
         if receivedSignal != 0 { res.interrupted = true; break }
         if requesterLeft() { res.cancelled = true; break }
         if Date() > deadline { res.timedOut = true; break }
@@ -343,6 +348,7 @@ struct GuestRead {
 /// never copied, since the VM has every value it was ever given and could put one in any form into its answer.
 func fillReason(_ guest: String) -> String {
     let known: [(String, String)] = [
+        ("the link tried to take the tab to another site", "the link tried to take the tab to another site (not shown); that was stopped before it was visited, and nothing more was done (check the page)"),
         ("the link led to another site", "the link led to another site (not shown); nothing more was done (check the page)"),
         ("the tab didn't settle on the link's page", "the tab didn't settle on the link's page in time; check the page"),
         ("the selector matches no element", "the selector matches no element on the page"),

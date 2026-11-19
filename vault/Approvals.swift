@@ -581,9 +581,10 @@ func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let id = a.positional[0]
     var req: [String: Any] = ["op": "approve", "id": id, "method": "local-auth", "scope": scopeName(scope)]
     // Approving a waiting one-time code request fills it once allowed: like a fill, this client then withdraws it on a
-    // signal (or when its wrapper is killed) and waits for the unlock process to confirm that it stopped.
-    let fills = ((try? request(paths, ["op": "requests"], timeout: 15))?["requests"] as? [[String: Any]] ?? [])
-        .contains { ($0["id"] as? String) == id && ["code", "link"].contains($0["kind"] as? String ?? "") && $0["needs_approval"] as? Bool == true }
+    // signal (or when its wrapper is killed) and waits for the unlock process to confirm that it stopped. Only an
+    // approval the list shows as another kind is sent as before; a list that can't be read counts as "may fill".
+    let listed = (try? request(paths, ["op": "requests"], timeout: 15))?["requests"] as? [[String: Any]]
+    let fills = !(listed ?? []).contains { ($0["id"] as? String) == id && $0["kind"] == nil } || listed == nil
     if a.has("passphrase") {
         try requireTTY("approve --passphrase")
         installPromptSignalHandlers()

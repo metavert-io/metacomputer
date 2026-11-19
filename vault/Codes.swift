@@ -454,13 +454,16 @@ extension UnlockServer {
                     continue
                 }
                 say("\(clockTime())  request \(cr.id): a value was given in the dialog")
-                _ = codeGive(cr, value: v, source: "dialog", interactive: true, presentAtMac: true)
+                // The dialog gives (and, with your approval, approves) the value; it never fills by itself. Nothing here
+                // holds this VM's dispatch lock or checks for an open handoff, so the fill waits for `fill --request ID`,
+                // which bin/metacomputer runs like any fill.
+                _ = codeGive(cr, value: v, source: "dialog", interactive: true, presentAtMac: true, act: false)
             }
         }
     }
 
     /// The request reaches a final state: its value is wiped, it's recorded, and the unlock terminal says so.
-    func codeFinish(_ cr: CodeRequest, state: String, reason: String?) {
+    func codeFinish(_ cr: CodeRequest, state: String, reason: String?, flush: Bool = true) {
         cr.state = state
         cr.reason = reason
         cr.parked = false
@@ -474,7 +477,7 @@ extension UnlockServer {
             if let r = reason { rec["reason"] = r }
             record(rec)
             say("\(clockTime())  request \(cr.id) (\(cr.kind) for \(cr.site)) \(state)" + (reason.map { ": \($0)" } ?? ""))
-            flushSinks(force: true)
+            if flush { flushSinks(force: true) }
         }
     }
 
@@ -600,7 +603,8 @@ extension UnlockServer {
 
     /// The value for a request: checked against its kind and site, then approved (the person, or a rule), then filled when
     /// the request has a target.
-    func codeGive(_ cr: CodeRequest, value: [UInt8], source: String, interactive: Bool, presentAtMac: Bool, giver: Requester? = nil) -> [String: Any] {
+    func codeGive(_ cr: CodeRequest, value: [UInt8], source: String, interactive: Bool, presentAtMac: Bool, giver: Requester? = nil,
+                  act: Bool = true) -> [String: Any] {
         if cr.state != "pending" {
             if cr.state == "expired" { return codeResult(cr) }
             var out = codeResult(cr)
@@ -642,7 +646,7 @@ extension UnlockServer {
                                   "source": source, "requester": (giver ?? cr.who).record]
         if let h = cr.reportedLinkHost { rec["link_host"] = h }
         record(rec)
-        return codeDecide(cr, interactive: interactive, presentAtMac: presentAtMac)
+        return codeDecide(cr, interactive: interactive, presentAtMac: presentAtMac, act: act)
     }
 
     /// Approve (or park) a request that holds its value, then act on it.
@@ -672,7 +676,7 @@ extension UnlockServer {
     /// Why a link can't go ahead without a person: its host isn't the site's and no rule lists it. Fixed words: the host
     /// itself is never named (whoever chose it could have spelled a value in it).
 
-    func codeDecide(_ cr: CodeRequest, interactive: Bool, presentAtMac: Bool) -> [String: Any] {
+    func codeDecide(_ cr: CodeRequest, interactive: Bool, presentAtMac: Bool, act: Bool = true) -> [String: Any] {
         if !cr.identityProvider && !interactive {
             // No terminal: only a standing rule the person made lets it go ahead without asking.
             if let r = coveringCodeRule(cr) {
@@ -706,6 +710,10 @@ extension UnlockServer {
                 return codeResult(cr)
             }
             cr.approved = true
+        }
+        guard act else {
+            say("          -> request \(cr.id) given and approved; it's filled by `metacomputer secrets fill --request \(cr.id)`")
+            return codeResult(cr)
         }
         return codeAct(cr)
     }
@@ -788,6 +796,8 @@ extension UnlockServer {
             if let bp = target.browserPID { rq["browser_pid"] = bp }
         }
         func step(_ request: [String: Any], _ value: [UInt8]?, _ timeout: TimeInterval) -> [String: Any] {
+            codeInFlight = cr.id
+            defer { codeInFlight = nil }
             do {
                 return target.human ? try runner.human(t, request: request, value: value, timeout: timeout)
                                     : try runner.fill(t, request: request, value: value, timeout: timeout)
@@ -859,12 +869,14 @@ extension UnlockServer {
         return codeResult(cr, extra)
     }
 
-    /// Expire what's due, and nothing else: safe to call from any loop that waits (a question, a dialog), so a request
-    /// never outlives its time, or keeps its value, because the unlock process was busy waiting for an answer.
-    func codeExpirySweep() {
+    /// Expire what's due, and nothing else: safe to call from any loop that waits (a question, a dialog, a step in the
+    /// VM: runProcess calls it through waitHook), so a request never outlives its time, or keeps its value, because the
+    /// unlock process was busy with something else. During a step, the request that step serves is left to it (the step
+    /// is cut at that request's expiry anyway), and audit sinks are delivered to afterwards, not from inside the wait.
+    func codeExpirySweep(duringStep: Bool = false) {
         let now = Date()
-        for cr in codeRequests.values where !cr.final && now >= cr.expires {
-            codeFinish(cr, state: "expired", reason: "it expired before it was filled")
+        for cr in codeRequests.values where !cr.final && now >= cr.expires && !(duringStep && cr.id == codeInFlight) {
+            codeFinish(cr, state: "expired", reason: "it expired before it was filled", flush: !duringStep)
         }
     }
 
@@ -897,10 +909,14 @@ extension UnlockServer {
         let read: GuestRead
         let readTime = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)
         guard readTime >= 1 else { codeFinish(cr, state: "expired", reason: "it expired before it was filled"); return codeResult(cr) }
+        codeInFlight = cr.id
+        defer { codeInFlight = nil }
         do { read = try runner.read(t, request: rq, timeout: readTime) } catch let e as VaultError {
             codeFinish(cr, state: "refused", reason: e.message)
             return codeResult(cr)
         } catch { codeFinish(cr, state: "refused", reason: "reading the page failed"); return codeResult(cr) }
+        codeInFlight = nil
+        if cr.final { return codeResult(cr) }       // it ended while the page was read: nothing read is kept
         guard read.ok, read.origin == fromOrigin else {
             codeFinish(cr, state: "refused", reason: read.reason ?? "the VM reported a page outside --from's site")
             return codeResult(cr)

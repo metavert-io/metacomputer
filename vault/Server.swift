@@ -198,6 +198,7 @@ final class UnlockServer {
     var requesterWithdrew = false
     var promptOpen = false              // a question waits on the terminal, its cursor at the end of the prompt
     var codeRequests: [String: CodeRequest] = [:]   // one-time code requests (Codes.swift): in memory only, gone at lock
+    var codeInFlight: String?           // the code request a step in the VM is serving right now
     let interactivePrompts: Bool        // INTERACTIVE_PROMPTS=on at unlock: `ask` also shows a dialog on this Mac
     lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
     // The audit log and its sinks. The audit key (from the vault) MACs every record this
@@ -948,6 +949,9 @@ final class UnlockServer {
         guard let ak = vaultAuditKey(paths, key) else { throw VaultError("cannot read the vault's audit key") }
         auditKey = ak
         hub.recorder = { [unowned self] rec in self.record(rec) }
+        // One-time code requests expire on time (their values wiped) even while a step in the VM runs.
+        waitHook = { [unowned self] in self.codeExpirySweep(duringStep: true) }
+        defer { waitHook = nil }
         hub.preUse = { [unowned self] fields, requester in self.requiredSinkProblem("api", fields, requester: requester) }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw VaultError("cannot make a socket") }

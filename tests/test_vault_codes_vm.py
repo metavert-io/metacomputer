@@ -284,8 +284,12 @@ def run(td, procs):
     call("browser_navigate", dict(stgt, url=SITE + "/site.html"))
     time.sleep(1.5)
     r = mc("secrets", "relay", "--kind", "link", "--from", MAIL + "/#redirect-link", "--to", SITE, "--site", SITE, "--json")
-    check("relay --kind link to the site that then moves the tab to another site: reported (where it went isn't named)",
-          r.returncode == 2 and "led to another site" in r.stdout and "localhost" not in r.stdout, (r.stdout[-300:], r.stderr[-200:]))
+    check("relay --kind link to the site whose page then moves the tab to another site: the move is stopped before the "
+          "tab visits it (real Chrome's Fetch interception), and where it would have gone isn't named",
+          r.returncode == 2 and "stopped before it was visited" in r.stdout and "localhost" not in r.stdout, (r.stdout[-300:], r.stderr[-200:]))
+    t = page_text(stgt, "Signing you in", tries=4)
+    check("...the site's tab is still on the site, not the other one (it stayed on the page that tried to move)",
+          "moved=1" not in t and "Signed in: link" not in t, t[-300:])
     h.call("end_session", {"session": "vmcodes-s"})
     h.call("end_session", {"session": "vmcodes-m"})
 
