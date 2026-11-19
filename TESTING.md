@@ -746,7 +746,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (155 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (172 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -780,12 +780,18 @@ Each of these needs no VM and takes seconds.
   (`--remember` at a terminal too), an explicit save that fails (a locked keychain, no
   login keychain) an error with its reason, `--open --remember` then opening with the
   clipboard and failing; `--no-remember`, `on`, a locked keychain falling back to the
-  clipboard for `--open`; plain `view` opening at a terminal on the Mac and printing over SSH. Then
+  clipboard for `--open`; plain `view` opening at a terminal on the Mac and printing over SSH.
+  `lib/liveview.py` called directly: `remember` and `forget` refused without a terminal
+  on stdin or `--consent-checked`, `remember` and `refresh` refused while `VIEW_REMEMBER`
+  is off (in the settings file, in the environment, or an unknown value there), an
+  environment that says `on` not loosening the file's `off`, `refresh` never making an
+  item, a password typed at a terminal accepted. Then
   the real osascript and Security framework in a keychain the test makes in its own
   folder, with HOME there too (the login keychain and the search list untouched;
   `security` is a stand-in that only names that keychain; nothing reads a password
-  back): created with Screen Sharing's key (server `127.0.0.1:PORT`, port 0, type
-  `vncl`), updated in place, removed. The handoff's dialog (`INTERACTIVE_PROMPTS`): none
+  back): `refresh` making nothing, `remember` refused without consent, then created with
+  Screen Sharing's key (server `127.0.0.1:PORT`, port 0, type `vncl`), updated in place by
+  `refresh` and `remember`, `forget` refused without consent, then removed. The handoff's dialog (`INTERACTIVE_PROMPTS`): none
   when off, over SSH, outside the screen session or for a person's own handoff; with it on,
   a stand-in osascript gets the fixed script and the `--say` text as an argument (quotes,
   backslashes, `do shell script`, `end run` and `tell`, verbatim, and the real osascript's

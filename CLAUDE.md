@@ -119,8 +119,8 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   browsers or profiles to get around one, or run `handoff done` for the user. Live
   view for the user: `metacomputer view --open` (Screen Sharing's remembered password in the
   login keychain, written by osascript, or the clipboard; never in argv, output, logs or events;
-  lib/liveview.py). Only the user saves or removes it (`view --remember` / `--forget` refuse without
-  a terminal; `VIEW_REMEMBER=off` = no writes); `view --tailnet` only prints the command. Dialogs that wait for the user
+  lib/liveview.py, which checks the same consent rules when run directly). Only the user saves or
+  removes it (`view --remember` / `--forget` refuse without a terminal; `VIEW_REMEMBER=off` = no writes); `view --tailnet` only prints the command. Dialogs that wait for the user
   need `INTERACTIVE_PROMPTS=on` (off by default): the handoff's dialog takes `--say` as osascript
   argv data, never script text.
   Tests: `python3 tests/test_handoff.py` (no VM), test_hub.py's handoff checks, and

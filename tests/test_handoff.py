@@ -802,6 +802,10 @@ case "$5" in
         if [ -f "$STUB/kc.fail" ]; then echo "error created -25308"; exit 0; fi
         if [ -f "$STUB/kc.item" ]; then how=updated; else how=created; fi
         printf '%s\n%s\n%s\n%s\n' "$6" "$8" "$9" "${10}" > "$STUB/kc.item"; echo "$how" ;;
+  refresh) cat > "$STUB/kc.pw"; echo "$7" > "$STUB/kc.used"
+        if [ -f "$STUB/kc.fail" ]; then echo "error updated -25308"; exit 0; fi
+        if [ ! -f "$STUB/kc.item" ]; then echo none; exit 0; fi
+        printf '%s\n%s\n%s\n%s\n' "$6" "$8" "$9" "${10}" > "$STUB/kc.item"; echo updated ;;
   show) if [ -f "$STUB/kc.item" ]; then
           printf '{"server": "%s", "port": "0", "label": "%s"}\n' "$(sed -n 1p "$STUB/kc.item")" "$(sed -n 2p "$STUB/kc.item")"
         else echo null; fi ;;
@@ -1076,8 +1080,10 @@ def remember_checks():
     tag1 = saved[2]
     open(argv, "w").close()
     r = view(vd, stub, lume, ssh, "--open")
-    check("once saved, view --open without a terminal brings it up to date in place (a new tag), no question",
+    check("once saved, view --open without a terminal brings it up to date in place (a new tag), no question, "
+          "through the helper's refresh (which never makes one)",
           r.returncode == 0 and read(item).splitlines()[2] != tag1 and "Save it?" not in r.stdout
+          and any(" refresh " in x for x in lines("osascript ")) and not any(" save " in x for x in lines("osascript "))
           and "nothing to paste" in r.stdout and not clipped() and read(os.path.join(stub, "kc.pw")) == VNC_PW,
           (r.stdout, r.stderr))
     open(argv, "w").close()
@@ -1175,6 +1181,79 @@ def remember_checks():
         check(f"view {' '.join(bad)}: a usage error", r.returncode != 0 and "usage" in r.stderr, r.stderr)
 
 
+def remember_helper_checks():
+    """lib/liveview.py's remember, refresh and forget called directly (not through bin/metacomputer view): the same
+    consent and VIEW_REMEMBER rules, applied by the helper itself."""
+    print("lib/liveview.py remember | refresh | forget called directly: its own consent and VIEW_REMEMBER checks")
+    vd, stub, lume, ssh = view_setup("helper")
+    item = os.path.join(stub, "kc.item")
+    fake_kc = os.path.join(vd, "login.keychain-db")
+    open(fake_kc, "w").close()
+    open(os.path.join(stub, "kcpath"), "w").write(fake_kc)
+    cfg = os.path.join(vd, "test.env")
+    lv = [sys.executable, os.path.join(LAB, "lib", "liveview.py")]
+
+    def call(*args, setting=None, conf="", tty=False):
+        open(cfg, "w").write(f"VM_NAME=hvtest\nVNC_PORT=59871\n{conf}")
+        e = env(MCOMP_CONFIG=cfg, STUB=stub, PATH=stub + os.pathsep + os.environ.get("PATH", ""),
+                MCOMP_VIEW_REMEMBER=setting)
+        open(os.path.join(stub, "argv.log"), "w").close()
+        if not tty:
+            return subprocess.run(lv + list(args), input=VNC_PW + "\n", env=e, capture_output=True, text=True,
+                                  timeout=60)
+        m, s = pty.openpty()
+        p = subprocess.Popen(lv + list(args), env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True)
+        os.close(s)
+        os.write(m, (VNC_PW + "\n").encode())
+        o, err = p.communicate(timeout=60)
+        os.close(m)
+        return subprocess.CompletedProcess(p.args, p.returncode, o, err)
+
+    def wrote():
+        return any(f" {op} " in x for x in read(os.path.join(stub, "argv.log")).splitlines()
+                   for op in ("save", "refresh", "forget"))
+
+    r = call("remember", "--port", "59871")
+    check("remember with the password piped in and no --consent-checked: refused, the keychain never reached",
+          r.returncode == 1 and "needs your yes" in r.stderr and not wrote() and not os.path.exists(item), r.stderr)
+    r = call("remember", "--port", "59871", "--consent-checked", setting="off")
+    check("remember --consent-checked with MCOMP_VIEW_REMEMBER=off: refused", r.returncode == 1
+          and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
+    r = call("remember", "--port", "59871", "--consent-checked", setting="on", conf="VIEW_REMEMBER=off\n")
+    check("…and with the settings file's VIEW_REMEMBER=off, an environment that says on can't loosen it",
+          r.returncode == 1 and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
+    r = call("remember", "--port", "59871", "--consent-checked", setting="yes please")
+    check("an unknown MCOMP_VIEW_REMEMBER counts as off (fails closed)", r.returncode == 1
+          and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
+    r = call("refresh", "--port", "59871", setting="ask")
+    check("refresh with nothing saved: makes nothing (exit 1, says so)", r.returncode == 1
+          and "no saved live-view password" in r.stderr and not os.path.exists(item), (r.returncode, r.stderr))
+    r = call("remember", "--port", "59871", tty=True)
+    check("remember with the password typed at a terminal (stdin is one): allowed", r.returncode == 0
+          and r.stdout.strip() == "created" and os.path.exists(item), (r.returncode, r.stdout, r.stderr))
+    tag = read(item).splitlines()[2]
+    r = call("refresh", "--port", "59871", setting="ask")
+    check("refresh with metacomputer's item there: updated in place, no terminal needed", r.returncode == 0
+          and r.stdout.strip() == "updated" and read(item).splitlines()[2] != tag, (r.returncode, r.stderr))
+    tag = read(item).splitlines()[2]
+    r = call("refresh", "--port", "59871", conf="VIEW_REMEMBER=off\n")
+    r2 = call("refresh", "--port", "59871", setting="off")
+    check("refresh while VIEW_REMEMBER is off (settings file or environment): refused, the item untouched",
+          r.returncode == 1 and r2.returncode == 1 and read(item).splitlines()[2] == tag and not wrote(),
+          (r.stderr, r2.stderr))
+    r = call("forget", "--port", "59871")
+    check("forget with no terminal and no --consent-checked: refused, the item stays", r.returncode == 1
+          and "needs your yes" in r.stderr and os.path.exists(item) and not wrote(), r.stderr)
+    r = call("forget", "--port", "59871", "--consent-checked")
+    check("forget --consent-checked (what bin/metacomputer passes after its own check): removed", r.returncode == 0
+          and r.stdout.strip() == "removed" and not os.path.exists(item), (r.returncode, r.stderr))
+    for bad in (["remember", "--port", "59871", "--json"], ["refresh", "--port", "59871", "--consent-checked"],
+                ["remembered", "--port", "59871", "--consent-checked"]):
+        r = call(*bad)
+        check(f"liveview.py {' '.join(bad)}: a usage error", r.returncode == 2 and "usage" in r.stderr, r.stderr)
+
+
 def keychain_checks():
     """lib/liveview.py's REMEMBER_JS with the real osascript and Security framework, in a keychain made for this test
     inside its temporary folder (HOME too, so not even the keychain search list changes). The login keychain is
@@ -1220,7 +1299,14 @@ def keychain_checks():
         def lvrun(*a, data=None):
             return subprocess.run(lv + list(a), input=data, capture_output=True, text=True, timeout=60, env=senv,
                                   stdin=None if data is not None else subprocess.DEVNULL)
+        r = lvrun("refresh", "--port", "59871", data=fake + "\n")
+        r0 = lvrun("remembered", "--port", "59871")
+        check("refresh with nothing there: makes nothing (exit 1)", r.returncode == 1 and r0.returncode == 1,
+              (r.returncode, r.stdout, r.stderr, r0.returncode))
         r = lvrun("remember", "--port", "59871", data=fake + "\n")
+        check("remember without a terminal or --consent-checked: refused, nothing made", r.returncode == 1
+              and "needs your yes" in r.stderr and lvrun("remembered", "--port", "59871").returncode == 1, r.stderr)
+        r = lvrun("remember", "--port", "59871", "--consent-checked", data=fake + "\n")
         check("remember: the item is created in the keychain it was given", r.returncode == 0
               and r.stdout.strip() == "created", (r.returncode, r.stdout, r.stderr))
         r = lvrun("remembered", "--port", "59871", "--json")
@@ -1231,15 +1317,22 @@ def keychain_checks():
               and a.get("account") is None and a.get("label") == "metacomputer live view (127.0.0.1:59871)"
               and str(a.get("comment", "")).startswith("mcomp-"), (r.returncode, r.stdout, r.stderr))
         tag1 = a.get("comment")
-        r = lvrun("remember", "--port", "59871", data="Ot" + secrets.token_hex(3) + "\n")
+        r = lvrun("refresh", "--port", "59871", data="Ot" + secrets.token_hex(3) + "\n")
         a2 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
-        check("remember again: updated in place (the same key, a new tag)", r.returncode == 0
+        check("refresh: updated in place (the same key, a new tag)", r.returncode == 0
               and r.stdout.strip() == "updated" and a2.get("comment") not in (None, tag1), (r.stdout, r.stderr, a2))
+        r = lvrun("remember", "--port", "59871", "--consent-checked", data="Ot" + secrets.token_hex(3) + "\n")
+        a3 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
+        check("remember again: updated in place too", r.returncode == 0 and r.stdout.strip() == "updated"
+              and a3.get("comment") not in (None, tag1, a2.get("comment")), (r.stdout, r.stderr, a3))
         r = lvrun("remembered", "--port", "59872")
         check("another port isn't that item (exit 1)", r.returncode == 1, (r.returncode, r.stderr))
         r = lvrun("forget", "--port", "59871")
+        check("forget without a terminal or --consent-checked: refused, the item stays", r.returncode == 1
+              and lvrun("remembered", "--port", "59871").returncode == 0, r.stderr)
+        r = lvrun("forget", "--port", "59871", "--consent-checked")
         r2 = lvrun("remembered", "--port", "59871")
-        r3 = lvrun("forget", "--port", "59871")
+        r3 = lvrun("forget", "--port", "59871", "--consent-checked")
         check("forget removes it, so there was exactly one; a second forget finds none", r.stdout.strip() == "removed"
               and r2.returncode == 1 and r3.stdout.strip() == "none", (r.stdout, r.stderr, r2.returncode, r3.stdout))
         calls = read(os.path.join(stub, "calls")).split("\n")
@@ -1445,6 +1538,7 @@ def main():
         fill_checks()
         view_checks()
         remember_checks()
+        remember_helper_checks()
         keychain_checks()
         dialog_checks()
     finally:

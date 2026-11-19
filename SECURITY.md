@@ -552,8 +552,13 @@ reaches it. `view --remember` and `view --forget` (which removes only the item
 metacomputer made) refuse without a terminal, whether or not an item is there,
 and an explicit save that fails is an error with its reason (`view --open`
 falls back to the clipboard). `off` means no writes at all: nothing is saved,
-`view --remember` refuses, and an item saved earlier is no longer updated. No
-Screen Sharing setting is changed.
+`view --remember` refuses, and an item saved earlier is no longer updated.
+`lib/liveview.py`, the helper that writes and removes it, applies the same rules
+when it's run directly: saving or removing needs a terminal on its stdin (or the
+flag `view` passes after its own check), nothing is written while `VIEW_REMEMBER`
+is off (the settings file's value, which the environment can make stricter but
+never looser), and the silent update only changes an item that's already there.
+No Screen Sharing setting is changed.
 
 The item is written by osascript (Apple's scripting tool) through the Security
 framework, with the password on osascript's stdin: never in an argument, the

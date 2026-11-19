@@ -1045,6 +1045,8 @@ CLAIMS = [
                     r"with its reason", lambda m: remember_flag_gated()),
     ("SECURITY.md", r"`off` means no writes at all: nothing is saved, `view --remember` refuses, and an item saved "
                     r"earlier is no longer updated", lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"`lib/liveview.py`, the helper that writes and removes it, applies the same rules when it's run "
+                    r"directly", lambda m: helper_gated()),
     ("SECURITY.md", r"the helper checks all of that again itself, whoever starts it, from the handoff's own record",
      lambda m: 'if dialog_off_reason(rec.get("interactive") is not False) is not None:\n        return 0'
      in raw("lib/handoff.py") and raw("lib/handoff.py").index("if dialog_off_reason(rec.get(")
@@ -1324,12 +1326,14 @@ def remembered_item_shape():
 
 def remember_needs_a_person():
     """The item is made only with a person's yes: a terminal for the question and for --remember, or
-    VIEW_REMEMBER=on; off never writes."""
+    VIEW_REMEMBER=on; off never writes; the silent update goes through the helper's refresh, which never makes one.
+    The helper applies the same rules when it's run directly (helper_gated)."""
     b = raw("bin/metacomputer")
     return ('if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi' in b
-            and '[ "$setting" = on ] && { VIEW_SAVE=1; return 0; }' in b and remember_flag_gated()
+            and '[ "$setting" = on ] && { VIEW_SAVE=create; return 0; }' in b and remember_flag_gated()
             and re.search(r'view_remembered \|\| rc=\$\?\n  if \[ "\$setting" = off \]; then\n(?:    [^\n]*\n)+?'
-                          r'    return 0\n  fi\n  \[ \$rc = 0 \] && \{ VIEW_SAVE=1', b) is not None)
+                          r'    return 0\n  fi\n  \[ \$rc = 0 \] && \{ VIEW_SAVE=refresh', b) is not None
+            and '[ "$1" = refresh ] && op=refresh extra=""' in b and helper_gated())
 
 
 def remember_flag_gated():
@@ -1338,18 +1342,33 @@ def remember_flag_gated():
     b = raw("bin/metacomputer")
     return ('  if [ "$flag" = remember ]; then\n    [ -t 0 ] || die "view --remember saves the live-view password in '
             'your login keychain, so it\'s yours to run: in your own terminal"\n    [ "$setting" = off ] && die '
-            '"$(view_off_note)"\n    VIEW_SAVE=1' in b
+            '"$(view_off_note)"\n    VIEW_SAVE=create' in b
             and '[ -t 0 ] || die "view --forget changes your login keychain, so it\'s yours to run: in your own '
             'terminal"' in b
-            and 'view_save || die "the live-view password wasn\'t saved for Screen Sharing (the reason is above)"' in b)
+            and 'view_save create || die "the live-view password wasn\'t saved for Screen Sharing (the reason is above)"'
+            in b)
+
+
+def helper_gated():
+    """lib/liveview.py itself: remember and forget only with a terminal on stdin or --consent-checked; remember and
+    refresh never while VIEW_REMEMBER is off (the settings file's value, made stricter, never looser, by the
+    environment; an unknown value there is off); refresh never makes an item."""
+    lv = raw("lib/liveview.py")
+    return ('if checked or sys.stdin.isatty():\n        return None' in lv
+            and 'if op == "save":\n        why = consent_refusal(' in lv
+            and 'why = consent_refusal("removing Screen Sharing\'s saved live-view password", checked)' in lv
+            and 'if remember_setting() == "off":' in lv
+            and 'given = given if given in ORDER else "off"\n    return max(conf, given, key=ORDER.get)' in lv
+            and "if (op === 'refresh' && item === null) { return 'none'; }" in lv)
 
 
 def remember_pipes_password():
     """view --open's save: the password from its store through a pipe to liveview.py, then osascript's stdin; the
     arguments are the address, the keychain, the label, the tag and Screen Sharing's path."""
     b, lv = raw("bin/metacomputer"), raw("lib/liveview.py")
-    return ('vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" remember --port "$VNC_PORT"' in b
-            and 'keychain_js(["save", ss_server(port), kc, ss_label(port), tag, SS_APP], pw)' in lv
+    return ('how="$(vnc_password_get | MCOMP_VIEW_REMEMBER="$(view_remember_setting)" \\\n           "$PY" '
+            '"$LAB_ROOT/lib/liveview.py" "$op" --port "$VNC_PORT"' in b
+            and 'keychain_js([op, ss_server(port), kc, ss_label(port), tag, SS_APP], pw)' in lv
             and 'input=data if data is not None else b""' in lv and "print(pw" not in lv)
 
 

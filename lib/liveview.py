@@ -8,19 +8,31 @@
                                         helper empties the clipboard after that many seconds, but only if nothing
                                         was copied since: it keeps the change count the copy's own clearContents
                                         returned (never the password), and compares and empties in one run.
-  liveview.py remember --port PORT      the live-view password, one line on stdin -> the login keychain item that
+  liveview.py remember --port PORT [--consent-checked]
+                                        the live-view password, one line on stdin -> the login keychain item that
                                         Screen Sharing reads for vnc://127.0.0.1:PORT (created, or updated in place;
-                                        then checked by its attributes). Prints "created" or "updated".
+                                        then checked by its attributes). Prints "created" or "updated". Refused unless
+                                        stdin is a terminal (a person typing it) or --consent-checked says the caller
+                                        (bin/metacomputer view) already has the user's yes; refused while VIEW_REMEMBER
+                                        is off
+  liveview.py refresh --port PORT       the same, but only into metacomputer's item that's already there (never makes
+                                        one): view --open's silent update. "updated", or exit 1. Refused while off
   liveview.py remembered --port PORT [--json]   exit 0 when that item is metacomputer's and there, 1 when it isn't,
                                         3 when the keychain couldn't say; --json prints its attributes (never the
                                         password)
-  liveview.py forget --port PORT        removes that item (only metacomputer's); prints "removed" or "none"
+  liveview.py forget --port PORT [--consent-checked]
+                                        removes that item (only metacomputer's); prints "removed" or "none". Refused
+                                        unless stdin is a terminal or --consent-checked
+
+VIEW_REMEMBER, as these apply it: the settings file's value (lib/labconfig.py: the file bin/metacomputer reads), made
+stricter, never looser, by MCOMP_VIEW_REMEMBER from bin/metacomputer (off > ask > on); a value in the environment that
+isn't one of those counts as off.
 
 The clipboard is macOS's general pasteboard, through osascript's JavaScript bridge to AppKit (NSPasteboard), so
 the copy and its change count, and later the comparison and the clearing, each happen inside one process. The
 password is marked concealed and transient (nspasteboard.org's markers), which clipboard managers that follow
 them don't keep. It comes in on stdin and leaves on osascript's stdin: never in an argument, the environment,
-a file, a log or an event, and nothing here prints it. Stdlib only.
+a file, a log or an event, and nothing here prints it. Stdlib only (and lib/labconfig.py).
 
 Screen Sharing's remembered password (SECURITY.md, "The live view"). Screen Sharing (ScreenSharing.framework,
 -[SSSessionView findCredentialInKeychainForAuthType:...]) looks for internet-password items in the login keychain
@@ -34,14 +46,17 @@ names Screen Sharing and osascript, so neither asks. Keychain dialogs are switch
 a locked keychain fails instead of asking. The password reaches osascript on its stdin, as above; its arguments
 are the address, the keychain's path, the item's label and a one-time tag for the check.
 """
-import secrets
 import json
 import os
 import re
 import resource
+import secrets
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import labconfig  # noqa: E402
 
 MAX_PASSWORD = 256
 CLEAR_DEFAULT_S = 45
@@ -75,9 +90,11 @@ COUNT_RE = re.compile(r"-?\d{1,20}")
 
 SS_APP = "/System/Applications/Utilities/Screen Sharing.app"
 LABEL_PREFIX = "metacomputer live view"
-# run(argv) = [op, server, keychain path, label] + for "save": [tag, Screen Sharing's path]; the password is on stdin.
+# run(argv) = [op, server, keychain path, label] + for "save" and "refresh": [tag, Screen Sharing's path]; the password
+# is on stdin.
 #   save    create the item (access: osascript and Screen Sharing), or update metacomputer's in place; then check
 #           that the item found by its key carries this tag. "created" / "updated" / "foreign" / "error ..."
+#   refresh only update metacomputer's item in place: "updated" / "none" (there isn't one; nothing made) / "foreign"
 #   show    the attributes of the item found by its key, as JSON (null: none), never its password
 #   forget  delete metacomputer's item: "removed" / "none" / "foreign" / "error ..."
 # The item's key: server, protocol 'vnc ', port 0, empty account, authentication type 'dflt' (Screen Sharing's own
@@ -159,7 +176,8 @@ function run(argv) {
       st = $.SecKeychainItemDelete(item);
       return st === 0 ? 'removed' : 'error delete ' + st;
     }
-    if (op !== 'save' || argv.length !== 6) { return 'error usage'; }
+    if ((op !== 'save' && op !== 'refresh') || argv.length !== 6) { return 'error usage'; }
+    if (op === 'refresh' && item === null) { return 'none'; }
     var tag = argv[4], app = argv[5], how;
     var pw = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
     if (pw.isNil() || pw.length < 1 || pw.length > 256) { return 'error password'; }
@@ -333,7 +351,43 @@ def port_arg(argv):
     return None, argv
 
 
-def remember(port):
+ORDER = {"on": 0, "ask": 1, "off": 2}
+
+
+def remember_setting(env=None):
+    """VIEW_REMEMBER as the settings file says (unknown there: ask, as bin/metacomputer reads it), made stricter, never
+    looser, by MCOMP_VIEW_REMEMBER; an unknown value in the environment counts as off."""
+    env = os.environ if env is None else env
+    try:
+        conf = labconfig.load(env).get("VIEW_REMEMBER", "ask")
+    except Exception:
+        conf = "off"
+    conf = conf if conf in ORDER else "ask"
+    if "MCOMP_VIEW_REMEMBER" not in env:
+        return conf
+    given = env["MCOMP_VIEW_REMEMBER"]
+    given = given if given in ORDER else "off"
+    return max(conf, given, key=ORDER.get)
+
+
+def consent_refusal(what, checked):
+    """None when a person agreed: stdin is their terminal, or the caller says it checked (--consent-checked)."""
+    if checked or sys.stdin.isatty():
+        return None
+    return (f"{what} changes your login keychain, so it needs your yes: run `metacomputer view --remember` (or "
+            "--forget) in your own terminal")
+
+
+def remember(port, op="save", checked=False):
+    if op == "save":
+        why = consent_refusal("saving the live-view password for Screen Sharing", checked)
+        if why:
+            print(why, file=sys.stderr)
+            return 1
+    if remember_setting() == "off":
+        print("VIEW_REMEMBER is off, so nothing is saved for Screen Sharing (set it to ask to change that)",
+              file=sys.stderr)
+        return 1
     pw = read_password()
     if pw is None:
         print("couldn't read the live-view password from its store", file=sys.stderr)
@@ -343,11 +397,15 @@ def remember(port):
         print("couldn't find the login keychain (security login-keychain)", file=sys.stderr)
         return 1
     tag = "mcomp-" + secrets.token_hex(10)
-    result = keychain_js(["save", ss_server(port), kc, ss_label(port), tag, SS_APP], pw)
+    result = keychain_js([op, ss_server(port), kc, ss_label(port), tag, SS_APP], pw)
     del pw
     if result in ("created", "updated"):
         print(result)
         return 0
+    if result == "none":
+        print(f"there's no saved live-view password of metacomputer's for {ss_server(port)} to bring up to date",
+              file=sys.stderr)
+        return 1
     if result == "foreign":
         print(f"the login keychain has an item for {ss_server(port)} that metacomputer didn't make, so it was left "
               "alone (Keychain Access shows it)", file=sys.stderr)
@@ -370,7 +428,11 @@ def remembered(port, as_json):
     return 0 if isinstance(attrs, dict) and attrs.get("label") == ss_label(port) else 1
 
 
-def forget(port):
+def forget(port, checked=False):
+    why = consent_refusal("removing Screen Sharing's saved live-view password", checked)
+    if why:
+        print(why, file=sys.stderr)
+        return 1
     kc = login_keychain()
     if kc is None:
         print("couldn't find the login keychain (security login-keychain)", file=sys.stderr)
@@ -388,15 +450,16 @@ def forget(port):
 
 
 def main(argv):
-    if argv[:1] in (["remember"], ["remembered"], ["forget"]):
+    if argv[:1] in (["remember"], ["refresh"], ["remembered"], ["forget"]):
         port, rest = port_arg(argv[1:])
-        if port is None or rest not in ([], ["--json"]) or (rest and argv[0] != "remembered"):
-            print(f"usage: liveview.py {argv[0]} --port PORT" + (" [--json]" if argv[0] == "remembered" else ""),
+        extra = {"remembered": ["--json"], "remember": ["--consent-checked"], "forget": ["--consent-checked"]}
+        if port is None or rest not in ([], extra.get(argv[0], [])):
+            print(f"usage: liveview.py {argv[0]} --port PORT" + "".join(f" [{x}]" for x in extra.get(argv[0], [])),
                   file=sys.stderr)
             return 2
-        if argv[0] == "remember":
-            return remember(port)
-        return remembered(port, bool(rest)) if argv[0] == "remembered" else forget(port)
+        if argv[0] in ("remember", "refresh"):
+            return remember(port, "save" if argv[0] == "remember" else "refresh", bool(rest))
+        return remembered(port, bool(rest)) if argv[0] == "remembered" else forget(port, bool(rest))
     if argv[:1] == ["gui"]:
         why = gui_reason()
         if why:
