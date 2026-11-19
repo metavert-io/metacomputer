@@ -291,7 +291,8 @@ class Run:
         self.d = Driver()
         CURRENT.append(self)
         self.d.claim(f"web {kind}", a.override)
-        out = lab("task", "start", f"web-{kind}")
+        # Without --record nothing is recorded, so no copier (and no task finish to end one).
+        out = lab("task", "start", f"web-{kind}", *([] if a.record else ["--no-sync"]))
         kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
         self.task = kv["NAME"]
         self.rec_dir = kv["RECORDING_DIR"].split()[0]

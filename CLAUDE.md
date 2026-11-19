@@ -25,7 +25,10 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   Pass secrets you type to `redact_values` (or don't record those steps).
   For a whole-desktop video that doesn't depend on the MCP connection:
   `metacomputer record start NAME` / `record stop` (settings `RECORD_*`; the
-  description file beside the MP4 lists key moments when `ACTION_LOG=on`).
+  description file beside the MP4 lists key moments when `ACTION_LOG=on`). It
+  streams to the Mac as it records (`RECORD_TO=host`, the default), so it's the
+  one to run for untrusted work: the driver's recording and `RECORD_TO=guest`
+  live in the VM, where what runs there can delete them (SECURITY.md, "Recordings").
 - Work from structure: `list_windows` / `metacomputer inspect` to find things,
   `get_window_state` with `include_screenshot: false` and a `query` to read,
   `run_steps` with role/name targets and `expect` checks (or `run_script` for

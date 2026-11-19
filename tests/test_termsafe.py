@@ -204,7 +204,9 @@ def cli_checks():
         cfg = os.path.join(td, "test.env")
         with open(cfg, "w") as f:
             f.write(f'VM_NAME=fake-termsafe-vm\nLUME="{bindir}/lume"\nSSH_DIR="{td}/ssh"\nSSH_PORT=1\n'
-                    f'RUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\nACTION_LOG=off\n')
+                    f'RUN_DIR="{td}/run"\nLOG_DIR="{td}/logs"\nACTION_LOG=off\n'
+                    # record start below reads what the VM's recorder answers, which only guest mode does
+                    'RECORD_TO=guest\n')
         env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""), MCOMP_CONFIG=cfg,
                    MCOMP_EVENTS_DIR=os.path.join(td, "events"))
         cli = os.path.join(LAB, "bin", "metacomputer")

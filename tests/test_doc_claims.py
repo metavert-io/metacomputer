@@ -287,6 +287,146 @@ def claude_escaped():
     c = raw(VC)
     return ("isatty" not in c and 'clean(out["screen"])' in c and 'clean(f.extra["screen"])' in c
             and vm_claude.clean("a\x1b]52;c;QQ==\x07‮b") == "a\\x1b]52;c;QQ==\\x07\\u202eb")
+def function_text(name, rel="bin/metacomputer"):
+    """One shell function's source, as written."""
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), raw(rel), re.S | re.M)
+    if not m:
+        raise LookupError(f"{rel}: no function {name}")
+    return m.group(0)
+
+
+def record_to_host():
+    """Desktop recordings stream to the Mac unless RECORD_TO=guest: the default, the code's fallback, and the
+    streamed path writing on the Mac."""
+    rec = function_text("do_record")
+    return (D["RECORD_TO"] == "host" and 'local mode="${RECORD_TO:-host}"' in rec
+            and '"$SELF" _record-pipe' in rec and "recording.py\" save" in function_text("do_record_pipe")), D["RECORD_TO"]
+
+
+def stream_keeps_reserve():
+    """The Mac's half of a stream gets the free-space reserve, and stops on it."""
+    import recording
+    return ('--min-free-gb "${IMPORT_MIN_FREE_GB:-' + D["IMPORT_MIN_FREE_GB"] + '}"' in function_text("do_record_pipe")
+            and "IMPORT_MIN_FREE_GB" in raw("lib/recording.py") and callable(recording.cmd_save))
+
+
+def finalize_keeps_reserve():
+    """recording.py finalize claims its space (lib/storage.py's claims) before ffmpeg starts and watches the free space
+    and the MP4's size while it runs; every copy from the VM and the stream count claims against the reserve."""
+    import recording
+    import inspect
+    fin, save = inspect.getsource(recording.cmd_finalize), inspect.getsource(recording.cmd_save)
+    gi = raw("lib/guest_import.py")
+    return (recording.FINALIZE_GUARD == 512 << 20 and recording.FINALIZE_POLL == 0.2
+            and "space_claim(folder, limit + 2 * FINALIZE_GUARD, min_free" in fin
+            and "free_bytes(folder) < min_free + FINALIZE_GUARD" in fin and "os.killpg(proc.pid, signal.SIGKILL)" in fin
+            and "os.unlink(a.mp4)" in fin and chunks_claimed())
+
+
+def chunks_claimed():
+    """Every copy from the VM (guest_import's unpack) and every stream (recording.py save) claims its next stretch
+    through guest_import.ChunkClaim before writing it, under the claims' lock, counting every other claim."""
+    import recording
+    import inspect
+    import guest_import
+    save, take = inspect.getsource(recording.cmd_save), inspect.getsource(guest_import.ChunkClaim.take)
+    gi = raw("lib/guest_import.py")
+    return ('claim.take(SAVE_CHECK_EVERY, min_free, lambda: free_bytes(fd))' in save and "claim.release()" in save
+            and "need = FREE_CHECK_EVERY + WRITE_CHUNK" in gi and "claim.take(need, min_free" in gi
+            and "claim = ChunkClaim(dest)" in gi and "claim.release()" in gi
+            and "with storage.GlobalLock():" in take and "storage.claims_on(self.pool) - mine" in take
+            and "free() - nbytes - others < reserve" in take
+            and guest_import.FREE_CHECK_EVERY == 64 << 20 and guest_import.WRITE_CHUNK == 1 << 20
+            and recording.SAVE_CHECK_EVERY == 64 << 20)
+
+
+def sync_before_delete():
+    """reset, restore and baseline copy ~/metacomputer-runs first and stop before deleting unless the copy is whole;
+    --discard-unsynced (never --yes) or 'discard' typed at a terminal goes on; a missing or empty folder is whole;
+    a listing that can't be had is never whole."""
+    stop = function_text("sync_or_stop")
+    return ('sync_or_stop "$evtype"' in function_text("restore_from")
+            and function_text("restore_from").index('sync_or_stop "$evtype"')
+            < function_text("restore_from").index('"$LUME" delete "$VM_NAME"')
+            and "sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*'" in function_text("do_baseline")
+            and "do_recordings --sync >/dev/null && whole=1" in stop and '[ $whole = 1 ] && [ $rc = 0 ] && return 0' in stop
+            and stop.count("$whole = 1") == 1   # both checks every time: no way out on the copy alone
+            and 'recording.py" unsynced' in stop
+            and '[ "${DISCARD_UNSYNCED:-0}" = 1 ]' in stop and "ASSUME_YES" not in stop
+            and '[ "$a" = discard ]' in stop and stop.rstrip().endswith("}") and 'die "stopped before $what' in stop
+            and "--discard-unsynced) DISCARD_UNSYNCED=1" in function_text("parse_flags")
+            and "tar -cf - -T /dev/null" in function_text("do_recordings"))
+
+
+def recording_deadlines():
+    """The deadlines SECURITY.md lists for what a recording asks of the VM, and the stream without one."""
+    rec, sync = function_text("do_record"), function_text("do_task_sync")
+    return ('local wait_s="${MCOMP_RECORD_WAIT:-60}"' in rec
+            and 'run_until $((SECONDS + wait_s)) gssh ops "/opt/metacomputer/bin/desktop-record start' in rec
+            and "run_until $((SECONDS + ${MCOMP_RECORD_WAIT:-60})) gssh ops /opt/metacomputer/bin/desktop-record status" in rec
+            and '--idle-timeout "${MCOMP_RECORD_WAIT:-60}" --timeout 3600' in function_text("vm_copy_video")
+            and "--only-top \"$wantf\" --timeout 300" in sync
+            and 'vm_tar_copy "$host/guest" "test -d' in function_text("do_task")
+            and "vm_tar_copy \"$dest\" 'if cd ~/metacomputer-runs" in function_text("do_recordings")
+            and '--idle-timeout "${MCOMP_SYNC_IDLE:-120}" -- ssh' in function_text("vm_tar_copy")
+            and "timeout = 600.0 if idle is None or \"--timeout\" in args else None" in raw("lib/guest_import.py")
+            and "--timeout" not in function_text("do_record_pipe"))
+
+
+def task_finish_keeps_turns():
+    """task start starts the copier; it copies every turn but the newest, once; task finish keeps those copies."""
+    sync = function_text("do_task_sync")
+    return ("task_sync_start" in function_text("do_task") and "--keep-existing recording/turn-" in function_text("do_task")
+            and '[ "$t" != "$last" ] || continue' in sync
+            and 'guest_import "$host" --quiet --keep-existing turn- --only-top "$wantf" --timeout' in sync
+            and '>> "$donef"' in sync
+            and "${TASK_SYNC_INTERVAL:-" + D["TASK_SYNC_INTERVAL"] + "}" in sync), D.get("TASK_SYNC_INTERVAL")
+
+
+def kept_any_spelling():
+    """--keep-existing compares paths folded as macOS's default filesystem does, and a folder never replaces a kept
+    file (lib/guest_import.py)."""
+    import guest_import
+    src = raw("lib/guest_import.py")
+    return (guest_import.fold("Recording/TURN-1") == guest_import.fold("recording/turn-1")
+            and "protected(rel + name, keep)" in src
+            and src.count("keep_existing(src_fd, dst_fd, name, rel + name, report)") == 2)
+
+
+def recording_events_fixed():
+    """task.recording_failed: a reason from a fixed list, no detail; task.recording_stopped: the Mac's duration and a
+    size bound; task.finished: count classes. A sidecar spelling a value in its numbers doesn't reach the event."""
+    rec = raw("bin/metacomputer")
+    fail = re.search(r"^      rec_fail\(\) \{.*?^      \}$", rec, re.M | re.S).group(0)
+    import tempfile
+    td = tempfile.mkdtemp()
+    try:
+        mp4 = os.path.join(td, "r.mp4")
+        open(mp4, "wb").close()
+        with open(os.path.join(td, "r.json"), "w") as f:
+            json.dump({"name": "r", "mode": "host", "duration_s": 4242.0, "bytes": 123456789,
+                       "started_at": "2026-11-18T20:00:00-0500", "ended_at": "2026-11-18T20:00:30-0500"}, f)
+        ev = events.recording_event(mp4)
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+    flat = json.dumps(ev)
+    return ("detail=" not in fail and '"reason=$reason"' in fail and "reason=other" in fail
+            and ev["data"]["duration_s"] == 30 and ev["data"]["size_bound"] == 1 << 28
+            and "4242" not in flat and "123456789" not in flat
+            and 'cc(items["recording_turns"])' in rec and '"seconds": v["seconds"]' not in rec), ev["data"]
+
+
+def keys_outside_home(path="/etc/ssh/metacomputer-keys/%u"):
+    """sshd reads the key lists from PATH, set before any Match block; provision.sh installs them root-owned and
+    read-only to the accounts; finalize.sh removes the homes' bootstrap copies after checking sshd reads the lists."""
+    conf = raw("provisioning/guest/rootfs/etc/ssh/sshd_config.d/10-metacomputer.conf")
+    prov, fin = raw("provisioning/guest/provision.sh"), raw("provisioning/guest/finalize.sh")
+    first_match = conf.find("\nMatch ")
+    return (f"\nAuthorizedKeysFile {path}\n" in conf and (first_match < 0 or conf.index("AuthorizedKeysFile") < first_match)
+            and "install -d -o root -g root -m 0755 /etc/ssh/metacomputer-keys" in prov
+            and 'install -o root -g root -m 0644 "$PAYLOAD/${pair#*:}" "/etc/ssh/metacomputer-keys/${pair%%:*}"' in prov
+            and 'rm -f "$home/.ssh/authorized_keys"' in fin), path
 
 
 def mb(n):
@@ -494,6 +634,89 @@ CLAIMS = [
      lambda m: fill_types_match()),
     ("docs/guide.md", r"Passwords filled by `metacomputer secrets` show as dots, but usernames and codes are visible",
      lambda m: fill_types_match()),
+    # Where recordings are while they record (bin/metacomputer do_record, do_record_pipe, the task copier, task
+    # finish; lib/recording.py save). A VM that turns hostile can erase only what's still inside it.
+    ("SECURITY.md", r"\| \*\*Desktop, `RECORD_TO=host`\*\* \(the default\) \| On the Mac: the VM encodes its screen and streams it",
+     lambda m: record_to_host()),
+    ("SECURITY.md", r"the stream stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB` \((\d+) GB by "
+                    r"default\), and the MP4 is made from it only if that copy fits above the reserve too",
+     lambda m: m[1] == D["IMPORT_MIN_FREE_GB"] and stream_keeps_reserve()
+     and 'recording.py" finalize "$dir/$name.mkv"' in function_text("do_record")),
+    ("SECURITY.md", r"Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold",
+     lambda m: '--max-bytes "${VM_DISK_BYTES:-0}"' in function_text("vm_copy_video")
+     and '--min-free-gb "${IMPORT_MIN_FREE_GB:-' in function_text("vm_copy_video")),
+    ("SECURITY.md", r"or hold it open: it ends after a minute without a byte, or an hour in all, keeping what arrived",
+     lambda m: recording_deadlines()),
+    ("SECURITY.md", r"and is stopped if the free space nears the reserve while it's made \(either way the `\.mkv` is kept",
+     lambda m: finalize_keeps_reserve()),
+    ("SECURITY.md", r"that space is claimed while ffmpeg writes it: every copy from the VM \(the task copier's included\), "
+                    r"every stream and every S3 sync counts the claim against the reserve",
+     lambda m: finalize_keeps_reserve() and "claims_on(pool)" in raw("lib/storage.py")),
+    ("SECURITY.md", r"ffmpeg is watched as well \(five times a second\): if the free space comes within (\d+) MiB of the "
+                    r"reserve anyway",
+     lambda m: int(m[1]) << 20 == __import__("recording").FINALIZE_GUARD and finalize_keeps_reserve()),
+    ("SECURITY.md", r"Everything else a recording asks of the VM has a deadline too: `record start` and `record status` in "
+                    r"guest mode \(a minute\), the guest-mode copy at `record stop` \(a minute without a byte, or an hour "
+                    r"in all\), the task copier's copies \(5 minutes\), and `task finish` and `recordings --sync`, which "
+                    r"stop only once the VM has sent nothing for (\d+) s: a copy that keeps moving, however large or slow, "
+                    r"is never cut off",
+     lambda m: m[1] == "120" and recording_deadlines()),
+    ("SECURITY.md", r"`reset`, `restore` and `baseline` copy the VM's `~/metacomputer-runs` first, and delete it \(with the "
+                    r"VM, or inside it\) only once that copy is whole\. A folder that's missing or empty counts as whole",
+     lambda m: sync_before_delete()),
+    ("SECURITY.md", r"and go on only with `--discard-unsynced`, or when you type `discard` at the prompt that names the "
+                    r"loss\. `--yes` never does",
+     lambda m: sync_before_delete()),
+    ("SECURITY.md", r"Each copy from the VM and each stream claims the next stretch it writes \((\d+) MiB for a copy, (\d+) "
+                    r"MiB for a stream\) before writing it",
+     lambda m: int(m[1]) << 20 == (64 << 20) + (1 << 20) and int(m[2]) << 20 == 64 << 20 and chunks_claimed()),
+    ("docs/commands.md", r"`--discard-unsynced` goes on without what wasn't copied \(`--yes` doesn't\)",
+     lambda m: sync_before_delete()),
+    ("skills/metacomputer/SKILL.md", r"never add `--discard-unsynced` yourself", lambda m: sync_before_delete()),
+    ("SECURITY.md", r"The one exchange without a deadline is the stream itself", lambda m: recording_deadlines()),
+    ("SECURITY.md", r"from the VM's answer it takes only those folders \(anything else the VM slips in is left out\) and "
+                    r"never replaces a file the Mac already has, with a file or a folder",
+     lambda m: task_finish_keeps_turns()[0] and kept_any_spelling()),
+    ("SECURITY.md", r"under any spelling of its path \(case and Unicode normalization don't matter", lambda m: kept_any_spelling()),
+    ("SECURITY.md", r"are read with a byte limit and a deadline",
+     lambda m: 'recording.py" capture --max-bytes "$max" --timeout "$t"' in function_text("vm_answer")
+     and "vm_answer 4194304 60" in function_text("do_task_sync")),
+    ("SECURITY.md", r"`metacomputer stop`, `reset` and `restore` save what was streamed whether or not the VM is still running",
+     lambda m: function_text("restore_from").index("( do_record stop )") < function_text("restore_from").index("vm_running")
+     and function_text("do_stop").count("( do_record stop )") == 2),
+    ("SECURITY.md", r"the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds \((\d+)\), once, and `task finish` "
+                    r"never replaces it",
+     lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
+    ("SECURITY.md", r"`record start` warns while `RECORD_TO=guest` is in force",
+     lambda m: 'warn "RECORD_TO=guest:' in function_text("do_record")),
+    ("SECURITY.md", r"`record stop` then cuts the stream on the Mac at once, saves what arrived and says why",
+     lambda m: '[ "$path" = "(VM unreachable)" ] && waits=2' in function_text("do_record")),
+    ("README.md", r"streamed to your Mac as it records so a run that wipes the VM can't take it back",
+     lambda m: record_to_host()),
+    ("README.md", r"it streams to your Mac as it records \(`RECORD_TO=host`, the default\)", lambda m: record_to_host()),
+    ("docs/guide.md", r"A desktop recording streams to your Mac as it records \(`RECORD_TO=host`\)", lambda m: record_to_host()),
+    ("docs/guide.md", r"each finished step is copied to the Mac every (\d+) s, once, and `task finish` never replaces it",
+     lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
+    # Recording events carry nothing the VM chose (lib/events.py recording_event, bin/metacomputer rec_fail and task
+    # finish): fixed reasons, the Mac's own clock, size bounds and count classes.
+    ("SECURITY.md", r"`task.recording_failed` gives a fixed reason category, never what the recorder said",
+     lambda m: recording_events_fixed()),
+    ("docs/events.md", r"Nothing the VM's recorder said is sent", lambda m: recording_events_fixed()),
+    ("docs/events.md", r"duration \(this Mac's clock, record start to record stop, never the video's own\)",
+     lambda m: recording_events_fixed()),
+    # The VM's SSH key lists: root-owned, outside every home (provisioning/guest; tests/test_ssh_options.py
+    # resolves the config with sshd -T)
+    ("SECURITY.md", r"the VM reads its SSH keys from root-owned files, so nothing running as the desktop user can add "
+                    r"a key or lock your Mac out", lambda m: keys_outside_home()),
+    ("SECURITY.md", r"The VM's sshd reads every account's keys from a root-owned file "
+                    r"\(`AuthorizedKeysFile (/etc/ssh/metacomputer-keys/%u)`", lambda m: keys_outside_home(m[1])),
+    ("SECURITY.md", r"It still reaches a VM whose home folder was wiped\.", lambda m: keys_outside_home()),
+    ("SECURITY.md", r"With `SSH_AUTH=cert` the desktop user has no static keys at all",
+     lambda m: "Match User cua\n\tAuthorizedKeysFile none" in raw("provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin")),
+    ("docs/guide.md", r"The VM reads every account's keys from root-owned files in `/etc/ssh/metacomputer-keys/`",
+     lambda m: keys_outside_home()),
+    ("README.md", r"the VM reads the keys from root-owned files the desktop user can't change",
+     lambda m: keys_outside_home()),
     # Optional hardening: off by default (config/defaults.env and the code's own reading of an unset setting)
     ("SECURITY.md", r"This page covers three \*\*optional\*\* protections\. All are off by default",
      lambda m: hardening_off()),
@@ -1106,7 +1329,8 @@ def settings_tables():
 
 
 SECURITY_SETTINGS = ("ACTION_LOG", "ACTION_LOG_TEXT", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",
-                     "HIDDEN_TEXT", "MCP_HUB", "LESSONS", "SHARE_CLIPBOARD", "SHARE_AUDIO", "SHARE_ROSETTA")
+                     "HIDDEN_TEXT", "MCP_HUB", "LESSONS", "SHARE_CLIPBOARD", "SHARE_AUDIO", "SHARE_ROSETTA",
+                     "RECORD_TO", "TASK_SYNC_INTERVAL")
 FALLBACKS = (re.compile(r"\$\{(?:MCOMP_)?([A-Z][A-Z0-9_]+):-([^}$]+)\}"),
              re.compile(r"""\.get\(\s*["'](?:MCOMP_)?([A-Z][A-Z0-9_]+)["']\s*,\s*["']([^"']+)["']\s*\)"""),
              re.compile(r"""onoff\(\s*env\.get\(\s*["']MCOMP_([A-Z][A-Z0-9_]+)["']\s*\)\s*,\s*["']([^"']+)["']\s*\)"""))

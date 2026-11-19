@@ -184,6 +184,7 @@ End each task, and each checkpoint that matters, with the cheapest check that pr
 
 - **Recording.** `start_recording {output_dir: RECORDING_DIR, record_video: true}` produces a 1920×1080, 30 fps MP4 and per-action `turn-NNNNN` folders with before and after state, screenshots and click markers. `stop_recording` ends it, and `get_recording_state` reports `last_video_path`.
 - **Recordings capture the whole screen.** Never type secrets while recording, or pass them in `redact_values`.
+- **Untrusted runs** (a stranger's script or installer, a suspicious file): also run `metacomputer record start NAME` before and `metacomputer record stop` after. It streams the whole desktop to the Mac as it records (`RECORD_TO=host`, the default), so it survives a run that wipes the VM. The driver's recording lives in the VM: finished steps reach the Mac every 15 s while the task folder is open, the newest step and the video only at `task finish`. If `record start` warns about `RECORD_TO=guest`, tell the user; the setting is theirs. After a run that wiped the VM, finish the task (the Mac still reaches it), then ask before `metacomputer reset`.
 - **Handing artifacts over:** `metacomputer task finish NAME` copies everything to the Mac and makes contact sheets; `metacomputer shot --task NAME` saves a whole-desktop PNG; `metacomputer get PATH --task NAME` copies any file out.
 
 ## When only the user can go on

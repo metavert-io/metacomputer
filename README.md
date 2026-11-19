@@ -213,7 +213,8 @@ with Claude Code's normal tools.
 
 **Evidence and safety**
 - **Recordings:** per task, with screenshots before and after each action and a
-  contact sheet, or the whole desktop, with sound and key moments.
+  contact sheet, or the whole desktop, with sound and key moments, streamed to
+  your Mac as it records so a run that wipes the VM can't take it back.
 - **The signed action log** (opt-in), checked by `metacomputer actions verify`.
 - **Untrusted links and files:** `web open-untrusted` follows a link in a
   throwaway profile without clicking anything; suspicious files are read inside
@@ -434,6 +435,14 @@ click markers before and after each action, and `artifacts.json` listing it all.
 For a video of the whole desktop instead, `metacomputer record start NAME` and
 `record stop` capture it with ffmpeg, with the VM's sound if it has a sound card.
 
+**If the task might turn on the VM** (a script from a repository you don't trust,
+say), the whole-desktop recording is the one to run: it streams to your Mac as it
+records (`RECORD_TO=host`, the default), so a script that wipes the VM's home
+folder can't take it back. Cua Driver's per-task recording is written inside the
+VM; while the task folder is open, your Mac copies each finished step every 15
+seconds, and the newest step and the video at `task finish`.
+[SECURITY.md](SECURITY.md#recordings) says what a hostile VM can and can't erase.
+
 </details>
 
 <details>
@@ -535,7 +544,8 @@ through the vault rather than the chat.
 - **Public internet only.** The gateway on your Mac refuses connections to your
   Mac, your LAN, your tailnet, cloud metadata and outbound mail, and logs them.
 - **Locked down.** SSH and the live view listen on `127.0.0.1` only. SSH is
-  key-only, a key per role, with a pinned host key; the desktop user has no sudo;
+  key-only, a key per role, with a pinned host key, and the VM reads the keys from
+  root-owned files the desktop user can't change; the desktop user has no sudo;
   and what the build downloads is pinned and checked.
 - **The VM is treated as hostile.** What comes back is bounded and checked, files
   arrive as plain files, and its text is escaped before your terminal shows it.

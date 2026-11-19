@@ -4,7 +4,9 @@
 
 The VM is untrusted, so nothing of the Mac's may be forwarded to it whatever the
 user's own ssh configuration says. No VM needed and nothing connects: the
-arguments are built by lib.sh and resolved with `ssh -G`. Run:
+arguments are built by lib.sh and resolved with `ssh -G`. It also resolves the
+VM's own sshd config with this Mac's `sshd -T`: every account's keys come from a
+root-owned list outside its home (SSH_AUTH=cert: none for cua). Run:
     python3 tests/test_ssh_options.py
 """
 import os
@@ -94,6 +96,84 @@ def check_args(label, args):
     return rc
 
 
+GUEST_SSHD = os.path.join(LAB, "provisioning", "guest", "rootfs", "etc", "ssh", "sshd_config.d")
+KEYS_DIR = "/etc/ssh/metacomputer-keys"
+
+
+def sshd_effective(td, user, cert=False):
+    """What the guest's sshd config (its sshd_config.d files, plus the SSH_AUTH=cert file metacomputer-admin
+    writes) gives USER, resolved by this Mac's own sshd -T. Nothing listens."""
+    d = os.path.join(td, "cert" if cert else "key", "d")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+        for f in sorted(os.listdir(GUEST_SSHD)):
+            shutil.copy(os.path.join(GUEST_SSHD, f), d)
+        if cert:   # the file `metacomputer-admin ssh-auth cert` writes, as it writes it
+            admin = open(os.path.join(LAB, "provisioning", "guest", "rootfs", "usr", "local", "sbin",
+                                      "metacomputer-admin")).read()
+            body = admin.split("cat > \"$CERT_CONF\" <<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0]
+            open(os.path.join(d, "20-metacomputer-cert.conf"), "w").write(body + "\n")
+        hk = os.path.join(td, "hostkey")
+        if not os.path.exists(hk):
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", hk], check=True)
+        open(os.path.join(os.path.dirname(d), "sshd_config"), "w").write(f"Include {d}/*.conf\nHostKey {hk}\n")
+    r = subprocess.run(["/usr/sbin/sshd", "-T", "-f", os.path.join(os.path.dirname(d), "sshd_config"),
+                        "-C", f"user={user},host=localhost,addr=127.0.0.1"], capture_output=True, text=True)
+    out = {}
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition(" ")
+        out.setdefault(k, v)
+    return out, r.stderr
+
+
+def guest_key_checks(td):
+    """The VM's key lists: root-owned files outside every home, so a VM that wipes or edits ~/.ssh can neither
+    add a key nor cut the Mac off; SSH_AUTH=cert still turns the desktop user's static keys off."""
+    if not os.access("/usr/sbin/sshd", os.X_OK):
+        check("guest sshd config (needs /usr/sbin/sshd on this Mac)", False, "no /usr/sbin/sshd")
+        return
+    for user in ("cua", "cuaadmin"):
+        got, err = sshd_effective(td, user)
+        akf = got.get("authorizedkeysfile", "")
+        check(f"guest sshd: {user}'s keys come only from {KEYS_DIR}/, never the home folder",
+              akf == f"{KEYS_DIR}/%u", (akf, err[-200:]))
+    for user, lst in (("mcfill", "/etc/ssh/metacomputer-fill/authorized_keys"),
+                      ("mcproxy", "/etc/ssh/metacomputer-proxy/authorized_keys")):
+        got, err = sshd_effective(td, user)
+        check(f"guest sshd: {user} keeps its own root-owned list", got.get("authorizedkeysfile") == lst,
+              (got.get("authorizedkeysfile"), err[-200:]))
+    got, err = sshd_effective(td, "cua", cert=True)
+    check("guest sshd, SSH_AUTH=cert: cua has no static keys at all (certificates only)",
+          got.get("authorizedkeysfile") == "none" and got.get("trustedusercakeys") == "/etc/ssh/metacomputer-ca.pub",
+          (got.get("authorizedkeysfile"), got.get("trustedusercakeys"), err[-200:]))
+    got, err = sshd_effective(td, "cuaadmin", cert=True)
+    check("guest sshd, SSH_AUTH=cert: the maintenance account keeps its root-owned list",
+          got.get("authorizedkeysfile") == f"{KEYS_DIR}/%u", (got.get("authorizedkeysfile"), err[-200:]))
+    got, _ = sshd_effective(td, "cua")
+    check("guest sshd: StrictModes stays on (it checks the lists' owners and modes)", got.get("strictmodes") == "yes",
+          got.get("strictmodes"))
+    # Who writes the lists: the build puts the keys in the payload with cloud-init's options, provision.sh installs
+    # them root-owned (0644 in a 0755 folder) before the sshd config that names them, finalize.sh removes the
+    # bootstrap copies in the homes once sshd is shown to read the lists.
+    build = open(os.path.join(LAB, "scripts", "build-vm.sh")).read()
+    prov = open(os.path.join(LAB, "provisioning", "guest", "provision.sh")).read()
+    fin = open(os.path.join(LAB, "provisioning", "guest", "finalize.sh")).read()
+    check("build: the key lists carry the options cloud-init's copies do",
+          "printf 'restrict,pty %s\\n' \"$(head -n 1 \"$SSH_DIR/ops.pub\")\"" in build
+          and "printf 'restrict,command=\"/opt/metacomputer/bin/driver-mcp\" %s\\n' \"$(head -n 1 \"$SSH_DIR/mcp.pub\")\"" in build
+          and "printf 'restrict,pty %s\\n' \"$(head -n 1 \"$SSH_DIR/admin.pub\")\" > \"$SEED/payload/keys-admin\"" in build
+          and "'restrict,pty ' + k('ops.pub')" in build and "'restrict,command=\"/opt/metacomputer/bin/driver-mcp\" ' + k('mcp.pub')" in build)
+    i_dir = prov.find(f"install -d -o root -g root -m 0755 {KEYS_DIR}")
+    i_lst = prov.find('install -o root -g root -m 0644 "$PAYLOAD/${pair#*:}" "/etc/ssh/metacomputer-keys/${pair%%:*}"')
+    i_cfg = prov.find('cp -r --preserve=mode,timestamps "$PAYLOAD/rootfs/." /')
+    check("provision: root-owned lists (0644 in a 0755 folder), installed before the sshd config naming them",
+          0 <= i_dir < i_lst < i_cfg and '"$GUSER:keys-guest" "$AUSER:keys-admin"' in prov, (i_dir, i_lst, i_cfg))
+    i_chk = fin.find("grep -x 'authorizedkeysfile /etc/ssh/metacomputer-keys/%u' >/dev/null")
+    i_rm = fin.find('rm -f "$home/.ssh/authorized_keys"')
+    check("finalize: the homes' bootstrap copies go only after sshd is shown to read the lists", 0 <= i_chk < i_rm,
+          (i_chk, i_rm))
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-sshopt-")
     try:
@@ -139,6 +219,7 @@ def main():
                   transport[:6])
         else:
             check("metacomputer sh: its transport is ssh -T with the same safe arguments", False, argv[:5])
+        guest_key_checks(os.path.join(td, "sshd"))
     finally:
         shutil.rmtree(td, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} passed")

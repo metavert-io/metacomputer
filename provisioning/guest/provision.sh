@@ -38,6 +38,16 @@ systemctl stop snapd.service snapd.socket snapd.seeded.service 2>/dev/null || tr
 rm -rf /snap /var/snap /var/lib/snapd /root/snap
 
 step "install the guest file tree"
+# SSH key lists first: root-owned, outside every home (10-metacomputer.conf: AuthorizedKeysFile
+# /etc/ssh/metacomputer-keys/%u), in place before that file is and so before anything (an
+# openssh-server upgrade below) can restart sshd with it; cloud-init's copies in the homes stop
+# counting then, and finalize.sh removes them. Readable by all (sshd reads a list as its user),
+# writable only by root, in a root-owned folder: what sshd's StrictModes asks.
+install -d -o root -g root -m 0755 /etc/ssh/metacomputer-keys
+for pair in "$GUSER:keys-guest" "$AUSER:keys-admin"; do
+  [ -s "$PAYLOAD/${pair#*:}" ] || { echo "the payload has no ${pair#*:} (scripts/build-vm.sh makes it)"; false; }
+  install -o root -g root -m 0644 "$PAYLOAD/${pair#*:}" "/etc/ssh/metacomputer-keys/${pair%%:*}"
+done
 # rootfs/ mirrors target paths. The payload tarball was extracted with
 # --no-same-owner, so everything copied here is root-owned; the desktop
 # user's home is re-owned below.

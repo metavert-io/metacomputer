@@ -213,7 +213,64 @@ didn't run is marked the way the action log records it: refused by a guard (a
 `refused` record) or a shell run refused after its call was logged, `refused`; a
 call that came back as an error (Cua Driver refusing it in bounded mode, or an RPC
 error), `error`; calls that worked, or whose result came after the recording, stay
-plain, and `record moments` shows each outcome.
+plain, and `record moments` shows each outcome. It also runs
+the real `record` and `task` functions from `bin/metacomputer` against a stand-in
+VM, and checks:
+- where recordings go: the shipped default is `RECORD_TO=host` (and so is an unset
+  one); `record start` with `RECORD_TO=guest` still records in the VM and warns that
+  anything running there can delete it; any other value is refused before anything
+  starts; what `status` and `security` say in each case (`lib/recording.py`);
+- the Mac's half of a stream (`recording.py save`): it writes exactly what arrives,
+  never over an existing file or through a link, stops itself and the stream before
+  the free space falls below the reserve, and on TERM ends the command it runs and
+  keeps what arrived;
+- `record stop` after a stream that had ended on its own (saved, said, recorded in
+  the description file and as a warning event), and with a VM it can't reach (the
+  stream cut on the Mac within seconds, saved, and why);
+- the task copier (`TASK_SYNC_INTERVAL`), with a local folder as the VM and a stand-in
+  `ssh` that runs the copier's real commands: finished turns arrive while the task
+  runs, the newest and the video don't, each turn is copied once (a later change in
+  the VM doesn't reach the Mac), names other than `turn-<digits>` are never used; a
+  VM that slips a doctored copy of an earlier turn (and a folder in place of one of
+  its files) into its answer changes nothing the Mac has; a copy cut short is asked
+  for again until it comes through whole; a listing of 64 MB with no newline is
+  dropped at its limit; it ends when `task finish` removes its pid file, after the
+  folder has gone, or after its idle limit, and `TASK_SYNC_INTERVAL=0` and `task
+  start --no-sync` start none;
+- the bounds: `recording.py capture` passes on an answer within its limits, stops an
+  endless one (no newline) at its byte limit and a silent one at its deadline;
+  `vm_answer` with a VM that floods keeps nothing; `record start`/`stop` read the
+  recorder only through it; `recording.py finalize` converts only when the copy fits
+  above the reserve (else the `.mkv` is kept, exit 3) and never over an existing file;
+  `save --max-bytes` stops at its limit, and `--idle-timeout` and `--timeout` cut off a
+  VM that goes quiet or drips bytes, keeping what arrived; in guest mode, `record
+  start`, `record status` and the copy at `record stop` end at their deadlines with a
+  VM that never answers or goes quiet;
+- the copy before `reset`, `restore` and `baseline`, with a stand-in VM: a copy cut off (the VM goes quiet) and an
+  unreachable VM stop `reset` before anything is deleted and list what wasn't copied, and so does a copy that came
+  through but left out a file (a name the importer refuses, shown escaped); `--yes` doesn't go on,
+  `--discard-unsynced` does; a wiped home (no folder) and an empty folder go on with no flag; a copy that keeps
+  moving, with pauses under the idle limit, is never cut off; `baseline` deletes the VM's recordings only after a
+  whole copy. Two copies with room for one stretch: the first claims it, the second stops until it's released; a
+  real copy holds its 65 MiB claim while it writes and none after;
+- finalize under pressure, with a stand-in ffmpeg that ignores `-fs`: free space that
+  falls while it writes (stubbed) stops it before the reserve (exit 3); a TERM stops
+  it; an MP4 past its limit, or one that ends at it, isn't kept; each time the partial
+  MP4 is deleted and the `.mkv` kept, with the reason given. Its space claim exists
+  while ffmpeg runs and is what a copy sees; another operation's live claim leaves the
+  conversion no room (exit 3) and stops a `guest_import` copy and a stream, which go
+  through once it's gone;
+- a recording whose VM went away: `restore_from` and `stop` with the VM already off
+  still save what was streamed, and `record start` saves a stale streamed recording
+  first instead of refusing.
+
+`tests/test_guest_import.py` checks `--keep-existing`, which `task finish` and the copier
+use: a turn file already on the Mac is kept, one the VM has changed since is named and
+counted, a folder the VM sends in a kept file's place doesn't replace it, another
+spelling of the path (`Recording/TURN-00001/...`, on a case-insensitive filesystem)
+doesn't either, and a link in its place is still replaced, not followed. It checks
+`--only-top` (only the folders asked for arrive) and `-- CMD` with `--timeout` (a
+command that doesn't finish is stopped, and that isn't a whole copy).
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm` also records six
 seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality,
@@ -227,6 +284,19 @@ connected) is refused rather than created, and that a `RECORD_AUDIO` other than
 when it does; on such a VM it also checks that `RECORD_AUDIO=off` leaves it out.
 Without a VM, it checks that the description file describes a clip's sound track
 and reports none for a silent one.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm --wipe` then plays a
+VM that turns hostile, and resets the test VM twice (test VMs only). First the key
+lists: the desktop user's is root-owned (0644 in a 0755 folder), not writable by it,
+with no copy in `~/.ssh`, and `status` says so. A recording with the defaults;
+`rm -rf ~` in the VM through `metacomputer sh` in the middle of it; `record stop`:
+the MP4 must be on the Mac, decode whole and cover the time after the wipe, and
+`record stop` must still reach the VM and end it the usual way; `metacomputer sh`
+and `recordings --sync` must still work. Then a task with a real driver recording
+(`metacomputer call`): finished turns must reach the Mac while it runs, and after
+the same wipe `task finish` must work and still list them, and `sh` too. Last run:
+on a test VM built from this change (2026-11-18), all 115 checks of `--vm --wipe`
+passed, and `tests/test_options.py B D` (SSH certificates, the secrets accounts) 33/33.
 
 Sync between sound and picture was measured separately, by recording a full-screen
 flash and a beep started on the same frame once a second. The pulse input's
@@ -1036,6 +1106,25 @@ update the row with the doc's new wording. What it pins:
 - what recordings show of a filled login: the VM's fill puts a password only into a
   password field and never a username or code into one (secret-fill), and every doc that
   says passwords show as dots says usernames are visible;
+- where recordings are while they record: `RECORD_TO=host` in the defaults and as
+  `record start`'s fallback, streamed through `recording.py save` with the
+  `IMPORT_MIN_FREE_GB` reserve, and converted to MP4 by `recording.py finalize` only
+  within it; guest copies held to the reserve and `VM_DISK_BYTES`; the warning for
+  `RECORD_TO=guest`; `record stop` cutting the stream at once when the VM can't be
+  reached; the VM's answers read through `vm_answer` (a byte limit and a deadline);
+  finalize's space claim and watchdog (512 MiB, five times a second) and every copy
+  counting claims and each copy claiming its next stretch; the deadlines SECURITY.md lists
+  (guest-mode start, status and copy, the copier, the 120 s idle limit of `task finish` and
+  `recordings --sync`) and the stream without one; `reset`, `restore` and `baseline`
+  stopping before they delete an incomplete copy (`--discard-unsynced`, never `--yes`);
+  the task copier every `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest,
+  once, taking only the folders it asked for and keeping what the Mac has; `task
+  finish` keeping those copies under any spelling (`--keep-existing`); `stop`,
+  `reset` and `restore` saving a streamed recording with the VM down; every fallback
+  for `RECORD_TO` and `TASK_SYNC_INTERVAL` in the code is its default;
+- the VM's key lists: `AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u` before any
+  `Match` block, installed root-owned by provision.sh, the homes' copies removed by
+  finalize.sh, and no static keys for `cua` with `SSH_AUTH=cert`;
 - the optional hardening off by default (defaults.env and the code reading an unset
   setting), the hub and coordinate guard on, `VM_SHELL=auto` off while bounded,
   `SHELL_LOG=auto` logging when `ACTION_LOG=on` (called, not read), the 5-minute
@@ -1098,7 +1187,7 @@ get.sh, every suite release.sh runs and `gh` (each logs what it was asked). It c
 
 ## SSH options: `tests/test_ssh_options.py`
 
-`python3 tests/test_ssh_options.py` needs no VM and connects nowhere (44
+`python3 tests/test_ssh_options.py` needs no VM and connects nowhere (54
 checks). For each role (`admin`, `ops`, `mcp`) with static keys and with
 certificates, it builds the arguments `scripts/lib.sh` uses for every
 connection to the VM and checks:
@@ -1109,6 +1198,15 @@ connection to the VM and checks:
   config read in place of `/dev/null`;
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
+
+It also resolves the VM's own sshd config (`provisioning/guest/.../sshd_config.d`, plus
+the file `metacomputer-admin ssh-auth cert` writes) with this Mac's `sshd -T`: `cua` and
+`cuaadmin` read keys only from `/etc/ssh/metacomputer-keys/%u`, never a home folder;
+`mcfill` and `mcproxy` keep their own lists; with `SSH_AUTH=cert`, `cua` has no static
+keys and `cuaadmin` keeps its list; StrictModes stays on. And it checks that the build
+writes the lists with cloud-init's key options, `provision.sh` installs them root-owned
+before the config that names them, and `finalize.sh` removes the homes' copies only
+after `sshd -T` shows the lists in use.
 
 ## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 

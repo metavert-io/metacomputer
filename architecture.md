@@ -78,18 +78,22 @@ and `/var/lib/metacomputer/package-versions.txt` (copied to `logs/` at build).
    Mozilla's APT key (pinned fingerprint).
 3. `lume create --os linux`, then the cloud image is converted into the VM's
    50 GiB sparse `disk.img` (cloud-init grows the root partition).
-4. A NoCloud seed ISO (label `cidata`) carries `user-data` (users, SSH keys,
-   a pre-generated pinned SSH host key), `network-config` and `payload.tgz`
-   (provision script, guest file tree, the verified driver tarball, the
-   Mozilla key). The guest never downloads Cua components itself.
+4. A NoCloud seed ISO (label `cidata`) carries `user-data` (users, bootstrap
+   SSH keys, a pre-generated pinned SSH host key), `network-config` and
+   `payload.tgz` (provision script, guest file tree, the verified driver
+   tarball, the Mozilla key, and the accounts' key lists `keys-guest` and
+   `keys-admin`). The guest never downloads Cua components itself.
 5. First boot: cloud-init creates `cua` and `cuaadmin`, runs
-   `provisioning/guest/provision.sh` (purges snapd, adds Mozilla's repo,
+   `provisioning/guest/provision.sh` (installs the key lists root-owned in
+   `/etc/ssh/metacomputer-keys/` before the sshd config that reads only them
+   (`AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u`), purges snapd, adds Mozilla's repo,
    full-upgrade, installs Xorg/LightDM/XFCE/AT-SPI/apps/ffmpeg/x11vnc,
    installs the driver, configures autologin, accessibility, no screen
    blanking/locking, uinput, sshd, ufw, unattended-upgrades) and reboots.
 6. The host waits for the XFCE session, installs the VNC password, checks
    readiness (`guest-status`), runs `finalize.sh` (narrow sudo,
-   cloud-init disabled, cached user-data removed), stops the VM and clones
+   cloud-init disabled, cached user-data removed, cloud-init's key copies
+   removed from the homes once `sshd -T` shows the lists in use), stops the VM and clones
    the baseline (`BASELINE_NAME`, default `metacomputer-baseline`).
 
 ## Desktop-control transport
@@ -745,22 +749,67 @@ reason.
 
 ## Recording
 
-Two recorders, both writing MP4 inside the guest and copied to the host:
+Two recorders. Where each keeps its file while it records decides whether a VM
+that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
 
 1. **Driver-owned (per automation run):** `start_recording` with
    `record_video: true` on the agent's MCP connection: ffmpeg `x11grab` (1920×1080,
    30 fps, H.264) of the
    X display plus a trajectory folder per action (`turn-NNNNN/` with
    before/after accessibility state, before/after window images, click
-   markers, `action.json`). The test harness uses this for every test (in a
+   markers, `action.json`), all written inside the guest. The test harness uses this for every test (in a
    driver session of its own, through the hub) and copies everything to
    `recordings/<run>/` and `results/<run>/<test>/guest/`, unpacked as it streams
    in, with the same limits as `metacomputer get` (`guest_import.import_from_command`).
+   For a task folder (`metacomputer task start`), a copier on the Mac (`_task-sync`,
+   detached; pid file `RUN_DIR/task-sync.NAME.pid`) lists the folder's recording every
+   `TASK_SYNC_INTERVAL` seconds (`vm_answer`: at most 4 MB within 60 s) and asks for each
+   turn but the newest that hasn't come through whole yet, at most 500 at a time: names
+   other than `turn-<digits>` are never used. The copy runs `guest_import --only-top
+   LIST --keep-existing turn- --timeout 300 -- ssh ...`: only the folders asked for are
+   taken from the VM's answer, no file already on the Mac is replaced (by a file or a
+   folder, under any spelling), and the copy has a deadline. A turn is marked done
+   (`RUN_DIR/task-sync.NAME.done`) only after a whole copy, so one cut short is asked
+   for again. It ends when
+   `task finish` removes its pid file (killed with its process group after 30 s),
+   after the folder has been missing four times in a row, after eight failed
+   listings, after an hour without a new turn, or after a day. `task start
+   --no-sync` starts none (`web` checks without `--record`, which never call
+   `task finish`). `task finish` then copies the folder with
+   `guest_import --keep-existing recording/turn-` (`vm_tar_copy`: it ends only once the VM has sent
+   nothing for 120 s): a turn file the Mac already has
+   stays as it is, and one the VM changed since is named and counted in the
+   `task.finished` event. The video is only whole at `stop_recording`, so it
+   arrives at `task finish`.
 2. **Whole-desktop (any task, any driver):** `metacomputer record start|stop` runs
    `desktop-record` (ffmpeg x11grab, visible pointer, 20 fps, H.264) and
-   saves to `recordings/manual/`.
+   saves to `recordings/manual/` (or `RECORD_DIR`). With `RECORD_TO=host`, the
+   default, `desktop-record stream` writes Matroska to stdout over SSH, and the
+   Mac's half (`_record-pipe`, detached) is `lib/recording.py save`: it runs that
+   ssh, writes what arrives to a new `.mkv` (exclusive, no-follow), and stops the
+   stream before the Mac's free space falls below `IMPORT_MIN_FREE_GB`. `record
+   stop` asks the VM's recorder to stop (its answer through `vm_answer`: at most 4 KB
+   within 60 s), waits up to 30 s for the stream to end (none if the VM can't be
+   reached), then `recording.py finalize` remuxes to MP4 without re-encoding, only if a
+   copy of the `.mkv`'s size (plus two 512 MiB margins) fits above the reserve and what
+   other operations have claimed. It claims that space (`lib/storage.py`'s free-space
+   claims, which S3 syncs use too, and which `guest_import` and `recording.py save`
+   count against the reserve) until ffmpeg ends, and watches ffmpeg every 0.2 s: free
+   space within 512 MiB of the reserve, an MP4 past its limit (`-fs` is only advice),
+   a failure or a signal stops it, deletes the partial MP4 and keeps the `.mkv`. A
+   stream whose Mac side ended before `record stop` is marked `stream_ended_early` in
+   the description file. With `RECORD_TO=guest` the MP4 is written in
+   `~/metacomputer-runs/manual/` and copied at stop (`vm_copy_video`: `recording.py
+   save` with the reserve, `VM_DISK_BYTES` and deadlines: 60 s without a byte, an hour
+   in all); `record start` and `record status` in that mode run under `run_until` (60
+   s, `MCOMP_RECORD_WAIT`).
+   `stream`, `stop` and `status` keep their state in `/run/user/UID/metacomputer`,
+   not the home folder.
 
-`metacomputer reset` syncs `~/metacomputer-runs` from the guest before replacing the VM.
+`metacomputer reset` (and `restore`) finishes a desktop recording, whether or not the
+VM is still running, then syncs `~/metacomputer-runs` from the guest, before replacing
+the VM; `stop` does the same with a VM that's already off, and `record start` saves a
+streamed recording whose stream had ended before it starts a new one.
 
 ## Lifecycle
 
@@ -769,8 +818,8 @@ Two recorders, both writing MP4 inside the guest and copied to the host:
 | `start` | check and lock the storage (`VOLUMES`, `REFDISKS`; none with `--no-volumes`), start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags) and the storage's `--disk`/`--mount`/`--usb-storage`, wait for SSH, mount the storage, wait for the XFCE session and an MCP handshake |
 | `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw, release the storage locks |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe (through the hub, as a status client), the hub (pid, clients, idle time) |
-| `reset` | sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
-| `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
+| `reset` | finish a desktop recording → sync guest recordings (`sync_or_stop`: stop here, deleting nothing, unless the copy is whole or `--discard-unsynced`) → stop → `lume delete` working VM → `lume clone` baseline → start |
+| `baseline` | sync guest recordings (`sync_or_stop`, as for `reset`) and remove them from the VM, then re-snapshot the working VM (previous baseline kept as `-prev`) |
 
 The VMs are not started at login and no LaunchAgent or daemon was added.
 With an event sink configured (or a sink-change announcement still waiting),

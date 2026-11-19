@@ -19,23 +19,23 @@ alias). `metacomputer help` prints a summary.
 | `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s |
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
 | `who` / `release` | Who is using the VM; hand it over (one controller at a time) |
-| `reset [--yes]` | Restore the clean baseline (asks first; evidence on the Mac is kept) |
-| `checkpoint NAME [--replace] [--with-volumes]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes]` | Saved states of the stopped VM, with its disk volumes if you ask (deleting and restoring ask first) |
+| `reset [--yes] [--discard-unsynced]` | Restore the clean baseline (asks first; evidence on the Mac is kept). It copies the VM's recordings first and stops, deleting nothing, if that copy isn't whole; `--discard-unsynced` goes on without what wasn't copied (`--yes` doesn't) |
+| `checkpoint NAME [--replace] [--with-volumes]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes] [--discard-unsynced]` | Saved states of the stopped VM, with its disk volumes if you ask (deleting and restoring ask first; `restore` copies the recordings first, as `reset` does) |
 | `volume create NAME --size 20G [--dir PATH]` / `volume create NAME --folder PATH` / `volume list [--json]` / `volume resize NAME --size 40G` / `volume delete NAME [--yes]` | Disk volumes (kept outside the VM, read-write to one VM) and folder volumes (a Mac folder, read-only unless `:rw`), attached with `VOLUMES` |
 | `volume create NAME --s3 --bucket B --endpoint URL [--region R] [--prefix P]` / `volume keys NAME` / `volume test NAME` / `volume sync NAME [--force] [--resync]` | S3 volumes: a folder kept in step with a bucket; the keys (your own terminal, into the Keychain); a connection check; a sync now |
 | `refdisk create NAME --from FOLDER [--dir PATH]` / `refdisk list [--json]` / `refdisk delete NAME [--yes]` | Read-only reference disks packed from a Mac folder, attached with `REFDISKS` |
-| `baseline [--yes]` | Make the current VM the new baseline (the old one is kept as `-prev`) |
+| `baseline [--yes] [--discard-unsynced]` | Make the current VM the new baseline (the old one is kept as `-prev`). The VM's recordings are copied to the Mac and then removed from it, only once the copy is whole, as for `reset` |
 | `build [--replace]` | Build the VM and its baseline from scratch |
 | `sh -c CMD \| --file SCRIPT \| - [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]` | Run bash in the VM as the desktop user, with the desktop's environment |
 | `claude [start] [--token NAME] [--ttl 1h] [--model M] [--skip-permissions] [--session NAME] [--cwd DIR] [--show] [--no-install] [-- CLAUDE_ARGS]` | Claude Code inside the VM, in tmux: installed if missing, signed in through the vault's proxy with a short-lived token for an api secret (`Authorization: Bearer` → `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key` → `ANTHROPIC_API_KEY`), first-run choices set ([guide](guide.md#claude-inside-the-metacomputer)) |
 | `claude send TEXT\|--file F\|- [--no-enter] [--wait] [--quiet S] [--timeout S]` / `claude read [--lines N\|--all]` / `claude wait` / `claude keys KEY...` / `claude show [--again]` / `claude status` / `claude renew [--ttl D]` / `claude stop [--revoke]` | Talk to it through tmux (a bracketed paste, then Enter), read its screen (escaped), wait for it to settle, answer its questions, put it on the VM's desktop, check it and its token, keep its token going (`secrets token renew`, asked like a new token), end it (and its token). Each takes `--session NAME`, `--json`, `--override` |
 | `inspect [SECTION...] [--minutes N] [--top N] [--json]` | Read-only snapshot of the VM: `system`, `windows`, `processes`, `ports`, `files`, `browser` |
-| `task start SLUG` / `task finish NAME` | One folder per task: video, contact sheet, screenshots, files, `artifacts.json` |
+| `task start SLUG [--no-sync]` / `task finish NAME` | One folder per task: video, contact sheet, screenshots, files, `artifacts.json`; the recording's finished turns are copied to the Mac while it's open (`TASK_SYNC_INTERVAL`; `--no-sync` for a task that records nothing) |
 | `put HOST_PATH... [--to GUEST_DIR] [--overwrite]` | Copy files into the VM (default `~/Inbox`), each checked by SHA-256; a taken name lands as `name (1).ext` unless `--overwrite` |
 | `get GUEST_PATH [HOST_DIR] [--task NAME]` | Copy files out of the VM |
 | `shot [HOST_PATH] [--task NAME]` | A PNG of the whole VM screen |
 | `rename GUEST_PATH NEW_NAME` | Rename a file in the VM (a download saved under its id) |
-| `record start [NAME] [FPS]` / `record stop` / `record status` / `record moments FILE` | Record the whole desktop; its key moments when the action log is on |
+| `record start [NAME] [FPS]` / `record stop` / `record status` / `record moments FILE` | Record the whole desktop, streamed to the Mac as it records; its key moments when the action log is on |
 | `recordings [--sync] [N]` | List recent recordings; copy the VM's task runs to the Mac |
 | `contact-sheet MP4 [OUT.png]` | 12 frames of a recording in one image |
 | `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model |
@@ -152,15 +152,16 @@ instead.
 | `S3_SYNC_INTERVAL` | `60` | Seconds between syncs of S3 volumes while the VM runs (they also sync at start and stop) |
 | `S3_BACKUP_MAX_GB` | `5` | How much of the local files a sync overwrote or deleted is kept (newest first) |
 
-**Desktop recordings** (`metacomputer record`):
+**Recordings** (`metacomputer record`, and per-task recordings in task folders):
 
 | Key | Default | |
 | --- | --- | --- |
 | `RECORD_FPS` | `20` | Frames per second |
 | `RECORD_QUALITY` | `standard` | `high`: sharp enough to edit into videos, several times larger |
-| `RECORD_TO` | `guest` | `host`: stream to the Mac while recording, so nothing builds up in the VM |
+| `RECORD_TO` | `host` | `host`: stream to the Mac while recording, so what arrived is out of the VM's reach and nothing builds up in it. `guest`: record in the VM and copy at `record stop`; until then anything running there can delete it, and `record start` warns ([SECURITY.md](../SECURITY.md#recordings)) |
 | `RECORD_DIR` | `recordings/manual/` | Any folder on the Mac, such as an external drive; only its last part is created |
 | `RECORD_AUDIO` | `auto` | `auto`: include the VM's sound when it has the virtual sound card; `off`: video only |
+| `TASK_SYNC_INTERVAL` | `15` | Seconds between copies of a task's finished recording turns to the Mac while its task folder is open (`task start` to `task finish`); each turn is copied once and `task finish` never replaces it. `0`: copy only at `task finish` |
 
 **Optional hardening** ([SECURITY.md](../SECURITY.md)):
 

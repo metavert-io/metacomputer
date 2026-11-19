@@ -1558,9 +1558,18 @@ def main():
                             capture_output=True, text=True, env=dict(os.environ, MCOMP_CONFIG=cfgf), timeout=60,
                             stdin=subprocess.DEVNULL)
         new = [e for e in local_log()[n0:] if e["type"] == "recording_failed"]
-        check("R5 a failed recording: a fixed message; what the VM said only as cleaned data",
+        check("R5 a failed recording: a fixed message and a fixed reason; nothing the VM said, even cleaned",
               new and new[0]["message"] == "Recording 'demo' failed: the VM's recorder didn't hand over a video"
-              and "CALL" in new[0]["data"].get("detail", "") and "token=abc" not in json.dumps(new[0]), (rr.stderr, new))
+              and new[0]["data"].get("reason") == "other" and "detail" not in new[0]["data"]
+              and "CALL" not in json.dumps(new[0]) and "555" not in json.dumps(new[0]), (rr.stderr, new))
+        n0 = len(local_log())
+        subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; die() {{ exit 1; }}; name=demo; mode=guest; '
+                        f'state=/nonexistent/x\n{fn}\nrec_fail "the VM\'s recorder didn\'t hand over a video" "x" recorder_answer'],
+                       capture_output=True, text=True, env=dict(os.environ, MCOMP_CONFIG=cfgf), timeout=60,
+                       stdin=subprocess.DEVNULL)
+        new = [e for e in local_log()[n0:] if e["type"] == "recording_failed"]
+        check("R5 ...a known reason is passed as its category", new and new[0]["data"].get("reason") == "recorder_answer",
+              new)
         f5 = untrusted_findings("https://start.example/", [], [{"tabs": [("https://call-555-now.evil.example/x", "t")],
                                                                   "password_fields": 1}],
                                 "http://we ird.example/", 1, ["https://a.example/"], ["invoice.pdf.exe"])

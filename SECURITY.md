@@ -7,6 +7,8 @@ it:
 - nothing listens off your Mac's loopback;
 - the VM shares no storage with your Mac or other VMs unless you attach some
   ([Storage](#storage));
+- the VM reads its SSH keys from root-owned files, so nothing running as the desktop
+  user can add a key or lock your Mac out ([SSH keys outside the home](#ssh-keys-outside-the-home));
 - with mcomp-vm, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
   adds a sound card inside the VM that plays into nothing; it never reaches the Mac.)
 
@@ -23,7 +25,8 @@ guard) to every way in, through a socket only you can use, and marks page text a
 person likely can't see ([Hidden page text](#hidden-page-text)); the live view and
 handoffs, where Claude gives the computer to you and waits; and the lessons
 channel (`metacomputer learn`), which can't carry text from the VM into future
-sessions.
+sessions; and [recordings](#recordings): which of them a VM that turns hostile
+mid-run can erase.
 
 | Setting | What it adds | Costs |
 | --- | --- | --- |
@@ -210,6 +213,27 @@ anyone: anything running as you can call `emit`, or post to a sink directly.
 - It is best effort, at least once, not an audit trail: anyone with your login
   can change its backlog and logs. The signed action log above is the
   tamper-evident record.
+
+## SSH keys outside the home
+
+The VM's sshd reads every account's keys from a root-owned file
+(`AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u`; `mcfill` and `mcproxy` have their
+own, also root-owned), never from `~/.ssh`. The desktop user can read its list, as
+sshd needs, but not change it: nothing running in the VM as that user can add a key
+of its own, or cut your Mac off by deleting `~/.ssh` (a run that wipes the home
+folder, say). The build writes the lists from your keys with the same options as
+before (`restrict`, and the forced driver command for `mcp`) before sshd's config
+names them, and removes cloud-init's bootstrap copies from the homes once sshd is
+shown to read the lists. `metacomputer status` says which a VM has; a VM built
+before this reads `~/.ssh/authorized_keys` until it's rebuilt. With
+`SSH_AUTH=cert` the desktop user has no static keys at all (below), and the
+maintenance account keeps its list.
+
+**Where it ends:** root in the VM can change any of this, as it can everything
+else in the VM. What `metacomputer status` shows (from the VM's `guest-status`) is
+the VM's own report of its configuration and file owners: an indicator for a VM
+that behaves, not proof about one that doesn't. Your Mac's side still checks the
+VM's pinned host key on every connection.
 
 ## SSH certificates (`SSH_AUTH=cert`)
 
@@ -1000,6 +1024,132 @@ persistence that you can audit, not an approval you can prove.
 - A misclassified error only moves a count: the classes come from fixed
   patterns over the driver's and the hub's messages, and a page can contain
   those words.
+
+## Recordings
+
+A recording is the evidence of what ran in the VM, and that includes a run that
+turns hostile, such as a script from a stranger's repository that wipes the home
+folder. What decides whether it survives is where the recording is while it's
+being made: a file inside the VM can be deleted or changed by anything running
+there, and a file on your Mac can't be reached from the VM at all.
+
+| Recording | While it records, it is | A VM that turns hostile mid-recording can | It can't |
+| --- | --- | --- | --- |
+| **Desktop, `RECORD_TO=host`** (the default) | On the Mac: the VM encodes its screen and streams it over SSH, and the Mac writes what arrives to a new file | Stop sending (kill the recorder, shut down); from then on, with root, send any picture | Take back or change what already arrived; fill your disk: the stream stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB` (10 GB by default), and the MP4 is made from it only if that copy fits above the reserve too, and is stopped if the free space nears the reserve while it's made (either way the `.mkv` is kept as it is) |
+| **Desktop, `RECORD_TO=guest`** | An MP4 in the VM's `~/metacomputer-runs/manual/`, copied at `record stop` | Delete or change it before then (wiping the home folder does) | Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold; or hold it open: it ends after a minute without a byte, or an hour in all, keeping what arrived |
+| **Per task** (Cua Driver's `start_recording` into a task folder) | Files in the VM's task folder: a folder per action, and the video, which is only whole at `stop_recording` | Delete or change the newest action's folder, the video, and anything not copied yet, before `task finish` | Change an action's folder once the Mac has it: while the task folder is open, the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds (15), once, and `task finish` never replaces it |
+
+Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while
+`RECORD_TO=guest` is in force, and `metacomputer status` and `metacomputer security`
+say which mode is.
+
+**What the Mac does:**
+- **It notices a stream that ends early.** If the stream ends before you run
+  `record stop` (the VM stopped sending or went away, or your disk reached its
+  reserve), `record stop` saves what arrived and says so, the description file
+  records `stream_ended_early`, and the `task.recording_stopped` event is a
+  warning. With an event sink, the health watcher also reports a recording that
+  stopped on its own (`recording_failed`) within 5 minutes. A VM that's gone (it
+  crashed, or was stopped without `record stop`) doesn't strand a recording:
+  `metacomputer stop`, `reset` and `restore` save what was streamed whether or not
+  the VM is still running, and the next `record start` does it too.
+- **It still reaches a VM whose home folder was wiped.** The VM reads its SSH
+  keys from root-owned files, not `~/.ssh` ([keys outside the home](#ssh-keys-outside-the-home)),
+  so a wipe doesn't cut the Mac off: `record stop` ends the recording the usual
+  way, and `metacomputer sh`, `task finish` and `recordings --sync` keep working.
+  (Checked on a test VM: `rm -rf ~` in the middle of a recording, which came back
+  whole, including what happened on screen after the wipe.) A VM built before
+  this reads `~/.ssh/authorized_keys`, so there a wipe locks the desktop account
+  out until `metacomputer reset --discard-unsynced` (the copy before a reset can't
+  reach the VM, so reset stops without the flag); `record stop` then cuts the
+  stream on the Mac at once, saves what arrived and says why. `SSH_AUTH=cert` never
+  used `~/.ssh`.
+- **Copies made during a task stay as they were copied.** The copier uses only
+  names of the form `turn-<digits>` from the VM's listing and asks for a few of them
+  at a time; from the VM's answer it takes only those folders (anything else the VM
+  slips in is left out) and never replaces a file the Mac already has, with a file
+  or a folder. A turn counts as copied only once a copy of it came through whole,
+  so one cut short is asked for again. `task finish` copies the rest the same way:
+  every turn file the Mac already has is kept, whatever the VM sends in its place,
+  under any spelling of its path (case and Unicode normalization don't matter, as
+  on macOS's default filesystem). A file the VM has changed since is named on the
+  terminal and counted in the `task.finished` event (`recording_changed_in_vm`),
+  which is then a warning. All of it goes through the importer every copy from the
+  VM uses (plain files and folders, never written through a link, within the disk
+  reserve), and each copy has a deadline (below).
+- **It deletes nothing in the VM that wasn't copied.** `reset`, `restore` and
+  `baseline` copy the VM's `~/metacomputer-runs` first, and delete it (with the VM,
+  or inside it) only once that copy is whole. A folder that's missing or empty
+  counts as whole, so a VM whose home was wiped resets as usual. Whole means the
+  copy came through and the VM's own listing names no file this Mac doesn't have
+  at that size; both are checked every time, and a listing that can't be had (the
+  VM can't be reached, or it's over 4 MB) is never whole. When the copy stops
+  short (the VM went quiet or can't be reached, the disk reached its reserve, a
+  file came through cut off or was left out), they stop before deleting anything,
+  list what the
+  VM holds that this Mac doesn't (from the VM's own listing), and go on only with
+  `--discard-unsynced`, or when you type `discard` at the prompt that names the
+  loss. `--yes` never does.
+- **It keeps its reserve while it converts.** The MP4 is made only if a copy of the
+  stream fits above `IMPORT_MIN_FREE_GB`, and that space is claimed while ffmpeg
+  writes it: every copy from the VM (the task copier's included), every stream
+  and every S3 sync counts the claim against the reserve (and the conversion
+  counts an S3 sync's claim). ffmpeg is watched as well (five times a second): if
+  the free space comes within 512 MiB of the reserve anyway (a copy that was
+  already writing, another program), or the MP4 grows past its limit, ffmpeg is
+  stopped. Whatever stops it, the partial MP4 is deleted, the `.mkv` is kept, and
+  `record stop` says which happened.
+- **Copies share that reservation.** Each copy from the VM and each stream claims
+  the next stretch it writes (65 MiB for a copy, 64 MiB for a stream) before
+  writing it, and only if it fits above the reserve beside every other claim, so
+  two copies at once can't both count on the same headroom.
+- **It bounds what the VM says, and how long it waits.** The VM's short answers
+  (the recorder's replies, a task folder's listing) are read with a byte limit and
+  a deadline, so a VM that answers without end, or never, can't grow or stall the
+  command reading them. Everything else a recording asks of the VM has a deadline
+  too: `record start` and `record status` in guest mode (a minute), the guest-mode
+  copy at `record stop` (a minute without a byte, or an hour in all), the task
+  copier's copies (5 minutes), and `task finish` and `recordings --sync`, which
+  stop only once the VM has sent nothing for 120 s: a copy that keeps moving,
+  however large or slow, is never cut off. What arrived before a deadline is kept.
+  The one exchange without a deadline is the stream itself, which runs until
+  `record stop` (or until the Mac's free space reaches its reserve).
+- **Its events carry nothing the VM chose.** A VM that holds a value from the vault
+  could spell it in a file name, a size, a video's own length or its recorder's
+  reply. So `task.recording_failed` gives a fixed reason category, never what the
+  recorder said; `task.recording_stopped` gives the length this Mac's clock measured
+  (record start to stop) and the size only as one of eight bounds; and
+  `task.finished` gives what the task made as count classes (`none`, `1-9`, `10-99`,
+  `100 or more`), with no file names or video lengths. The files themselves, their
+  description files and `artifacts.json` keep the exact values on your Mac.
+- **It describes what it saved.** The description file beside a desktop recording
+  is written by the Mac, with the MP4's length and SHA-256.
+
+**Where it ends:**
+- A streamed recording is the VM's own picture of its screen. A VM with root could
+  send a doctored picture from some point on; what arrived before that point is as
+  it was sent. The driver's recording is made inside the VM too.
+- A per-task recording's video, its newest action, and whatever the driver wrote
+  since the last copy are only in the VM until `task finish`. So are recordings made
+  outside a task folder (an `output_dir` of your own, `web --record`), which only
+  `recordings --sync`, `task finish` or `reset` copy. For a run you don't trust,
+  record the whole desktop as well.
+- `recordings --sync` replaces what it copied before with what the VM has now; only
+  the task copier and `task finish` keep earlier copies.
+- A VM that sends a byte now and then keeps `task finish` and `recordings --sync`
+  going until you stop them (Ctrl-C); what arrived whole stays on the Mac.
+- A VM that's stopped when `reset` or `restore` runs isn't started to copy its
+  recordings: what's only inside it goes with it (the prompt says so).
+  `install.sh --replace-vm` deletes the VM without copying anything.
+- The reservation covers metacomputer's own writers. Another program filling the
+  disk at the same time isn't counted; each copy still checks the real free space
+  before every stretch, and the MP4 conversion's watchdog stops it.
+- Before the copier's first pass, and for the newest turn throughout, a turn exists
+  only in the VM; the VM can also simply never list a turn, or send nothing. What it
+  can't do is change a turn file the Mac already has.
+- On your Mac, recordings are your own files: anything running as you can change
+  them. The SHA-256 in the description file lets you check a copy you keep
+  elsewhere; it isn't signed.
 
 ## Storage
 

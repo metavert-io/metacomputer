@@ -102,6 +102,29 @@ def proxy_account():
 
 
 out["secrets_proxy"] = proxy_account()
+
+
+# Where sshd reads this account's keys: a root-owned list outside the home (VMs built with this version), so
+# wiping or editing ~/.ssh neither adds a key nor cuts the Mac off; older VMs read ~/.ssh/authorized_keys.
+def ssh_keys():
+    import pwd
+    user = pwd.getpwuid(os.getuid()).pw_name
+    lst, conf = f"/etc/ssh/metacomputer-keys/{user}", "/etc/ssh/sshd_config.d/10-metacomputer.conf"
+    try:
+        configured = any(l.split() == ["AuthorizedKeysFile", "/etc/ssh/metacomputer-keys/%u"] for l in open(conf))
+    except OSError:
+        configured = False
+    ok = True
+    for p in (lst, os.path.dirname(lst)):
+        try:
+            st = os.stat(p, follow_symlinks=False)
+            ok = ok and st.st_uid == 0 and not st.st_mode & 0o022
+        except OSError:
+            ok = False
+    return {"outside_home": configured and ok}
+
+
+out["ssh_keys"] = ssh_keys()
 # Storage (metacomputer volumes, Mac folders, reference disks): whether this VM can mount them
 # (VMs built before storage support can't: `metacomputer build --replace`), and what this boot
 # attached, as storage-helper recorded it, checked against the live mount table.

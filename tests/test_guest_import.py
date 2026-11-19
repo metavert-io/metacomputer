@@ -17,7 +17,9 @@ It checks that:
 - `contact-sheet` refuses an output that's a link and writes through a temporary
   file it then renames;
 - `recordings --sync` goes through the same importer, and the listing escapes what
-  it prints.
+  it prints;
+- `--keep-existing PREFIX` (task finish) keeps files the Mac already has under PREFIX,
+  names and counts the ones the VM has changed since, and still replaces a link.
 """
 import io
 import json
@@ -320,6 +322,7 @@ def run(td):
     check("the Mac file is still untouched at the end", open(victim, "rb").read() == before)
     hostile_metadata_checks(td)
     command_checks(td)
+    keep_checks(td)
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0
@@ -579,6 +582,128 @@ def command_checks(td):
           and os.listdir(os.path.join(td, "col2")) == ["a.bin"], (probs, os.listdir(os.path.join(td, "col2"))))
     ok, probs = harness.collect_guest([sys.executable, prod, "quiet"], os.path.join(td, "col3"), lim)
     check("collection: a whole copy is complete, with nothing to report", ok and probs == [], probs)
+
+
+def keep_checks(td):
+    # 11. --keep-existing (task finish): recording turns copied while the task ran can't be swapped by the VM later
+    dest = os.path.join(td, "keep")
+    for rel, data in (("recording/turn-00001/a.json", b"as copied\n"), ("recording/turn-00001/b.png", b"same\n"),
+                      ("files/out.txt", b"old output\n")):
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        with open(os.path.join(dest, rel), "wb") as f:
+            f.write(data)
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        add_file(tf, "./recording/turn-00001/a.json", b"doctored by the VM\n")
+        add_file(tf, "./recording/turn-00001/b.png", b"same\n")
+        add_file(tf, "./recording/turn-00002/c.json", b"new turn\n")
+        add_file(tf, "./recording/recording.mp4", b"video\n")
+        add_file(tf, "./files/out.txt", b"new output\n")
+    report = os.path.join(td, "keep-report.json")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet", "--keep-existing", "recording/turn-"],
+                       input=b.getvalue(), capture_output=True, env=dict(os.environ, MCOMP_IMPORT_KEEP_REPORT=report))
+    err = r.stderr.decode()
+    rd = lambda rel: open(os.path.join(dest, rel), "rb").read()  # noqa: E731
+    check("--keep-existing: a turn file the Mac already had keeps the Mac's copy", r.returncode == 0
+          and rd("recording/turn-00001/a.json") == b"as copied\n", (r.returncode, err))
+    check("...new turn files and anything outside the prefix arrive as usual",
+          rd("recording/turn-00002/c.json") == b"new turn\n" and rd("recording/recording.mp4") == b"video\n"
+          and rd("files/out.txt") == b"new output\n")
+    check("...a kept file the VM has changed since is named on stderr (escaped), an identical one isn't",
+          "1 of them differ in the VM now" in err and "recording/turn-00001/a.json" in err and "b.png" not in err, err)
+    rep = json.load(open(report)) if os.path.exists(report) else {}
+    check("...and counted for the caller's event, with folder names only", rep == {"kept": 2, "changed": 1,
+                                                                                  "changed_in": ["turn-00001"]}, rep)
+    # Without the option the importer replaces, as before (recordings --sync, get).
+    with tarfile.open(fileobj=(b2 := io.BytesIO()), mode="w") as tf:
+        add_file(tf, "recording/turn-00001/a.json", b"replaced\n")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet"], input=b2.getvalue(), capture_output=True)
+    check("without --keep-existing a file is replaced as before", r.returncode == 0
+          and rd("recording/turn-00001/a.json") == b"replaced\n")
+    # A kept name on the Mac that's a link isn't kept: it's replaced, never followed (the usual rule).
+    target = os.path.join(td, "keep-target.txt")
+    with open(target, "w") as f:
+        f.write("the Mac's\n")
+    os.remove(os.path.join(dest, "recording/turn-00001/a.json"))
+    os.symlink(target, os.path.join(dest, "recording/turn-00001/a.json"))
+    with tarfile.open(fileobj=(b3 := io.BytesIO()), mode="w") as tf:
+        add_file(tf, "recording/turn-00001/a.json", b"from the VM\n")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet", "--keep-existing", "recording/turn-"],
+                       input=b3.getvalue(), capture_output=True)
+    p = os.path.join(dest, "recording/turn-00001/a.json")
+    check("...a link where a kept file would be is replaced, its target untouched", not os.path.islink(p)
+          and open(p, "rb").read() == b"from the VM\n" and open(target).read() == "the Mac's\n")
+    for bad in ("/abs", "../up", ""):
+        r = subprocess.run([sys.executable, IMPORT, dest, "--keep-existing", bad], input=b"", capture_output=True)
+        check(f"--keep-existing {bad!r} is refused", r.returncode == 2, r.stderr)
+
+    # A folder where a kept file is: the file stays (before, the file was unlinked to make room for the folder).
+    with open(p, "wb") as f:
+        pass
+    os.remove(p)
+    with open(p, "wb") as f:
+        f.write(b"as copied\n")
+    with tarfile.open(fileobj=(b4 := io.BytesIO()), mode="w") as tf:
+        add_dir(tf, "recording/turn-00001/a.json")
+        add_file(tf, "recording/turn-00001/a.json/inner.txt", b"x\n")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet", "--keep-existing", "recording/turn-"],
+                       input=b4.getvalue(), capture_output=True)
+    check("--keep-existing: a folder the VM sends in a kept file's place doesn't replace it",
+          os.path.isfile(p) and open(p, "rb").read() == b"as copied\n" and b"differ in the VM now" in r.stderr,
+          (r.returncode, r.stderr[-300:]))
+    # Another spelling of the same path (case, Unicode normalization): on macOS's default filesystem it's the same
+    # file, and it's kept like the first spelling.
+    probe_dir = tempfile.mkdtemp(dir=td)
+    open(os.path.join(probe_dir, "Aa"), "w").close()
+    insensitive = os.path.exists(os.path.join(probe_dir, "aA"))
+    with tarfile.open(fileobj=(b5 := io.BytesIO()), mode="w") as tf:
+        add_file(tf, "Recording/TURN-00001/a.json", b"doctored by the VM\n")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet", "--keep-existing", "recording/turn-"],
+                       input=b5.getvalue(), capture_output=True)
+    if insensitive:
+        check("--keep-existing: Recording/TURN-00001/... (another spelling of the kept path) doesn't replace it",
+              open(p, "rb").read() == b"as copied\n" and b"differ in the VM now" in r.stderr, (r.returncode, r.stderr[-300:]))
+    else:
+        check("--keep-existing: another spelling is a different path here (case-sensitive filesystem)", True)
+    check("guest_import.fold: case and Unicode normalization don't matter",
+          guest_import.fold("Recording/Café") == guest_import.fold("recording/café"))
+
+    # --only-top: only the folders asked for are taken from the stream.
+    d6 = os.path.join(td, "only")
+    names = os.path.join(td, "only-names")
+    with open(names, "w") as f:
+        f.write("turn-00003\n")
+    with tarfile.open(fileobj=(b6 := io.BytesIO()), mode="w") as tf:
+        add_file(tf, "turn-00003/action.json", b"asked for\n")
+        add_file(tf, "./turn-00003/after.png", b"png\n")
+        add_file(tf, "turn-00001/action.json", b"not asked for\n")
+        add_file(tf, "evil.txt", b"not asked for\n")
+    r = subprocess.run([sys.executable, IMPORT, d6, "--only-top", names], input=b6.getvalue(), capture_output=True)
+    check("--only-top: only the folders asked for arrive; the rest is left out and named",
+          r.returncode == 0 and sorted(os.listdir(d6)) == ["turn-00003"]
+          and sorted(os.listdir(os.path.join(d6, "turn-00003"))) == ["action.json", "after.png"]
+          and b"not one of the folders asked for" in r.stderr, (sorted(os.listdir(d6)), r.stderr[-300:]))
+    for bad in ("../x", "a/b", ""):
+        with open(names, "w") as f:
+            f.write(bad + "\n")
+        r = subprocess.run([sys.executable, IMPORT, d6, "--only-top", names], input=b"", capture_output=True)
+        check(f"--only-top refuses a list naming {bad!r}", r.returncode == 2, r.stderr)
+
+    # -- CMD with --timeout: the command's output is the stream, and a command that doesn't finish is stopped.
+    with open(names, "w") as f:
+        f.write("turn-00003\n")
+    t0 = time.time()
+    r = subprocess.run([sys.executable, IMPORT, os.path.join(td, "slow"), "--timeout", "2", "--",
+                        sys.executable, "-c", "import time; time.sleep(60)"], capture_output=True, timeout=30)
+    check("-- CMD: stopped at its --timeout, and that isn't a whole copy", r.returncode == 1 and time.time() - t0 < 15,
+          (r.returncode, round(time.time() - t0, 1)))
+    tarbytes = b6.getvalue()
+    src = os.path.join(td, "stream.tar")
+    open(src, "wb").write(tarbytes)
+    r = subprocess.run([sys.executable, IMPORT, os.path.join(td, "fromcmd"), "--only-top", names, "--", "cat", src],
+                       capture_output=True, timeout=30)
+    check("-- CMD: its output is unpacked with the same rules", r.returncode == 0
+          and sorted(os.listdir(os.path.join(td, "fromcmd"))) == ["turn-00003"], (r.returncode, r.stderr[-300:]))
 
 
 if __name__ == "__main__":

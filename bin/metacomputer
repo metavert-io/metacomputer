@@ -4,7 +4,7 @@
 #
 # Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
 #
-#   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes]
+#   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes] [--discard-unsynced]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
 #   call [--session NAME] TOOL ['JSON']
@@ -20,7 +20,8 @@
 #   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
-#   task start SLUG | finish NAME  one folder per task (guest + host), artifacts listed
+#   task start SLUG [--no-sync] | finish NAME   one folder per task (guest + host), artifacts listed; finished recording
+#                                  turns copied to the Mac while it's open (TASK_SYNC_INTERVAL)
 #   put HOST_PATH... [--to GUEST_DIR] [--overwrite]
 #                                  copy files into the VM (default ~/Inbox), each checked by SHA-256; a
 #                                  name that's taken lands as "name (1).ext" unless --overwrite
@@ -28,9 +29,10 @@
 #   shot [HOST_PATH] [--task NAME] screenshot of the whole VM desktop to the Mac
 #   contact-sheet MP4 [OUT.png]    12 frames of a recording in one image
 #   record start [NAME] [FPS] | stop | status | moments FILE
-#                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR)
+#                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR);
+#                                  streamed to the Mac as it records unless RECORD_TO=guest
 #   recordings [--sync] [N]
-#   checkpoint NAME [--replace] [--with-volumes] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes]
+#   checkpoint NAME [--replace] [--with-volumes] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes] [--discard-unsynced]
 #   volume create NAME --size 20G [--dir PATH] | create NAME --folder PATH | list [--json] | delete NAME [--yes]
 #          | resize NAME --size 40G
 #                                  disk volumes (kept outside the VM) and Mac folders (shared, read-only unless
@@ -68,7 +70,7 @@
 #                                  From the Claude Code plugin with no checkout yet: download it and set
 #                                  everything up (get.sh; says what it will do and asks first)
 #   build [--replace]              build the VM + baseline from scratch
-#   baseline [--yes]               re-snapshot the current VM as the baseline
+#   baseline [--yes] [--discard-unsynced]  re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
 #   security [apply] [--json]      the optional hardening: action log, SSH certificates, bounded driver;
 #                                  and the shell channel (VM_SHELL, SHELL_LOG)
@@ -159,12 +161,13 @@ confirm() { # PROMPT
   printf '%s [y/N] ' "$1"; read -r a; [ "$a" = y ] || [ "$a" = Y ] || die "cancelled"
 }
 
-# --override / --yes anywhere in the arguments; the rest stays in REST.
+# --override / --yes / --discard-unsynced anywhere in the arguments; the rest stays in REST.
 OVERRIDE=0
+DISCARD_UNSYNCED=0
 parse_flags() {
   REST=()
   for a in "$@"; do
-    case "$a" in --override) OVERRIDE=1 ;; --yes) ASSUME_YES=1 ;; *) REST+=("$a") ;; esac
+    case "$a" in --override) OVERRIDE=1 ;; --yes) ASSUME_YES=1 ;; --discard-unsynced) DISCARD_UNSYNCED=1 ;; *) REST+=("$a") ;; esac
   done
 }
 
@@ -202,7 +205,8 @@ guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
 
 abs_host_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac; }
 # A tar stream from the VM on stdin -> plain files and folders under DEST (lib/guest_import.py).
-# Stops past the VM's disk size or when the Mac would have less than IMPORT_MIN_FREE_GB free.
+# Stops past the VM's disk size or when the Mac would have less than IMPORT_MIN_FREE_GB free beside the space
+# other operations have claimed (lib/storage.py's claims: a recording being converted to MP4, an S3 sync).
 guest_import() { # DEST [--quiet]
   MCOMP_IMPORT_MAX_BYTES="${VM_DISK_BYTES:-}" MCOMP_IMPORT_MIN_FREE_GB="${IMPORT_MIN_FREE_GB:-10}" \
     "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"
@@ -334,7 +338,7 @@ do_health() { # internal (the event watcher): VM, gateway, SSH, guest-status, de
   if [ "$vm_state" = running ] && $gw && gssh ops true >/dev/null 2>&1; then
     ssh_ok=true
     gs="$(gssh ops /opt/metacomputer/bin/guest-status 2>/dev/null || echo '{}')"
-    [ -n "$rec_name" ] && rec_status="$(gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null)"
+    [ -n "$rec_name" ] && rec_status="$(vm_answer 4096 15 /opt/metacomputer/bin/desktop-record status 2>/dev/null)"
   fi
   local pid_alive=""; [ -n "$rec_pid" ] && { kill -0 "$rec_pid" 2>/dev/null && pid_alive=1 || pid_alive=0; }
   "$PY" - "$vm_state" "$gw" "$ssh_ok" "$gs" "$rec_name" "$rec_mode" "$rec_status" "$pid_alive" <<'EOF'
@@ -394,13 +398,19 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
     if [ -s "$RUN_DIR/manual-recording" ]; then
       say "finishing the desktop recording first"
-      do_record stop || warn "could not finish the recording (metacomputer record stop)"
+      # In a subshell: a recording that can't be saved ends with die, which must not end the stop too.
+      ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
     fi
-    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
+    vm_answer 64 15 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
     storage_release
     emit_event lifecycle stopped info "The virtual computer $VM_NAME stopped" "" "forced=$([ -n "$force" ] && echo yes || echo no)"
   else
+    if [ -s "$RUN_DIR/manual-recording" ]; then
+      # The VM went away while recording (a crash, a power-off): what was streamed is saved now.
+      say "finishing the desktop recording first"
+      ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
+    fi
     netgw_stop
     events_watcher_stop
     hub_stop
@@ -424,6 +434,7 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
   fi
   export_options
   local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
+  record_env
   "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" "$stg" "$VAULT_BIN" <<'EOF'
 import json, os, subprocess, sys
 js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir, stg, vault_bin = sys.argv[1:]
@@ -470,6 +481,8 @@ if vs is not None:
     on = vs.get("presence", vs.get("presence_default"))
     out["vault"] = {"approvals": ("presence" if on else "typed") if on is not None else None, "why": vs.get("presence_why"),
                     "unlocked": vs.get("unlocked"), "decided": "presence" in vs}
+import recording
+out["recordings"] = recording.settings_summary()
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0)
 def y(b): return "\033[33m" + b + "\033[0m"
@@ -515,6 +528,8 @@ if out["lessons"] is not None:
             print(f"  ! {_esc(pr)}")
 for line in storage.describe_security(out["storage"]):
     print(line)
+for line in recording.security_lines(out["recordings"]):
+    print(line)
 v = out.get("vault")
 if v and v["approvals"]:
     print("Secrets vault approvals (SECURITY.md, \"Approving from elsewhere\")")
@@ -550,6 +565,7 @@ do_status() {
   local ev; ev="$("$PY" "$LAB_ROOT/lib/events.py" status --json 2>/dev/null || echo '{}')"
   local hub; hub="$("$PY" "$LAB_ROOT/lib/mcp_hub.py" status --json 2>/dev/null || echo '{}')"
   local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
+  record_env
   "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" "$hub" "$stg" <<'EOF'
 import json, math, os, re, sys
 js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib, hub, stg = sys.argv[1:]
@@ -592,6 +608,8 @@ try:
 except Exception:
     out["lessons"] = None
 out["ready"] = bool(out["ssh"] and gs.get("ready") and mcp.get("ok"))
+import recording
+out["recordings"] = recording.settings_summary()
 if js == "1":
     print(json.dumps(out, indent=2)); sys.exit(0 if out["ready"] else 1)
 # The guest's status, the driver's handshake and the lease come from the VM side: every string is shown escaped.
@@ -631,6 +649,12 @@ if gs:
         print(f"api proxy     {m(sp.get('keys_root_owned'))} proxy account (mcproxy) for metacomputer secrets tokens")
     elif sf.get("present"):
         print("api proxy     no proxy account: built before API tokens (rebuild to use metacomputer secrets token)")
+    sk = gs.get("ssh_keys") if isinstance(gs.get("ssh_keys"), dict) else {}
+    if sk.get("outside_home") is True:
+        print(f"ssh keys      {m(True)} root-owned, outside the home folder: wiping it can't lock this Mac out")
+    else:
+        print("ssh keys      \033[33min the home folder\033[0m (built before root-owned key lists): something that wipes it "
+              "cuts SSH off until reset; rebuild to change that")
     if gs.get("virtual_audio"):
         print("sound         virtual sound card: plays into nothing, recordings include it")
     def num(v):    # a number from the guest's report, shown as one; anything else (or past 10^15) is '?'
@@ -676,6 +700,7 @@ if stg:
     import storage
     for line in storage.describe_status(stg, gs.get("storage") if isinstance(gs.get("storage"), dict) else None, vm == "running"):
         print(line)
+print(recording.status_line(out["recordings"]))
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -701,12 +726,19 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
   local src="$1" label="$2" evtype="${3:-restored}"
   vm_lock_or_die "restoring $VM_NAME"   # held already by its callers; never a delete without it
   expect_guard
+  if [ -s "$RUN_DIR/manual-recording" ]; then
+    # A reset often follows a run that went wrong; the recording of it is saved before the VM goes, whether or
+    # not the VM is still running (a streamed one is on this Mac either way).
+    say "finishing the desktop recording first"
+    ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
+  fi
   if vm_exists "$VM_NAME" && vm_running "$VM_NAME"; then
+    sync_or_stop "$evtype"   # stops here, before anything is deleted, unless the copy is whole
     events_watcher_stop   # start brings it back; meanwhile the replacement isn't a health problem
-    say "saving guest recordings to the host first"
-    do_recordings --sync >/dev/null || warn "could not sync guest recordings"
     vm_stop "$VM_NAME"
     storage_release --quiet
+  elif vm_exists "$VM_NAME"; then
+    warn "the VM is stopped, so recordings still inside it (~/metacomputer-runs) aren't copied before it's replaced"
   fi
   if [ -n "${RESTORE_VOLUMES:-}" ]; then
     storage_py checkpoint restore "$RESTORE_VOLUMES" || die "the volumes couldn't be rolled back; the VM wasn't replaced"
@@ -726,7 +758,7 @@ do_reset() {
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
-  confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"
+  confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept$(unsynced_note))"
   handoff_hold_unless_override
   restore_from "$BASELINE_NAME" baseline reset
 }
@@ -786,7 +818,7 @@ do_restore() { # NAME [--yes] [--override]
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
-  confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept)"
+  confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept$(unsynced_note))"
   handoff_hold_unless_override
   RESTORE_VOLUMES="${vols:+$name}" restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
 }
@@ -798,7 +830,8 @@ do_baseline() {
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   handoff_hold_unless_override
   local was_running=0; vm_running "$VM_NAME" && was_running=1
-  [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
+  # The baseline mustn't carry recordings, so they're copied and then deleted in the VM: only once the copy is whole.
+  [ $was_running = 1 ] && { sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
@@ -821,9 +854,81 @@ record_dir() { # the folder on the Mac for recordings (RECORD_DIR); made if only
   printf '%s' "$d"
 }
 
-record_sidecar() { # MP4 NAME STARTED ENDED FPS QUALITY MODE
+# The VM's short answers (the recorder's replies, a task folder's listing), read with a byte limit and a deadline
+# (lib/recording.py capture): a VM that sends without end or never answers can't grow or stall the command. Prints
+# the answer only when it fits; otherwise nothing, and a non-zero status.
+vm_answer() { # MAX_BYTES TIMEOUT_S REMOTE_COMMAND...
+  local max="$1" t="$2"; shift 2
+  ssh_base ops
+  "$PY" "$LAB_ROOT/lib/recording.py" capture --max-bytes "$max" --timeout "$t" -- ssh -T "${SSH_ARGS[@]}" "$@"
+}
+# A video file in the VM (RECORD_TO=guest) to a new file on the Mac, held to what the VM's disk can hold, to the
+# free-space reserve (beside what other operations have claimed) and to deadlines: the VM going quiet for
+# MCOMP_RECORD_WAIT seconds (60), or an hour in all, ends it (lib/recording.py save). Its stderr arrives escaped
+# and capped.
+vm_copy_video() { # GUEST_PATH OUT
+  ssh_base ops
+  "$PY" "$LAB_ROOT/lib/recording.py" save "$2" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" \
+    --max-bytes "${VM_DISK_BYTES:-0}" --idle-timeout "${MCOMP_RECORD_WAIT:-60}" --timeout 3600 \
+    -- ssh -T "${SSH_ARGS[@]}" "cat '$1'" 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
+}
+
+# A tar stream from the VM (REMOTE_COMMAND over SSH) into DEST through guest_import (task finish, recordings
+# --sync). It ends only when the VM has sent nothing for MCOMP_SYNC_IDLE seconds (120): a copy that keeps moving is
+# never cut off, however large or slow. A VM that sends a byte now and then keeps it going until you stop it.
+vm_tar_copy() { # DEST REMOTE_COMMAND [guest_import options...]
+  local dest="$1" cmd="$2"; shift 2
+  ssh_base ops
+  guest_import "$dest" "$@" --idle-timeout "${MCOMP_SYNC_IDLE:-120}" -- ssh -T "${SSH_ARGS[@]}" "$cmd"
+}
+
+# Before reset, restore or baseline deletes the guest's ~/metacomputer-runs: copy it, and stop here (before
+# anything is deleted) unless the copy is whole: the copy came through (recordings --sync), and the VM's own
+# listing names no file this Mac doesn't have at that size (a copy can leave a file out), both checks every time:
+# a listing that can't be had (the VM unreachable, or the listing over 4 MB) is never whole. A folder that's missing
+# or empty is whole. Otherwise what's missing is listed, and it goes on only with --discard-unsynced, or when the
+# person at the terminal types 'discard' at a prompt that names the loss; --yes never does.
+sync_or_stop() { # WHAT (reset, restored, baseline)
+  local what="$1" listing whole=0 rc=0 report
+  [ "$what" = restored ] && what=restore
+  say "saving guest recordings to the host first"
+  do_recordings --sync >/dev/null && whole=1
+  mkdir -p "$RUN_DIR"; listing="$(mktemp "$RUN_DIR/unsynced.XXXXXX")" || die "stopped before $what: nothing was deleted (cannot write in $RUN_DIR)"
+  if ! vm_answer 4194304 60 'cd ~/metacomputer-runs 2>/dev/null || exit 0; find . -type f -printf "%s\t%P\0"' > "$listing" 2>/dev/null; then
+    rm -f "$listing"
+    listing="$listing.unavailable"      # recording.py says the VM couldn't be asked: never whole, even after a copy
+  fi
+  report="$("$PY" "$LAB_ROOT/lib/recording.py" unsynced "$LAB_ROOT/recordings/guest-runs" "$listing" 2>&1)" || rc=$?
+  rm -f "${listing%.unavailable}"
+  [ $whole = 1 ] && [ $rc = 0 ] && return 0
+  warn "the recordings in the VM (~/metacomputer-runs) weren't copied in full, and $what would delete them"
+  [ -z "$report" ] || printf '%s\n' "$report" >&2
+  if [ "${DISCARD_UNSYNCED:-0}" = 1 ]; then
+    warn "going on without them (--discard-unsynced)"; return 0
+  fi
+  if [ -t 0 ] && [ -t 2 ]; then
+    local a=""
+    printf '%s' "Go on with $what and lose what wasn't copied? Type 'discard' to go on, anything else to stop: " >&2
+    read -r a || a=""
+    [ "$a" = discard ] && { warn "going on without them"; return 0; }
+  fi
+  die "stopped before $what: nothing was deleted. Try the copy again (metacomputer recordings --sync), or run metacomputer $what again with --discard-unsynced to go on without what wasn't copied"
+}
+# For reset's and restore's prompt: a VM that isn't running can't be asked for its recordings.
+unsynced_note() {
+  vm_exists "$VM_NAME" && ! vm_running "$VM_NAME" \
+    && printf '; the VM is stopped, so recordings still inside it are not copied: start it and run metacomputer recordings --sync first to keep them'
+  return 0
+}
+
+record_env() { # what status and security show about recordings (lib/recording.py settings_summary)
+  local now=""; [ -s "$RUN_DIR/manual-recording" ] && now="$(sed -n 's/^name=//p' "$RUN_DIR/manual-recording")"
+  export MCOMP_RECORD_TO="${RECORD_TO:-host}" MCOMP_RECORDING_NOW="$now" MCOMP_TASK_SYNC_INTERVAL="${TASK_SYNC_INTERVAL:-15}"
+}
+
+record_sidecar() { # MP4 NAME STARTED ENDED FPS QUALITY MODE [--ended-early]
   "$PY" "$LAB_ROOT/lib/recording.py" sidecar "$1" --name "$2" --started "$3" --ended "$4" --fps "$5" \
-    --quality "$6" --mode "$7" --vm "$VM_NAME" --actions-dir "$LOG_DIR/actions" >/dev/null \
+    --quality "$6" --mode "$7" ${8:+"$8"} --vm "$VM_NAME" --actions-dir "$LOG_DIR/actions" >/dev/null \
     || warn "could not write the description file for $1"
 }
 
@@ -834,11 +939,21 @@ do_record() {
     start)
       need_running
       local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}" fps="${2:-${RECORD_FPS:-20}}" quality="${RECORD_QUALITY:-standard}"
-      local mode="${RECORD_TO:-guest}" audio="${RECORD_AUDIO:-auto}" dir started
+      local mode="${RECORD_TO:-host}" audio="${RECORD_AUDIO:-auto}" dir started
       [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "recording names use letters, digits, . _ - only"
       case "$quality" in standard|high) ;; *) die "RECORD_QUALITY must be standard or high" ;; esac
       case "$audio" in auto|off) ;; *) die "RECORD_AUDIO must be auto or off" ;; esac
-      case "$mode" in guest|host) ;; *) die "RECORD_TO must be guest or host" ;; esac
+      case "$mode" in host|guest) ;; *) die "RECORD_TO must be host or guest" ;; esac
+      if [ -s "$state" ] && [ "$(sed -n 's/^mode=//p' "$state")" = host ]; then
+        # A streamed recording whose Mac side has ended (the VM crashed or was stopped without record stop) is
+        # saved now rather than blocking this one.
+        local opid; opid="$(sed -n 's/^pid=//p' "$state")"
+        if [ -n "$opid" ] && ! kill -0 "$opid" 2>/dev/null; then
+          say "saving the earlier recording '$(sed -n 's/^name=//p' "$state")' first (its stream had ended)"
+          ( do_record stop ) || warn "could not save it (its .mkv, if any, stays in $(sed -n 's/^dir=//p' "$state" 2>/dev/null))"
+          rm -f "$state"
+        fi
+      fi
       [ -s "$state" ] && die "already recording ($(sed -n 's/^name=//p' "$state")); metacomputer record stop first"
       dir="$(record_dir)" || exit 1
       [ -e "$dir/$name.mp4" ] || [ -e "$dir/$name.mkv" ] && die "$dir/$name.mp4 already exists; pick another name"
@@ -849,11 +964,11 @@ do_record() {
         daemonize "$dir/$name.stream.log" "$SELF" _record-pipe "$name" "$fps" "$quality" "$dir/$name.mkv" "$audio"
         local pid=$! i=0
         while [ $i -lt 20 ]; do
-          gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$" && break
+          vm_answer 4096 15 /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$" && break
           kill -0 "$pid" 2>/dev/null || break
           sleep 0.5; i=$((i + 1))
         done
-        if ! gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$"; then
+        if ! vm_answer 4096 15 /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$"; then
           kill "$pid" 2>/dev/null; sleep 1
           "$PY" "$LAB_ROOT/lib/termsafe.py" < "$dir/$name.stream.log" >&2 2>/dev/null; rm -f "$dir/$name.mkv"
           die "could not start streaming the recording"
@@ -862,65 +977,91 @@ do_record() {
           "$name" "$dir" "$pid" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality), streaming to $dir/ — run your task, then: metacomputer record stop"
       else
+        # Kept for whoever wants it, but until stop copies it the video is a file in the VM's home, which
+        # anything running there can delete (a script that wiped ~ mid-recording took one with it).
+        warn "RECORD_TO=guest: this video stays in the VM until 'metacomputer record stop' copies it, so anything running there can delete it first (wiping ~ does). For a task you don't trust, use RECORD_TO=host, the default: it streams to this Mac as it records."
         # The recorder's words go out escaped as they come (term_safe caps them on a terminal), never held in a
-        # variable: a recorder that writes without end can't grow this shell. Its own exit status decides.
-        gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio" | term_safe
-        [ "${PIPESTATUS[0]}" = 0 ] || die "could not start recording"
+        # variable: a recorder that writes without end can't grow this shell. Its own exit status decides, within
+        # MCOMP_RECORD_WAIT seconds (60): a VM that never answers is cut off (run_until).
+        local wait_s="${MCOMP_RECORD_WAIT:-60}" src
+        run_until $((SECONDS + wait_s)) gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio" | term_safe
+        src="${PIPESTATUS[0]}"
+        [ "$src" != 124 ] || die "could not start recording: the VM's recorder didn't answer within $wait_s s (if it started anyway, metacomputer record stop copies what it made)"
+        [ "$src" = 0 ] || die "could not start recording"
         printf 'name=%s\nmode=guest\ndir=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
           "$name" "$dir" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality) — run your task, then: metacomputer record stop"
       fi ;;
     stop)
-      local name mode dir pid started fps quality ended path i=0 out
-      rec_fail() { # WHY MESSAGE [DETAIL]: tell the event stream (a fixed reason; anything from the VM only
-                   # as a cleaned detail in its data), then stop with the message
+      local name mode dir pid started fps quality ended path i=0 out early=""
+      rec_fail() { # WHY MESSAGE [REASON]: tell the event stream (a fixed sentence and a fixed category: nothing the
+                   # VM said or chose, which could spell a value it was given), then stop with the message
+        local reason="${3:-other}"
+        case "$reason" in no_stream|no_room|not_converted|recorder_answer|copy_failed) ;; *) reason=other ;; esac
         emit_event task recording_failed error "Recording '$name' failed: $1" "metacomputer record status" \
-          "name=$name" "mode=$mode" ${3:+"detail=$3"}
+          "name=$name" "mode=$mode" "reason=$reason"
         rm -f "$state"; die "$2"
       }
       if [ ! -s "$state" ]; then
         # A recording started some other way (or before this version): stop it and copy it.
-        path="$(gssh ops /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
+        path="$(vm_answer 4096 60 /opt/metacomputer/bin/desktop-record stop)" || die "stop failed"
         case "$path" in "not recording") ok "not recording"; return 0 ;; stream:*) die "a streamed recording was running without this Mac's record of it; it stopped (see RECORD_DIR for a .mkv)" ;; esac
+        # The path comes from the VM: the recorder's own folder and a plain name only, never written through a link.
+        case "$path" in "$GUEST_RUN_DIR/manual/"*.mp4) ;; *) die "the VM's recorder named an unexpected file; it stays in the VM" ;; esac
         name="$(basename "$path" .mp4)"; dir="$(record_dir)" || exit 1
-        # The name comes from the VM: a plain name only, and never written through a link.
         [[ "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || die "the VM's recorder named an unexpected file; it stays in the VM"
-        [ -L "$dir/$name.mp4" ] && die "$dir/$name.mp4 is a symbolic link; not writing through it"
-        gssh ops "cat '$path'" > "$dir/$name.mp4" || die "copy failed"
+        [ -e "$dir/$name.mp4" ] || [ -L "$dir/$name.mp4" ] && die "$dir/$name.mp4 already exists; the video stays in the VM"
+        vm_copy_video "$GUEST_RUN_DIR/manual/$name.mp4" "$dir/$name.mp4" \
+          || { [ -s "$dir/$name.mp4" ] || rm -f "$dir/$name.mp4"; die "copy failed (whatever arrived is kept; the video stays in the VM)"; }
         ok "saved $dir/$name.mp4 ($(du -h "$dir/$name.mp4" | cut -f1))"; return 0
       fi
       name="$(sed -n 's/^name=//p' "$state")"; mode="$(sed -n 's/^mode=//p' "$state")"; dir="$(sed -n 's/^dir=//p' "$state")"
       pid="$(sed -n 's/^pid=//p' "$state")"; started="$(sed -n 's/^started=//p' "$state")"
       fps="$(sed -n 's/^fps=//p' "$state")"; quality="$(sed -n 's/^quality=//p' "$state")"
-      path="$(gssh ops /opt/metacomputer/bin/desktop-record stop 2>/dev/null)" || path="(VM unreachable)"
+      # A stream whose Mac side ended before this stop: the VM stopped sending (its recorder ended or was
+      # stopped, the VM went away) or this Mac's disk reached its reserve. What arrived is saved all the same.
+      if [ "$mode" = host ] && [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then early=--ended-early; fi
+      path="$(vm_answer 4096 60 /opt/metacomputer/bin/desktop-record stop 2>/dev/null)" || path="(VM unreachable)"
       ended="$("$PY" -c 'import time; print(f"{time.time():.2f}")')"
       out="$dir/$name.mp4"
       if [ "$mode" = host ]; then
-        while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+        # The stream ends when the VM's recorder finishes. A VM that can't be reached to stop it (on a VM built
+        # before root-owned key lists, wiping the home folder removes the SSH key too) gets no 30 s: the stream
+        # is cut here and now.
+        local waits=60; [ "$path" = "(VM unreachable)" ] && waits=2
+        while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt $waits ]; do sleep 0.5; i=$((i + 1)); done
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing" "the stream saved nothing (see $dir/$name.stream.log)"
-        # Same video, in an MP4 that players and editors open at once (no re-encoding).
-        if ffmpeg -hide_banner -loglevel error -nostdin -y -i "$dir/$name.mkv" -c copy -movflags +faststart "$out" \
-           && [ -n "$("$PY" "$LAB_ROOT/lib/recording.py" probe "$out" 2>/dev/null)" ]; then
-          rm -f "$dir/$name.mkv"
-          [ -s "$dir/$name.stream.log" ] || rm -f "$dir/$name.stream.log"
-        else
-          rm -f "$out"
-          rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is"
-        fi
+        [ -s "$dir/$name.mkv" ] || rec_fail "the stream saved nothing" "the stream saved nothing (see $dir/$name.stream.log)" no_stream
+        # Same video, in an MP4 that players and editors open at once (no re-encoding), made only if the copy
+        # leaves this Mac its reserve, and held to a size limit (lib/recording.py finalize). Otherwise the .mkv,
+        # which plays as it is, stays.
+        local frc=0
+        "$PY" "$LAB_ROOT/lib/recording.py" finalize "$dir/$name.mkv" "$out" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" || frc=$?
+        case "$frc" in
+          0) rm -f "$dir/$name.mkv"; [ -s "$dir/$name.stream.log" ] || rm -f "$dir/$name.stream.log" ;;
+          3) rec_fail "there wasn't room to convert it to MP4 (the .mkv is kept)" "not converted to MP4: there isn't room above IMPORT_MIN_FREE_GB; $dir/$name.mkv is kept and plays as it is" no_room ;;
+          *) rec_fail "it couldn't be converted to MP4 (the .mkv is kept)" "could not convert $dir/$name.mkv to MP4; the .mkv is kept and plays as it is" not_converted ;;
+        esac
       else
-        case "$path" in */"$name.mp4") ;; *) rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $(esc_text "$path")" "$path" ;; esac
-        gssh ops "cat '$path'" > "$out" || rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (the file stays in the VM: $(esc_text "$path"))" "$path"
+        [ "$path" = "$GUEST_RUN_DIR/manual/$name.mp4" ] \
+          || rec_fail "the VM's recorder didn't hand over a video" "the VM's recorder said: $(esc_text "$path")" recorder_answer
+        vm_copy_video "$GUEST_RUN_DIR/manual/$name.mp4" "$out" || { [ -s "$out" ] || rm -f "$out"
+          rec_fail "copying it from the VM failed (it stays in the VM)" "copy failed (whatever arrived is kept; the file stays in the VM: $(esc_text "$path"))" copy_failed; }
       fi
       rm -f "$state"
-      record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode"
+      record_sidecar "$out" "$name" "$started" "$ended" "$fps" "$quality" "$mode" "$early"
       ( export_options; "$PY" "$LAB_ROOT/lib/events.py" _recording "$out" ) >/dev/null 2>&1 || true
-      ok "saved $out ($(du -h "$out" | cut -f1)); its description: ${out%.mp4}.json" ;;
+      ok "saved $out ($(du -h "$out" | cut -f1)); its description: ${out%.mp4}.json"
+      [ "$mode" != host ] || [ "$path" != "(VM unreachable)" ] || [ -n "$early" ] \
+        || warn "the VM couldn't be reached to stop its recorder (metacomputer status says why; on a VM built before root-owned key lists, wiping its home folder takes the SSH key with it until metacomputer reset), so the stream was cut on this Mac. What arrived is saved."
+      [ -z "$early" ] || warn "the stream had ended before this stop: the VM stopped sending (its recorder ended or was stopped, or the VM went away), or this Mac's free space reached IMPORT_MIN_FREE_GB. The video covers what arrived until then$([ -s "$dir/$name.stream.log" ] && echo "; see $dir/$name.stream.log")." ;;
     status)
       if [ -s "$state" ]; then
         echo "recording $(sed -n 's/^name=//p' "$state") ($(sed -n 's/^mode=//p' "$state"), to $(sed -n 's/^dir=//p' "$state"))"
       else
-        gssh ops /opt/metacomputer/bin/desktop-record status | term_safe
+        # Streamed escaped as it comes, within MCOMP_RECORD_WAIT seconds (60): a VM that never answers is cut off.
+        run_until $((SECONDS + ${MCOMP_RECORD_WAIT:-60})) gssh ops /opt/metacomputer/bin/desktop-record status | term_safe
+        [ "${PIPESTATUS[0]}" != 124 ] || die "the VM's recorder didn't answer within ${MCOMP_RECORD_WAIT:-60} s"
       fi ;;
     moments)
       local f="${1:-}"; [ -n "$f" ] || die "usage: metacomputer record moments RECORDING.mp4|.json"
@@ -931,8 +1072,12 @@ do_record() {
 
 do_record_pipe() { # NAME FPS QUALITY OUT.mkv [AUDIO] (internal: the detached half of RECORD_TO=host)
   ssh_base ops
-  # The VM's stderr goes to the stream log escaped and capped (1 MB), so it can't fill the disk.
-  exec ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" > "$4" \
+  # lib/recording.py save writes the stream to OUT as it arrives (a new file, never through a link) and ends it
+  # before this Mac's free space falls below IMPORT_MIN_FREE_GB, since the VM decides how much it sends. It runs
+  # ssh itself and ends it when it's stopped. The VM's stderr goes to the stream log escaped and capped (1 MB).
+  # Space other operations have claimed (a recording being converted to MP4, an S3 sync) counts against the reserve.
+  exec "$PY" "$LAB_ROOT/lib/recording.py" save "$4" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" -- \
+    ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" \
     2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
 }
 
@@ -940,12 +1085,13 @@ do_recordings() {
   local sync=0 n=20
   for a in "$@"; do case "$a" in --sync) sync=1 ;; [0-9]*) n="$a" ;; esac; done
   if [ $sync = 1 ]; then
-    # A failed sync returns non-zero instead of exiting: reset, stop and checkpoint call this first and must
-    # go on (a VM whose home was wiped has no ~/metacomputer-runs to copy).
+    # Returns 0 only when the copy is whole (a folder that's missing or empty is whole: a wiped home has nothing
+    # to copy), non-zero otherwise without exiting: reset, restore and baseline decide (sync_or_stop).
     vm_running "$VM_NAME" || { warn "VM is not running; nothing to sync"; return 1; }
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
     # Plain files and folders only: links and special files from the VM are left out (lib/guest_import.py).
-    gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | guest_import "$dest" \
+    # No ~/metacomputer-runs (a wiped home) is nothing to copy, not a failure: an empty archive and a note.
+    vm_tar_copy "$dest" 'if cd ~/metacomputer-runs 2>/dev/null; then tar -cf - . 2>/dev/null; else echo "no ~/metacomputer-runs in the VM: nothing to copy" >&2; tar -cf - -T /dev/null; fi' \
       || { warn "could not sync ~/metacomputer-runs from the guest"; return 1; }
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
@@ -1161,13 +1307,88 @@ do_contact_sheet() { # MP4 [OUT.png]
   echo "$(abs_host_path "$out")"
 }
 
-do_task() { # start SLUG | finish NAME
+# Per-task recordings are Cua Driver's: written in the VM, where anything running there can delete them. While
+# a task folder is open, a copier on the Mac fetches each recording turn the driver has finished (every one but
+# the newest) every TASK_SYNC_INTERVAL seconds, once each; task finish copies the rest and never replaces a turn
+# file copied earlier. The video itself is only whole at stop_recording, so it's copied at finish.
+task_sync_pidfile() { printf '%s' "$RUN_DIR/task-sync.$1.pid"; }
+task_sync_on() { [[ "${TASK_SYNC_INTERVAL:-15}" =~ ^[0-9]{1,5}$ ]] && [ "${TASK_SYNC_INTERVAL:-15}" -gt 0 ]; }
+task_sync_start() { # NAME
+  task_sync_on || return 0
+  daemonize "$RUN_DIR/task-sync.$1.log" "$SELF" _task-sync "$1"
+  echo $! > "$(task_sync_pidfile "$1")"
+}
+task_sync_stop() { # NAME: ask the task's copier to end (it finishes a copy it's in), then make sure it has
+  local pidf pid i=0; pidf="$(task_sync_pidfile "$1")"
+  [ -f "$pidf" ] || { rm -f "$RUN_DIR/task-sync.$1.done" "$RUN_DIR/task-sync.$1.want"; return 0; }
+  pid="$(cat "$pidf" 2>/dev/null)"; rm -f "$pidf"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  while kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+  # Still there after 30 s, and still the copier (not a process that reused its number): its whole group goes.
+  if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_task-sync $1\$"; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  fi
+  [ -s "$RUN_DIR/task-sync.$1.log" ] || rm -f "$RUN_DIR/task-sync.$1.log"
+  rm -f "$RUN_DIR/task-sync.$1.done" "$RUN_DIR/task-sync.$1.want"
+  return 0
+}
+do_task_sync() { # NAME (internal; task start runs it detached, task finish ends it)
+  local name="${1:-}"
+  [[ "$name" =~ ^mcomp-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: metacomputer _task-sync NAME"
+  task_sync_on || return 0
+  local every="${TASK_SYNC_INTERVAL:-15}" pidf donef wantf guest host deadline list sorted seen="" changed last t n
+  local copied gone=0 down=0
+  pidf="$(task_sync_pidfile "$name")"; donef="$RUN_DIR/task-sync.$name.done"; wantf="$RUN_DIR/task-sync.$name.want"
+  guest="$GUEST_RUN_DIR/$name/recording"; host="$LAB_ROOT/results/$name/guest/recording"
+  deadline=$(( $(date +%s) + 86400 ))        # a task left open ends its copier after a day...
+  changed=$(date +%s)                         # ...or after an hour without a new turn (a task never finished)
+  mkdir -p "$host"
+  while [ "$(date +%s)" -lt "$deadline" ] && [ $(( $(date +%s) - changed )) -lt "${MCOMP_TASK_SYNC_IDLE:-3600}" ]; do
+    n=0; while [ $n -lt "$every" ]; do [ -f "$pidf" ] || return 0; sleep 1; n=$((n + 1)); done
+    # What the VM lists is only a list of names, read with a byte limit and a deadline (vm_answer); each name is
+    # checked here (turn-<digits>) before it's used.
+    list="$(vm_answer 4194304 60 "test -d '$guest' || { echo GONE; exit 0; }; cd '$guest' && ls -1 && echo END" 2>/dev/null)" \
+      || list=""
+    case "$list" in
+      GONE) down=0; gone=$((gone + 1)); [ $gone -ge 4 ] && break; continue ;;   # wiped, or the VM was reset
+      END|*$'\n'END) gone=0; down=0 ;;
+      *) down=$((down + 1)); [ $down -ge 8 ] && break; continue ;;            # unreachable, too much, too slow
+    esac
+    sorted="$(printf '%s\n' "$list" | grep -E '^turn-[0-9]{1,9}$' | sort -t- -k2,2n)" || continue
+    [ "$sorted" = "$seen" ] || { seen="$sorted"; changed=$(date +%s); }
+    last="$(printf '%s\n' "$sorted" | tail -n 1)"
+    # Done = copied whole once (the .done list), not merely present: a copy cut short is asked for again.
+    copied=$'\n'"$(cat "$donef" 2>/dev/null)"$'\n'
+    local want=()
+    while IFS= read -r t; do
+      [ "$t" != "$last" ] || continue                                  # the newest may still be written
+      case "$copied" in *$'\n'"$t"$'\n'*) continue ;; esac
+      want+=("$t")
+      [ ${#want[@]} -lt 500 ] || break
+    done <<< "$sorted"
+    [ ${#want[@]} -gt 0 ] && [ -f "$pidf" ] || continue
+    # Only the folders asked for are taken from the VM's answer (--only-top), a file the Mac already has is
+    # never replaced, by a file or a folder (--keep-existing), and the copy has a deadline.
+    printf '%s\n' "${want[@]}" > "$wantf"
+    ssh_base ops
+    if guest_import "$host" --quiet --keep-existing turn- --only-top "$wantf" --timeout 300 \
+         -- ssh -T "${SSH_ARGS[@]}" "cd '$guest' && tar -cf - ${want[*]}" 2>/dev/null; then
+      for t in "${want[@]}"; do [ -d "$host/$t" ] && printf '%s\n' "$t" >> "$donef"; done
+    fi
+  done
+  rm -f "$pidf" "$donef" "$wantf"
+}
+
+do_task() { # start SLUG [--no-sync] | finish NAME
   local sub="${1:-}"; shift || true
   case "$sub" in
     start)
       need_running
-      local slug name guest host
-      slug="$(printf '%s' "${1:-task}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
+      local slug="" name guest host sync=1 a
+      for a in "$@"; do   # --no-sync: nothing will be recorded (web checks without --record), so no copier
+        case "$a" in --no-sync) sync=0 ;; *) [ -n "$slug" ] || slug="$a" ;; esac
+      done
+      slug="$(printf '%s' "${slug:-task}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
       name="mcomp-$(date +%Y%m%d-%H%M%S)-${slug:-task}"
       guest="$GUEST_RUN_DIR/$name"; host="$LAB_ROOT/results/$name"
       gssh ops "mkdir -p '$guest/recording' '$guest/files'" >/dev/null || die "cannot create $guest in the guest"
@@ -1178,6 +1399,7 @@ p, name, guest, host, cwd = sys.argv[1:]
 json.dump({"name": name, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "requested_from": cwd,
            "guest_dir": guest, "host_dir": host}, open(p, "w"), indent=2)
 EOF
+      [ $sync = 0 ] || task_sync_start "$name"
       echo "NAME=$name"
       echo "GUEST_DIR=$guest"
       echo "RECORDING_DIR=$guest/recording    # start_recording output_dir"
@@ -1187,11 +1409,17 @@ EOF
       local name="${1:-}" host guest copied=yes
       [[ "$name" =~ ^mcomp-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: metacomputer task finish mcomp-YYYYMMDD-HHMMSS-slug"
       host="$LAB_ROOT/results/$name"; guest="$GUEST_RUN_DIR/$name"; mkdir -p "$host/guest"
+      task_sync_stop "$name"
+      local keeprep="$RUN_DIR/task-keep.$name.json"; rm -f "$keeprep"
       if vm_running "$VM_NAME"; then
         # Plain files and folders only: links and special files from the VM are left out, so the
         # contact sheets below can't be written through a link it planted (lib/guest_import.py).
-        gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." | guest_import "$host/guest" --quiet \
+        # Recording turns copied while the task ran stay as they were copied: the VM can't swap them now,
+        # and any it changed since are named (--keep-existing), and counted for the event below.
+        export MCOMP_IMPORT_KEEP_REPORT="$keeprep"
+        vm_tar_copy "$host/guest" "test -d '$guest' && tar -C '$guest' -cf - ." --quiet --keep-existing recording/turn- \
           || { warn "nothing (or not everything) could be copied from $guest"; copied=no; }
+        unset MCOMP_IMPORT_KEEP_REPORT
       else
         warn "the virtual computer is off; listing what is already on the Mac"; copied=off
       fi
@@ -1207,9 +1435,9 @@ EOF
         [ -n "$v" ] && ( do_contact_sheet "$v" ) >/dev/null 2>&1 || true
       done < <(find "$host" -type f -name '*.mp4' -size +0 -print0 2>/dev/null)
       export_options
-      "$PY" - "$host" "$LAB_ROOT/lib" "$copied" <<'EOF'
+      "$PY" - "$host" "$LAB_ROOT/lib" "$copied" "$keeprep" <<'EOF'
 import json, os, subprocess, sys, time
-host, lib, copied = sys.argv[1:4]
+host, lib, copied, keeprep = sys.argv[1:5]
 sys.path.insert(0, lib)
 from termsafe import escape_for_terminal as esc
 items = {"videos": [], "contact_sheets": [], "screenshots": [], "files": []}
@@ -1230,6 +1458,17 @@ for d, _, fs in os.walk(host):
             items["screenshots"].append(p)
         elif rel.startswith("guest/files/") or rel.startswith("files/"):
             items["files"].append(p)
+rec = os.path.join(host, "guest", "recording")    # Cua Driver's per-action folders, some copied while it ran
+items["recording_turns"] = len([t for t in os.listdir(rec) if t.startswith("turn-")]) if os.path.isdir(rec) else 0
+try:   # turn files the VM changed after the copier had them (guest_import --keep-existing): the Mac kept its copies
+    kr = json.load(open(keeprep)) if keeprep and os.path.isfile(keeprep) else {}
+    os.unlink(keeprep)
+except (OSError, ValueError):
+    kr = {}
+changed = kr.get("changed") if isinstance(kr.get("changed"), int) else 0
+if changed:
+    items["recording_changed_in_vm"] = {"files": changed, "turns": [t for t in kr.get("changed_in") or []
+                                                                   if isinstance(t, str) and t[5:].isdigit()][:20]}
 items["host_dir"] = host
 items["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 json.dump(items, open(os.path.join(host, "artifacts.json"), "w"), indent=2)
@@ -1239,6 +1478,8 @@ for v in items["videos"]:
 for k, label in (("contact_sheets", "contact sheet"), ("screenshots", "screenshot"), ("files", "file")):
     for p in items[k]:
         print(f"{label:<12} {esc(p)}")
+if items["recording_turns"]:
+    print(f"turns        {items['recording_turns']} recording turn folder(s) in {esc(rec)}")
 print(f"index        {os.path.join(host, 'artifacts.json')}")
 try:   # the optional event stream (docs/events.md); never fails the command
     from datetime import datetime
@@ -1247,24 +1488,33 @@ try:   # the optional event stream (docs/events.md); never fails the command
     task = json.load(open(os.path.join(host, "task.json")))
     secs = round(time.time() - datetime.strptime(task["started"], "%Y-%m-%dT%H:%M:%S%z").timestamp())
     name = os.path.basename(host)
-    empty = not (items["videos"] or items["files"] or items["screenshots"])
+    empty = not (items["videos"] or items["files"] or items["screenshots"] or items["recording_turns"])
     failed = empty and copied != "yes"
-    what = (f"{len(items['videos'])} video(s), {len(items['files'])} file(s), {len(items['screenshots'])} screenshot(s)"
-            if not empty else "no artifacts")
+    # What the VM made (file names, how many, a video's own length) is its choice and could spell a value it was
+    # given: the event carries counts as classes and no names or lengths from the VM (artifacts.json has them all).
+    cc = events.count_class
+    counts = {"videos": len(items["videos"]), "files": len(items["files"]), "screenshots": len(items["screenshots"]),
+              "recording turns": items["recording_turns"]}
+    what = (", ".join(f"{k}: {cc(v)}" for k, v in counts.items() if v) if not empty else "no artifacts")
+    partial = copied == "no" and not empty     # the VM's folder was gone at finish; the copier's copies remain
     events.emit("task", "finished",
                 f"Task {name} finished after {secs // 60} min {secs % 60} s: {what}"
-                + (" (nothing could be copied from the VM)" if failed else ""),
-                "error" if failed else "info", f"See {host}" if not failed else "metacomputer status",
+                + (" (nothing could be copied from the VM)" if failed else
+                   " (the copy from the VM failed at finish; this includes what was copied while the task ran)" if partial else "")
+                + (f"; the VM changed recording files after they were copied ({cc(changed)}; the Mac kept its copies)"
+                   if changed else ""),
+                "error" if failed else "warn" if partial or changed else "info",
+                f"See {host}" if not failed else "metacomputer status",
                 {"task": name, "duration_s": secs, "host_dir": host, "copied_from_vm": copied,
-                 "videos": [{"path": v["path"], "seconds": v["seconds"]} for v in items["videos"][:10]],
-                 "contact_sheets": items["contact_sheets"][:10], "files": len(items["files"]),
-                 "screenshots": len(items["screenshots"])},
+                 "videos": cc(len(items["videos"])), "contact_sheets": cc(len(items["contact_sheets"])),
+                 "files": cc(len(items["files"])), "screenshots": cc(len(items["screenshots"])),
+                 "recording_turns": cc(items["recording_turns"]), "recording_changed_in_vm": cc(changed)},
                 project=task.get("requested_from"))
 except Exception:
     pass
 EOF
       ;;
-    *) die "usage: metacomputer task start SLUG | finish NAME" ;;
+    *) die "usage: metacomputer task start SLUG [--no-sync] | finish NAME" ;;
   esac
 }
 
@@ -1704,6 +1954,7 @@ case "$cmd" in
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;
   _record-pipe) do_record_pipe "$@" ;;
+  _task-sync) do_task_sync "$@" ;;
   recordings) do_recordings "$@" ;;
   view)       do_view "$@" ;;
   sh)         do_sh "$@" ;;
