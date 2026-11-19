@@ -6,6 +6,10 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/release.sh VERSION --tag` checks that the one-line install picks the new tag again: for the real repository it passed an empty list to get.sh, which macOS's bash 3.2 treats as an unset variable, so v0.3.0's run stopped after pushing the tag (the check was then run by hand). `tests/test_release.py` fails on any array the script expands without the guard.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

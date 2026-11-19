@@ -325,6 +325,16 @@ def tag(w):
     check("a second --tag is refused (the tag exists)", r.returncode != 0 and "already exists" in r.stderr, r.stderr[-200:])
 
 
+def bash32_arrays():
+    """macOS's bash is 3.2, where "${a[@]}" of an empty array is an unbound variable under set -u: every array the
+    release script expands must be guarded (${a[@]+"${a[@]}"}). v0.3.0's --tag stopped at get.sh's check because
+    repo_arg is empty for the real repository, a case these tests (a local origin) don't reach."""
+    print("bash 3.2 and empty arrays")
+    src = open(os.path.join(LAB, "scripts", "release.sh")).read()
+    bare = [m.group(0) for m in re.finditer(r'(?<!\+)"\$\{(\w+)\[@\]\}"', src)]
+    check("release.sh expands no array without the empty-array guard", not bare, bare)
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-release-test-")
     try:
@@ -332,6 +342,7 @@ def main():
         refusals(w)
         prepare(w)
         tag(w)
+        bash32_arrays()
     finally:
         shutil.rmtree(td, ignore_errors=True)
     print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
