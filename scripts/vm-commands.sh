@@ -91,6 +91,14 @@ vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes]
     1) die "another build or change of the VM $name is running ($LOCK_OWNER); nothing was done" ;;
     *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
   esac
+  # One vm create at a time from the first look at the settings until the new file is written (descriptor 9,
+  # released before the build): two creates never pick the same free ports or write one name twice.
+  rc=0; lock_hold "vms-create" "${MCOMP_LOCK_WAIT:-10}" "metacomputer vm create $name" 9 || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "another metacomputer vm create is choosing ports ($LOCK_OWNER); nothing was done. Run this again when it's done" ;;
+    *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
+  esac
   f="$MC_VMS_DIR/$name.env"
   [ ! -e "$f" ] || die "config/vms/$name.env exists already: that VM's settings (metacomputer --vm $name ..., or vm delete $name)"
   rows="$(vm_all_settings)"
@@ -167,6 +175,10 @@ print(" ".join(out))') "
     [ "${VNC_PASSWORD_STORE:-file}" != keychain ] || printf '%s\n' "VNC_PASSWORD_STORE=keychain"
   } > "$tmp" || { rm -f "$tmp"; die "couldn't write $f"; }
   chmod 600 "$tmp" && mv "$tmp" "$f" || { rm -f "$tmp"; die "couldn't write $f"; }
+  # The new file must resolve like every other: its names, ports and folders against every VM's (scripts/lib.sh).
+  a="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; })" \
+    || { rm -f "$f"; die "the new settings were refused, so they were removed: $a"; }
+  exec 9>&-   # the settings are written: the next vm create sees them (the VM's own lock stays, through the build)
   MCOMP_VM_NOTICE=1
   printf '%s\n' "metacomputer: new VM $name: config/vms/$name.env, SSH 127.0.0.1:$ssh, live view 127.0.0.1:$vnc, vault $(mc_tilde "$vault")" >&2
   emit_event lifecycle vm_created info "Settings for a new VM $name were made (config/vms/$name.env)" "metacomputer --vm $name build" "name=$name"
@@ -224,86 +236,53 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
     exec env -u MCOMP_CONFIG -u MCOMP_VM -u MCOMP_VM_NOTICE MC_VM_DELETE_HOP=1 "$SELF" --vm "$name" vm delete ${args[@]+"${args[@]}"}
   fi
   vm_notice
+  # The VM's lock from here to the end: no build, reset, restore or start of it (start takes it too) meanwhile.
   vm_lock_or_die "metacomputer vm delete $VM_NAME"
   command -v "$LUME" >/dev/null 2>&1 || die "the VM runner $LUME isn't installed; nothing was deleted"
-  local out facts line vm=absent vm_state=absent vm_bytes="" base=absent base_bytes="" prev=absent prev_bytes="" ckpts=""
-  out="$("$LUME" ls --format json 2>/dev/null)" || die "couldn't list the VMs with $LUME, so it can't tell what exists; nothing was deleted"
-  facts="$(printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/vms.py" facts "$VM_NAME" "$BASELINE_NAME")" \
-    || die "couldn't read $LUME's list of VMs; nothing was deleted"
-  while IFS= read -r line; do
-    case "$line" in
-      vm=*) vm="${line#*=}" ;; vm_state=*) vm_state="${line#*=}" ;; vm_bytes=*) vm_bytes="${line#*=}" ;;
-      base=*) base="${line#*=}" ;; base_bytes=*) base_bytes="${line#*=}" ;;
-      prev=*) prev="${line#*=}" ;; prev_bytes=*) prev_bytes="${line#*=}" ;; ckpts=*) ckpts="${line#*=}" ;;
-    esac
-  done <<< "$facts"
-  [ -z "$ckpts" ] || die "$VM_NAME has checkpoints ($ckpts); delete them first (metacomputer --vm $VM_NAME checkpoint --delete NAME), or keep the VM. Nothing was deleted"
-  local settings_file=""; [ "$MC_SETTINGS_KIND" = vm ] && settings_file="$LOCAL_CONFIG"
-  if [ "$vm" = absent ] && [ "$base" = absent ] && [ "$prev" = absent ] && [ -z "$settings_file" ]; then
-    die "there's no VM $VM_NAME, no baseline $BASELINE_NAME and no settings file of its own to delete"
-  fi
-  # What the flags ask for must be possible before anything goes.
-  local own_vault="$MC_APP_DIR/vms/$VM_NAME"
-  if [ "$del_vault" = 1 ]; then
-    [ "$(mc_vault_dir)" = "$own_vault" ] \
-      || die "--delete-vault deletes only a VM's own vault folder ($(mc_tilde "$own_vault")); $VM_NAME's vault is $(mc_tilde "$(mc_vault_dir)"), which may be shared: delete it yourself if you mean to. Nothing was deleted"
-    [ ! -L "$own_vault" ] || die "$own_vault is a link; nothing was deleted"
-  fi
-  local vols="" v others
-  if [ "$del_vols" = 1 ]; then
-    vols="$(printf '%s' "${VOLUMES:-}" | tr ',' '\n' | sed 's/:.*//; s/^ *//; s/ *$//' | grep -v '^$' | tr '\n' ' ' || true)"
-    others="$(vm_all_settings | "$PY" -c 'import json, sys
-me, mine = sys.argv[1], set(sys.argv[2].split())
-for line in sys.stdin:
-    try: d = json.loads(line)
-    except ValueError: continue
-    if d.get("ok") and d.get("vm") != me:
-        shared = mine & {e.split(":")[0].strip() for e in (d.get("volumes") or "").split(",") if e.strip()}
-        if shared: print(d.get("vm") + ": " + " ".join(sorted(shared)))' "$VM_NAME" "$vols")"
-    [ -z "$others" ] || die "--delete-volumes: other VMs here attach some of the same volumes ($others); delete those yourself with metacomputer volume delete NAME. Nothing was deleted"
-  fi
-  # Never the VM in use without --force: the one this checkout's settings choose, one that runs, or one a session holds.
-  local why=() main_id
-  main_id="$(mc_main_identity | head -1)"
-  [ "$main_id" != "$VM_NAME" ] || why+=("it's the VM this checkout uses without --vm ($([ -f "$MC_MAIN_CONFIG" ] && echo config/local.env || echo the defaults))")
-  [ "$vm_state" != running ] || why+=("it's running")
-  "$PY" "$LAB_ROOT/lib/owners.py" check >/dev/null 2>&1 || why+=("a session is using it (metacomputer --vm $VM_NAME who)")
-  if [ ${#why[@]} -gt 0 ] && [ "$force" != 1 ]; then
-    local w=""; for a in "${why[@]}"; do w="${w:+$w; }$a"; done
-    die "not deleting $VM_NAME: $w. Add --force to delete it anyway; nothing was deleted"
-  fi
+  local settings_file="" own_vault="$MC_APP_DIR/vms/$VM_NAME" lab_p first v
+  [ "$MC_SETTINGS_KIND" = vm ] && settings_file="$LOCAL_CONFIG"
+  lab_p="$(cd "$LAB_ROOT" && pwd -P)" || die "can't read the checkout's folder; nothing was deleted"
+  vm_delete_plan
   # The plan, then the name typed: never --yes.
   printf '%s\n' "This deletes:"
-  [ "$vm" = absent ] || printf '%s\n' "  the VM $VM_NAME ($vm_state, $(vm_human "$vm_bytes") on disk)"
-  [ "$base" = absent ] || printf '%s\n' "  its baseline $BASELINE_NAME ($(vm_human "$base_bytes"))"
-  [ "$prev" = absent ] || printf '%s\n' "  its previous baseline $BASELINE_NAME-prev ($(vm_human "$prev_bytes"))"
+  [ "$DP_VM" = absent ] || printf '%s\n' "  the VM $VM_NAME ($DP_STATE, $(vm_human "$DP_VM_BYTES") on disk)"
+  [ "$DP_BASE" = absent ] || printf '%s\n' "  its baseline $BASELINE_NAME ($(vm_human "$DP_BASE_BYTES"))"
+  [ "$DP_PREV" = absent ] || printf '%s\n' "  its previous baseline $BASELINE_NAME-prev ($(vm_human "$DP_PREV_BYTES"))"
   [ -z "$settings_file" ] || printf '%s\n' "  its settings, config/vms/$VM_NAME.env, and its runtime folder"
   [ "$del_vault" = 0 ] || printf '%s\n' "  its vault folder $(mc_tilde "$own_vault"), with every secret in it"
-  [ -z "$vols" ] || printf '%s\n' "  its volumes: $vols(each asks again)"
+  [ -z "$DP_VOLS" ] || printf '%s\n' "  its volumes: $DP_VOLS(each asks again)"
   printf '%s\n' "It keeps:"
   [ "$del_vault" = 1 ] || printf '%s\n' "  the vault folder $(mc_tilde "$(mc_vault_dir)") (--delete-vault deletes a VM's own)"
   [ "$del_vols" = 1 ] || [ -z "${VOLUMES:-}" ] || printf '%s\n' "  its volumes, $VOLUMES (--delete-volumes)"
   printf '%s\n' "  its logs ($(vm_path "$LOG_DIR")) and SSH keys ($(mc_tilde "$SSH_DIR"))"
   [ -n "$settings_file" ] || printf '%s\n' "  its settings file, $MC_SETTINGS_LABEL"
+  # The typed name guards against a slip, not against a program: anything with a terminal can type it (docs).
   if [ -n "$confirm_name" ]; then
     [ "$confirm_name" = "$VM_NAME" ] || die "--confirm names '$confirm_name', not $VM_NAME; nothing was deleted"
   else
     [ -t 0 ] || die "deleting a VM needs its name typed: run this in a terminal, or add --confirm $VM_NAME$([ "$yes_given" = 0 ] || echo ' (--yes doesn'"'"'t count)'). Nothing was deleted"
     printf 'Type the name of the VM to delete it (%s): ' "$VM_NAME"
-    IFS= read -r a || a=""
-    [ "$a" = "$VM_NAME" ] || die "that isn't $VM_NAME; nothing was deleted"
+    IFS= read -r v || v=""
+    [ "$v" = "$VM_NAME" ] || die "that isn't $VM_NAME; nothing was deleted"
   fi
   expect_guard
-  # Stop what runs for it (the gateway, the hub, the event watcher), and the VM itself: it's going anyway.
+  # What runs for it (the event watcher, the hub) stops, then its owners lock is held to the end, so no session can
+  # claim it; then everything is checked again: whatever changed while you were confirming refuses.
   events_watcher_stop
   hub_stop
-  if [ "$vm_state" = running ]; then
+  ( umask 077; mkdir -p "$RUN_DIR/owners" ) 2>/dev/null
+  exec 6>>"$RUN_DIR/owners/.lock" || die "can't open $VM_NAME's owners lock; nothing was deleted"
+  lock_fd_take 6 "${MCOMP_LOCK_WAIT:-10}" || die "a session holds $VM_NAME's owners lock; nothing was deleted (metacomputer --vm $VM_NAME who)"
+  first="$DP_SIG"
+  vm_delete_plan
+  [ "$DP_SIG" = "$first" ] || die "$VM_NAME changed while you were confirming ($first, now $DP_SIG); nothing was deleted. Run this again"
+  if [ "$DP_STATE" = running ]; then
     say "stopping $VM_NAME (forced: it's being deleted)"
     vm_stop "$VM_NAME" --force
   fi
   netgw_stop
   storage_release --quiet
-  local gone=()
+  local gone=() a
   for v in "$VM_NAME" "$BASELINE_NAME" "$BASELINE_NAME-prev"; do
     a="$(vm_lookup "$v")" || die "couldn't list the VMs with $LUME before deleting $v; deleted so far: ${gone[*]:-nothing}"
     [ "$a" = present ] || continue
@@ -312,21 +291,92 @@ for line in sys.stdin:
   done
   if [ -n "$settings_file" ]; then
     rm -f "$settings_file" && gone+=("config/vms/$VM_NAME.env")
-    if [ "$RUN_DIR" = "$LAB_ROOT/.run/vms/$VM_NAME" ] && [ -d "$RUN_DIR" ] && [ ! -L "$RUN_DIR" ]; then rm -rf "$RUN_DIR"; fi
+    if [ "$DP_RUN" = 1 ]; then
+      a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run/vms/$VM_NAME")" || warn "kept its runtime folder: $a"
+    fi
   fi
-  if [ "$del_vault" = 1 ] && [ -e "$own_vault" ]; then
+  if [ "$del_vault" = 1 ]; then
     # End an unlocked vault's process first (anyone may lock: it only restricts), then remove the folder.
     [ ! -S "$own_vault/vault.sock" ] || [ ! -x "$VAULT_BIN" ] || MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 || true
-    rm -rf "$own_vault" && gone+=("the vault folder $(mc_tilde "$own_vault")")
+    if a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_APP_DIR" "vms/$VM_NAME")"; then
+      [ "$a" = absent ] || gone+=("the vault folder $(mc_tilde "$own_vault")")
+    else
+      warn "kept the vault folder: $a"
+    fi
   fi
   emit_event lifecycle vm_deleted info "The VM $VM_NAME was deleted" "" "name=$VM_NAME" "baseline=$BASELINE_NAME"
   local list=""; for v in ${gone[@]+"${gone[@]}"}; do list="${list:+$list, }$v"; done
   ok "deleted: ${list:-nothing}"
-  for v in $vols; do
+  for v in $DP_VOLS; do
     say "volume $v:"
     storage_py volume delete "$v" || warn "volume $v was kept (above)"
   done
   return 0
+}
+# BASE REL [--check]: lib/vms.py rmtree on this VM's own folder BASE/REL (never through a link, never one that is or
+# holds another VM's folder, this account's home or the checkout); the settings rows on stdin. Prints present|absent.
+vm_rmtree() {
+  "$PY" "$LAB_ROOT/lib/vms.py" rmtree --base "$1" --rel "$2" --target-vm "$VM_NAME" --home "$MC_SYS_HOME" \
+    --guard "$MC_SYS_HOME" --guard "$HOME" --guard "$LAB_ROOT" ${3:+"$3"}
+}
+# Everything vm delete checks, before the prompt and again after it (under the owners lock): what exists (DP_*), that
+# nothing it would delete is another VM's, that its folders can go, its volumes, and that it isn't in use (without
+# --force). Dies with the reason; DP_SIG sums up what was found, to compare. Uses vm_delete's flags.
+vm_delete_plan() {
+  local out facts line w why=() a
+  DP_VM=absent; DP_STATE=absent; DP_VM_BYTES=""; DP_BASE=absent; DP_BASE_BYTES=""; DP_PREV=absent; DP_PREV_BYTES=""
+  DP_CKPTS=""; DP_VOLS=""; DP_RUN=0
+  out="$("$LUME" ls --format json 2>/dev/null)" || die "couldn't list the VMs with $LUME, so it can't tell what exists; nothing was deleted"
+  facts="$(printf '%s' "$out" | "$PY" "$LAB_ROOT/lib/vms.py" facts "$VM_NAME" "$BASELINE_NAME")" \
+    || die "couldn't read $LUME's list of VMs; nothing was deleted"
+  while IFS= read -r line; do
+    case "$line" in
+      vm=*) DP_VM="${line#*=}" ;; vm_state=*) DP_STATE="${line#*=}" ;; vm_bytes=*) DP_VM_BYTES="${line#*=}" ;;
+      base=*) DP_BASE="${line#*=}" ;; base_bytes=*) DP_BASE_BYTES="${line#*=}" ;;
+      prev=*) DP_PREV="${line#*=}" ;; prev_bytes=*) DP_PREV_BYTES="${line#*=}" ;; ckpts=*) DP_CKPTS="${line#*=}" ;;
+    esac
+  done <<< "$facts"
+  [ -z "$DP_CKPTS" ] || die "$VM_NAME has checkpoints ($DP_CKPTS); delete them first (metacomputer --vm $VM_NAME checkpoint --delete NAME), or keep the VM. Nothing was deleted"
+  if [ "$DP_VM" = absent ] && [ "$DP_BASE" = absent ] && [ "$DP_PREV" = absent ] && [ -z "$settings_file" ]; then
+    die "there's no VM $VM_NAME, no baseline $BASELINE_NAME and no settings file of its own to delete"
+  fi
+  # Nothing it would delete may be another VM's: not a VM, baseline, previous baseline or checkpoint of any VM this
+  # checkout has settings for (config/local.env, config/vms/*).
+  DP_ROWS="$(vm_all_settings)"
+  w="$(printf '%s\n' "$DP_ROWS" | "$PY" "$LAB_ROOT/lib/vms.py" delete-check --target "$VM_NAME" --baseline "$BASELINE_NAME")" \
+    || die "not deleting $VM_NAME: $w"
+  # Its runtime folder (the default one in this checkout) and its vault folder (--delete-vault): only its own,
+  # reached without links, holding no other VM's folder.
+  if [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run/vms/$VM_NAME" ]; then
+    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run/vms/$VM_NAME" --check)" || die "not deleting $VM_NAME: $w"
+    [ "$w" = absent ] || DP_RUN=1
+  fi
+  if [ "$del_vault" = 1 ]; then
+    [ "$(mc_vault_dir)" = "$own_vault" ] \
+      || die "--delete-vault deletes only a VM's own vault folder ($(mc_tilde "$own_vault")); $VM_NAME's vault is $(mc_tilde "$(mc_vault_dir)"), which may be shared: delete it yourself if you mean to. Nothing was deleted"
+    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_APP_DIR" "vms/$VM_NAME" --check)" || die "--delete-vault: $w. Nothing was deleted"
+  fi
+  if [ "$del_vols" = 1 ]; then
+    DP_VOLS="$(printf '%s' "${VOLUMES:-}" | tr ',' '\n' | sed 's/:.*//; s/^ *//; s/ *$//' | grep -v '^$' | tr '\n' ' ' || true)"
+    w="$(printf '%s\n' "$DP_ROWS" | "$PY" -c 'import json, sys
+me, mine = sys.argv[1], set(sys.argv[2].split())
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except ValueError: continue
+    if d.get("ok") and d.get("vm") != me:
+        shared = mine & {e.split(":")[0].strip() for e in (d.get("volumes") or "").split(",") if e.strip()}
+        if shared: print(d.get("vm") + ": " + " ".join(sorted(shared)))' "$VM_NAME" "$DP_VOLS")"
+    [ -z "$w" ] || die "--delete-volumes: other VMs here attach some of the same volumes ($w); delete those yourself with metacomputer volume delete NAME. Nothing was deleted"
+  fi
+  # Never the VM in use without --force: the one this checkout's settings choose, one that runs, or one a session holds.
+  [ "$(mc_main_identity | head -1)" != "$VM_NAME" ] || why+=("it's the VM this checkout uses without --vm ($([ -f "$MC_MAIN_CONFIG" ] && echo config/local.env || echo the defaults))")
+  [ "$DP_STATE" != running ] || why+=("it's running")
+  "$PY" "$LAB_ROOT/lib/owners.py" check >/dev/null 2>&1 || why+=("a session is using it (metacomputer --vm $VM_NAME who)")
+  if [ ${#why[@]} -gt 0 ] && [ "$force" != 1 ]; then
+    w=""; for a in "${why[@]}"; do w="${w:+$w; }$a"; done
+    die "not deleting $VM_NAME: $w. Add --force to delete it anyway; nothing was deleted"
+  fi
+  DP_SIG="vm=$DP_VM/$DP_STATE base=$DP_BASE prev=$DP_PREV in-use=${#why[@]}"
 }
 vm_path() { case "$1" in "$LAB_ROOT"/*) printf '%s' "${1#"$LAB_ROOT"/}" ;; *) mc_tilde "$1" ;; esac; }
 vm_human() { "$PY" -c 'import sys

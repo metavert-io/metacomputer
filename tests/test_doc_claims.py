@@ -1078,18 +1078,37 @@ CLAIMS = [
      lambda m: int(m[1]) * 3600 == owners.HANDOFF_MAX_S),
     ("docs/guide.md", r"\((\d+) minutes unless Claude chose another, at most (\d+) hours\)",
      lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
-    # More than one VM (scripts/lib.sh, scripts/vm-commands.sh): a per-VM vault, and what `vm delete` needs
+    # More than one VM (scripts/lib.sh, scripts/vm-commands.sh, lib/vms.py, lib/mcp_hub.py)
     ("SECURITY.md", r"A VM made with `metacomputer vm create NAME` has a vault of its own, `\.\.\./metacomputer/vms/NAME/`",
-     lambda m: '[ -n "$VAULT_DIR" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"' in raw("scripts/lib.sh")
+     lambda m: '[ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"' in raw("scripts/lib.sh")
      and 'export MCOMP_VAULT_DIR="$VAULT_DIR"' in raw("bin/metacomputer")),
     ("SECURITY.md", r"keeps it unless `--delete-vault` asks, and that deletes only such a per-VM folder, never a shared one",
-     lambda m: '[ "$(mc_vault_dir)" = "$own_vault" ]' in vm_delete_src() and 'local own_vault="$MC_APP_DIR/vms/$VM_NAME"' in vm_delete_src()),
+     lambda m: '[ "$(mc_vault_dir)" = "$own_vault" ]' in vm_delete_src() and 'own_vault="$MC_APP_DIR/vms/$VM_NAME"' in vm_delete_src()
+     and 'vm_rmtree "$MC_APP_DIR" "vms/$VM_NAME"' in vm_delete_src()),
     ("docs/commands.md", r"once you type its name \(no terminal: `--confirm NAME`; `--yes` never counts\)",
      lambda m: "ASSUME_YES" not in vm_delete_src() and "confirm \"" not in vm_delete_src()
-     and '[ "$a" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
+     and '[ "$v" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
     ("docs/commands.md", r"Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`",
-     lambda m: all(s in vm_delete_src() for s in ('[ "$main_id" != "$VM_NAME" ]', '[ "$vm_state" != running ]',
+     lambda m: all(s in vm_delete_src() for s in ('[ "$(mc_main_identity | head -1)" != "$VM_NAME" ]', '[ "$DP_STATE" != running ]',
                                                   'lib/owners.py" check', '[ "$force" != 1 ]'))),
+    ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
+     lambda m: 'BASELINE_NAME must be $VM_NAME-baseline' in raw("scripts/lib.sh") and "def check_identity" in raw("lib/vms.py")
+     and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),
+    ("SECURITY.md", r"they're compared as the folders they are \(device and inode, with links, `\.` and `//` resolved\)",
+     lambda m: "return (st.st_dev, st.st_ino, tuple(rest))" in raw("lib/vms.py") and "os.stat(" in raw("lib/vms.py")),
+    ("SECURITY.md", r"It holds the VM's lock throughout, and `start` takes the same lock",
+     lambda m: 'vm_lock_or_die "metacomputer start"' in raw("bin/metacomputer") and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
+    ("SECURITY.md", r"It deletes folders only through a walk from `/` that follows no link",
+     lambda m: "os.O_NOFOLLOW" in raw("lib/vms.py") and "shutil.rmtree(leaf, dir_fd=fd)" in raw("lib/vms.py")
+     and "rm -rf" not in vm_delete_src()),
+    ("SECURITY.md", r"After you confirm, it holds the VM's owners lock \(so no session can claim it\), checks everything again",
+     lambda m: 'exec 6>>"$RUN_DIR/owners/.lock"' in vm_delete_src() and '[ "$DP_SIG" = "$first" ] || die' in vm_delete_src()),
+    ("SECURITY.md", r"A hub serves the VM it started with, and only it\.\*\* It pins that VM's name, SSH port and host key",
+     lambda m: "def pin_identity" in raw("lib/mcp_hub.py") and "self.pin" in raw("lib/mcp_hub.py")
+     and all(k in raw("bin/metacomputer") for k in ("MCOMP_EXPECT_VM", "MCOMP_EXPECT_SSH_PORT", "MCOMP_EXPECT_HOSTKEY"))),
+    # An honest limit, kept honest: the typed name is a terminal read, not a person check.
+    ("SECURITY.md", r"The typed name guards against a slip, not against a program\.\*\* It isn't proof that a person is there",
+     lambda m: '[ -t 0 ] || die "deleting a VM needs its name typed' in vm_delete_src()),
 ]
 
 
@@ -1207,9 +1226,13 @@ def fills_guarded():
 
 
 def vm_delete_src():
-    """The body of `vm delete` (scripts/vm-commands.sh)."""
-    m = re.search(r"^vm_delete\(\) \{.*?^\}$", raw("scripts/vm-commands.sh"), re.S | re.M)
-    return m.group(0) if m else ""
+    """`vm delete`'s code (scripts/vm-commands.sh): vm_delete, the checks it runs twice and its folder deletion."""
+    src = raw("scripts/vm-commands.sh")
+    out = []
+    for fn in ("vm_delete", "vm_delete_plan", "vm_rmtree"):
+        m = re.search(r"^%s\(\) \{.*?^\}$" % fn, src, re.S | re.M)
+        out.append(m.group(0) if m else "")
+    return "\n".join(out)
 
 
 def fpr(full, head, tail):

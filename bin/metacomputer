@@ -155,12 +155,28 @@ while [ $# -gt 0 ]; do
 done
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
-# A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM: settings that now name
-# another VM (they are shell code, and can change) stop every command here, before anything touches a VM.
+# A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM, and the hub pins the VM it
+# serves (MCOMP_EXPECT_VM, _SSH_PORT, _HOSTKEY, from when it started): settings that now name another VM (they are
+# shell code, and can change, or their file can be gone) stop every command here, before anything touches a VM.
+mc_hint=""
+[ -z "${MCOMP_HUB_PID:-}" ] || mc_hint=". This hub serves only the VM it started with (metacomputer hub stop ends it)"
 if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
-  echo "metacomputer: the settings now name the VM '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed (MCOMP_EXPECT_VM); refusing" >&2
+  if [ -n "${MC_MISSING_CONFIG:-}" ]; then
+    echo "metacomputer: the settings file for the VM '$MCOMP_EXPECT_VM' ($MC_MISSING_CONFIG) is gone, and without it the settings name '$VM_NAME'; refusing$mc_hint" >&2
+  else
+    echo "metacomputer: the settings now name the VM '$VM_NAME', not '$MCOMP_EXPECT_VM' as confirmed (MCOMP_EXPECT_VM); refusing$mc_hint" >&2
+  fi
   exit 1
 fi
+if [ -n "${MCOMP_EXPECT_SSH_PORT:-}" ] && [ "$MCOMP_EXPECT_SSH_PORT" != "$SSH_PORT" ]; then
+  echo "metacomputer: the settings now give $VM_NAME the SSH port $SSH_PORT, not $MCOMP_EXPECT_SSH_PORT as when this started (MCOMP_EXPECT_SSH_PORT); refusing$mc_hint" >&2
+  exit 1
+fi
+if [ -n "${MCOMP_EXPECT_HOSTKEY:-}" ] && [ "$(grep -F "[127.0.0.1]:$SSH_PORT " "$KNOWN_HOSTS" 2>/dev/null | head -1)" != "$MCOMP_EXPECT_HOSTKEY" ]; then
+  echo "metacomputer: $VM_NAME's pinned host key (known_hosts in its SSH_DIR) isn't the one it had when this started (MCOMP_EXPECT_HOSTKEY); refusing$mc_hint" >&2
+  exit 1
+fi
+unset mc_hint
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
@@ -243,6 +259,9 @@ need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (meta
 do_start() { # [--no-volumes]
   local novol=0 a
   for a in "$@"; do case "$a" in --no-volumes) novol=1 ;; *) die "usage: metacomputer start [--no-volumes]" ;; esac; done
+  # The VM's lock (held already by reset, restore and baseline, which start it): never during a build, a delete
+  # (`vm delete` holds it through its prompt) or another change of it.
+  vm_lock_or_die "metacomputer start"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then

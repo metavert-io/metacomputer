@@ -634,9 +634,29 @@ class Client:
 
 
 # --- the core --------------------------------------------------------------------------
+def pin_identity(env):
+    """The VM a hub serves, fixed when it starts: its name, SSH port and pinned host key (the known_hosts line for its
+    port in SSH_DIR). Each connection to the driver (bin/metacomputer mcp, which reads the settings again) carries them
+    as MCOMP_EXPECT_VM, _SSH_PORT and _HOSTKEY, and is refused, saying why, when the settings then name another VM:
+    their file is gone (the defaults' VM), was changed, or now points elsewhere. Never a reconnect to another VM."""
+    vm, port, ssh_dir = env.get("MCOMP_VM_NAME", ""), env.get("MCOMP_SSH_PORT", ""), env.get("MCOMP_SSH_DIR", "")
+    hostkey = ""
+    if port and ssh_dir:
+        try:
+            with open(os.path.join(ssh_dir, "known_hosts")) as f:
+                for line in f:
+                    if f"[127.0.0.1]:{port} " in line:   # as bin/metacomputer reads it (grep -F, the first line)
+                        hostkey = line.rstrip("\n")
+                        break
+        except OSError:
+            pass
+    return {"MCOMP_EXPECT_VM": vm, "MCOMP_EXPECT_SSH_PORT": port, "MCOMP_EXPECT_HOSTKEY": hostkey}
+
+
 class Hub:
     def __init__(self, env=None, spawn=None, inject_sessions=True, local=False):
         self.env = dict(os.environ if env is None else env)
+        self.pin = pin_identity(self.env)
         self.settings = settings_of(self.env)
         self.paths = paths(self.env)
         self.coord_on = self.settings["coord_guard"] == "on"
@@ -1268,6 +1288,7 @@ class Hub:
     def _spawn_bridge(self):
         os.makedirs(self.paths["dir"], exist_ok=True)
         env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
+        env.update({k: v for k, v in self.pin.items() if v})   # the VM this hub started with, and only it (pin_identity)
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
         # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).

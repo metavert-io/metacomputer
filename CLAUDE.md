@@ -166,8 +166,12 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   picked with `--vm NAME` / `MCOMP_VM`; `MCOMP_CONFIG=FILE` still names any file.
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
-  borrowing the main VM's identity, a settings-less checkout with other VMs in the
-  runner: `vm_target_check`); `lib/labconfig.py` must pick the same file. A VM chosen
+  whose names, ports or folders are another VM's: `lib/vms.py identity`, folders by device
+  and inode; a settings-less checkout with other VMs in the runner: `vm_target_check`);
+  `lib/labconfig.py` must pick the same file. A hub pins the VM it started with
+  (`pin_identity`: name, SSH port, host key) and refuses a reconnect to anything else.
+  `vm delete` deletes folders only through `lib/vms.py rmtree` (no-link walk, never another
+  VM's folder) and checks everything again after its prompt, under the owners lock. A VM chosen
   by name is passed on to children as `MCOMP_CONFIG`. Its vault folder and spool
   (`VAULT_DIR`, `EVENTS_SPOOL`) follow it; the main VM keeps the vault's own defaults.
   Commands that change a VM, and `secrets`, print which VM (and vault) first (`vm_notice`). Guest-internal paths (`/opt/metacomputer`, `~/metacomputer-runs`) are

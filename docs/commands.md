@@ -19,9 +19,9 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `--vm NAME COMMAND` | Any command, on the VM `NAME` (its settings: `config/vms/NAME.env`, or `config/local.env` when that's the VM it names). `MCOMP_VM=NAME` does the same |
 | `vm list [--json]` | This checkout's VMs (from its settings files and the runner): state, disk use, baseline (and checkpoints), ports, settings file; the runner's other VMs; problems such as a port two VMs share. `*` marks the VM these settings act on |
 | `vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]` | A VM of its own: writes `config/vms/NAME.env` (its names, ports, SSH keys, vault folder and spool, plus this Mac's choices such as `LUME`, `BROWSERS` and the hardening settings) and builds it after asking (`--yes` doesn't ask; `--no-build` only writes the file). Without ports, the first free pair from 2300 (live view = SSH + 3700) |
-| `vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]` | Delete the VM, its baseline (and `-prev`) and `config/vms/NAME.env`, after saying what goes and what stays, once you type its name (no terminal: `--confirm NAME`; `--yes` never counts). Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`; refuses while it has checkpoints. Keeps volumes and the vault folder unless `--delete-volumes` (each volume asks again) or `--delete-vault` (only the VM's own folder) |
+| `vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]` | Delete the VM, its baseline (and `-prev`) and `config/vms/NAME.env`, after saying what goes and what stays, once you type its name (no terminal: `--confirm NAME`; `--yes` never counts). Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`; refuses while it has checkpoints, and when anything it would delete is another VM's VM, baseline or copy. Holds the VM's lock throughout and its owners lock once you confirm, and checks everything again then. Deletes folders only along a path with no links, never one that is or holds another VM's. Keeps volumes and the vault folder unless `--delete-volumes` (each volume asks again) or `--delete-vault` (only the VM's own folder). The typed name guards against a slip; it isn't proof a person typed it (any program with a terminal can) |
 | `setup [--no-chrome] [--no-build] [--yes]` | Finish or repair the setup (`./install.sh`; finished steps are skipped). From the Claude Code plugin with no checkout yet, the one-line install shipped in the plugin, which says what it will do and asks first ([install.md](install.md#from-claude-code-first-the-plugin)) |
-| `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s |
+| `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s. `start` takes the VM's lock, so it never runs during a build, reset, restore or `vm delete` of it |
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
 | `who` / `release` | Who is using the VM; hand it over (one controller at a time) |
 | `reset [--yes] [--discard-unsynced]` | Restore the clean baseline (asks first; evidence on the Mac is kept). It copies the VM's recordings first and stops, deleting nothing, if that copy isn't whole; `--discard-unsynced` goes on without what wasn't copied (`--yes` doesn't) |
@@ -106,8 +106,8 @@ layered:
 
 A file in `config/vms/` is one VM's own (`vm create` writes it; `config/vms/` is
 never committed). Its `VM_NAME` is its file name, and it must set its own
-`SSH_PORT` and `VNC_PORT`. What it doesn't set comes from its name, never from the
-main VM: `BASELINE_NAME` `NAME-baseline`, `SSH_DIR` `~/.ssh/metacomputer-NAME`,
+`SSH_PORT` and `VNC_PORT`. Its baseline is always `NAME-baseline`. What it doesn't set comes from
+its name, never from the main VM: `SSH_DIR` `~/.ssh/metacomputer-NAME`,
 `RUN_DIR` and `LOG_DIR` `.run/vms/NAME` and `logs/vms/NAME`, and the vault folder
 and spool below. `config/local.env` isn't read for it (`vm create` copies this
 Mac's choices into the file once).
@@ -118,20 +118,27 @@ Mac's choices into the file once).
 | `EVENTS_SPOOL` | the event stream's own spool, `~/Library/Application Support/metacomputer/events/spool`; for a `config/vms/` VM, `.../vms/NAME/events/spool` | Where this VM's vault drops events, and where its event watcher takes them from |
 
 `MCOMP_VAULT_DIR` and `MCOMP_EVENTS_SPOOL` in the environment still override these
-for every VM; one that disagrees with a file's own `VAULT_DIR` or `EVENTS_SPOOL` is
-refused.
+for every VM (they must be absolute); one that isn't the same folder as a file's own
+`VAULT_DIR` or `EVENTS_SPOOL` is refused. Both reach the vault as the folders they
+are, with links resolved.
 
 Refused rather than guessed (nothing runs):
 - `--vm NAME` with no settings for `NAME`, or with two (`config/local.env` and
   `config/vms/NAME.env`); `--vm` and an `MCOMP_CONFIG` naming different files;
-- a `config/vms/` file that names another VM, has no ports of its own, or shares the
-  main VM's baseline, keys, ports or folders (a copy of `config/local.env`, or one
-  that sources it);
+- a `config/vms/` file that names another VM, has no ports of its own, is named like a
+  VM's copy (`-baseline`, `-baseline-prev`, `-ckpt-`), sets another `BASELINE_NAME`, or
+  shares a name, a port or a folder with the main VM or any other `config/vms/` VM.
+  Folders are compared as the folders they are (device and inode; links, `.` and `//`
+  resolved), so another spelling of the main VM's keys or runtime folder is refused
+  too;
 - in a checkout with no `config/local.env` and no `--vm`: any command that acts on a
   VM while `config/vms/` has files, or the runner has a VM besides the default one,
   or its list can't be read; and an `MCOMP_CONFIG` file that doesn't exist. `help`,
   `where`, `setup`, `vm`, `events`, `notify`, `learn` and `actions` still work there;
-- `install.sh` with `MCOMP_VM` set (it sets up `config/local.env`'s VM).
+- `install.sh` with `MCOMP_VM` set (it sets up `config/local.env`'s VM), and `setup`
+  for a VM chosen by name;
+- a reconnect by a hub whose settings no longer name the VM it started with (its file
+  gone, or another VM, port or host key): a hub serves only that VM (`hub stop` ends it).
 
 **The VM** (all but the names take effect on the next build):
 

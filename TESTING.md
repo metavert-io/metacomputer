@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (107 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (140 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
@@ -113,6 +113,21 @@ private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
   deletes the VM, baseline and `-prev`, its settings and runtime folder and keeps its
   vault; `--delete-vault` removes only the VM's own folder; `--force` stops a running VM
   first; the main VM keeps `config/local.env`. No other VM is ever deleted.
+- The independent audit's findings, each failing on the first version (797fbc6; checked by running
+  this file there): a per-VM baseline that is the main VM, an `MCOMP_CONFIG` baseline that is the
+  main VM or a previous baseline another file names, a file named like a baseline (each: refused,
+  nothing deleted); a per-VM `SSH_DIR` spelled `x/.` or `x//y`, a `RUN_DIR` through a link, a
+  `LOG_DIR` that is the main `RUN_DIR`, two per-VM files sharing a folder through a link (refused);
+  a runtime folder behind a linked `.run/vms`, `--delete-vault` behind a linked `vms/`, another
+  VM's vault inside the one to delete or equal to it (refused, the other folders kept); a per-VM
+  vault linked to the main one, a relative `MCOMP_VAULT_DIR` (refused), one through a link (the
+  vault gets the real folder); `start` while the VM's lock is held, the VM started or a checkpoint
+  made while the name was typed, the owners lock held (refused, nothing deleted); `vm create` while
+  another chooses ports (refused), two at once (different ports; on the first version they collided).
+- The hub (a real `Hub` from the copy, connecting through `bin/metacomputer mcp`): it pins the VM's
+  name, SSH port and host key; with its settings file deleted, or naming another VM, port or host
+  key, each reconnect is refused with the reason (on main it reached the default VM); with the
+  settings back, it connects again.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
@@ -1192,6 +1207,11 @@ update the row with the doc's new wording. What it pins:
   the vault by `bin/metacomputer`); `vm delete --delete-vault` deletes only that folder; `vm
   delete` takes the VM's lock, wants the name typed or `--confirm` and never reads `--yes`,
   and refuses the main, a running and a held VM without `--force`;
+- the rest of the separation between VMs: a per-VM baseline is always `NAME-baseline` and names are
+  checked against every VM's; folders are compared by device and inode; `start` takes the VM's
+  lock; folders are deleted along a no-link walk; after the prompt the owners lock is held and
+  everything checked again; a hub pins its VM; and the typed name is described as what it is (a
+  terminal read, not proof of a person);
 - pinned versions and digests: architecture.md's components table, the diagram, the guide
   and THIRD_PARTY_NOTICES.md against defaults.env; no doc names a newer Cua Driver than
   the pin; download names and URLs carry the pinned versions;

@@ -943,7 +943,11 @@ It deletes the VM, its baseline and `config/vms/staging.env`; it keeps its volum
 folder (`--delete-vault`), its logs and SSH keys. It refuses while the VM has
 checkpoints, and refuses the VM this checkout uses without `--vm`, a running VM or
 one a session holds unless you add `--force`. `--yes` never confirms it; without a
-terminal, `--confirm staging` does.
+terminal, `--confirm staging` does. The typed name guards against a slip, not
+against a program: anything that can run a command in a terminal can type it, so
+Claude passes `--confirm` only for a VM you named for deletion. It never deletes
+another VM's VM, baseline or copies, or a folder that is or holds another VM's, and
+it checks everything again after you confirm ([SECURITY.md](../SECURITY.md#more-than-one-vm---vm-name-metacomputer-vm)).
 
 The `metacomputer` MCP server drives the VM a bare `metacomputer` means. To give a
 Claude Code session the second VM instead, start it with `MCOMP_VM` set (for the

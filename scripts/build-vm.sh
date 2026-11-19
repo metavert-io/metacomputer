@@ -69,6 +69,9 @@ echo "[127.0.0.1]:$SSH_PORT $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN
 rm -f "$SSH_DIR/guest-features"
 
 # --- 1. VM shell --------------------------------------------------------------
+# A hub still serving the VM being replaced pinned its host key (lib/mcp_hub.py pin_identity) and would refuse the
+# new one: it ends here, and the next client starts a hub for the new VM.
+[ "$REPLACE" != 1 ] || ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) >/dev/null 2>&1 || true
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME before replacing them; nothing was deleted"
   if [ "$st" = present ]; then

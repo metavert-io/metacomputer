@@ -5,12 +5,19 @@ command resolves them (scripts/lib.sh), and the runner's list (`lume ls --format
 
     vms.py list --settings ROWS.jsonl (--runner LIST.json | --runner-failed) [--selected NAME] [--json]
     vms.py facts NAME BASELINE < LIST.json      KEY=VALUE lines: the VM, its baseline, its previous one, checkpoints
+    vms.py identity --home HOME < RECORDS      one VM's names, ports and folders against every other VM's
+    vms.py delete-check --target NAME --baseline B --home HOME < ROWS.jsonl
+                                               what `vm delete` would delete, against every other VM's names
+    vms.py rmtree --base DIR --rel A/NAME --target-vm NAME --home HOME [--guard PATH]... [--check] < ROWS.jsonl
+                                               delete one VM's own folder, never through a link, never another's
 
-Changes nothing. Names from the runner are escaped on a terminal (lib/termsafe.py)."""
+Only rmtree changes anything. Names from the runner are escaped on a terminal (lib/termsafe.py)."""
 import argparse
 import json
 import os
 import re
+import shutil
+import stat
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +25,235 @@ from termsafe import escape_for_terminal as esc  # noqa: E402
 
 COPY = re.compile(r"^(?P<owner>.+?)(?:-baseline(?:-prev)?|-ckpt-(?P<ckpt>.+))$")
 SAFE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+PATH_KEYS = ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL")
+
+
+class Refused(Exception):
+    pass
+
+
+# --- folders as the folders they are --------------------------------------------------------------------------
+def absolute(path, home, what="a folder"):
+    """path as an absolute path (~/ is the account's home); no . or .. components. Refused otherwise."""
+    if not isinstance(path, str) or not path:
+        raise Refused(f"{what} is empty")
+    if path == "~" or path.startswith("~/"):
+        path = home + path[1:]
+    if not path.startswith("/"):
+        raise Refused(f"{what} must be an absolute folder, not {path!r}")
+    parts = [c for c in path.split("/") if c]
+    if any(c in (".", "..") for c in parts):
+        if ".." in parts:
+            raise Refused(f"{what} can't have .. in it ({path})")
+        parts = [c for c in parts if c != "."]
+    return "/" + "/".join(parts)
+
+
+def identity(path, home, what="a folder"):
+    """What the folder at path is, whatever spells it: (device, inode) of the path when it exists (links followed),
+    else of its nearest existing ancestor plus the rest of the path. Two spellings of one folder (a link, a firmlink,
+    `x/.`, `x//y`) get the same identity."""
+    p = absolute(path, home, what)
+    parts = [c for c in p.split("/") if c]
+    rest = []
+    while True:
+        try:
+            st = os.stat("/" + "/".join(parts))
+            return (st.st_dev, st.st_ino, tuple(rest))
+        except (FileNotFoundError, NotADirectoryError):
+            if not parts:
+                raise Refused(f"can't read {what} ({path})")
+            rest.insert(0, parts.pop())
+        except OSError as e:
+            raise Refused(f"can't read {what} ({path}): {e.strerror}")
+
+
+def canonical(path, home, what="a folder"):
+    """path with the links in the part that exists resolved (what the vault is handed)."""
+    return os.path.realpath(absolute(path, home, what))
+
+
+def ancestors(path, home):
+    """The identities of path's existing folder and every folder above it (to see whether path is inside another)."""
+    out = set()
+    p = canonical(path, home)
+    while True:
+        try:
+            st = os.stat(p)
+            out.add((st.st_dev, st.st_ino))
+        except OSError:
+            pass
+        if p == "/":
+            return out
+        p = os.path.dirname(p)
+
+
+def read_records(stream):
+    """NUL-separated OWNER KEY VALUE records -> {owner: {key: [values]}} in the order owners first appear."""
+    data = stream.read().split("\0")
+    owners = {}
+    for i in range(0, len(data) - 2, 3):
+        owner, key, value = data[i], data[i + 1], data[i + 2]
+        owners.setdefault(owner, {}).setdefault(key, []).append(value)
+    return owners
+
+
+def names_of(ids):
+    """A VM's own names: itself, its baseline and the baseline's previous copy; and its checkpoint prefix."""
+    vm = (ids.get("VM_NAME") or [""])[0]
+    base = (ids.get("BASELINE_NAME") or [""])[0]
+    return {n for n in (vm, base, base + "-prev" if base else "") if n}, (vm + "-ckpt-" if vm else None)
+
+
+def check_identity(owners, home):
+    """One VM ("self") against every other: no name of one is a name or checkpoint of another, no port is shared,
+    and no folder (SSH_DIR, RUN_DIR, LOG_DIR, VAULT_DIR, EVENTS_SPOOL) is another's, whatever spells it.
+    Returns self's vault folder and spool as their canonical paths."""
+    me = owners.pop("self", None)
+    if not me:
+        raise Refused("nothing to check")
+    my_names, my_ckpt = names_of(me)
+    my_ports = {p for k in ("SSH_PORT", "VNC_PORT") for p in me.get(k, []) if p}
+    mine = {}
+    for k in PATH_KEYS:
+        for v in me.get(k, []):
+            mine.setdefault(identity(v, home, k), (k, v))
+    for owner, ids in owners.items():
+        names, ckpt = names_of(ids)
+        for n in sorted(my_names):
+            if n in names or (ckpt and n.startswith(ckpt)):
+                raise Refused(f"the name {n} is {owner}'s (its VM, baseline or a copy); every VM needs its own")
+        for n in sorted(names):
+            if my_ckpt and n.startswith(my_ckpt):
+                raise Refused(f"{owner}'s {n} would be one of this VM's checkpoints")
+        for k in ("SSH_PORT", "VNC_PORT"):
+            for p in ids.get(k, []):
+                if p and p in my_ports:
+                    raise Refused(f"port {p} is {owner}'s {k}; every VM needs its own ports")
+        for k in PATH_KEYS:
+            for v in ids.get(k, []):
+                try:
+                    theirs = identity(v, home, k)
+                except Refused:
+                    continue                  # theirs can't be read: it can't be the folder ours is
+                if theirs in mine:
+                    mk, mv = mine[theirs]
+                    raise Refused(f"its {mk} ({mv}) is the same folder as {owner}'s {k} ({v}); every VM needs its own")
+    return {k: canonical(me[k][0], home, k) for k in ("VAULT_DIR", "EVENTS_SPOOL") if me.get(k)}
+
+
+# --- what vm delete deletes -----------------------------------------------------------------------------------
+def rows_from(stream):
+    out = []
+    for line in stream:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+VMS_FILE = re.compile(r"^config/vms/(?P<name>[A-Za-z0-9_][A-Za-z0-9._-]{0,63})\.env$")
+
+
+def delete_check(rows, target, baseline):
+    """The names `vm delete TARGET` deletes (the VM, BASELINE, BASELINE-prev) against every other VM this checkout
+    has settings for: none may be another VM, its baseline, its previous baseline or one of its checkpoints. A
+    settings file that can't be read counts by its file name (config/vms/NAME.env: NAME and NAME's copies); any
+    other unreadable one refuses (its names aren't known)."""
+    if baseline != target + "-baseline":
+        raise Refused(f"its baseline is named {baseline}, not {target}-baseline; delete that VM by hand if you mean to")
+    doomed = {target, baseline, baseline + "-prev"}
+    for r in rows:
+        if r.get("ok"):
+            if r.get("vm") == target:
+                continue
+            names, ckpt = names_of({"VM_NAME": [r.get("vm") or ""], "BASELINE_NAME": [r.get("baseline") or ""]})
+            owner = r.get("file") or "another VM's settings"
+        else:
+            m = VMS_FILE.match(r.get("file") or "")
+            if not m:
+                raise Refused(f"{r.get('file')} can't be read ({r.get('error')}), so its VMs aren't known; fix it first")
+            if m.group("name") == target:
+                continue
+            n = m.group("name")
+            names, ckpt, owner = {n, n + "-baseline", n + "-baseline-prev"}, n + "-ckpt-", r.get("file")
+        for d in sorted(doomed):
+            if d in names or (ckpt and d.startswith(ckpt)):
+                raise Refused(f"{d} is {owner}'s (its VM, baseline or a copy); nothing was deleted")
+        for n in sorted(names):
+            if n.startswith(target + "-ckpt-"):
+                raise Refused(f"{owner}'s {n} looks like one of {target}'s checkpoints; nothing was deleted")
+
+
+def protected(rows, target, home, extra=()):
+    """Every folder another VM uses (its keys, runtime, logs, vault, spool), the account's home and the checkout:
+    what a VM's own folder must neither be nor hold."""
+    out = list(extra)
+    for r in rows:
+        if r.get("ok") and r.get("vm") != target:
+            out += [r.get(k) for k in ("ssh_dir", "run_dir", "log_dir", "vault", "spool") if r.get(k)]
+            if r.get("kind") in ("local", "defaults", "config") and not r.get("spool"):
+                out += [home + "/Library/Application Support/metacomputer/events/spool"]
+    return out
+
+
+# --- deleting one VM's own folder -----------------------------------------------------------------------------
+def _open_dir_nofollow(name, dir_fd):
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+
+
+def rmtree_own(base, rel, guard, home, check_only=False):
+    """Delete base/rel (a VM's own folder) with nothing followed through a link: base is walked from / one folder at
+    a time (O_NOFOLLOW openat), then each part of rel; a link anywhere refuses. The folder must be this account's
+    and must neither be nor hold anything in guard (another VM's folders, the home folder, the checkout). The
+    deletion itself goes through the parent's descriptor (shutil.rmtree with dir_fd, which never follows links).
+    Returns False (nothing to do) when the folder isn't there."""
+    parts = [c for c in absolute(base, home, "the base folder").split("/") if c]
+    relparts = [c for c in rel.split("/") if c]
+    if not relparts or any(c in (".", "..") for c in relparts):
+        raise Refused(f"not a folder name: {rel}")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        walked = "/"
+        for c in parts + relparts[:-1]:
+            try:
+                nfd = _open_dir_nofollow(c, fd)
+            except FileNotFoundError:
+                return False
+            except OSError:
+                raise Refused(f"{os.path.join(walked, c)} is a link or not a folder; nothing there was deleted")
+            os.close(fd)
+            fd, walked = nfd, os.path.join(walked, c)
+        leaf = relparts[-1]
+        try:
+            st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        target = os.path.join(walked, leaf)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise Refused(f"{target} is a link or not a folder; it wasn't deleted")
+        if st.st_uid != os.getuid():
+            raise Refused(f"{target} isn't this account's; it wasn't deleted")
+        me = (st.st_dev, st.st_ino)
+        for g in guard:
+            try:
+                held = me in ancestors(g, home)
+            except Refused:
+                continue                      # not a folder path at all: it can't be inside this one
+            if held:
+                raise Refused(f"{target} is or holds {g}, which another VM (or this account) uses; it wasn't deleted")
+        if check_only:
+            return True
+        st2 = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        if (st2.st_dev, st2.st_ino) != me:
+            raise Refused(f"{target} changed while it was being checked; it wasn't deleted")
+        shutil.rmtree(leaf, dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
 
 
 def human(n):
@@ -168,7 +404,34 @@ def main(argv=None):
     p = sub.add_parser("facts")
     p.add_argument("name")
     p.add_argument("baseline")
+    p = sub.add_parser("identity")
+    p.add_argument("--home", required=True)
+    p = sub.add_parser("delete-check")
+    p.add_argument("--target", required=True)
+    p.add_argument("--baseline", required=True)
+    p = sub.add_parser("rmtree")
+    p.add_argument("--base", required=True)
+    p.add_argument("--rel", required=True)
+    p.add_argument("--target-vm", required=True)
+    p.add_argument("--home", required=True)
+    p.add_argument("--guard", action="append", default=[])
+    p.add_argument("--check", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd in ("identity", "delete-check", "rmtree"):
+        try:
+            if a.cmd == "identity":
+                for k, v in check_identity(read_records(sys.stdin), a.home).items():
+                    print(f"{k}={v}")
+            elif a.cmd == "delete-check":
+                delete_check(rows_from(sys.stdin), a.target, a.baseline)
+            else:
+                guard = protected(rows_from(sys.stdin), a.target_vm, a.home, a.guard)
+                done = rmtree_own(a.base, a.rel, guard, a.home, check_only=a.check)
+                print("present" if done else "absent")
+        except Refused as e:
+            print(str(e))
+            return 1
+        return 0
     if a.cmd == "facts":
         try:
             runner = json.load(sys.stdin)

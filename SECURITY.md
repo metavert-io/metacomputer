@@ -1237,6 +1237,45 @@ Common to every kind:
   with a quota or a disk image of its own. Measurements and details:
   [docs/storage.md](docs/storage.md#folder-volumes).
 
+## More than one VM (`--vm NAME`, `metacomputer vm`)
+
+Each extra VM has its own settings file, `config/vms/NAME.env`
+([docs/commands.md](docs/commands.md#more-than-one-vm)). What keeps one VM's commands off
+another VM:
+
+- **Its identity is checked against every other VM's** each time its settings load: the
+  main VM's and every other `config/vms/` file's. Its name, baseline (always
+  `NAME-baseline`), previous baseline and checkpoint names may not be another VM's. Its
+  ports may not be another VM's. Its SSH keys, runtime, logs, vault and spool folders may
+  not be another VM's folder, however spelled: they're compared as the folders they are
+  (device and inode, with links, `.` and `//` resolved), so a link or another spelling
+  can't reach the main VM's keys, gateway or vault. Anything that clashes is refused, and
+  nothing runs.
+- **A command only goes ahead when it's clear which VM is meant.** A checkout with no
+  `config/local.env` and no `--vm` refuses to act on a VM while the runner has others, and
+  so does an `MCOMP_CONFIG` file that's gone. Vault folders reach the vault as the folders
+  they are, and `MCOMP_VAULT_DIR` must be absolute.
+- **A hub serves the VM it started with, and only it.** It pins that VM's name, SSH port and
+  host key. If its settings file goes away, or comes to name another VM, port or host key,
+  each reconnect is refused with the reason, never redirected to the defaults' VM
+  (`metacomputer hub stop` ends it). `build --replace` ends the VM's hub first.
+- **`vm delete` changes nothing it hasn't checked.**
+  - It holds the VM's lock throughout, and `start` takes the same lock, so the VM can't be
+    started, rebuilt or restored meanwhile.
+  - It refuses a set of names that touches any other VM's VM, baseline, previous baseline
+    or checkpoints, and a baseline not named `NAME-baseline`.
+  - It deletes folders only through a walk from `/` that follows no link, and only a
+    folder of this account's that neither is nor holds another VM's folder, your home or
+    the checkout. `--delete-vault` deletes only the VM's own folder under
+    `.../metacomputer/vms/`.
+  - After you confirm, it holds the VM's owners lock (so no session can claim it), checks
+    everything again, and refuses if anything changed.
+- **The typed name guards against a slip, not against a program.** It isn't proof that a
+  person is there: any program that can run a command in a terminal can type the name,
+  just as it can type a vault approval at the unlock terminal, and `--confirm NAME` does
+  the same without one. Claude's skill passes `--confirm` only for a VM you named for
+  deletion.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands
