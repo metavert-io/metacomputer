@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (172 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (176 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
@@ -156,6 +156,9 @@ runner's does.
   VM while another VM's vault is in its `RUN_DIR`'s seed folder, beside a file that can't be read,
   or when that file appears while the tools are built (each refused before anything is created or
   deleted, the vault kept; before, the seed folder went with it).
+- `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
+  and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
+  and an acting subcommand prints the VM and vault first (`status` doesn't).
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

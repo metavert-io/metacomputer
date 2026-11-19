@@ -186,6 +186,7 @@ case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
   secrets) vm_notice vault ;;
+  claude) case "${1:-}" in read|wait|status|_probe|_keeper|-h|--help|help) ;; *) vm_notice vault ;; esac ;;   # its token is the vault's
 esac
 
 # --- EVENTS HOOK (secrets) ---------------------------------------------------------

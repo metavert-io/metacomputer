@@ -82,8 +82,10 @@ using the VM; `--override` proceeds anyway.
 
 `start`, `stop`, `restart`, `reset`, `restore`, `baseline`, `checkpoint`, `build`,
 `desktop-restart`, `test`, `security apply`, `vm create` and `vm delete` first print
-which VM they act on, and every `secrets` command which VM and vault, in one line
-on stderr: `metacomputer: VM demo (config/vms/demo.env), vault ~/Library/Application Support/metacomputer-vms/demo`.
+which VM they act on, and every `secrets` command and every `claude` subcommand
+that acts (all but `read`, `wait` and `status`; its token is the vault's) which VM
+and vault, in one line on stderr. What `claude` starts (its keeper, the keeper's
+probes, its `secrets` calls) runs with the same VM's settings. For example: `metacomputer: VM demo (config/vms/demo.env), vault ~/Library/Application Support/metacomputer-vms/demo`.
 
 ## Configuration
 

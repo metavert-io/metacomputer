@@ -1110,6 +1110,43 @@ def final2_fixes(td):
         b.close()
 
 
+CLAUDE_STAND_IN = r'''import json, os, subprocess, sys
+# A stand-in for lib/vm_claude.py: what it was started with, and what a child it starts the way its keeper's probes
+# and its `secrets` calls do ($MCOMP_SELF, with the environment it inherited) acts on.
+r = subprocess.run([os.environ["MCOMP_SELF"], "where"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+print(json.dumps({"config": os.environ.get("MCOMP_CONFIG", ""), "vm": os.environ.get("MCOMP_VM_NAME", ""),
+                  "args": sys.argv[1:], "child_where": r.stdout, "child_err": r.stderr}))
+'''
+
+
+def claude_flow(td):
+    """`metacomputer claude` (lib/vm_claude.py, from main) on a VM chosen by name: it, its keeper and its probes run
+    with that VM's settings, and its acting subcommands say which VM and vault first."""
+    b = Box(td, "claude")
+    try:
+        co = b.co
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        demo = b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.set_vms([vm("metacomputer"), vm("metacomputer-baseline"), vm("demo"), vm("demo-baseline")])
+        write(os.path.join(co, "lib", "vm_claude.py"), CLAUDE_STAND_IN)
+        r = b.run("--vm", "demo", "claude", "stop")
+        try:
+            got = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            got = {}
+        check("metacomputer --vm demo claude: vm_claude runs with demo's settings file (MCOMP_CONFIG) and name",
+              os.path.realpath(got.get("config", "")) == os.path.realpath(demo) and got.get("vm") == "demo", (r.stderr[-300:], got))
+        check("...and what it starts as $MCOMP_SELF (its keeper's probes, its secrets calls) acts on demo too",
+              "vm        demo (baseline demo-baseline; settings: config/vms/demo.env)" in got.get("child_where", ""),
+              got.get("child_where", "")[:300] + got.get("child_err", "")[-200:])
+        check("...after one line naming the VM and its vault (an acting subcommand)", r.stderr.startswith(
+              f"metacomputer: VM demo (config/vms/demo.env), vault {b.app}/demo\n"), r.stderr[-300:])
+        r = b.run("--vm", "demo", "claude", "status")
+        check("...but not for one that only looks (status)", "metacomputer: VM demo" not in r.stderr, r.stderr[-300:])
+    finally:
+        b.close()
+
+
 HUB_SCRIPT = r'''
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -1194,6 +1231,7 @@ def main():
         recheck2_fixes(td)
         recheck3_fixes(td)
         final2_fixes(td)
+        claude_flow(td)
         hub_pin(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)
