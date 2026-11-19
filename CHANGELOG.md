@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-19
+
 ### Added
 - Renewable API tokens: `metacomputer secrets token renew ID|--all [--ttl 15m]` keeps a live token going, the same token in the VM, so a program running there on it (Claude Code inside the VM, a long job) needn't restart. Only the Mac side can renew. A renewal follows the rules of a new token, checked again: an `each` secret (or `unlock --confirm each`, or an identity provider's host) asks again, a `session` secret doesn't, `--project` applies to whoever renews, a required audit sink gets its record first. Renewing a token made for another requester (another Claude Code session, a script, anything but the token's own session or you at a terminal) asks at the unlock terminal like an `each` secret, even for a `session` secret, and says whose token it is; the record says who renewed it (`renewer`). A renewal that was asked about gets the expiry its question named. Never past the unlock, never more than 12 hours after the token was made, never shorter. A revoke, an expiry or a changed secret while a renewal waits wins. Recorded as `renew` in the audit log (the token's id and its new lifetime; `secrets_token_renew` in the signed action log); `tokens` shows renewals and the latest a token may live until.
 - A per-secret answer time limit for the API proxy: `secrets set NAME --kind api ... --answer-timeout 30m` (or later `secrets policy NAME --answer-timeout 30m|default`, without typing the key again); at least 10 s, at most 1 h; the default stays 600 seconds. The API must still send its first byte, and each next one, within 120 seconds. `secrets list` shows each api secret's limit.
