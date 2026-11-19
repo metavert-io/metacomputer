@@ -658,6 +658,13 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
+    ("SECURITY.md", r"A batch pixel step is checked against the window the driver runs it in, by the same model as the "
+                    r"Chrome guard and human pacing \(`step_windows`",
+     lambda m: "wins = {i: w for i, _t, _a, w in self.step_windows(args)}" in raw("lib/mcp_hub.py")
+     and "self.step_windows(args)]" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"is refused \(code `(pixel_window_unclear)`\)", lambda m: mcp_hub.UNCLEAR_CODE == m[1]),
+    ("SECURITY.md", r"The live layout is read again for each call it checks",
+     lambda m: "self._live = (0.0, -1, None)" in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"A `run_steps` step is judged by the window the driver runs it in, by the driver's own rules "
                     r"\(`step_targets`\)",
      lambda m: "self.step_targets(args, CHROME_RE)" in raw("lib/mcp_hub.py")

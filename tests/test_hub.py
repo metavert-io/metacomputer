@@ -438,6 +438,10 @@ def multiplex_checks():
     check("the driver's tools/list_changed reaches the clients", any(m.get("method") == "notifications/tools/list_changed" for m in got), got)
     raw.close()
     st = a.status()
+    end = time.time() + 2                # the raw connection just closed: let the hub see it go
+    while len(st.get("clients") or []) != 2 and time.time() < end:
+        time.sleep(0.05)
+        st = a.status()
     check("status: pid, clients, the driver connection", st["pid"] == os.getpid() and len(st["clients"]) == 2
           and st["driver"]["connected"], st)
     q = mcp_hub.query_status(r.env)
@@ -1725,6 +1729,77 @@ def inheritance_checks():
     h.close()
     clear_claims()
     r.stop()
+
+
+def coord_model_checks():
+    """The coordinate guard checks a batch pixel step against the window the driver runs it in (step_windows, the
+    model the Chrome guard and pacing use): after a check-only wait_for that moved to another window, after a skipped
+    read, and for a nested target with an inherited window beside it (both must hold); one it can't put an id to
+    among several is refused."""
+    print("the coordinate guard on the shared step model")
+    clear_claims()
+    B = 31
+    base = BASE_WINDOWS + [win(B, 90, "Gnome-calculator", 1000, 850, 300, 200, "Calculator")]
+    set_windows(base)
+    r = Running(MCOMP_BROWSER_PACING="fast")
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="cm")
+
+    def shots(resize):
+        set_windows(base)
+        h.call("get_window_state", {"pid": 50, "window_id": W})
+        h.call("get_window_state", {"pid": 90, "window_id": B})
+        ws = json.loads(json.dumps(base))
+        for w in ws:
+            if w["window_id"] == resize:
+                w["bounds"].update(width=w["bounds"]["width"] - 100)
+        set_windows(ws)
+
+    shots(B)
+    n0 = len(calls())
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"wait_for": {"pid": 90, "window_id": B, "text": "x"}}, {"click": {"x": 10, "y": 10}}]})
+    check("a pixel click after a check-only wait_for that moved to another window is checked against that window "
+          "(resized since its screenshot: refused)", res.is_error and res.structured.get("code") == mcp_hub.COORD_CODE
+          and f"window {B}" in res.text and not sent_args("run_steps", n0), res.text[:200])
+    shots(B)
+    n0 = len(calls())
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [
+        {"click": {"pid": 90, "window_id": B, "role": "entry", "name": "x"}},
+        {"get_window_state": {"pid": 50, "window_id": W}},
+        {"click": {"x": 10, "y": 10}}]})
+    check("a pixel click after a skipped read is checked against the window the step before it named (the read "
+          "changes nothing): refused", res.is_error and res.structured.get("code") == mcp_hub.COORD_CODE
+          and f"window {B}" in res.text and not sent_args("run_steps", n0), res.text[:200])
+    shots(W)
+    n0 = len(calls())
+    nested = {"click": {"target": {"kind": "window", "pid": 90, "window_id": B}, "x": 10, "y": 10}}
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [json.loads(json.dumps(nested))]})
+    check("a nested-target pixel click with an inherited window beside it must hold for both: the inherited window "
+          "was resized, so it's refused", res.is_error and res.structured.get("code") == mcp_hub.COORD_CODE
+          and f"window {W}" in res.text and not sent_args("run_steps", n0), res.text[:200])
+    res = h.call("run_steps", {"steps": [json.loads(json.dumps(nested))]})
+    check("…and with no inherited window it's checked against its own target only (unchanged: passed on)",
+          not res.is_error, res.text[:200])
+    shots(W)
+    res1 = h.call("click", {"pid": 50, "window_id": W, "x": 10, "y": 10})      # refused: W was resized
+    ws = json.loads(json.dumps(base)) + [win(41, 91, "Gnome-calculator", 950, 800, 400, 300, "Dialog")]
+    set_windows(ws)                                                           # now a window covers B
+    n0 = len(calls())
+    res2 = h.call("click", {"pid": 90, "window_id": B, "x": 50, "y": 50})
+    check("the live layout is read again for each call it checks: a list kept from a refused call a moment ago "
+          "(no action in between) doesn't vouch for the next one (a window now covers B: refused)",
+          res1.is_error and res2.is_error and "covers" in res2.text and not sent_args("click", n0), res2.text[:200])
+    shots(None)
+    n0 = len(calls())
+    res = h.call("run_steps", {"app": "Mousepad", "steps": [json.loads(json.dumps(nested))]})
+    check("a pixel step that could be in several windows, one the hub can't put an id to (inherited by app name), is "
+          "refused: it can't check them all", res.is_error and res.structured.get("code") == mcp_hub.UNCLEAR_CODE
+          and not sent_args("run_steps", n0), res.text[:200])
+    h.close()
+    clear_claims()
+    r.stop()
+    set_windows(BASE_WINDOWS)
 
 
 def bounded_checks():
@@ -3241,6 +3316,7 @@ def main():
         chrome_nested_checks()
         normalize_checks()
         inheritance_checks()
+        coord_model_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()

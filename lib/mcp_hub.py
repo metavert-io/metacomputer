@@ -244,6 +244,8 @@ COORD_CODE = "windows_changed_since_screenshot"
 # Inside one run_steps batch the hub can't look between steps, so a pixel step that comes after a step able to
 # move, resize, open, close or raise a window is refused before the batch runs (geometry_step below says which).
 BATCH_CODE = "pixels_after_window_change"
+UNCLEAR_CODE = "pixel_window_unclear"   # a batch pixel step that could land in several windows, one without an id
+PIXEL_ANY_WINDOW = -1                   # pixel_target's default window in a batch: the window comes from step_windows
 PRESS_TOOLS = {"click", "right_click", "double_click", "type_text", "press_key", "hotkey"}
 DRAG_TOOLS = {"drag", "mouse_drag", "mouse_button_down", "mouse_button_up", "parallel_mouse_drag"}
 WM_MODIFIERS = ("super", "meta", "win", "hyper", "alt", "cmd", "command", "option", "mod1", "mod4")
@@ -2334,10 +2336,10 @@ class Hub:
         self.note(pacing.describe(plan), kind="pacing")
         return pacing.note_of(plan)
 
-    def step_targets(self, args, rx):
-        """[(index, tool, args, verdicts)] for each action step of a run_steps batch: the verdicts (app_verdict with rx)
-        of every window the step could run in, by Cua Driver 0.53.0's own rules for the window a step inherits
-        (batch_tools.rs run, run_step):
+    def step_windows(self, args):
+        """[(index, tool, args, windows)] for each action step of a run_steps batch: every window the step could run in,
+        as a spec (a dict of pid, window_id, app, window and element_token keys), by Cua Driver 0.53.0's own rules for
+        the window a step inherits (batch_tools.rs run, run_step):
         - the inherited window starts as the batch's own pid, window_id, app or window, else none;
         - a read written as a step between actions (get_window_state and the like) is skipped: it changes nothing;
         - a wait_for that names a window (pid, window_id, app or window) makes it the inherited window;
@@ -2346,49 +2348,79 @@ class Hub:
           pid and window_id beside the target (both count); an element token runs in its own read's window (and, with
           an inherited window, that one counts too), and when nothing is inherited yet, later steps inherit it;
         - an expect that names a window makes it the inherited window only on a step with no action.
-        A step with no window at all (nothing named, nothing inherited) counts as not matching."""
+        windows is empty for a step with no window at all (nothing named, nothing inherited). The Chrome guard, the
+        coordinate guard and pacing all read this one model (step_targets, coord_guard, browser_steps)."""
         steps = args.get("steps") or []
-        reads = [batch_steps.read_step(st) for st in steps] if isinstance(steps, list) else []
+        if not isinstance(steps, list):
+            return []
+        reads = [batch_steps.read_step(st) for st in steps]
         acts = any(rd is None for rd in reads)
         win_keys = ("pid", "window_id", "app", "window")
 
         def window(d):
             return {k: d[k] for k in win_keys if isinstance(d, dict) and d.get(k) not in (None, "")}
 
-        ctx = self.app_verdict(args, None, rx) if window(args) else None      # None: no inherited window yet
+        ctx = window(args) or None                                            # None: no inherited window yet
         out = []
-        for i, st in enumerate(steps if isinstance(steps, list) else []):
+        for i, st in enumerate(steps):
             if not isinstance(st, dict) or (acts and reads[i] is not None):
                 continue                                                      # a read between actions: skipped
             wf = st.get("wait_for")
             if window(wf):
-                ctx = self.app_verdict(window(wf), None, rx)
+                ctx = window(wf)
             tool, a = pacing.step_parts(st)
             if tool is not None:
                 own = window(a)
                 if own:
-                    ctx = self.app_verdict(own, None, rx)
+                    ctx = own
                 tok = a.get("element_token")
                 t = a.get("target") if isinstance(a.get("target"), dict) else None
                 if tok not in (None, ""):
-                    tv = self.app_verdict(dict(own, element_token=tok), None, rx)
-                    cands = [tv] + ([ctx] if ctx is not None and not own else [])
+                    spec = dict(own, element_token=tok)
+                    wins = [spec] + ([ctx] if ctx is not None and not own else [])
                     if ctx is None:
-                        ctx = tv
+                        ctx = spec
                 elif own:
-                    cands = [ctx]
+                    wins = [own]
                 elif t is not None and t.get("kind") == "window" and window(t):
-                    cands = [self.app_verdict(window(t), None, rx)] + ([ctx] if ctx is not None else [])
+                    wins = [window(t)] + ([ctx] if ctx is not None else [])
                 else:
-                    cands = [ctx] if ctx is not None else [(False, None)]
-                out.append((i, tool, a, cands))
+                    wins = [ctx] if ctx is not None else []
+                out.append((i, tool, a, wins))
             ex = st.get("expect")
             checks = ex if isinstance(ex, list) else [ex] if isinstance(ex, dict) else []
             if tool is None:
                 for c in checks:
                     if window(c):
-                        ctx = self.app_verdict(window(c), None, rx)
+                        ctx = window(c)
         return out
+
+    def step_targets(self, args, rx):
+        """[(index, tool, args, verdicts)]: step_windows with each window's app_verdict for rx; a step with no window at
+        all counts as not matching."""
+        return [(i, t, a, [self.app_verdict(w, None, rx) for w in wins] or [(False, None)])
+                for i, t, a, wins in self.step_windows(args)]
+
+    def window_ids(self, wins):
+        """The window ids of a step's possible windows (step_windows): a window_id, or an element token's read's window.
+        [] when there's no window, or one window the hub can't put an id to (named by app or title, resolved by the
+        driver: its own checks apply, as for any such step); None when there are several and one of them has no id
+        (the coordinate guard can't check them all, so it refuses)."""
+        ids, unknown = [], 0
+        for w in wins:
+            wid = w.get("window_id")
+            if not (isinstance(wid, int) and not isinstance(wid, bool)):
+                tok = w.get("element_token")
+                m = TOKEN_RE.match(tok) if isinstance(tok, str) else None
+                snap = self.snapshots.get(m.group(1)) if m else None
+                wid = snap[1] if snap and isinstance(snap[1], int) else None
+            if wid is None:
+                unknown += 1
+            elif wid not in ids:
+                ids.append(wid)
+        if unknown and len(wins) > 1:
+            return None
+        return ids
 
     def browser_steps(self, args):
         """(indexes of the run_steps steps aimed at a Firefox or Chrome window, the first index from which nothing
@@ -2502,14 +2534,24 @@ class Hub:
         targets = []
         if name == "run_steps":
             dwid = args.get("window_id")
+            # Which window each step's pixels land in: the same model as the Chrome guard and pacing (step_windows).
+            wins = {i: w for i, _t, _a, w in self.step_windows(args)}
             changer = None                       # the first step that can move, resize, open or close windows
-            for i, (t, a) in enumerate(steps_of(args)):
-                tg = pixel_target(t, a, dwid, args)
+            for i, st in enumerate(args.get("steps") or []):
+                t, a = pacing.step_parts(st)
+                if t is None:
+                    continue
+                tg = pixel_target(t, a, PIXEL_ANY_WINDOW, args)   # frame and points; the window comes from the model
                 if tg and changer is not None:
                     # The hub can't look between steps: these pixels were aimed before the batch started.
                     return batch_refusal(changer, i, t, sess)
-                if tg:
+                if tg and tg[0] == "desktop":
                     targets.append((i, t, tg))
+                elif tg:
+                    ids = self.window_ids(wins.get(i, []))
+                    if ids is None:
+                        return unclear_refusal(i, t)
+                    targets += [(i, t, ("window", wid, tg[2], tg[3])) for wid in ids]
                 if changer is None:
                     why = geometry_step(t, a, dwid, args)
                     if why:
@@ -2521,6 +2563,9 @@ class Hub:
         if not targets:
             return None
         live = None
+        # The live layout is read fresh for each call it checks: a list kept from an earlier call (one that was refused,
+        # so no action moved act_seq on) may no longer show the windows. Pacing then reuses this one in the same call.
+        self._live = (0.0, -1, None)
         for i, t, (frame, wid, pts, zoomed) in targets:
             key = (sess, "desktop") if frame == "desktop" else (sess, "w", wid)
             rec = self.layouts.get(key)
@@ -3164,6 +3209,18 @@ def incomplete_refusal(wid, step, tool):
           "hint": "use role/name or element-token targets, or close windows"}
     if step is not None:
         sc["failed_step"] = step
+    return text, sc
+
+
+def unclear_refusal(step, tool):
+    """(text, structured) for a pixel step that could land in more than one window, one of which the hub can't put an
+    id to: it can't check them all, so it refuses (fails closed)."""
+    text = (f"Refused by the metacomputer bridge (coordinate guard) (step {step + 1}, {tool}): this step could run in "
+            "more than one window (its own target and the window it inherits), and the hub can't tell which one for "
+            "all of them, so it can't check that the pixels land where you aimed; no step was run. Name the window "
+            "with pid and window_id on the step (or the batch), or target the element by role and name.")
+    sc = {"code": UNCLEAR_CODE, "effect": "refused", "failed_step": step,
+          "hint": "name the step's window with pid and window_id, or target by role and name"}
     return text, sc
 
 

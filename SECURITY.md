@@ -474,8 +474,14 @@ edge), a click on a dialog's button or the window's own control named by role
 and name (OK, Cancel, Save, …, Maximize, Minimize, Restore), Escape, or keys
 with Super, Alt or Meta, a function key (F11 is full screen) or
 Ctrl+N/W/Q/O/S/P. Run the steps up to that one, take a fresh screenshot, and
-send the pixel steps in a new batch. `COORD_GUARD=off` leaves only the driver's
-own checks.
+send the pixel steps in a new batch. A batch pixel step is checked against the
+window the driver runs it in, by the same model as the Chrome guard and human
+pacing (`step_windows`: what a `wait_for` or a step before it named, not a read
+written as a step); a nested target with an inherited window beside it must hold
+for both, and a step that could be in several windows, one of them named only by
+app or title, is refused (code `pixel_window_unclear`). The live layout is read
+again for each call it checks. `COORD_GUARD=off` leaves only the driver's own
+checks.
 
 **Where it ends:**
 - The socket and the uid checks keep out other users of this Mac. They don't keep
