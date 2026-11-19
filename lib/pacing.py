@@ -4,18 +4,22 @@ The hub (lib/mcp_hub.py) calls this, after every guard and right before an actin
 type_text and run_steps aimed at a Firefox or Chrome window, so it applies to every client. With
 BROWSER_PACING=human (the default) it changes only the call's own arguments, with what Cua Driver offers:
 - type_text's delay_ms, the driver's pause between characters (one value for a whole call, 0..200 ms), set to a
-  random value in KEY_MS. In a run_steps batch, a text of RUN_MIN_CHARS or more is typed in two or three runs,
-  split at random places, each with its own pause, so the rhythm changes within a field. The driver can't vary
-  the pause key by key, and each extra run costs about RUN_COST_S of driver time, so runs stay few.
+  random value in KEY_MS. In a run_steps batch, a text of RUN_MIN_CHARS or more typed into the focus is typed in
+  two or three runs, split at random places, each with its own pause, so the rhythm changes within a field (a step
+  that names its element or its window by app or title is typed in one run: each run would resolve it again).
+  The driver can't vary the pause key by key, and each extra run costs about RUN_COST_S of driver time, so runs
+  stay few.
 - run_steps' delay_ms, its pause between steps, set to a random value in STEP_MS when a step types into, or clicks
   in, a browser window.
 - before a pixel click (x,y) in a browser window, a few move_cursor steps at desktop scope carry the real pointer
-  along a gentle curve toward the target; the click itself lands exactly where it was aimed. Only pixel clicks:
-  the hub doesn't know where a click by element token or by role and name lands (the driver resolves it, and moves
-  the pointer straight there as part of the click).
-A delay_ms the caller set (0 included) is kept. At most CAP_S is added per call, and never so much that a batch
-could pass the driver's own limits (MAX_STEPS steps, BATCH_LIMIT_S); a batch too long for any pacing is left as it
-is. BROWSER_PACING=fast changes nothing.
+  along a gentle curve toward the target; the click itself lands exactly where it was aimed. Only pixel clicks
+  without a wait_for (moves in front of it would happen whether or not it holds): the hub doesn't know where a
+  click by element token or by role and name lands (the driver resolves it, and moves the pointer straight there
+  as part of the click).
+From a step aimed at another window (or a check naming one) on, nothing more is split or added. A delay_ms the
+caller set (0 included) is kept, and counted: every added step waits it too. At most CAP_S is added per call, and
+never so much that a batch could pass the driver's own limits (MAX_STEPS steps, BATCH_LIMIT_S); a batch too long
+for any pacing, its own pauses included, is left as it is. BROWSER_PACING=fast changes nothing.
 
 Nothing here logs or returns text: a plan holds counts and milliseconds. The secrets vault types on its own path
 (SSH to the VM), never through the hub, so its fills never come here.
@@ -137,9 +141,15 @@ def pace_type(args, r, cap_s=CAP_S):
             "added_s": round(len(text) * d / 1000, 1)}
 
 
-def _plan(steps, browser, targets, r, split, moves_on):
+# Keys that name the element a step acts on (re-resolved on every run if they were copied to each one) or a
+# window by app name or title (which can resolve differently once the page changes).
+ELEMENT_TARGET_KEYS = ("x", "y", "element_token", "role", "name", "nth", "app", "window")
+
+
+def _plan(steps, browser, targets, r, split, moves_on, limit):
     """One try: (new steps, [(characters, the step that types them)], extra type steps, pointer moves, whether a
-    browser field changes). Steps it changes are copies."""
+    browser field changes). Steps it changes are copies. From step `limit` on (a step aimed at another window, or
+    a check naming one), nothing is split and no pointer moves are added."""
     out, typed, extra, moves, fields = [], [], 0, 0, False
     for i, st in enumerate(steps):
         tool, a = step_parts(st)
@@ -147,7 +157,10 @@ def _plan(steps, browser, targets, r, split, moves_on):
             out.append(st)
             continue
         fields = fields or tool in FIELD_TOOLS
-        if moves_on and tool in CLICK_TOOLS and i in targets:
+        more = i < limit
+        # Moves only before a pixel click whose step has no precondition: a wait_for is checked right before the
+        # click's own action, so moves in front of it would happen whether or not it then holds.
+        if moves_on and more and tool in CLICK_TOOLS and i in targets and "wait_for" not in st:
             for x, y in path(targets[i][0], targets[i][1], r):
                 out.append({"tool": "move_cursor", "args": {"scope": "desktop", "x": x, "y": y}})
                 moves += 1
@@ -155,10 +168,11 @@ def _plan(steps, browser, targets, r, split, moves_on):
         if not isinstance(text, str) or not text or own_delay(a):
             out.append(st)
             continue
-        # A step that clicks (x,y) or focuses (element_token) before typing would do it again for each run and move
-        # the caret: those are typed in one run.
-        whole = any(a.get(k) is not None for k in ("x", "y", "element_token"))
-        runs = split_runs(text, r) if split and not whole else [text]
+        # A step that names its element (x,y, a token, role and name) or its window by app or title would resolve
+        # it, and focus or click it, again for every run: the caret could move or land elsewhere. Those are typed
+        # in one run; only typing into the focus (a window named by pid and window_id at most) is split.
+        whole = any(a.get(k) is not None for k in ELEMENT_TARGET_KEYS)
+        runs = split_runs(text, r) if split and more and not whole else [text]
         if len(runs) == 1:
             new = copy_step(st)
             out.append(new)
@@ -167,7 +181,7 @@ def _plan(steps, browser, targets, r, split, moves_on):
         base = {k: v for k, v in a.items() if k not in ("text", "delay_ms", "tool") + STEP_KEYS}
         for j, run in enumerate(runs):
             new = {"tool": "type_text", "args": dict(base, text=run)}
-            if j == 0:
+            if j == 0:                               # the step's checks: before the first run, after the last
                 new.update({k: st[k] for k in ("wait_for", "timeout_ms") if k in st})
             if j == len(runs) - 1 and "expect" in st:
                 new["expect"] = st["expect"]
@@ -177,23 +191,33 @@ def _plan(steps, browser, targets, r, split, moves_on):
     return out, typed, extra, moves, fields
 
 
-def pace_batch(args, browser, targets, r, cap_s=CAP_S, moves_on=True):
+def pace_batch(args, browser, targets, r, cap_s=CAP_S, moves_on=True, limit=None):
     """A run_steps batch: browser is the set of step indexes aimed at a browser window, targets maps a pixel click's
-    index to (where the pointer is, the screen point the click lands on). Replaces args["steps"] with a paced list
-    and sets args["delay_ms"] unless the caller set it. Returns a plan of counts, or None when nothing changed."""
+    index to (where the pointer is, the screen point the click lands on), limit is the first step aimed at another
+    window (nothing is split or added from there on). Replaces args["steps"] with a paced list and sets
+    args["delay_ms"] unless the caller set it. Returns a plan of counts, or None when nothing changed.
+
+    Every step it adds also waits the batch's pause, the caller's own delay_ms included, so that counts against
+    both limits: at most cap_s added, and the batch's own steps and pauses plus everything added kept
+    BATCH_MARGIN_S under the driver's BATCH_LIMIT_S. A batch whose own pauses leave no room goes as it came."""
     steps = args.get("steps")
     if not isinstance(steps, list) or not browser or len(steps) > MAX_STEPS:
         return None
-    cap = min(cap_s, BATCH_LIMIT_S - BATCH_MARGIN_S - len(steps) * STEP_COST_S)
+    limit = len(steps) if limit is None else limit
+    own = args.get("delay_ms") if own_delay(args) else None
+    own_s = max(0.0, float(own)) / 1000 if isinstance(own, (int, float)) and not isinstance(own, bool) else 0.0
+    base = len(steps) * STEP_COST_S + (len(steps) - 1) * own_s
+    cap = min(cap_s, BATCH_LIMIT_S - BATCH_MARGIN_S - base)
     if cap <= 0:
         return None
     for split, moves in ((True, moves_on), (False, moves_on), (False, False)):
-        out, typed, extra, nmoves, fields = _plan(steps, browser, targets, r, split, moves)
-        fixed = extra * RUN_COST_S + nmoves * MOVE_COST_S
+        out, typed, extra, nmoves, fields = _plan(steps, browser, targets, r, split, moves, limit)
+        # what the added steps cost: their own driver time and the caller's pause before each of them
+        fixed = extra * RUN_COST_S + nmoves * MOVE_COST_S + (len(out) - len(steps)) * own_s
         if len(out) <= MAX_STEPS and fixed <= cap / 2:
             break
     keys = [r.randint(*KEY_MS) for _ in typed]
-    step_ms = r.randint(*STEP_MS) if fields and not own_delay(args) and len(out) > 1 else None
+    step_ms = r.randint(*STEP_MS) if fields and own is None and len(out) > 1 else None
 
     def timed():
         return (sum(n * d for (n, _), d in zip(typed, keys)) + (len(out) - 1) * (step_ms or 0)) / 1000

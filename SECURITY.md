@@ -518,10 +518,14 @@ as a person meets it. It isn't a protection, and it isn't a way past bot defence
 **Human pacing (`BROWSER_PACING=human`, the default).** The hub (`lib/pacing.py`) paces `type_text` and
 `run_steps` calls aimed at a Firefox or Chrome window, for every client, after every guard has passed the call.
 It changes only the call's delays (`delay_ms`: a random 60-140 ms per key, 120-320 ms between batch steps),
-splits a long text in a batch into two or three typing runs, and adds `move_cursor` steps (desktop scope, the real
-pointer) toward a pixel click; nothing else in the call changes, and a `delay_ms` the call sets is kept. At most
-15 s is added per call, and a batch whose own steps leave no room under the driver's 60 s limit isn't paced.
-Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came. What it keeps:
+splits a long text typed into the focus into two or three typing runs (never a step that names its field, or its
+window by app or title: each run would resolve it again), and adds `move_cursor` steps (desktop scope, the real
+pointer) toward a pixel click that has no `wait_for`; nothing else in the call changes, and a `delay_ms` the call
+sets is kept. Every added step also waits the batch's pause, the caller's own included, and that counts: at most
+15 s is added per call, and a batch whose own steps and pauses leave no room under the driver's 60 s limit isn't
+paced. From a step aimed at another app, the desktop or a target the hub can't tell, or a check naming another
+app, nothing more is split or added. Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came.
+What it keeps:
 - **No values in new places.** `hub.log` gets each plan as counts and milliseconds, never text. The action log
   records the call as sent to the driver: with `ACTION_LOG_TEXT=redact` a text split into runs shows as two or
   three redacted runs with their lengths (split at random places), instead of one.
@@ -530,6 +534,12 @@ Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came. What
   the coordinate guard already checked; they move the pointer and press nothing, but a page can react to the
   pointer passing over it (a hover menu). Bounded mode gets the delays but no moves (a manifest may not list
   `move_cursor`).
+
+**Kept profiles.** `metacomputer browser profiles --new` and `--delete` work inside the VM through
+`lib/guest_profiles.py`: the profiles folder is reached from the home folder without following a link (a link
+anywhere on the way is refused), a profile is only ever a real folder directly inside it, named by letters, digits,
+`.`, `_` and `-`, and it's deleted by descriptor without following links inside it. A profile a running browser
+uses (`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome) isn't deleted.
 
 ## The live view (`metacomputer view`)
 

@@ -704,6 +704,12 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_guest_profiles.py`: `lib/guest_profiles.py`, which makes and deletes browser profile
+  folders inside the VM (`metacomputer browser profiles --new|--delete`), run against a temporary home and a
+  stand-in `/proc`. A profiles folder that is a link (to the home folder), a link further up the way, and a profile
+  that is a link are refused with nothing outside touched; a running Firefox with `--profile DIR`, `-profile DIR`,
+  `--profile=DIR` or another spelling of the path, and Chrome with `--user-data-dir`, block the delete; bad names
+  are refused; a delete removes the profile without following a link inside it.
 - `python3 tests/test_guest_import.py` (54 checks; needs ffmpeg): files copied from the
   VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
   stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
@@ -997,7 +1003,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (228 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (234 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1067,7 +1073,11 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   desktop scope toward a pixel click inside the box from the pointer to the target, the `expect` kept on the last
   run, and a note saying steps were added; a Mousepad batch goes as sent; a 1,800-character batch stays within the
   cap; `hub.log` gets counts, never the typed text; `BROWSER_PACING=fast` sends every call as it came; bounded
-  mode gets delays but no moves. (Without the hub's pacing call these checks fail.)
+  mode gets delays but no moves. A caller's own `delay_ms` counts against the caps (10 clicks 2 s apart go as they
+  came; 100 batches with caller pauses stay within 15 s and the driver's limit); text whose step names its field
+  or its window by app is typed in one run; no pointer moves before a click with a `wait_for`; a nested
+  `target: {kind: "window", …}` counts as that window; after a check naming another app nothing more is paced.
+  (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;
 - the action log through the hub (the real relay in front of the stand-in): one

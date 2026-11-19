@@ -1235,30 +1235,43 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | pacing human
       case "${2:-}" in
         --new)
           # A kept Firefox profile for human mode: sign in once (the user, in a handoff), stay signed in until a reset.
-          gssh ops "umask 077 && mkdir -p -- '$kept_root/$name'" >/dev/null || die "couldn't make the profile folder in the VM"
+          # Made in the VM by lib/guest_profiles.py, which refuses a link anywhere on the way.
+          local rc=0
+          gssh ops "python3 -I - new firefox '$name'" < "$LAB_ROOT/lib/guest_profiles.py" >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0) ;;
+            5) die "refused: a link or something other than a folder is on the way to $kept_root/$name in the VM" ;;
+            *) die "couldn't make the profile folder in the VM (exit $rc)" ;;
+          esac
           echo "kept Firefox profile $name: $kept_root/$name"
           echo "open it with launch_app:"
           printf '  {"name": "firefox", "additional_arguments": ["--profile", "%s", "--no-remote", "URL"]}\n' "$kept_root/$name"
           echo "(--no-remote lets it run beside another Firefox; its cookies and sign-ins stay until a VM reset)" ;;
         --delete)
           shift 3 2>/dev/null || true
-          local firefox=0 rest=()
+          local firefox=0 rest=() kind label rc=0
           for a in "$@"; do [ "$a" = --firefox ] && firefox=1 || rest+=("$a"); done
           parse_flags ${rest[@]+"${rest[@]}"}
-          if [ "$firefox" = 1 ]; then
-            local dir="$kept_root/$name"
-            gssh ops "test -d '$dir' && test ! -L '$dir'" >/dev/null || die "no kept Firefox profile named $name (metacomputer browser profiles)"
-            gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-profile $dir( |\$)' >/dev/null" >/dev/null && die "profile $name is in use by a running Firefox; close it first"
-            confirm "Delete the kept Firefox profile '$name' in the VM (its cookies and sign-ins go with it)?"
-            gssh ops "rm -rf -- '$dir'" >/dev/null && echo "deleted Firefox profile $name"
-          else
-            local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
-            gssh ops "test -d '$dir'" >/dev/null || die "no driver profile named $name (metacomputer browser profiles; a kept Firefox profile needs --firefox)"
-            # [-] keeps pgrep from matching this very ssh command line
-            gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" >/dev/null && die "profile $name is in use by a running Chrome; close it first"
-            confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
-            gssh ops "rm -rf -- '$dir'" >/dev/null && echo "deleted profile $name"
-          fi ;;
+          if [ "$firefox" = 1 ]; then kind=firefox label="kept Firefox profile"; else kind=chrome label="Chrome profile"; fi
+          # Checked and deleted in the VM by lib/guest_profiles.py: only a direct child of the profiles folder, reached
+          # without following a link, never one a running browser uses (either way of naming it on its command line).
+          gssh ops "python3 -I - check $kind '$name'" < "$LAB_ROOT/lib/guest_profiles.py" >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0) ;;
+            3) if [ "$firefox" = 1 ]; then die "no kept Firefox profile named $name (metacomputer browser profiles)"
+               else die "no driver profile named $name (metacomputer browser profiles; a kept Firefox profile needs --firefox)"; fi ;;
+            4) die "profile $name is in use by a running $([ "$firefox" = 1 ] && echo Firefox || echo Chrome); close it first" ;;
+            5) die "refused: the $label $name, or the folder that holds it, is a link or not a folder in the VM" ;;
+            *) die "couldn't check the $label $name in the VM (exit $rc)" ;;
+          esac
+          confirm "Delete the $label '$name' in the VM (its cookies and sign-ins go with it)?"
+          rc=0
+          gssh ops "python3 -I - delete $kind '$name'" < "$LAB_ROOT/lib/guest_profiles.py" >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0) echo "deleted $label $name" ;;
+            4) die "profile $name came into use by a running browser; close it first" ;;
+            *) die "the $label $name wasn't deleted (exit $rc)" ;;
+          esac ;;
         "")
           gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles ;;
         *) die "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;;

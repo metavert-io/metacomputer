@@ -1295,6 +1295,62 @@ def pacing_checks():
     check("in a mixed batch only the steps aimed at Firefox are paced (a step that names no window inherits the "
           "last one named)", [d is not None for _, d in typed_steps(fwd.get("steps") or [])] == [True, False, False],
           fwd.get("steps"))
+    # The caller's own pause counts: every added step waits it too (10 pixel clicks, 2 s apart, already take most of
+    # the driver's 60 s with their own steps: nothing may be added).
+    clicks = {"pid": 88, "window_id": FIREFOX, "delay_ms": 2000,
+              "steps": [{"click": {"x": 100 + 30 * i, "y": 300}} for i in range(10)]}
+    n0 = len(calls())
+    h.call("run_steps", json.loads(json.dumps(clicks)))
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("a caller's delay_ms counts against the caps: 10 clicks 2 s apart go as they came (no steps added)",
+          {k: v for k, v in fwd.items() if k != "session"} == clicks, (len(fwd.get("steps") or []), fwd.get("delay_ms")))
+    worst = 0.0
+    for seed in range(100):
+        own = 50 * (seed % 30)
+        b = {"delay_ms": own, "steps": [{"click": {"x": 10 * i, "y": 10}} for i in range(1 + seed % 12)]
+             + [{"tool": "type_text", "args": {"text": "z" * (seed * 7 % 200)}}]}
+        n = len(b["steps"])
+        pacing.pace_batch(b, set(range(n)), {i: ((1900, 1000), (10 * i, 10)) for i in range(n - 1)}, pacing.rng(seed))
+        m = len(b["steps"])
+        added = (m - n) * (own / 1000 + pacing.MOVE_COST_S) + sum(len(t) * (d or 0) for t, d in typed_steps(b["steps"])) / 1000
+        total = n * pacing.STEP_COST_S + (n - 1) * own / 1000 + added   # the batch's own steps and pauses, plus
+        worst = max(worst, added if total <= pacing.BATCH_LIMIT_S - pacing.BATCH_MARGIN_S + 1e-6 else 1e9)
+    check(f"…over 100 batches with caller pauses up to 1.45 s: never more than {pacing.CAP_S:g} s added, and never past the "
+          "driver's limit (its margin kept)", worst <= pacing.CAP_S + 1e-6, worst)
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"tool": "type_text", "args": {"role": "entry", "name": "Email", "text": "named-field@example.com and more"}},
+        {"tool": "type_text", "args": {"app": "firefox", "text": "window by app name, long enough to split"}},
+        {"tool": "type_text", "args": {"text": "into the focus, long enough to be split"}}]})
+    typed = typed_steps((sent_args("run_steps", n0) or [{}])[-1].get("steps") or [])
+    check("text whose step names its element (role and name) or its window by app is typed in one run; typing into "
+          "the focus is split", len(typed) == 4 and typed[0][0] == "named-field@example.com and more"
+          and typed[1][0] == "window by app name, long enough to split" and all(d for _, d in typed), typed)
+    h.call("get_window_state", {"pid": 88, "window_id": FIREFOX})
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"click": {"x": 400, "y": 300}, "wait_for": {"text": "Sign in"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("no pointer moves in front of a pixel click that has a wait_for (they'd happen whether or not it holds)",
+          not any(st.get("tool") == "move_cursor" for st in fwd.get("steps") or []), fwd.get("steps"))
+    n0 = len(calls())
+    h.call("type_text", {"target": {"kind": "window", "pid": 88, "window_id": FIREFOX}, "text": "via target"})
+    h.call("run_steps", {"steps": [
+        {"tool": "type_text", "args": {"target": {"kind": "window", "pid": 88, "window_id": FIREFOX}, "text": "nested"}},
+        {"tool": "type_text", "args": {"text": "inherits it"}}]})
+    t1 = sent_args("type_text", n0)
+    typed = typed_steps((sent_args("run_steps", n0) or [{}])[-1].get("steps") or [])
+    check("a nested target {kind: window, pid, window_id} counts as that window (alone and in a batch, inherited too)",
+          t1 and pacing.KEY_MS[0] <= (t1[-1].get("delay_ms") or 0) <= pacing.KEY_MS[1] and len(typed) == 2
+          and all(d for _, d in typed), (t1, typed))
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"tool": "type_text", "args": {"text": "short"}},
+        {"wait_for": {"app": "mousepad", "text": "Untitled"}},
+        {"tool": "type_text", "args": {"text": "after a check that names Mousepad, long text"}}]})
+    typed = typed_steps((sent_args("run_steps", n0) or [{}])[-1].get("steps") or [])
+    check("…and after a check naming another app, nothing more is paced or split",
+          typed[:1] and typed[0][1] and typed[-1] == ("after a check that names Mousepad, long text", None), typed)
     long_batch = {"pid": 88, "window_id": FIREFOX, "steps": [{"tool": "type_text", "args": {"text": "y" * 300}}] * 6}
     n0 = len(calls())
     h.call("run_steps", long_batch)

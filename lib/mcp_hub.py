@@ -2298,14 +2298,16 @@ class Hub:
         result when steps were added (their numbers in the driver's report shift), else None."""
         try:
             if name == "type_text":
-                plan = pacing.pace_type(args, self.pace_rng) if self.app_verdict(args, None, BROWSER_RE)[0] else None
+                v = target_view(args)
+                plan = pacing.pace_type(args, self.pace_rng) \
+                    if v is not None and self.app_verdict(v, None, BROWSER_RE)[0] is True else None
             else:
-                browser = self.browser_steps(args)
+                browser, limit = self.browser_steps(args)
                 if not browser:
                     return None
                 moves_on = not self.bounded_mode         # a bounded manifest may not list move_cursor
                 targets = self.pointer_targets(args, browser, sess) if moves_on else {}
-                plan = pacing.pace_batch(args, browser, targets, self.pace_rng, moves_on=moves_on)
+                plan = pacing.pace_batch(args, browser, targets, self.pace_rng, moves_on=moves_on, limit=limit)
         except Exception as e:                           # never let pacing break a call
             self.note(f"pacing skipped: {type(e).__name__}", kind="pacing failed")
             return None
@@ -2315,19 +2317,46 @@ class Hub:
         return pacing.note_of(plan)
 
     def browser_steps(self, args):
-        """Indexes of the run_steps steps aimed at a Firefox or Chrome window, following targets as the driver does:
-        a step that names none runs in the window the last one that did named, or in the batch's default."""
+        """(indexes of the run_steps steps aimed at a Firefox or Chrome window, the first index from which nothing
+        may be split or added). Targets follow the driver: a step that names none runs in the window the last one
+        that did named, or in the batch's default, and a step's `target: {kind: "window", pid, window_id}` counts as
+        its pid and window_id. A step aimed elsewhere (another app, the desktop, a target that can't be told) and a
+        check naming another app or window (wait_for, expect, or a step that is only a check) end what may be added
+        from there on: a check can only take pacing away, never bring it."""
+        def elsewhere(checks):
+            """Does a check name an app or window that isn't a browser?"""
+            for c in checks:
+                for k in ("app", "window"):
+                    v = c.get(k) if isinstance(c, dict) else None
+                    if isinstance(v, str) and v and not BROWSER_RE.search(v):
+                        return True
+            return False
+
         inherited = names_target(args) and self.app_verdict(args, None, BROWSER_RE)[0] is True
-        out = set()
-        for i, st in enumerate(args.get("steps") or []):
-            tool, a = pacing.step_parts(st)
-            if tool is None:
+        out, limit = set(), None
+        steps = args.get("steps") or []
+        for i, st in enumerate(steps):
+            if not isinstance(st, dict):
                 continue
-            if names_target(a):
-                inherited = self.app_verdict(a, None, BROWSER_RE)[0] is True
-            if inherited:
-                out.add(i)
-        return out
+            before = [st["wait_for"]] if isinstance(st.get("wait_for"), dict) else []
+            after = [c for c in st.get("expect") or [] if isinstance(c, dict)] if isinstance(st.get("expect"), list) \
+                else ([st["expect"]] if isinstance(st.get("expect"), dict) else [])
+            if elsewhere(before):
+                inherited, limit = False, i if limit is None else limit
+            tool, a = pacing.step_parts(st)
+            if tool is not None:
+                v = target_view(a)
+                if v is None:                            # the desktop: not a window this step is paced for
+                    limit = i if limit is None else limit
+                elif names_target(v):
+                    inherited = self.app_verdict(v, None, BROWSER_RE)[0] is True
+                    if not inherited:
+                        limit = i if limit is None else limit
+                if v is not None and inherited:
+                    out.add(i)
+            if elsewhere(after):
+                inherited, limit = False, i + 1 if limit is None else limit
+        return out, len(steps) if limit is None else limit
 
     def pointer_targets(self, args, browser, sess):
         """For each pixel click among the browser steps: (where the pointer is, the screen point the click lands on).
@@ -2727,6 +2756,22 @@ TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
 def names_target(a):
     """Does a call or a run_steps step name its own target (else a step runs in the window it inherits)?"""
     return isinstance(a, dict) and any(a.get(k) not in (None, "") for k in TARGET_KEYS)
+
+
+def target_view(a):
+    """For human pacing: a call's or step's target as the keys names_target reads, with a `target: {kind: "window",
+    pid, window_id}` folded into pid and window_id; None when it's aimed at the desktop (a desktop target, or
+    scope "desktop" with no window), which pacing leaves alone."""
+    t = a.get("target") if isinstance(a.get("target"), dict) else None
+    if t is not None and t.get("kind") != "window":
+        return None
+    if t is None:
+        return None if a.get("scope") == "desktop" and not names_target(a) else a
+    v = dict(a)
+    for k in ("pid", "window_id"):
+        if v.get(k) is None and t.get(k) is not None:
+            v[k] = t[k]
+    return v
 
 
 def stricter(v1, v2):

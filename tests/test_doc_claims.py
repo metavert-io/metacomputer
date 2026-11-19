@@ -582,6 +582,31 @@ def pacing_keeps_text_and_own_delay():
             and "moves_on = not self.bounded_mode" in hub)
 
 
+def caller_pause_counted():
+    """A caller's own run_steps delay_ms counts: ten pixel clicks 2 s apart get nothing added (each added step would
+    wait 2 s too, past the cap), while the same batch without a pause gets pointer moves."""
+    def batch(own):
+        b = {"steps": [{"click": {"x": 10 * i, "y": 10}} for i in range(10)]}
+        if own is not None:
+            b["delay_ms"] = own
+        return b
+    b = batch(2000)
+    keep = json.dumps(b)
+    none = pacing.pace_batch(b, set(range(10)), {i: ((1900, 1000), (10 * i, 10)) for i in range(10)}, pacing.rng(1))
+    plain = pacing.pace_batch(batch(None), set(range(10)), {i: ((1900, 1000), (10 * i, 10)) for i in range(10)},
+                              pacing.rng(1))
+    return none is None and json.dumps(b) == keep and bool(plain and plain["moves"])
+
+
+def profiles_deleted_in_the_vm():
+    """`browser profiles --new|--delete` go through lib/guest_profiles.py in the VM (no rm -rf on a path), which
+    opens the way with O_NOFOLLOW and deletes a direct child by descriptor."""
+    fn = function_text("do_browser")
+    g = raw("lib/guest_profiles.py")
+    return ("lib/guest_profiles.py" in fn and "rm -rf" not in fn and "os.O_NOFOLLOW" in g
+            and "shutil.rmtree(name, dir_fd=root)" in g and "follow_symlinks=False" in g)
+
+
 def vault_types_on_its_own_path():
     """The vault reaches the VM with /usr/bin/ssh itself; nothing in vault/ talks to the hub."""
     files = [f for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift")]
@@ -597,8 +622,8 @@ CLAIMS = [
     ("SECURITY.md", r"for every client, after every guard has passed the call", lambda m: pacing_after_guards()),
     ("SECURITY.md", r"a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between batch steps",
      lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))),
-    ("SECURITY.md", r"At most (\d+) s is added per call, and a batch whose own steps leave no room under the driver's "
-                    r"(\d+) s limit isn't paced",
+    ("SECURITY.md", r"at most (\d+) s is added per call, and a batch whose own steps and pauses leave no room under the "
+                    r"driver's (\d+) s limit isn't paced",
      lambda m: pacing.CAP_S == int(m[1]) and pacing.BATCH_LIMIT_S == int(m[2])),
     ("SECURITY.md", r"`hub\.log` gets each plan as counts and milliseconds, never text",
      lambda m: pacing_keeps_text_and_own_delay()),
@@ -613,8 +638,16 @@ CLAIMS = [
     ("skills/metacomputer/BROWSER.md", r"a pause between steps \(`delay_ms`, (\d+)-(\d+) ms\)",
      lambda m: pacing.STEP_MS == (int(m[1]), int(m[2]))),
     ("skills/metacomputer/BROWSER.md", r"at most (\d+) s added per call, less in a long batch; a `delay_ms` you set "
-                                       r"yourself is kept; other apps, and `fast`, are left as they were",
-     lambda m: pacing.CAP_S == int(m[1]) and pacing_keeps_text_and_own_delay() and pacing_after_guards()),
+                                       r"yourself is kept, and every added step waits it too",
+     lambda m: pacing.CAP_S == int(m[1]) and pacing_keeps_text_and_own_delay() and pacing_after_guards()
+     and caller_pause_counted()),
+    ("SECURITY.md", r"Every added step also waits the batch's pause, the caller's own included, and that counts",
+     lambda m: caller_pause_counted()),
+    ("SECURITY.md", r"the profiles folder is reached from the home folder without following a link",
+     lambda m: profiles_deleted_in_the_vm()),
+    ("SECURITY.md", r"\(`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome\)",
+     lambda m: '("--profile", "-profile")' in raw("lib/guest_profiles.py") and '("--user-data-dir",)' in raw("lib/guest_profiles.py")
+     and 'a.startswith(fl + "=")' in raw("lib/guest_profiles.py")),
     ("skills/metacomputer/BROWSER.md", r"the result starts with a note `(metacomputer hub \(human pacing\):)",
      lambda m: m[1] == pacing.NOTE_PREFIX and pacing.note_of({"moves": 1}).startswith(pacing.NOTE_PREFIX)),
     ("skills/metacomputer/BROWSER.md", r"Sign-in, sign-up, checkout, account settings and posting go through human mode",

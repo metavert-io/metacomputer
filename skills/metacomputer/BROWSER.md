@@ -39,10 +39,10 @@ If a sign-in or sign-up looks different from what a person gets (no code box, "c
 ### Human pacing (`BROWSER_PACING`)
 
 With `BROWSER_PACING=human` (the default; `metacomputer browser pacing fast` turns it off) the hub paces input aimed at a Firefox or Chrome window, for every client (`lib/pacing.py`):
-- **Typing:** `type_text` gets the driver's pause between characters (`delay_ms`), a random 60-140 ms per call. In a `run_steps` batch a longer text is typed in two or three runs, each with its own pause. The driver can't vary the pause key by key, so the rhythm changes run to run.
+- **Typing:** `type_text` gets the driver's pause between characters (`delay_ms`), a random 60-140 ms per call. In a `run_steps` batch a longer text typed into the focus is typed in two or three runs, each with its own pause; a step that names its field (role and name, a token, x,y) or its window by app or title is typed in one run. The driver can't vary the pause key by key, so the rhythm changes run to run.
 - **Steps:** a batch that types or clicks in a browser gets a pause between steps (`delay_ms`, 120-320 ms).
-- **The pointer:** before a pixel click (x,y) in a browser window, the real pointer moves toward the target in a few steps; the click lands where it was aimed. A click by element token or by role and name goes straight there: the driver resolves it, and the hub doesn't know where it lands.
-- **Bounds:** at most 15 s added per call, less in a long batch; a `delay_ms` you set yourself is kept; other apps, and `fast`, are left as they were. Bounded mode gets the pauses but no pointer moves.
+- **The pointer:** before a pixel click (x,y) in a browser window, the real pointer moves toward the target in a few steps; the click lands where it was aimed. Not before a click with a `wait_for`, and not for a click by element token or by role and name: the driver resolves that one, and the hub doesn't know where it lands.
+- **Bounds:** at most 15 s added per call, less in a long batch; a `delay_ms` you set yourself is kept, and every added step waits it too, so a batch whose own pauses leave no room goes as you sent it. From a step aimed at another app (or a check naming one) on, nothing more is split or added. Other apps, and `fast`, are left as they were. Bounded mode gets the pauses but no pointer moves.
 - **What you see:** when steps were added, the result starts with a note `metacomputer hub (human pacing): …`: the driver's step numbers then run higher than yours. A paced batch takes several times longer (a sign-in batch of six steps: about 15 s instead of 3).
 
 ## Human mode
@@ -119,7 +119,7 @@ Signing in again and again looks like a bot, and each sign-in is a chance for a 
 - **The VM's default Firefox profile and Chrome's normal profile** (`launch_app`, human mode) keep sign-ins too, shared by every site.
 - **Page-mode Chrome:** throwaway by default; `{mode: "isolated_named", name: "shopping"}` keeps a named profile, which vault fills and sealed sessions use ([SECRETS.md](SECRETS.md)). Never attach to Chrome's normal profile from page mode: `strategy: existing_profile` isn't enabled in this lab.
 - **A VM reset clears every profile**, kept ones included: the user signs in again afterwards.
-- **Housekeeping:** `metacomputer browser profiles` lists them; `metacomputer browser profiles --delete NAME [--firefox]` deletes one (ask first).
+- **Housekeeping:** `metacomputer browser profiles` lists them; `metacomputer browser profiles --delete NAME [--firefox]` deletes one (ask first). It refuses a profile a running browser uses, and one whose folder, or a folder on the way to it, is a link.
 - **Never type the user's credentials yourself.** Use `metacomputer secrets` ([SECRETS.md](SECRETS.md)) or a handoff.
 
 ## Signing in: `metacomputer secrets`
