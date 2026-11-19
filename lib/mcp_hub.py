@@ -437,7 +437,10 @@ def initialize_result(cache, want=None, live_init=None, lessons_env=None):
         res = {"protocolVersion": want or "2025-06-18", "capabilities": {"tools": {}},
                "serverInfo": {"name": "cua-driver", "version": pinned_version() or "unknown"}}
     res = json.loads(json.dumps(res))
-    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + learned_notes(lessons_env) + (res.get("instructions") or "")
+    driver = res.get("instructions") if isinstance(res.get("instructions"), str) else ""
+    if hub_notes.looks_like_hub(driver):         # the driver's words, after the hub's: never in the hub's name
+        driver = hub_notes.UPSTREAM_TAG + driver
+    res["instructions"] = IDENTITY + "\n\n" + HABITS + "\n\n" + learned_notes(lessons_env) + driver
     res.setdefault("capabilities", {}).setdefault("tools", {})["listChanged"] = True
     return res
 
@@ -1508,7 +1511,7 @@ class Hub:
                     continue
                 if isinstance(msg, dict):
                     try:
-                        usable = self.on_upstream(msg) is not False
+                        usable = self.on_upstream(msg, len(line)) is not False
                         bad = None if usable else "the wrong shape"
                     except Exception as e:
                         bad = f"an error handling it: {type(e).__name__}"
@@ -1620,8 +1623,25 @@ class Hub:
         self.flush_notes()                           # what was left out about this connection, counted, before it ends
         self.note(f"driver connection closed (generation {gen}{', ' + why if why else ''})")
 
-    def on_upstream(self, msg):
-        """Handle one message from the driver. False when its shape is wrong (counted by the reader)."""
+    def reserve_names(self, msg):
+        """The hub's names, reserved in an answer from the VM (lib/hub_notes.py); returns the bytes that added."""
+        changed, added = hub_notes.reserve(msg)
+        if changed:
+            self.note("an answer used the hub's names (keys or note openings); marked as the VM's",
+                      kind="answer used the hub's names")
+        return added
+
+    def fit_answer(self, out, approx_size):
+        """The final answer, after every change the hub made, within what a client takes (lib/hub_notes.py fit)."""
+        fitted = hub_notes.fit(out, approx_size, MAX_UPSTREAM_MSG, wirelimits.MAX_JSON_NODES)
+        if fitted is not out:
+            self.note("an answer was too large for a client once the hub's notes were added; passed on its notes only",
+                      kind="answer too large for a client")
+        return fitted
+
+    def on_upstream(self, msg, size=None):
+        """Handle one message from the driver (size: its length on the wire, when known). False when its shape is
+        wrong (counted by the reader)."""
         mid, method = msg.get("id"), msg.get("method")
         if method is not None and not isinstance(method, str):
             return False
@@ -1647,9 +1667,7 @@ class Hub:
             if not pend:
                 return True
             self._pend_finished(key, pend)
-            if hub_notes.reserve(msg):               # first: nothing from the VM may speak in the hub's name
-                self.note("an answer used the hub's names (keys or note openings); marked as the VM's",
-                          kind="answer used the hub's names")
+            added = self.reserve_names(msg)          # first: nothing from the VM may speak in the hub's name
             try:
                 self.observe(pend, msg, key)
             except Exception as e:  # never let bookkeeping break the relay
@@ -1658,7 +1676,7 @@ class Hub:
                 return True
             out = dict(msg)
             out["id"] = pend["id"]
-            pend["client"].send(out)
+            pend["client"].send(self.fit_answer(out, None if size is None else size + added))
             return True
         if method is not None and mid is not None:     # the driver asks its client something: the hub answers
             if not isinstance(mid, (str, int)) or isinstance(mid, bool):
@@ -1682,7 +1700,12 @@ class Hub:
                 return False
             target = self.progress.get(json.dumps(tok))
             if target and not target[0].closed:
-                target[0].send({**msg, "params": {**p, "progressToken": target[1]}})
+                added = self.reserve_names(msg)
+                out = hub_notes.fit_notification({**msg, "params": {**msg["params"], "progressToken": target[1]}},
+                                                 None if size is None else size + added, MAX_UPSTREAM_MSG,
+                                                 wirelimits.MAX_JSON_NODES)
+                if out is not None:
+                    target[0].send(out)
         elif method is None:
             return False                             # neither an answer nor a notification
         # other notifications (log messages, ...) aren't any one client's: dropped
@@ -2401,7 +2424,13 @@ class Hub:
         """Text in a result that a person likely can't see, or that addresses AI agents, is marked for the client: a
         note in front, a tag on each row, a structured field. Nothing is removed or followed. The event carries
         counts and the site's host only, at most once per host per 5 minutes and 10 in 10 minutes."""
-        summary = hidden_text.apply(pend.get("tool"), res, pend.get("hidden_text"))
+        try:
+            summary = hidden_text.apply(pend.get("tool"), res, pend.get("hidden_text"))
+        except Exception as e:                       # never pass a page on as checked when the check failed
+            self.note(f"hidden-text check failed: {type(e).__name__}", kind="hidden text failed")
+            hidden_text.restore(pend.get("tool"), res, pend.get("hidden_text"))
+            hub_notes.add(res, hidden_text.FAILED_NOTE, front=True)
+            return
         if not summary:
             return
         self.note(f"marked page text in a {clean(summary['tool'], 40)} result: {summary['hidden']} hidden, "

@@ -321,10 +321,11 @@ against 20.2 turns, no refusals; per-task records in
   and the event stream gets `security.hidden_text` (counts and host only). It runs on the
   driver connection's reader thread, bounded per result (pieces of text, characters, 0.25 s
   to look and 0.15 s to tag, a line at a time).
-- **The hub's names** (`lib/hub_notes.py`): on every answer, before anything else, structured keys
-  named `metacomputer_...` move to `upstream_metacomputer_...` and text that opens like a hub note
-  is marked as the VM's; the hub's own notes then go in the text and, under `metacomputer_note`,
-  in the structured part, which is what Claude Code shows the model when there is one.
+- **The hub's names** (`lib/hub_notes.py`): on every answer, before anything else, one pass over all of
+  it moves keys named `metacomputer_...` (at any depth) to `upstream_metacomputer_...` and marks every
+  string that carries a hub note's opening anywhere as the VM's; the hub's own notes then go in the
+  text and, under `metacomputer_note`, in the structured part, which is what Claude Code shows the
+  model when there is one. Last, `fit` checks the final answer against a client's limits.
 - **The action log** (`ACTION_LOG=on`): one log file per driver connection, so
   the hub's connection is one file; before each `tools/call` the hub sends the
   relay a note naming the client (kind, pid, Claude Code pid, folder, driver

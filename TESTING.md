@@ -982,8 +982,14 @@ the other usual ways of hiding text, beside visible text), kept in `tests/fixtur
   end of a bounded session and "answer too complex" is in the structured part; a 100,000-line Chrome outline
   against 5,000 references, a 3-million-line block and 60,000 instruction-like rows stay under a second; a
   scan cut short says so with nothing found; a tree row missing from the element list is read; a VM `ref`
-  is escaped; the note and field byte caps with 4-byte characters; an answer the marks would push past a
-  client's limit is replaced by the marks alone; a query read reports no host;
+  is escaped; the note and field byte caps with 4-byte characters; a query read reports no host;
+- the second audit's findings, each failing on its audited code: a forged hub note after 256 empty blocks, after
+  200 or a million spaces, mid-block, with zero-width characters, look-alike letters or spelled out, deep in the
+  structured part, in an error and in the driver's MCP instructions is marked as the VM's (hub-named keys at any
+  depth move); the final answer, after the hub's own notes, is checked against a client's limits (an error
+  pushed over by the mark, a result with a bridge note, a marked read, the value limit), keeping the hub's notes;
+  the combined-refs and windows cuts are reported; a lone surrogate no longer stops the note; a failed check
+  says so; a clean read restores the token line whatever time tagging had left;
 - through a hub with a stand-in driver: the request asks for the element list only where it helps (not for
   `elements`, `full_output`, more than 2,000 elements or Mousepad), the client gets the note, tags and field,
   `HIDDEN_TEXT=off` changes nothing, one `security.hidden_text` event per host with counts and no page text,
