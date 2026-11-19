@@ -318,6 +318,18 @@ def task_finish_keeps_turns():
             and "${TASK_SYNC_INTERVAL:-" + D["TASK_SYNC_INTERVAL"] + "}" in sync), D.get("TASK_SYNC_INTERVAL")
 
 
+def keys_outside_home(path="/etc/ssh/metacomputer-keys/%u"):
+    """sshd reads the key lists from PATH, set before any Match block; provision.sh installs them root-owned and
+    read-only to the accounts; finalize.sh removes the homes' bootstrap copies after checking sshd reads the lists."""
+    conf = raw("provisioning/guest/rootfs/etc/ssh/sshd_config.d/10-metacomputer.conf")
+    prov, fin = raw("provisioning/guest/provision.sh"), raw("provisioning/guest/finalize.sh")
+    first_match = conf.find("\nMatch ")
+    return (f"\nAuthorizedKeysFile {path}\n" in conf and (first_match < 0 or conf.index("AuthorizedKeysFile") < first_match)
+            and "install -d -o root -g root -m 0755 /etc/ssh/metacomputer-keys" in prov
+            and 'install -o root -g root -m 0644 "$PAYLOAD/${pair#*:}" "/etc/ssh/metacomputer-keys/${pair%%:*}"' in prov
+            and 'rm -f "$home/.ssh/authorized_keys"' in fin), path
+
+
 def mb(n):
     return n >> 20
 
@@ -534,7 +546,7 @@ CLAIMS = [
      lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
     ("SECURITY.md", r"`record start` warns while `RECORD_TO=guest` is in force",
      lambda m: 'warn "RECORD_TO=guest:' in function_text("do_record")),
-    ("SECURITY.md", r"`record stop` still saves a streamed recording: it cuts the stream on the Mac at once",
+    ("SECURITY.md", r"`record stop` then cuts the stream on the Mac at once, saves what arrived and says why",
      lambda m: '[ "$path" = "(VM unreachable)" ] && waits=2' in function_text("do_record")),
     ("README.md", r"streamed to your Mac as it records so a run that wipes the VM can't take it back",
      lambda m: record_to_host()),
@@ -542,6 +554,19 @@ CLAIMS = [
     ("docs/guide.md", r"A desktop recording streams to your Mac as it records \(`RECORD_TO=host`\)", lambda m: record_to_host()),
     ("docs/guide.md", r"each finished step is copied to the Mac every (\d+) s, once, and `task finish` never replaces it",
      lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
+    # The VM's SSH key lists: root-owned, outside every home (provisioning/guest; tests/test_ssh_options.py
+    # resolves the config with sshd -T)
+    ("SECURITY.md", r"the VM reads its SSH keys from root-owned files, so nothing running as the desktop user can add "
+                    r"a key or lock your Mac out", lambda m: keys_outside_home()),
+    ("SECURITY.md", r"The VM's sshd reads every account's keys from a root-owned file "
+                    r"\(`AuthorizedKeysFile (/etc/ssh/metacomputer-keys/%u)`", lambda m: keys_outside_home(m[1])),
+    ("SECURITY.md", r"It still reaches a VM whose home folder was wiped\.", lambda m: keys_outside_home()),
+    ("SECURITY.md", r"With `SSH_AUTH=cert` the desktop user has no static keys at all",
+     lambda m: "Match User cua\n\tAuthorizedKeysFile none" in raw("provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin")),
+    ("docs/guide.md", r"The VM reads every account's keys from root-owned files in `/etc/ssh/metacomputer-keys/`",
+     lambda m: keys_outside_home()),
+    ("README.md", r"the VM reads the keys from root-owned files the desktop user can't change",
+     lambda m: keys_outside_home()),
     # Optional hardening: off by default (config/defaults.env and the code's own reading of an unset setting)
     ("SECURITY.md", r"This page covers three \*\*optional\*\* protections\. All are off by default",
      lambda m: hardening_off()),

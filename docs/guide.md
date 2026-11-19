@@ -594,8 +594,8 @@ steps don't show in a recording, so for a recorded demo Claude uses the apps.
 script from a stranger's repository, so a desktop recording goes to your Mac as
 it's made (`RECORD_TO=host`, the default): if the script wipes the VM's home
 folder, what was recorded up to the end is on the Mac already, and `record stop`
-saves it even though the VM can no longer be reached (the wipe takes the desktop
-account's SSH key with it; `metacomputer reset` brings it back). If the VM stops
+saves it. The VM's SSH keys aren't in the home folder, so the wipe doesn't cut your
+Mac off: `metacomputer sh` and `task finish` still work afterwards. If the VM stops
 sending before you stop it, `record stop` says so and the description file
 records it. `RECORD_TO=guest` records inside the VM instead and copies at
 `record stop`; anything running there can delete it first, and `record start`
@@ -1020,7 +1020,7 @@ the following. These are **always on**:
 | **mcomp-vm** (the installer's default) | Lume attaches your Mac's clipboard, its speakers and microphone, and Rosetta to every VM. [mcomp-vm](https://github.com/metavert-io/metacomputer-vm) is metacomputer's build of Lume, made by Metavert, not by Cua and not endorsed by them. It's Lume 0.7.2 plus `--no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta` and `--no-host-sharing`, and metacomputer starts the VM without all three unless you turn one on. `metacomputer status` reports what the VM actually has, read from inside it. |
 | **Public internet only** | The VM's network is a user-mode gateway on the Mac (Cua's `cua-netgw`) that checks every connection the VM opens. It refuses your Mac, your LAN and router, Tailscale and CGNAT addresses, link-local and cloud-metadata addresses, and outbound mail ports. Blocked attempts are logged. |
 | **Nothing listens off loopback** | SSH and the live view are forwarded only to `127.0.0.1` on your Mac. Lume's own VNC server, which listens on every interface, is never started. The live view is a password-protected VNC server inside the VM, and the VM's firewall admits it, and SSH, only from the gateway. |
-| **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, `fill` can only run the vault's fill program, and `proxy` can only open one port on the VM's loopback for the vault's API proxy. The Mac's ssh ignores your SSH config and forwards nothing to the VM: no agent, no X11, no ports. |
+| **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, `fill` can only run the vault's fill program, and `proxy` can only open one port on the VM's loopback for the vault's API proxy. The VM reads every account's keys from root-owned files in `/etc/ssh/metacomputer-keys/` (and the vault accounts' own), never `~/.ssh`, so nothing running as the desktop user can add a key or lock your Mac out by wiping its home folder. The Mac's ssh ignores your SSH config and forwards nothing to the VM: no agent, no X11, no ports. |
 | **Narrow accounts** | The desktop user has no sudo. After the build, the maintenance account can run only one root script with a fixed list of verbs, cloud-init is turned off, and its cached user-data (which held the host key) is deleted. All accounts have locked passwords. |
 | **Verified inputs** | The Ubuntu image (signed `SHA256SUMS`, pinned signing key and image digest), the Cua Driver release (pinned SHA-256, cross-checked against the release's checksums and checked again inside the VM), Lume (pinned checksum, or mcomp-vm's pinned tag and commit), and the Mozilla and Google repository keys (pinned fingerprints), and rclone for S3 volumes (signed checksums, pinned key and digest). The VM never downloads Cua components itself. |
 | **Less in the guest** | No snaps. No clipboard agent (`spice-vdagent` is removed) and the virtio sound driver is blacklisted, a second layer for when standard Lume attaches those devices. No shared storage unless you attach some ([storage.md](storage.md)). Cua Driver's telemetry and update checks are off, and so is Lume's telemetry. Browser policies turn off telemetry and password saving in both browsers, and sign-in and sync in Chrome. Security updates install automatically, without automatic reboots. |
@@ -1079,6 +1079,8 @@ private files are 0600):
 
 The VM's SSH accepts keys only, for `cua`, `cuaadmin`, `mcfill` and `mcproxy`, with
 root login and every kind of forwarding off apart from `mcproxy`'s one reverse forward.
+It reads each account's keys from a root-owned file (`/etc/ssh/metacomputer-keys/` for
+`cua` and `cuaadmin`), never from a home folder ([SECURITY.md](../SECURITY.md#ssh-keys-outside-the-home)).
 All accounts have locked passwords, and no macOS credentials are used anywhere.
 After a successful build, the VM's private host key is deleted from the Mac.
 

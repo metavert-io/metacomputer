@@ -78,18 +78,22 @@ and `/var/lib/metacomputer/package-versions.txt` (copied to `logs/` at build).
    Mozilla's APT key (pinned fingerprint).
 3. `lume create --os linux`, then the cloud image is converted into the VM's
    50 GiB sparse `disk.img` (cloud-init grows the root partition).
-4. A NoCloud seed ISO (label `cidata`) carries `user-data` (users, SSH keys,
-   a pre-generated pinned SSH host key), `network-config` and `payload.tgz`
-   (provision script, guest file tree, the verified driver tarball, the
-   Mozilla key). The guest never downloads Cua components itself.
+4. A NoCloud seed ISO (label `cidata`) carries `user-data` (users, bootstrap
+   SSH keys, a pre-generated pinned SSH host key), `network-config` and
+   `payload.tgz` (provision script, guest file tree, the verified driver
+   tarball, the Mozilla key, and the accounts' key lists `keys-guest` and
+   `keys-admin`). The guest never downloads Cua components itself.
 5. First boot: cloud-init creates `cua` and `cuaadmin`, runs
-   `provisioning/guest/provision.sh` (purges snapd, adds Mozilla's repo,
+   `provisioning/guest/provision.sh` (installs the key lists root-owned in
+   `/etc/ssh/metacomputer-keys/` before the sshd config that reads only them
+   (`AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u`), purges snapd, adds Mozilla's repo,
    full-upgrade, installs Xorg/LightDM/XFCE/AT-SPI/apps/ffmpeg/x11vnc,
    installs the driver, configures autologin, accessibility, no screen
    blanking/locking, uinput, sshd, ufw, unattended-upgrades) and reboots.
 6. The host waits for the XFCE session, installs the VNC password, checks
    readiness (`guest-status`), runs `finalize.sh` (narrow sudo,
-   cloud-init disabled, cached user-data removed), stops the VM and clones
+   cloud-init disabled, cached user-data removed, cloud-init's key copies
+   removed from the homes once `sshd -T` shows the lists in use), stops the VM and clones
    the baseline (`BASELINE_NAME`, default `metacomputer-baseline`).
 
 ## Desktop-control transport
@@ -778,8 +782,7 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    ssh, writes what arrives to a new `.mkv` (exclusive, no-follow), and stops the
    stream before the Mac's free space falls below `IMPORT_MIN_FREE_GB`. `record
    stop` asks the VM's recorder to stop, waits up to 30 s for the stream to end
-   (none if the VM can't be reached: a wiped home folder takes the desktop
-   account's SSH key), then remuxes to MP4 without re-encoding. A stream whose
+   (none if the VM can't be reached), then remuxes to MP4 without re-encoding. A stream whose
    Mac side ended before `record stop` is marked `stream_ended_early` in the
    description file. With `RECORD_TO=guest` the MP4 is written in
    `~/metacomputer-runs/manual/` and copied at stop. `stream`, `stop` and `status`

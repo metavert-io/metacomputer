@@ -10,9 +10,11 @@
                                             also `metacomputer record` in both RECORD_TO modes and
                                             both qualities on a running test VM (about a minute)
     MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm --wipe
-                                            also wipes the test VM's home folder in the middle of a
-                                            default recording and of a task's driver recording, checks
-                                            what the Mac kept, then resets the test VM (about 2 minutes)
+                                            also checks the VM's key lists are root-owned and outside the
+                                            home, then wipes the test VM's home folder in the middle of a
+                                            default recording and of a task's driver recording, checks what
+                                            the Mac kept and that it still reaches the VM (sh, recordings
+                                            --sync, task finish), then resets the test VM (about 3 minutes)
 """
 import json
 import os
@@ -333,7 +335,8 @@ def record_cli_checks():
         check("...says so, and the description file records it", "the stream had ended before this stop" in r.stderr
               and "stream_ended_early" in side, (r.stderr, side))
 
-        # stop, host mode, the VM can't be reached (a wiped home takes the SSH key): cut on the Mac, at once
+        # stop, host mode, the VM can't be reached (on a VM built before root-owned key lists, a wiped home
+        # takes the SSH key): cut on the Mac, at once
         live = subprocess.Popen(["sleep", "60"])
         try:
             mkv("cut")
@@ -482,6 +485,17 @@ def wipe_tests():
     sh = lambda c, t=60: subprocess.run([CLI, "sh", "-c", c], env=env, capture_output=True, text=True, timeout=t)  # noqa
     cli = lambda *a, t=120: subprocess.run([CLI, *a], env=env, capture_output=True, text=True, timeout=t)  # noqa
     try:
+        # 0. The VM's key lists: root-owned, outside the home, not writable by the desktop user, no copy in ~/.ssh.
+        r = sh("stat -c '%U %a' /etc/ssh/metacomputer-keys /etc/ssh/metacomputer-keys/$(id -un); "
+               "test -w /etc/ssh/metacomputer-keys/$(id -un) && echo WRITABLE || echo read-only; "
+               "test -e ~/.ssh/authorized_keys && echo HOME-KEYS || echo no-home-keys")
+        check("keys: the desktop user's key list is root-owned, read-only to it, and not in its home",
+              r.returncode == 0 and r.stdout.split() == ["root", "755", "root", "644", "read-only", "no-home-keys"],
+              (r.stdout, r.stderr[-200:]))
+        r = cli("status")
+        check("keys: status says the key lists are outside the home folder", "outside the home folder" in r.stdout,
+              r.stdout[-600:])
+
         # 1. A desktop recording with the defaults; the VM wipes ~ in the middle of it.
         name = f"t-wipe-{int(time.time())}"
         r = cli("record", "start", name)
@@ -490,7 +504,9 @@ def wipe_tests():
         r = sh("rm -rf ~ 2>/dev/null; ls -A ~ | wc -l")
         check("wipe: the VM's home folder is wiped mid-recording", r.returncode == 0, r.stderr)
         time.sleep(4)
+        t0 = time.time()
         r = cli("record", "stop", t=180)
+        took = time.time() - t0
         mp4 = os.path.join(out_dir, name + ".mp4")
         dec = subprocess.run(["ffmpeg", "-v", "error", "-i", mp4, "-f", "null", "-"], capture_output=True, text=True) \
             if os.path.exists(mp4) else None
@@ -498,8 +514,15 @@ def wipe_tests():
         check("wipe: the MP4 is on the Mac, decodes whole, and covers the time after the wipe",
               r.returncode == 0 and dec is not None and dec.returncode == 0 and dec.stderr.strip() == ""
               and (side.get("duration_s") or 0) >= 8, (r.returncode, r.stderr[-400:], side.get("duration_s")))
-        check("wipe: record stop says the VM couldn't be reached (the SSH key went with ~) and cut the stream",
-              "couldn't be reached" in r.stderr, r.stderr[-400:])
+        check("wipe: record stop still reaches the VM and ends the recording the usual way",
+              "couldn't be reached" not in r.stderr and "had ended before" not in r.stderr
+              and "stream_ended_early" not in side and took < 25, (round(took, 1), r.stderr[-400:]))
+        r = sh("echo alive; id -un")
+        check("wipe: metacomputer sh still works after the wipe", r.returncode == 0 and r.stdout.startswith("alive"),
+              (r.returncode, r.stderr[-300:]))
+        r = cli("recordings", "--sync")
+        check("wipe: recordings --sync still works (nothing to copy is not a failure)", r.returncode == 0,
+              (r.returncode, r.stderr[-300:]))
         cli("reset", "--yes", t=400)
 
         # 2. A task's driver recording: finished turns copied while it runs survive the same wipe.
@@ -524,8 +547,12 @@ def wipe_tests():
             r = cli("task", "finish", tname)
             arts = json.load(open(os.path.join(host, "artifacts.json"))) if os.path.exists(
                 os.path.join(host, "artifacts.json")) else {}
-            check("wipe: after the wipe, task finish still lists the turns copied before it",
-                  arts.get("recording_turns", 0) >= len(copied) >= 2 and "turns" in r.stdout, (r.stdout, r.stderr[-300:]))
+            check("wipe: after the wipe, task finish works and still lists the turns copied before it",
+                  r.returncode == 0 and arts.get("recording_turns", 0) >= len(copied) >= 2 and "turns" in r.stdout
+                  and "Permission denied" not in r.stderr, (r.returncode, r.stdout, r.stderr[-300:]))
+            r = sh("echo alive")
+            check("wipe: and metacomputer sh still works", r.returncode == 0 and r.stdout.startswith("alive"),
+                  (r.returncode, r.stderr[-300:]))
             shutil.rmtree(host, ignore_errors=True)
         cli("reset", "--yes", t=400)
     finally:

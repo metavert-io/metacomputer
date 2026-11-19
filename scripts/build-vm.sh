@@ -101,6 +101,14 @@ cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payloa
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$SEED/payload/mozilla-repo-signing-key.gpg"   # only the pinned key (fetch-artifacts.sh)
 cp "$SSH_DIR/fill.pub" "$SEED/payload/fill.pub"   # the fill account's key (provision.sh installs it under /etc)
 cp "$SSH_DIR/proxy.pub" "$SEED/payload/proxy.pub" # the proxy account's key (likewise)
+# The desktop user's and the maintenance account's key lists, with the options cloud-init's bootstrap copies
+# (user-data, below) carry: provision.sh installs them root-owned in /etc/ssh/metacomputer-keys/, the only
+# place sshd reads keys from once it's provisioned (10-metacomputer.conf), and finalize.sh removes the copies
+# in the homes. So nothing in the VM can add a key, or cut the Mac off by deleting ~/.ssh.
+{ printf 'restrict,pty %s\n' "$(head -n 1 "$SSH_DIR/ops.pub")"
+  printf 'restrict,command="/opt/metacomputer/bin/driver-mcp" %s\n' "$(head -n 1 "$SSH_DIR/mcp.pub")"
+} > "$SEED/payload/keys-guest"
+printf 'restrict,pty %s\n' "$(head -n 1 "$SSH_DIR/admin.pub")" > "$SEED/payload/keys-admin"
 case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/pinned-key.asc" "$SEED/payload/google-linux-signing-key.pub" ;; esac
 {
   echo "GUEST_USER=$GUEST_USER"; echo "ADMIN_USER=$ADMIN_USER"
@@ -221,7 +229,7 @@ for k in ("xorg_running", "xfce_session_running", "session_env_published", "atsp
 print(f"  resolution {s.get('resolution')}, driver {s.get('driver_version')}, doctor rc {s.get('driver_doctor_rc')}")
 sys.exit(0 if s.get("ready") else 1)
 EOF
-gssh admin 'sudo bash -s cuaadmin' < "$LAB_ROOT/provisioning/guest/finalize.sh"
+gssh admin "sudo bash -s cuaadmin '$GUEST_USER'" < "$LAB_ROOT/provisioning/guest/finalize.sh"
 gssh admin 'sync; test -f /var/lib/metacomputer/finalized && sudo -n -l | grep -q metacomputer-admin' \
   || die "finalize did not take effect"
 ok "finalized"

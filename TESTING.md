@@ -252,14 +252,17 @@ Without a VM, it checks that the description file describes a clip's sound track
 and reports none for a silent one.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm --wipe` then plays a
-VM that turns hostile, and resets the test VM twice (test VMs only). A recording
-with the defaults; `rm -rf ~` in the VM through `metacomputer sh` in the middle of
-it; `record stop`: the MP4 must be on the Mac, decode whole and cover the time
-after the wipe, and `record stop` must say it couldn't reach the VM (the wipe takes
-the desktop account's SSH key). Then a task with a real driver recording
+VM that turns hostile, and resets the test VM twice (test VMs only). First the key
+lists: the desktop user's is root-owned (0644 in a 0755 folder), not writable by it,
+with no copy in `~/.ssh`, and `status` says so. A recording with the defaults;
+`rm -rf ~` in the VM through `metacomputer sh` in the middle of it; `record stop`:
+the MP4 must be on the Mac, decode whole and cover the time after the wipe, and
+`record stop` must still reach the VM and end it the usual way; `metacomputer sh`
+and `recordings --sync` must still work. Then a task with a real driver recording
 (`metacomputer call`): finished turns must reach the Mac while it runs, and after
-the same wipe `task finish` must still list them. Last run, on a test VM built from
-this change (2026-11-18): all 84 checks of `--vm --wipe` passed.
+the same wipe `task finish` must work and still list them, and `sh` too. Last run:
+on a test VM built from this change (2026-11-18), all 94 checks of `--vm --wipe`
+passed, and `tests/test_options.py B D` (SSH certificates, the secrets accounts) 33/33.
 
 Sync between sound and picture was measured separately, by recording a full-screen
 flash and a beep started on the same frame once a second. The pulse input's
@@ -1076,6 +1079,9 @@ update the row with the doc's new wording. What it pins:
   `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest, once, and `task finish`
   keeping those copies (`--keep-existing`); every fallback for `RECORD_TO` and
   `TASK_SYNC_INTERVAL` in the code is its default;
+- the VM's key lists: `AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u` before any
+  `Match` block, installed root-owned by provision.sh, the homes' copies removed by
+  finalize.sh, and no static keys for `cua` with `SSH_AUTH=cert`;
 - the optional hardening off by default (defaults.env and the code reading an unset
   setting), the hub and coordinate guard on, `VM_SHELL=auto` off while bounded,
   `SHELL_LOG=auto` logging when `ACTION_LOG=on` (called, not read), the 5-minute
@@ -1138,7 +1144,7 @@ get.sh, every suite release.sh runs and `gh` (each logs what it was asked). It c
 
 ## SSH options: `tests/test_ssh_options.py`
 
-`python3 tests/test_ssh_options.py` needs no VM and connects nowhere (44
+`python3 tests/test_ssh_options.py` needs no VM and connects nowhere (54
 checks). For each role (`admin`, `ops`, `mcp`) with static keys and with
 certificates, it builds the arguments `scripts/lib.sh` uses for every
 connection to the VM and checks:
@@ -1149,6 +1155,15 @@ connection to the VM and checks:
   config read in place of `/dev/null`;
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
+
+It also resolves the VM's own sshd config (`provisioning/guest/.../sshd_config.d`, plus
+the file `metacomputer-admin ssh-auth cert` writes) with this Mac's `sshd -T`: `cua` and
+`cuaadmin` read keys only from `/etc/ssh/metacomputer-keys/%u`, never a home folder;
+`mcfill` and `mcproxy` keep their own lists; with `SSH_AUTH=cert`, `cua` has no static
+keys and `cuaadmin` keeps its list; StrictModes stays on. And it checks that the build
+writes the lists with cloud-init's key options, `provision.sh` installs them root-owned
+before the config that names them, and `finalize.sh` removes the homes' copies only
+after `sshd -T` shows the lists in use.
 
 ## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 

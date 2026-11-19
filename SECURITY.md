@@ -7,6 +7,8 @@ it:
 - nothing listens off your Mac's loopback;
 - the VM shares no storage with your Mac or other VMs unless you attach some
   ([Storage](#storage));
+- the VM reads its SSH keys from root-owned files, so nothing running as the desktop
+  user can add a key or lock your Mac out ([SSH keys outside the home](#ssh-keys-outside-the-home));
 - with mcomp-vm, the VM doesn't get your clipboard, audio or Rosetta. (`VIRTUAL_AUDIO=on`
   adds a sound card inside the VM that plays into nothing; it never reaches the Mac.)
 
@@ -211,6 +213,25 @@ anyone: anything running as you can call `emit`, or post to a sink directly.
 - It is best effort, at least once, not an audit trail: anyone with your login
   can change its backlog and logs. The signed action log above is the
   tamper-evident record.
+
+## SSH keys outside the home
+
+The VM's sshd reads every account's keys from a root-owned file
+(`AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u`; `mcfill` and `mcproxy` have their
+own, also root-owned), never from `~/.ssh`. The desktop user can read its list, as
+sshd needs, but not change it: nothing running in the VM as that user can add a key
+of its own, or cut your Mac off by deleting `~/.ssh` (a run that wipes the home
+folder, say). The build writes the lists from your keys with the same options as
+before (`restrict`, and the forced driver command for `mcp`) before sshd's config
+names them, and removes cloud-init's bootstrap copies from the homes once sshd is
+shown to read the lists. `metacomputer status` says which a VM has; a VM built
+before this reads `~/.ssh/authorized_keys` until it's rebuilt. With
+`SSH_AUTH=cert` the desktop user has no static keys at all (below), and the
+maintenance account keeps its list.
+
+**Where it ends:** root in the VM can change any of this, as it can everything
+else in the VM. Your Mac's side still checks the VM's pinned host key on every
+connection.
 
 ## SSH certificates (`SSH_AUTH=cert`)
 
@@ -1026,17 +1047,15 @@ Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while `RECOR
   records `stream_ended_early`, and the `task.recording_stopped` event is a
   warning. With an event sink, the health watcher also reports a recording that
   stopped on its own (`recording_failed`) within 5 minutes.
-- **It saves a stream from a VM it can't reach.** Wiping the home folder also
-  deletes the desktop account's SSH key (`~/.ssh/authorized_keys`), so afterwards
-  nothing can run as that account: `metacomputer sh`, `task finish` and
-  `recordings --sync` fail until `metacomputer reset`. `record stop` still saves a
-  streamed recording: it cuts the stream on the Mac at once and says why. (Checked
-  on a test VM: a recording with `rm -rf ~` in the middle came back whole,
-  including what happened on screen after the wipe.) With
-  [`SSH_AUTH=cert`](#ssh-certificates-ssh_authcert) the account is reached through
-  certificates that a root-owned file trusts, not `~/.ssh`, so it stays reachable
-  after such a wipe and `record stop` ends the recording the usual way (also
-  checked on a test VM).
+- **It still reaches a VM whose home folder was wiped.** The VM reads its SSH
+  keys from root-owned files, not `~/.ssh` ([keys outside the home](#ssh-keys-outside-the-home)),
+  so a wipe doesn't cut the Mac off: `record stop` ends the recording the usual
+  way, and `metacomputer sh`, `task finish` and `recordings --sync` keep working.
+  (Checked on a test VM: `rm -rf ~` in the middle of a recording, which came back
+  whole, including what happened on screen after the wipe.) A VM built before
+  this reads `~/.ssh/authorized_keys`, so there a wipe locks the desktop account
+  out until `metacomputer reset`; `record stop` then cuts the stream on the Mac at
+  once, saves what arrived and says why. `SSH_AUTH=cert` never used `~/.ssh`.
 - **Copies made during a task stay as they were copied.** The copier uses only
   names of the form `turn-<digits>` from the VM's listing, and the same importer as
   every copy from the VM (plain files and folders, never written through a link,

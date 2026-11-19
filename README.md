@@ -544,7 +544,8 @@ through the vault rather than the chat.
 - **Public internet only.** The gateway on your Mac refuses connections to your
   Mac, your LAN, your tailnet, cloud metadata and outbound mail, and logs them.
 - **Locked down.** SSH and the live view listen on `127.0.0.1` only. SSH is
-  key-only, a key per role, with a pinned host key; the desktop user has no sudo;
+  key-only, a key per role, with a pinned host key, and the VM reads the keys from
+  root-owned files the desktop user can't change; the desktop user has no sudo;
   and what the build downloads is pinned and checked.
 - **The VM is treated as hostile.** What comes back is bounded and checked, files
   arrive as plain files, and its text is escaped before your terminal shows it.

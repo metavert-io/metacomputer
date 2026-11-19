@@ -642,6 +642,12 @@ if gs:
         print(f"api proxy     {m(sp.get('keys_root_owned'))} proxy account (mcproxy) for metacomputer secrets tokens")
     elif sf.get("present"):
         print("api proxy     no proxy account: built before API tokens (rebuild to use metacomputer secrets token)")
+    sk = gs.get("ssh_keys") if isinstance(gs.get("ssh_keys"), dict) else {}
+    if sk.get("outside_home") is True:
+        print(f"ssh keys      {m(True)} root-owned, outside the home folder: wiping it can't lock this Mac out")
+    else:
+        print("ssh keys      \033[33min the home folder\033[0m (built before root-owned key lists): something that wipes it "
+              "cuts SSH off until reset; rebuild to change that")
     if gs.get("virtual_audio"):
         print("sound         virtual sound card: plays into nothing, recordings include it")
     def num(v):    # a number from the guest's report, shown as one; anything else (or past 10^15) is '?'
@@ -924,8 +930,9 @@ do_record() {
       ended="$("$PY" -c 'import time; print(f"{time.time():.2f}")')"
       out="$dir/$name.mp4"
       if [ "$mode" = host ]; then
-        # The stream ends when the VM's recorder finishes. A VM that can't be reached to stop it (wiping the
-        # home folder removes the desktop account's SSH key too) gets no 30 s: the stream is cut here and now.
+        # The stream ends when the VM's recorder finishes. A VM that can't be reached to stop it (on a VM built
+        # before root-owned key lists, wiping the home folder removes the SSH key too) gets no 30 s: the stream
+        # is cut here and now.
         local waits=60; [ "$path" = "(VM unreachable)" ] && waits=2
         while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ $i -lt $waits ]; do sleep 0.5; i=$((i + 1)); done
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
@@ -948,7 +955,7 @@ do_record() {
       ( export_options; "$PY" "$LAB_ROOT/lib/events.py" _recording "$out" ) >/dev/null 2>&1 || true
       ok "saved $out ($(du -h "$out" | cut -f1)); its description: ${out%.mp4}.json"
       [ "$mode" != host ] || [ "$path" != "(VM unreachable)" ] || [ -n "$early" ] \
-        || warn "the VM couldn't be reached to stop its recorder (if something wiped its home folder, the desktop account's SSH key went with it; metacomputer reset), so the stream was cut on this Mac. What arrived is saved."
+        || warn "the VM couldn't be reached to stop its recorder (metacomputer status says why; on a VM built before root-owned key lists, wiping its home folder takes the SSH key with it until metacomputer reset), so the stream was cut on this Mac. What arrived is saved."
       [ -z "$early" ] || warn "the stream had ended before this stop: the VM stopped sending (its recorder ended or was stopped, or the VM went away), or this Mac's free space reached IMPORT_MIN_FREE_GB. The video covers what arrived until then$([ -s "$dir/$name.stream.log" ] && echo "; see $dir/$name.stream.log")." ;;
     status)
       if [ -s "$state" ]; then
@@ -982,7 +989,8 @@ do_recordings() {
     vm_running "$VM_NAME" || { warn "VM is not running; nothing to sync"; return 1; }
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
     # Plain files and folders only: links and special files from the VM are left out (lib/guest_import.py).
-    gssh ops 'cd ~/metacomputer-runs 2>/dev/null && tar -cf - . 2>/dev/null' | guest_import "$dest" \
+    # No ~/metacomputer-runs (a wiped home) is nothing to copy, not a failure: an empty archive and a note.
+    gssh ops 'if cd ~/metacomputer-runs 2>/dev/null; then tar -cf - . 2>/dev/null; else echo "no ~/metacomputer-runs in the VM: nothing to copy" >&2; tar -cf - -T /dev/null; fi' | guest_import "$dest" \
       || { warn "could not sync ~/metacomputer-runs from the guest"; return 1; }
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
