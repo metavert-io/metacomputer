@@ -489,7 +489,7 @@ another site is also sent as a security event.
 
 There are two recorders:
 - **Per task, through Cua Driver.** Claude makes a task folder and calls `start_recording`. It produces a 1920×1080, 30 fps MP4 and a folder per action with the state, screenshots and click markers before and after. `metacomputer task finish` copies it all to the Mac and makes a contact sheet.
-- **The whole desktop, whoever drives it.** `metacomputer record start NAME` and `record stop` capture the screen with ffmpeg, at 20 fps by default. A description file (`NAME.json`) beside the MP4 lists its times, settings, length, size, sound track and SHA-256. With `ACTION_LOG=on` it also lists the key moments: every tool call and shell run made on this VM while it recorded, with its time in the video (for example `0:42 launch_app inkscape`).
+- **The whole desktop, whoever drives it.** `metacomputer record start NAME` and `record stop` capture the screen with ffmpeg, at 20 fps by default. A description file (`NAME.json`) beside the MP4 lists its times, settings, length, size, sound track and SHA-256. With `ACTION_LOG=on` it also lists the key moments: every tool call and shell run made on this VM while it recorded, with its time in the video (for example `0:42 launch_app inkscape`). A call that didn't run says so, as the action log records it: `(refused)` when a guard refused it, `(error)` when it came back as an error, Cua Driver's own refusals in bounded mode included.
 
 ```bash
 metacomputer record start demo          # name and, optionally, frames per second

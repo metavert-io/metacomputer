@@ -6,6 +6,19 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `tests/test_doc_claims.py` (no VM, about a second) pins the docs' security promises to the code and settings that keep them, so SECURITY.md, the README and the guide can't promise more than the code does: the vault's approval defaults and the identity-provider list, the API proxy's limits, what recordings show of a filled login, the optional hardening's defaults (in `config/defaults.env` and in the code's own fallbacks), the hub's limits and what the coordinate guard checks, the gateway's refusal list both ways, mcomp-vm's flags, pinned versions and digests, every row of the settings tables, and no absolute security claims anywhere. Each promise is one row of a table: the document, its phrase, and the check (TESTING.md).
+- `scripts/release.sh VERSION [--dry-run]` prepares a release through a pull request: it refuses unless it's on an up-to-date, clean main, the CHANGELOG's [Unreleased] has entries, `scripts/check-public.sh -a` passes and every no-VM suite passes; then it moves [Unreleased] to [VERSION] - DATE on a branch `release-vVERSION` and opens the PR (never a push to main). After the merge, `scripts/release.sh VERSION --tag [--draft-release]` tags the merge commit, pushes the tag and checks that get.sh's dry run now installs it; `--draft-release` drafts a GitHub Release from the CHANGELOG section without publishing it (`tests/test_release.py`).
+
+### Changed
+- The install no longer shows the linker's harmless `ld: warning: search path '...' not found` lines from the Swift builds of mcomp-vm and the vault (Apple's Command Line Tools name SDK folders they don't have). Every other line those builds print is still shown, and a failed build still stops the install.
+- SECURITY.md states the API proxy's limit on an answer: 600 seconds from sending the request, after which it's cancelled and the connection to the VM closed.
+
+### Fixed
+- `metacomputer learn bench` stops with the reason when a benchmark run is refused (another session using the test VM, the cost cap, a usage limit), and says how to pick it up again, instead of starting the second run and printing an empty comparison ("over the 0 tasks"); two runs with no task in common print no table.
+- `metacomputer learn approve` prints its summary once (`Lessons: 1 active in the MCP instructions, ...`), not "active in the MCP instructions" twice.
+- A desktop recording's key moments (the description file `record stop` writes, and `record moments`) no longer list calls that didn't run as if they did: a call the action log records as refused is marked `refused` (a guard on the Mac, or a shell run refused after its call was logged), and one that came back as an error, Cua Driver's own refusals in bounded mode included, is marked `error`.
+
 ## [0.2.0] - 2026-11-18
 
 The first public release. Highlights:

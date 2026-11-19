@@ -53,7 +53,7 @@ its own, so a second run in the same hub isn't refused as an ended session.
 
 ## The VM runner: `tests/test_vm_runner.py`
 
-`python3 tests/test_vm_runner.py` (37 checks) needs no VM: fake runners in a
+`python3 tests/test_vm_runner.py` (42 checks) needs no VM: fake runners in a
 temporary home, and `install.sh` run from a temporary copy of the checkout with
 a fake `git`.
 - `scripts/lib.sh` picks `~/.local/bin/mcomp-vm` by default. While the configured
@@ -69,7 +69,10 @@ a fake `git`.
   `_COMMIT` in `local.env` still count, the new names win over them, and a tag from
   before the rename (which installs lume-secure) leaves `LUME` on lume-secure. An
   existing lume-secure is left byte for byte as it was, and an installed mcomp-vm
-  isn't built again.
+  isn't built again. Its build's harmless linker warnings (`ld: warning: search path
+  '...' not found`, from Swift with only the Command Line Tools) aren't shown, while
+  every other line it prints is, on its own stream; a build that fails still stops the
+  install, once, with its advice.
 - `install.sh --uninstall` names the runner in use (mcomp-vm, lume-secure when
   that's the one installed, or standard Lume) and how to remove it, and mentions a
   lume-secure left beside mcomp-vm.
@@ -121,7 +124,7 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
 
 ## The installers: `tests/test_install.py`
 
-`python3 tests/test_install.py` (215 checks) needs no VM, no network and no
+`python3 tests/test_install.py` (218 checks) needs no VM, no network and no
 Homebrew. Every command that looks at the Mac or reaches out (`uname`, `sw_vers`,
 `sysctl`, `df`, `dscl`, `curl`, `xcode-select`, `brew`, `ssh`, `security`, the VM
 runner) is a stub on `PATH` that logs its calls, in a temporary home, with its own
@@ -168,6 +171,9 @@ real `security`, on a throwaway keychain that exists only inside a temporary hom
   `--rebuild --fresh-source` never uses the checkout's `.cache/cua-src`; git runs with
   hooks off. install.sh builds out-of-date tools when the VM is already built, and
   checks the checkout's disk when it builds the runner or tools, `--no-build` too.
+  `scripts/build-vault.sh`, against a stand-in `swiftc`, leaves out only the linker's
+  `search path ... not found` warnings (other warnings stay on their own stream), and a
+  failed compile still fails the build.
 - Concurrency, with real concurrent runs against stand-ins: two `install.sh` runs (two
   checkouts and homes, one lock folder), and two `get.sh` runs: the second waits, then
   refuses without changing anything, and runs once the first is done. Two
@@ -202,7 +208,12 @@ real `security`, on a throwaway keychain that exists only inside a temporary hom
 `python3 tests/test_recording.py` needs no VM. It makes a short video and an
 action log with calls before, during and after it, and on another VM, then checks
 the description file: settings, length, size and hash, and that the key moments
-are exactly this VM's calls during the recording at the right times.
+are exactly this VM's calls during the recording at the right times. A call that
+didn't run is marked the way the action log records it: refused by a guard (a
+`refused` record) or a shell run refused after its call was logged, `refused`; a
+call that came back as an error (Cua Driver refusing it in bounded mode, or an RPC
+error), `error`; calls that worked, or whose result came after the recording, stay
+plain, and `record moments` shows each outcome.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm` also records six
 seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality,
@@ -449,7 +460,7 @@ Each of these needs no VM and takes seconds.
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (111 checks, about 45 s) needs no VM and no network.
+`python3 tests/test_learn.py` (116 checks, about 45 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -495,6 +506,12 @@ results, window titles, app names, typed text, errors and the model's own text.
   limit; and a flood of unrelated events rotating the general event log leaves
   approved lessons working (the never-rotated `lesson-events.jsonl` keeps the
   evidence) while a forged head is still refused.
+- Polish: `learn approve` prints its summary once (`Lessons: 1 active in the MCP
+  instructions, ...`, not "active in the MCP instructions" twice); `learn bench` whose
+  first run is refused (a stand-in benchmark run that stops the way bench.py does when
+  another controller uses the VM) ends with the reason and how to pick it up again,
+  without starting the run with the lessons or printing a comparison; and two runs with
+  no task in common print no table.
 
 ## Storage: `tests/test_storage.py`, `tests/test_storage_vm.py`
 
@@ -790,6 +807,75 @@ Chrome profile and closes them again, and changes no VM settings (it turns
   the window keeps its size), refuses a foreground click under a window that has
   since covered the point, and passes a point that window doesn't cover;
 - `hub stop` stops it and the next call starts a new one.
+
+## The docs' security promises: `tests/test_doc_claims.py`
+
+`python3 tests/test_doc_claims.py` needs no VM and takes about a second. It pins each
+important promise in SECURITY.md, the README, docs/ and the defaults to the code or setting
+that keeps it, so a doc can't quietly promise more than the code does (an independent review
+once found approval defaults, what recordings show and what the coordinate guard catches
+overstated). Its table `CLAIMS` holds one row per promise: the document, a phrase it must
+contain (matched with line breaks folded) and a check; numbers in the phrase are compared
+with the code's. A row fails when either side changes alone: fix whichever is wrong, and
+update the row with the doc's new wording. What it pins:
+- the vault's approvals: `set` defaults to `--approval session` (vault/Commands.swift);
+  everything the imports write starts at `each` (vault/Import.swift); unlock's default
+  `--confirm session`; rules at most 30 days; 600,000 PBKDF2 rounds; SECURITY.md's
+  identity-provider table is exactly vault/Approvals.swift's list;
+- the API proxy: 16 connections per VM, a 15 s wait for a slot, a 64 KB head within 10 s,
+  a 32 MB body within 300 s, 600 s for the whole answer, tokens of at most 8 hours (both
+  where they're asked for and where they're made), 192 random bits, port 18765 in the
+  defaults and the VM's sshd;
+- what recordings show of a filled login: the VM's fill puts a password only into a
+  password field and never a username or code into one (secret-fill), and every doc that
+  says passwords show as dots says usernames are visible;
+- the optional hardening off by default (defaults.env and the code reading an unset
+  setting), the hub and coordinate guard on, `VM_SHELL=auto` off while bounded,
+  `SHELL_LOG=auto` logging when `ACTION_LOG=on` (called, not read), the 5-minute
+  certificate;
+- the hub's limits (frame, write deadline, JSON depth and size, unusable messages,
+  client message and backlog, tools refresh, windows per layout, stderr tail, the
+  activity window and the kill grace, the socket's modes), the coordinate guard's codes and
+  which tools it checks and doesn't; the event stream's rate limits; the shell's timeout
+  and output limits;
+- the gateway: each refusal docs/guide.md, architecture.md and the README name is a
+  refusing rule in config/netgw-rules.json and every refusing rule is named, nothing of
+  the Mac is reachable, and `scripts/lib.sh` starts the gateway with that file;
+- mcomp-vm's flags as the docs name them are the ones `host_sharing_args` passes, one per
+  `SHARE_*` setting, all off by default;
+- pinned versions and digests: architecture.md's components table, the diagram, the guide
+  and THIRD_PARTY_NOTICES.md against defaults.env; no doc names a newer Cua Driver than
+  the pin; download names and URLs carry the pinned versions;
+- every row of the settings tables in docs/commands.md and docs/shell.md against
+  defaults.env (a default the doc spells out, like `.run/`, is an empty setting there);
+  every fallback the code gives a security setting (`${ACTION_LOG:-off}`,
+  `.get("MCOMP_SSH_AUTH", "key")`) is its default;
+- `scripts/release.sh` runs exactly the no-VM suites CLAUDE.md lists, and each exists;
+- no doc makes an absolute security claim (the patterns are in the test, with phrasings
+  it must catch and honest ones it must pass).
+
+## Releases: `tests/test_release.py`
+
+`python3 tests/test_release.py` needs no VM, no network and no GitHub (about 10 s). A bare
+repository in a temporary folder stands in for origin and a clone of it for the checkout,
+with a copy of `scripts/release.sh`, a CHANGELOG, and stand-ins for `check-public.sh`,
+get.sh, every suite release.sh runs and `gh` (each logs what it was asked). It checks:
+- each refusal changes nothing (no branch, commit, push, tag or PR): a VERSION with a `v` or
+  not MAJOR.MINOR.PATCH, one that isn't newer than every tag (origin's included) or whose
+  tag exists (here, or only on origin), not on
+  main, an untracked file, main behind origin, check-public failing (and then no suite
+  runs), a suite failing (named, after all ran), an [Unreleased] with no entries,
+  `--skip-tests` without `--dry-run`;
+- the dry run runs every check, shows the CHANGELOG change and changes nothing;
+- the real run moves [Unreleased] to [VERSION] - DATE under a new empty [Unreleased], in
+  one commit on `release-vVERSION` that changes only the CHANGELOG, runs check-public
+  again before the push, pushes that branch (origin's main untouched), opens the PR against
+  main and leaves the checkout on a clean main; a second run is refused;
+- `--tag` is refused before the PR is merged and when the merge commit isn't on
+  origin/main; its dry run changes nothing and shows what get.sh picks today; then an
+  annotated tag on the merge commit, pushed, get.sh's dry run (origin/main's, in a
+  temporary HOME) picking it, a GitHub Release only as a draft (`--draft --verify-tag`,
+  never published) from the CHANGELOG section; a second `--tag` is refused.
 
 ## SSH options: `tests/test_ssh_options.py`
 

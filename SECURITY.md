@@ -1363,6 +1363,8 @@ it expires.
    - streams the answer back, replacing every exact copy of the key in its headers
      and body with `[key withheld by metacomputer secrets]` (an echo endpoint such as
      httpbin.org/anything would otherwise hand the key to the VM);
+   - gives the whole answer at most 600 seconds from the moment it sends the request: a slower
+     one is cancelled and the connection to the VM closed, with nothing more written to it;
    - with a required audit sink, first records the request (`begin`, use `api`) and
      waits for every required sink to acknowledge that record; otherwise 503;
    - checks again, just before forwarding, that the token is still live (not revoked,

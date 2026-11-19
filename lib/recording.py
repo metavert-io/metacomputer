@@ -11,7 +11,10 @@ started and ended, its settings, size, length, sound track (if any) and SHA-256.
 log is on (ACTION_LOG=on), it also lists the log files that cover the recording
 and its key moments: every tool call made on this VM while it was recording, with
 its time in the video, so a moment can be found without watching it all
-("0:42 launch_app inkscape"). Times are the Mac's clock, to about a second.
+("0:42 launch_app inkscape"). Times are the Mac's clock, to about a second. A call
+that didn't run is marked as the action log records it: `refused` (refused by a
+guard on the Mac, or a shell run refused) or `error` (it came back as an error,
+which includes Cua Driver's own refusals in bounded mode).
 """
 import argparse
 import datetime
@@ -103,6 +106,7 @@ def moments(actions_dir, vm, started, ended):
             if os.path.getmtime(path) < started - 2:
                 continue
             used = False
+            open_calls = {}   # call id -> its moment, until the call's result says how it ended
             try:
                 with open(path, encoding="utf-8") as f:
                     for i, line in enumerate(f):
@@ -110,9 +114,23 @@ def moments(actions_dir, vm, started, ended):
                             rec = json.loads(line)
                         except ValueError:
                             continue
+                        if not isinstance(rec, dict):
+                            continue
                         if i == 0:
                             if rec.get("type") != "start" or (rec.get("session") or {}).get("vm") != vm:
                                 break
+                            continue
+                        if rec.get("type") == "result":
+                            # The log's own record of how a call ended, as `actions show` reads it: refused (the
+                            # shell refusing after the call was logged) or an error (the driver refusing it, in
+                            # bounded mode for one, or failing). Such a call is never shown as one that ran.
+                            m = open_calls.pop(json.dumps(rec.get("id")), None)
+                            if m is not None:
+                                res = rec.get("result") if isinstance(rec.get("result"), dict) else {}
+                                if res.get("status") == "refused":
+                                    m["refused"] = True
+                                elif rec.get("rpc_error") or res.get("error"):
+                                    m["error"] = True
                             continue
                         if rec.get("type") not in ("call", "refused"):
                             continue
@@ -120,10 +138,13 @@ def moments(actions_dir, vm, started, ended):
                         if t is None or t < started - 1 or t > ended + 1:
                             continue
                         used = True
-                        found.append({"t": round(max(0.0, t - started), 1), "at": rec["ts"],
-                                      "tool": rec.get("tool"), "what": describe(rec.get("args")),
-                                      **({"refused": True} if rec["type"] == "refused" else {}),
-                                      "log": f"{day}/{fn}", "seq": rec.get("seq")})
+                        m = {"t": round(max(0.0, t - started), 1), "at": rec["ts"],
+                             "tool": rec.get("tool"), "what": describe(rec.get("args")),
+                             **({"refused": True} if rec["type"] == "refused" else {}),
+                             "log": f"{day}/{fn}", "seq": rec.get("seq")}
+                        found.append(m)
+                        if rec["type"] == "call":
+                            open_calls[json.dumps(rec.get("id"))] = m
             except OSError:
                 continue
             if used:
@@ -184,7 +205,8 @@ def cmd_moments(a):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from termsafe import escape_for_terminal as esc
     for m in ms:
-        print(esc(f"{fmt_t(m['t']):>8}  {m['tool']}{' (refused)' if m.get('refused') else ''}  {m.get('what', '')}".rstrip()))
+        how = " (refused)" if m.get("refused") else " (error)" if m.get("error") else ""
+        print(esc(f"{fmt_t(m['t']):>8}  {m['tool']}{how}  {m.get('what', '')}".rstrip()))
 
 
 def main():

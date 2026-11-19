@@ -151,7 +151,9 @@ def install_cases(td):
           "  clone) for a; do dest=\"$a\"; done; mkdir -p \"$dest\"\n"
           "    printf '#!/bin/sh\\nmkdir -p \"$HOME/.local/bin\" \"$HOME/.local/share/%s\"\\n"
           "printf \"#!/bin/sh\\\\necho --no-host-sharing\\\\n\" > \"$HOME/.local/bin/%s\"\\n"
-          "chmod +x \"$HOME/.local/bin/%s\"\\n' \"$FAKE_RUNNER\" \"$FAKE_RUNNER\" \"$FAKE_RUNNER\" > \"$dest/install.sh\"\n"
+          "chmod +x \"$HOME/.local/bin/%s\"\\n"
+          # what the build prints, and how it ends (a test's script, sourced last)
+          "[ -z \"${FAKE_BUILD_OUTPUT:-}\" ] || . \"$FAKE_BUILD_OUTPUT\"\\n' \"$FAKE_RUNNER\" \"$FAKE_RUNNER\" \"$FAKE_RUNNER\" > \"$dest/install.sh\"\n"
           "    chmod +x \"$dest/install.sh\" ;;\n"
           "  -C) echo \"$FAKE_HEAD\" ;;\n"
           "esac\n", 0o755)
@@ -161,7 +163,7 @@ def install_cases(td):
     n = [0]
 
     def install(args, local_env=None, have=(), head=NEW_COMMIT, runner="mcomp-vm", build_info=False,
-                build_version="0.7.2-mcomp.2"):
+                build_version="0.7.2-mcomp.2", extra_env=None):
         n[0] += 1
         home = os.path.join(td, f"ihome{n[0]}")
         os.makedirs(home)
@@ -180,6 +182,7 @@ def install_cases(td):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("MCOMP_", "LUME"))}
         env.update(HOME=home, PATH=fakebin + ":/usr/bin:/bin:/usr/sbin:/sbin", FAKE_HEAD=head, FAKE_RUNNER=runner,
                    MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # install.sh's lock: never the real per-user folder
+        env.update(extra_env or {})
         r = subprocess.run([os.path.join(root, "install.sh")] + args, env=env, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=60)
         clone = open(calls).read().splitlines()[0] if os.path.exists(calls) else ""
@@ -250,6 +253,31 @@ def install_cases(td):
     home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n", have=["mcomp-vm"], build_info=True,
                                    build_version="0.7.2-mcomp.1")
     check("...and so is a build of an earlier release", r.returncode == 0 and NEW_TAG in clone, (clone, (r.stdout + r.stderr)[-300:]))
+
+    # The build's harmless linker warnings ("search path ... not found", from Swift with only the Command Line
+    # Tools) are left out of what install.sh shows; everything else the build prints stays, on its own stream.
+    noise = os.path.join(td, "build-output.sh")
+    write(noise, "echo 'Building for production...'\n"
+                 "echo \"/tmp/x/Package.swift: lume-product: ld: warning: search path "
+                 "'/Library/Developer/CommandLineTools/Developer/usr/lib' not found\"\n"
+                 "echo 'ld: warning: another linker warning, kept'\n"
+                 "echo \"ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' "
+                 "not found\" >&2\n"
+                 "echo 'error: something the build says on stderr, kept' >&2\n"
+                 "exit \"${FAKE_BUILD_EXIT:-0}\"\n")
+    home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n",
+                                   extra_env={"FAKE_BUILD_OUTPUT": noise})
+    check("mcomp-vm's build: the linker's 'search path ... not found' warnings aren't shown",
+          r.returncode == 0 and "search path" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-500:])
+    check("...every other line is, on its own stream",
+          "Building for production" in r.stdout and "another linker warning, kept" in r.stdout
+          and "something the build says on stderr, kept" in r.stderr, (r.stdout[-300:], r.stderr[-300:]))
+    home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n",
+                                   extra_env={"FAKE_BUILD_OUTPUT": noise, "FAKE_BUILD_EXIT": "3"})
+    out = r.stdout + r.stderr
+    check("...and a build that fails still stops the install, once, with its advice",
+          r.returncode != 0 and out.count("install: stopped") == 1 and "mcomp-vm didn't build" in out
+          and "something the build says on stderr, kept" in r.stderr, out[-500:])
 
     # --uninstall names the runner in use.
     def uninstall(local_env, have):
