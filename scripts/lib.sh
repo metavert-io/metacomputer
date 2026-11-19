@@ -338,10 +338,10 @@ export_options() {
          MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
          MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}"
-  # The hub (lib/mcp_hub.py) and its coordinate guard. MCOMP_MCP_HUB / MCOMP_COORD_GUARD already in the
-  # environment win over the config (the benchmark's switches).
+  # The hub (lib/mcp_hub.py), its coordinate guard and its hidden-text marks. MCOMP_MCP_HUB / MCOMP_COORD_GUARD /
+  # MCOMP_HIDDEN_TEXT already in the environment win over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
-         MCOMP_HUB_IDLE="${HUB_IDLE:-10m}"
+         MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}"
   # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
   # lessons switch, an isolated store for tests).
   export MCOMP_LESSONS="${MCOMP_LESSONS:-${LESSONS:-on}}" MCOMP_LESSONS_DIR="${MCOMP_LESSONS_DIR:-${LESSONS_DIR:-}}"

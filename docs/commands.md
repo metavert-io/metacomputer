@@ -126,6 +126,7 @@ instead.
 | `MCP_HUB` | `on` | `on`: Claude Code's bridge, `metacomputer call` and scripts share one hub per VM, which applies every guard to each of them; `off`: each connects on its own, with the same guards |
 | `HUB_IDLE` | `10m` | The hub exits after this long with no client and no driver recording |
 | `COORD_GUARD` | `on` | `on`: pixel input is refused when certain window-layout changes happened since the screenshot it was aimed from (a window resized, or covered by a dialog or another app; it compares geometry, not content); `off`: only Cua Driver's own checks |
+| `HIDDEN_TEXT` | `on` | `on`: page text a person likely can't see (too small, off the page, no size on screen) or that addresses AI agents is marked in the results that carry it, for Claude to tell you about, and reported as `security.hidden_text` ([SECURITY.md](../SECURITY.md#hidden-page-text)); it labels, never removes or blocks; `off`: results as the driver sends them |
 
 **Lessons** (`metacomputer learn`; [docs/learn.md](learn.md)):
 

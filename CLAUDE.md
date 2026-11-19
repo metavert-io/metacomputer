@@ -68,6 +68,11 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `metacomputer call --session NAME` keeps element tokens and driver state
   between calls. Tests: `python3 tests/test_hub.py` (no VM) and
   `tests/test_options.py G` (VM).
+- Hidden page text (`HIDDEN_TEXT=on`, `lib/hidden_text.py`, SECURITY.md "Hidden page text"): the hub marks
+  page text a person likely can't see, or that addresses AI agents, in the results that carry it; it labels,
+  never removes, blocks or follows. Its signals come only from what the driver reports (frames, Chrome's
+  visibility); keep every loop bounded and the event free of page text. Tests: `python3 tests/test_hidden_text.py`
+  (no VM; real reads in `tests/fixtures/hidden_text/`) and `tests/test_hidden_text_vm.py` (test VM).
 - Don't reset or rebuild the VM without being asked (`metacomputer reset` restores
   the baseline; host recordings/results are kept).
 - Optional hardening (SECURITY.md): `ACTION_LOG`, `SSH_AUTH`, `DRIVER_MODE`.
@@ -207,11 +212,12 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff` (no VM; `scripts/release.sh` runs exactly these),
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text` (no VM;
+  `scripts/release.sh` runs exactly these),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
-  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py` and `tests/test_vm_claude_vm.py` (test VM only:
-  `MCOMP_CONFIG`). See TESTING.md.
+  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vm_claude_vm.py` and
+  `tests/test_hidden_text_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
   it with `scripts/build-vault.sh`. Values must never reach output, logs or a

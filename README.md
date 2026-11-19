@@ -545,6 +545,10 @@ through the vault rather than the chat.
   since its screenshot (the window resized, or covered by a dialog or another
   app); it compares window geometry, not content. A refusal is reported to you,
   never worked around.
+- **Hidden text marked.** Page text a person likely can't see (tiny, off the page,
+  no size on screen) or that addresses AI agents is marked in what Claude reads,
+  so it tells you about it; a label, not a filter: colour and opacity aren't
+  detected ([SECURITY.md](SECURITY.md#hidden-page-text)).
 
 **The vault.** Nothing is used until you unlock it in your own terminal, which
 shows every request. Imported secrets then ask before every use; secrets you add

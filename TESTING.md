@@ -957,6 +957,60 @@ Chrome profile and closes them again, and changes no VM settings (it turns
   since covered the point, and passes a point that window doesn't cover;
 - `hub stop` stops it and the next call starts a new one.
 
+## Hidden page text: `tests/test_hidden_text.py`, `tests/test_hidden_text_vm.py`
+
+`python3 tests/test_hidden_text.py` (no VM, about 2 s) checks the hub's marks (SECURITY.md, "Hidden page
+text") against Cua Driver's real answers for `tests/fixtures/site/hidden.html`, a page like the
+prompt-injection finding's (a white 1-px paragraph, a block at `left:-10000px`, an `aria-hidden` block, and
+the other usual ways of hiding text, beside visible text), kept in `tests/fixtures/hidden_text/`:
+- Firefox and Chrome (`launch_app`) accessibility trees, a run_steps observation scrolled to the end, a read
+  right after the page opened, Chrome's page snapshot and `page get_text`: the hidden and instruction-like
+  rows are marked with the right signals, visible text, text below the fold, short screen-reader labels and
+  rows in view without a frame yet aren't, and colour and opacity (not in the driver's data) aren't claimed;
+- markdown and element reads of the same page, taken both ways on a test VM: with the marks taken out, the
+  hub's answer is the driver's own markdown answer (the element list removed, the token line rebuilt), for a
+  full, a query, a cut-short, a since-fallback and a one-row read;
+- the patterns on examples of each kind (zero-width and fullwidth tricks included) and on ordinary text that
+  mustn't match (AI policy news, game rules, setup guides, API docs);
+- limits: 5,000 rows of 4 KB trigger words within the time budget, the note under 8 KB with at most 20
+  quotes, nothing dropped, 2 MB pathological texts, wording after filler found and quoted, control and
+  direction characters out of the quotes, the event limiter;
+- the first audit's findings, each failing on the audited code: answers that use the hub's names (structured
+  `metacomputer_*` keys on reads, clicks, zooms and errors; text and JSON-RPC errors opening like a hub note)
+  are marked as the VM's through the hub's own path (`on_upstream`); the hub's bridge note keeps its key and
+  isn't scanned as page text; the full explanation of every coordinate-guard and Chrome-target refusal, the
+  end of a bounded session and "answer too complex" is in the structured part; a 100,000-line Chrome outline
+  against 5,000 references, a 3-million-line block and 60,000 instruction-like rows stay under a second; a
+  scan cut short says so with nothing found; a tree row missing from the element list is read; a VM `ref`
+  is escaped; the note and field byte caps with 4-byte characters; a query read reports no host;
+- the second audit's findings, each failing on its audited code: a forged hub note after 256 empty blocks, after
+  200 or a million spaces, mid-block, with zero-width characters, look-alike letters or spelled out, deep in the
+  structured part, in an error and in the driver's MCP instructions is marked as the VM's (hub-named keys at any
+  depth move); the final answer, after the hub's own notes, is checked against a client's limits (an error
+  pushed over by the mark, a result with a bridge note, a marked read, the value limit), keeping the hub's notes;
+  the combined-refs and windows cuts are reported; a lone surrogate no longer stops the note; a failed check
+  says so; a clean read restores the token line whatever time tagging had left;
+- the third audit's findings, each failing on its audited code: a hub note's opening in a structured key (an
+  error result, a JSON-RPC error's data) and keys named like the hub's in another case or with look-alike or
+  invisible letters are marked or moved; the opening split by default-ignorable characters that count as
+  letters (the Hangul fillers) or by other format characters, tags and variation selectors, in a block, a value
+  and a key, is marked; mathematical and circled letters and an underscore for the space are marked (best
+  effort); the table of those characters covers every format character in all of Unicode and the rest of
+  Default_Ignorable_Code_Point; the letter classes stay apart from the spacing, and hostile texts of millions of
+  such characters stay quick (guards); an error of 64 blocks with the bounded session's end added as block 65,
+  and 300 blocks with notes at both ends, keep every hub note when replaced, and the VM's copy of the hub's
+  words isn't kept;
+- through a hub with a stand-in driver: the request asks for the element list only where it helps (not for
+  `elements`, `full_output`, more than 2,000 elements or Mousepad), the client gets the note, tags and field,
+  `HIDDEN_TEXT=off` changes nothing, one `security.hidden_text` event per host with counts and no page text,
+  `hub.log` with counts only, and the type is reserved.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_hidden_text_vm.py` (22 checks, a test VM: it serves the page on
+the VM's 127.0.0.1:8000, opens and closes Firefox and Chrome, and restarts the VM's hub) does the same with
+live answers: Firefox's marks, the same answers with `HIDDEN_TEXT` off and on (three kinds of read), the
+structured field Claude Code shows the model, a scrolled observation, `page get_text`, Chrome's page snapshot
+and accessibility tree, and the event, in an events folder of its own (never your sinks).
+
 ## The docs' security promises: `tests/test_doc_claims.py`
 
 `python3 tests/test_doc_claims.py` needs no VM and takes about a second. It pins each

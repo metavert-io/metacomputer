@@ -91,7 +91,7 @@ RESERVED = {("needs_you", "in_use"), ("needs_you", "refused"), ("security", "chr
             ("security", "special_file_removed"), ("security", "quarantine_restored"),
             ("security", "storage_protection_failed"), ("task", "s3_conflict"), ("task", "s3_sync_failed"),
             ("lifecycle", "handoff_opened"), ("lifecycle", "handoff_done"), ("lifecycle", "handoff_cancelled"),
-            ("lifecycle", "handoff_timed_out")}
+            ("lifecycle", "handoff_timed_out"), ("security", "hidden_text")}
 RESERVED_TYPES = {"suppressed"}
 ADMIN_TYPES = {"sink_added", "sink_removed", "sink_config_changed"}
 
