@@ -1106,6 +1106,19 @@ CLAIMS = [
     ("SECURITY.md", r"A hub serves the VM it started with, and only it\.\*\* It pins that VM's name, SSH port and host key",
      lambda m: "def pin_identity" in raw("lib/mcp_hub.py") and "self.pin" in raw("lib/mcp_hub.py")
      and all(k in raw("bin/metacomputer") for k in ("MCOMP_EXPECT_VM", "MCOMP_EXPECT_SSH_PORT", "MCOMP_EXPECT_HOSTKEY"))),
+    ("SECURITY.md", r"A settings file that's refused for any reason still counts, by the names and folders it says",
+     lambda m: "def error_row" in raw("lib/vms.py") and "mc_identity_records raw" in raw("scripts/vm-commands.sh")
+     and 'r.get("raw_vm")' in raw("lib/vms.py")),
+    ("SECURITY.md", r"When another settings file's folders can't be known \(one it can't read, or one that isn't an absolute path\), nothing is deleted recursively",
+     lambda m: "its folders can't be read" in raw("lib/vms.py") and "isn't an absolute path, so" in raw("lib/vms.py")),
+    ("SECURITY.md", r"Only then does it stop what runs for the VM \(its event watcher, its hub\)",
+     lambda m: 0 <= vm_delete_src().find('[ "$DP_SIG" = "$first" ] || die') < vm_delete_src().find("events_watcher_stop")
+     and vm_delete_src().find("lock_fd_take 6") < vm_delete_src().find("hub_stop")),
+    ("SECURITY.md", r"every command it runs \(its connection to the driver, `input-reset`\) carries them",
+     lambda m: "def cli_env" in raw("lib/mcp_hub.py") and 'env=self.cli_env(' in raw("lib/mcp_hub.py")
+     and "env=self.env)" not in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"for a `config/vms/` VM it's checked like the file's own folder, so it can't be another VM's vault either",
+     lambda m: raw("scripts/lib.sh").find('mc_canon MCOMP_VAULT_DIR "$MCOMP_VAULT_DIR"') < raw("scripts/lib.sh").find("mc_identity_input \"$main_vm\"")),
     # An honest limit, kept honest: the typed name is a terminal read, not a person check.
     ("SECURITY.md", r"The typed name guards against a slip, not against a program\.\*\* It isn't proof that a person is there",
      lambda m: '[ -t 0 ] || die "deleting a VM needs its name typed' in vm_delete_src()),

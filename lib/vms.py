@@ -158,45 +158,75 @@ def rows_from(stream):
 VMS_FILE = re.compile(r"^config/vms/(?P<name>[A-Za-z0-9_][A-Za-z0-9._-]{0,63})\.env$")
 
 
+def error_row(owners, file, vm, error):
+    """The row for a settings file that was refused: its names and folders as the file says them (unchecked,
+    `mc_identity_records`), kept so `vm delete` still protects them."""
+    ids = next(iter(owners.values()), {})
+    first = lambda k: (ids.get(k) or [""])[0]     # noqa: E731
+    return {"file": file, "vm": vm or first("VM_NAME") or None, "ok": False, "error": error,
+            "raw_vm": first("VM_NAME"), "raw_baseline": first("BASELINE_NAME"),
+            "folders": [v for k in PATH_KEYS for v in ids.get(k, [])], "known": bool(ids)}
+
+
 def delete_check(rows, target, baseline):
     """The names `vm delete TARGET` deletes (the VM, BASELINE, BASELINE-prev) against every other VM this checkout
     has settings for: none may be another VM, its baseline, its previous baseline or one of its checkpoints. A
-    settings file that can't be read counts by its file name (config/vms/NAME.env: NAME and NAME's copies); any
-    other unreadable one refuses (its names aren't known)."""
+    settings file that was refused counts by the names it says (unchecked) and, for config/vms/NAME.env, by NAME and
+    NAME's copies too; one whose names can't be read at all refuses."""
     if baseline != target + "-baseline":
         raise Refused(f"its baseline is named {baseline}, not {target}-baseline; delete that VM by hand if you mean to")
     doomed = {target, baseline, baseline + "-prev"}
     for r in rows:
+        owner = r.get("file") or "another VM's settings"
         if r.get("ok"):
             if r.get("vm") == target:
                 continue
-            names, ckpt = names_of({"VM_NAME": [r.get("vm") or ""], "BASELINE_NAME": [r.get("baseline") or ""]})
-            owner = r.get("file") or "another VM's settings"
+            groups = [names_of({"VM_NAME": [r.get("vm") or ""], "BASELINE_NAME": [r.get("baseline") or ""]})]
         else:
             m = VMS_FILE.match(r.get("file") or "")
-            if not m:
-                raise Refused(f"{r.get('file')} can't be read ({r.get('error')}), so its VMs aren't known; fix it first")
-            if m.group("name") == target:
-                continue
-            n = m.group("name")
-            names, ckpt, owner = {n, n + "-baseline", n + "-baseline-prev"}, n + "-ckpt-", r.get("file")
-        for d in sorted(doomed):
-            if d in names or (ckpt and d.startswith(ckpt)):
-                raise Refused(f"{d} is {owner}'s (its VM, baseline or a copy); nothing was deleted")
-        for n in sorted(names):
-            if n.startswith(target + "-ckpt-"):
-                raise Refused(f"{owner}'s {n} looks like one of {target}'s checkpoints; nothing was deleted")
+            groups = []
+            if m:
+                if m.group("name") == target:
+                    continue
+                n = m.group("name")
+                groups.append(({n, n + "-baseline", n + "-baseline-prev"}, n + "-ckpt-"))
+            if r.get("raw_vm"):
+                groups.append(names_of({"VM_NAME": [r["raw_vm"]], "BASELINE_NAME": [r.get("raw_baseline") or ""]}))
+            if not groups:
+                raise Refused(f"{owner} can't be read ({r.get('error')}), so its VMs aren't known; fix it first")
+        for names, ckpt in groups:
+            for d in sorted(doomed):
+                if d in names or (ckpt and d.startswith(ckpt)):
+                    raise Refused(f"{d} is {owner}'s (its VM, baseline or a copy); nothing was deleted")
+            for n in sorted(names):
+                if n.startswith(target + "-ckpt-"):
+                    raise Refused(f"{owner}'s {n} looks like one of {target}'s checkpoints; nothing was deleted")
 
 
 def protected(rows, target, home, extra=()):
     """Every folder another VM uses (its keys, runtime, logs, vault, spool), the account's home and the checkout:
-    what a VM's own folder must neither be nor hold."""
+    what a VM's own folder must neither be nor hold. A refused settings file counts by the folders it says
+    (unchecked); one whose folders can't be read, or aren't absolute, refuses: an unknown folder can't be kept safe."""
     out = list(extra)
     for r in rows:
-        if r.get("ok") and r.get("vm") != target:
+        if r.get("ok"):
+            if r.get("vm") == target:
+                continue
             out += [r.get(k) for k in ("ssh_dir", "run_dir", "log_dir", "vault", "spool") if r.get(k)]
             if r.get("kind") in ("local", "defaults", "config") and not r.get("spool"):
                 out += [home + "/Library/Application Support/metacomputer/events/spool"]
+        else:
+            folders = r.get("folders") or []
+            if not r.get("known") or not folders or any(not isinstance(f, str) or not f for f in folders):
+                raise Refused(f"{r.get('file')} was refused ({r.get('error')}) and its folders can't be read, so "
+                              "nothing is deleted that might be one of them; fix it first")
+            for f in folders:
+                try:
+                    absolute(f, home)
+                except Refused:
+                    raise Refused(f"{r.get('file')} names a folder that isn't an absolute path ({f}), so nothing is "
+                                  "deleted that might be it; fix it first")
+            out += folders
     return out
 
 
@@ -242,7 +272,7 @@ def rmtree_own(base, rel, guard, home, check_only=False):
             try:
                 held = me in ancestors(g, home)
             except Refused:
-                continue                      # not a folder path at all: it can't be inside this one
+                raise Refused(f"another VM's folder {g!r} isn't an absolute path, so {target} wasn't deleted")
             if held:
                 raise Refused(f"{target} is or holds {g}, which another VM (or this account) uses; it wasn't deleted")
         if check_only:
@@ -409,6 +439,10 @@ def main(argv=None):
     p = sub.add_parser("delete-check")
     p.add_argument("--target", required=True)
     p.add_argument("--baseline", required=True)
+    p = sub.add_parser("error-row")
+    p.add_argument("--file", required=True)
+    p.add_argument("--vm", default="")
+    p.add_argument("--error", default="")
     p = sub.add_parser("rmtree")
     p.add_argument("--base", required=True)
     p.add_argument("--rel", required=True)
@@ -417,6 +451,9 @@ def main(argv=None):
     p.add_argument("--guard", action="append", default=[])
     p.add_argument("--check", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd == "error-row":
+        print(json.dumps(error_row(read_records(sys.stdin), a.file, a.vm, a.error)))
+        return 0
     if a.cmd in ("identity", "delete-check", "rmtree"):
         try:
             if a.cmd == "identity":

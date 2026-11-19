@@ -34,8 +34,13 @@ print(json.dumps(dict(zip(k, sys.argv[1:]), ok=True)))' \
         "$MC_SETTINGS_LABEL" "$MC_SETTINGS_KIND" "$VM_NAME" "$BASELINE_NAME" "$SSH_PORT" "$VNC_PORT" "$(mc_vault_dir)" \
         "${EVENTS_SPOOL:-}" "${VOLUMES:-}" "$SSH_DIR" "${RUN_DIR:-$LAB_ROOT/.run}" "${LOG_DIR:-$LAB_ROOT/logs}"
     else
-      "$PY" -c 'import json, sys; print(json.dumps({"file": sys.argv[1], "vm": sys.argv[2], "ok": False, "error": sys.argv[3]}))' \
-        "$3" "${4:-}" "$MC_REFUSAL"
+      # Refused, but still a VM's settings: its names and folders as the file says them (unchecked) go in the row,
+      # so nothing that's that VM's can be deleted with another; `vm delete` refuses folders it can't know.
+      local refusal="$MC_REFUSAL"
+      { if [ -n "${4:-}" ] && [ -f "$MC_VMS_DIR/$4.env" ]; then mc_identity_records raw vm "$4"
+        elif [ -n "$2" ]; then mc_identity_records raw file "$2"
+        else mc_identity_records raw main; fi; } \
+        | "$PY" "$LAB_ROOT/lib/vms.py" error-row --file "$3" --vm "${4:-}" --error "$refusal"
     fi )
 }
 # Every settings file of this checkout, one JSON line each: config/local.env (or the defaults), config/vms/*.env,
@@ -266,16 +271,17 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
     [ "$v" = "$VM_NAME" ] || die "that isn't $VM_NAME; nothing was deleted"
   fi
   expect_guard
-  # What runs for it (the event watcher, the hub) stops, then its owners lock is held to the end, so no session can
-  # claim it; then everything is checked again: whatever changed while you were confirming refuses.
-  events_watcher_stop
-  hub_stop
+  # Its owners lock from here to the end, so no session can claim it; then everything is checked again, before
+  # anything stops: whatever changed while you were confirming refuses, and leaves what runs for it running.
   ( umask 077; mkdir -p "$RUN_DIR/owners" ) 2>/dev/null
   exec 6>>"$RUN_DIR/owners/.lock" || die "can't open $VM_NAME's owners lock; nothing was deleted"
   lock_fd_take 6 "${MCOMP_LOCK_WAIT:-10}" || die "a session holds $VM_NAME's owners lock; nothing was deleted (metacomputer --vm $VM_NAME who)"
   first="$DP_SIG"
   vm_delete_plan
   [ "$DP_SIG" = "$first" ] || die "$VM_NAME changed while you were confirming ($first, now $DP_SIG); nothing was deleted. Run this again"
+  # Only now what runs for it (the event watcher, the hub) stops, then the VM.
+  events_watcher_stop
+  hub_stop
   if [ "$DP_STATE" = running ]; then
     say "stopping $VM_NAME (forced: it's being deleted)"
     vm_stop "$VM_NAME" --force

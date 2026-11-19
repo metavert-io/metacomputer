@@ -787,6 +787,78 @@ def audit_fixes(td):
         b.close()
 
 
+def recheck_fixes(td):
+    """The re-check's findings (on 3998be6), each failing before its fix."""
+    b = Box(td, "recheck")
+    try:
+        co, root = b.co, b.root
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        main = [vm("metacomputer"), vm("metacomputer-baseline")]
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        appvms = os.path.join(b.app, "vms")
+        inner = os.path.join(appvms, "demo", "inner")
+        os.makedirs(inner)
+        write(os.path.join(inner, "vault.json"), "{}")
+        # P1: a settings file refused for an unrelated reason still protects its folders (and names) from deletion.
+        b.settings("config/vms/other.env", f'SSH_PORT=2402\nVNC_PORT=not-a-port\nVAULT_DIR="{inner}"\n')
+        rc, s, err = b.resolve("other")
+        check("(setup) the other VM's settings are refused, for its port", rc == 1 and "VNC_PORT" in err, err)
+        b.set_vms(main + [vm("demo"), vm("demo-baseline")])
+        r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-vault")
+        check("vm delete --delete-vault when a refused file's vault is inside demo's: refused, both kept", r.returncode == 1
+              and "is or holds" in r.stderr and os.path.exists(os.path.join(inner, "vault.json")) and b.deletes() == [],
+              (r.stderr[-300:], b.deletes()))
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        os.makedirs(inner, exist_ok=True)
+        write(os.path.join(inner, "vault.json"), "{}")
+        b.set_vms(main + [vm("demo"), vm("demo-baseline")])
+        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=not-a-port\nVAULT_DIR="relative/vault"\n')
+        r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-vault")
+        check("...and when a refused file's folder can't be placed (not absolute): refused, nothing deleted", r.returncode == 1
+              and "isn't an absolute path" in r.stderr and os.path.exists(os.path.join(inner, "vault.json")) and b.deletes() == [],
+              (r.stderr[-300:], b.deletes()))
+        drop(os.path.join(co, "config/vms/other.env"))
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.set_vms(main + [vm("demo"), vm("demo-baseline")])
+        b.settings("config/vms/zz.env", "VM_NAME=zz\nBASELINE_NAME=demo-baseline\nSSH_PORT=2403\nVNC_PORT=6103\n")
+        r = b.run("vm", "delete", "demo", "--confirm", "demo")
+        check("a refused file that names demo-baseline as its own: vm delete demo refuses, nothing deleted", r.returncode == 1
+              and "demo-baseline is config/vms/zz.env's" in r.stderr and b.deletes() == [], (r.stderr[-300:], b.deletes()))
+        drop(os.path.join(co, "config/vms/zz.env"))
+        shutil.rmtree(inner, ignore_errors=True)
+
+        # P2: MCOMP_VAULT_DIR goes through the identity check like the file's own folder.
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        os.makedirs(os.path.join(root, "mainvault"))
+        b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{root}/mainvault"\n')
+        r = b.run("--vm", "demo", "secrets", "lock", env=b.env(MCOMP_VAULT_DIR=os.path.join(root, "mainvault")))
+        check("MCOMP_VAULT_DIR naming the main VM's vault for --vm demo: refused (no client reaches it)", r.returncode == 1
+              and "is the same folder as the main VM" in r.stderr and "VAULT " not in r.stdout, (r.stdout, r.stderr[-300:]))
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+
+        # P2: a delete refused after the prompt leaves what runs for the VM running.
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        rundir = os.path.join(co, ".run", "vms", "demo")
+        os.makedirs(rundir, exist_ok=True)
+        watcher = subprocess.Popen([PY, "-c", "import time; time.sleep(120)", "events.py", "watch"])
+        try:
+            write(os.path.join(rundir, "events-watcher.pid"), f"{watcher.pid}\n")
+            b.set_vms(main + [vm("demo"), vm("demo-baseline")])
+            p = Pty([b.mc, "vm", "delete", "demo"], b.env())
+            asked = p.expect("Type the name of the VM")
+            b.set_vms(main + [vm("demo", "running"), vm("demo-baseline")])
+            if asked:
+                p.send("demo\n")
+            rc = p.wait()
+            check("a delete refused after the prompt (the VM started): its event watcher keeps running", asked and rc == 1
+                  and watcher.poll() is None and b.deletes() == [], (rc, watcher.poll(), p.buf[-300:]))
+        finally:
+            watcher.kill()
+            watcher.wait()
+    finally:
+        b.close()
+
+
 HUB_SCRIPT = r'''
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -805,6 +877,7 @@ def step(name, cfg_text=None, kh_text=None):
 step("as started", good_cfg)
 step("settings file gone")
 step("settings name another VM", good_cfg.replace("VM_NAME=pinned", "VM_NAME=metacomputer"))
+out["input_reset_other"] = h.input_reset() or ""     # every command the hub runs, not just its bridge
 step("another SSH port", good_cfg.replace("SSH_PORT=2481", "SSH_PORT=2482"))
 step("another host key", good_cfg, good_kh.replace("AAAAPINNED", "AAAAOTHER"))
 step("back as started", good_cfg)
@@ -851,6 +924,8 @@ def hub_pin(td):
                   "refusing" in steps[name] and words in steps[name] and "hub stop" in steps[name], steps[name][-400:])
         check("...and once the settings are as they were, it connects again", "refusing" not in steps["back as started"],
               steps["back as started"])
+        check("the hub's other commands (input-reset) are pinned too: refused when the settings name another VM",
+              "now name the VM 'metacomputer', not 'pinned'" in d.get("input_reset_other", ""), d.get("input_reset_other", "")[-300:])
     finally:
         b.close()
 
@@ -864,6 +939,7 @@ def main():
         creating(td)
         deleting(td)
         audit_fixes(td)
+        recheck_fixes(td)
         hub_pin(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)

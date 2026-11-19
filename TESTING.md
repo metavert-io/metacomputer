@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (140 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (147 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
@@ -128,6 +128,12 @@ private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
   name, SSH port and host key; with its settings file deleted, or naming another VM, port or host
   key, each reconnect is refused with the reason (on main it reached the default VM); with the
   settings back, it connects again.
+- The re-check's findings (failing on 3998be6): a settings file refused for another reason whose
+  vault is inside the one `--delete-vault` would delete, or whose folder isn't absolute (refused,
+  kept); `MCOMP_VAULT_DIR` naming the main VM's vault for a `config/vms/` VM (refused); a delete
+  refused after its prompt leaves the VM's event watcher running; the hub's `input-reset` is
+  refused when the settings name another VM. A refused file naming `demo-baseline` as its own
+  blocks deleting demo (this one already held).
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
@@ -1210,7 +1216,8 @@ update the row with the doc's new wording. What it pins:
 - the rest of the separation between VMs: a per-VM baseline is always `NAME-baseline` and names are
   checked against every VM's; folders are compared by device and inode; `start` takes the VM's
   lock; folders are deleted along a no-link walk; after the prompt the owners lock is held and
-  everything checked again; a hub pins its VM; and the typed name is described as what it is (a
+  everything checked again before anything stops; refused settings files keep their names and folders
+  protected; every command a hub runs is pinned to its VM; and the typed name is described as what it is (a
   terminal read, not proof of a person);
 - pinned versions and digests: architecture.md's components table, the diagram, the guide
   and THIRD_PARTY_NOTICES.md against defaults.env; no doc names a newer Cua Driver than

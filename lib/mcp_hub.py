@@ -1285,10 +1285,16 @@ class Hub:
     def _stderr_path(self):
         return self.paths["stderr"] if not self.local else os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr")
 
+    def cli_env(self, **extra):
+        """The environment for every metacomputer command this hub runs: its own, plus the VM it started with
+        (pin_identity), so no command it starts can act on another VM."""
+        env = dict(self.env, **extra)
+        env.update({k: v for k, v in self.pin.items() if v})
+        return env
+
     def _spawn_bridge(self):
         os.makedirs(self.paths["dir"], exist_ok=True)
-        env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
-        env.update({k: v for k, v in self.pin.items() if v})   # the VM this hub started with, and only it (pin_identity)
+        env = self.cli_env(MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
         # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).
@@ -2172,7 +2178,7 @@ class Hub:
         try:
             with owners.acting():
                 out = subprocess.run([MCOMP_CLI, "input-reset"], capture_output=True, text=True, timeout=30,
-                                     env=self.env)
+                                     env=self.cli_env(MCOMP_HUB_PID=str(self.pid)))
         except owners.HandoffOpen:
             return None
         except (OSError, TimeoutError, subprocess.TimeoutExpired) as e:

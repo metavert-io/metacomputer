@@ -61,9 +61,10 @@ mc_canon() {
   head="$(cd "$head" 2>/dev/null && pwd -P)" || { MC_REFUSAL="$1: can't read $head"; return 1; }
   MC_CANON="${head%/}/$rest"; MC_CANON="${MC_CANON%/}"; [ -n "$MC_CANON" ] || MC_CANON=/
 }
-# OWNER KIND [NAME]: one VM's identity as it resolves (in a subshell), NUL-separated OWNER KEY VALUE records for
-# `lib/vms.py identity`: names, ports and folders. KIND main: config/local.env (or the defaults), with both default
-# spools (the event stream's, from $HOME, and the vault's); vm: config/vms/NAME.env with its own defaults.
+# OWNER KIND [NAME|FILE]: one VM's identity as its file says it (in a subshell, unchecked), NUL-separated OWNER KEY
+# VALUE records for `lib/vms.py identity` and error rows: names, ports and folders. KIND main: config/local.env (or the
+# defaults), with both default spools (the event stream's, from $HOME, and the vault's); file: that settings file,
+# the same way; vm: config/vms/NAME.env with its own defaults.
 mc_identity_records() {
   ( owner="$1"; ikind="$2"; iname="${3:-}"
     . "$LAB_ROOT/config/defaults.env"
@@ -78,7 +79,8 @@ mc_identity_records() {
       [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
       [ -n "${EVENTS_SPOOL:-}" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
     else
-      [ ! -f "$MC_MAIN_CONFIG" ] || . "$MC_MAIN_CONFIG" >/dev/null 2>&1
+      ifile="$MC_MAIN_CONFIG"; [ "$ikind" != file ] || ifile="$iname"
+      [ ! -f "$ifile" ] || . "$ifile" >/dev/null 2>&1
       RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"; LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
       [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_SYS_HOME/Library/Application Support/metacomputer"
       if [ -z "${EVENTS_SPOOL:-}" ]; then
@@ -174,6 +176,24 @@ mc_load_settings() {
     [ -z "${EVENTS_SPOOL:-}" ] || x_spool=1
     [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
     [ -n "${EVENTS_SPOOL:-}" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
+    # MCOMP_VAULT_DIR / MCOMP_EVENTS_SPOOL from the environment come first, so the check below is of the folders this
+    # VM will really use (one that isn't the folder the file itself sets is refused).
+    if [ -n "${MCOMP_VAULT_DIR:-}" ]; then
+      mc_canon MCOMP_VAULT_DIR "$MCOMP_VAULT_DIR" || return 1; v="$MC_CANON"
+      if [ "$x_vault" = 1 ]; then
+        mc_canon VAULT_DIR "$VAULT_DIR" || return 1
+        [ "$MC_CANON" = "$v" ] || { MC_REFUSAL="MCOMP_VAULT_DIR ($MCOMP_VAULT_DIR) and VAULT_DIR in config/vms/$name.env ($VAULT_DIR) name different vault folders; unset one"; return 1; }
+      fi
+      VAULT_DIR="$v"
+    fi
+    if [ -n "${MCOMP_EVENTS_SPOOL:-}" ]; then
+      mc_canon MCOMP_EVENTS_SPOOL "$MCOMP_EVENTS_SPOOL" || return 1; v="$MC_CANON"
+      if [ "$x_spool" = 1 ]; then
+        mc_canon EVENTS_SPOOL "$EVENTS_SPOOL" || return 1
+        [ "$MC_CANON" = "$v" ] || { MC_REFUSAL="MCOMP_EVENTS_SPOOL ($MCOMP_EVENTS_SPOOL) and EVENTS_SPOOL in config/vms/$name.env ($EVENTS_SPOOL) name different spools; unset one"; return 1; }
+      fi
+      EVENTS_SPOOL="$v"
+    fi
     # Nothing that makes this VM may be another's: not the main VM's, not another config/vms/ VM's. Folders are
     # compared as the folders they are (device and inode, links and . resolved), names with each VM's copies, and
     # ports. lib/vms.py identity prints the vault folder and spool as their canonical paths.
@@ -192,27 +212,27 @@ mc_load_settings() {
   fi
   # The vault folder and the event spool (handed to mcomp-vault as MCOMP_VAULT_DIR and MCOMP_EVENTS_SPOOL), as the
   # folders they really are. Empty for the main VM and MCOMP_CONFIG files unless set: the vault's and the event
-  # stream's own defaults, as before. A config/vms/ VM has folders of its own (above). MCOMP_VAULT_DIR /
-  # MCOMP_EVENTS_SPOOL in the environment override every VM's, as before (absolute, like the settings); one that
-  # isn't the same folder as the file's own setting is refused.
+  # stream's own defaults, as before. A config/vms/ VM has folders of its own, and the environment's were applied
+  # before its identity check (above). MCOMP_VAULT_DIR / MCOMP_EVENTS_SPOOL in the environment override every VM's, as
+  # before (absolute, like the settings); one that isn't the same folder as the file's own setting is refused.
   if [ "$kind" != vm ]; then
     [ -z "${VAULT_DIR:-}" ] || x_vault=1
     [ -z "${EVENTS_SPOOL:-}" ] || x_spool=1
     if [ -n "${VAULT_DIR:-}" ]; then mc_canon VAULT_DIR "$VAULT_DIR" || return 1; VAULT_DIR="$MC_CANON"; fi
     if [ -n "${EVENTS_SPOOL:-}" ]; then mc_canon EVENTS_SPOOL "$EVENTS_SPOOL" || return 1; EVENTS_SPOOL="$MC_CANON"; fi
-  fi
-  VAULT_DIR="${VAULT_DIR:-}"; EVENTS_SPOOL="${EVENTS_SPOOL:-}"
-  if [ -n "${MCOMP_VAULT_DIR:-}" ]; then
-    mc_canon MCOMP_VAULT_DIR "$MCOMP_VAULT_DIR" || return 1
-    [ "$x_vault" = 0 ] || [ "$VAULT_DIR" = "$MC_CANON" ] \
-      || { MC_REFUSAL="MCOMP_VAULT_DIR ($MCOMP_VAULT_DIR) and VAULT_DIR in $(mc_tilde "$file") ($VAULT_DIR) name different vault folders; unset one"; return 1; }
-    VAULT_DIR="$MC_CANON"
-  fi
-  if [ -n "${MCOMP_EVENTS_SPOOL:-}" ]; then
-    mc_canon MCOMP_EVENTS_SPOOL "$MCOMP_EVENTS_SPOOL" || return 1
-    [ "$x_spool" = 0 ] || [ "$EVENTS_SPOOL" = "$MC_CANON" ] \
-      || { MC_REFUSAL="MCOMP_EVENTS_SPOOL ($MCOMP_EVENTS_SPOOL) and EVENTS_SPOOL in $(mc_tilde "$file") ($EVENTS_SPOOL) name different spools; unset one"; return 1; }
-    EVENTS_SPOOL="$MC_CANON"
+    VAULT_DIR="${VAULT_DIR:-}"; EVENTS_SPOOL="${EVENTS_SPOOL:-}"
+    if [ -n "${MCOMP_VAULT_DIR:-}" ]; then
+      mc_canon MCOMP_VAULT_DIR "$MCOMP_VAULT_DIR" || return 1
+      [ "$x_vault" = 0 ] || [ "$VAULT_DIR" = "$MC_CANON" ] \
+        || { MC_REFUSAL="MCOMP_VAULT_DIR ($MCOMP_VAULT_DIR) and VAULT_DIR in $(mc_tilde "$file") ($VAULT_DIR) name different vault folders; unset one"; return 1; }
+      VAULT_DIR="$MC_CANON"
+    fi
+    if [ -n "${MCOMP_EVENTS_SPOOL:-}" ]; then
+      mc_canon MCOMP_EVENTS_SPOOL "$MCOMP_EVENTS_SPOOL" || return 1
+      [ "$x_spool" = 0 ] || [ "$EVENTS_SPOOL" = "$MC_CANON" ] \
+        || { MC_REFUSAL="MCOMP_EVENTS_SPOOL ($MCOMP_EVENTS_SPOOL) and EVENTS_SPOOL in $(mc_tilde "$file") ($EVENTS_SPOOL) name different spools; unset one"; return 1; }
+      EVENTS_SPOOL="$MC_CANON"
+    fi
   fi
   # This machine's settings file: what `browser default` and the like write to (config/local.env when none exists).
   LOCAL_CONFIG="${file:-$MC_MAIN_CONFIG}"
