@@ -245,13 +245,19 @@ one-controller check, like any acting tool.
   binds that process's windows), reads the page's fields from a `dom_refs_v1` snapshot,
   and runs `metacomputer secrets login` (or `fill --field username`) with those
   selectors. It binds what it checked: `--origin`, `--browser-pid`, the request id,
-  and the client's pid as an unverified `--on-behalf-pid`. It then reads the tab again
+  and the client's pid as an unverified `--on-behalf-pid`. The vault uses the selectors
+  and the pid to choose the field and the Chrome, and never shows or records them (they
+  come off the page). The call is pinned to the hub's VM (`site_login.vm_pin`): `--vm`,
+  `--expect-port` and `--expect-host-key` (the host key its driver connection pinned,
+  `Hub.vm_identity`), and `MCOMP_HUB_IDENTITY` for `metacomputer secrets`, which refuses
+  a config that now names another VM. It then reads the tab again
   and submits only if it's still on that origin. `teleport_browser_session` runs
   `metacomputer secrets session load NAME --site ...` for a session imported with
-  `import-session` that covers the sites. If the profile has no cookie store yet, it
+  `import-session` for those exact sites. If the profile has no cookie store yet, it
   has the driver open and close that profile first.
 - **What comes back.** Status, the site, a masked username, `submitted`, `same_site`
-  (whether the page is still on the login's origin), and the tab. Its errors are its own
+  (whether the page is still on the login's origin), and the driver session. No tab or
+  target id: the VM chooses those. Its errors are its own
   words or the vault's (already free of the VM's). Never a page address, a driver error
   or an exception's text.
 - **Who asks.** The vault sees these requests as the hub's own, with no Claude Code
@@ -275,8 +281,12 @@ job or one connection: one file, `RUN_DIR/vm-may-hold-values` (`lib/vmtaint.py`)
   load|token` writes it before it runs the vault. Those commands act on their config's
   VM only, and refuse `--vm` naming another. If the file can't be written, nothing is
   sent.
-- **Who removes it.** Only replacing the VM with a fresh copy of its baseline
-  (`metacomputer reset`) or a new build.
+- **It travels with copies.** Each image (the baseline, `-prev`, a checkpoint) has a
+  record, `RUN_DIR/vm-taint/IMAGE`: `baseline` and `checkpoint` record the working VM's
+  mark, a build records clean, and `reset` / `restore` set the mark from the image they
+  copy (`bin/metacomputer`, `vm_taint`). An image with no record counts as holding a
+  value once any VM of the run folder was ever marked (`.ever`); an unreadable record
+  counts as holding one.
 - **Why there's no race.** Whatever the VM sends after it got the value arrives after
   the file exists. Each reader looks at the file when it records, not when the
   connection started, and stays tainted from then on.

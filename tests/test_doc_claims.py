@@ -333,6 +333,16 @@ CLAIMS = [
      lambda m: 'who.hubPID != nil && profile == nil && req["browser_pid"] == nil' in raw(SERVER)),
     ("SECURITY.md", r"Nothing of the page's address comes back, not its path or query and not its host",
      lambda m: "page_url" not in raw("lib/site_login.py") and not any("url" in f for f in site_login_report_fields())),
+    ("SECURITY.md", r"So none of them is shown in your terminal, answered or recorded: the audit log says only that one "
+                    r"was given \(`selector_given`, `selectors_given`, `browser_pid_given`\)",
+     lambda m: selectors_unrecorded()),
+    ("SECURITY.md", r"No tab or target id comes back either, since those are the VM's to choose too",
+     lambda m: "target_id" not in site_login_report_fields() and "tab_id" not in site_login_report_fields()
+     and not re.search(r'out\.update\(status="filled"[^)]*target_id', raw("lib/site_login.py"), re.S)),
+    ("SECURITY.md", r"The vault refuses a binding under that name with another port or host key",
+     lambda m: vault_pinned()),
+    ("SECURITY.md", r"An image with no record \(made before this\) counts as holding a value if any VM of this run folder "
+                    r"was ever marked", lambda m: unknown_images_tainted()),
     ("SECURITY.md", r"when the process `--while-pid` names ends \(the hub passes its own\)",
      lambda m: 'whilePID, kill(w, 0) != 0 && errno == ESRCH' in raw(CMDS)
      and '["--while-pid", str(os.getpid())]' in raw("lib/site_login.py")),
@@ -363,17 +373,61 @@ def size_classes_match():
     return list(vmtaint.SIZES) == swift_list == want and tail == 1 << 40 and vmtaint.size_class(1 << 33) == 1 << 40
 
 
+def _bash_fn(src, name):
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), src, re.S | re.M)
+    return m.group(0) if m else ""
+
+
 def vm_mark_kept(name):
-    """The mark's file name, written by `secrets fill|login|session load|token` before the vault runs, cleared only by
-    reset (restoring the baseline) and a new build."""
+    """The mark's file name, written by `secrets fill|login|session load|token` before the vault runs, and carried with
+    every copy of the VM: baseline and checkpoint record it, reset and restore set it from the image, a build records
+    clean (bin/metacomputer's vm_taint, scripts/build-vm.sh)."""
     import vmtaint
     mc = raw("bin/metacomputer")
     mark_at = mc.find('lib/vmtaint.py" mark')
     run_at = mc.find('out="$("$VAULT_BIN" "$sub" "$@")"')
-    clear = re.search(r'if \[ "\$evtype" = reset \]; then "\$PY" "\$LAB_ROOT/lib/vmtaint\.py" clear', mc)
-    return (name == vmtaint.NAME and 0 < mark_at < run_at and clear is not None
-            and f'rm -f "$RUN_DIR/{name}"' in raw("scripts/build-vm.sh")
-            and mc.count('lib/vmtaint.py" clear') == 1), (mark_at, run_at, bool(clear))
+    rf, bl, ck = _bash_fn(mc, "restore_from"), _bash_fn(mc, "do_baseline"), _bash_fn(mc, "do_checkpoint")
+    ok = (name == vmtaint.NAME and 0 < mark_at < run_at and 'vm_taint restore "$src"' in rf and "clear" not in rf
+          and 'vm_taint copy "$BASELINE_NAME" "$keep"' in bl and 'vm_taint save "$BASELINE_NAME"' in bl
+          and 'vm_taint save "$CKPT_PREFIX$name"' in ck and ck.count("vm_taint forget") == 2
+          and 'lib/vmtaint.py" fresh "$BASELINE_NAME"' in raw("scripts/build-vm.sh"))
+    return ok, (mark_at, run_at)
+
+
+def unknown_images_tainted():
+    """vmtaint.image_state: no record counts as clean until a VM of the run folder was marked, then as holding a value;
+    an unreadable record always holds one."""
+    import tempfile
+    import vmtaint
+    with tempfile.TemporaryDirectory() as d:
+        env = {"MCOMP_RUN_DIR": d}
+        before = vmtaint.image_state(env, "old-baseline")
+        vmtaint.mark(env, "doc-claims")
+        vmtaint.clear(env)
+        after = vmtaint.image_state(env, "old-baseline")
+        os.makedirs(os.path.join(d, vmtaint.STATE), exist_ok=True)
+        with open(os.path.join(d, vmtaint.STATE, "bad"), "w") as f:
+            f.write("???")
+        return (before, after, vmtaint.image_state(env, "bad")) == ("clean", "tainted", "tainted")
+
+
+def selectors_unrecorded():
+    """vault/Server.swift records only that a selector or browser pid was given, never its text."""
+    s = raw(SERVER)
+    return ('fields["selector"] = clean(' not in s and 'fields["password_selector"]' not in s
+            and 'fields["username_selector"]' not in s and 'fields["browser_pid"] = bp' not in s
+            and 'fields["selector_given"] = true' in s and 'fields["browser_pid_given"] = true' in s
+            and "selector '\\(promptText" not in s and "password '\\(promptText" not in s)
+
+
+def vault_pinned():
+    """Every vault lookup of a VM binding checks the asker's pin; the hub passes it; the wrapper checks its config."""
+    s = raw(SERVER)
+    lookups = len(re.findall(r"guard let t = target\(p, vm\)", s))
+    pinned = len(re.findall(r"if let why = pinProblem\(req, t\)", s))
+    sl = raw("lib/site_login.py")
+    return (lookups == pinned == 5 and '"--expect-port"' in sl and '"--expect-host-key"' in sl and '"--vm", p["vm"]' in sl
+            and "MCOMP_HUB_IDENTITY" in raw("bin/metacomputer")), (lookups, pinned)
 
 
 def tool_list_frozen():

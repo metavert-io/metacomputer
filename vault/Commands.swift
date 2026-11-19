@@ -694,6 +694,21 @@ func useOptions(_ a: Args, _ req: inout [String: Any]) throws {
         guard let n = Int32(p), n > 1 else { throw usageError("--on-behalf-pid: a process id") }
         req["on_behalf_pid"] = Int(n)
     }
+    // --expect-port / --expect-host-key: the VM the caller drives (the metacomputer hub passes them); a binding under
+    // that name with another port or host key is refused (Server.swift, pinProblem).
+    if let p = a.last("expect-port") {
+        guard let n = Int(p), n >= 1, n <= 65535 else { throw usageError("--expect-port: a TCP port") }
+        req["expect_port"] = n
+    }
+    if let k = a.last("expect-host-key") {
+        let parts = k.split(separator: " ")
+        guard k.count <= 1024, parts.count >= 2,
+              parts[0].allSatisfy({ $0.isLetter || $0.isNumber || "-@.".contains($0) }),
+              parts[1].allSatisfy({ $0.isLetter || $0.isNumber || "+/=".contains($0) }) else {
+            throw usageError("--expect-host-key: TYPE BASE64, as in known_hosts")
+        }
+        req["expect_host_key"] = parts.prefix(2).joined(separator: " ")
+    }
 }
 
 /// A use refused because the vault is locked: recorded, and said in the client's output.
@@ -712,7 +727,8 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid", "while-pid"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid", "while-pid",
+                                         "expect-port", "expect-host-key"])
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
         throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]")
     }
@@ -745,7 +761,8 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--request-id ID] [--origin https://site]"
-    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent", "origin", "browser-pid", "while-pid"])
+    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "agent", "origin",
+                                         "browser-pid", "while-pid", "expect-port", "expect-host-key"])
     guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
     if let ag = a.last("agent") {
         // What the asking agent calls itself (request_site_login's `agent`): a few plain characters, shown and
@@ -781,7 +798,7 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid", "while-pid"])
+    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid", "while-pid", "expect-port", "expect-host-key"])
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
         throw usageError("usage: token NAME --vm VM [--ttl 15m]")
     }
@@ -836,7 +853,8 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] [--site HOST ...] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site", "while-pid"], flags: ["replace"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site", "while-pid",
+                                                          "expect-port", "expect-host-key"], flags: ["replace"])
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")

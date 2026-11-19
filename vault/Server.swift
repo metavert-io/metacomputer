@@ -1251,15 +1251,17 @@ final class UnlockServer {
             return finish("fill", fields, failed("bad request"), who, approval: "-")
         }
         let profile = req["profile"] as? String
+        // A selector and a browser process id may come from the page (the hub reads them off it, and so may Claude):
+        // they choose where the fill goes and nothing else. The VM could spell a value it was given in either, so
+        // neither is shown, answered or recorded: only that one was given.
         let selector = (req["selector"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        if let sel = selector { fields["selector"] = clean(sel, max: 300) }
+        if selector != nil { fields["selector_given"] = true }
         let only = req["origin"] as? String
-        if let o = only { fields["for_origin"] = clean(o, max: 300) }
         let browserPID = (req["browser_pid"] as? NSNumber)?.intValue
-        if let bp = browserPID { fields["browser_pid"] = bp }
+        if browserPID != nil { fields["browser_pid_given"] = true }
         if let why = browserBindingProblem(req, profile: profile, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
-            + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who.describe)")
+            + (selector == nil ? "" : ", into the field the caller named") + ", asked by \(who.describe)")
         let p: Payload
         do { p = try load() } catch let e as VaultError { return finish("fill", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
             return finish("fill", fields, failed("cannot read the vault"), who, approval: "-")
@@ -1278,12 +1280,15 @@ final class UnlockServer {
             return finish("fill", fields, denied("\(name) has no username stored"), who, approval: "-")
         }
         if let o = only, canonicalOrigin(o) != o || !s.origins.contains(o) {
-            return finish("fill", fields, denied("--origin \(clean(o, max: 120)) isn't one of \(name)'s sites"), who, approval: "-")
+            // The caller's words may come off the page: not echoed or recorded unless they're one of the secret's own.
+            return finish("fill", fields, denied("--origin isn't one of \(name)'s sites (as `metacomputer secrets list` shows them)"), who, approval: "-")
         }
+        if let o = only { fields["for_origin"] = o }
         if let why = projectProblem(name, s, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         guard let t = target(p, vm) else {
             return finish("fill", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
+        if let why = pinProblem(req, t) { return finish("fill", fields, denied(why), who, approval: "-") }
         if let why = requiredSinkProblem("fill", fields, who) { return finish("fill", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
             return finish("fill", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
@@ -1321,7 +1326,7 @@ final class UnlockServer {
                 if idp || confirmEach || s.approval == "each" {
                     let o = approve("fill", name, "  Fill \(name) (\(field)) into \(origin) on VM \(vm)"
                                     + (profile.map { ", Chrome profile \($0)" } ?? "")
-                                    + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "")
+                                    + (selector == nil ? "" : ", into the field the caller named")
                                     + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin,
                                     use: "fill", summary: "fill \(name) (\(field)) into \(origin)", usernameHint: hint,
                                     identityProvider: idp, proposedID: proposed, ruleUse: "fill")
@@ -1393,17 +1398,17 @@ final class UnlockServer {
         let profile = req["profile"] as? String
         let userSel = req["username_selector"] as? String
         let only = req["origin"] as? String
-        if let o = only { fields["for_origin"] = clean(o, max: 300) }
+        // The selectors and the browser process id choose where the values go and nothing else: they may come from the
+        // page, which could spell a value it was given in them, so none is shown, answered or recorded (as for fill).
         let browserPID = (req["browser_pid"] as? NSNumber)?.intValue
-        if let bp = browserPID { fields["browser_pid"] = bp }
+        if browserPID != nil { fields["browser_pid_given"] = true }
         if let why = browserBindingProblem(req, profile: profile, who) { return finish("login", fields, denied(why), who, approval: "-") }
         // What the agent calls itself (request_site_login's `agent`): shown and recorded as its claim, never trusted.
         let agent = (req["agent"] as? String).flatMap { validAgentName($0) ? $0.trimmingCharacters(in: .whitespaces) : nil }
-        fields["password_selector"] = clean(passSel, max: 300)
-        if let u = userSel { fields["username_selector"] = clean(u, max: 300) }
+        fields["selectors_given"] = userSel == nil ? "password" : "username and password"
         if let ag = agent { fields["agent"] = ag }
         say("\(clockTime())  sign in with \(name) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
-            + ", password '\(promptText(passSel, max: 60))'" + (userSel.map { ", username '\(promptText($0, max: 60))'" } ?? "")
+            + (userSel == nil ? ", the password field the caller named" : ", the username and password fields the caller named")
             + ", asked by \(who.describe)")
         let p: Payload
         do { p = try load() } catch let e as VaultError { return finish("login", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
@@ -1421,12 +1426,15 @@ final class UnlockServer {
         let hint = s.username.map(maskUsername)
         if let h = hint { fields["username_hint"] = h }
         if let o = only, canonicalOrigin(o) != o || !s.origins.contains(o) {
-            return finish("login", fields, denied("--origin \(clean(o, max: 120)) isn't one of \(name)'s sites"), who, approval: "-")
+            // The caller's words may come off the page: not echoed or recorded unless they're one of the secret's own.
+            return finish("login", fields, denied("--origin isn't one of \(name)'s sites (as `metacomputer secrets list` shows them)"), who, approval: "-")
         }
+        if let o = only { fields["for_origin"] = o }
         if let why = projectProblem(name, s, who) { return finish("login", fields, denied(why), who, approval: "-") }
         guard let t = target(p, vm) else {
             return finish("login", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
+        if let why = pinProblem(req, t) { return finish("login", fields, denied(why), who, approval: "-") }
         if let why = requiredSinkProblem("login", fields, who) { return finish("login", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
             return finish("login", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
@@ -1529,6 +1537,7 @@ final class UnlockServer {
         }
         if let why = projectProblem(name, s, who) { return finish("token", fields, denied(why), who, approval: "-") }
         guard let t = target(p, vm) else { return finish("token", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-") }
+        if let why = pinProblem(req, t) { return finish("token", fields, denied(why), who, approval: "-") }
         if let why = requiredSinkProblem("token", fields, who) { return finish("token", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
             return finish("token", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
@@ -1722,6 +1731,7 @@ final class UnlockServer {
         guard let t = target(p, vm) else {
             return finish("session_save", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
+        if let why = pinProblem(req, t) { return finish("session_save", fields, denied(why), who, approval: "-") }
         if let why = requiredSinkProblem("session_save", fields, who) { return finish("session_save", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
             return finish("session_save", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
@@ -1785,7 +1795,7 @@ final class UnlockServer {
                 return finish("session_load", fields, failed("bad request: sites must be 1 to 20 host names"), who, approval: "-")
             }
             only = Array(Set(list.map { $0.lowercased() })).sorted()
-            fields["sites"] = only
+            // Recorded once they're known to be the session's own sites (below): the caller's words may come off a page.
         }
         say("\(clockTime())  session load \(name) on VM \(vm), asked by \(who.describe)")
         let p: Payload
@@ -1803,10 +1813,13 @@ final class UnlockServer {
             guard cookies else {
                 return finish("session_load", fields, denied("\(name) is a whole browser profile, which loads whole: --site narrows only a session imported with import-session"), who, approval: "-")
             }
+            // Each one of the session's own sites, exactly: then all that's shown and recorded is the user's own list,
+            // whatever the caller read off a page.
             let held = meta.sites ?? []
-            if let outside = o.first(where: { s in !held.contains { s == $0 || s.hasSuffix("." + $0) } }) {
-                return finish("session_load", fields, denied("\(name) holds cookies for \(held.joined(separator: ", ")) only, not \(outside)"), who, approval: "-")
+            if o.contains(where: { !held.contains($0) }) {
+                return finish("session_load", fields, denied("\(name) holds cookies for \(held.joined(separator: ", ")) only, not every site asked for"), who, approval: "-")
             }
+            fields["sites"] = o
         }
         // Don't forge or rewrite the driver's own records. (Imported cookies go into a profile's own store, whatever its name.)
         guard profile == meta.profile || cookies else {
@@ -1815,6 +1828,7 @@ final class UnlockServer {
         guard let t = target(p, vm) else {
             return finish("session_load", fields, failed("VM \(vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-")
         }
+        if let why = pinProblem(req, t) { return finish("session_load", fields, denied(why), who, approval: "-") }
         if let why = requiredSinkProblem("session_load", fields, who) { return finish("session_load", fields, denied(why), who, approval: "-") }
         if let problem = runner.listenerProblem(t) {
             return finish("session_load", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
@@ -1912,6 +1926,22 @@ func browserBindingProblem(_ req: [String: Any], profile: String?, _ who: Reques
     }
     if who.hubPID != nil && profile == nil && req["browser_pid"] == nil {
         return "a request through the metacomputer hub must name the Chrome it checked (--profile or --browser-pid)"
+    }
+    return nil
+}
+
+/// The VM the caller drives, when it says (the metacomputer hub passes the SSH port and host key it connected with):
+/// a binding under that name with another port or host key is another VM, refused before anything reaches it.
+func pinProblem(_ req: [String: Any], _ t: GuestTarget) -> String? {
+    if let n = req["expect_port"] as? NSNumber, n.intValue != t.binding.ssh_port {
+        return "VM \(t.vm) is bound to port \(t.binding.ssh_port), not the port the asker drives (\(n.intValue)); nothing was sent"
+    }
+    if let k = req["expect_host_key"] as? String {
+        let want = k.split(separator: " ").prefix(2).joined(separator: " ")
+        let have = t.binding.host_key_line.split(separator: " ").prefix(2).joined(separator: " ")
+        if want != have {
+            return "VM \(t.vm)'s pinned host key isn't the one the asker drives (bind the VM again if it was rebuilt); nothing was sent"
+        }
     }
     return nil
 }

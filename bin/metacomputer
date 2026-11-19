@@ -655,6 +655,13 @@ expect_guard() {
   [ -z "$why" ] || die "refusing to replace the VM: $why"
 }
 
+vm_taint() { # save IMAGE | restore IMAGE | copy FROM TO | forget IMAGE: the "may hold a value" mark travels with copies
+  # of the VM (lib/vmtaint.py). A restore that can't tell what the image holds leaves the working VM marked.
+  ( export_options; "$PY" "$LAB_ROOT/lib/vmtaint.py" "$@" ) >/dev/null && return 0
+  warn "couldn't record whether $VM_NAME may hold a value from the vault (lib/vmtaint.py $1)"
+  if [ "$1" = restore ]; then ( umask 077; mkdir -p "$RUN_DIR" && : >> "$RUN_DIR/vm-may-hold-values" ) || true; fi
+  return 1
+}
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
   local src="$1" label="$2" evtype="${3:-restored}"
   vm_lock_or_die "restoring $VM_NAME"   # held already by its callers; never a delete without it
@@ -673,8 +680,8 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
   if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force >/dev/null || die "lume delete failed"; fi
   say "cloning $src -> $VM_NAME"
   "$LUME" clone "$src" "$VM_NAME" >/dev/null || die "lume clone failed"
-  # A fresh copy of the baseline holds no value from the vault (lib/vmtaint.py); a checkpoint may.
-  if [ "$evtype" = reset ]; then "$PY" "$LAB_ROOT/lib/vmtaint.py" clear || true; fi
+  # The working VM now holds what that image holds: its "may hold a value" mark follows the image's record.
+  vm_taint restore "$src" || true
   ok "restored from $label"
   emit_event lifecycle "$evtype" info "The virtual computer $VM_NAME was replaced by $label" "" "from=$src"
   do_start
@@ -702,6 +709,7 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
     local vols; vols="$(storage_py checkpoint list "$2" 2>/dev/null)"
     confirm "Delete checkpoint '$2'${vols:+ (and its snapshot of volumes: $vols)}?"
     "$LUME" delete "$CKPT_PREFIX$2" --force >/dev/null || die "lume delete failed"
+    vm_taint forget "$CKPT_PREFIX$2" || true
     storage_py checkpoint delete "$2" || warn "could not delete the volume snapshots of checkpoint '$2'"
     emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
     ok "checkpoint '$2' deleted"; return 0
@@ -716,9 +724,11 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die "lume delete failed"
+    vm_taint forget "$CKPT_PREFIX$name" || true
     storage_py checkpoint delete "$name" || true
   fi
   "$LUME" clone "$VM_NAME" "$CKPT_PREFIX$name" >/dev/null || die "lume clone failed"
+  vm_taint save "$CKPT_PREFIX$name" || true     # (no record: counts as holding a value once any VM here was marked)
   if [ $withvol = 1 ] && ! storage_py checkpoint save "$name"; then
     "$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null 2>&1
     die "checkpoint '$name' not saved: its volumes couldn't be snapshotted (above)"
@@ -759,10 +769,14 @@ do_baseline() {
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
-    "$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null && "$LUME" delete "$BASELINE_NAME" --force >/dev/null
+    if "$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null; then
+      vm_taint copy "$BASELINE_NAME" "$keep" || true
+      "$LUME" delete "$BASELINE_NAME" --force >/dev/null
+    fi
     ok "previous baseline kept as $keep"
   fi
   "$LUME" clone "$VM_NAME" "$BASELINE_NAME" >/dev/null || die "clone failed"
+  vm_taint save "$BASELINE_NAME" || true        # a baseline made from a VM that may hold a value holds it too
   emit_event lifecycle baseline info "The baseline $BASELINE_NAME was replaced by the current state of $VM_NAME" ""
   ok "baseline updated"
   [ $was_running = 1 ] && do_start
@@ -1474,6 +1488,12 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # The VM is marked before anything of the vault's can reach it (lib/vmtaint.py): from then until it's reset,
       # nothing it chooses is kept on the Mac (the action log, hub.log, its stderr, its tool list). The mark goes in
       # this VM's run folder, so these commands act on this config's VM only.
+      # The hub's sign-in tools pass the VM they drive (lib/site_login.py, vm_pin): a config that now names another VM
+      # (the file repointed while the hub runs) is refused, never followed.
+      if [ -n "${MCOMP_HUB_IDENTITY:-}" ] && [ "$MCOMP_HUB_IDENTITY" != "vm=$VM_NAME;port=$SSH_PORT;ssh_dir=$SSH_DIR" ]; then
+        printf '%s\n' "{\"ok\": false, \"status\": \"denied\", \"reason\": \"the config no longer names the VM the hub drives (it changed while the hub ran); nothing was sent. Stop the hub (metacomputer hub stop) and call again\"}"
+        exit 2
+      fi
       if [ "$has_vm" = 1 ] && [ "$vm_arg" != "$VM_NAME" ]; then
         die "metacomputer secrets $sub acts on this config's VM ($VM_NAME); for another, run it with MCOMP_CONFIG set to that VM's config"
       fi

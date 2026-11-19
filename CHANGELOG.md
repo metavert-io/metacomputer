@@ -26,6 +26,11 @@ All notable changes to metacomputer are recorded here. The format follows
   - the hub neither asks for, saves nor serves a new tool list, handshake or resources and prompts listing;
   - `metacomputer sh` records output streams by size class only.
 - `metacomputer secrets fill|login|session|token` refuse `--vm` naming a VM other than the config's (use `MCOMP_CONFIG`).
+- The "may hold a value" mark travels with copies of the VM: `baseline` and `checkpoint` record it for the image they make (and `baseline` keeps the old record with `-prev`), a build records a clean VM, and `reset` / `restore` set it from the image they copy. An image with no record counts as holding a value once any VM of that run folder was marked.
+- The vault never shows or records a fill's selectors or browser process id (they may come off the page): the unlock terminal names the field the caller named, and the audit log says only that one was given (`selector_given`, `selectors_given`, `browser_pid_given`).
+- `mcomp-vault fill|login|session|token --expect-port P --expect-host-key KEY`: refuse a binding with another port or host key (the hub passes the VM it drives); `metacomputer secrets` refuses when its config now names another VM than the hub's (`MCOMP_HUB_IDENTITY`).
+- `request_site_login` answers with the driver session and no tab or target id (they're the VM's to choose); `SiteLoginReport` drops `target_id` and `tab_id`.
+- `session load --site` takes only sites the session was imported for, exactly (no subdomains), and `--origin` / `--site` are recorded only once they're the secret's or session's own; a refusal doesn't repeat them.
 - A sign-in or session load holds the computer until its work has provably stopped (its vault call answered or `settle` returned; every driver call answered or its connection's process tree ended). That holds while its client stays connected, under the client's lease if it leaves, and across the hub stopping. The hub doesn't idle out, or restart for another client's settings, while one runs. architecture.md, "Tools the hub serves itself", lists every way a job ends. `metacomputer hub stop` waits up to 75 s for them.
 
 ### Fixed

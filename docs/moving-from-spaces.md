@@ -68,7 +68,9 @@ profile to open) and `submit` (default true).
    `status: "pending"` with a `request_id` while you decide.
 5. Call again with that `request_id` (and `wait_secs`, default 20, at most 120). The answer
    is `status: "filled"` with `site`, `origin`, `username_hint` (`a***@example.com`),
-   `submitted`, `same_site` and the tab, or `status: "denied"`.
+   `submitted`, `same_site` and the driver `session`, or `status: "denied"`. Unlike
+   Keyvault's report, no tab or target id comes back (the VM chooses those): find the tab
+   with `list_windows` and `get_browser_state`.
    - There is no `page_url`: no address of the page comes back after a sign-in, only
      whether it's still on the login's origin (`same_site`).
    - The vault fills only a tab on that one origin, in the Chrome the tool read, and only
@@ -77,12 +79,12 @@ profile to open) and `submit` (default true).
 
 **`teleport_browser_session`** takes `sites` (required), `browser`, `name`, `reason`,
 `request_id` and `duration_minutes`. It adds `session` and `wait_secs`.
-- It finds a session you imported that covers those sites, and loads only the cookies
+- It finds a session you imported for those sites (exactly as you named them at import), and loads only the cookies
   those sites get, even when the session holds more.
 - The first call answers `consent_required` with a `request_id`. Once you approve, the
   retry answers `moved: true` and names the driver profile to open with `browser_prepare`.
 - If the profile has no cookie store yet, the hub has the driver create one first.
-- If no imported session covers the sites, the error names the `import-session` command
+- If no imported session holds those sites, the error names the `import-session` command
   you run in your own terminal.
 
 From scripts, `Hub.request_site_login(url, options)` in `lib/mcomp_sdk.py` is the

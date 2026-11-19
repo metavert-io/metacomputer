@@ -762,7 +762,8 @@ def run(td, procs):
     n = len(calls())
     proc = background("fill", "web-each", "--vm", "testvm", "--field", "password", "--profile", "prof1", "--selector",
                       "form   #pw\n" + "x" * 200)
-    u2.expect(f"Fill web-each (password) into {SITE} on VM testvm, Chrome profile prof1, selector 'form #pw " + "x" * 71 + "...'?")
+    # The selector isn't shown (it may come from the page, which could spell a value it was given in it): only that one was named.
+    u2.expect(f"Fill web-each (password) into {SITE} on VM testvm, Chrome profile prof1, into the field the caller named?")
     u2.expect("Type web-each to allow")
     u2.send("y\n")
     rc, out, _ = finish(proc)

@@ -591,7 +591,8 @@ def run(td, procs):
           rc == 0 and [c["host_key"] for c in got2.get("cookies", [])] == ["localhost"] and js(out).get("cookies") == 1
           and last.get("op") == "session_load" and last.get("sites") == ["localhost"], (out, got2, last))
     r = client("session", "load", "multi", "--vm", "ivm", "--site", "bank.example")
-    check("--site outside what the session holds is refused before anything is sent", r.returncode == 2 and "only, not bank.example" in r.stdout + r.stderr,
+    check("--site outside what the session holds is refused before anything is sent, without repeating the caller's site",
+          r.returncode == 2 and "only, not every site asked for" in r.stdout + r.stderr and "bank.example" not in r.stdout,
           r.stdout + r.stderr)
 
     # replacing keeps an identity provider's mark

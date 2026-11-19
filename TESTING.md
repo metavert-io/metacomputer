@@ -1168,7 +1168,7 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
-`python3 tests/test_site_login.py` (about 55 checks, a few minutes) checks the hub's own
+`python3 tests/test_site_login.py` (about 65 checks, a few minutes) checks the hub's own
 sign-in tools (`lib/site_login.py`). It runs the hub with a stand-in driver (page-mode Chrome's
 tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver 0.53 returns it) and a TEST
 build of the vault behind `metacomputer secrets`, with the ssh stub standing in for the VM.
@@ -1232,7 +1232,19 @@ build of the vault behind `metacomputer secrets`, with the ssh stub standing in 
   the requested site's cookies sent though the session holds two sites'.
 - **The mark from the command line:** `secrets list` makes none; `secrets fill` makes it
   before the vault answers; another VM's `--vm` is refused before anything; `vmtaint.py
-  clear` (what `reset` runs) removes it.
+  clear` removes it.
+- **The mark travels with copies of the VM:** the real `baseline`, `checkpoint`, `reset`
+  and `restore` from `bin/metacomputer` under /bin/bash with a stand-in runner. A baseline
+  made while marked keeps the VM marked after `reset`; a checkpoint taken while marked is
+  marked again on `restore`; images with no record count as holding a value once any VM
+  was marked; `-prev` keeps its record; an unreadable record counts as holding a value.
+- **Round 8 (the re-check of PR #53):**
+  - field ids a VM chose to spell a value reach the VM as selectors and nowhere else (the
+    unlock terminal, the audit log, the answers), for a sign-in and a username-only page;
+  - tab ids a VM chose to spell a value aren't in the answer;
+  - a config repointed to another VM while the hub runs: refused, nothing reaches either
+    VM; the vault refuses a binding with another port or host key than the asker's;
+  - a request still at work is never dropped from the hub's outcomes.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (a test VM) signs in and loads a
 session end to end, the way Claude does (skills/metacomputer/SECRETS.md), first with the

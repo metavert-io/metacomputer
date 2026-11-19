@@ -1223,6 +1223,7 @@ class Hub:
         env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid), MCOMP_VM_MARK=vmtaint.path(self.env))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
+        host_key = self._known_host_key()
         # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, close_fds=True, start_new_session=True)
@@ -1231,11 +1232,39 @@ class Hub:
         # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail). Once the VM may hold a value
         # (the mark, looked at as each chunk arrives), nothing more of it is kept, and only whether the Mac side said
         # the VM isn't running is still noticed.
+        # The host key this connection pins (SSH_DIR/known_hosts, as `metacomputer mcp` reads it now): the sign-in tools
+        # pin their vault call to it (vm_identity).
+        proc.mcomp_host_key = host_key
         mark = vmtaint.path(self.env)
         self.stderr_tail = proc.mcomp_stderr = wirelimits.StderrTail(
             proc.stderr, self._stderr_path(), withhold_when=lambda: vmtaint.tainted(mark_path=mark),
             watch=(b"not running",))
         return proc
+
+    def _known_host_key(self):
+        """The VM's pinned host key (TYPE BASE64) from SSH_DIR/known_hosts' [127.0.0.1]:SSH_PORT line, or None."""
+        d, port = self.settings.get("ssh_dir"), self.settings.get("ssh_port")
+        if not d or not str(port).isdigit():
+            return None
+        try:
+            with open(os.path.join(d, "known_hosts")) as f:
+                for line in f.read(1 << 20).splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[0] == f"[127.0.0.1]:{port}":
+                        return parts[1] + " " + parts[2]
+        except OSError:
+            return None
+        return None
+
+    def vm_identity(self):
+        """The VM this hub drives: its name, SSH port and SSH folder from the settings it started with, and the host key
+        its current driver connection pinned. None when any is unknown (the sign-in tools then send nothing)."""
+        proc = self.up
+        hk = getattr(proc, "mcomp_host_key", None) if proc is not None else None
+        vm, port, d = self.settings.get("vm_name"), str(self.settings.get("ssh_port") or ""), self.settings.get("ssh_dir")
+        if not (vm and port.isdigit() and d and hk):
+            return None
+        return {"vm": vm, "port": int(port), "ssh_dir": d, "host_key": hk}
 
     def _stderr_text(self):
         tail = self.stderr_tail

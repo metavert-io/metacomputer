@@ -75,11 +75,11 @@ TOOLS = [
             "vault passphrase, or their unlock terminal; identity providers always ask). The first call answers "
             "status \"pending\" with a request_id while the user decides; call again with the same url and request_id "
             "to get \"filled\" (site, origin, a masked username_hint, submitted, same_site (whether the page is still on "
-            "the login's origin; no address of the page is returned) and the tab) or \"denied\". "
+            "the login's origin; no address of the page is returned) and the driver session) or \"denied\". No tab or "
+            "target id comes back (they're the VM's to choose): read the tab with get_browser_state. "
             "Pass the tab you opened (session, target_id, tab_id from get_browser_state, and pid, the Chrome process you "
             "bound it with; the tool checks the tab is in that Chrome) to sign in there; without one it opens page-mode "
-            "Chrome on url itself and returns its "
-            "tab. The fill refuses when another tab in that Chrome is on the same site. A multi-step sign-in needs one call per page "
+            "Chrome on url itself (find it with list_windows and get_browser_state afterwards). The fill refuses when another tab in that Chrome is on the same site. A multi-step sign-in needs one call per page "
             "(a page with only a username field gets only the username). Never returns a password."),
         "inputSchema": {
             "type": "object",
@@ -111,7 +111,7 @@ TOOLS = [
             "request_id while the user approves the load (Touch ID, password, passphrase or their unlock terminal); only "
             "the cookies those sites get are loaded. Call again with the request_id to get moved: true and the driver "
             "profile to open with browser_prepare "
-            "({mode: \"isolated_named\", name: profile}). If no imported session covers the sites, it says which command "
+            "({mode: \"isolated_named\", name: profile}). If no imported session holds those exact sites, it says which command "
             "the user runs in their own terminal to import one. Chrome only (no Firefox); cookies only, not localStorage. "
             "Use it only when the user asks to browse as themselves."),
         "inputSchema": {
@@ -263,8 +263,14 @@ class Job:
     def __init__(self, kind, owner, info):
         self.kind, self.owner, self.info = kind, owner, info
         self.created = time.time()
+        self.finished = None            # when its outcome was known: it's kept JOB_TTL_S from then
         self.done = threading.Event()
         self.result = None
+
+    def finish(self, result):
+        self.result = result
+        self.finished = time.time()
+        self.done.set()
 
 
 JOBS = {}
@@ -272,11 +278,18 @@ JOBS_LOCK = threading.Lock()
 
 
 def new_request_id():
+    """A new request id. Outcomes are kept JOB_TTL_S after they're known; a request still at work is never dropped
+    (at MAX_JOBS of those, a new one is refused rather than an old one forgotten)."""
     with JOBS_LOCK:
-        for k in [k for k, j in JOBS.items() if time.time() - j.created > JOB_TTL_S]:
+        now = time.time()
+        for k in [k for k, j in JOBS.items() if j.finished is not None and now - j.finished > JOB_TTL_S]:
             JOBS.pop(k, None)
         while len(JOBS) >= MAX_JOBS:
-            JOBS.pop(min(JOBS, key=lambda k: JOBS[k].created), None)
+            done = [k for k, j in JOBS.items() if j.finished is not None]
+            if not done:
+                raise ToolError("busy", f"{MAX_JOBS} sign-ins or session loads are still at work here; try again when "
+                                        "one has finished")
+            JOBS.pop(min(done, key=lambda k: JOBS[k].finished), None)
         while True:
             rid = _random.token_hex(4)
             if rid not in JOBS:
@@ -346,7 +359,21 @@ def mark_vm(hub, why):
                                  "(check that its run folder is writable)")
 
 
-def vault(hub, *args, timeout=330, hold=None):
+def vm_pin(hub):
+    """The VM the hub drives, for a vault call that can send a value: `--vm` (its name), `--expect-port` and
+    `--expect-host-key` (the SSH port and host key its driver connection uses), and MCOMP_HUB_IDENTITY for
+    `metacomputer secrets`, which refuses when its config now names another VM (a config file repointed while the hub
+    runs). The vault refuses a binding with another port or host key. Nothing is sent when the hub can't tell."""
+    p = hub.vm_identity()
+    if not p:
+        raise ToolError("vault", "the hub can't tell which VM it drives (its name, SSH port or host key), so nothing was "
+                                 "sent; restart it through `metacomputer` (`metacomputer hub stop`, then call again)")
+    args = ["--vm", p["vm"], "--expect-port", str(p["port"]), "--expect-host-key", p["host_key"]]
+    env = {"MCOMP_HUB_IDENTITY": f"vm={p['vm']};port={p['port']};ssh_dir={p['ssh_dir']}"}
+    return args, env
+
+
+def vault(hub, *args, timeout=330, hold=None, pin=None):
     """`metacomputer secrets ARGS` with the hub's settings; (exit code, its JSON answer, its stderr). It returns only
     once the vault's work for it has provably stopped. A call that acts (WITHDRAWABLE) is withdrawn when its hold is
     stopped or at timeout: SIGTERM to its process group, and mcomp-vault closes its side of the request, which the unlock
@@ -356,8 +383,12 @@ def vault(hub, *args, timeout=330, hold=None):
     the unlock process answers it only once everything it got before has finished, or it isn't running."""
     withdrawable = bool(args) and args[0] in WITHDRAWABLE
     cmd = [CLI, "secrets", *args] + (["--while-pid", str(os.getpid())] if withdrawable else [])
+    env = dict(hub.env)
+    if pin is not None:
+        cmd += pin[0]
+        env.update(pin[1])
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(hub.env),
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
         return 4, {}, f"could not run metacomputer secrets ({type(e).__name__})"
@@ -591,9 +622,11 @@ def site_login(hub, client, args, hold):
                 cmd += ["--browser-pid", str(bpid)]
             if agent and pw:
                 cmd += ["--agent", agent]
-            # A: from here on the VM may hold the value (marked before the vault can send it).
+            # Pinned to the VM this hub drives (its name, port and host key), then A: from here on the VM may hold the
+            # value (marked before the vault can send it).
+            pin = vm_pin(hub)
             mark_vm(hub, "request_site_login")
-            rc, res, err = vault(hub, *cmd, hold=hold)
+            rc, res, err = vault(hub, *cmd, hold=hold, pin=pin)
             hold.phase(AFTER_S)
             out = {"request_id": rid, "site": job.info["site"], "space": hub.settings.get("vm_name") or ""}
             if rc == 0 and res.get("ok"):
@@ -624,10 +657,12 @@ def site_login(hub, client, args, hold):
                     same = canonical_origin((driver(hub, client, "get_browser_state", dict(tgt, snapshot_format="dom_refs_v1")) or {}).get("url")) == origin
                 except ToolError:
                     pass
+                # No tab or target id: they're the VM's to choose, and it may hold a value from an earlier fill. The
+                # driver session is the client's own (or the hub's label for it).
                 out.update(status="filled", origin=origin,
                            username_hint=mask(secret.get("username")), submitted=submitted, same_site=same,
                            fields=[f for f in (res.get("fields") or ["username"]) if f in ("username", "password")],
-                           session=tgt["session"], target_id=tgt["target_id"], tab_id=tgt["tab_id"])
+                           session=tgt["session"])
                 if held:
                     out["note"] = held
             elif rc == 2:
@@ -636,13 +671,14 @@ def site_login(hub, client, args, hold):
                 out.update(status="error", error="locked", reason=LOCKED)
             else:
                 out.update(status="error", error="login_failed", reason=clean(res.get("reason") or err, 300))
-            job.result = out
+            job.finish(out)
         except ToolError as e:
-            job.result = {"status": "error", "error": e.code, "reason": e.message, "request_id": rid}
+            job.finish({"status": "error", "error": e.code, "reason": e.message, "request_id": rid})
         except Exception as e:   # never leave a request hanging
-            job.result = {"status": "error", "error": "internal", "reason": f"internal error ({type(e).__name__})", "request_id": rid}
+            job.finish({"status": "error", "error": "internal", "reason": f"internal error ({type(e).__name__})", "request_id": rid})
         finally:
-            job.done.set()
+            if not job.done.is_set():
+                job.finish({"status": "error", "error": "internal", "reason": "stopped", "request_id": rid})
             hold.end()
 
     hold.background = True
@@ -680,7 +716,8 @@ def collect(client, rid, kind, wait, **_):
 
 # --- teleport_browser_session -----------------------------------------------------------------------
 def covers(session_sites, site):
-    return any(site == s or site.endswith("." + s) for s in session_sites)
+    """A site the session was imported for, exactly (the vault's --site takes only those)."""
+    return site in session_sites
 
 
 def teleport(hub, client, args, hold):
@@ -734,11 +771,13 @@ def teleport(hub, client, args, hold):
         _current.hold = hold
         try:
             def load():
-                # A: from here on the VM may hold the cookies (marked before the vault can send them).
+                # Pinned to the VM this hub drives; then A: from here on the VM may hold the cookies (marked before the
+                # vault can send them).
+                pin = vm_pin(hub)
                 mark_vm(hub, "teleport_browser_session")
                 # --site: the vault sends only the cookies those sites get (filtered on the Mac), whatever else the session holds.
                 r_ = vault(hub, "session", "load", s["name"], *[a for x in sites for a in ("--site", x)], "--request-id", rid,
-                           "--on-behalf-pid", on_behalf, hold=hold)
+                           "--on-behalf-pid", on_behalf, hold=hold, pin=pin)
                 hold.phase(AFTER_S + 30)
                 return r_
             rc, res, err = load()
@@ -752,23 +791,25 @@ def teleport(hub, client, args, hold):
                 time.sleep(1)
                 rc, res, err = load()
             if rc == 0 and res.get("ok"):
-                job.result = {"moved": True, "request_id": rid, "session": s["name"], "sites": sites,
+                result = {"moved": True, "request_id": rid, "session": s["name"], "sites": sites,
                               "cookies": res.get("cookies"), "profile": profile,
                               "next": (f"browser_prepare with profile {{mode: \"isolated_named\", name: \"{profile}\"}} and "
                                        "allow_launch: true opens Chrome with these cookies"),
                               "note": "cookies only: localStorage wasn't imported; they stay in the profile until it's deleted or the VM is reset"}
             elif rc == 2:
-                job.result = {"status": "error", "error": "denied", "reason": clean(res.get("reason") or err, 300), "request_id": rid}
+                result = {"status": "error", "error": "denied", "reason": clean(res.get("reason") or err, 300), "request_id": rid}
             elif rc == 3:
-                job.result = {"status": "error", "error": "locked", "reason": LOCKED, "request_id": rid}
+                result = {"status": "error", "error": "locked", "reason": LOCKED, "request_id": rid}
             else:
-                job.result = {"status": "error", "error": "teleport_refused", "reason": clean(res.get("reason") or err, 300), "request_id": rid}
+                result = {"status": "error", "error": "teleport_refused", "reason": clean(res.get("reason") or err, 300), "request_id": rid}
+            job.finish(result)
         except ToolError as e:
-            job.result = {"status": "error", "error": e.code, "reason": e.message, "request_id": rid}
+            job.finish({"status": "error", "error": e.code, "reason": e.message, "request_id": rid})
         except Exception as e:
-            job.result = {"status": "error", "error": "internal", "reason": f"internal error ({type(e).__name__})", "request_id": rid}
+            job.finish({"status": "error", "error": "internal", "reason": f"internal error ({type(e).__name__})", "request_id": rid})
         finally:
-            job.done.set()
+            if not job.done.is_set():
+                job.finish({"status": "error", "error": "internal", "reason": "stopped", "request_id": rid})
             hold.end()
 
     hold.background = True

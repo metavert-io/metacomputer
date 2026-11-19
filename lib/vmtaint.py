@@ -15,11 +15,18 @@ baseline, nothing it chooses is recorded or kept on the Mac (SECURITY.md, "After
 The mark is one file per VM's run folder (RUN_DIR/vm-may-hold-values). It's written BEFORE a value can be sent:
 by the hub before a sign-in's or session load's vault call (lib/site_login.py), and by `metacomputer secrets
 fill|login|session load|token` before it runs the vault (bin/metacomputer). Whatever the VM sends after the value
-arrives is read after the mark exists, so every reader that looks at the mark before it records sees it. It's
-removed only when the VM is replaced by a fresh copy of its baseline (`metacomputer reset`) or rebuilt. A mark that
-can't be read counts as set (fail closed); one that can't be written stops the use before the vault is asked.
+arrives is read after the mark exists, so every reader that looks at the mark before it records sees it. A mark
+that can't be read counts as set (fail closed); one that can't be written stops the use before the vault is asked.
+
+A copy of the VM carries the mark with it. Each saved image (the baseline, its -prev, a checkpoint) has a record,
+RUN_DIR/vm-taint/IMAGE, written when it's made from the working VM (`baseline`, `checkpoint`: the working VM's
+mark then) or made fresh (a build: clean). Replacing the working VM with an image (`reset`, `restore`) sets the mark
+from that image's record. An image with no record (made before this) counts as holding a value if any VM of this
+run folder was ever marked (RUN_DIR/vm-taint/.ever, written with every mark and never removed); a record that can't
+be read counts as holding one.
 
   vmtaint.py status | mark [WHY] | clear      (RUN_DIR from MCOMP_RUN_DIR, as bin/metacomputer exports it)
+  vmtaint.py save IMAGE | restore IMAGE | copy FROM TO | forget IMAGE | fresh BASELINE
 """
 import os
 import sys
@@ -57,6 +64,7 @@ def mark(env=None, why="a value"):
     must then not send the value."""
     p = path(env)
     os.makedirs(os.path.dirname(p), exist_ok=True)
+    _write(os.path.join(_state_dir(env), EVER), "marked\n")      # first: an image with no record counts from now
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         os.write(fd, (time.strftime("%Y-%m-%dT%H:%M:%S%z") + " " + str(why)[:80].replace("\n", " ") + "\n").encode())
@@ -67,11 +75,96 @@ def mark(env=None, why="a value"):
 
 
 def clear(env=None):
-    """The VM was replaced by a fresh copy of its baseline (or rebuilt): it holds no value."""
+    """The VM was replaced by a fresh copy of an image that holds no value (or rebuilt)."""
     try:
         os.remove(path(env))
     except FileNotFoundError:
         pass
+
+
+# --- the mark travels with copies of the VM -------------------------------------------------------------------
+STATE = "vm-taint"
+EVER = ".ever"
+IMAGE_RE = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _state_dir(env=None):
+    env = os.environ if env is None else env
+    rd = env.get("MCOMP_RUN_DIR") or os.path.join(LAB, ".run")
+    return os.path.join(rd, STATE)
+
+
+def _write(p, text):
+    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    tmp = p + f".{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, p)
+
+
+def _image_path(env, image):
+    if not IMAGE_RE.fullmatch(image or ""):
+        raise ValueError(f"not an image name: {image!r}")
+    return os.path.join(_state_dir(env), image)
+
+
+def ever(env=None):
+    """Was any VM of this run folder ever marked (or can that not be told)?"""
+    try:
+        os.lstat(os.path.join(_state_dir(env), EVER))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def image_state(env, image):
+    """'tainted' or 'clean': the image's record; with none, 'tainted' when a VM here was ever marked."""
+    try:
+        with open(_image_path(env, image)) as f:
+            state = f.read().strip()
+    except FileNotFoundError:
+        return "tainted" if ever(env) else "clean"
+    except (OSError, ValueError):
+        return "tainted"
+    return state if state in ("tainted", "clean") else "tainted"
+
+
+def save_image(env, image):
+    """IMAGE was just made from the working VM: it holds what the working VM holds."""
+    _write(_image_path(env, image), ("tainted" if tainted(env) else "clean") + "\n")
+
+
+def copy_image(env, src, dst):
+    """DST was just made from SRC (the baseline kept as -prev)."""
+    _write(_image_path(env, dst), image_state(env, src) + "\n")
+
+
+def restore_image(env, image):
+    """The working VM was just replaced by a copy of IMAGE: its mark follows that image. Returns the state."""
+    state = image_state(env, image)
+    if state == "tainted":
+        mark(env, f"restored from {image}")
+    else:
+        clear(env)
+    return state
+
+
+def forget_image(env, image):
+    try:
+        os.remove(_image_path(env, image))
+    except FileNotFoundError:
+        pass
+
+
+def fresh_image(env, baseline):
+    """A build: the working VM and its baseline are new, holding no value. Other images keep their records."""
+    clear(env)
+    _write(_image_path(env, baseline), "clean\n")
 
 
 def size_class(n):
@@ -113,8 +206,29 @@ def main(argv):
     if cmd == "clear":
         clear()
         return 0
-    print(__doc__, file=sys.stderr)
-    return 2
+    try:
+        if cmd == "save" and len(argv) == 2:
+            save_image(None, argv[1])
+        elif cmd == "copy" and len(argv) == 3:
+            copy_image(None, argv[1], argv[2])
+        elif cmd == "forget" and len(argv) == 2:
+            forget_image(None, argv[1])
+        elif cmd == "fresh" and len(argv) == 2:
+            fresh_image(None, argv[1])
+        elif cmd == "restore" and len(argv) == 2:
+            print(restore_image(None, argv[1]))
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except (OSError, ValueError) as e:
+        if cmd == "restore":
+            try:                                 # can't tell what the image holds: the working VM counts as marked
+                mark(None, f"restored from {argv[1]} (its record unreadable)")
+            except OSError:
+                pass
+        print(f"metacomputer: couldn't record whether the VM may hold a value ({e})", file=sys.stderr)
+        return 4
+    return 0
 
 
 if __name__ == "__main__":

@@ -877,7 +877,7 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
      has the contents pinned at bind.
 4. If the secret or the unlock says `each`, it first asks the VM to check the page
    without the value. It then asks in your terminal, naming the real site, the Chrome
-   profile, any selector and who asked, for example:
+   profile and who asked, for example:
    `Fill x-login (password) into https://x.com on VM metacomputer?`
    `Asked by Claude Code in ~/Projects/foo (pid 4242).`
    - You type the secret's name to allow this use, `NAME session` for this Claude
@@ -1213,6 +1213,15 @@ the site, which must be one of the secret's, and the username field must be on t
 site), then both are typed through the same path as `fill`, to that site only. The
 answer lists the fields filled, the site and a masked username.
 
+A selector (`--selector`, `--password-selector`, `--username-selector`) and a browser
+process id (`--browser-pid`) choose where a value goes, and that's all they do. (So does
+`--origin`: it's recorded only once it's known to be one of the secret's own sites, and a
+refusal doesn't repeat it.) They're
+read off the page, by Claude or the hub, and a VM that holds a value from an earlier fill
+could spell it in a field's id. So none of them is shown in your terminal, answered or
+recorded: the audit log says only that one was given (`selector_given`,
+`selectors_given`, `browser_pid_given`).
+
 ### A request whose requester goes away stops
 
 While the unlock process serves a `fill`, `login`, `session save|load` or `token`
@@ -1254,9 +1263,19 @@ moment until the VM is reset, nothing the VM chooses is kept on your Mac.
   - by the hub, before a `request_site_login` or `teleport_browser_session` asks the
     vault.
 
-  If it can't be written, nothing is sent. Only `metacomputer reset` (a fresh copy of
-  the baseline) or a new build removes it; restoring a checkpoint doesn't, since a
-  checkpoint may hold a value too.
+  If it can't be written, nothing is sent.
+- **It travels with copies of the VM.** Each saved image has a record,
+  `RUN_DIR/vm-taint/IMAGE`:
+  - `metacomputer baseline` and `checkpoint` record the working VM's mark for the copy
+    they make, and `baseline` keeps the old baseline's record with it as `-prev`;
+  - a build records a clean VM and baseline;
+  - `reset` and `restore` set the working VM's mark from the image they copy.
+
+  An image with no record (made before this) counts as holding a value if any VM of
+  this run folder was ever marked (`RUN_DIR/vm-taint/.ever`, which is never removed), and
+  a record that can't be read counts as holding one. So the mark goes away only with a
+  copy of an image that's known to hold no value: a fresh baseline, or one made before
+  any value was sent.
 - **No race.** Whatever the VM sends after the value arrives is read after the file
   exists, and each place below looks at it when it records, not when its connection
   started. It stays that way for the rest of that connection.
@@ -1366,8 +1385,10 @@ plain text: delete it once it's imported.
 - `session load NAME --site HOST` (repeatable) sends only the cookies a browser would send to
   those sites, filtered on the Mac before anything goes to the VM. The question and the audit
   record (`sites`) name that scope; an answer that reaches further (`NAME session`) covers
-  loads of exactly those sites; a site the session doesn't hold, and `--site` on a whole
-  browser profile (which loads whole), are refused.
+  loads of exactly those sites; a site the session wasn't imported for (a subdomain of
+  one included), and `--site` on a whole browser profile (which loads whole), are refused.
+  The refusal doesn't repeat the site asked for, and the record names sites only once
+  they're the session's own: the caller may have read them off a page.
 
 Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME_DIR` (a
 folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
@@ -1404,10 +1425,23 @@ vault does the asking and the typing, as for `metacomputer secrets login`.
     that site only.
   - Before clicking the submit button the hub reads the tab again, and doesn't submit if
     it has left the site.
-  - The answer carries status, the site, a masked username, the tab and `same_site`:
-    whether the page is still on the login's origin. Nothing of the page's address comes
-    back, not its path or query and not its host: a page, or the VM, could spell the
-    password or a token in any of them.
+  - The answer carries status, the site, a masked username, the driver session and
+    `same_site`: whether the page is still on the login's origin. Nothing of the page's
+    address comes back, not its path or query and not its host: a page, or the VM, could
+    spell the password or a token in any of them. No tab or target id comes back either,
+    since those are the VM's to choose too: Claude finds the tab with `list_windows` and
+    `get_browser_state`.
+  - The field selectors and the Chrome's process id the hub read off the page go to the
+    vault to choose where the values go, and the vault neither shows nor records them
+    ("Signing in with one approval" above).
+- **The vault call is pinned to the hub's VM.**
+  - The hub passes the VM it drives: its name (`--vm`), and the SSH port and host key
+    its driver connection uses (`--expect-port`, `--expect-host-key`). The vault refuses
+    a binding under that name with another port or host key.
+  - `metacomputer secrets` refuses when its config file now names another VM than the
+    hub's (the file repointed while the hub runs), so the vault never acts on a VM the
+    hub hasn't checked and doesn't hold.
+  - With any of these unknown, the hub sends nothing.
 - **The Chrome is bound, the tab isn't.**
   - The hub tells the vault which Chrome it read, by its browser process id
     (`--browser-pid`): the one it opened, or the one a tab passed in belongs to.
@@ -1422,8 +1456,8 @@ vault does the asking and the typing, as for `metacomputer secrets login`.
   - The tab itself can't be bound: the driver's tab ids aren't the ones Chrome's
     DevTools uses. The process id and the profile are Chrome's own answers, like
     everything secret-fill reads from DevTools.
-- **`teleport_browser_session`** finds a session you imported with `import-session` that
-  covers the sites, and runs `metacomputer secrets session load NAME --site ...` for it.
+- **`teleport_browser_session`** finds a session you imported with `import-session` for
+  those exact sites, and runs `metacomputer secrets session load NAME --site ...` for it.
   - Only the cookies a browser sends to those sites go to the VM, filtered on the Mac,
     whatever else the session holds. The question and the audit record name that scope.
   - If the profile has no cookie store yet, the vault says so before asking you, in its
@@ -1944,10 +1978,11 @@ something waits for you:
   sign-in to confirm it stopped, and keeps its hold until then.
 - **A VM that was given values without the mark.** A VM that got a fill, a session or a
   token from an earlier version has no mark, so its records aren't secret-adjacent yet.
-  The first value sent through this version marks it; `metacomputer reset` starts it
-  clean. The same goes for a program that runs `mcomp-vault` itself instead of
-  `metacomputer secrets`: the vault program doesn't
-  know which VM folder to mark.
+  The first value sent through this version marks it. Its images made before that have
+  no record, and count as clean until some VM of its run folder is marked: `reset` to
+  such a baseline after the first mark keeps the VM marked. The same goes for a program
+  that runs `mcomp-vault` itself instead of `metacomputer secrets`: the vault program
+  doesn't know which VM folder to mark.
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
   sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:

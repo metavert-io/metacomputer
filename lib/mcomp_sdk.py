@@ -209,10 +209,10 @@ class SiteLoginOptions:
 
 
 class SiteLoginReport:
-    """What request_site_login did. Never the password, and nothing the page chose: same_site says whether it's still
-    on the login's origin (no page address comes back)."""
-    FIELDS = ("status", "request_id", "site", "origin", "username_hint", "submitted", "same_site", "session",
-              "target_id", "tab_id")
+    """What request_site_login did. Never the password, and nothing the page or the VM chose: same_site says whether
+    it's still on the login's origin (no page address comes back), and no tab or target id (read the tab with
+    get_browser_state in `session`)."""
+    FIELDS = ("status", "request_id", "site", "origin", "username_hint", "submitted", "same_site", "session")
 
     def __init__(self, **kw):
         for k in self.FIELDS:

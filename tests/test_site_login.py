@@ -170,6 +170,21 @@ for line in sys.stdin:
     elif name in ("browser_click", "browser_type") and s.get("leak"):
         send({"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "refused " + s["leak"]}],
               "structuredContent": {"error": s["leak"]}, "isError": True}})
+    elif name == "get_browser_state" and "snapshot_format" in a and s.get("ids_leak"):
+        # A hostile VM that already holds a value names the page's fields after it (id u_<L>, p_<L>): the hub builds
+        # its selectors from those ids. username_only: a first page with no password field.
+        s["snaps"] = s.get("snaps", 0) + 1; save(s)
+        L = s["ids_leak"]
+        sid = "p%d" % s["snaps"]
+        refs = [dict(r, ref=sid + ":" + r["ref"].split(":")[1],
+                     label=(r["label"] or "").replace("id=username", "id=u_" + L).replace("id=password", "id=p_" + L))
+                for r in REFS if not (s.get("username_only") and "password" in (r["label"] or ""))]
+        ok(mid, {"status": "ok", "refs": refs, "url": s.get("url", "about:blank"), "snapshot_id": sid})
+    elif name == "get_browser_state" and "snapshot_format" not in a and s.get("tab_leak"):
+        # A hostile VM that spells a value in the ids it gives the tab it's asked to bind.
+        L = s["tab_leak"]
+        ok(mid, {"target_id": "bt-" + L, "tabs": [{"tab_id": "tab-" + L, "url": s.get("url", "about:blank")}],
+                 "binding_quality": "exact"})
     elif name == "get_browser_state" and "snapshot_format" in a:
         # move_on_snap: from that page snapshot on, the tab is on move_url (a page that navigated away after the fill)
         s["snaps"] = s.get("snaps", 0) + 1; save(s)
@@ -259,6 +274,105 @@ def units(td):
           "as zero or not", leak not in json.dumps(rf) and rf.get("stdout") == {"size": 65536, "truncated": False}
           and rf.get("exit_code") == "nonzero" and "sha256" not in json.dumps(rf), rf)
 
+    try:
+        import site_login
+        site_login.JOBS.clear()
+        saved_max = site_login.MAX_JOBS
+        site_login.MAX_JOBS = 3
+        jobs = [site_login.Job("login", 1, {}) for _ in range(3)]
+        for i, j in enumerate(jobs):
+            site_login.JOBS[f"a{i}"] = j
+            j.created -= 10 ** 6                       # long-running: started well past the outcomes' lifetime
+        try:
+            site_login.new_request_id()
+            refused = False
+        except site_login.ToolError as e:
+            refused = e.code == "busy"
+        aged_kept = all(f"a{i}" in site_login.JOBS for i in range(3))
+        jobs[0].finish({"status": "error"})
+        site_login.new_request_id()                    # full: the finished one goes, the running ones stay
+        evict_ok = "a0" not in site_login.JOBS and "a1" in site_login.JOBS and "a2" in site_login.JOBS
+        jobs[1].finish({"status": "error"})
+        jobs[1].finished -= site_login.JOB_TTL_S + 1
+        site_login.new_request_id()
+        expiry_ok = "a1" not in site_login.JOBS and "a2" in site_login.JOBS
+        site_login.MAX_JOBS = saved_max
+        site_login.JOBS.clear()
+        check("P2 r8: a request still at work is never dropped (not by age, not by a full table: a new one is refused); "
+              "outcomes expire from when they're known, the oldest finished first", refused and aged_kept and evict_ok
+              and expiry_ok, (refused, aged_kept, evict_ok, expiry_ok))
+    except Exception as e:
+        check("P2 r8: outcomes kept while their request is at work", False, repr(e))
+
+
+def _function(src, name):
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), src, re.S | re.M)
+    return m.group(0) if m else ""
+
+
+def lifecycle(td):
+    """P1 r8#3: the "may hold a value" mark travels with copies of the VM. The real functions from bin/metacomputer
+    (vm_taint, restore_from, do_reset, do_restore, do_checkpoint, do_baseline) run under /bin/bash with a stand-in
+    runner that records clones, and lib/vmtaint.py itself."""
+    src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+    funcs = "".join(_function(src, n) for n in ("ckpt_name", "vm_taint", "restore_from", "do_reset", "do_restore",
+                                                 "do_checkpoint", "do_baseline"))
+    rd = os.path.join(td, "life-run")
+    reg = os.path.join(td, "life-vms")
+    os.makedirs(reg)
+    lume = os.path.join(td, "life-lume")
+    open(lume, "w").write("#!/bin/bash\nR=%s\ncase \"$1\" in\n"
+                          "  clone) [ -e \"$R/$2\" ] || exit 1; [ -e \"$R/$3\" ] && exit 1; cp \"$R/$2\" \"$R/$3\" ;;\n"
+                          "  delete) rm -f \"$R/$2\" ;;\nesac\n" % shlex.quote(reg))
+    os.chmod(lume, 0o755)
+    prelude = f"""
+set -uo pipefail
+LAB_ROOT={shlex.quote(LAB)}; PY={shlex.quote(sys.executable)}; LUME={shlex.quote(lume)}; RUN_DIR={shlex.quote(rd)}
+VM_NAME=t; BASELINE_NAME=t-baseline; CKPT_PREFIX=t-ckpt-; REG={shlex.quote(reg)}
+export MCOMP_RUN_DIR="$RUN_DIR"
+parse_flags() {{ REST=("$@"); }}
+vm_lock_or_die() {{ :; }}; expect_guard() {{ :; }}; owners_check() {{ :; }}; confirm() {{ :; }}
+vm_exists() {{ [ -e "$REG/$1" ]; }}; vm_running() {{ false; }}; events_watcher_stop() {{ :; }}
+do_recordings() {{ :; }}; vm_stop() {{ :; }}; storage_release() {{ :; }}; storage_py() {{ :; }}; gssh() {{ :; }}
+say() {{ :; }}; ok() {{ :; }}; warn() {{ echo "WARN $*" >&2; }}; die() {{ echo "DIE $*" >&2; exit 9; }}
+emit_event() {{ :; }}; do_start() {{ :; }}; export_options() {{ :; }}
+marked() {{ [ -e "$RUN_DIR/vm-may-hold-values" ] && echo yes || echo no; }}
+vmt() {{ "$PY" "$LAB_ROOT/lib/vmtaint.py" "$@" >/dev/null; }}
+{funcs}
+"""
+
+    def run(body):
+        shutil.rmtree(rd, ignore_errors=True)
+        for f in os.listdir(reg):
+            os.remove(os.path.join(reg, f))
+        p = subprocess.run(["/bin/bash", "-c", prelude + body], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL)
+        return p.stdout.split(), p.stderr
+
+    # a build (VM and baseline fresh), a value, `baseline`, then `reset`: the baseline holds it, so the VM stays marked
+    out, err = run("touch $REG/t $REG/t-baseline; vmt fresh t-baseline; vmt mark test; do_baseline; do_reset; marked")
+    check("P1 r8#3: a baseline made from a VM that may hold a value: `reset` to it keeps the VM marked", out == ["yes"],
+          (out, err[-300:]))
+    # a value, a checkpoint, `reset` to a clean baseline (unmarked), `restore` the checkpoint (marked again)
+    out, err = run("touch $REG/t $REG/t-baseline; vmt fresh t-baseline; vmt mark test; do_checkpoint c1; do_reset; marked; "
+                   "do_restore c1; marked")
+    check("P1 r8#3: a checkpoint taken while the VM may hold a value: `reset` to the clean baseline clears the mark, and "
+          "`restore` of that checkpoint puts it back", out == ["no", "yes"], (out, err[-300:]))
+    # images with no record (made before this): clean while no VM here was ever marked, holding a value once one was
+    out, err = run("touch $REG/t $REG/t-baseline; do_reset; marked; vmt mark test; vmt clear; do_reset; marked")
+    check("P1 r8#3: an image with no record counts as holding a value once any VM of this run folder was ever marked "
+          "(and as clean before)", out == ["no", "yes"], (out, err[-300:]))
+    # `baseline` keeps the old one as -prev with its record; a deleted checkpoint loses its record
+    out, err = run("touch $REG/t $REG/t-baseline; vmt fresh t-baseline; vmt mark test; do_baseline; vmt clear; do_baseline; "
+                   "cat $RUN_DIR/vm-taint/t-baseline-prev $RUN_DIR/vm-taint/t-baseline; do_checkpoint c2; "
+                   "do_checkpoint --delete c2; [ -e $RUN_DIR/vm-taint/t-ckpt-c2 ] && echo kept || echo gone")
+    check("P1 r8#3: `baseline` keeps the old baseline's record with it as -prev; a deleted checkpoint's record goes",
+          out == ["tainted", "clean", "gone"], (out, err[-300:]))
+    # a record that can't be read counts as holding a value
+    out, err = run("touch $REG/t $REG/t-baseline; vmt fresh t-baseline; printf 'garbage' > $RUN_DIR/vm-taint/t-baseline; "
+                   "do_reset; marked")
+    check("P1 r8#3: an unreadable or unknown record counts as holding a value", out == ["yes"], (out, err[-300:]))
+
 
 def main():
     td = tempfile.mkdtemp(prefix="mcsl-", dir="/tmp")
@@ -266,6 +380,7 @@ def main():
     env = None
     try:
         units(td)
+        lifecycle(td)
         env = run(td, procs)
     finally:
         if env:
@@ -368,6 +483,10 @@ def run(td, procs):
     rc, out = tty([BIN, "set", "dual", "--kind", "password", "--origin", SITE4, "--origin", SITE5, "--username", USER, "--approval", "session"],
                   [("Vault passphrase", PASS + "\n"), ("Password for dual", PW + "\n"), ("same password again", PW + "\n")])
     check("...a login saved for two sites that doesn't ask", rc == 0, out)
+    rc = tty([BIN, "bind", "othervm", "--port", str(port), "--host-key-line", hostkey, "--fill-key", sshdir + "/fill", "--fill-user",
+              "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua", "--gateway", my_exe],
+             [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])[0]
+    check("...and another VM name bound in the vault (for a config repointed while a hub runs)", rc == 0)
 
     sys.path.insert(0, os.path.join(LAB, "lib"))
     import mcomp_sdk
@@ -377,7 +496,7 @@ def run(td, procs):
         env.pop(k, None)
     env.update(MCOMP_CONFIG=conf, MCOMP_VAULT_BIN=BIN, MCOMP_VAULT_ALLOW_TEST_BUILD="1", MCOMP_RUN_DIR=rundir,
                MCOMP_LOG_DIR=os.path.join(td, "logs"), MCOMP_EVENTS_DIR=os.path.join(td, "events"),
-               MCOMP_EVENTS_SPOOL=os.path.join(td, "spool"), MCOMP_VM_NAME="slvm", MCOMP_SSH_PORT=str(port),
+               MCOMP_EVENTS_SPOOL=os.path.join(td, "spool"), MCOMP_VM_NAME="slvm", MCOMP_SSH_PORT=str(port), MCOMP_SSH_DIR=sshdir,
                MCOMP_ACTION_LOG="off", MCOMP_DRIVER_MODE="standard", MCOMP_COORD_GUARD="on", MCOMP_MCP_HUB="on",
                MCOMP_HUB_DRIVER_CMD=json.dumps([sys.executable, fake, state]))
     h = mcomp_sdk.Hub(env=env, timeout=200, session="sl")
@@ -432,10 +551,11 @@ def run(td, procs):
     sc = r.structured
     sent = [json.loads(c["stdin"]) for c in calls()[n:] if c.get("kind", "").startswith("fill:")]
     dc = [c["tool"] for c in driver_calls()]
-    check("after `approve ID`: filled, with the origin, a masked username, submitted, the page and its tab; never the password",
+    check("after `approve ID`: filled, with the origin, a masked username, submitted and the driver session; no tab or "
+          "target id (the VM's to choose), never the password",
           ra.returncode == 0 and not r.is_error and sc.get("status") == "filled" and sc.get("origin") == SITE
-          and sc.get("username_hint") == "s***@example.com" and sc.get("submitted") is True and sc.get("target_id") == "bt-1"
-          and sc.get("tab_id") == "tab-1" and sc.get("session") == "sl" and not any(v in json.dumps(r.raw) for v in VALUES), r.raw)
+          and sc.get("username_hint") == "s***@example.com" and sc.get("submitted") is True and "target_id" not in sc
+          and "tab_id" not in sc and sc.get("session") == "sl" and not any(v in json.dumps(r.raw) for v in VALUES), r.raw)
     check("the vault filled both fields through its own path, on that site only, with the snapshot's selectors",
           [(s["mode"], s["field"], s.get("selector")) for s in sent] == [("check", "password", "#password"), ("check", "username", "#username"),
                                                                          ("fill", "username", "#username"), ("fill", "password", "#password")]
@@ -1014,10 +1134,79 @@ def run(td, procs):
                          text=True, timeout=30)
     cleared = not os.path.exists(os.path.join(td, "run-cli-a", "vm-may-hold-values"))
     check("the mark: `secrets list` makes none; `secrets fill` makes it before the vault answers (here a refusal); "
-          "another VM's name is refused before anything (no mark there either); `vmtaint.py clear` (what reset runs) "
-          "removes it", not listed_marks and rf.returncode != 0 and fill_marks and rv.returncode != 0
+          "another VM's name is refused before anything (no mark there either); `vmtaint.py clear` removes it", not listed_marks and rf.returncode != 0 and fill_marks and rv.returncode != 0
           and "acts on this config's VM" in rv.stderr and not other_marks and rc_.returncode == 0 and cleared,
           (listed_marks, rf.returncode, fill_marks, rv.returncode, rv.stderr[-200:], other_marks, cleared))
+
+    # --- round 8 (the re-check of PR #53) ------------------------------------------------------------------------
+    L8 = "LEAK" + PW2.encode().hex()
+
+    # P1 #1: the selectors (and the browser pid) the hub reads off a page are used to fill, never shown or recorded.
+    # A VM that already holds a value names the fields after it (id p_<L>, u_<L>); then a username-only page.
+    e11, st11 = hub_env("r8sel", {"url": SITE4 + "/login.html", "ids_leak": L8}, relay=False)
+    h11 = mcomp_sdk.Hub(env=e11, timeout=200, session="sl11")
+    h11.connect()
+    n11, t11, a11 = len(calls()), len(u.text()), len(open(vaudit).read())
+    r11 = outcome(h11, h11.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200), SITE4 + "/login.html")
+    json.dump({"url": SITE4 + "/login.html", "ids_leak": L8, "username_only": True}, open(os.path.join(st11, "state.json"), "w"))
+    r11b = outcome(h11, h11.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200), SITE4 + "/login.html")
+    h11.close()
+    mcp_hub.stop_hub(e11)
+    sent11 = [json.loads(c["stdin"]) for c in calls()[n11:] if c.get("kind", "").startswith("fill:")]
+    shown11, audit11 = u.text()[t11:], open(vaudit).read()[a11:]
+    check("P1 r8#1: field ids the VM chose to spell a value (p_<hex>, u_<hex>) reach the VM as the fill's selectors, and "
+          "nowhere else: not the unlock terminal, the audit log or the tools' answers (a sign-in, then a username-only page)",
+          r11.structured.get("status") == "filled" and r11b.structured.get("status") == "filled"
+          and any(L8 in str(x.get("selector")) for x in sent11) and L8 not in shown11 and L8 not in audit11
+          and L8 not in json.dumps(r11.raw) + json.dumps(r11b.raw) and "selector_given" in audit11,
+          (r11.raw, r11b.raw, L8 in shown11, L8 in audit11, [x.get("selector") for x in sent11]))
+
+    # P1 #2: tab and target ids are the VM's to choose: none comes back in a sign-in's answer.
+    e12, st12 = hub_env("r8tab", {"url": SITE4 + "/login.html", "tab_leak": L8}, relay=False)
+    h12 = mcomp_sdk.Hub(env=e12, timeout=200, session="sl12")
+    h12.connect()
+    r12 = outcome(h12, h12.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200), SITE4 + "/login.html")
+    h12.close()
+    mcp_hub.stop_hub(e12)
+    check("P1 r8#2: a VM that spells a value in the tab's ids: the sign-in works and its answer carries no tab or target id",
+          r12.structured.get("status") == "filled" and L8 not in json.dumps(r12.raw) and "target_id" not in r12.structured
+          and "tab_id" not in r12.structured, r12.raw)
+
+    # P1 #4: the vault call is pinned to the hub's VM. Its config file repointed to another VM while the hub runs: the
+    # sign-in is refused and nothing reaches either VM. And the vault itself refuses a binding with another port or
+    # host key than the asker drives.
+    conf13 = os.path.join(td, "drift.env")
+
+    def drift_conf(name):
+        open(conf13, "w").write(f'VM_NAME={name}\nSSH_PORT={port}\nSSH_DIR="{sshdir}"\nRUN_DIR="{td}/run-r8drift"\n'
+                                f'LOG_DIR="{td}/logs-r8drift"\nACTION_LOG=off\nGUEST_USER=cua\nDRIVER_MODE=standard\n')
+    drift_conf("slvm")
+    e13, st13 = hub_env("r8drift", {"url": SITE4 + "/login.html"}, relay=False, MCOMP_CONFIG=conf13)
+    h13 = mcomp_sdk.Hub(env=e13, timeout=200, session="sl13")
+    h13.connect()
+    h13.call("list_windows", {}, timeout=60)
+    drift_conf("othervm")
+    n13, a13 = len(calls()), len(vault_recs())
+    r13 = h13.call("request_site_login", {"url": SITE4 + "/login.html"}, timeout=200)
+    h13.close()
+    mcp_hub.stop_hub(e13)
+    recs13 = vault_recs()[a13:]
+    filled13 = [c for c in calls()[n13:] if c.get("kind", "").startswith("fill:")]
+    rp = subprocess.run([BIN, "fill", "dual", "--vm", "slvm", "--field", "password", "--expect-port", "1"], env=venv,
+                        capture_output=True, text=True, timeout=60)
+    rk = subprocess.run([BIN, "fill", "dual", "--vm", "slvm", "--field", "password", "--expect-host-key",
+                         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyDummyDummyDummyDummyDummyDummyDum"], env=venv,
+                        capture_output=True, text=True, timeout=60)
+    rok = subprocess.run([BIN, "fill", "dual", "--vm", "slvm", "--field", "password", "--expect-port", str(port),
+                          "--expect-host-key", hostkey], env=venv, capture_output=True, text=True, timeout=60)
+    check("P1 r8#4: a config repointed to another VM while the hub runs: the sign-in is refused (the config no longer names "
+          "the VM the hub drives) and nothing reaches either VM; the vault refuses a binding whose port or host key isn't "
+          "the asker's, and fills when both match",
+          (r13.structured or {}).get("status") == "denied" and "no longer names the VM" in json.dumps(r13.raw)
+          and not filled13 and not any(x.get("vm") == "othervm" for x in recs13)
+          and rp.returncode == 2 and "bound to port" in rp.stdout and rk.returncode == 2 and "host key" in rk.stdout
+          and rok.returncode == 0, (r13.raw, len(filled13), [x.get("vm") for x in recs13], rp.stdout[-160:],
+                                    rk.stdout[-160:], rok.stdout[-160:]))
 
     u.send("\x03")
     u.wait(15)

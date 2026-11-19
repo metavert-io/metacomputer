@@ -305,7 +305,15 @@ def run(td, procs):
           and sc.get("origin") == SITE and sc.get("submitted") is True and sc.get("username_hint") == "v***@example.com"
           and sc.get("same_site") is True and "page_url" not in sc and not any(v in json.dumps(r.raw) for v in VALUES),
           (ra.stderr, r.raw))
-    tgt3 = {"target_id": sc.get("target_id"), "tab_id": sc.get("tab_id"), "session": sc.get("session")}
+    # No tab comes back (the VM's to choose): find the Chrome the tool opened, as Claude would, and bind its tab.
+    sess3 = sc.get("session") or "vmtest-rsl"
+    wins = [w for w in (h.call("list_windows", {}).structured.get("windows") or [])
+            if "chrom" in str(w.get("app_name", "")).lower()]
+    b3 = h.call("get_browser_state", {"pid": (wins[0] if wins else {}).get("pid"),
+                                      "window_id": (wins[0] if wins else {}).get("window_id"), "session": sess3}).structured
+    tgt3 = {"target_id": b3.get("target_id"), "tab_id": ((b3.get("tabs") or [{}])[0]).get("tab_id"), "session": sess3}
+    check("the answer carries no tab or target id; the tab is found with list_windows and get_browser_state",
+          "target_id" not in sc and "tab_id" not in sc and bool(wins) and bool(tgt3["target_id"]), (sc, wins[:2]))
     text = ""
     for _ in range(20):
         s_ = h.call("get_browser_state", dict(tgt3, snapshot_format="semantic_v2", query="Signed in"))

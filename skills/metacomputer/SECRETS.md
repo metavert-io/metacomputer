@@ -43,7 +43,7 @@ On an identity provider's page, and for a whole-profile session load, every use 
 - It opens page-mode Chrome on `url`, or uses your tab: pass `session`, `target_id`, `tab_id` and `pid` (the Chrome process you bound it with in `get_browser_state`); the tab must be in that Chrome.
 - It finds the fields, has the vault fill them under one approval, and submits (`submit: false` to submit yourself). Pass `username` when the site has several logins, and `agent` (a short name for yourself) if you like: the user sees it marked unverified.
 - If the user must approve, it answers `status: "pending"` with a `request_id`. Tell them the id and how to approve (below), then call again with `{url, request_id, wait_secs: 60}`.
-- `status: "filled"` gives the tab to keep working in and `same_site` (whether the page is still on the login's site). No address of the page comes back: read the page itself with a snapshot. `denied` means the user said no; don't retry.
+- `status: "filled"` gives the driver `session` and `same_site` (whether the page is still on the login's site). No address of the page and no tab id comes back: find the tab with `list_windows` and `get_browser_state` (in that session), then read the page itself with a snapshot. `denied` means the user said no; don't retry.
 - The fill refuses when another tab in that Chrome is on the same site: close it. A multi-step sign-in needs one call per page.
 - Through this tool the vault sees the request as the hub's, not your session's, so a login limited to your project, an unattended rule or a `NAME session` answer doesn't cover it: it asks (or is refused). Use `secrets login` when the user set those up for this project.
 
@@ -82,7 +82,7 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
 5. Later, with no Chrome on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`. A session loads only under the profile name it was saved from.
 
-A session the user imported from their own Chrome (`list` shows it as cookies for its sites) loads into its profile's own cookie store: open that profile once first (`browser_prepare` with `{mode: "isolated_named", name: P}`, then `end_session`), then `session load NAME`, then `browser_prepare` with the same profile. If the reason says the profile has no cookie store yet, do that first step. One whose cookies reach an identity provider asks at every load. When you need only some of its sites, add `--site HOST` (repeatable): only the cookies those sites get go to the VM.
+A session the user imported from their own Chrome (`list` shows it as cookies for its sites) loads into its profile's own cookie store: open that profile once first (`browser_prepare` with `{mode: "isolated_named", name: P}`, then `end_session`), then `session load NAME`, then `browser_prepare` with the same profile. If the reason says the profile has no cookie store yet, do that first step. One whose cookies reach an identity provider asks at every load. When you need only some of its sites, add `--site HOST` (repeatable, each exactly as `list` shows it): only the cookies those sites get go to the VM.
 
 ## Using an API key from the VM (tokens)
 
