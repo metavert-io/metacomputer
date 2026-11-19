@@ -673,6 +673,8 @@ class Hub:
         self.coord_on = self.settings["coord_guard"] == "on"
         self.hidden_on = self.settings["hidden_text"] == "on"
         self.pacing_on = self.settings["browser_pacing"] == "human"
+        self.call_seq = 0           # one per tools/call: what named_windows reads is fresh for each call
+        self._named = None
         self.pace_rng = pacing.rng()
         self.hidden_events = hidden_text.Limiter()   # security.hidden_text: per host, and in all
         self.action_log = self.env.get("MCOMP_ACTION_LOG") == "on"
@@ -1888,13 +1890,13 @@ class Hub:
         # The call as the driver will run it (lib/batch_steps.py): old tool names, scalars sent as strings, and for
         # run_steps every step's shorthand and aliases, in canonical form. Every guard and pacing read this, and it's
         # what goes to the driver, so what they checked is what runs.
+        self.call_seq += 1
         if batch_steps.tool_name(name) != name:
             name = params["name"] = batch_steps.tool_name(name)
         try:
             batch_steps.normalize_call(name, args, self.tool_schemas())
-        except batch_steps.Refused as e:         # what the driver refuses before running anything
-            self.tool_error(client, msg, f"Refused by the metacomputer hub: {name}: {e} (Cua Driver's own limit; "
-                                         "nothing was sent).")
+        except batch_steps.Refused as e:         # what the driver refuses, or what the hub can't read safely
+            self.tool_error(client, msg, f"Refused by the metacomputer hub: {name}: {e}. Nothing was sent.")
             return
         except Exception as e:                   # fail closed: a call the guards can't read isn't passed on
             self.note(f"normalising a {clean(name, 40)} call failed: {type(e).__name__}", kind="normalise failed")
@@ -2163,8 +2165,60 @@ class Hub:
         the pid or window the call also names ("conflict"). Naming something else never makes a target safe."""
         return self.app_verdict(args, outer, CHROME_RE)
 
-    def app_verdict(self, args, outer, rx):
-        """chrome_verdict for the apps whose names match rx (BROWSER_RE: Firefox or Chrome, for pacing)."""
+    def named_windows(self):
+        """The driver's window list with app names and titles, for resolving a target named by app or title
+        (resolve_named). Read once per call (call_seq); None when it can't be read. Bounded: at most MAX_WINDOW_PIDS
+        windows, names and titles cut short (they're only matched, never shown)."""
+        cached = self._named
+        if cached is not None and cached[0] == self.call_seq:
+            return cached[1]
+        r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {}}, timeout=10) if self.connected() else None
+        ws = (((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
+        out = None
+        if isinstance(ws, list):
+            out = []
+            for order, w in enumerate(ws[:MAX_WINDOW_PIDS]):
+                if not isinstance(w, dict) or not (isinstance(w.get("pid"), int) and not isinstance(w.get("pid"), bool)):
+                    continue
+                z = w.get("z_index")
+                out.append({"pid": w["pid"], "window_id": w.get("window_id") if isinstance(w.get("window_id"), int) else None,
+                            "app": str(w.get("app_name") or "")[:400], "title": str(w.get("title") or "")[:2000],
+                            "on_screen": w.get("is_on_screen") is not False, "z": z if _num(z) else None,
+                            "order": order})
+        self._named = (self.call_seq, out)
+        return out
+
+    def resolve_named(self, spec):
+        """The windows a spec that names an app or a title can resolve to, by the driver's own rules (locate.rs
+        listed_windows and search_windows, 0.53.0): the pid's windows if it names one; an app matches a window whose app
+        name contains it, a title one whose title contains it (both trimmed, case folded); the window_id if named; the
+        on-screen ones if any match, else the rest, best first (on screen, then frontmost). [] when nothing matches here
+        (the driver may still find the app through list_apps), None when the list can't be read: both count as
+        unresolved."""
+        ws = self.named_windows()
+        if ws is None:
+            return None
+        cands = list(ws)
+        pid, wid = spec.get("pid"), spec.get("window_id")
+        if isinstance(pid, int) and not isinstance(pid, bool):
+            cands = [w for w in cands if w["pid"] == pid]
+        app = spec.get("app").strip().lower() if isinstance(spec.get("app"), str) else ""
+        if app:
+            cands = [w for w in cands if app in w["app"].strip().lower()]
+        if isinstance(wid, int) and not isinstance(wid, bool):
+            cands = [w for w in cands if w["window_id"] == wid]
+        title = spec.get("window").strip().lower() if isinstance(spec.get("window"), str) else ""
+        if title:
+            cands = [w for w in cands if title in w["title"].strip().lower()]
+        on = [w for w in cands if w["on_screen"]]
+        pool = on or cands
+        return sorted(pool, key=lambda w: (-(w["z"] if w["z"] is not None else -(1 << 62)), w["order"]))
+
+    def app_verdict(self, args, outer, rx, strict=True):
+        """chrome_verdict for the apps whose names match rx (BROWSER_RE: Firefox or Chrome, for pacing). A target named
+        by app or title is resolved against the live window list (resolve_named). strict (the Chrome guard): it counts
+        as matching when any window it could resolve to matches, or when it can't be resolved (fails closed). Not strict
+        (pacing): only when every window it could resolve to matches."""
         if not isinstance(args, dict):
             return False, None
         args = window_keys(args)                 # a nested window target names the window too; only read here
@@ -2175,6 +2229,15 @@ class Hub:
             v = layer.get(k)
             if isinstance(v, str) and v and rx.search(v):
                 return True, None
+        if any(isinstance(layer.get(k), str) and layer.get(k).strip() for k in ("app", "window")):
+            pool = self.resolve_named({k: layer.get(k) for k in ("pid", "window_id", "app", "window")})
+            if not pool:
+                return (True, None) if strict else (False, None)
+            hits = [bool(rx.search(w["app"])) for w in pool]
+            if (any(hits) if strict else all(hits)):
+                return True, None
+            if not strict:
+                return False, None
         hints = set()
         pid = layer.get("pid")
         if isinstance(pid, int) and not isinstance(pid, bool):
@@ -2320,7 +2383,7 @@ class Hub:
             if name == "type_text":
                 v = target_view(args)
                 plan = pacing.pace_type(args, self.pace_rng) \
-                    if v is not None and self.app_verdict(v, None, BROWSER_RE)[0] is True else None
+                    if v is not None and self.app_verdict(v, None, BROWSER_RE, strict=False)[0] is True else None
             else:
                 browser, limit = self.browser_steps(args)
                 if not browser:
@@ -2395,17 +2458,17 @@ class Hub:
                         ctx = window(c)
         return out
 
-    def step_targets(self, args, rx):
-        """[(index, tool, args, verdicts)]: step_windows with each window's app_verdict for rx; a step with no window at
-        all counts as not matching."""
-        return [(i, t, a, [self.app_verdict(w, None, rx) for w in wins] or [(False, None)])
+    def step_targets(self, args, rx, strict=True):
+        """[(index, tool, args, verdicts)]: step_windows with each window's app_verdict for rx (strict as there); a step
+        with no window at all counts as not matching."""
+        return [(i, t, a, [self.app_verdict(w, None, rx, strict) for w in wins] or [(False, None)])
                 for i, t, a, wins in self.step_windows(args)]
 
     def window_ids(self, wins):
-        """The window ids of a step's possible windows (step_windows): a window_id, or an element token's read's window.
-        [] when there's no window, or one window the hub can't put an id to (named by app or title, resolved by the
-        driver: its own checks apply, as for any such step); None when there are several and one of them has no id
-        (the coordinate guard can't check them all, so it refuses)."""
+        """The window ids of a step's possible windows (step_windows): a window_id, an element token's read's window, or
+        for one named by app or title the window the driver would pick (resolve_named, the best match). [] when there's
+        no window, or one window the hub can't put an id to (the driver's own checks apply, as for any such step); None
+        when there are several and one of them has no id (the coordinate guard can't check them all, so it refuses)."""
         ids, unknown = [], 0
         for w in wins:
             wid = w.get("window_id")
@@ -2414,6 +2477,9 @@ class Hub:
                 m = TOKEN_RE.match(tok) if isinstance(tok, str) else None
                 snap = self.snapshots.get(m.group(1)) if m else None
                 wid = snap[1] if snap and isinstance(snap[1], int) else None
+            if wid is None and (w.get("app") or w.get("window")):
+                pool = self.resolve_named(w)              # a pixel step runs in the best match (locate.rs window)
+                wid = pool[0]["window_id"] if pool else None
             if wid is None:
                 unknown += 1
             elif wid not in ids:
@@ -2428,7 +2494,7 @@ class Hub:
         browser, and one aimed at the desktop (a desktop target, or scope "desktop" with no window) never counts.
         The first action step that doesn't count ends what may be added."""
         out, limit = set(), None
-        for i, tool, a, cands in self.step_targets(args, BROWSER_RE):
+        for i, tool, a, cands in self.step_targets(args, BROWSER_RE, strict=False):
             if target_view(a) is not None and all(v[0] is True for v in cands):
                 out.add(i)
             elif limit is None:

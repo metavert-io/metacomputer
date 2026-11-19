@@ -350,8 +350,8 @@ normalisation, so what the guards checked is what runs (rewrites are applied unt
 own second pass would). A step the driver would refuse is left as it came (the driver then refuses the whole batch
 before running any of it), and argument spellings no guard reads (key names, scroll deltas) are left to the driver.
 A batch over the driver's 64 items is refused on the list as sent, before trailing reads are folded, as the driver
-does. Numbers in strings are read in one linear pass, and a string over 64 characters isn't tried (it can't be a
-number the driver takes). A call the hub can't normalise isn't passed on.
+does. Numbers in strings are read in one linear pass, and a number field holding a string over 64 characters is
+refused (the driver would still read a zero-padded one). A call the hub can't normalise isn't passed on.
 
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
 the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
@@ -384,9 +384,12 @@ the hub, and the hub applies, to each one:
   written as a step between actions changes nothing, an `expect` on an action step
   changes nothing, and a nested `target: {kind: "window", pid, window_id}` counts for
   its own step (with the inherited window beside it, which the driver adds) but isn't
-  passed on. Where a step could run in more than one window, Chrome among them counts
-  (`set_value` doesn't take a nested target, and `run_script` can't run inside
-  `run_steps`);
+  passed on. Where a step could run in more than one window, Chrome among them counts.
+  A window named by app or title is resolved against the live window list by the
+  driver's own rules (a case-folded substring of the app name or title, on-screen
+  windows first): when Chrome is among the windows it could be, or it matches none
+  the hub can see, it counts as Chrome (`set_value` doesn't take a nested target,
+  and `run_script` can't run inside `run_steps`);
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
@@ -479,8 +482,9 @@ window the driver runs it in, by the same model as the Chrome guard and human
 pacing (`step_windows`: what a `wait_for` or a step before it named, not a read
 written as a step); a nested target with an inherited window beside it must hold
 for both, and a step that could be in several windows, one of them named only by
-app or title, is refused (code `pixel_window_unclear`). The live layout is read
-again for each call it checks. `COORD_GUARD=off` leaves only the driver's own
+app or title the hub can't resolve, is refused (code `pixel_window_unclear`); one
+named by app or title is checked against the window the driver would pick. The
+live layout is read again for each call it checks. `COORD_GUARD=off` leaves only the driver's own
 checks.
 
 **Where it ends:**

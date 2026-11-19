@@ -1551,14 +1551,26 @@ def normalize_checks():
           f"the driver's second pass would make it ({len(chain)} cases, e.g. {{tool: enter, args: {{key: '*'}}}})",
           not unfixed, unfixed[:3])
     t0 = time.time()
+    refused = 0
     for bad in ("1" * 200000 + "!", "1" * 200000 + ".", "1." + "1" * 200000 + "e", "+" + "9" * 200000 + "x"):
-        batch_steps.coerce_scalars(sch["click"], {"x": bad, "y": bad, "pid": bad})
+        try:
+            batch_steps.coerce_scalars(sch["click"], {"x": bad, "y": bad, "pid": bad})
+        except batch_steps.Refused:
+            refused += 1
     took = time.time() - t0
-    check("numbers in strings are read in one linear pass with a length cap (200,000-digit near misses: no "
-          "backtracking)", took < 0.2, round(took, 3))
-    check("…a number longer than 64 characters isn't tried (the driver refuses it as the wrong type)",
-          batch_steps.coerce_scalars(sch["click"], {"x": "1" * 65})["x"] == "1" * 65
-          and batch_steps.coerce_scalars(sch["click"], {"x": "1" * 64})["x"] == float("1" * 64))
+    check("numbers in strings are read in one linear pass with a length cap (200,000-digit near misses: refused at "
+          "once, no backtracking)", took < 0.2 and refused == 4, (round(took, 3), refused))
+    def refuses(args):
+        try:
+            batch_steps.coerce_scalars(sch["click"], args)
+        except batch_steps.Refused:
+            return True
+        return False
+    check("…a number field holding a string over 64 characters is refused (zero-padded: the driver would still read "
+          "it), while 64 characters, and padding spaces, are read", refuses({"x": "0" * 65 + "10"})
+          and refuses({"pid": "0" * 70 + "77"}) and refuses({"window_id": " " + "0" * 64 + "21"})
+          and batch_steps.coerce_scalars(sch["click"], {"x": "1" * 64})["x"] == float("1" * 64)
+          and batch_steps.coerce_scalars(sch["click"], {"pid": " " * 100 + "77"})["pid"] == 77)
     try:
         batch_steps.normalize_batch({"steps": [{"type": {"text": "x"}}] + [{"tool": "screenshot"}] * 64}, sch)
         over = None
@@ -1792,10 +1804,65 @@ def coord_model_checks():
           res1.is_error and res2.is_error and "covers" in res2.text and not sent_args("click", n0), res2.text[:200])
     shots(None)
     n0 = len(calls())
-    res = h.call("run_steps", {"app": "Mousepad", "steps": [json.loads(json.dumps(nested))]})
-    check("a pixel step that could be in several windows, one the hub can't put an id to (inherited by app name), is "
-          "refused: it can't check them all", res.is_error and res.structured.get("code") == mcp_hub.UNCLEAR_CODE
+    res = h.call("run_steps", {"app": "No-such-app", "steps": [json.loads(json.dumps(nested))]})
+    check("a pixel step that could be in several windows, one the hub can't put an id to (inherited by an app name "
+          "no window has), is refused: it can't check them all", res.is_error
+          and res.structured.get("code") == mcp_hub.UNCLEAR_CODE and not sent_args("run_steps", n0), res.text[:200])
+    shots(W)
+    n0 = len(calls())
+    res = h.call("run_steps", {"app": "mousepad", "steps": [{"click": {"x": 10, "y": 10}}]})
+    check("a pixel step in a window named by app is checked against the window the driver picks (Mousepad, resized: "
+          "refused)", res.is_error and res.structured.get("code") == mcp_hub.COORD_CODE and f"window {W}" in res.text
           and not sent_args("run_steps", n0), res.text[:200])
+    h.close()
+    clear_claims()
+    r.stop()
+    set_windows(BASE_WINDOWS)
+
+
+def named_target_checks():
+    """A target named by app or title is resolved against the live window list by the driver's rules (substring, case
+    folded, on screen first): one that resolves to Chrome, could, or can't be resolved gets the Chrome rules; one that
+    resolves elsewhere doesn't. Zero-padded numbers are refused rather than read past the guards."""
+    print("targets named by app or title, resolved like the driver; zero-padded numbers")
+    clear_claims()
+    ws = [win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(W, 50, "Mousepad", 100, 100, 800, 600, "Untitled - Mousepad"),
+          win(CHROME, 77, "Google-chrome", 1000, 100, 800, 700, "Inbox - Google Chrome"),
+          win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)]
+    set_windows(ws)
+    r = Running(MCOMP_BROWSER_PACING="fast")
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="named")
+    sv = {"set_value": {"role": "textfield", "name": "q", "value": "x"}}
+    for label, batch in (("an app name that matches Chrome's (\"Google\")", {"app": "Google", "steps": [sv]}),
+                         ("a title that matches Chrome's (\"Inbox\")", {"window": "inbox", "steps": [sv]}),
+                         ("an app name several apps match, Chrome among them (\"e\")", {"app": "e", "steps": [sv]}),
+                         ("an app name no window has (unresolved)", {"app": "No-such-app", "steps": [sv]}),
+                         ("a check-only wait_for naming Chrome's title, then an untargeted step",
+                          {"pid": 50, "window_id": W, "steps": [{"wait_for": {"window": "Inbox", "text": "x"}}, sv]})):
+        n0 = len(calls())
+        res = h.call("run_steps", json.loads(json.dumps(batch)))
+        check(f"set_value in a window named by {label}: Chrome rules, refused", res.is_error and "set_value" in res.text
+              and not sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    res = h.call("run_steps", {"app": "mousepad", "steps": [json.loads(json.dumps(sv))]})
+    check("…while an app name that resolves only to Mousepad is left alone", not res.is_error
+          and sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    h.call("run_steps", {"window": "Inbox", "steps": [{"type_text": {"text": "abc"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("typing in a window named by Chrome's title goes in the foreground",
+          "foreground" in (fwd.get("delivery_mode"), (fwd.get("steps") or [{}])[0].get("args", {}).get("delivery_mode")),
+          fwd)
+    for label, call in (("pid and window_id", ("type_text", {"pid": "0" * 65 + "77", "window_id": "0" * 65 + str(CHROME),
+                                                               "text": "abc"})),
+                        ("x and y", ("click", {"pid": 50, "window_id": W, "x": "0" * 65 + "10", "y": "0" * 65 + "10"})),
+                        ("a batch step's pid", ("run_steps", {"steps": [{"type_text": {"pid": "0" * 66 + "77",
+                                                                                       "text": "abc"}}]}))):
+        n0 = len(calls())
+        res = h.call(call[0], call[1])
+        check(f"zero-padded numbers in {label} (over 64 characters) are refused, not passed on unread",
+              res.is_error and "64 characters" in res.text and not sent_args(call[0], n0), res.text[:160])
     h.close()
     clear_claims()
     r.stop()
@@ -3317,6 +3384,7 @@ def main():
         normalize_checks()
         inheritance_checks()
         coord_model_checks()
+        named_target_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()

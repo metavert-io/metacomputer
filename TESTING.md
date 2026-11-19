@@ -1004,7 +1004,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (274 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (285 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1099,7 +1099,12 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
 - the coordinate guard on that same model: a pixel click after a check-only wait_for that moved to another window,
   and after a skipped read, is checked against the window the driver uses (resized: refused); a nested-target pixel
   click must hold for its target and the inherited window; one that could be in several windows, one named only by
-  app, is refused (`pixel_window_unclear`); a live layout kept from a refused call doesn't vouch for the next.
+  app no window has, is refused (`pixel_window_unclear`); one in a window named by app is checked against the
+  window the driver picks; a live layout kept from a refused call doesn't vouch for the next.
+- targets named by app or title, resolved like the driver: set_value in a window named by an app name or a title
+  that matches Chrome's, by a name several apps match (Chrome among them), by one no window has, or after a
+  check-only wait_for naming Chrome's title, is refused, and typing there goes in the foreground; a name that
+  resolves only to Mousepad is left alone; zero-padded pid, window_id, x and y over 64 characters are refused.
   (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;

@@ -658,6 +658,10 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
+    ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
+     lambda m: "def resolve_named(self, spec):" in raw("lib/mcp_hub.py")
+     and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")
+     and "(any(hits) if strict else all(hits))" in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"A batch pixel step is checked against the window the driver runs it in, by the same model as the "
                     r"Chrome guard and human pacing \(`step_windows`",
      lambda m: "wins = {i: w for i, _t, _a, w in self.step_windows(args)}" in raw("lib/mcp_hub.py")
@@ -668,11 +672,12 @@ CLAIMS = [
     ("SECURITY.md", r"A `run_steps` step is judged by the window the driver runs it in, by the driver's own rules "
                     r"\(`step_targets`\)",
      lambda m: "self.step_targets(args, CHROME_RE)" in raw("lib/mcp_hub.py")
-     and "self.step_targets(args, BROWSER_RE)" in raw("lib/mcp_hub.py")
+     and "self.step_targets(args, BROWSER_RE, strict=False)" in raw("lib/mcp_hub.py")
      and "(acts and reads[i] is not None)" in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"A batch over the driver's (\d+) items is refused on the list as sent, before trailing reads are folded",
      lambda m: int(m[1]) == normaliser().MAX_STEPS and refuses_over_limit()),
-    ("SECURITY.md", r"Numbers in strings are read in one linear pass, and a string over (\d+) characters isn't tried",
+    ("SECURITY.md", r"Numbers in strings are read in one linear pass, and a number field holding a string over (\d+) "
+                    r"characters is refused",
      lambda m: int(m[1]) == normaliser().MAX_SCALAR and "re.compile" not in function_src("lib/batch_steps.py", "_float_text")
      and "re.compile" not in function_src("lib/batch_steps.py", "_int_text")),
     ("SECURITY.md", r"rewrites are applied until nothing changes, as the driver's own second pass would",

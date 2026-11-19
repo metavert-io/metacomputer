@@ -51,7 +51,7 @@ STEP_KEYS = ("tool", "args", "wait_for", "expect", "timeout_ms")
 TOOL_RENAMES = {"type_text_chars": "type_text", "run_actions": "run_steps"}   # dispatch's old names
 SELECTOR_KEYS = ("role", "name", "label", "nth", "app", "window")
 MAX_STEPS = 64                  # the driver refuses a batch of more items than this, before anything else
-MAX_SCALAR = 64                 # a longer string isn't tried as a number: the driver refuses it as the wrong type
+MAX_SCALAR = 64                 # a longer string in a number field is refused (the driver would still read it)
 DIGITS = frozenset("0123456789")
 
 
@@ -144,7 +144,13 @@ def coerce_scalars(schema, args):
             continue
         text = value.strip()
         if len(text) > MAX_SCALAR:
-            continue                            # no number or boolean is this long: left for the driver to refuse
+            if "integer" in types or "number" in types:
+                # The driver would still read it as a number ("000...077" is 77), so the guards must too; rather than
+                # parse what no client sends, refuse it (fails closed).
+                raise Refused(f"`{name}` is a number written as a string of {len(text)} characters; the hub reads "
+                              f"numbers in strings up to {MAX_SCALAR} characters, so it can't check where this one "
+                              "points. Send it as a number")
+            continue                            # a long string for a boolean: the driver refuses it
         new = None
         if "boolean" in types and text.lower() == "true":
             new = True
