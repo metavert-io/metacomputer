@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (231 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (246 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
@@ -185,14 +185,28 @@ runner's does.
   (`cert_for`, with a stand-in CA) while VM x's vault is a link into `$SOCK_DIR/certs` with files over an
   hour old (kept); and, with `config/local.env` naming its own vault and spool, the folder holding the
   account's own vault (refused by `safedelete.py check`: only checked, nothing deleted).
+- The sixth final check's findings (failing on 96791f2): `RUN_DIR/owners`, storage's `space` folder and the
+  events admin journal each a link to VM x's vault (`owners.claims()`, `storage.claims_on()`,
+  `events._admin_records()` in-process: `vault.json` and files shaped like their records kept; in their own
+  folders, dead or broken records go and other files stay); deleting with `shutil.rmtree` made to refuse
+  `dir_fd` (as on Python 3.9), quiet or not, and with `scripts/safe-rmtree.sh` under macOS's own
+  `/usr/bin/python3` when it's here (a folder with a link inside goes, the link's target stays; `alias/`
+  still refused); and `vm delete x` while `config/local.env` names its own vault and spool and the account's
+  vault folder (here the one under the box's `$HOME`) is a link into `.run-vms/x` (refused before anything is
+  deleted; `rmtree_own` refuses the same with the account's home standing in; with nothing of anyone else's
+  there, x and its runtime folder go).
 - No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
   `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS` (the runner's
-  own deletes, each checked to run after the identity rule; `vm delete`'s own-folder delete; deletes
-  inside the VM; printed hints). So does every delete that walks a tree: a Python function that walks a
-  folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`) and deletes what it finds
-  itself is in `DELETE_WALK_EXCEPTIONS` with why (one level of its own files, or inside the VM), and no
-  script has `find -delete`, `find -exec rm`, `xargs rm`, `rsync --delete`, `tar --remove-files` or
-  `ditto`. A new one, or an exception no longer in the code, fails the test.
+  own deletes, each checked to run after the identity rule; deletes inside the VM; printed hints). So does
+  every delete that walks a tree: a Python function that walks a folder (`os.walk`, `fwalk`, `listdir`,
+  `scandir`, `glob`, `rglob`, `iterdir`) and deletes what it finds itself is in `DELETE_WALK_EXCEPTIONS`
+  with why and the code that keeps it safe (each fragment must stay in the function), records go through
+  `safedelete.remove_records`, and no script has `find -delete`, `find -exec rm`, `xargs rm`,
+  `rsync --delete`, `tar --remove-files` or `ditto`. A new one, or an exception no longer in the code,
+  fails the test.
+- `MCOMP_TEST_PY=PATH python3 tests/test_multi_vm.py` runs everything the tests start under another Python
+  (3.11 or later: `scripts/lib.sh` refuses older). The helper itself must also work under macOS's own
+  `/usr/bin/python3` (3.9), which `scripts/safe-rmtree.sh` may run it with: `final6_fixes` checks that.
 - `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).

@@ -20,7 +20,8 @@ import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAILS = []
-PY = shutil.which("python3") or sys.executable
+# MCOMP_TEST_PY runs everything the tests start under another Python (3.11 or later: scripts/lib.sh refuses older).
+PY = os.environ.get("MCOMP_TEST_PY") or shutil.which("python3") or sys.executable
 
 FAKE_RUNNER = r'''#!/usr/bin/env python3
 import json, os, shutil, sys
@@ -1525,10 +1526,179 @@ def final5_fixes(td):
         b.close()
 
 
+def sys_python():
+    """macOS's own python3 (3.9, which the installer accepts) when it's here and isn't a stub that would ask to install
+    the developer tools; else None."""
+    if not os.path.exists("/usr/bin/python3") or subprocess.run(["xcode-select", "-p"], capture_output=True).returncode:
+        return None
+    r = subprocess.run(["/usr/bin/python3", "-c", "import sys; print(sys.version_info < (3, 11))"], capture_output=True,
+                       text=True, timeout=60)
+    return "/usr/bin/python3" if r.stdout.strip() == "True" else None
+
+
+def final6_fixes(td):
+    """The sixth check's findings (on 96791f2), each failing before its fix: the deletes of a program's own records
+    (owners' dead claims, storage's stale space claims, events' broken journal entries) went through a link into
+    another VM's vault; vm delete's own protected list left out the account's vault; and deletes crashed on macOS's
+    own Python 3.9 (shutil.rmtree's dir_fd needs 3.11)."""
+    b = Box(td, "final6")
+    try:
+        co, root, app = b.co, b.root, b.app
+        lib = os.path.join(co, "lib")
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        b.settings("config/vms/x.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
+        vault = os.path.join(app, "x")
+
+        def fresh(extra):
+            os.makedirs(vault, exist_ok=True)
+            write(os.path.join(vault, "vault.json"), "{}")
+            for name, body in extra.items():
+                write(os.path.join(vault, name), body)
+            return ["vault.json", *extra]
+
+        def kept(names):
+            return all(os.path.exists(os.path.join(vault, n)) for n in names)
+
+        def inproc(code, py=PY, **env):
+            return subprocess.run([py, "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1])\n" + code, lib],
+                                  env=b.env(**env), capture_output=True, text=True, timeout=120)
+
+        # P1 1a: RUN_DIR/owners a link to VM x's vault: claims() took vault.json (and anything shaped like a claim)
+        # for dead claims and deleted them.
+        run = os.path.join(co, ".run")
+        os.makedirs(run, exist_ok=True)
+        os.symlink(vault, os.path.join(run, "owners"))
+        names = fresh({"99999.json": '{"bridge_pid": 99999}'})
+        r = inproc("import owners; owners.claims()", MCOMP_RUN_DIR=run)
+        check("owners: RUN_DIR/owners a link to VM x's vault; vault.json and a file shaped like a dead claim kept",
+              kept(names), (r.stdout + r.stderr)[-300:])
+        os.remove(os.path.join(run, "owners"))
+        own = os.path.join(run, "owners")
+        os.makedirs(own)
+        write(os.path.join(own, "99999.json"), '{"bridge_pid": 99999}')
+        write(os.path.join(own, "notes.json"), "{}")
+        r = inproc("import owners; owners.claims()", MCOMP_RUN_DIR=run)
+        check("(in its own folder, a dead claim goes; a file that isn't a claim stays)",
+              not os.path.exists(os.path.join(own, "99999.json")) and os.path.exists(os.path.join(own, "notes.json")),
+              (r.stdout + r.stderr)[-300:])
+
+        # P1 1b: storage's space folder a link to VM x's vault: claims_on() took vault.json for a stale claim.
+        sh = os.path.join(root, "storage-home")
+        os.makedirs(sh)
+        os.symlink(vault, os.path.join(sh, "space"))
+        names = fresh({"s3-v-99999-abcdef12.json": '{"pid": 99999, "pstart": "x", "pool": "p", "bytes": 1}'})
+        r = inproc("import storage; storage.claims_on('p')", MCOMP_STORAGE_HOME=sh)
+        check("storage: its space folder a link to VM x's vault; vault.json and a file shaped like a stale claim kept",
+              kept(names), (r.stdout + r.stderr)[-300:])
+        os.remove(os.path.join(sh, "space"))
+        space = os.path.join(sh, "space")
+        os.makedirs(space)
+        write(os.path.join(space, "s3-v-99999-abcdef12.json"), '{"pid": 99999, "pstart": "x", "pool": "p", "bytes": 1}')
+        write(os.path.join(space, "notes.json"), "{}")
+        r = inproc("import storage; storage.claims_on('p')", MCOMP_STORAGE_HOME=sh)
+        check("(in its own folder, a stale claim goes; a file that isn't one stays)",
+              not os.path.exists(os.path.join(space, "s3-v-99999-abcdef12.json"))
+              and os.path.exists(os.path.join(space, "notes.json")), (r.stdout + r.stderr)[-300:])
+
+        # P1 1c: events' admin journal folder a link to VM x's vault: _admin_records() took vault.json for a broken
+        # journal entry.
+        ev = os.path.join(root, "events")
+        os.makedirs(os.path.join(ev, "events-state"))
+        os.symlink(vault, os.path.join(ev, "events-state", "admin"))
+        rec = "000000000000001-00000000-0000-4000-8000-000000000000.json"
+        names = fresh({rec: "{}"})
+        r = inproc("import events; events._admin_records()", MCOMP_EVENTS_DIR=ev)
+        check("events: its admin journal a link to VM x's vault; vault.json and a file shaped like a broken entry kept",
+              kept(names), (r.stdout + r.stderr)[-300:])
+        os.remove(os.path.join(ev, "events-state", "admin"))
+        adm = os.path.join(ev, "events-state", "admin")
+        os.makedirs(adm)
+        write(os.path.join(adm, rec), "{}")
+        write(os.path.join(adm, "notes.json"), "{}")
+        r = inproc("import events; events._admin_records()", MCOMP_EVENTS_DIR=ev)
+        check("(in its own folder, a broken entry goes; a file that isn't one stays)",
+              not os.path.exists(os.path.join(adm, rec)) and os.path.exists(os.path.join(adm, "notes.json")),
+              (r.stdout + r.stderr)[-300:])
+
+        # P1 3: macOS's own Python 3.9 (shutil.rmtree has no dir_fd there): a plain delete, quiet or not. And with
+        # rmtree made to refuse dir_fd, in-process under any Python.
+        def tree(name):
+            t = os.path.join(root, name)
+            os.makedirs(os.path.join(t, "a", "b"))
+            write(os.path.join(t, "a", "b", "f"), "x")
+            write(os.path.join(t, "g"), "x")
+            os.symlink(vault, os.path.join(t, "a", "to-vault"))    # a link inside: deleted itself, never followed
+            return t
+        rm = os.path.join(co, "scripts", "safe-rmtree.sh")
+        fresh({})
+        code = ("import shutil\n_rm = shutil.rmtree\n"
+                "def rmtree(*a, **k):\n    if 'dir_fd' in k:\n        raise TypeError(\"rmtree() got an unexpected keyword argument 'dir_fd'\")\n"
+                "    return _rm(*a, **k)\nrmtree.avoids_symlink_attacks = True\nshutil.rmtree = rmtree\n"
+                "import safedelete\nsafedelete.rmtree(sys.argv[2])\nsafedelete.rmtree(sys.argv[3], quiet=True)\n")
+        t1, t2 = tree("t39a"), tree("t39b")
+        r = subprocess.run([PY, "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1])\n" + code, lib, t1, t2],
+                           env=b.env(), capture_output=True, text=True, timeout=120)
+        check("with shutil.rmtree refusing dir_fd (as on 3.9): a folder with a link inside is deleted, quiet or not, "
+              "and the link's target is kept", r.returncode == 0 and not os.path.lexists(t1) and not os.path.lexists(t2)
+              and kept(["vault.json"]), (r.stdout + r.stderr)[-300:])
+        sp = sys_python()
+        if sp:
+            for quiet in ([], ["--quiet"]):
+                t = tree("t39-sys" + ("q" if quiet else ""))
+                r = subprocess.run([rm, *quiet, t], env=b.env(PY=sp), capture_output=True, text=True, timeout=120)
+                check(f"under {sp} (3.9): safe-rmtree.sh {' '.join(quiet)} deletes a folder with a link inside, the "
+                      "link's target kept", r.returncode == 0 and not os.path.lexists(t) and kept(["vault.json"]),
+                      (r.stdout + r.stderr)[-300:])
+            alias = os.path.join(root, "alias39")
+            os.symlink(vault, alias)
+            r = subprocess.run([rm, alias + "/"], env=b.env(PY=sp), capture_output=True, text=True, timeout=120)
+            check(f"under {sp}: alias/ to VM x's vault still refused, the vault kept", r.returncode == 1
+                  and kept(["vault.json"]), (r.stdout + r.stderr)[-300:])
+        else:
+            print("  (macOS's own python3 isn't here: its checks were skipped)")
+    finally:
+        b.close()
+
+    # P1 2: vm delete's own protected list. config/local.env names its own vault and spool; the account's vault folder
+    # (here: the one under $HOME, this box's home) is a link into .run-vms/x/account. vm delete x deleted it.
+    b = Box(td, "final6-del")
+    try:
+        co, root = b.co, b.root
+        b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{root}/main-vault"\nEVENTS_SPOOL="{root}/main-spool"\n')
+        b.settings("config/vms/x.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
+        b.set_vms([vm("metacomputer"), vm("metacomputer-baseline"), vm("x"), vm("x-baseline")])
+        acct = os.path.join(co, ".run-vms", "x", "account")
+        os.makedirs(acct)
+        write(os.path.join(acct, "vault.json"), "{}")
+        av = os.path.join(b.home, "Library", "Application Support", "metacomputer")
+        os.makedirs(os.path.dirname(av), exist_ok=True)
+        os.symlink(acct, av)
+        r = b.run("vm", "delete", "x", "--confirm", "x")
+        check("vm delete x, with the account's vault folder a link into .run-vms/x: refused before anything is deleted, "
+              "the vault kept", r.returncode == 1 and os.path.exists(os.path.join(acct, "vault.json"))
+              and b.deletes() == [] and "vault folder" in r.stderr, (r.returncode, r.stderr[-400:], b.deletes()))
+        # The same list with the account's own home (pwd) standing in for this box's: rmtree_own refuses too.
+        h2 = os.path.join(root, "acct-home")
+        os.makedirs(os.path.join(h2, "Library", "Application Support"))
+        os.symlink(acct, os.path.join(h2, "Library", "Application Support", "metacomputer"))
+        code = ("import safedelete\nsafedelete.account_home = lambda: sys.argv[2]\n"
+                "try:\n    safedelete.rmtree_own(sys.argv[3], '.run-vms/x', 'x', check_only=True)\n    print('passed')\n"
+                "except safedelete.Refused as e:\n    print('refused:', e)\n")
+        r = subprocess.run([PY, "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1])\n" + code, os.path.join(co, "lib"),
+                            h2, os.path.realpath(co)], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("(the account's own vault folder, wherever its home is, is in the same list: refused)",
+              "refused:" in r.stdout and "the account's vault folder" in r.stdout, (r.stdout + r.stderr)[-300:])
+        os.remove(av)
+        r = b.run("vm", "delete", "x", "--confirm", "x")
+        check("(with nothing of anyone else's in it, vm delete x deletes x and its runtime folder)", r.returncode == 0
+              and not os.path.exists(os.path.join(co, ".run-vms", "x")) and "x" in b.deletes(), (r.returncode, r.stderr[-400:]))
+    finally:
+        b.close()
+
+
 # The recursive deletes that aren't made through lib/safedelete.py (scripts/safe-rmtree.sh), each with why:
 #   runner   the runner's delete of a VM, baseline or checkpoint, after the identity rule (vm_change_lock, vm delete's
 #            plan, build-vm.sh's check); no VM's folder may be in its storage
-#   own      vm delete's own-folder delete (lib/vms.py rmtree_own: no links followed, the same guards)
 #   guest    runs inside the VM, not on the Mac
 #   text     not a delete: a hint printed for the user
 DELETE_EXCEPTIONS = [
@@ -1543,7 +1713,6 @@ DELETE_EXCEPTIONS = [
     ("scripts/build-vm.sh", '"$LUME" delete "$vm" --force', "runner"),
     ("scripts/build-vm.sh", "gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'", "guest"),
     ("scripts/vm-commands.sh", '"$LUME" delete "$v" --force', "runner"),
-    ("lib/vms.py", "shutil.rmtree(leaf, dir_fd=fd)", "own"),
     ("lib/guest_put.py", "shutil.rmtree(target)", "guest"),
     ("lib/guest_put.py", "shutil.rmtree(tmp, ignore_errors=True)", "guest"),
     ("lib/guest_put.py", 'remote(ssh, f"rm -rf -- {shlex.quote(tmp)}"', "guest"),
@@ -1558,20 +1727,21 @@ DELETE_EXCEPTIONS = [
 ]
 DELETE_HELPER = ("lib/safedelete.py", "scripts/safe-rmtree.sh")
 # Python functions that walk a folder (os.walk, fwalk, listdir, scandir, glob, rglob, iterdir) and delete what they
-# find (os.remove, unlink, rmdir, removedirs) themselves, not through lib/safedelete.py: each with why it isn't a
-# recursive delete into another VM's folder.
+# find (os.remove, unlink, rmdir, removedirs) themselves, not through lib/safedelete.py: each with why it can't reach
+# another VM's folder, and the code that keeps it so (pinned: each fragment must stay in the function). A program's
+# own records (claims, journals, quarantined files) go through safedelete.remove_records instead.
 DELETE_WALK_EXCEPTIONS = {
-    ("lib/vm_shell_guest.py", "sweep"): "runs inside the VM, not on the Mac",
-    ("lib/guest_import.py", "sweep"): "the staging folder this import made (mkdtemp), by descriptor, following no link",
-    ("lib/guest_import.py", "merge"): "replaces one entry at a time in the destination (a file or link where the VM "
-                                      "sent a folder), by descriptor; never a folder's contents",
-    ("lib/owners.py", "claims"): "one level: dead claim files in the VM's own RUN_DIR/owners",
-    ("lib/events.py", "quarantine"): "one level: the spool's own .quarantine, by descriptor",
-    ("lib/events.py", "_admin_records"): "one level: the events admin folder's own records",
-    ("lib/storage.py", "clear_state"): "named state files and one level of storage's own run folder",
-    ("lib/storage.py", "claims_on"): "one level: stale space claims in storage's own space folder",
-    ("lib/storage.py", "clean_stage"): "one level, by descriptor, in a staging folder this program made (its identity "
-                                       "checked); only empty folders removed",
+    ("lib/vm_shell_guest.py", "sweep"): ("runs inside the VM, not on the Mac", []),
+    ("lib/guest_import.py", "sweep"): ("the staging folder this import made (mkdtemp), by descriptor, following no link",
+                                       ["dir_fd="]),
+    ("lib/guest_import.py", "merge"): ("replaces one entry at a time in the destination (a file or link where the VM "
+                                       "sent a folder), by descriptor; never a folder's contents", ["dir_fd="]),
+    ("lib/storage.py", "clear_state"): ("storage's own fixed names only (its state files, storage-snap-*, "
+                                        "storage-watch.json), never a folder",
+                                        ['f.startswith("storage-snap-") or f == "storage-watch.json"']),
+    ("lib/storage.py", "clean_stage"): ("only names of this program's own sessions, by descriptor, in a staging folder "
+                                        "it made (its identity checked); folders only when empty",
+                                        ["n.startswith(prefixes)", "os.rmdir(n, dir_fd=fd)", "S_ISREG"]),
 }
 WALK_CALLS = {"walk", "fwalk", "listdir", "scandir", "glob", "rglob", "iterdir"}
 DELETE_CALLS = {"remove", "unlink", "rmdir", "removedirs", "rmtree"}
@@ -1595,8 +1765,8 @@ def shell_function(text, line_no):
 def delete_inventory(td):
     """No bare recursive delete: every rm -r, rmtree and removedirs in bin/, scripts/, lib/ and install.sh goes
     through lib/safedelete.py (scripts/safe-rmtree.sh), except those in DELETE_EXCEPTIONS (the runner's own deletes,
-    which run after the identity rule; vm delete's own-folder delete; deletes inside the VM; printed hints). A new one,
-    or an exception no longer in the code, fails this test."""
+    which run after the identity rule; deletes inside the VM; printed hints). A new one, or an exception no longer in
+    the code, fails this test."""
     pat = re.compile(DELETE_PAT)
     files = ["install.sh"] + sorted(os.path.relpath(os.path.join(d, f), LAB) for top in ("bin", "scripts", "lib")
                                     for d, _, fs in os.walk(os.path.join(LAB, top)) if "__pycache__" not in d for f in fs)
@@ -1624,7 +1794,7 @@ def delete_inventory(td):
     check("...and every listed exception is still in the code", not stale, stale)
     # Deletes that walk a tree: Python functions with a walk and a delete of their own, and shell tree-delete forms.
     import ast
-    walkers, seen, shell = [], set(), []
+    walkers, seen, shell, unpinned = [], set(), [], []
     tpat = re.compile(TREE_SHELL_PAT)
     for rel in files:
         if rel in DELETE_HELPER:
@@ -1651,6 +1821,9 @@ def delete_inventory(td):
                 if names & WALK_CALLS and names & DELETE_CALLS:
                     if (rel, node.name) in DELETE_WALK_EXCEPTIONS:
                         seen.add((rel, node.name))
+                        body = ast.get_source_segment(text, node) or ""
+                        unpinned += [f"{rel} {node.name}(): {frag}" for frag in DELETE_WALK_EXCEPTIONS[(rel, node.name)][1]
+                                     if frag not in body]
                     else:
                         walkers.append(f"{rel}:{node.lineno} {node.name}()")
             # Code outside any function, too (a script's top level).
@@ -1672,6 +1845,17 @@ def delete_inventory(td):
           not walkers, "\n".join(walkers))
     check("...and every listed one is still in the code", seen == set(DELETE_WALK_EXCEPTIONS),
           sorted(set(DELETE_WALK_EXCEPTIONS) - seen))
+    check("...and each still keeps the guard it's listed for", not unpinned, "\n".join(unpinned))
+    recs = {("lib/owners.py", "drop_dead_claims"): "safedelete.remove_records(OWNERS_DIR, names, CLAIM_NAME)",
+            ("lib/storage.py", "claims_on"): "safedelete.remove_records(d, stale, SPACE_NAME)",
+            ("lib/events.py", "remove_records"): "safedelete.remove_records(folder, names, pattern)"}
+    missing = [f"{r} {fn}" for (r, fn), frag in recs.items()
+               if not any(isinstance(n, ast.FunctionDef) and n.name == fn and frag in (ast.get_source_segment(src, n) or "")
+                          for src in [open(os.path.join(LAB, r)).read()] for n in ast.walk(ast.parse(src)))]
+    check("records (dead claims, stale space claims, broken journal entries, old quarantined files) go through "
+          "safedelete.remove_records", not missing and "remove_records(admin_dir(), broken, ADMIN_NAME)"
+          in open(os.path.join(LAB, "lib", "events.py")).read() and "QUARANTINED)" in open(os.path.join(LAB, "lib", "events.py")).read(),
+          missing)
     check("no shell tree delete (find -delete, -exec rm, xargs rm, rsync --delete, tar --remove-files, ditto)",
           not shell, "\n".join(shell))
     hp = os.path.join(LAB, "lib", "safedelete.py")
@@ -1679,7 +1863,8 @@ def delete_inventory(td):
     sr = os.path.join(LAB, "scripts", "safe-rmtree.sh")
     check("the helper checks each target physically against every VM's folders, failing closed", os.path.exists(sr) and
           "def check(path, prot" in helper and "vms.physical(t.path" in helper
-          and "shutil.rmtree(t.name, dir_fd=fd)" in helper and "avoids_symlink_attacks" in helper and "mc_all_identity_records" in helper
+          and "remove_tree_at(fd, t.name, t.st, t.spelled)" in helper and "shutil.rmtree(" not in helper
+          and "def rmtree_own(" in helper and "exclude_vm=target_vm" in helper and "mc_all_identity_records" in helper
           and 'if ids.get("UNREADABLE"):' in helper and 'MC_LIB_DEFS_ONLY=1' in helper
           and "safedelete.py\" rmtree" in open(sr).read())
     checked = []
@@ -1830,6 +2015,7 @@ def main():
         final3_fixes(td)
         final4_fixes(td)
         final5_fixes(td)
+        final6_fixes(td)
         delete_inventory(td)
         claude_flow(td)
         hub_pin(td)

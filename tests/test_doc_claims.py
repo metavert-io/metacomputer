@@ -1108,24 +1108,35 @@ CLAIMS = [
     ("SECURITY.md", r"It deletes a folder only when that folder, as it physically is, neither is nor holds a folder some VM of this checkout uses \(every VM's keys, runtime, logs, vault and spool, the account's own vault and spools whatever the settings say, a vault folder the environment names, the home folder and the checkout\), nor holds a link on the way to one; a link is deleted itself, never what it points to, and not when it's on the way to such a folder\.",
      lambda m: all(x in raw("lib/safedelete.py") for x in (
          "def check(path, prot", "vms.physical(t.path", "def links_on_the_way(", "mc_all_identity_records",
-         'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(t.name, dir_fd=fd)", "shutil.rmtree(t.name, dir_fd=fd)",
+         'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(t.name, dir_fd=fd)", "remove_tree_at(fd, t.name, t.st, t.spelled)",
          '("this checkout", lab)', "a link on the way to", '("the account\'s vault folder", os.path.join(home, ACCOUNT_VAULT))',
          '("the account\'s event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool"))'))
      and "mc_all_identity_records() {" in raw("scripts/lib.sh") and '[ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0' in raw("scripts/lib.sh")
      and 'safedelete.py" rmtree' in raw("scripts/safe-rmtree.sh")),
-    ("SECURITY.md", r"It resolves a path once \(its folder physically, its last part as it is; a path ending in `/`, `/\.` or `/\.\.` is refused\) and deletes exactly that entry, through a descriptor of its folder, following no link inside",
+    ("SECURITY.md", r"It resolves a path once \(its folder physically, its last part as it is; a path ending in `/`, `/\.` or `/\.\.` is refused\) and deletes exactly that entry, through a descriptor of its folder, following no link inside \(descriptors only, so it works on the Python 3\.9 macOS ships too\)",
      lambda m: all(x in raw("lib/safedelete.py") for x in (
          "class Target:", 'if path.endswith("/"):', 'if parts[-1] in (".", ".."):', "self.parent = os.path.realpath(",
-         "def _open_parent(t):", "shutil.rmtree(t.name, dir_fd=fd)", "if not shutil.rmtree.avoids_symlink_attacks:",
-         "changed while it was being checked"))),
-    ("SECURITY.md", r"A cleanup that walks a folder checks that folder the same way first, then follows no link while it walks\. It fails closed",
+         "def _open_parent(t):", "remove_tree_at(fd, t.name, t.st, t.spelled)", "def remove_tree_at(parent_fd, name",
+         "os.rmdir(n, dir_fd=", "os.scandir(fd)", "changed while it was being checked"))
+     and "shutil.rmtree(" not in raw("lib/safedelete.py")),
+    ("SECURITY.md", r"A program's own records \(dead claims, stale space claims, broken journal entries, old quarantined files\) are deleted only by their own names, in a folder that isn't a link and passes the same check",
+     lambda m: "def remove_records(folder, names, pattern" in raw("lib/safedelete.py")
+     and "pattern.fullmatch(n)" in raw("lib/safedelete.py")
+     and "safedelete.remove_records(OWNERS_DIR, names, CLAIM_NAME)" in raw("lib/owners.py")
+     and "safedelete.remove_records(d, stale, SPACE_NAME)" in raw("lib/storage.py")
+     and "remove_records(admin_dir(), broken, ADMIN_NAME)" in raw("lib/events.py") and "QUARANTINED)" in raw("lib/events.py")),
+    ("SECURITY.md", r"`vm delete`'s delete of a VM's own folders goes through it too, against the same list of protected folders less that VM's own; there is no second list\. It fails closed",
+     lambda m: "def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=())" in raw("lib/safedelete.py")
+     and "def protected(" not in raw("lib/vms.py") and "def rmtree_own(" not in raw("lib/vms.py")
+     and '("the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT))' in raw("lib/safedelete.py")),
+    ("SECURITY.md", r"A cleanup that walks a folder checks that folder the same way first, then follows no link while it walks",
      lambda m: all(x in raw("lib/safedelete.py") for x in (
          "def prune_files(root, choose", "check_target(t, protected(home, lab), home)", "follow_symlinks=False",
          "os.O_NOFOLLOW", "isn't a folder (a link isn't followed)"))
      and "safedelete.prune_files(folder, choose)" in raw("lib/storage.py")
      and 'safedelete.py" prune --older-than 3600 -- "$dir"' in raw("scripts/lib.sh")
      and "-mmin +60 -delete" not in raw("scripts/lib.sh")),
-    ("SECURITY.md", r"The only recursive deletes not made through it are the runner's own delete of a VM, baseline or checkpoint \(after the rule above\), `vm delete`'s delete of the VM's own folders \(`lib/vms\.py rmtree_own`, which follows no link and has the same guards\), and those inside the VM; a test fails when any other appears, a loop that deletes what it walks and `find -delete`, `xargs rm` or `rsync --delete` included",
+    ("SECURITY.md", r"The only recursive deletes not made through it are the runner's own delete of a VM, baseline or checkpoint \(after the rule above\) and those inside the VM; a test fails when any other appears, a loop that deletes what it walks and `find -delete`, `xargs rm` or `rsync --delete` included",
      lambda m: "DELETE_EXCEPTIONS = [" in raw("tests/test_multi_vm.py") and "def delete_inventory(td):" in raw("tests/test_multi_vm.py")
      and "DELETE_WALK_EXCEPTIONS = {" in raw("tests/test_multi_vm.py") and "TREE_SHELL_PAT = (" in raw("tests/test_multi_vm.py")
      and "        delete_inventory(td)\n" in raw("tests/test_multi_vm.py")
@@ -1168,9 +1179,12 @@ CLAIMS = [
      and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),
     ("SECURITY.md", r"It holds the VM's lock throughout, and `start` takes the same lock",
      lambda m: 'vm_lock_or_die "metacomputer start"' in raw("bin/metacomputer") and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
-    ("SECURITY.md", r"It deletes folders only through a walk from `/` that follows no link",
-     lambda m: "os.O_NOFOLLOW" in raw("lib/vms.py") and "shutil.rmtree(leaf, dir_fd=fd)" in raw("lib/vms.py")
-     and "rm -rf" not in vm_delete_src()),
+    ("SECURITY.md", r"It deletes folders only through a walk from `/` that follows no link, and only a folder of this account's that neither is nor holds another VM's folder, the account's own vault or spools, your home or the checkout \(`lib/safedelete\.py`, the same check as every other delete\)",
+     lambda m: "def rmtree_own(" in raw("lib/safedelete.py") and "nfd = _open_dir_at(c, fd)" in raw("lib/safedelete.py")
+     and "check_target(t, protected(home, lab, exclude_vm=target_vm, own=own), home)" in raw("lib/safedelete.py")
+     and "remove_tree_at(fd, leaf, st, target)" in raw("lib/safedelete.py")
+     and 'lib/safedelete.py" own --base "$1" --rel "$2" --target-vm "$VM_NAME"' in raw("scripts/vm-commands.sh")
+     and "def protected(" not in raw("lib/vms.py") and "rm -rf" not in vm_delete_src()),
     ("SECURITY.md", r"After you confirm, it holds the VM's owners lock \(so no session can claim it\), checks everything again",
      lambda m: 'exec 6>>"$RUN_DIR/owners/.lock"' in vm_delete_src() and '[ "$DP_SIG" = "$first" ] || die' in vm_delete_src()),
     ("SECURITY.md", r"A hub serves the VM it started with, and only it\.\*\* It pins that VM's name, SSH port and host key",
@@ -1180,7 +1194,9 @@ CLAIMS = [
      lambda m: "def error_row" in raw("lib/vms.py") and "mc_identity_records raw" in raw("scripts/vm-commands.sh")
      and 'r.get("raw_vm")' in raw("lib/vms.py") and '"volumes": first("VOLUMES") if known else None' in raw("lib/vms.py")),
     ("SECURITY.md", r"When another settings file's folders can't be known \(one it can't read, one that reads a file it can't, one that isn't an absolute path or can't be resolved\), nothing is deleted, and `--delete-volumes` refuses while any file's volumes are unknown",
-     lambda m: "its folders can't be read" in raw("lib/vms.py") and "isn't an absolute path, so" in raw("lib/vms.py")
+     lambda m: "can't be read, so its folders aren't known and nothing is deleted" in raw("lib/safedelete.py")
+     and "so nothing is deleted that might be it" in raw("lib/safedelete.py")
+     and 'raise Refused(f"{what} must be an absolute folder, not {path!r}")' in raw("lib/vms.py")
      and "folders aren't known, so this VM can't be checked against them" in raw("lib/vms.py")
      and 'known = bool(ids) and not ids.get("UNREADABLE")' in raw("lib/vms.py") and 'print("UNKNOWN "' in vm_delete_src()
      and 'mc_source_strict "$ifile" >/dev/null || unreadable' in raw("scripts/lib.sh")),

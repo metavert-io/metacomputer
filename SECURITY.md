@@ -1269,20 +1269,24 @@ another VM:
   certificates) goes through one helper, `lib/safedelete.py` (`scripts/safe-rmtree.sh` for
   scripts). It resolves a path once (its folder physically, its last part as it is; a path
   ending in `/`, `/.` or `/..` is refused) and deletes exactly that entry, through a
-  descriptor of its folder, following no link inside. It deletes a folder only when that
+  descriptor of its folder, following no link inside (descriptors only, so it works on the
+  Python 3.9 macOS ships too). It deletes a folder only when that
   folder, as it physically is, neither is nor holds a folder some VM of this checkout uses
   (every VM's keys, runtime, logs, vault and spool, the account's own vault and spools
   whatever the settings say, a vault folder the environment names, the home folder and the
   checkout), nor holds a link on the way to one; a link is deleted itself, never what it
   points to, and not when it's on the way to such a folder. A cleanup that walks a folder
-  checks that folder the same way first, then follows no link while it walks. It fails
+  checks that folder the same way first, then follows no link while it walks. A program's
+  own records (dead claims, stale space claims, broken journal entries, old quarantined
+  files) are deleted only by their own names, in a folder that isn't a link and passes the
+  same check. `vm delete`'s delete of a VM's own folders goes through it too, against the
+  same list of protected folders less that VM's own; there is no second list. It fails
   closed: when a settings file can't be read, or a VM's folder can't be resolved, nothing is
   deleted. The only recursive deletes not made through it are the runner's own delete of a
-  VM, baseline or checkpoint (after the rule above), `vm delete`'s delete of the VM's own
-  folders (`lib/vms.py rmtree_own`, which follows no link and has the same guards), and
-  those inside the VM; a test fails when any other appears, a loop that deletes what it
-  walks and `find -delete`, `xargs rm` or `rsync --delete` included (a program's deletes of
-  its own files one level deep are listed in the test, each with why).
+  VM, baseline or checkpoint (after the rule above) and those inside the VM; a test fails
+  when any other appears, a loop that deletes what it walks and `find -delete`, `xargs rm`
+  or `rsync --delete` included (the few loops left, over a staging folder's own entries,
+  are listed in the test with the code that keeps them safe).
 - **Where the rule is checked.** A `config/vms/` VM's settings are refused when they're read
   if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it.
   Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks
@@ -1323,8 +1327,9 @@ another VM:
     for any reason still counts, by the names, folders and volumes it says; one whose names
     can't be read refuses (never its file name alone).
   - It deletes folders only through a walk from `/` that follows no link, and only a
-    folder of this account's that neither is nor holds another VM's folder, your home or
-    the checkout. `--delete-vault` deletes only the VM's own folder under
+    folder of this account's that neither is nor holds another VM's folder, the account's
+    own vault or spools, your home or the checkout (`lib/safedelete.py`, the same check as
+    every other delete). `--delete-vault` deletes only the VM's own folder under
     `.../metacomputer-vms/`. When another settings file's folders can't be known (one it
     can't read, one that reads a file it can't, one that isn't an absolute path or can't be
     resolved), nothing is deleted, and `--delete-volumes` refuses while any file's volumes are

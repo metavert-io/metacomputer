@@ -829,6 +829,7 @@ def mark_debounce(key):
 
 # --- the spool (other producers, e.g. the secrets vault) ------------------------------
 QUARANTINE_KEEP = 50
+QUARANTINED = re.compile(r"[^/.][^/]*\.json")       # what quarantine() moves aside: spool files
 
 
 def spool_event(obj, mtime):
@@ -921,6 +922,14 @@ def _read_spool_file(dfd, f):
         os.close(fd)
 
 
+def _prune_quarantine(qfd):
+    """The oldest quarantined files beyond QUARANTINE_KEEP go, through lib/safedelete.py (remove_records: the
+    .quarantine folder checked first, only spool files' names)."""
+    old = sorted(os.listdir(qfd))
+    if len(old) > QUARANTINE_KEEP:
+        remove_records(os.path.join(spool_dir(), ".quarantine"), old[:len(old) - QUARANTINE_KEEP], QUARANTINED)
+
+
 def quarantine(dfd, f):
     """Move a spool file that isn't a valid event aside (spool/.quarantine/, newest QUARANTINE_KEEP kept),
     relative to the pinned spool descriptor; if .quarantine isn't a folder of ours, just remove the file."""
@@ -930,12 +939,7 @@ def quarantine(dfd, f):
             os.unlink(f, dir_fd=dfd)
             return
         os.rename(f, f, src_dir_fd=dfd, dst_dir_fd=qfd)
-        old = sorted(os.listdir(qfd))
-        for x in old[:max(0, len(old) - QUARANTINE_KEEP)]:
-            try:
-                os.unlink(x, dir_fd=qfd)
-            except OSError:
-                pass
+        _prune_quarantine(qfd)
     except OSError:
         try:
             os.unlink(f, dir_fd=dfd)
@@ -1452,23 +1456,37 @@ def admin_log(line):
         pass
 
 
+ADMIN_NAME = re.compile(r"[0-9]{15}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json")
+
+
+def remove_records(folder, names, pattern):
+    """Delete some of this program's own records through lib/safedelete.py: only names of pattern, in a folder that
+    isn't a link and neither is, holds nor reaches a folder some VM uses. Best effort: never fails its caller."""
+    try:
+        import safedelete
+        safedelete.remove_records(folder, names, pattern)
+    except Exception:
+        pass
+
+
 def _admin_records():
-    """(path, record) for each journaled announcement, oldest first."""
+    """(path, record) for each journaled announcement, oldest first. A broken one is removed only when it has
+    journal_announcement's kind of name (ADMIN_NAME); any other is left alone."""
     try:
         files = sorted(f for f in os.listdir(admin_dir()) if f.endswith(".json"))
     except OSError:
         return []
-    out = []
+    out, broken = [], []
     for f in files:
         p = os.path.join(admin_dir(), f)
         rec = read_json(p, None)
         if not isinstance(rec, dict) or not isinstance(rec.get("targets"), dict) or not isinstance(rec.get("event"), dict):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+            if ADMIN_NAME.fullmatch(f):
+                broken.append(f)
             continue
         out.append((p, rec))
+    if broken:
+        remove_records(admin_dir(), broken, ADMIN_NAME)
     return out
 
 

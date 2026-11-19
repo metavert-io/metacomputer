@@ -297,13 +297,13 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   if [ -n "$settings_file" ]; then
     rm -f "$settings_file" && gone+=("config/vms/$VM_NAME.env")
     if [ "$DP_RUN" = 1 ]; then
-      a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run-vms/$VM_NAME")" || warn "kept its runtime folder: $a"
+      a="$(vm_rmtree "$lab_p" ".run-vms/$VM_NAME")" || warn "kept its runtime folder: $a"
     fi
   fi
   if [ "$del_vault" = 1 ]; then
     # End an unlocked vault's process first (anyone may lock: it only restricts), then remove the folder.
     [ ! -S "$own_vault/vault.sock" ] || [ ! -x "$VAULT_BIN" ] || MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 || true
-    if a="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME")"; then
+    if a="$(vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME")"; then
       [ "$a" = absent ] || gone+=("the vault folder $(mc_tilde "$own_vault")")
     else
       warn "kept the vault folder: $a"
@@ -328,11 +328,12 @@ vm_other_identities() {
     mc_identity_records "config/vms/$n.env" vm "$n"
   done
 }
-# BASE REL [--check]: lib/vms.py rmtree on this VM's own folder BASE/REL (never through a link, never one that is or
-# holds another VM's folder, this account's home or the checkout); the settings rows on stdin. Prints present|absent.
+# BASE REL [--check]: this VM's own folder BASE/REL deleted through lib/safedelete.py (`own`): never through a link,
+# and checked against the same protected folders as every other delete (every VM's, the account's own vault and
+# spools, the home folder, the checkout) less this VM's own. Prints present|absent, or the refusal.
 vm_rmtree() {
-  "$PY" "$LAB_ROOT/lib/vms.py" rmtree --base "$1" --rel "$2" --target-vm "$VM_NAME" --home "$MC_SYS_HOME" \
-    --guard "$MC_SYS_HOME" --guard "$HOME" --guard "$LAB_ROOT" ${3:+"$3"}
+  "$PY" -B "$LAB_ROOT/lib/safedelete.py" own --base "$1" --rel "$2" --target-vm "$VM_NAME" \
+    --own "$SSH_DIR" --own "$RUN_DIR" --own "$LOG_DIR" --own "$(mc_vault_dir)" --own "${EVENTS_SPOOL:-}" ${3:+"$3"}
 }
 # Everything vm delete checks, before the prompt and again after it (under the owners lock): what exists (DP_*), that
 # nothing it would delete is another VM's, that its folders can go, its volumes, and that it isn't in use (without
@@ -371,13 +372,13 @@ vm_delete_plan() {
   # Its runtime folder (the default one in this checkout) and its vault folder (--delete-vault): only its own,
   # reached without links, holding no other VM's folder.
   if [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run-vms/$VM_NAME" ]; then
-    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$lab_p" ".run-vms/$VM_NAME" --check)" || die "not deleting $VM_NAME: $w"
+    w="$(vm_rmtree "$lab_p" ".run-vms/$VM_NAME" --check)" || die "not deleting $VM_NAME: $w"
     [ "$w" = absent ] || DP_RUN=1
   fi
   if [ "$del_vault" = 1 ]; then
     [ "$(mc_vault_dir)" = "$own_vault" ] \
       || die "--delete-vault deletes only a VM's own vault folder ($(mc_tilde "$own_vault")); $VM_NAME's vault is $(mc_tilde "$(mc_vault_dir)"), which may be shared: delete it yourself if you mean to. Nothing was deleted"
-    w="$(printf '%s\n' "$DP_ROWS" | vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME" --check)" || die "--delete-vault: $w. Nothing was deleted"
+    w="$(vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME" --check)" || die "--delete-vault: $w. Nothing was deleted"
   fi
   if [ "$del_vols" = 1 ]; then
     DP_VOLS="$(printf '%s' "${VOLUMES:-}" | tr ',' '\n' | sed 's/:.*//; s/^ *//; s/ *$//' | grep -v '^$' | tr '\n' ' ' || true)"

@@ -10,16 +10,14 @@ command resolves them (scripts/lib.sh), and the runner's list (`lume ls --format
                                                other VM's, and every VM's folders against the runner's VM storage
     vms.py delete-check --target NAME --baseline B --home HOME < ROWS.jsonl
                                                what `vm delete` would delete, against every other VM's names
-    vms.py rmtree --base DIR --rel A/NAME --target-vm NAME --home HOME [--guard PATH]... [--check] < ROWS.jsonl
-                                               delete one VM's own folder, never through a link, never another's
 
-Only rmtree changes anything. Names from the runner are escaped on a terminal (lib/termsafe.py)."""
+Nothing here changes anything: vm delete's delete of a VM's own folders is lib/safedelete.py's (`own`), checked
+against the same protected folders as every other delete. Names from the runner are escaped on a terminal
+(lib/termsafe.py)."""
 import argparse
 import json
 import os
 import re
-import shutil
-import stat
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -114,21 +112,6 @@ def chain(path, home, what="a folder"):
 def canonical(path, home, what="a folder"):
     """path with the links in the part that exists resolved (what the vault is handed)."""
     return os.path.realpath(absolute(path, home, what))
-
-
-def ancestors(path, home):
-    """The identities of path's existing folder and every folder above it (to see whether path is inside another)."""
-    out = set()
-    p = canonical(path, home)
-    while True:
-        try:
-            st = os.stat(p)
-            out.add((st.st_dev, st.st_ino))
-        except OSError:
-            pass
-        if p == "/":
-            return out
-        p = os.path.dirname(p)
 
 
 def read_records(stream):
@@ -316,89 +299,6 @@ def delete_check(rows, target, baseline):
                     raise Refused(f"{owner}'s {n} looks like one of {target}'s checkpoints; nothing was deleted")
 
 
-def protected(rows, target, home, extra=()):
-    """Every folder another VM uses (its keys, runtime, logs, vault, spool), the account's home and the checkout:
-    what a VM's own folder must neither be nor hold. A refused settings file counts by the folders it says
-    (unchecked); one whose folders can't be read, or aren't absolute, refuses: an unknown folder can't be kept safe."""
-    out = list(extra)
-    for r in rows:
-        if r.get("ok"):
-            if r.get("vm") == target:
-                continue
-            out += [r.get(k) for k in ("ssh_dir", "run_dir", "log_dir", "vault", "spool") if r.get(k)]
-            if r.get("kind") in ("local", "defaults", "config") and not r.get("spool"):
-                out += [home + "/Library/Application Support/metacomputer/events/spool"]
-        else:
-            folders = r.get("folders") or []
-            if not r.get("known") or not folders or any(not isinstance(f, str) or not f for f in folders):
-                raise Refused(f"{r.get('file')} was refused ({r.get('error')}) and its folders can't be read, so "
-                              "nothing is deleted that might be one of them; fix it first")
-            for f in folders:
-                try:
-                    absolute(f, home)
-                except Refused:
-                    raise Refused(f"{r.get('file')} names a folder that isn't an absolute path ({f}), so nothing is "
-                                  "deleted that might be it; fix it first")
-            out += folders
-    return out
-
-
-# --- deleting one VM's own folder -----------------------------------------------------------------------------
-def _open_dir_nofollow(name, dir_fd):
-    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
-
-
-def rmtree_own(base, rel, guard, home, check_only=False):
-    """Delete base/rel (a VM's own folder) with nothing followed through a link: base is walked from / one folder at
-    a time (O_NOFOLLOW openat), then each part of rel; a link anywhere refuses. The folder must be this account's
-    and must neither be nor hold anything in guard (another VM's folders, the home folder, the checkout). The
-    deletion itself goes through the parent's descriptor (shutil.rmtree with dir_fd, which never follows links).
-    Returns False (nothing to do) when the folder isn't there."""
-    parts = [c for c in absolute(base, home, "the base folder").split("/") if c]
-    relparts = [c for c in rel.split("/") if c]
-    if not relparts or any(c in (".", "..") for c in relparts):
-        raise Refused(f"not a folder name: {rel}")
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        walked = "/"
-        for c in parts + relparts[:-1]:
-            try:
-                nfd = _open_dir_nofollow(c, fd)
-            except FileNotFoundError:
-                return False
-            except OSError:
-                raise Refused(f"{os.path.join(walked, c)} is a link or not a folder; nothing there was deleted")
-            os.close(fd)
-            fd, walked = nfd, os.path.join(walked, c)
-        leaf = relparts[-1]
-        try:
-            st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        target = os.path.join(walked, leaf)
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-            raise Refused(f"{target} is a link or not a folder; it wasn't deleted")
-        if st.st_uid != os.getuid():
-            raise Refused(f"{target} isn't this account's; it wasn't deleted")
-        me = (st.st_dev, st.st_ino)
-        for g in guard:
-            try:
-                held = me in ancestors(g, home)
-            except Refused:
-                raise Refused(f"another VM's folder {g!r} isn't an absolute path, so {target} wasn't deleted")
-            if held:
-                raise Refused(f"{target} is or holds {g}, which another VM (or this account) uses; it wasn't deleted")
-        if check_only:
-            return True
-        st2 = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
-        if (st2.st_dev, st2.st_ino) != me:
-            raise Refused(f"{target} changed while it was being checked; it wasn't deleted")
-        shutil.rmtree(leaf, dir_fd=fd)
-        return True
-    finally:
-        os.close(fd)
-
-
 def human(n):
     if not isinstance(n, (int, float)) or isinstance(n, bool) or n < 0:
         return "-"
@@ -557,13 +457,6 @@ def main(argv=None):
     p.add_argument("--file", required=True)
     p.add_argument("--vm", default="")
     p.add_argument("--error", default="")
-    p = sub.add_parser("rmtree")
-    p.add_argument("--base", required=True)
-    p.add_argument("--rel", required=True)
-    p.add_argument("--target-vm", required=True)
-    p.add_argument("--home", required=True)
-    p.add_argument("--guard", action="append", default=[])
-    p.add_argument("--check", action="store_true")
     sub.add_parser("all-known")
     a = ap.parse_args(argv)
     if a.cmd == "all-known":
@@ -577,17 +470,13 @@ def main(argv=None):
     if a.cmd == "error-row":
         print(json.dumps(error_row(read_records(sys.stdin), a.file, a.vm, a.error)))
         return 0
-    if a.cmd in ("identity", "delete-check", "rmtree"):
+    if a.cmd in ("identity", "delete-check"):
         try:
             if a.cmd == "identity":
                 for k, v in check_identity(read_records(sys.stdin), a.home, ports=not a.no_ports).items():
                     print(f"{k}={v}")
-            elif a.cmd == "delete-check":
-                delete_check(rows_from(sys.stdin), a.target, a.baseline)
             else:
-                guard = protected(rows_from(sys.stdin), a.target_vm, a.home, a.guard)
-                done = rmtree_own(a.base, a.rel, guard, a.home, check_only=a.check)
-                print("present" if done else "absent")
+                delete_check(rows_from(sys.stdin), a.target, a.baseline)
         except Refused as e:
             print(str(e))
             return 1

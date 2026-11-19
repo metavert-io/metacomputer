@@ -2767,21 +2767,30 @@ def space_dir():
     return d
 
 
+SPACE_NAME = re.compile(r"(?P<what>[A-Za-z0-9][A-Za-z0-9._-]*)-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8}\.json")
+
+
 def claims_on(pool):
-    """Bytes held by live claims on the pool (space_pool; stale claims are removed)."""
-    held = 0
-    for f in os.listdir(space_dir()):
-        p = os.path.join(space_dir(), f)
-        rec = read_json(p) if f.endswith(".json") else None
+    """Bytes held by live claims on the pool (space_pool; every *.json there counts). Stale claims are removed: only
+    space claim files of ours (SPACE_NAME, their pid in the name), through lib/safedelete.py (which refuses when the folder is a link or is,
+    holds or reaches a folder some VM uses; then they're kept)."""
+    held, stale = 0, []
+    d = space_dir()
+    for f in os.listdir(d):
+        rec = read_json(os.path.join(d, f)) if f.endswith(".json") else None
         if not isinstance(rec, dict):
             continue
         if not holder_alive(rec):
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+            m = SPACE_NAME.fullmatch(f)
+            if m and rec.get("pid") == int(m.group("pid")) and "pool" in rec:
+                stale.append(f)
         elif rec.get("pool") == pool:
             held += int(rec.get("bytes", 0))
+    if stale:
+        try:
+            safedelete.remove_records(d, stale, SPACE_NAME)
+        except (safedelete.Refused, OSError):
+            pass
     return held
 
 

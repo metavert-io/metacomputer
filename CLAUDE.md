@@ -182,8 +182,11 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   DELETE_WALK_EXCEPTIONS) fails on a bare one;
   `lib/labconfig.py` must pick the same file. A hub pins the VM it started with
   (`pin_identity`: name, SSH port, host key) and refuses a reconnect to anything else.
-  `vm delete` deletes folders only through `lib/vms.py rmtree` (no-link walk, never another
-  VM's folder) and checks everything again after its prompt, under the owners lock. A VM chosen
+  `vm delete` deletes folders only through `lib/safedelete.py own` (no-link walk, the same protected
+  list as every delete, less that VM's own) and checks everything again after its prompt, under the
+  owners lock. A program's own records go through `safedelete.remove_records` (own names only, the
+  folder checked). `lib/safedelete.py` must work under any python3, macOS's 3.9 included
+  (`scripts/safe-rmtree.sh` may run it there; `final6_fixes` checks it). A VM chosen
   by name is passed on to children as `MCOMP_CONFIG`. Its vault folder and spool
   (`VAULT_DIR`, `EVENTS_SPOOL`) follow it; the main VM keeps the vault's own defaults.
   Commands that change a VM, and `secrets`, print which VM (and vault) first (`vm_notice`). Guest-internal paths (`/opt/metacomputer`, `~/metacomputer-runs`) are

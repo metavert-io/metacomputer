@@ -8,14 +8,18 @@ only when that folder, as the folder it physically is, neither is nor holds a fo
     safedelete.py prune --older-than SECONDS [--] FOLDER...
                                                   delete the regular files older than that anywhere in each FOLDER
     safedelete.py check [--] PATH...              only the check
+    safedelete.py own --base DIR --rel A/NAME --target-vm NAME [--own PATH]... [--check]
+                                                  vm delete's delete of that VM's own folder (prints present|absent)
     scripts/safe-rmtree.sh PATH...                the same as rmtree, for shell scripts
-    Python: import safedelete; safedelete.rmtree(path, ...), safedelete.prune_files(folder, choose)
+    Python: import safedelete; safedelete.rmtree(path, ...), prune_files(folder, choose),
+            remove_records(folder, names, pattern), rmtree_own(base, rel, target_vm, own)
 
 A path is resolved once (Target): it may not end in /, /. or /.. (each means another entry than the one it names),
 its folder is resolved physically (as the system resolves it: links, then .., at every level), and its last part is
 taken as it is (a link there is a link: deleted itself, never what it points to). That resolved entry is what's
-checked and exactly what's deleted, through a descriptor of its folder (shutil's descriptor-based rmtree, which
-follows no link inside); one that changed in between isn't deleted.
+checked and exactly what's deleted, through a descriptor of its folder: a folder is opened without following a link,
+checked to be the one checked, and emptied bottom-up through descriptors (remove_tree_at; not shutil.rmtree, whose
+dir_fd needs Python 3.11, while macOS ships 3.9); one that changed in between isn't deleted.
 
 The folders no delete may be or hold are every VM's SSH_DIR, RUN_DIR, LOG_DIR, VAULT_DIR and EVENTS_SPOOL (the main
 VM's, every config/vms/ VM's, the MCOMP_CONFIG file's, and a vault folder or spool the environment names; scripts/lib.sh
@@ -24,12 +28,15 @@ this checkout. Each is compared as the folder it physically is (lib/vms.py physi
 followed, then device and inode), and a delete may not hold a link on the way to one either. It fails closed: when a
 settings file can't be read, or a VM's folder can't be resolved, nothing is deleted.
 
+A program's own records (claims, journals) go through remove_records: only names of its own pattern, in a folder that
+isn't a link and is checked like any delete's target. vm delete's delete of a VM's own folders goes through
+rmtree_own: the same protected folders (protected(), the one list), less that VM's own.
+
 The runner's own delete of a VM (its storage folder) is the one recursive delete on the Mac not made here: it runs after
 the identity rule (scripts/lib.sh vm_change_lock, vm delete's plan, build-vm.sh's check)."""
 import io
 import os
 import pwd
-import shutil
 import stat
 import subprocess
 import sys
@@ -100,12 +107,16 @@ def links_on_the_way(path, home, what, limit=64):
     return out
 
 
-def protected(home=None, lab=LAB, owners=None):
+def protected(home=None, lab=LAB, owners=None, exclude_vm=None, own=()):
     """[(what, value, identity, chain, links)]: every folder no delete may be or hold, with the links on the way to it
-    (links_on_the_way). Fails closed (Refused)."""
+    (links_on_the_way). Fails closed (Refused). The one list: every delete here, vm delete's included, uses it.
+    exclude_vm (vm delete): that VM's own folders are left out (they're what it deletes), so are the environment's
+    vault folder and spool when they're its own folders (own); the account's own vault and spools, the home folder and
+    the checkout never are."""
     home = home or account_home()
     owners = records(lab) if owners is None else owners
     out = []
+    mine = {os.path.normpath(v) for v in own if isinstance(v, str) and v}
 
     def add(what, v):
         try:
@@ -113,6 +124,12 @@ def protected(home=None, lab=LAB, owners=None):
         except vms.Refused as e:
             raise Refused(f"{e}; so nothing is deleted that might be it")
     for owner, ids in owners.items():
+        if exclude_vm and not ids.get("UNREADABLE"):
+            if ids.get("VM_NAME") == [exclude_vm]:
+                continue
+            vals = [v for k in vms.FOLDER_KEYS for v in ids.get(k, [])]
+            if owner.startswith("the environment (") and vals and all(os.path.normpath(v) in mine for v in vals):
+                continue
         if ids.get("UNREADABLE"):
             raise Refused(f"{owner} can't be read, so its folders aren't known and nothing is deleted that might be "
                           "one of them; fix it first")
@@ -125,6 +142,7 @@ def protected(home=None, lab=LAB, owners=None):
                     # its own still leaves these where the vault's defaults put them).
                     ("the account's vault folder", os.path.join(home, ACCOUNT_VAULT)),
                     ("the account's event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool")),
+                    ("the vault folder of $HOME", os.path.join(env_home, ACCOUNT_VAULT)),
                     ("the event spool of $HOME", os.path.join(env_home, ACCOUNT_VAULT, "events", "spool"))):
         add(what, v)
     return out
@@ -207,14 +225,63 @@ def _open_parent(t):
         raise
 
 
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def fd_ops_ok():
+    """Whether this Python deletes through folder descriptors here (every macOS Python 3 does)."""
+    return (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+            and os.rmdir in os.supports_dir_fd and os.scandir in os.supports_fd)
+
+
+def _open_dir_at(name, dir_fd, expect=None, what=None):
+    """name in dir_fd opened as a folder, never through a link; refused when it isn't the folder expect (an lstat)
+    says it was."""
+    fd = os.open(name, DIR_FLAGS, dir_fd=dir_fd)
+    if expect is not None:
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) != (expect.st_dev, expect.st_ino):
+            os.close(fd)
+            raise Refused(f"{what or name} changed while it was being deleted; what's left of it was kept")
+    return fd
+
+
+def remove_tree_at(parent_fd, name, expect, what=None):
+    """Delete the folder name in parent_fd, with everything in it, through descriptors only: each folder is opened
+    without following a link and checked to be the one just listed (expect: the top's lstat), its files and links are
+    unlinked in it, its folders emptied the same way, then removed. No link is ever followed, and shutil.rmtree isn't
+    used (its dir_fd needs Python 3.11; macOS's own python3 is 3.9)."""
+    stack = [(_open_dir_at(name, parent_fd, expect, what), name)]
+    try:
+        while stack:
+            fd = stack[-1][0]
+            with os.scandir(fd) as it:
+                names = [e.name for e in it]
+            down = None
+            for n in names:
+                st = os.stat(n, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    down = (_open_dir_at(n, fd, st, what), n)
+                    break
+                os.unlink(n, dir_fd=fd)
+            if down is not None:
+                stack.append(down)
+                continue
+            fd, n = stack.pop()
+            os.close(fd)
+            os.rmdir(n, dir_fd=stack[-1][0] if stack else parent_fd)
+    finally:
+        for fd, _n in stack:
+            os.close(fd)
+
+
 def _delete(t):
-    """Delete exactly the checked entry, through its folder's descriptor: a folder with everything in it (shutil's
-    descriptor-based rmtree, which follows no link inside), else the entry itself (a file, or a link, never what it
-    points to)."""
+    """Delete exactly the checked entry, through its folder's descriptor: a folder with everything in it
+    (remove_tree_at, which follows no link), else the entry itself (a file, or a link, never what it points to)."""
     fd = _open_parent(t)
     try:
         if t.is_dir:
-            shutil.rmtree(t.name, dir_fd=fd)
+            remove_tree_at(fd, t.name, t.st, t.spelled)
         else:
             os.unlink(t.name, dir_fd=fd)
     finally:
@@ -225,12 +292,13 @@ def rmtree(*paths, quiet=False, lab=LAB, out=sys.stderr):
     """Delete each path (rm -rf), each resolved once (Target), checked (check_target) and deleted exactly as resolved.
     A refusal raises Refused (quiet: it's said on out and the path is kept; the rest go on), and so does a failure to
     delete (quiet: said and kept, as with ignore_errors)."""
-    if not shutil.rmtree.avoids_symlink_attacks:
-        raise Refused("this Python's rmtree can be led through links, so nothing is deleted with it")
     home = account_home()
     prot = None
+    ops = fd_ops_ok()
     for path in paths:
         try:
+            if not ops:
+                raise Refused("this Python can't delete through folder descriptors, so nothing is deleted with it")
             t = Target(path)
             if t.st is None:
                 continue
@@ -246,6 +314,10 @@ def rmtree(*paths, quiet=False, lab=LAB, out=sys.stderr):
             if not quiet:
                 raise
             print(f"metacomputer: couldn't delete {path}: {e.strerror}", file=out)
+        except Exception as e:                  # quiet (a cleanup): never a crash; the path is kept
+            if not quiet:
+                raise
+            print(f"metacomputer: couldn't delete {path} ({type(e).__name__}); it was kept", file=out)
 
 
 def prune_files(root, choose, lab=LAB):
@@ -263,7 +335,7 @@ def prune_files(root, choose, lab=LAB):
     files = []
     top = _open_parent(t)
     try:
-        rfd = os.open(t.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=top)
+        rfd = _open_dir_at(t.name, top, t.st, root)
     finally:
         os.close(top)
     try:
@@ -283,7 +355,7 @@ def prune_files(root, choose, lab=LAB):
             fd, opened = rfd, []
             try:
                 for c in parts[:-1]:          # each folder on the way opened without following a link
-                    fd = os.open(c, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    fd = _open_dir_at(c, fd)
                     opened.append(fd)
                 st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
                 if stat.S_ISREG(st.st_mode):
@@ -299,12 +371,116 @@ def prune_files(root, choose, lab=LAB):
         os.close(rfd)
 
 
+def remove_records(folder, names, pattern, lab=LAB):
+    """Delete some of a program's own records (stale claims, broken journal entries): the regular files among names in
+    folder whose whole name matches pattern (a compiled regex), nothing else. folder is resolved and checked like any
+    delete's target: not a link, and neither being, holding nor reaching (through a link in it) a protected folder.
+    It's opened without following a link and each file is unlinked through its descriptor. Returns how many went; a
+    refusal raises Refused before any is deleted."""
+    names = [n for n in names if isinstance(n, str) and "/" not in n and pattern.fullmatch(n)]
+    if not names:
+        return 0
+    home = account_home()
+    t = Target(folder)
+    if t.st is None:
+        return 0
+    if not t.is_dir:
+        raise Refused(f"{folder} isn't a folder (a link isn't followed); no record in it was deleted")
+    check_target(t, protected(home, lab), home)
+    top = _open_parent(t)
+    try:
+        dfd = _open_dir_at(t.name, top, t.st, folder)
+    finally:
+        os.close(top)
+    n = 0
+    try:
+        for name in names:
+            try:
+                if stat.S_ISREG(os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode):
+                    os.unlink(name, dir_fd=dfd)
+                    n += 1
+            except OSError:
+                pass
+        return n
+    finally:
+        os.close(dfd)
+
+
+def rmtree_own(base, rel, target_vm, own=(), check_only=False, lab=LAB):
+    """vm delete's delete of target_vm's own folder base/rel (its runtime folder or vault): base is walked from / one
+    folder at a time without following a link, then each part of rel (a link anywhere refuses); the folder must be
+    this account's and is checked like every other delete (check_target) against protected() less target_vm's own
+    folders (exclude_vm, own). Deleted through descriptors (remove_tree_at). False when it isn't there."""
+    home = account_home()
+    if not fd_ops_ok():
+        raise Refused("this Python can't delete through folder descriptors, so nothing is deleted with it")
+    parts = [c for c in vms.absolute(base, home, "the base folder").split("/") if c]
+    relparts = [c for c in rel.split("/") if c]
+    if not relparts or any(c in (".", "..") for c in relparts):
+        raise Refused(f"not a folder name: {rel}")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        walked = "/"
+        for c in parts + relparts[:-1]:
+            try:
+                nfd = _open_dir_at(c, fd)
+            except FileNotFoundError:
+                return False
+            except OSError:
+                raise Refused(f"{os.path.join(walked, c)} is a link or not a folder; nothing there was deleted")
+            os.close(fd)
+            fd, walked = nfd, os.path.join(walked, c)
+        leaf = relparts[-1]
+        try:
+            st = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        target = os.path.join(walked, leaf)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise Refused(f"{target} is a link or not a folder; it wasn't deleted")
+        if st.st_uid != os.getuid():
+            raise Refused(f"{target} isn't this account's; it wasn't deleted")
+        t = Target(target)
+        if t.st is None or (t.st.st_dev, t.st.st_ino) != (st.st_dev, st.st_ino):
+            raise Refused(f"{target} changed while it was being checked; it wasn't deleted")
+        check_target(t, protected(home, lab, exclude_vm=target_vm, own=own), home)
+        if check_only:
+            return True
+        remove_tree_at(fd, leaf, st, target)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _own_main(args):
+    import argparse
+    ap = argparse.ArgumentParser(prog="safedelete.py own")
+    ap.add_argument("--base", required=True)
+    ap.add_argument("--rel", required=True)
+    ap.add_argument("--target-vm", required=True)
+    ap.add_argument("--own", action="append", default=[])
+    ap.add_argument("--check", action="store_true")
+    a = ap.parse_args(args)
+    try:
+        done = rmtree_own(a.base, a.rel, a.target_vm, a.own, check_only=a.check)
+    except Refused as e:
+        print(str(e))
+        return 1
+    except OSError as e:
+        print(f"couldn't delete {os.path.join(a.base, a.rel)}: {e.strerror}")
+        return 1
+    print("present" if done else "absent")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("rmtree", "check", "prune"):
+    if not argv or argv[0] not in ("rmtree", "check", "prune", "own"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    if cmd == "own":
+        return _own_main(args)
     quiet = args[:1] == ["--quiet"]
     if quiet:
         args = args[1:]
