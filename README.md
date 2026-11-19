@@ -113,16 +113,20 @@ what goes where, updating, uninstalling and troubleshooting.
 **Security: walled off from your Mac.** Out of the box the VM shares no
 clipboard, audio or files with your Mac, and its only network is a gateway that
 reaches the public internet and nothing of yours: not your Mac, your LAN or your
-tailnet. A signed log of every action, a restricted mode that holds Cua Driver to
-the apps and sites you list, and recordings are there when you want them
-([Security in brief](#security-in-brief)).
+tailnet. Page text that's likely hidden from you, or that addresses AI agents, is
+marked in what Claude reads, so it can point it out to you; and at a CAPTCHA or a
+sign-in that's yours, Claude hands you the computer and waits. A signed log of
+every action, a restricted mode that holds Cua Driver to the apps and sites you
+list, and recordings saved on your Mac as they're made are there when you want
+them ([Security in brief](#security-in-brief)).
 
 **Key management: Claude signs in without seeing your passwords.** The vault on
 your Mac types a password or the current 2FA code into the page and tells Claude
 only the outcome, and API keys go through a proxy on your Mac, so they never enter
-the VM. Uses can wait for your approval, by Touch ID where the Mac has it, and
-each one lands in an audit trail you can send off the Mac. Bring your logins from
-Chrome, the Passwords app, 1Password or Bitwarden
+the VM, not even for Claude Code running inside it. Uses can wait for your
+approval, by Touch ID where the Mac has it, and each one lands in an audit trail
+you can send off the Mac. Bring your logins from Chrome, the Passwords app,
+1Password or Bitwarden
 ([the vault, step by step](docs/guide.md#use-saved-passwords-and-2fa-codes)).
 
 **Shared storage: files that outlive the VM.** Disk volumes survive resets and
@@ -203,7 +207,8 @@ with Claude Code's normal tools.
 - **Sign-ins:** saved passwords and 2FA codes typed by the vault into page-mode
   Chrome, signed-in profiles sealed and restored, or you sign in yourself through
   the live view, in a handoff.
-- **API keys:** short-lived tokens for a proxy on your Mac that adds the real key.
+- **API keys:** short-lived tokens for a proxy on your Mac that adds the real key;
+  a long job renews its token (`secrets token renew`) instead of getting a new one.
 - **Claude inside the metacomputer:** `metacomputer claude` installs and starts
   Claude Code in the VM, signed in through that proxy (your subscription token or
   API key stays on the Mac), and Claude drives it with `send` and `read`; `--show`
@@ -228,7 +233,8 @@ with Claude Code's normal tools.
   `metacomputer handoff done`; Claude's actions wait until then.
 - **Notifications and events:** `metacomputer notify` when Claude is blocked on
   you, and events to your phone (ntfy), Slack, an OpenTelemetry Collector or a
-  SIEM, once you add a sink.
+  SIEM, once you add a sink. The first blocked connection after a quiet spell
+  reaches them within seconds.
 
 **Getting better**
 - **Lessons** from your own sessions (`metacomputer learn`, or
@@ -570,7 +576,7 @@ typed approvals, one that can type there could. Passwords show as dots on the
 page, but usernames and one-time codes are visible, in recordings too. Programs in
 the VM that need an API key, Claude Code inside the VM included, get a short-lived
 token for a proxy on your Mac instead; anything in the VM can use that token until
-it ends, never the key.
+it ends or you revoke it, never the key, and renewing it can ask you first.
 
 **Opt-in,** so out of the box metacomputer behaves the way Cua Driver does on its
 own (`metacomputer security` shows what's on):
