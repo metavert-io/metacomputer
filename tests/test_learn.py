@@ -626,7 +626,7 @@ def lessons_set_checks():
         learn.print_bench_comparison(report, {"without": a, "with": b}, path)
     out = buf.getvalue()
     check("learn bench prints the targeted patterns, each with how many tasks target it",
-          re.search(r"targeted patterns\s+3\s+0\s+-3", out) and re.search(r"no_frame \(1 tasks\)\s+2\s+0\s+-2", out)
+          re.search(r"targeted patterns\s+3\s+0\s+-3", out) and re.search(r"no_frame \(1 task\)\s+2\s+0\s+-2", out)
           and re.search(r"not_found\s+1\s+1\s+\+0", out), out)
     check("…and which tasks the with-run's lessons answer",
           "Lessons the with-run's sessions got: no-frame, check-text; tasks whose targets they answer: ff-seat-map" in out, out)

@@ -1,0 +1,158 @@
+{
+  "run_id": "learn-lessons-2026-11-18-with",
+  "date": "2026-11-18",
+  "model": "claude-opus-5-5",
+  "cua_driver": "0.53.0",
+  "metacomputer": {
+    "commit": "1cceb9b338a21baf53005fe9508aea43d28c8209",
+    "uncommitted_changes": false,
+    "on_main": false,
+    "rebased_as": "266d57e (branch learn-bench-tasks, rebased onto 3da8e2c)"
+  },
+  "task_set": "lessons",
+  "switches": {
+    "hub": "the VM's setting (MCP_HUB, on)",
+    "coord_guard": "off",
+    "shell": "allow",
+    "lessons": "on",
+    "lessons_count": 3,
+    "lessons_ids": [
+      "no-frame",
+      "repeat-class",
+      "not-found"
+    ]
+  },
+  "tasks": [
+    {
+      "task": "calc-arrows",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 15,
+      "minutes": 0.98,
+      "patterns": {
+        "acted_without_check": 1
+      }
+    },
+    {
+      "task": "calc-chart-size",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 34,
+      "minutes": 2.1,
+      "targets": [
+        "menu_path",
+        "churn",
+        "no_frame",
+        "foreground_unavailable",
+        "focus_not_restored"
+      ],
+      "targeted": 1,
+      "patterns": {
+        "menu_path": 1
+      }
+    },
+    {
+      "task": "calc-cross-sheet",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12,
+      "minutes": 0.53,
+      "targets": [
+        "no_frame",
+        "no_extents",
+        "not_found",
+        "repeat"
+      ],
+      "targeted": 0,
+      "patterns": {}
+    },
+    {
+      "task": "calc-save-xlsx",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 26,
+      "minutes": 1.24,
+      "targets": [
+        "no_extents",
+        "foreground_unavailable",
+        "stale_window",
+        "acted_without_check"
+      ],
+      "targeted": 0,
+      "patterns": {}
+    },
+    {
+      "task": "ff-article-links",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 16,
+      "minutes": 0.69,
+      "targets": [
+        "check_failed",
+        "not_found"
+      ],
+      "targeted": 0,
+      "patterns": {}
+    },
+    {
+      "task": "ff-renew-loans",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 13,
+      "minutes": 0.45,
+      "targets": [
+        "not_found",
+        "check_failed",
+        "repeat"
+      ],
+      "targeted": 0,
+      "patterns": {}
+    },
+    {
+      "task": "ff-seat-map",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 13,
+      "minutes": 0.54,
+      "targets": [
+        "no_frame",
+        "repeat",
+        "churn"
+      ],
+      "targeted": 0,
+      "patterns": {}
+    },
+    {
+      "task": "mousepad-replace",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 18,
+      "minutes": 0.82,
+      "targets": [
+        "menu_foreground",
+        "stale_window",
+        "repeat"
+      ],
+      "targeted": 1,
+      "patterns": {
+        "repeat": 1,
+        "stale_token": 2
+      }
+    }
+  ],
+  "totals": {
+    "tasks": 8,
+    "passed": 8,
+    "invalid_calls": 0,
+    "mean_turns": 18.38,
+    "mean_minutes": 0.92,
+    "targeted": 2,
+    "failed_driver_calls": 3,
+    "patterns": {
+      "acted_without_check": 1,
+      "menu_path": 1,
+      "repeat": 1,
+      "stale_token": 2
+    }
+  }
+}

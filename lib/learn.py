@@ -63,8 +63,9 @@ DRAFT_BUDGET_USD = "0.50"
 DRAFT_TIMEOUT_S = 240
 BENCH_EST_PER_TASK = 0.55          # USD per task and run, from the benchmark's recent runs (bench/README.md)
 BENCH_MIN_PER_TASK = 1.7           # minutes per task, reset and setup included
-# The lessons set's tasks are harder (more steps, more dialogs): its own estimates, per task and run.
-BENCH_EST_BY_SET = {"standard": (BENCH_EST_PER_TASK, BENCH_MIN_PER_TASK), "lessons": (0.9, 3.0)}
+# Per set, per task and run: (USD, minutes with reset and setup). The lessons set's from its first comparison
+# (2026-11-18: 0.60-0.64 USD a task, 12 minutes for eight tasks).
+BENCH_EST_BY_SET = {"standard": (BENCH_EST_PER_TASK, BENCH_MIN_PER_TASK), "lessons": (0.65, 1.6)}
 # Words a drafted lesson may not use: it must not talk about secrets, or about switching off, getting
 # around or overriding the user's controls. Defense in depth; a draft still needs the user at a terminal.
 DRAFT_DENY = re.compile(r"passphrase|password|secret|token|api[ _-]?key|credential|vault|disable|turn(?:ing)? off|"
@@ -1073,11 +1074,12 @@ def print_bench_comparison(report, runs, path):
         rows.append(("targeted patterns", ta["targeted"], tb["targeted"], f"{tb['targeted'] - ta['targeted']:+d}"))
     for k in sorted(set(pa) | set(pb) | set(tg), key=lambda k: (-tg.get(k, 0), k)):
         a, b = pa.get(k, 0), pb.get(k, 0)
-        label = f"  {k}" + (f" ({tg[k]} tasks)" if tg.get(k) else "")
-        rows.append((label[:24], a, b, f"{b - a:+d}"))
-    print(f"  {'':24} {'without':>10} {'with':>10} {'change':>8}")
+        label = f"  {k}" + (f" ({tg[k]} task{'s' if tg[k] != 1 else ''})" if tg.get(k) else "")
+        rows.append((label[:48], a, b, f"{b - a:+d}"))
+    w = max([24] + [len(r[0]) for r in rows])
+    print(f"  {'':{w}} {'without':>10} {'with':>10} {'change':>8}")
     for label, x, y, d in rows:
-        print(f"  {esc(label):24} {str(x):>10} {str(y):>10} {d:>8}")
+        print(f"  {esc(label):{w}} {str(x):>10} {str(y):>10} {d:>8}")
     ids = (mb.get("switches") or {}).get("lessons_ids") or []
     if ids:
         hit = [k for k in common if set(B[k]["targets"]) and set(ids) & set(next(

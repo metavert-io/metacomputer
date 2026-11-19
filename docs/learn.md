@@ -43,6 +43,7 @@ metacomputer learn edit no-frame             # change a lesson's text (your term
 metacomputer learn add                       # write one of your own (your terminal only)
 metacomputer learn reseal                    # accept lessons.json after it changed outside learn (your terminal only)
 metacomputer learn bench --config results/my-test-vm/test.env      # measure: with vs without, on a test VM
+metacomputer learn bench --config results/my-test-vm/test.env --tasks lessons   # …on tasks where the stumbles come up
 ```
 
 From a Claude Code chat, the plugin's `/metacomputer:learn` runs the report and
@@ -59,7 +60,7 @@ walks you through the proposals; Claude approves only the IDs you name.
 | `edit ID` | your terminal | New text (and title) for an approved lesson or a proposal; an edited proposal then needs `approve` at your terminal |
 | `add` | your terminal | A lesson in your own words, approved at once |
 | `reseal` | your terminal | After `lessons.json` changed outside `learn` (and so isn't sent): shows exactly what it holds and, on your yes, accepts it |
-| `bench` | your terminal, or `--yes` | The benchmark without and with the approved lessons; it states the number of runs and the likely cost, and asks first |
+| `bench` | your terminal, or `--yes` | The benchmark without and with the approved lessons (`--tasks lessons`: the set built for this); it states the number of runs and the likely cost, and asks first |
 
 "Your terminal" is the bar the secrets vault uses for its user-only commands:
 standard input must be a terminal, so Claude's Bash tool, a script or a pipe is
@@ -279,8 +280,8 @@ comparison spent. The per-task table goes to `results/bench/compare-*.md`.
 
 The benchmark's switch is also available directly: `bench/bench.py run
 --lessons on|off` (default off), with the lessons from `MCOMP_LESSONS_DIR` or the
-default store. `run.json` records how many lessons the sessions got and a hash of
-the exact text.
+default store. `run.json` records how many lessons the sessions got, which ones
+(`lessons_ids`) and a hash of the exact text.
 
 **The first comparison** (2026-11-18; a test VM with Cua Driver 0.53.0, Opus 5.5,
 the skill from main, $1.50 a task). The two lessons approved for it were the
@@ -305,6 +306,79 @@ run's noise. Per-task results:
 and [learn-2026-11-18-with.json](../bench/runs/learn-2026-11-18-with.json). The
 benchmark's tasks already pass with today's skill, which holds the same rules;
 lessons are for what your own sessions keep running into.
+
+### Measuring on tasks where the stumbles come up: `--tasks lessons`
+
+```bash
+metacomputer learn bench --config results/my-test-vm/test.env --tasks lessons
+```
+
+The benchmark's standard tasks pass with today's skill and rarely bring up what
+lessons are about, so a comparison on them can't show much. The **lessons set**
+(`bench/tasks-lessons/`, eight tasks; [bench/README.md](../bench/README.md#the-lessons-set)
+lists them) is ordinary desktop work chosen so those stumbles come up: pixel clicks
+that alternate with reads (a seat map drawn on a canvas, cells across Calc sheets),
+dialogs and menus that change under you (a chart set to an exact size, a copy saved
+in Excel format, find and replace in Mousepad), and names and wording that differ
+from the request (a page whose buttons say "Extend" when you asked to renew, facts
+that are link text in a long article). Each task names the failure patterns it
+targets and the built-in lessons that answer them; one task, `calc-arrows`, is a
+control that no built-in lesson answers (Calc's AutoCorrect turning a typed `->`
+into an arrow). No task needs a lesson to pass.
+
+What the comparison adds, besides passes, invalid calls, turns and time:
+- **Targeted patterns:** `learn report`'s own classifier, run over every task's
+  transcript, counts the patterns each task was built to bring up, summed over the
+  tasks. That is the number lessons aimed at those patterns should lower.
+- **Each pattern on its own,** with how many tasks target it, and any other failure
+  class that came up.
+- **The lessons the with-run's sessions got,** and which tasks' targets they answer.
+
+How to read it:
+- A lesson can only help where its pattern comes up without it. Look first at the
+  without-run's count for the lesson's pattern: if it's zero or one, that run says
+  nothing about the lesson.
+- One run of each is noisy, more so with eight tasks than twenty: a difference of
+  one or two in a pattern, or one task's pass, is within that noise. Repeat the
+  comparison before deciding anything.
+- The control task should come out the same both ways; when it doesn't, that's the
+  size of the noise. A lesson of your own about the quirk (`learn add`) is what
+  should move it.
+
+**The first comparison on the lessons set** (2026-11-18; the same test VM, Opus 5.5,
+Cua Driver 0.53.0). Three built-in lessons were approved in a throwaway store
+(`MCOMP_LESSONS_DIR` in a temporary folder): `no-frame`, `repeat-class` and
+`not-found`, the three proposals with the most sessions behind them in a report on
+33 recorded sessions. Between them they answer the targets of six of the eight
+tasks.
+
+| | without | with |
+| --- | --- | --- |
+| passed | 8/8 | 8/8 |
+| invalid-argument calls | 1 | 0 |
+| targeted patterns (summed over the tasks) | 3 | 2 |
+| pixel actions without a screenshot frame (`no_frame`) | 3 | 0 |
+| failed driver calls, any class | 7 | 3 |
+| mean turns | 19.0 | 18.4 |
+| mean minutes | 1.07 | 0.92 |
+
+What it shows, and what it doesn't:
+- **Passes can't separate the two:** every task passed both ways.
+- **The set does what the standard tasks didn't:** without lessons, the stumbles
+  came up. Three pixel actions without a frame (in the chart and Excel tasks), the
+  chart's menu path not found in edit mode, an element not found, one with no extents.
+- **With the lessons,** the no-frame failures didn't happen and failed driver calls
+  fell from 7 to 3; two stale-token errors appeared in the Mousepad task, which no
+  lesson here is about.
+- **No measurable effect.** These are single-digit counts from one run of each, the
+  size of one run's noise. The no-frame direction is the thing to check with a
+  repeat (two or three runs of each), not a result.
+- **The control never met its quirk:** both sessions wrote the Calc routes as
+  formulas, which AutoCorrect leaves alone.
+
+Per task: [bench/runs/learn-lessons-2026-11-18-without.json](../bench/runs/learn-lessons-2026-11-18-without.json)
+and [learn-lessons-2026-11-18-with.json](../bench/runs/learn-lessons-2026-11-18-with.json),
+with each task's failure patterns.
 
 ## Security
 
