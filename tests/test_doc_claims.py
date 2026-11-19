@@ -192,7 +192,23 @@ def claude_keeper():
             and "if not os.path.exists(owners.claim_path(me)):" in k and "owners.drop_claim(me)" in k
             and "vm_shell.execute(" in p and "run_guarded" not in p and vm_claude.KEEP_S == 60
             and 'if o.get("claim") == "inner":' in raw("lib/owners.py") and "stop_keeper(" in vc_fn("do_stop")
-            and "owners.ACTIVE_S" not in k and owners.ACTIVE_S == 600)
+            and "owners.ACTIVE_S" not in k and owners.ACTIVE_S == 600
+            and "probe_fresh(session)" in k and "probe(transport" not in k
+            and '[me, "claude", "_probe", "--session", session]' in vc_fn("probe_fresh")
+            and '"_keeper", "--session", o["session"]]' in s and "--transport" not in s)
+
+
+def claude_release_locked():
+    """`release` drops claims under owners.lock(); the keeper reads its claim and renews it under the same lock, and
+    exits when the claim is gone."""
+    o = raw("lib/owners.py")
+    rel = o[o.index('if cmd == "release":'):]
+    rel = rel[:rel.index("return 0")]
+    k = vc_fn("run_keeper")
+    held = k[k.index("with owners.lock():"):]
+    return ("with lock():" in rel and rel.index("with lock():") < rel.index("drop_claim(")
+            and held.index("json.load(open(owners.claim_path(me)))") < held.index("owners.write_claim(")
+            and "return 0              # released" in held[:held.index("owners.write_claim(")])
 
 
 def answer_cut_at_token_end():
@@ -524,9 +540,13 @@ CLAIMS = [
     ("SECURITY.md", r"never in the session record on the Mac \(`RUN_DIR/claude/NAME\.json`: the id, the secret's name, the "
                     r"expiry, the folder asked for\)\. What the VM's half reports back is checked field by field against "
                     r"fixed shapes", lambda m: claude_record_without_token()),
-    ("SECURITY.md", r"The keeper looks once a minute \(read-only, and not in the action log, like `who`\)\. It renews the "
-                    r"claim whenever the inner Claude's screen has changed, so other sessions are refused while the inner "
-                    r"Claude works and for (\d+) minutes after", lambda m: int(m[1]) * 60 == owners.ACTIVE_S and claude_keeper()),
+    ("SECURITY.md", r"The keeper looks once a minute \(read-only, and not in the action log, like `who`\)\. Each look is a "
+                    r"new `metacomputer claude _probe` with SSH credentials made for it \(a fresh certificate under "
+                    r"`SSH_AUTH=cert`\)\. It renews the claim whenever the inner Claude's screen has changed, so other "
+                    r"sessions are refused while the inner Claude works and for (\d+) minutes after",
+     lambda m: int(m[1]) * 60 == owners.ACTIVE_S and claude_keeper()),
+    ("SECURITY.md", r"Both `release` and the keeper's check-and-renew hold the owners lock, so a released claim stays released",
+     lambda m: claude_release_locked()),
     ("SECURITY.md", r"`stop --revoke` revokes the token from the Mac even when the VM can't be reached or refuses, and keeps "
                     r"the session's record \(and exits non-zero\) until both are done",
      lambda m: vc_fn("do_stop").index("revoke_token(tid)") < vc_fn("do_stop").index("if stop_err is not None:")

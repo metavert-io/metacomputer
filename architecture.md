@@ -458,8 +458,10 @@ logged as a `vm_claude` call.
 - `show` attaches an `xfce4-terminal` on the desktop to the same session.
 - While it runs, a keeper (`vm_claude.py _keeper`, detached) holds an owners claim of
   kind `inner` for the session that started it. It probes the pane once a minute
-  (read-only, unlogged), renews the claim when the screen changed, and ends with `stop`,
-  the inner Claude's exit, `metacomputer release` or the VM going away.
+  (read-only, unlogged; each probe a new `metacomputer claude _probe`, so its SSH
+  credentials are made for that connection), renews the claim under the owners lock
+  when the screen changed, and ends with `stop`, the inner Claude's exit,
+  `metacomputer release` (which takes the same lock) or the VM going away.
 - The Mac keeps a record per session in `RUN_DIR/claude/` (the token's id, never the
   token).
 - SECURITY.md, "Claude inside the VM", has what it can reach.

@@ -407,7 +407,7 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 
 ## Claude inside the VM: `tests/test_vm_claude.py`, `tests/test_vm_claude_vm.py`
 
-`python3 tests/test_vm_claude.py` needs no VM (132 checks). `bash -c` stands in
+`python3 tests/test_vm_claude.py` needs no VM (134 checks). `bash -c` stands in
 for SSH, so the shell channel's VM half and `lib/vm_claude_guest.sh` run locally,
 with a temp folder as the VM's home. A fake `metacomputer` answers `secrets
 list|token|token renew|tokens|revoke` with a dummy token (or, as a vault from before
@@ -443,9 +443,10 @@ checks:
 - the VM's fields: each takes only its own shape, and `workdir` isn't read at all (the
   Mac's record holds the folder asked for);
 - the keeper: a live process with an owners claim of kind `inner` that another session
-  sees as active, `who` naming it, renewed when the screen changes, `status` showing
+  sees as active, `who` naming it, no SSH arguments of its own (each probe a new
+  `metacomputer claude _probe`), renewed when the screen changes, `status` showing
   it; it ends, with its claim, when Claude Code quits, when its claim is released, and
-  at `stop`;
+  at `stop`; `release` waiting for the owners lock the keeper renews under;
 - `stop --revoke` when the vault doesn't confirm (255, record kept, then a second run
   finishes) and with the VM unreachable (revoked from the Mac all the same, record
   kept);
@@ -458,8 +459,8 @@ checks:
   non-text value and a header over 1 MB are refused by the Mac before sending and,
   in crafted headers, by the VM's half.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (32 checks with a vault
-from PR #51, which renews tokens and cuts an answer when its token ends; 30 and a skip without; `MCOMP_VAULT_TEST_BIN` picks the build) runs it
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (33 checks with a vault
+from PR #51, which renews tokens and cuts an answer when its token ends; 31 and a skip without; `MCOMP_VAULT_TEST_BIN` picks the build) runs it
 for real on a test VM, with no real key: a TEST build of the vault in a temp folder,
 bound to the VM, whose proxy goes to a stand-in Anthropic API on the Mac
 (`MCOMP_VAULT_TEST_API_HTTP=1`). It removes Claude Code and its settings from the VM
@@ -474,7 +475,10 @@ Mac or in the VM and in no file written on the Mac during the test (the signed a
 log with text kept, events, the vault's audit log, the session record), the proxy
 taking the token before `revoke` (200) and refusing it after (401), and the session
 and its terminal gone after `stop`. `MCOMP_TEST_SHOT_DIR=DIR` keeps a screenshot of
-the terminal on the desktop.
+the terminal on the desktop. The keeper's own probes renewing its claim are checked too, and
+with `MCOMP_TEST_KEEPER_SPAN_S=S` the inner Claude is kept busy for S seconds and the keeper must still
+renew and hold the computer: run it under `SSH_AUTH=cert` with a short `SSH_CERT_TTL` (1m) to show it
+outlives its first certificate (each probe makes its own).
 
 ## What the VM hands back, and other boundaries (no VM)
 

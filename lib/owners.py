@@ -408,13 +408,21 @@ def main(argv):
         return 0
     if cmd == "release":
         n = 0
-        for o in others():
-            if o["kind"] == "session":
-                drop_claim(o["bridge_pid"])
-                print("released: " + describe(o))
-                n += 1
-            else:
-                print("cannot release (stop that process instead): " + describe(o))
+        # Under the owners lock, which the inner Claude's keeper (vm_claude.py) holds to check and renew its claim:
+        # a claim dropped here can't be written back by a renewal already under way, and the keeper then exits.
+        try:
+            with lock():
+                for o in others():
+                    if o["kind"] == "session":
+                        drop_claim(o["bridge_pid"])
+                        print("released: " + describe(o))
+                        n += 1
+                    else:
+                        print("cannot release (stop that process instead): " + describe(o))
+        except TimeoutError:
+            print("couldn't take the owners lock (another process holds it); nothing was released. Try again.",
+                  file=sys.stderr)
+            return 1
         if not n:
             print("No other session's claim to release.")
         else:

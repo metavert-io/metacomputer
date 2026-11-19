@@ -198,7 +198,8 @@ def run(td, procs, port):
     events = os.path.join(td, "events")
     venv = dict(os.environ, MCOMP_CONFIG=cfg, MCOMP_VAULT_DIR=os.path.join(td, "v"), MCOMP_VAULT_BIN=BIN,
                 MCOMP_VAULT_ALLOW_TEST_BUILD="1", MCOMP_VAULT_TEST_LOCAL_AUTH="allow", MCOMP_VAULT_TEST_PROMPT_TIMEOUT="60",
-                MCOMP_VAULT_TEST_API_HTTP="1", MCOMP_EVENTS_DIR=events, MCOMP_EVENTS_SPOOL=os.path.join(td, "spool"))
+                MCOMP_VAULT_TEST_API_HTTP="1", MCOMP_EVENTS_DIR=events, MCOMP_EVENTS_SPOOL=os.path.join(td, "spool"),
+                MCOMP_KEEPER_POLL_S=os.environ.get("MCOMP_KEEPER_POLL_S", "5"))
     for k in ("MCOMP_VAULT_TEST_SSH", "MCOMP_VAULT_TEST_LISTENERS", "MCOMP_DIRECT_BRIDGE", "MCOMP_HUB_PID"):
         venv.pop(k, None)
     outputs = []
@@ -288,9 +289,25 @@ def run(td, procs, port):
           "ANTHROPIC_BASE_URL=http://127.0.0.1:18765/claude-sub\n" in r.stdout + "\n"
           and "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in r.stdout and "ANTHROPIC_API_KEY" not in r.stdout, r.stdout)
 
+    def inner_claim():
+        try:
+            w = json.loads(mc("who", "--json").stdout or "{}")
+        except ValueError:
+            return {}
+        return next((c for c in w.get("sessions") or [] if c.get("kind") == "inner" and c.get("session") == "claude"), {})
+
     # --- send / read / keys ---
+    c0 = inner_claim()
     n1 = len(FakeAPI.got)
     r = mc("claude", "send", "Answer with the word PING only", "--wait", "--quiet", "4", "--timeout", "180")
+    renewed = False
+    for _ in range(30):
+        if (inner_claim().get("last_call") or 0) > (c0.get("last_call") or 0):
+            renewed = True
+            break
+        time.sleep(1)
+    check("the keeper's own probes (a new `metacomputer claude _probe` each, fresh SSH credentials) see the screen change "
+          "and renew its claim", bool(c0) and renewed, (c0, inner_claim()))
     m = msgs(n1)
     check("send --wait: the prompt went through the proxy with the dummy key in Authorization: Bearer (the oauth beta), "
           "and the answer is on the screen", r.returncode == 0 and f"PONG-{NONCE}" in r.stdout and m
@@ -349,6 +366,26 @@ def run(td, procs, port):
         check("... and the same Claude Code, with the same token, keeps answering through the proxy",
               r.returncode == 0 and f"PONG-{NONCE}" in r.stdout and same == tok
               and any(x["last"] == "still there? PING" and x["auth"] == "bearer-sub" for x in msgs(n5)), r.stdout[-600:])
+
+    # --- the keeper outlives its first credentials (run under SSH_AUTH=cert with a short SSH_CERT_TTL) ---
+    span = int(os.environ.get("MCOMP_TEST_KEEPER_SPAN_S") or 0)
+    if span:
+        t_end, k = time.time() + span, 0
+        while time.time() < t_end:
+            k += 1
+            mc("claude", "send", f"PING {k}", "--wait", "--quiet", "3", "--timeout", "60")
+            time.sleep(15)
+        mc("claude", "send", "PING final", "--wait", "--quiet", "3", "--timeout", "60")
+        poll = int(venv["MCOMP_KEEPER_POLL_S"])
+        renewed_lately = False
+        for _ in range(6 * poll):
+            c = inner_claim()
+            if c and time.time() - float(c.get("last_call") or 0) < 3 * poll + 5:
+                renewed_lately = True
+                break
+            time.sleep(1)
+        check(f"after {span} s (past its first SSH credentials' lifetime), the keeper still probes, renews and holds "
+              "the computer", renewed_lately and bool(inner_claim().get("active")), inner_claim())
 
     # --- an API key (x-api-key), a model, --skip-permissions ---
     n4 = len(FakeAPI.got)

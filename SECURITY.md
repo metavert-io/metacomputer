@@ -1548,10 +1548,13 @@ what that user can:
 - the inner Claude keeps working after those commands return, so a **keeper** on the Mac
   holds the computer for it. That's an owners claim of kind `inner`, in the name of the
   session that started it. The keeper looks once a minute (read-only, and not in the
-  action log, like `who`). It renews the claim whenever the inner Claude's screen has
-  changed, so other sessions are refused while the inner Claude works and for 10 minutes
-  after. `metacomputer who` and `claude status` show it. It ends with `claude stop`, the
-  inner Claude's exit, `metacomputer release` or the VM going away;
+  action log, like `who`). Each look is a new `metacomputer claude _probe` with SSH
+  credentials made for it (a fresh certificate under `SSH_AUTH=cert`). It renews the claim
+  whenever the inner Claude's screen has changed, so other sessions are refused while the
+  inner Claude works and for 10 minutes after. `metacomputer who` and `claude status` show
+  it. It ends with `claude stop`, the inner Claude's exit, `metacomputer release` or the VM
+  going away. Both `release` and the keeper's check-and-renew hold the owners lock, so a
+  released claim stays released;
 - `stop --revoke` revokes the token from the Mac even when the VM can't be reached or
   refuses, and keeps the session's record (and exits non-zero) until both are done, so
   running it again finishes the job;

@@ -157,7 +157,7 @@ def parse(argv):
          "token": None, "ttl": None, "model": None, "skip": False, "cwd": DEFAULT_WORKDIR, "show": False,
          "install": True, "claude_args": [], "text": None, "text_source": None, "enter": True, "wait": False,
          "timeout": 600, "quiet": 5, "lines": 40, "all": False, "keys": [], "again": False, "revoke": False}
-    if argv and (argv[0] in ACTIONS or argv[0] == "_keeper"):
+    if argv and (argv[0] in ACTIONS or argv[0] in ("_keeper", "_probe")):
         o["action"] = argv[0]
         argv = argv[1:]
     elif argv and argv[0] in ("-h", "--help", "help"):
@@ -171,7 +171,7 @@ def parse(argv):
                "read": {"--lines", "--all"},
                "wait": {"--timeout", "--quiet", "--lines"},
                "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"},
-               "_keeper": set()}[act]
+               "_keeper": set(), "_probe": set()}[act]
     allowed |= {"--session", "--json", "--override", "-h", "--help"}
     positional = []
     i = 0
@@ -933,9 +933,10 @@ def start_keeper(transport, o, rec):
     name of the Claude Code session that started it) and ends with it. None when it couldn't start: the session
     runs anyway, and the output says so."""
     try:
-        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--transport", str(len(transport)), *transport,
-                              "_keeper", "--session", o["session"]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        # No transport of its own: each probe gets fresh SSH credentials (probe_fresh).
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "_keeper", "--session", o["session"]],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
     except OSError:
         return None
     try:
@@ -981,11 +982,31 @@ def probe(transport, session):
     return parse_output(vm_shell.shown_bytes(st, "stdout"))[0], True
 
 
-def run_keeper(transport, o):
+def probe_fresh(session):
+    """The probe as a new `metacomputer claude _probe` each time, so bin/metacomputer makes the SSH credentials for
+    that connection afresh (under SSH_AUTH=cert, a new short-lived certificate), as every other path does: a
+    keeper outlives any one certificate. ({fields}, True), or ({}, False) when it couldn't ask the VM."""
+    me = os.environ.get("MCOMP_SELF")
+    if not me:
+        return {}, False
+    try:
+        p = subprocess.run([me, "claude", "_probe", "--session", session], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+        d = json.loads(p.stdout.decode("utf-8", "replace")[:65536] or "{}")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return {}, False
+    if p.returncode != 0 or not isinstance(d, dict) or d.get("ok") is not True or not isinstance(d.get("fields"), dict):
+        return {}, False
+    return {k: v for k, v in d["fields"].items()
+            if k in FIELD_RULES and isinstance(v, str) and FIELD_RULES[k].fullmatch(v)}, True
+
+
+def run_keeper(o):
     """Every KEEP_S: the session's record must still name this keeper and its claim must still exist (`claude stop`,
     a newer start or `metacomputer release` end it), and the VM must say the session still runs. A changed screen
     is the inner Claude working: the claim's time is renewed then, so it stays active while it works and for the
-    activity window after."""
+    activity window after. The claim is checked and rewritten under the owners lock, which `release` takes too,
+    so a released claim is never written back."""
     me, session = os.getpid(), o["session"]
 
     def leave(_signum=None, _frame=None):
@@ -1002,7 +1023,7 @@ def run_keeper(transport, o):
                 return 0
             if not os.path.exists(owners.claim_path(me)):
                 return 0
-            fields, ok = probe(transport, session)
+            fields, ok = probe_fresh(session)
             if not ok:
                 fails += 1
                 if fails >= KEEP_FAILS:
@@ -1011,19 +1032,19 @@ def run_keeper(transport, o):
             fails = 0
             if fields.get("state") != "running":
                 return 0
-            if fields.get("hash") != last:
-                try:
-                    with owners.lock():
-                        try:
-                            c = json.load(open(owners.claim_path(me)))
-                        except (OSError, ValueError):
-                            return 0          # released meanwhile
+            try:
+                with owners.lock():
+                    try:
+                        c = json.load(open(owners.claim_path(me)))
+                    except (OSError, ValueError):
+                        return 0              # released (or dropped by stop): gone for good
+                    if fields.get("hash") != last:
                         owners.write_claim(me, c.get("claude_pid"), c.get("cwd"), KEEP_TOOL, c.get("started"),
                                            kind="inner", sid=c.get("sid"),
                                            extra={"session": session, "vm": c.get("vm", "")})
-                    last = fields.get("hash")
-                except (OSError, TimeoutError):
-                    pass                      # the lock or the write failed: try again next time
+                        last = fields.get("hash")
+            except (OSError, TimeoutError):
+                pass                          # the lock or the write failed: try again next time
         return 0
     finally:
         owners.drop_claim(me)
@@ -1145,10 +1166,14 @@ def main(argv):
         else:
             print(f"metacomputer claude: {clean(str(e))} (metacomputer claude --help)", file=sys.stderr)
         return EXIT_USAGE
+    if o["action"] == "_keeper":
+        return run_keeper(o)
     if not transport:
         return show_failure(o, Failed(EXIT_FAILED, "no way to reach the VM (run it as metacomputer claude)"))
-    if o["action"] == "_keeper":
-        return run_keeper(transport, o)
+    if o["action"] == "_probe":       # for the keeper: one read-only probe over a connection made just now
+        fields, ok = probe(transport, o["session"])
+        print(json.dumps({"ok": ok, "fields": fields}))
+        return 0 if ok else EXIT_FAILED
     try:
         if o["action"] == "start":
             out = do_start(transport, o)

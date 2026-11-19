@@ -53,6 +53,11 @@ def skip(name, why):
 FAKE_VAULT = r'''#!/usr/bin/env python3
 import json, os, sys
 d = os.environ["FAKE_VAULT_DIR"]
+if sys.argv[1:2] == ["claude"]:   # `metacomputer claude ...` (the keeper's probes): a new run each time, like the real one
+    with open(os.path.join(d, "claude-runs.log"), "a") as f:
+        f.write(json.dumps(sys.argv[1:]) + "\n")
+    os.execv(os.environ["FAKE_PY"], [os.environ["FAKE_PY"], os.environ["FAKE_CLAUDE_PY"], "--transport", "2", "bash", "-c",
+                                     *sys.argv[2:]])
 with open(os.path.join(d, "argv.log"), "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 mode = open(os.path.join(d, "mode")).read().strip() if os.path.exists(os.path.join(d, "mode")) else "oauth"
@@ -259,7 +264,8 @@ def env_for(td, **extra):
                MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions"), MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys", "action-log"),
                MCOMP_VM_NAME="testvm", MCOMP_GUEST_USER="cua", MCOMP_SSH_PORT="1", XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
                MCOMP_SELF=os.path.join(td, "fake-vault"), FAKE_VAULT_DIR=os.path.join(td, "vault"),
-               FAKE_CLAUDE_SRC=os.path.join(td, "fake-claude"), MCOMP_SH_GRACE_S="5", MCOMP_KEEPER_POLL_S="1")
+               FAKE_CLAUDE_SRC=os.path.join(td, "fake-claude"), MCOMP_SH_GRACE_S="5", MCOMP_KEEPER_POLL_S="1",
+               FAKE_PY=sys.executable, FAKE_CLAUDE_PY=CLAUDE_PY)
     env.update({k: str(v) for k, v in extra.items()})
     return env
 
@@ -471,6 +477,15 @@ def keeper_checks(td, srec):
     check("metacomputer who names it: Claude Code inside the VM, its session, how to end it",
           "Claude Code inside the VM (metacomputer claude, session claude)" in w.stdout and "metacomputer claude stop" in w.stdout,
           w.stdout[-600:])
+    cmd = vc.owners.full_command(kpid)
+    runs = os.path.join(td, "vault", "claude-runs.log")
+    n_runs = lambda: sum(1 for x in open(runs) if json.loads(x) == ["claude", "_probe", "--session", "claude"]) \
+        if os.path.exists(runs) else 0   # noqa: E731
+    k0 = n_runs()
+    check("the keeper holds no SSH arguments of its own, and each probe is a new `metacomputer claude _probe` (so its "
+          "credentials, a certificate under SSH_AUTH=cert, are made for that connection)",
+          cmd.endswith("vm_claude.py _keeper --session claude") and "ssh" not in cmd and wait_for(lambda: n_runs() >= k0 + 2, 10),
+          (cmd[-200:], k0, n_runs()))
     before = c.get("last_call", 0)
     time.sleep(1.2)
     mc(td, "send", "keep me busy")
@@ -821,10 +836,27 @@ print(json.dumps(out))
 '''
 
 
+HOLD_LOCK = ("import sys, time; sys.path.insert(0, sys.argv[1]); import owners\n"
+             "with owners.lock():\n    open(sys.argv[2], 'w').close(); time.sleep(2.5)\n")
+
+
 def keeper_group(td):
     setup(td)
     set_mode(td, "oauth")
     keeper_end_checks(td)
+    # `release` waits for the owners lock, the one the keeper holds while it checks and renews its claim
+    flag = os.path.join(td, "locked")
+    holder = subprocess.Popen([sys.executable, "-c", HOLD_LOCK, os.path.join(LAB, "lib"), flag], env=env_for(td))
+    try:
+        wait_for(lambda: os.path.exists(flag), 10)
+        t0 = time.time()
+        r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "owners.py"), "release"], capture_output=True,
+                           text=True, env=env_for(td), timeout=60)
+        waited = time.time() - t0
+    finally:
+        holder.wait(10)
+    check("metacomputer release takes the owners lock (it waited for the holder), so a renewal can't write a released "
+          "claim back", r.returncode == 0 and waited >= 1.5, (waited, r.stdout + r.stderr))
 
 
 def guest_checks(td):
