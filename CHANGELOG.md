@@ -36,6 +36,8 @@ All notable changes to metacomputer are recorded here. The format follows
 - `secrets revoke` is answered at once while a question waits in the unlock terminal (it used to wait behind the question, and the token kept working meanwhile).
 
 ### Fixed
+
+- `metacomputer actions list` and anything that reads "the newest action log" order files by time and then by process ID as a number, so a log from a 5-digit process started in the same second as a 4-digit one is no longer taken for the older one.
 - `metacomputer learn bench` stops with the reason when a benchmark run is refused (another session using the test VM, the cost cap, a usage limit), and says how to pick it up again, instead of starting the second run and printing an empty comparison ("over the 0 tasks"); two runs with no task in common print no table.
 - `metacomputer learn approve` prints its summary once (`Lessons: 1 active in the MCP instructions, ...`), not "active in the MCP instructions" twice.
 - A desktop recording's key moments (the description file `record stop` writes, and `record moments`) no longer list calls that didn't run as if they did: a call the action log records as refused is marked `refused` (a guard on the Mac, or a shell run refused after its call was logged), and one that came back as an error, Cua Driver's own refusals in bounded mode included, is marked `error`.

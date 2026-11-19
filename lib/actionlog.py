@@ -254,10 +254,18 @@ def files(base, days=None):
     for day in sorted(os.listdir(base)):
         if day < cutoff or not os.path.isdir(os.path.join(base, day)):
             continue
-        for f in sorted(os.listdir(os.path.join(base, day))):
+        for f in sorted(os.listdir(os.path.join(base, day)), key=_order):
             if f.endswith(".jsonl"):
                 out.append(os.path.join(base, day, f))
     return out
+
+
+def _order(name):
+    """Files are TIME-PID.jsonl: order by time, then by the PID as a number, so a
+    5-digit PID started in the same second as a 4-digit one sorts after it."""
+    stem = name[:-6] if name.endswith(".jsonl") else name
+    t, _, pid = stem.partition("-")
+    return (t, 0, int(pid), name) if pid.isdigit() else (t, 1, 0, name)
 
 
 def load(path):
