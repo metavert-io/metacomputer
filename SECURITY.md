@@ -630,9 +630,10 @@ result with something to mark gets:
 - a tag at the end of each marked row of the tree, `⟦hub #N: hidden⟧`,
   `⟦hub #N: instruction-like⟧` or both, numbered as in the note;
 - a `metacomputer_hidden_text` field first in the structured result, with the same note
-  and items. Claude Code gives the model a result's structured part instead of its text
-  when there is one (seen in a headless session's transcript), so this field is what
-  Claude reads there.
+  and items, each with the hub's own words for what marked it (`marks`), which Claude
+  can repeat to you without repeating the page. Claude Code gives the model a result's
+  structured part instead of its text when there is one (seen in a headless session's
+  transcript), so this field is what Claude reads there.
 
 Nothing is removed, no visible text changes, and nothing in the page is followed or
 run: the hub measures and matches, and Claude decides. With `HIDDEN_TEXT=off` results
