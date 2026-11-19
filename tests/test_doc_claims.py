@@ -287,6 +287,35 @@ def claude_escaped():
     c = raw(VC)
     return ("isatty" not in c and 'clean(out["screen"])' in c and 'clean(f.extra["screen"])' in c
             and vm_claude.clean("a\x1b]52;c;QQ==\x07‮b") == "a\\x1b]52;c;QQ==\\x07\\u202eb")
+def function_text(name, rel="bin/metacomputer"):
+    """One shell function's source, as written."""
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), raw(rel), re.S | re.M)
+    if not m:
+        raise LookupError(f"{rel}: no function {name}")
+    return m.group(0)
+
+
+def record_to_host():
+    """Desktop recordings stream to the Mac unless RECORD_TO=guest: the default, the code's fallback, and the
+    streamed path writing on the Mac."""
+    rec = function_text("do_record")
+    return (D["RECORD_TO"] == "host" and 'local mode="${RECORD_TO:-host}"' in rec
+            and '"$SELF" _record-pipe' in rec and "recording.py\" save" in function_text("do_record_pipe")), D["RECORD_TO"]
+
+
+def stream_keeps_reserve():
+    """The Mac's half of a stream gets the free-space reserve, and stops on it."""
+    import recording
+    return ('--min-free-gb "${IMPORT_MIN_FREE_GB:-' + D["IMPORT_MIN_FREE_GB"] + '}"' in function_text("do_record_pipe")
+            and "IMPORT_MIN_FREE_GB" in raw("lib/recording.py") and callable(recording.cmd_save))
+
+
+def task_finish_keeps_turns():
+    """task start starts the copier; it copies every turn but the newest, once; task finish keeps those copies."""
+    sync = function_text("do_task_sync")
+    return ("task_sync_start" in function_text("do_task") and "--keep-existing recording/turn-" in function_text("do_task")
+            and '[ "$t" != "$last" ] && [ ! -e "$host/$t" ]' in sync
+            and "${TASK_SYNC_INTERVAL:-" + D["TASK_SYNC_INTERVAL"] + "}" in sync), D.get("TASK_SYNC_INTERVAL")
 
 
 def mb(n):
@@ -494,6 +523,25 @@ CLAIMS = [
      lambda m: fill_types_match()),
     ("docs/guide.md", r"Passwords filled by `metacomputer secrets` show as dots, but usernames and codes are visible",
      lambda m: fill_types_match()),
+    # Where recordings are while they record (bin/metacomputer do_record, do_record_pipe, the task copier, task
+    # finish; lib/recording.py save). A VM that turns hostile can erase only what's still inside it.
+    ("SECURITY.md", r"\| \*\*Desktop, `RECORD_TO=host`\*\* \(the default\) \| On the Mac: the VM encodes its screen and streams it",
+     lambda m: record_to_host()),
+    ("SECURITY.md", r"the copy stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB`, (\d+) GB by default",
+     lambda m: m[1] == D["IMPORT_MIN_FREE_GB"] and stream_keeps_reserve()),
+    ("SECURITY.md", r"the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds \((\d+)\), once, and `task finish` "
+                    r"never replaces it",
+     lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
+    ("SECURITY.md", r"`record start` warns while `RECORD_TO=guest` is in force",
+     lambda m: 'warn "RECORD_TO=guest:' in function_text("do_record")),
+    ("SECURITY.md", r"`record stop` still saves a streamed recording: it cuts the stream on the Mac at once",
+     lambda m: '[ "$path" = "(VM unreachable)" ] && waits=2' in function_text("do_record")),
+    ("README.md", r"streamed to your Mac as it records so a run that wipes the VM can't take it back",
+     lambda m: record_to_host()),
+    ("README.md", r"it streams to your Mac as it records \(`RECORD_TO=host`, the default\)", lambda m: record_to_host()),
+    ("docs/guide.md", r"A desktop recording streams to your Mac as it records \(`RECORD_TO=host`\)", lambda m: record_to_host()),
+    ("docs/guide.md", r"each finished step is copied to the Mac every (\d+) s, once, and `task finish` never replaces it",
+     lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),
     # Optional hardening: off by default (config/defaults.env and the code's own reading of an unset setting)
     ("SECURITY.md", r"This page covers three \*\*optional\*\* protections\. All are off by default",
      lambda m: hardening_off()),
@@ -1106,7 +1154,8 @@ def settings_tables():
 
 
 SECURITY_SETTINGS = ("ACTION_LOG", "ACTION_LOG_TEXT", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",
-                     "HIDDEN_TEXT", "MCP_HUB", "LESSONS", "SHARE_CLIPBOARD", "SHARE_AUDIO", "SHARE_ROSETTA")
+                     "HIDDEN_TEXT", "MCP_HUB", "LESSONS", "SHARE_CLIPBOARD", "SHARE_AUDIO", "SHARE_ROSETTA",
+                     "RECORD_TO", "TASK_SYNC_INTERVAL")
 FALLBACKS = (re.compile(r"\$\{(?:MCOMP_)?([A-Z][A-Z0-9_]+):-([^}$]+)\}"),
              re.compile(r"""\.get\(\s*["'](?:MCOMP_)?([A-Z][A-Z0-9_]+)["']\s*,\s*["']([^"']+)["']\s*\)"""),
              re.compile(r"""onoff\(\s*env\.get\(\s*["']MCOMP_([A-Z][A-Z0-9_]+)["']\s*\)\s*,\s*["']([^"']+)["']\s*\)"""))

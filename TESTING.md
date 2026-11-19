@@ -1069,6 +1069,13 @@ update the row with the doc's new wording. What it pins:
 - what recordings show of a filled login: the VM's fill puts a password only into a
   password field and never a username or code into one (secret-fill), and every doc that
   says passwords show as dots says usernames are visible;
+- where recordings are while they record: `RECORD_TO=host` in the defaults and as
+  `record start`'s fallback, streamed through `recording.py save` with the
+  `IMPORT_MIN_FREE_GB` reserve; the warning for `RECORD_TO=guest`; `record stop` cutting
+  the stream at once when the VM can't be reached; the task copier every
+  `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest, once, and `task finish`
+  keeping those copies (`--keep-existing`); every fallback for `RECORD_TO` and
+  `TASK_SYNC_INTERVAL` in the code is its default;
 - the optional hardening off by default (defaults.env and the code reading an unset
   setting), the hub and coordinate guard on, `VM_SHELL=auto` off while bounded,
   `SHELL_LOG=auto` logging when `ACTION_LOG=on` (called, not read), the 5-minute
