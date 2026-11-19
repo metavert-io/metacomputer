@@ -307,7 +307,7 @@ def run(td, procs):
           (ra.stderr, r.raw))
     # No tab comes back (the VM's to choose): find the Chrome the tool opened, as Claude would, and bind its tab.
     sess3 = sc.get("session") or "vmtest-rsl"
-    wins = [w for w in (h.call("list_windows", {}).structured.get("windows") or [])
+    wins = [w for w in (h.call("list_windows", {"session": sess3}).structured.get("windows") or [])
             if "chrom" in str(w.get("app_name", "")).lower()]
     b3 = h.call("get_browser_state", {"pid": (wins[0] if wins else {}).get("pid"),
                                       "window_id": (wins[0] if wins else {}).get("window_id"), "session": sess3}).structured
