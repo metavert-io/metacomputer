@@ -19,7 +19,8 @@ Each one is independent; turn on any of them in `config/local.env`. It also
 covers the shell channel, `metacomputer sh`: what it can reach, how bounded
 mode turns it off, and its optional logging; the hub, which applies the
 guards (one controller at a time, the Chrome guard, bounded mode, the coordinate
-guard) to every way in, through a socket only you can use; and the lessons
+guard) to every way in, through a socket only you can use; the live view and
+handoffs, where Claude gives the computer to you and waits; and the lessons
 channel (`metacomputer learn`), which can't carry text from the VM into future
 sessions.
 
@@ -328,6 +329,8 @@ the hub, and the hub applies, to each one:
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
+- a handoff ([below](#handing-the-computer-to-you-metacomputer-handoff)): while the user has the
+  computer, every acting call waits, from every client, the session that asked included;
 - the action log's notes (which client made each call) and the event stream.
 
 `metacomputer mcp` without `MCOMP_DIRECT_BRIDGE=1` is the same guarded bridge,
@@ -461,6 +464,73 @@ own checks.
   Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
   kept for the activity window after the last call even when that shell exits,
   and the same controller for later calls from the same terminal session.
+
+## The live view (`metacomputer view`)
+
+The VM runs a VNC server (x11vnc) for its desktop. cua-netgw forwards it to
+`127.0.0.1:VNC_PORT` on your Mac only, and the VM's firewall admits it only from
+the gateway. Lume's own VNC server, which listens on every interface, is never
+started.
+
+**The password** is random, 8 characters (VNC's own authentication uses at most
+8), made at each build and kept where `VNC_PASSWORD_STORE` says: the login
+Keychain (item `metacomputer-vnc`, account the VM's name), a 0600 file in
+`SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin.
+
+**`metacomputer view --open`**, on the Mac's own screen, reads the password from
+that store into a pipe, puts it on the clipboard (`pbcopy`'s input) and opens
+Screen Sharing at `vnc://127.0.0.1:PORT`. It's never in the link, an argument,
+the environment, a log, an event or the command's output. A detached helper
+that keeps only its SHA-256 empties the clipboard after `VIEW_CLIPBOARD_S`
+seconds (45), if the clipboard still holds the password then; whatever you
+copied meanwhile is left alone. Where it ends: while it's on the clipboard, any
+app you run can read it; a clipboard manager that keeps a history may keep a
+copy; Universal Clipboard can pass it to your other Apple devices nearby. Run
+from an SSH session, `view --open` touches nothing and says how to connect
+instead.
+
+**From another device.** The port stays on 127.0.0.1. `metacomputer view`
+prints an SSH tunnel. `view --tailnet` prints the `tailscale serve` command that
+would publish the port to your own tailnet, and its undo; metacomputer never
+runs it, since it changes your Mac's networking. Publishing it is your choice,
+and then every device your tailnet's access rules let reach this Mac can reach
+the port, guarded only by the VNC password (VNC's own authentication is weak, and
+VNC doesn't encrypt the session itself; Tailscale encrypts it between your
+devices). Prefer the foreground form, published only while it runs; undo the
+background form when you're done (`tailscale serve --tcp PORT off`).
+
+## Handing the computer to you (`metacomputer handoff`)
+
+When Claude reaches a step that's yours (a CAPTCHA or bot check, a sign-in you do
+yourself, a 2FA prompt the vault can't fill), the skill tells it to run
+`metacomputer handoff --why … --say "…"` and wait. That sends the `needs_you`
+notice (`--say` cleaned like every event) and writes a record,
+`RUN_DIR/owners/handoff.state` (0600), under the owners lock. While it's open:
+- the hub refuses every client's acting calls, the session that asked included,
+  with "Paused: the user has the computer" (code `user_has_computer`), and refuses
+  claims from `web` and the GUI tests; reads still work;
+- `metacomputer sh` refuses every run that isn't `--read-only`, with or without
+  `--override`;
+- `secrets fill`, `login` and `session load` refuse;
+- `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
+  unless you add `--override`; `release` doesn't end it.
+
+It ends with `handoff done` (you're finished; Claude carries on), `handoff
+cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
+most 2 hours), and each ending is an event. A record that can't be read (not
+valid, or a link in its place, which is never followed) counts as open for up to
+2 hours after it was written, so it fails closed; `handoff cancel` removes it.
+
+**What it is and isn't.** It's a pause, so Claude doesn't fight you for the
+mouse, and an honest handoff: metacomputer doesn't disguise its browser or try
+to get past bot checks, and the skill tells Claude never to (no other browser,
+mode or profile, no retrying in a loop). It isn't a barrier against a program
+running as you, which can run `handoff done`, remove the record, or use the raw
+driver connection. The Claude Code session that asked can't say "done" for you
+from its shell without a terminal (it can cancel its own request); another
+process running as you can. A call already running in the driver when the
+handoff opens finishes. Your `handoff done --note` reaches only Claude's output,
+never an event.
 
 ## The shell channel (`metacomputer sh`)
 

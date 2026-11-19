@@ -99,6 +99,15 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   is hostile here too: keep the refusal list, the mount-point rules, the folder watcher and the
   rule that keys reach rclone only in its environment. Guest-side changes need a rebuild, and a VM
   without `storage=1` in `SSH_DIR/guest-features` must keep refusing storage.
+- Human checks and the user's own steps: at a CAPTCHA or bot check, a sign-in the
+  user does or a 2FA prompt the vault can't fill, run `metacomputer handoff --why …
+  --say "…"` and wait (lib/handoff.py; the record is owners.py's, written under the
+  owners lock). While it's open every acting call waits, in the hub for every client
+  and in `sh`, fills and the lifecycle checks; never try to pass a check, switch
+  browsers or profiles to get around one, or run `handoff done` for the user. Live
+  view for the user: `metacomputer view --open` (the password goes on the clipboard,
+  never into argv, output, logs or events); `view --tailnet` only prints the command.
+  Tests: `python3 tests/test_handoff.py` (no VM) and test_hub.py's handoff checks.
 - Optional event stream (docs/events.md): `metacomputer notify` when blocked
   on the user; `metacomputer events sink …` only when the user asks (it
   decides what leaves the Mac). Off by default and best effort: an emitter
@@ -119,7 +128,8 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
 ## Useful commands
 
 ```bash
-metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view | where
+metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--tailnet] | where
+metacomputer handoff --why captcha|login|2fa|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
 metacomputer notify "TEXT" --why login --action "…" | events status|tail|sink list   # optional event stream
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
@@ -192,7 +202,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release` (no VM; `scripts/release.sh` runs exactly these),
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff` (no VM; `scripts/release.sh` runs exactly these),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
   `tests/test_chrome_guard.py`, `tests/test_vault_vm.py` and `tests/test_vm_claude_vm.py` (test VM only:

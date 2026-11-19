@@ -42,7 +42,8 @@ the plugin), then ask:
 
 Claude says which computer it's using before it acts, starts the VM if it isn't
 running, checks its own results and tells you where the evidence is. To watch it
-work, `metacomputer view` shows how to open the live desktop. More ideas:
+work, `metacomputer view --open` opens the live desktop in Screen Sharing, with
+its password on your clipboard. More ideas:
 [Prompt a computer into existence](#prompt-a-computer-into-existence).
 
 <details>
@@ -201,7 +202,7 @@ with Claude Code's normal tools.
   `get` move files.
 - **Sign-ins:** saved passwords and 2FA codes typed by the vault into page-mode
   Chrome, signed-in profiles sealed and restored, or you sign in yourself through
-  the live view.
+  the live view, in a handoff.
 - **API keys:** short-lived tokens for a proxy on your Mac that adds the real key.
 - **Claude inside the metacomputer:** `metacomputer claude` installs and starts
   Claude Code in the VM, signed in through that proxy (your subscription token or
@@ -217,8 +218,13 @@ with Claude Code's normal tools.
 - **Untrusted links and files:** `web open-untrusted` follows a link in a
   throwaway profile without clicking anything; suspicious files are read inside
   the VM.
-- **Watching and taking over:** the live view (`metacomputer view`), `inspect`,
-  checkpoints and `reset`.
+- **Watching and taking over:** the live view (`metacomputer view --open` opens
+  Screen Sharing with the password on your clipboard; `view` shows the SSH tunnel
+  from another device), `inspect`, checkpoints and `reset`.
+- **Handing it to you:** at a CAPTCHA or bot check, or a sign-in or 2FA prompt
+  that's yours to do, Claude runs `metacomputer handoff` instead of trying to get
+  past it. You get a notice, do that step in the live view and run
+  `metacomputer handoff done`; Claude's actions wait until then.
 - **Notifications and events:** `metacomputer notify` when Claude is blocked on
   you, and events to your phone (ntfy), Slack, an OpenTelemetry Collector or a
   SIEM, once you add a sink.
@@ -592,7 +598,8 @@ they're here for when you want to yourself.
 | --- | --- |
 | `start`, `stop`, `status` | Boot the VM (about 12 s), shut it down, check every layer |
 | `who`, `release` | Which session is using the VM; hand it over |
-| `view` | Watch or take over the live desktop |
+| `view [--open]` | Watch or take over the live desktop (`--open`: Screen Sharing, password on the clipboard) |
+| `handoff done`, `handoff cancel` | Hand the computer back to Claude after a step it handed you, or call it off |
 | `sh -c 'CMD'`, `put FILE`, `get PATH` | Bash in the VM; copy files in and out |
 | `web compare\|responsive\|a11y\|open-untrusted URL` | Browser checks that need no model |
 | `record start NAME`, `record stop` | Record the whole desktop |
@@ -635,6 +642,9 @@ lists every setting.
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the logs; `metacomputer restart` stops the VM and starts it again. |
 | A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `plugin:metacomputer:metacomputer`, or restart Claude Code. `./install.sh --only-claude` sets it up again. |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
+| "Paused: the user has the computer" | Claude handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
+| Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` puts it on the clipboard; paste it with Cmd+V. |
+| A site's "Verify you are human" check keeps failing | Sites with bot checks may refuse the VM's automated browser, even when you tick the box yourself: page-mode Chrome is driven through DevTools, which they detect. metacomputer doesn't disguise it, and Claude hands such checks to you rather than trying to get past them. If one keeps failing, do that step on your own computer. |
 | Chrome ignores typing | `metacomputer input-reset`. |
 | The vault says it's locked | Run `metacomputer secrets unlock` in your own terminal, and keep it open. |
 | The install stops | Fix what it names and run it again; finished steps are skipped and it never deletes a VM. |

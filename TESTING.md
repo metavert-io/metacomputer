@@ -526,6 +526,23 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
+- `python3 tests/test_handoff.py` (75 checks, about 1 min): `metacomputer handoff` and
+  `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
+  waiting command returns 0 with the user's note escaped), cancel (4), the time limit
+  (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
+  `c` and Ctrl-C at a terminal, the asking session refused "done" without a terminal,
+  one at a time, refused while another session acts (unless `--override` or a person at
+  a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and
+  invalid records failing closed for at most 2 hours, `sh` refused with or without
+  `--override`; its events (the `needs_you` notice cleaned of escapes, URL queries and
+  the live-view password; the note never in an event; the `handoff_*` types reserved;
+  the 5-minute repeat rule). The live view, with stand-ins for pbcopy, pbpaste, open,
+  launchctl, security, tailscale and the VM runner: the password from the file,
+  Keychain and command stores reaches the clipboard and no argument, output, log or
+  `vnc://` link; the clipboard is cleared after the delay only while it still holds the
+  password; over SSH or outside the screen session it prints instructions and touches
+  nothing; with the VM off it opens nothing; `--tailnet` prints the commands and runs
+  only `tailscale status`.
 - `python3 tests/test_owners.py` (14 checks): a `metacomputer sh` claim made outside
   Claude Code outlives its short-lived shell for the activity window, counts as the same
   controller from the same terminal session and as another one from a different
@@ -742,7 +759,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (187 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (198 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -787,6 +804,11 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   while another session acts (nothing reaches the driver; `needs_you.in_use`
   with the project), reads allowed, a call claims the computer for its holder,
   an acting call waits for the owners lock and a read doesn't;
+- a handoff (`metacomputer handoff`): while the user has the computer, Claude Code's,
+  `call`'s and a script's acting calls are refused (`user_has_computer`, nothing reaches
+  the driver, no `needs_you.in_use`), the session that asked included, and so is a
+  `web` claim; reads still work; a record that can't be read refuses too; once it's
+  done, or past its time limit, the same call acts;
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
 - bounded mode: `launch_app` by path; when the session ends its clients stay

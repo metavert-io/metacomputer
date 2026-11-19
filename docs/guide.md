@@ -139,7 +139,7 @@ package to add to `EXTRA_PACKAGES` (and the VM then needs a rebuild; see
 | --- | --- |
 | "Visit these ten competitors' pricing pages and put plan names and prices in a spreadsheet, with a screenshot of each page." | Firefox for the pages, Calc for the table, one screenshot each in the task folder. Page text is treated as data. |
 | "Download the March statements from the supplier portal, rename them by date, and zip them." | Sign-in from the vault (or by you, through the live view), downloads in Chrome, renaming and zipping through the shell. |
-| "Work through these 20 forms. Ping my phone if you hit a CAPTCHA or a sign-in, and when you're done." | With an ntfy sink set up, `metacomputer notify` reaches your phone when Claude is blocked, and the finished task is announced too. |
+| "Work through these 20 forms. Ping my phone if you hit a CAPTCHA or a sign-in, and when you're done." | With an ntfy sink set up, a CAPTCHA or sign-in pauses Claude with `metacomputer handoff`, which reaches your phone; you do that step in the live view and run `metacomputer handoff done`. The finished task is announced too. |
 | "Send my metacomputer events to our Slack." | Claude gives you the exact command for your own terminal, and the small relay from docs/events.md. Sinks only change from your terminal. |
 
 **Teach it a new app**
@@ -260,9 +260,11 @@ metacomputer browser mode page          # human | page | hybrid (page and hybrid
 - "Open a Chrome profile called shopping and wait while I sign in."
 
 The VM holds none of your accounts, and Claude never types your credentials
-itself. It opens the window and asks you to sign in through the live view
-(`metacomputer view`), or uses the vault (next section). Later sessions with
-the same profile name reuse its cookies until the VM is reset.
+itself. It opens the window and hands the computer to you to sign in
+(`metacomputer handoff --why login`; see
+[When Claude needs you](#when-claude-needs-you-handoffs-and-the-live-view)), or
+uses the vault (next section). Later sessions with the same profile name reuse
+its cookies until the VM is reset.
 
 ```bash
 metacomputer browser profiles                    # named Chrome profiles in the VM
@@ -692,15 +694,78 @@ running. Command lines are masked.
 
 - "Let me watch what you're doing." / "I'll take over for a minute."
 
-`metacomputer view` prints how to connect (`--open` opens Screen Sharing):
-- **On the Mac:** `open vnc://127.0.0.1:5977`.
-- **From another device:** tunnel over SSH (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`), then connect a VNC client to `localhost:5977`. If Tailscale is installed, `view` also prints the `tailscale serve` line that would publish it to your tailnet instead.
+- **On the Mac:** `metacomputer view --open`. Screen Sharing opens the live
+  view, and the live-view password is on your clipboard: paste it with Cmd+V
+  when Screen Sharing asks for a password (it isn't your Mac's password). It's
+  cleared from the clipboard after 45 seconds, if it's still there then
+  (`VIEW_CLIPBOARD_S` changes that). It's never put in the `vnc://` link,
+  on a command line, in a log or in an event.
+- **From another device:** `metacomputer view` prints the SSH tunnel
+  (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`); then connect a VNC client to
+  `localhost:5977`. Run `view --open` over SSH and it says this instead, since
+  that terminal isn't on the Mac's screen.
+- **Over your own tailnet:** `metacomputer view --tailnet` prints the
+  `tailscale serve` command that publishes the port to your tailnet, and its
+  undo. metacomputer never runs it: it changes your Mac's networking, so it's
+  your choice ([SECURITY.md](../SECURITY.md#the-live-view-metacomputer-view)).
 
-`view` also prints how to read the password, in your own terminal: from the
-login Keychain (item `metacomputer-vnc`) on an install made with get.sh or
-`./install.sh`, from `~/.ssh/metacomputer/vnc-pass` on an older one, or from
-your own secret store (see `VNC_PASSWORD_STORE` under
-[Configuration](commands.md#configuration)).
+The password comes from where your setup keeps it: the login Keychain (item
+`metacomputer-vnc`) on an install made with get.sh or `./install.sh`,
+`~/.ssh/metacomputer/vnc-pass` on an older one, or your own secret store (see
+`VNC_PASSWORD_STORE` under [Configuration](commands.md#configuration)).
+`metacomputer view` prints the command that reads it, for your own terminal.
+Clipboard managers that keep a history may keep a copy, and with Universal
+Clipboard your other Apple devices nearby can paste it too.
+
+### When Claude needs you: handoffs and the live view
+
+- "If you hit a CAPTCHA, hand it to me and wait."
+- "Let me sign in to the supplier portal myself."
+
+Some steps are yours: a CAPTCHA or "Verify you are human" check, a sign-in you'd
+rather do yourself, a 2FA prompt the vault can't fill. Claude never tries to get
+past them. It hands the computer to you and waits:
+
+1. It runs `metacomputer handoff --why captcha --say "Tick the 'Verify you are human' box on example.com"`.
+   That tells you through your event sinks (your phone, with an ntfy sink), and
+   Claude says the same in the chat.
+2. You run `metacomputer view --open`, paste the password (Cmd+V), and do the
+   step in the live view.
+3. You run `metacomputer handoff done` in your terminal (add
+   `--note "use the second account"` for anything Claude should know), or
+   `metacomputer handoff cancel` to call it off.
+4. Claude reads the screen again and carries on, or, after a cancel, stops and
+   asks you how to go on.
+
+While a handoff is open, Claude's actions on the desktop wait: the hub refuses
+every acting call, from every session and script, with "Paused: the user has
+the computer", and so do `metacomputer sh` (but `--read-only`), fills from the
+vault, and `stop`, `reset` and the other commands that check for other
+controllers (`--override` still goes ahead on those, as it does for another
+session). Claude can still read the screen. `metacomputer who` and
+`metacomputer handoff status` show it.
+
+It ends when you run `handoff done` or `handoff cancel`, or at its time limit
+(15 minutes unless Claude chose another, at most 2 hours); then the computer is
+Claude's again, and it asks you before trying anything else. If you ran
+`metacomputer handoff` yourself at a terminal, Enter there is "done", and `c`
+then Enter, or Ctrl-C, is "cancel". The Claude Code session that asked can't
+say "done" for you from its own shell; it can only call its handoff off.
+
+```bash
+metacomputer handoff status            # the open handoff, what to do, how long it has left
+metacomputer handoff done [--note T]   # you: finished, Claude carries on
+metacomputer handoff cancel            # you: called off, Claude stops and asks
+metacomputer view --open               # Screen Sharing, with the password on the clipboard
+```
+
+**Sites with bot checks.** Some sites refuse the VM's browser even when you tick
+the box yourself. Page-mode and hybrid Chrome are driven through Chrome's
+DevTools, and bot checks (Cloudflare Turnstile among them) look for that, so the
+check can keep failing or loop. metacomputer doesn't disguise its browser and
+Claude won't try to get around a check (no other browser, mode or profile, no
+retrying in a loop). If it keeps failing for you, do that step on your own
+computer, or ask Claude to skip that site.
 
 ### Hear from it: notifications and events
 
@@ -720,7 +785,7 @@ metacomputer events status               # sinks, the watcher, backlogs, failing
 metacomputer events tail                 # the local log
 ```
 
-- When Claude is blocked on you (a sign-in, a CAPTCHA, a 2FA code, a dialog it won't accept, an approval) it runs `metacomputer notify "what it needs" --why login --action "what to do"` and says the same in the chat.
+- When Claude is blocked on you (a dialog it won't accept, an approval) it runs `metacomputer notify "what it needs" --why approval --action "what to do"` and says the same in the chat. For a CAPTCHA or bot check, a sign-in you do yourself or a 2FA prompt it runs `metacomputer handoff` ([above](#when-claude-needs-you-handoffs-and-the-live-view)), which notifies you the same way and pauses Claude until you're done.
 - The rest is sent automatically: finished tasks and recordings, security signals (blocked connections, the Chrome guard, bounded-mode refusals, a failed `actions verify`, `open-untrusted` findings), the VM's lifecycle, and a health probe every 5 minutes.
 - Families: `needs_you`, `task`, `security`, `lifecycle`, and `actions` (every action-log record, for a SIEM; only when you name it). Filter per sink with `--families` and `--min-severity`.
 - Kinds: `webhook` (CloudEvents, signed with HMAC-SHA256), `otlp` (to an OpenTelemetry Collector, which can forward to S3, CloudWatch, Datadog, Splunk, Loki and others), `syslog` (RFC 5424 over TLS) and `ntfy`. Use `--header-env 'Authorization=Bearer $TOKEN'` so a token stays out of your shell history, and give sinks ingest-only tokens: the sink file is readable by anything running as you.
@@ -1031,6 +1096,8 @@ plain process that `start` and `stop` manage.
 - **A driver-launched Chrome closes** after 300 s without driver activity.
 - **No compositor.** With compositing on, window shadows shift the driver's pixel mapping by about 20 px, so it stays off.
 
+**Sites with bot checks:** some sites refuse the VM's automated browser, even when you tick "Verify you are human" yourself in the live view: page-mode and hybrid Chrome are driven through DevTools, which bot checks detect. Claude hands such steps to you (`metacomputer handoff`) and never tries to get around them; if a site keeps refusing, do that step on your own computer ([When Claude needs you](#when-claude-needs-you-handoffs-and-the-live-view)).
+
 **The shell channel** ([docs/shell.md](shell.md)):
 - Output comes back when the script ends, capped per stream; write big outputs to a file and `get` it.
 - `--read-only` is a promise, not a sandbox: it skips the one-controller check and leaves out the desktop's environment, but doesn't stop a script from changing things.
@@ -1078,6 +1145,10 @@ Problems during the install are in [install.md](install.md#troubleshooting).
 | The tools are listed twice (`mcp__metacomputer__*` and `mcp__plugin_metacomputer_metacomputer__*`) | Both the plugin and an older user-scope server are registered. `./install.sh --only-claude` removes the old one (or `--only-claude --no-plugin` removes the plugin). |
 | "The virtual computer is off" | `metacomputer start`, then try again. |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release` (or `--override` on the command). |
+| "Paused: the user has the computer" | A handoff is open (`metacomputer handoff status`): Claude waits for you. Run `metacomputer handoff done` when you've finished in the live view, or `handoff cancel`. `release` doesn't end it. |
+| Screen Sharing rejects the password | It wants the live-view password, not your Mac's. `metacomputer view --open` puts it on the clipboard for 45 s; paste it with Cmd+V. |
+| `view --open` says it needs the Mac's own screen | You're in over SSH. Run it in Terminal on the Mac's screen (in person, or through Screen Sharing or another remote-desktop app), or use the SSH tunnel `metacomputer view` prints, or `view --tailnet`. |
+| A site's "Verify you are human" check keeps failing or looping | The site is refusing the VM's automated browser (page-mode Chrome is driven through DevTools). Do that step on your own computer; Claude won't try to get around it ([Known limitations](#known-limitations)). |
 | Chrome ignores typing | `metacomputer input-reset`. |
 | An app stops answering (`atspi_app_unresponsive`) | It has to be closed (`kill_app`). `metacomputer desktop-restart` logs the desktop out and in, which closes every app. |
 | A call is refused as "outside the capability manifest" | Bounded mode is on. Choose another `DRIVER_PROFILE`, or allow it in your own `DRIVER_MANIFEST`. |

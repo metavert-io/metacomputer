@@ -92,7 +92,7 @@ Things to know:
 - **Throwaway by default.**
 - **Named profiles,** when the user asks for one (for example "use a profile called shopping"):
   1. Launch with `{mode: "isolated_named", name: "shopping"}`.
-  2. Sign in: fill it from the vault ([SECRETS.md](SECRETS.md)), or ask the user to sign in themselves through `metacomputer view`, in the window Claude opened.
+  2. Sign in: fill it from the vault ([SECRETS.md](SECRETS.md)), or hand the computer over so the user signs in themselves, in the window Claude opened: `metacomputer handoff --why login --say "Sign in to example.com in the Chrome window"` ([SKILL.md](SKILL.md), "When a step is the user's").
   3. Later sessions with the same name reuse the cookies.
 - **Never type the user's credentials yourself.** Use `metacomputer secrets` ([SECRETS.md](SECRETS.md)).
 - **Housekeeping:** `metacomputer browser profiles` lists named profiles, and `metacomputer browser profiles --delete NAME` deletes one (ask first). A VM reset removes them all.
@@ -122,7 +122,11 @@ Options: `--task NAME` puts the results in that task's folder, `--record` record
 
 ## When a page needs the user
 
-- **What counts:** a sign-in, a CAPTCHA, a one-time code, or an approval only they can give.
-- **Run `metacomputer notify`** with the site's name (not the link) and what to do, for example: `metacomputer notify "Sign-in needed at example.com to export the invoices" --why login --action "Sign in through the live view (metacomputer view), then tell Claude to carry on"`.
+- **Human checks:** a CAPTCHA, Cloudflare's "Verify you are human", "press and hold", a page that asks whether you're a robot, or one that loops back to the check. They're the user's. Hand over at once: `metacomputer handoff --why captcha --say "Tick the 'Verify you are human' box on example.com in Chrome"` ([SKILL.md](SKILL.md), "When a step is the user's"), and wait.
+  - Never tick, click, solve or wait out the check yourself, and never retry it in a loop.
+  - Never switch to the other browser, another mode (page, hybrid, human) or another profile to get past it, and never use a CAPTCHA service.
+  - Sites with bot checks may refuse the VM's automated browser even when the user ticks the box: page-mode and hybrid Chrome are driven through DevTools, and bot checks look for that. If it fails for the user too, say so plainly and ask how to go on (for example, they do that step on their own computer). Don't try another way in.
+- **A sign-in the user does themselves, or a 2FA prompt the vault can't fill:** `metacomputer handoff --why login|2fa --say "..."`.
+- **An approval only they can give, or a dialog you won't accept:** `metacomputer notify` with the site's name (not the link) and what to do, for example: `metacomputer notify "Approval needed to send the order at example.com" --why approval --action "Run metacomputer view --open (the live-view password goes on your clipboard: paste with Cmd+V), check the order, then tell Claude to carry on"`.
 - **Say it in your reply, then wait.** [EVENTS.md](EVENTS.md) has the `--why` values and what's sent automatically.
-- **Never solve a CAPTCHA through another service,** and never look for a way around a sign-in.
+- **Never look for a way around a sign-in.**
