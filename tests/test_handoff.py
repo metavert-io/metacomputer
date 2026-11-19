@@ -18,6 +18,8 @@ cleared after the delay only while it still holds that password; SSH sessions ge
 import json
 import os
 import pty
+import secrets
+import select
 import shutil
 import signal
 import stat
@@ -188,7 +190,7 @@ def basic_checks():
     ny = next(e for e in evs if e["type"] == "captcha")
     check("the needs_you notice is Claude's (origin claude), with the live-view command as its action",
           ny["origin"] == "claude" and ny["message"] == SAY and "metacomputer view --open" in ny["action"]
-          and "clipboard" in ny["action"] and "metacomputer handoff done" in ny["action"]
+          and "Cmd+V" in ny["action"] and "metacomputer handoff done" in ny["action"]
           and ny["data"].get("handoff_id") == h["id"], ny)
     dn = next(e for e in evs if e["type"] == "handoff_done")
     check("handoff_done: fixed words, the id and timing, has_note, never the note itself",
@@ -784,8 +786,26 @@ def fill_checks():
 # new change count; "clear N" empties it only if the count is still N. Every argument is logged (on one line).
 OSASCRIPT = r"""#!/bin/sh
 printf 'osascript %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$STUB/argv.log"
+if [ "$1" = "-e" ]; then
+  # The handoff's dialog (AppleScript: -e SCRIPT MODE TEXT SECONDS): its arguments exactly, then it "waits for
+  # the user" (dialog.answer) for up to 30 s, the way a dialog blocks.
+  printf '%s' "$2" > "$STUB/dialog.script"; printf '%s' "$4" > "$STUB/dialog.text"
+  printf '%s %s %s\n' "$3" "$5" "$#" > "$STUB/dialog.args"; echo $$ > "$STUB/dialog.pid"
+  i=0; while [ ! -f "$STUB/dialog.answer" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  cat "$STUB/dialog.answer" 2>/dev/null; echo done >> "$STUB/dialog.ended"; exit 0
+fi
 n=$(cat "$STUB/count" 2>/dev/null || echo 7)
 case "$5" in
+  # Screen Sharing's keychain item (lib/liveview.py's REMEMBER_JS: op server keychain label [tag app]); the password
+  # arrives on stdin and is kept in kc.pw (the stand-in's keychain).
+  save) cat > "$STUB/kc.pw"; echo "$7" > "$STUB/kc.used"
+        if [ -f "$STUB/kc.fail" ]; then echo "error created -25308"; exit 0; fi
+        if [ -f "$STUB/kc.item" ]; then how=updated; else how=created; fi
+        printf '%s\n%s\n%s\n%s\n' "$6" "$8" "$9" "${10}" > "$STUB/kc.item"; echo "$how" ;;
+  show) if [ -f "$STUB/kc.item" ]; then
+          printf '{"server": "%s", "port": "0", "label": "%s"}\n' "$(sed -n 1p "$STUB/kc.item")" "$(sed -n 2p "$STUB/kc.item")"
+        else echo null; fi ;;
+  forget) if [ -f "$STUB/kc.item" ]; then rm -f "$STUB/kc.item"; echo removed; else echo none; fi ;;
   copy) cat > "$STUB/clip"; n=$((n + 1)); echo "$n" > "$STUB/count"
         if [ -f "$STUB/race" ]; then echo raced; else echo "$n"; fi ;;
   clear) echo "clear $6 at $n" >> "$STUB/clears.log"
@@ -797,14 +817,15 @@ STUBS = {
     "pbpaste": 'echo "pbpaste $*" >> "$STUB/argv.log"; cat "$STUB/clip" 2>/dev/null',
     "open": 'echo "open $*" >> "$STUB/argv.log"',
     "launchctl": 'echo "launchctl $*" >> "$STUB/argv.log"; cat "$STUB/manager" 2>/dev/null || echo Aqua',
-    "security": ('echo "security $*" >> "$STUB/argv.log"; case " $* " in *" -w "*) cat "$STUB/keychain" ;; esac'),
+    "security": ('echo "security $*" >> "$STUB/argv.log"; case " $* " in *" -w "*) cat "$STUB/keychain" ;; esac; '
+                 'case "$1" in login-keychain) [ -f "$STUB/kcpath" ] && printf \'    "%s"\\n\' "$(cat "$STUB/kcpath")" ;; esac'),
     "tailscale": ('echo "tailscale $*" >> "$STUB/argv.log"; '
                   'case "$1" in status) echo \'{"Self": {"DNSName": "box.example-tailnet.ts.net."}}\' ;; esac'),
 }
 
 
-def view_setup():
-    vd = os.path.join(TD, "view")
+def view_setup(name="view"):
+    vd = os.path.join(TD, name)
     stub = os.path.join(vd, "stub")
     os.makedirs(stub)
     for name, body in STUBS.items():
@@ -846,7 +867,7 @@ def everything_but_clip(vd):
     out = []
     for root, _, files in os.walk(vd):
         for f in files:
-            if f not in ("clip", "keychain", "vnc-pass", "secret.txt", "count"):
+            if f not in ("clip", "keychain", "vnc-pass", "secret.txt", "count", "kc.pw"):
                 out.append(read(os.path.join(root, f)))
     return "\n".join(out)
 
@@ -908,7 +929,7 @@ def view_checks():
     r = view(vd, stub, lume, ssh, "--open", store="keychain", clear=0)
     sec = [l for l in read(argv).splitlines() if l.startswith("security ")]
     check("the Keychain store: read with security -w into the pipe, onto the clipboard", r.returncode == 0
-          and read(clip) == "Kc9Pw4Lm" and sec and "-s metacomputer-vnc -a hvtest -w" in sec[0]
+          and read(clip) == "Kc9Pw4Lm" and any("-s metacomputer-vnc -a hvtest -w" in x for x in sec)
           and "Kc9Pw4Lm" not in read(argv) + r.stdout + r.stderr, (sec, r.stdout, r.stderr))
     check("--clear-after 0 says nothing about clearing, and leaves it", "cleared" not in r.stdout
           and read(clip) == "Kc9Pw4Lm", r.stdout)
@@ -976,6 +997,368 @@ def view_checks():
     check("no password: exit 1", r.returncode == 1)
 
 
+# --- Screen Sharing's remembered password (view, lib/liveview.py remember) -----------------------------------
+def view_tty(vd, stub, lume, ssh, *args, answer=None, store="file", extra_cfg="", **extra):
+    """bin/metacomputer view at a terminal (stdin and stdout a pty): answers the question with `answer` when it's
+    asked. Returns (exit status, everything the terminal showed, whether the question was asked)."""
+    cfg = os.path.join(vd, "test.env")
+    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
+                         f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
+                         f'VNC_PASSWORD_STORE={store}\n{extra_cfg}')
+    e = env(MCOMP_CONFIG=cfg, STUB=stub, PATH=stub + os.pathsep + os.environ.get("PATH", ""),
+            MCOMP_VIEW_CLIPBOARD_S="0", **extra)
+    for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
+        e.pop(k, None)
+    m, s = pty.openpty()
+    p = subprocess.Popen([os.path.join(LAB, "bin", "metacomputer"), "view"] + list(args), env=e, stdin=s, stdout=s,
+                         stderr=s)
+    os.close(s)
+    buf, asked, end = b"", False, time.time() + 60
+    while time.time() < end:
+        try:
+            ready, _, _ = select.select([m], [], [], 0.2)
+        except (OSError, ValueError):
+            break
+        if ready:
+            try:
+                chunk = os.read(m, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            buf += chunk
+            if not asked and b"Save it? [Y/n]" in buf:
+                asked = True
+                os.write(m, (answer if answer is not None else "\n").encode())
+        elif p.poll() is not None:
+            break
+    p.wait(timeout=30)
+    os.close(m)
+    return p.returncode, buf.decode("utf-8", "replace"), asked
+
+
+def remember_checks():
+    print("view --open: Screen Sharing's remembered password (stand-ins for osascript and security)")
+    if os.stat("/dev/console").st_uid != os.getuid():
+        print("SKIP the remembered password's checks: this Mac's screen isn't this user's session right now")
+        return
+    vd, stub, lume, ssh = view_setup("remember")
+    clip, argv, item = os.path.join(stub, "clip"), os.path.join(stub, "argv.log"), os.path.join(stub, "kc.item")
+    open(os.path.join(ssh, "vnc-pass"), "w").write(VNC_PW + "\n")
+    os.chmod(os.path.join(ssh, "vnc-pass"), 0o600)
+    fake_kc = os.path.join(vd, "login.keychain-db")
+    open(fake_kc, "w").close()
+    open(os.path.join(stub, "kcpath"), "w").write(fake_kc)
+    label = "metacomputer live view (127.0.0.1:59871)"
+
+    def lines(prefix):
+        return [x for x in read(argv).splitlines() if x.startswith(prefix)]
+
+    def clipped():
+        return any(" copy" in x and "JavaScript" in x for x in lines("osascript "))
+
+    open(argv, "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", answer="\n")
+    saved = read(item).splitlines()
+    check("the first time, at a terminal: it asks; Enter is yes", asked and rc == 0, (rc, out))
+    check("…the password goes to the keychain item on osascript's stdin, for Screen Sharing's address",
+          read(os.path.join(stub, "kc.pw")) == VNC_PW and saved[:2] == ["127.0.0.1:59871", label]
+          and saved[2].startswith("mcomp-") and saved[3] == "/System/Applications/Utilities/Screen Sharing.app"
+          and read(os.path.join(stub, "kc.used")).strip() == fake_kc, (saved, read(os.path.join(stub, "kc.used"))))
+    check("…the login keychain's path comes from security login-keychain, and nothing else is asked of security",
+          lines("security ") == ["security login-keychain"] * len(lines("security ")) and lines("security "),
+          lines("security "))
+    check("…then Screen Sharing opens with nothing to paste: no clipboard", "Saved the live-view password" in out
+          and "nothing to paste" in out and not clipped() and lines("open ") == ["open vnc://127.0.0.1:59871"],
+          (out, lines("open ")))
+    check("…and the password is in no argument, no output and no log", VNC_PW not in read(argv) and VNC_PW not in out
+          and VNC_PW not in everything_but_clip(vd), out)
+    tag1 = saved[2]
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--open")
+    check("once saved, view --open without a terminal brings it up to date in place (a new tag), no question",
+          r.returncode == 0 and read(item).splitlines()[2] != tag1 and "Save it?" not in r.stdout
+          and "nothing to paste" in r.stdout and not clipped() and read(os.path.join(stub, "kc.pw")) == VNC_PW,
+          (r.stdout, r.stderr))
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--open", "--no-remember")
+    check("--no-remember: the clipboard this once, the keychain untouched", r.returncode == 0 and clipped()
+          and not any(" save " in x for x in lines("osascript ")) and "clipboard" in r.stdout, (r.stdout, r.stderr))
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--open", extra_cfg="VIEW_REMEMBER=off\n")
+    check("VIEW_REMEMBER=off with one saved earlier: not touched, says --forget removes it, the clipboard instead",
+          r.returncode == 0 and clipped() and not any(" save " in x for x in lines("osascript "))
+          and "view --forget" in r.stdout, r.stdout)
+    r = view(vd, stub, lume, ssh, "--forget")
+    check("--forget removes it (and says so)", r.returncode == 0 and not os.path.exists(item)
+          and "Removed the live-view password" in r.stdout, (r.stdout, r.stderr))
+    r = view(vd, stub, lume, ssh, "--forget")
+    check("--forget with none: says there's none", r.returncode == 0 and "has no live-view password" in r.stdout,
+          r.stdout)
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--open")
+    check("no terminal and nothing saved (Claude, a script, the dialog's button): nothing saved, the clipboard, and "
+          "a hint", r.returncode == 0 and not os.path.exists(item) and clipped()
+          and "metacomputer view --remember" in r.stdout and "Save it?" not in r.stdout, r.stdout)
+    r = view(vd, stub, lume, ssh, "--remember")
+    check("view --remember without a terminal is refused: it's the user's to run", r.returncode != 0
+          and "yours to run" in r.stderr and not os.path.exists(item), (r.returncode, r.stderr))
+    open(argv, "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", answer="n\n")
+    cfg_now = read(os.path.join(vd, "test.env"))
+    check("a no: nothing saved, VIEW_REMEMBER=off written to the settings, the clipboard", asked and rc == 0
+          and not os.path.exists(item) and "VIEW_REMEMBER=off" in cfg_now and "not asked again" in out and clipped(),
+          (out, cfg_now))
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", extra_cfg="VIEW_REMEMBER=off\n")
+    check("…and with VIEW_REMEMBER=off it isn't asked again", rc == 0 and not asked and not os.path.exists(item), out)
+    r = view(vd, stub, lume, ssh, "--open", extra_cfg="VIEW_REMEMBER=on\n")
+    check("VIEW_REMEMBER=on: saved without a question, even without a terminal", r.returncode == 0
+          and read(item).splitlines()[:2] == ["127.0.0.1:59871", label] and "nothing to paste" in r.stdout, r.stdout)
+    os.remove(item)
+    open(argv, "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember")
+    check("view --remember at a terminal: saved, no question, nothing opened", rc == 0 and not asked
+          and os.path.exists(item) and not lines("open ") and "view --open" in out, (rc, out))
+    open(os.path.join(stub, "kc.fail"), "w").close()
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--open")
+    os.remove(os.path.join(stub, "kc.fail"))
+    check("a keychain that won't take it (locked): says why, and the clipboard instead", r.returncode == 0
+          and clipped() and "locked" in r.stderr and "clipboard" in r.stdout, (r.stdout, r.stderr))
+    os.remove(item)
+    open(argv, "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, answer="\n")
+    check("plain view at a terminal on the Mac's screen opens the live view (asking first)", rc == 0 and asked
+          and lines("open ") == ["open vnc://127.0.0.1:59871"] and os.path.exists(item), (rc, out))
+    open(argv, "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, SSH_CONNECTION="10.0.0.2 5000 10.0.0.1 22")
+    check("plain view over SSH, even at a terminal: how to connect, nothing opened or asked", rc == 0 and not asked
+          and "ssh -N -L 59871:127.0.0.1:59871" in out and not lines("open ") and not lines("osascript "), out)
+    r = view(vd, stub, lume, ssh, "--print")
+    check("view --print: how to connect, nothing opened", r.returncode == 0 and "ssh -N -L 59871" in r.stdout
+          and not lines("open "), r.stdout)
+    for bad in (["--open", "--tailnet"], ["--remember", "--no-remember"], ["--tailnet", "--remember"]):
+        r = view(vd, stub, lume, ssh, *bad)
+        check(f"view {' '.join(bad)}: a usage error", r.returncode != 0 and "usage" in r.stderr, r.stderr)
+
+
+def keychain_checks():
+    """lib/liveview.py's REMEMBER_JS with the real osascript and Security framework, in a keychain made for this test
+    inside its temporary folder (HOME too, so not even the keychain search list changes). The login keychain is
+    never touched: `security` is a stand-in that answers login-keychain with the test keychain and refuses the rest,
+    and nothing here reads a password back."""
+    print("Screen Sharing's item in a throwaway keychain (real osascript and Security framework)")
+    real = "/usr/bin/security"
+    if sys.platform != "darwin" or not os.path.exists(real) or not shutil.which("osascript"):
+        print("SKIP: needs macOS's security and osascript")
+        return
+    kd = os.path.join(TD, "kc")
+    home, stub = os.path.join(kd, "home"), os.path.join(kd, "stub")
+    for d in (home, stub):
+        os.makedirs(d, mode=0o700)
+    kc = os.path.join(kd, "test.keychain")
+    pwfile = os.path.join(kd, "kc-pass")
+    fd = os.open(pwfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, secrets.token_hex(16).encode())
+    os.close(fd)
+    kenv = env(HOME=home)
+
+    def search_list():
+        r = subprocess.run([real, "list-keychains", "-d", "user"], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL, env=env())
+        return r.stdout
+    before = search_list()
+    r = subprocess.run([real, "-i"], input=f'create-keychain -p {read(pwfile)} "{kc}"\n', capture_output=True,
+                       text=True, timeout=60, env=kenv)
+    if not os.path.isfile(kc):
+        print(f"SKIP: couldn't make a throwaway keychain ({r.stderr.strip()[:200]})")
+        return
+    try:
+        subprocess.run([real, "set-keychain-settings", kc], capture_output=True, timeout=30, env=kenv,
+                       stdin=subprocess.DEVNULL)
+        with open(os.path.join(stub, "security"), "w") as f:
+            f.write('#!/bin/sh\necho "$*" >> "%s/calls"\ncase "$1" in login-keychain) printf \'    "%%s"\\n\' "%s" ;; '
+                    '*) echo "the test\'s security stand-in refuses: $1" >&2; exit 99 ;; esac\n' % (stub, kc))
+        os.chmod(os.path.join(stub, "security"), 0o755)
+        senv = env(HOME=home, PATH=stub + os.pathsep + os.environ.get("PATH", ""))
+        lv = [sys.executable, os.path.join(LAB, "lib", "liveview.py")]
+        fake = "Tk" + secrets.token_hex(3)
+
+        def lvrun(*a, data=None):
+            return subprocess.run(lv + list(a), input=data, capture_output=True, text=True, timeout=60, env=senv,
+                                  stdin=None if data is not None else subprocess.DEVNULL)
+        r = lvrun("remember", "--port", "59871", data=fake + "\n")
+        check("remember: the item is created in the keychain it was given", r.returncode == 0
+              and r.stdout.strip() == "created", (r.returncode, r.stdout, r.stderr))
+        r = lvrun("remembered", "--port", "59871", "--json")
+        a = json.loads(r.stdout or "{}") if r.stdout.strip().startswith("{") else {}
+        check("its attributes are Screen Sharing's key for vnc://127.0.0.1:59871: server 127.0.0.1:59871, port 0, "
+              "type 'vncl', no account; metacomputer's label and a one-time tag", r.returncode == 0
+              and a.get("server") == "127.0.0.1:59871" and a.get("port") == "0" and a.get("type") == "1986945900"
+              and a.get("account") is None and a.get("label") == "metacomputer live view (127.0.0.1:59871)"
+              and str(a.get("comment", "")).startswith("mcomp-"), (r.returncode, r.stdout, r.stderr))
+        tag1 = a.get("comment")
+        r = lvrun("remember", "--port", "59871", data="Ot" + secrets.token_hex(3) + "\n")
+        a2 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
+        check("remember again: updated in place (the same key, a new tag)", r.returncode == 0
+              and r.stdout.strip() == "updated" and a2.get("comment") not in (None, tag1), (r.stdout, r.stderr, a2))
+        r = lvrun("remembered", "--port", "59872")
+        check("another port isn't that item (exit 1)", r.returncode == 1, (r.returncode, r.stderr))
+        r = lvrun("forget", "--port", "59871")
+        r2 = lvrun("remembered", "--port", "59871")
+        r3 = lvrun("forget", "--port", "59871")
+        check("forget removes it, so there was exactly one; a second forget finds none", r.stdout.strip() == "removed"
+              and r2.returncode == 1 and r3.stdout.strip() == "none", (r.stdout, r.stderr, r2.returncode, r3.stdout))
+        calls = read(os.path.join(stub, "calls")).split("\n")
+        check("security was asked only for the login keychain's path (no find, dump or -w)",
+              set(c for c in calls if c) == {"login-keychain"}, calls)
+        check("the password never reached an argument or the output", fake not in json.dumps(calls) + r.stdout)
+    finally:
+        subprocess.run([real, "delete-keychain", kc], capture_output=True, timeout=30, env=kenv,
+                       stdin=subprocess.DEVNULL)
+    check("the throwaway keychain is gone and the user's keychain search list is as it was",
+          not os.path.exists(kc) and search_list() == before and kc not in before, search_list())
+
+
+# --- the handoff's dialog (INTERACTIVE_PROMPTS) --------------------------------------------------------------
+def dialog_checks():
+    print("handoff's dialog: INTERACTIVE_PROMPTS, the text as data, Open live view (a stand-in osascript)")
+    if os.stat("/dev/console").st_uid != os.getuid():
+        print("SKIP the dialog's checks: this Mac's screen isn't this user's session right now")
+        return
+    vd, stub, lume, ssh = view_setup("dialog")
+    open(os.path.join(ssh, "vnc-pass"), "w").write(VNC_PW + "\n")
+    os.chmod(os.path.join(ssh, "vnc-pass"), 0o600)
+    cfg = os.path.join(vd, "test.env")
+    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
+                         f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
+                         f'VNC_PASSWORD_STORE=file\n')
+    path = stub + os.pathsep + os.environ.get("PATH", "")
+    argv = os.path.join(stub, "argv.log")
+
+    def dfile(name):
+        return read(os.path.join(stub, name))
+
+    def reset_stub():
+        for f in ("dialog.script", "dialog.text", "dialog.args", "dialog.pid", "dialog.answer", "dialog.ended"):
+            try:
+                os.remove(os.path.join(stub, f))
+            except FileNotFoundError:
+                pass
+        open(argv, "w").close()
+
+    def opened(say, prompts="on", **extra):
+        clear()
+        reset_stub()
+        p = start("--why", "captcha", "--say", say, "--timeout", "120", MCOMP_INTERACTIVE_PROMPTS=prompts,
+                  MCOMP_CONFIG=cfg, STUB=stub, PATH=path, MCOMP_VIEW_CLIPBOARD_S="0", **extra)
+        wait_open()
+        return p
+
+    def wait_for(fn, timeout=10):
+        end = time.time() + timeout
+        while time.time() < end:
+            if fn():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def end_it(p):
+        run("cancel", claude=None)
+        return finish(p)
+
+    p = opened(SAY, prompts=None)
+    time.sleep(1.5)
+    rc, o, e = end_it(p)
+    check("INTERACTIVE_PROMPTS unset (off): no dialog, and the output says how to open the live view",
+          not dfile("dialog.args") and "metacomputer view --open" in o and "A dialog" not in o, o)
+    p = opened(SAY, prompts="off")
+    time.sleep(1.5)
+    rc, o, e = end_it(p)
+    check("INTERACTIVE_PROMPTS=off: no dialog either", not dfile("dialog.args") and "A dialog" not in o, o)
+
+    nasty = ('Tick "Verify" \\ then " & (do shell script "touch ' + os.path.join(vd, "canary") + '") & " '
+             'end run tell application "Finder" to quit -e x')
+    p = opened(nasty)
+    shown = wait_for(lambda: dfile("dialog.args"))
+    t0 = time.time()
+    rc, o, e = end_it(p)
+    check("on: a dialog is shown, and handoff says so", shown and "A dialog on the Mac's screen" in o, (o, e))
+    check("…handoff didn't wait for it: it ended as soon as the handoff did, while the dialog was still up",
+          rc == 4 and time.time() - t0 < 10, rc)
+    check("…osascript got the fixed script, then show, the --say text exactly as data, and the seconds left",
+          dfile("dialog.script") == handoff.DIALOG_SCRIPT and dfile("dialog.text") == handoff.dialog_text(nasty)
+          and dfile("dialog.args").split()[0] == "show" and dfile("dialog.args").split()[2] == "5"
+          and 1 <= int(dfile("dialog.args").split()[1]) <= 120, (dfile("dialog.args"), dfile("dialog.text")))
+    check("…and the dialog is taken down when the handoff ends", wait_for(lambda: dfile("dialog.pid") and not
+                                                                           pid_alive(int(dfile("dialog.pid"))), 8))
+    r = subprocess.run(["osascript", "-e", handoff.DIALOG_SCRIPT, "compose", handoff.dialog_text(nasty), "5"],
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    check("the real osascript, in the script's compose mode (no dialog): the text comes back verbatim after "
+          "\"Claude needs you: \", and nothing in it ran (quotes, backslashes, do shell script, end run, tell)",
+          r.returncode == 0 and r.stdout.rstrip("\n") == "Claude needs you: " + handoff.dialog_text(nasty)
+          and not os.path.exists(os.path.join(vd, "canary")), (r.returncode, r.stdout, r.stderr))
+    long_say = "x" * 600
+    check("the dialog's text is cleaned and capped (240 characters)", len(handoff.dialog_text(long_say)) == 240
+          and handoff.dialog_text("a\x1b[31mb\nc") == "a [31mb c", handoff.dialog_text("a\x1b[31mb\nc"))
+
+    p = opened(SAY)
+    wait_for(lambda: dfile("dialog.args"))
+    open(os.path.join(stub, "dialog.answer"), "w").write("Open live view\n")
+    got = wait_for(lambda: "open vnc://127.0.0.1:59871" in read(argv), 30)
+    rc, o, e = end_it(p)
+    check("Open live view runs metacomputer view --open (Screen Sharing at the live view; no terminal, so the "
+          "clipboard here, nothing saved)", got and not os.path.exists(os.path.join(stub, "kc.item"))
+          and read(os.path.join(stub, "clip")) == VNC_PW, read(argv)[-400:])
+    check("…and the password stays out of every argument and log", VNC_PW not in read(argv)
+          and VNC_PW not in everything_but_clip(vd))
+    p = opened(SAY)
+    wait_for(lambda: dfile("dialog.args"))
+    open(os.path.join(stub, "dialog.answer"), "w").write("Later\n")
+    wait_for(lambda: dfile("dialog.ended"))
+    time.sleep(1)
+    rc, o, e = end_it(p)
+    check("Later: nothing is opened", "open vnc://" not in read(argv), read(argv)[-300:])
+
+    p = opened(SAY, SSH_CONNECTION="10.0.0.2 5000 10.0.0.1 22")
+    time.sleep(1.5)
+    rc, o, e = end_it(p)
+    check("over SSH: no dialog", not dfile("dialog.args") and "A dialog" not in o, o)
+    open(os.path.join(stub, "manager"), "w").write("Background\n")
+    p = opened(SAY)
+    time.sleep(1.5)
+    rc, o, e = end_it(p)
+    os.remove(os.path.join(stub, "manager"))
+    check("outside the screen session (launchctl: Background): no dialog", not dfile("dialog.args"), o)
+    clear()
+    reset_stub()
+    m, s = pty.openpty()
+    p = start("--why", "captcha", "--say", SAY, stdin=s, claude=None, MCOMP_INTERACTIVE_PROMPTS="on",
+              MCOMP_CONFIG=cfg, STUB=stub, PATH=path)
+    os.close(s)
+    wait_open()
+    time.sleep(1.5)
+    os.write(m, b"c\n")
+    rc, o, e = finish(p)
+    os.close(m)
+    check("a handoff the person at this terminal opened: no dialog", not dfile("dialog.args") and rc == 4, (rc, o))
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        st = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return bool(st.strip()) and not st.strip().startswith("Z")
+
+
+
 def main():
     try:
         basic_checks()
@@ -992,6 +1375,9 @@ def main():
         web_cleanup_checks()
         fill_checks()
         view_checks()
+        remember_checks()
+        keychain_checks()
+        dialog_checks()
     finally:
         clear()
         shutil.rmtree(TD, ignore_errors=True)

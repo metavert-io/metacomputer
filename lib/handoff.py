@@ -18,6 +18,12 @@ and waits:
                                     lock is taken shared on the caller's descriptor N and kept for the caller
                                     (bin/metacomputer's fills, session loads and input-reset)
 
+With INTERACTIVE_PROMPTS=on (off by default: dialogs that wait for the user), opening one for Claude also shows a
+dialog on the Mac's screen, "Claude needs you: <--say>", with Open live view (runs `metacomputer view --open`) and
+Later. A detached helper (handoff.py _dialog ID) shows it and takes it down when the handoff ends; the text reaches
+osascript as an argument of a fixed script, never as part of one. Not over SSH, not without the user's screen
+session, and not when the person at this terminal opened the handoff.
+
 At a terminal, Enter where `handoff` waits is "done", and c then Enter (or Ctrl-C) is "cancel".
 
 Exit status of the commands that wait: 0 done, 4 cancelled, 124 time limit (the computer is Claude's again),
@@ -54,12 +60,26 @@ CODES = {"done": EXIT_DONE, "cancelled": EXIT_CANCELLED, "timed_out": EXIT_TIME_
 EVENT_TYPES = {"done": "handoff_done", "cancelled": "handoff_cancelled", "timed_out": "handoff_timed_out"}
 SUBCOMMANDS = ("done", "cancel", "wait", "status", "guard")
 # The live view, the way every "needs you" message says it (skills/metacomputer/EVENTS.md uses the same words).
-LIVE_VIEW = ("Run `metacomputer view --open` on your Mac: Screen Sharing opens the live view, and the live-view "
-             "password is on your clipboard (paste it with Cmd+V when it asks; it isn't your Mac's password).")
+LIVE_VIEW = ("Open the live view: run `metacomputer view --open` on your Mac. Screen Sharing connects with the "
+             "live-view password it remembers, or the password is on your clipboard (paste it with Cmd+V when it "
+             "asks; it isn't your Mac's password).")
 # The needs_you event's action (at most 300 characters after cleaning).
-ACTION = ("Run `metacomputer view --open` (it puts the live-view password on your clipboard: paste with Cmd+V), "
+ACTION = ("Run `metacomputer view --open` (Screen Sharing; paste the live-view password with Cmd+V if it asks), "
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
 SPACES = re.compile(r"\s+")
+# The dialog (INTERACTIVE_PROMPTS=on). argv: mode ("show"; "compose" returns the text instead, for the tests), the
+# --say text, seconds until it gives up. The text is data: AppleScript never parses it.
+DIALOG_SCRIPT = '''on run argv
+	set {mode, msg, secs} to {item 1 of argv, item 2 of argv, (item 3 of argv) as integer}
+	set txt to "Claude needs you: " & msg
+	if mode is "compose" then return txt
+	set r to display dialog txt with title "metacomputer" buttons {"Later", "Open live view"} \u00ac
+		default button "Open live view" giving up after secs with icon caution
+	if gave up of r then return "gave up"
+	return button returned of r
+end run'''
+DIALOG_TEXT_MAX = 240
+DIALOG_OPEN = "Open live view"
 
 
 class Stop(BaseException):
@@ -330,6 +350,88 @@ def announce(rec, interactive):
         return None
 
 
+# --- the dialog (INTERACTIVE_PROMPTS=on) ------------------------------------------------------------
+def dialog_text(say):
+    """The --say text as the dialog shows it after "Claude needs you: ": cleaned (one line, no control characters)
+    and at most DIALOG_TEXT_MAX characters."""
+    t = clean_text(say)
+    return t if len(t) <= DIALOG_TEXT_MAX else t[:DIALOG_TEXT_MAX - 1] + "\N{HORIZONTAL ELLIPSIS}"
+
+
+def dialog_off_reason(interactive):
+    """None when the dialog may be shown; else why not."""
+    if os.environ.get("MCOMP_INTERACTIVE_PROMPTS", "off") != "on":
+        return "off"
+    if interactive:
+        return "you're at this terminal"
+    try:
+        import liveview
+        return liveview.gui_reason()
+    except Exception:
+        return "couldn't check for the Mac's screen session"
+
+
+def start_dialog(hid):
+    """handoff.py _dialog ID, detached (its own session, no inherited descriptors), so this command goes on at once."""
+    try:
+        pid = os.fork()
+    except OSError:
+        return False
+    if pid:
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        return True
+    try:
+        os.setsid()
+        if os.fork():
+            os._exit(0)
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        os.closerange(3, 65536)
+        os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), "_dialog", hid])
+    except BaseException:
+        pass
+    os._exit(0)
+
+
+def run_dialog(hid):
+    """The detached helper: the dialog while handoff hid is open (taken down when it ends); Open live view runs
+    `metacomputer view --open` (no terminal: Screen Sharing's remembered password, else the clipboard)."""
+    rec = owners.open_handoff()
+    if not rec or rec.get("id") != hid or not re.fullmatch(r"h-[0-9a-f]{12}", hid):
+        return 0
+    secs = str(max(1, min(int(rec["deadline"] - time.time()), owners.HANDOFF_MAX_S)))
+    try:
+        p = subprocess.Popen(["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return 1
+    while True:
+        try:
+            out, _ = p.communicate(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            h = owners.open_handoff()
+            if not h or h.get("id") != hid:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                return 0
+    if out.decode("utf-8", "replace").strip() != DIALOG_OPEN:
+        return 0
+    try:
+        subprocess.run([os.path.join(owners.LAB, "bin", "metacomputer"), "view", "--open"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+    return 0
+
+
 def cmd_open(a):
     say = clean_text(a.say)
     if not say:
@@ -456,7 +558,11 @@ def open_and_wait(a, say, timeout, interactive, opened):
     finally:
         held.__exit__(None, None, None)
     told = announce(rec, interactive)
+    off = dialog_off_reason(interactive)
+    shown = off is None and start_dialog(rec["id"])
     instructions(rec, interactive)
+    if shown:
+        out("  A dialog on the Mac's screen says the same, with an Open live view button (INTERACTIVE_PROMPTS=on).")
     if told:
         out("  " + told)
     if not interactive:
@@ -582,6 +688,8 @@ def cmd_guard(argv):
 
 
 def main(argv):
+    if len(argv) == 2 and argv[0] == "_dialog":
+        return run_dialog(argv[1])
     if argv and argv[0] in SUBCOMMANDS:
         sub, rest = argv[0], argv[1:]
         if sub == "guard":

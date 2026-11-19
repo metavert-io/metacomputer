@@ -50,8 +50,12 @@
 #                                  S3 volumes: a folder kept in step with a bucket (rclone bisync, on the Mac)
 #   refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
 #                                  read-only reference disks, attached with REFDISKS=name[:mountpoint]
-#   view [--open | --tailnet]      how to watch / take over the desktop (VNC); --open: Screen Sharing on this Mac,
-#                                  the password on the clipboard for 45 s; --tailnet: how to publish it (you run it)
+#   view [--open | --print | --tailnet | --forget] [--remember | --no-remember]
+#                                  watch / take over the desktop (VNC). --open (and plain view at a terminal on the
+#                                  Mac's screen): Screen Sharing on this Mac, with the password it remembers in the
+#                                  login keychain once you agree (VIEW_REMEMBER), else on the clipboard for 45 s;
+#                                  --print: how to connect from elsewhere; --tailnet: how to publish it (you run it);
+#                                  --remember: save it for Screen Sharing now; --forget: remove what it saved
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
@@ -1672,17 +1676,37 @@ vnc_password_get() {
 
 view_host() { scutil --get LocalHostName 2>/dev/null || hostname -s; }
 
-do_view() { # [--open | --tailnet]
-  case "${1:-}" in
-    --open) view_open; return $? ;;
-    --tailnet) view_tailnet; return 0 ;;
-    "") ;;
-    *) die "usage: metacomputer view [--open | --tailnet]" ;;
+do_view() { # [--open | --print | --tailnet | --forget] [--remember | --no-remember]
+  local a mode="" flag=""
+  for a in "$@"; do
+    case "$a" in
+      --open|--print|--tailnet|--forget) [ -z "$mode" ] || die "usage: metacomputer view: one of --open, --print, --tailnet, --forget"
+                                         mode="${a#--}" ;;
+      --remember|--no-remember) [ -z "$flag" ] || die "usage: metacomputer view: --remember or --no-remember, not both"
+                                flag="${a#--}" ;;
+      *) die "usage: metacomputer view [--open | --print | --tailnet | --forget] [--remember | --no-remember]" ;;
+    esac
+  done
+  case "$mode:$flag" in tailnet:?*|print:?*|forget:?*) die "usage: --$flag goes with --open or plain view" ;; esac
+  case "$mode" in
+    open) view_open "$flag"; return $? ;;
+    print) view_print; return 0 ;;
+    tailnet) view_tailnet; return 0 ;;
+    forget) view_forget; return $? ;;
   esac
+  [ "$flag" = remember ] && { view_remember_now; return $?; }
+  # Plain view: a person at a terminal on the Mac's own screen gets the live view itself; anyone else (SSH, another
+  # device, a script or Claude, whose output isn't a terminal) gets how to connect.
+  if [ -t 0 ] && [ -t 1 ] && "$PY" "$LAB_ROOT/lib/liveview.py" gui >/dev/null; then view_open "$flag"; return $?; fi
+  view_print
+}
+
+view_print() {
   cat <<EOF
 Live view of the guest desktop (VNC, view + take over):
-  on this Mac:          metacomputer view --open
-                        (opens Screen Sharing and puts the live-view password on your clipboard)
+  on this Mac:          metacomputer view --open   (or plain metacomputer view, in Terminal on the Mac's screen)
+                        (opens Screen Sharing; it connects with the password it remembers once you agree,
+                        or the live-view password is on your clipboard)
   from another device:  ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $(view_host)
                         then connect a VNC client to localhost:$VNC_PORT
   password:             $(vnc_password_hint)
@@ -1692,9 +1716,79 @@ admits it only from the gateway.
 EOF
 }
 
-# --open: Screen Sharing on this Mac, with the password on the clipboard for a short while. Never in the URL.
+# Screen Sharing's remembered password (SECURITY.md, "The live view"; lib/liveview.py remember): the login keychain
+# item Screen Sharing reads for vnc://127.0.0.1:VNC_PORT, written by osascript with the password on its stdin (never
+# an argument, the environment, a log or the output). It's made only with the user's yes: typed at a terminal here,
+# `--remember` typed at one, or VIEW_REMEMBER=on. Once it's there, each view --open writes the current password into
+# it (updated in place), so a rebuilt VM's new password reaches Screen Sharing too.
+view_remember_setting() { case "${VIEW_REMEMBER:-ask}" in on|off) echo "$VIEW_REMEMBER" ;; *) echo ask ;; esac; }
+view_remembered() { "$PY" "$LAB_ROOT/lib/liveview.py" remembered --port "$VNC_PORT" </dev/null >/dev/null 2>&1; }
+view_save() { # 0 = Screen Sharing's item holds the current live-view password; prints what happened
+  local how
+  how="$(vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" remember --port "$VNC_PORT")" || return 1
+  case "$how" in
+    created) echo "Saved the live-view password in your login keychain, where Screen Sharing finds it for this"
+             echo "live view (vnc://127.0.0.1:$VNC_PORT). metacomputer view --forget removes it." ;;
+  esac
+  return 0
+}
+# FLAG (remember | no-remember | ""): sets VIEW_SAVE=1 when the remembered password is to be written now (made or
+# refreshed), else 0; VIEW_HINT=1 when it could be, once the user says so.
+view_remember_decide() {
+  local flag="$1" setting a rc=0
+  VIEW_SAVE=0 VIEW_HINT=0
+  setting="$(view_remember_setting)"
+  [ "$flag" = no-remember ] && return 0
+  view_remembered || rc=$?
+  if [ $rc = 0 ]; then
+    if [ "$setting" = off ] && [ "$flag" != remember ]; then
+      echo "Screen Sharing still has the live-view password saved earlier (VIEW_REMEMBER=off doesn't remove it;"
+      echo "metacomputer view --forget does)."
+    else
+      VIEW_SAVE=1
+    fi
+    return 0
+  fi
+  [ $rc = 1 ] || return 0                         # the keychain couldn't say: the clipboard, as before
+  if [ "$flag" = remember ] || [ "$setting" = on ]; then
+    if [ "$setting" = on ] || [ -t 0 ]; then VIEW_SAVE=1; return 0; fi
+    die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal"
+  fi
+  [ "$setting" = off ] && return 0
+  if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi
+  echo "Screen Sharing can remember the live-view password, so the live view opens without asking for it:"
+  echo "metacomputer saves it in your login keychain, where Screen Sharing (and osascript, which writes it) can"
+  echo "read it without asking, and updates it after each rebuild. It isn't your Mac's password."
+  printf 'Save it? [Y/n] '
+  read -r a || a=n
+  case "$a" in
+    ""|y|Y|yes|Yes) VIEW_SAVE=1 ;;
+    *) browser_set VIEW_REMEMBER off
+       echo "Not saved, and not asked again (VIEW_REMEMBER=off in $LOCAL_CONFIG). To save it later: metacomputer view --remember" ;;
+  esac
+}
+
+view_remember_now() { # view --remember: save it now, without opening anything
+  view_remember_decide remember
+  [ "$VIEW_SAVE" = 1 ] || return 0
+  view_save || die "the live-view password wasn't saved for Screen Sharing (above)"
+  echo "Screen Sharing now connects to the live view without asking for the password: metacomputer view --open"
+}
+
+view_forget() { # view --forget: remove Screen Sharing's saved live-view password (only the item metacomputer made)
+  local how
+  how="$("$PY" "$LAB_ROOT/lib/liveview.py" forget --port "$VNC_PORT" </dev/null)" || die "couldn't remove it (above)"
+  case "$how" in
+    removed) echo "Removed the live-view password metacomputer saved for Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+             [ "$(view_remember_setting)" = off ] || echo "(view --open asks again next time; VIEW_REMEMBER=off stops that.)" ;;
+    *) echo "Screen Sharing has no live-view password from metacomputer for vnc://127.0.0.1:$VNC_PORT." ;;
+  esac
+}
+
+# --open: Screen Sharing on this Mac, with the password it remembers, or on the clipboard for a short while. Never in
+# the URL. FLAG: remember | no-remember | "".
 view_open() {
-  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}"
+  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}" saved=0
   [[ "$secs" =~ ^[0-9]{1,4}$ ]] || secs=45
   vm_running "$VM_NAME" || die "the virtual computer is off: metacomputer start, then metacomputer view --open"
   if ! why="$("$PY" "$LAB_ROOT/lib/liveview.py" gui)"; then
@@ -1710,13 +1804,22 @@ metacomputer view --open needs the Mac's own screen, and $why.
 EOF
     return 1
   fi
-  if vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip --clear-after "$secs"; then
+  view_remember_decide "${1:-}"
+  if [ "$VIEW_SAVE" = 1 ]; then
+    if view_save; then saved=1
+    else warn "Screen Sharing's saved password couldn't be brought up to date (above); using the clipboard instead"; fi
+  fi
+  if [ "$saved" = 1 ]; then
+    echo "Screen Sharing connects with the live-view password saved in your login keychain: nothing to paste."
+    echo "(If it asks anyway: metacomputer view --open --no-remember puts it on the clipboard.)"
+  elif vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip --clear-after "$secs"; then
     echo "The live-view password is on your clipboard: paste it with Cmd+V when Screen Sharing asks (it isn't"
     if [ "$secs" -gt 0 ]; then
       echo "your Mac's password). It's cleared from the clipboard in $secs s, if it's still there then."
     else
       echo "your Mac's password)."
     fi
+    [ "$VIEW_HINT" = 1 ] && echo "To have Screen Sharing remember it instead, run once in your own terminal: metacomputer view --remember"
   else
     warn "the password isn't on the clipboard; when Screen Sharing asks, read it with: $(vnc_password_hint)"
   fi
