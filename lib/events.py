@@ -89,7 +89,9 @@ RESERVED = {("needs_you", "in_use"), ("needs_you", "refused"), ("security", "chr
             ("security", "lessons_resealed"),
             ("lifecycle", "storage_attached"), ("security", "symlink_neutralized"),
             ("security", "special_file_removed"), ("security", "quarantine_restored"),
-            ("security", "storage_protection_failed"), ("task", "s3_conflict"), ("task", "s3_sync_failed")}
+            ("security", "storage_protection_failed"), ("task", "s3_conflict"), ("task", "s3_sync_failed"),
+            ("lifecycle", "handoff_opened"), ("lifecycle", "handoff_done"), ("lifecycle", "handoff_cancelled"),
+            ("lifecycle", "handoff_timed_out")}
 RESERVED_TYPES = {"suppressed"}
 ADMIN_TYPES = {"sink_added", "sink_removed", "sink_config_changed"}
 

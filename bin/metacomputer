@@ -40,7 +40,8 @@
 #                                  S3 volumes: a folder kept in step with a bucket (rclone bisync, on the Mac)
 #   refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
 #                                  read-only reference disks, attached with REFDISKS=name[:mountpoint]
-#   view                           how to watch / take over the desktop (VNC)
+#   view [--open | --tailnet]      how to watch / take over the desktop (VNC); --open: Screen Sharing on this Mac,
+#                                  the password on the clipboard for 45 s; --tailnet: how to publish it (you run it)
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
@@ -52,6 +53,10 @@
 #   ssh [ops|admin] [CMD...]       shell into the guest
 #   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
 #                                  tell the user Claude is blocked on them (through the event sinks)
+#   handoff --why captcha|login|2fa|other --say "what to do" [--timeout 15m] [--json]
+#                                  hand the computer to the user and wait (Claude's actions pause meanwhile);
+#                                  exit 0 done, 4 cancelled, 124 time limit
+#   handoff done [--note TEXT] | cancel [--note TEXT] | wait | status   (done: the user, in their own terminal)
 #   events [status | sink add|list|show|test|remove | tail [N] | emit FAMILY TYPE --message TEXT
 #          | drain | watcher start|stop|status]
 #                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
@@ -166,8 +171,9 @@ parse_flags() {
 # One controller at a time: refuse while another session is using the computer.
 owners_check() {
   [ "$OVERRIDE" = 1 ] && return 0
-  "$PY" "$LAB_ROOT/lib/owners.py" check \
-    || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
+  local rc=0; "$PY" "$LAB_ROOT/lib/owners.py" check || rc=$?
+  [ $rc = 4 ] && die "the user has the computer (metacomputer handoff): wait until they run 'metacomputer handoff done' or 'cancel'"
+  [ $rc = 0 ] || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
 }
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
@@ -1329,22 +1335,101 @@ vnc_password_hint() {
   esac
 }
 
-do_view() {
-  local host; host="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+# The live-view password on stdout, for a pipe into lib/liveview.py only (never into a variable that's printed,
+# an argument, a file or a log). The same stores as above: your command, an earlier setup's file, the Keychain.
+vnc_password_get() {
+  case "$VNC_PASSWORD_STORE" in
+    command) [ -n "$VNC_PASSWORD_GET" ] || return 1
+             sh -c "$VNC_PASSWORD_GET" </dev/null 2>/dev/null ;;
+    keychain) vnc_file_io read 2>/dev/null && return 0
+              [[ "$VM_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+              run_until $(( SECONDS + ${MCOMP_KEYCHAIN_WAIT:-20} )) \
+                security find-generic-password -s "$VNC_KEYCHAIN_SERVICE" -a "$VM_NAME" -w </dev/null 2>/dev/null ;;
+    *) vnc_file_io read 2>/dev/null ;;
+  esac
+}
+
+view_host() { scutil --get LocalHostName 2>/dev/null || hostname -s; }
+
+do_view() { # [--open | --tailnet]
+  case "${1:-}" in
+    --open) view_open; return $? ;;
+    --tailnet) view_tailnet; return 0 ;;
+    "") ;;
+    *) die "usage: metacomputer view [--open | --tailnet]" ;;
+  esac
   cat <<EOF
 Live view of the guest desktop (VNC, view + take over):
-  on this Mac:          open vnc://127.0.0.1:$VNC_PORT        (Screen Sharing)
-  from another device:  ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $host
+  on this Mac:          metacomputer view --open
+                        (opens Screen Sharing and puts the live-view password on your clipboard)
+  from another device:  ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $(view_host)
                         then connect a VNC client to localhost:$VNC_PORT
   password:             $(vnc_password_hint)
+  over your tailnet:    metacomputer view --tailnet   (prints the command; publishing it is your choice)
 The port listens on 127.0.0.1 only (cua-netgw forward) and the guest firewall
 admits it only from the gateway.
 EOF
-  if command -v tailscale >/dev/null 2>&1; then
-    echo "To publish it to your tailnet instead:"
-    echo "  tailscale serve --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT   (undo: tailscale serve --tcp $VNC_PORT off)"
+}
+
+# --open: Screen Sharing on this Mac, with the password on the clipboard for a short while. Never in the URL.
+view_open() {
+  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}"
+  [[ "$secs" =~ ^[0-9]{1,4}$ ]] || secs=45
+  vm_running "$VM_NAME" || die "the virtual computer is off: metacomputer start, then metacomputer view --open"
+  if ! why="$("$PY" "$LAB_ROOT/lib/liveview.py" gui)"; then
+    cat <<EOF
+metacomputer view --open needs the Mac's own screen, and $why.
+  On the Mac's screen (in person, or through a remote-desktop app such as Screen Sharing
+  or Jump Desktop): open Terminal there and run  metacomputer view --open
+  From the device you're on:
+    ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $(view_host)
+    then connect a VNC client to localhost:$VNC_PORT
+    password: $(vnc_password_hint)
+  Over your own tailnet (your choice; you run it): metacomputer view --tailnet
+EOF
+    return 1
   fi
-  if [ "${1:-}" = "--open" ]; then open "vnc://127.0.0.1:$VNC_PORT"; fi
+  if vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip --clear-after "$secs"; then
+    echo "The live-view password is on your clipboard: paste it with Cmd+V when Screen Sharing asks (it isn't"
+    if [ "$secs" -gt 0 ]; then
+      echo "your Mac's password). It's cleared from the clipboard in $secs s, if it's still there then."
+    else
+      echo "your Mac's password)."
+    fi
+  else
+    warn "the password isn't on the clipboard; when Screen Sharing asks, read it with: $(vnc_password_hint)"
+  fi
+  open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
+  echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+}
+
+# --tailnet: the commands that would publish the port to your own tailnet. Printed, never run: it changes this
+# Mac's networking, so it's yours to run (and to undo).
+view_tailnet() {
+  local ts="" name=""
+  if command -v tailscale >/dev/null 2>&1; then ts=tailscale
+  elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale; fi
+  if [ -n "$ts" ]; then
+    name="$(run_until $(( SECONDS + 5 )) "$ts" status --json </dev/null 2>/dev/null | "$PY" -c 'import json, re, sys
+try:
+    n = str((json.load(sys.stdin).get("Self") or {}).get("DNSName") or "").rstrip(".")
+except Exception:
+    n = ""
+print(n if re.fullmatch(r"[A-Za-z0-9.-]{1,253}", n) else "")' 2>/dev/null)"
+  fi
+  cat <<EOF
+The live view listens on 127.0.0.1:$VNC_PORT only. To reach it from your other devices over
+Tailscale, publish it to your own tailnet. That's your choice: it changes this Mac's networking,
+so metacomputer doesn't run it for you.
+  while you need it (Ctrl-C stops it):  tailscale serve --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT
+  or until you undo it:                 tailscale serve --bg --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT
+  undo:                                 tailscale serve --tcp $VNC_PORT off
+Then connect a VNC client on your other device to ${name:-<this Mac's tailnet name>}:$VNC_PORT
+(vnc://${name:-<this Mac's tailnet name>}:$VNC_PORT); the live-view password still guards it:
+  $(vnc_password_hint)
+Every device your tailnet's access rules let reach this Mac can then reach the port.
+EOF
+  [ -n "$ts" ] || echo "(Tailscale isn't installed on this Mac: tailscale.com.)"
 }
 
 new_vnc_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8; }
@@ -1487,6 +1572,10 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
     fill|login|session|token)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
+      # While the user has the computer (metacomputer handoff), a fill or a session load waits like any acting call.
+      if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
+        "$PY" "$LAB_ROOT/lib/handoff.py" guard || exit 4
+      fi
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
         # The vault signs in for sealed sessions with the VM's static ops key, which a VM on
@@ -1529,6 +1618,10 @@ case "$cmd" in
               export_options; MCOMP_OVERRIDE="$OVERRIDE" exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
   who)        do_who "$@" ;;
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
+  handoff)    export_options
+              case "${1:-}" in done|cancel|wait|status|guard|-h|--help) ;;
+                *) MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE ;; esac
+              exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;;
   events)     export_options
               if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
               "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?

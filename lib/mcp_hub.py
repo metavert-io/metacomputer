@@ -131,7 +131,10 @@ HABITS = (
     "- Two failures, or two routes with no effect: stop, look once and check the premise (window, focus, mode, "
     "an open dialog, a frozen app), then change mechanism. Never a third identical call.\n"
     "- Pixel input needs a screenshot as that window's last read; any read without one cancels it.\n"
-    "- A refusal from the hub is the user's control: follow the route it names, or report it."
+    "- A refusal from the hub is the user's control: follow the route it names, or report it.\n"
+    "- A CAPTCHA or \"verify you are human\" check, or a sign-in or 2FA prompt that's the user's to do: never try to "
+    "pass it, switch browsers or retry it. Run `metacomputer handoff --why captcha|login|2fa|other --say \"...\"` "
+    "and wait for it to return."
 )
 OVERSIZE_MSG = ("The virtual computer sent a message larger than the hub accepts ({} MB), so the hub closed its "
                 "connection to it. Call again; element tokens from earlier reads are stale.").format(MAX_UPSTREAM_MSG >> 20)
@@ -1688,6 +1691,13 @@ class Hub:
                 self.refuse(client, msg, "The metacomputer bridge couldn't record that this session is using the "
                                          "virtual computer, so it didn't pass the call on. Check "
                                          f"`{CLI} who`, then call again.")
+                return
+            handoff = next((o for o in busy or () if o["kind"] == "handoff"), None)
+            if handoff:
+                # The user has the computer (metacomputer handoff): every client waits, this session included.
+                self.refuse(client, msg, owners.handoff_refusal(handoff),
+                            {"code": "user_has_computer", "effect": "refused",
+                             "hint": "wait for the handoff to end (metacomputer handoff wait); read-only tools work"})
                 return
             if busy:
                 lines = "\n".join("  - " + owners.describe(o) for o in busy)

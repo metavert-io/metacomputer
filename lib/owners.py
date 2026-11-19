@@ -36,15 +36,22 @@ session.
 "Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
 or a shell it runs under, so a session never blocks itself.
 
+A handoff (lib/handoff.py, `metacomputer handoff`) gives the computer to the user:
+while one is open, others() lists it for every caller, its own session included,
+so every acting call waits until the user hands the computer back. Its record,
+.run/owners/handoff.state, is written under the owners lock; `release` never drops it.
+
 CLI (used by bin/metacomputer):
   owners.py who [--json]      list controllers
-  owners.py check             exit 3 (and explain) if another controller is active
+  owners.py check             exit 3 (and explain) if another controller is active; 4 while the user has it (a handoff)
   owners.py release           forget other sessions' claims (after the user agrees)
 """
 import contextlib
 import json
+import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -276,6 +283,102 @@ def claims():
     return out
 
 
+# --- the user has the computer: a handoff (lib/handoff.py) ---------------------------------------
+# Its record sits beside the claims under a name claims() never reads (not *.json), and only lib/handoff.py
+# writes it, under the owners lock. While it's open (status "open", before its deadline), others() lists it
+# for every caller, so every acting call waits: the hub's clients, `metacomputer sh`, the vault's fills and
+# the lifecycle commands that check for other controllers.
+HANDOFF_FILE = "handoff.state"
+HANDOFF_MAX_S = 7200          # the longest time limit; a record that can't be read counts as open this long
+HANDOFF_WHY = ("captcha", "login", "2fa", "other")
+HANDOFF_STATUS = ("open", "done", "cancelled", "timed_out")
+HANDOFF_ID_RE = re.compile(r"^h-[0-9a-f]{12}$")
+
+
+def handoff_path():
+    return os.path.join(OWNERS_DIR, HANDOFF_FILE)
+
+
+def _finite(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def handoff_valid(rec):
+    return (isinstance(rec, dict) and rec.get("v") == 1 and isinstance(rec.get("id"), str)
+            and HANDOFF_ID_RE.match(rec["id"]) is not None and rec.get("status") in HANDOFF_STATUS
+            and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
+            and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S)
+
+
+def handoff_record():
+    """The handoff record as lib/handoff.py wrote it, whatever its status; None when there is none. A file
+    that isn't a valid record fails closed, for a bounded time: it reads as an open handoff ("unreadable")
+    until HANDOFF_MAX_S after it was last written (`metacomputer handoff cancel` removes it)."""
+    p = handoff_path()
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        fd = None                                    # a link, or not ours to read: unreadable
+    data, t = b"", None
+    try:
+        st = os.fstat(fd) if fd is not None else os.lstat(p)
+        t = st.st_mtime
+        if fd is not None and stat.S_ISREG(st.st_mode) and st.st_size <= 65536:
+            data = os.read(fd, 65537)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        rec = json.loads(data.decode("utf-8")) if data else None
+    except (UnicodeDecodeError, ValueError):
+        rec = None
+    if handoff_valid(rec):
+        return rec
+    t = t if _finite(t) else time.time()
+    return {"v": 1, "id": None, "status": "open", "unreadable": True, "why": "other", "opened": t,
+            "deadline": t + HANDOFF_MAX_S, "cwd": None, "claude_pid": None}
+
+
+def open_handoff(now=None):
+    """The open handoff (status open, before its deadline), or None."""
+    rec = handoff_record()
+    now = time.time() if now is None else now
+    if rec and rec["status"] == "open" and now < rec["deadline"]:
+        return rec
+    return None
+
+
+def fmt_s(s):
+    s = max(0, int(s))
+    return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
+
+
+def handoff_describe(h, now=None):
+    now = time.time() if now is None else now
+    left = fmt_s(h["deadline"] - now)
+    if h.get("unreadable"):
+        return (f"a handoff record that can't be read ({short(handoff_path())}): it counts as an open handoff for "
+                f"{left} more; `metacomputer handoff cancel` removes it [ACTIVE]")
+    where = f" from {short(h['cwd'])}" if h.get("cwd") else ""
+    return (f"the user has the computer: a handoff ({h['why']}) opened {fmt_s(now - h['opened'])} ago{where}, until "
+            f"they run `metacomputer handoff done` (or `cancel`), {left} at most [ACTIVE]")
+
+
+def handoff_refusal(h):
+    """What an acting call gets while a handoff is open (the hub, metacomputer sh, the vault's fills)."""
+    return ("Paused: " + handoff_describe(h) + ". Acting calls wait until the user hands the computer back; "
+            "read-only tools still work. Don't act on the desktop meanwhile, and don't reach it another way "
+            "(`metacomputer call`, a script or the shell): every way in waits. If this session ran "
+            "`metacomputer handoff`, wait for it to return (`metacomputer handoff wait` if it was stopped); "
+            "never run `handoff done` for the user.")
+
+
 # --- direct connections --------------------------------------------------------
 
 def direct_connections(table):
@@ -335,10 +438,18 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
         if self_pid in chain or (my_claude and my_claude in chain) or (chain & mine - {1}):
             continue
         found.append({"kind": "direct", "active": True, **d})
+    # The user has the computer: the same for every caller, the session that handed it over included.
+    h = open_handoff()
+    if h:
+        found.append({"kind": "handoff", "active": True, "handoff_id": h.get("id"), "why": h["why"],
+                      "opened": h["opened"], "deadline": h["deadline"], "cwd": h.get("cwd"),
+                      "unreadable": bool(h.get("unreadable"))})
     return found
 
 
 def describe(o):
+    if o["kind"] == "handoff":
+        return handoff_describe(o)
     if o["kind"] == "session":
         state = "ACTIVE" if o["active"] else "idle"
         if o.get("claim") == "pending":
@@ -380,14 +491,18 @@ def main(argv):
             hub = mcp_hub.query_status()
         except Exception:
             pass
+        handoff = open_handoff()
         if "--json" in argv:
             print(json.dumps({"self_claude_pid": me, "sessions": all_claims, "direct": direct,
-                              "active_s": ACTIVE_S, "hub": hub}, indent=2, default=str))
+                              "active_s": ACTIVE_S, "hub": hub, "handoff": handoff}, indent=2, default=str))
             return 0
         if hub:
             print("  hub: " + mcp_hub.describe_status(hub).replace("\n", "\n  "))
+        if handoff:
+            print("  " + handoff_describe(handoff))
         if not all_claims and not direct:
-            print("Nobody is using the virtual computer.")
+            if not handoff:
+                print("Nobody is using the virtual computer.")
             return 0
         for c in all_claims:
             tag = "  <- this session" if me and c.get("claude_pid") == me else ""
@@ -396,15 +511,16 @@ def main(argv):
             print("  " + describe({"kind": "direct", **d}))
         return 0
     if cmd == "check":
-        busy = [o for o in others() if o["active"]]
-        idle = [o for o in others() if not o["active"]]
+        found = others()
+        busy = [o for o in found if o["active"]]
+        idle = [o for o in found if not o["active"]]
         for o in idle:
             print("note: " + describe(o), file=sys.stderr)
         if busy:
             print("The virtual computer is in use by:", file=sys.stderr)
             for o in busy:
                 print("  " + describe(o), file=sys.stderr)
-            return 3
+            return 4 if any(o["kind"] == "handoff" for o in busy) else 3   # 4: the user has it (a handoff)
         return 0
     if cmd == "release":
         n = 0
@@ -413,6 +529,10 @@ def main(argv):
         try:
             with lock():
                 for o in others():
+                    if o["kind"] == "handoff":
+                        print("not released (only the user ends a handoff, with `metacomputer handoff done` or "
+                              "`cancel`): " + describe(o))
+                        continue
                     if o["kind"] == "session":
                         drop_claim(o["bridge_pid"])
                         print("released: " + describe(o))

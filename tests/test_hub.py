@@ -687,6 +687,67 @@ def owner_checks():
     r.stop()
 
 
+def handoff_checks():
+    """`metacomputer handoff` (lib/handoff.py): while the user has the computer, the hub refuses every client's acting
+    calls, the session that asked for the handoff included, and its claims (web, the GUI tests)."""
+    print("a handoff: the user has the computer, and every client waits")
+    import handoff
+    clear_claims()
+    r = Running()
+    now = time.time()
+    me = owners.claude_of(os.getpid(), owners.ps_table())      # this process's clients are the session that asked
+    rec = {"v": 1, "id": "h-cccccccccccc", "status": "open", "why": "captcha", "say": "Tick the box",
+           "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": "/handoff/project", "claude_pid": me}
+    handoff.write_record(rec)
+    in_use = len([e for e in local_events() if e.get("type") == "in_use"])
+    try:
+        for kind in ("claude-code", "call", "sdk"):
+            h = client(r, kind)
+            n0 = len(tool_calls("press_key"))
+            res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+            look = h.call("list_windows", {})
+            check(f"{kind}: an acting call is refused while the user has the computer; nothing reaches the driver",
+                  res.is_error and "Paused: the user has the computer" in res.text and "handoff done" in res.text
+                  and (res.structured or {}).get("code") == "user_has_computer"
+                  and len(tool_calls("press_key")) == n0, (res.text[:200], res.structured))
+            check(f"{kind}: read-only calls still work", not look.is_error)
+            h.close()
+        check("no needs_you.in_use for it: the user isn't another session",
+              len([e for e in local_events() if e.get("type") == "in_use"]) == in_use)
+        w = client(r, "web")
+        cl = w.claim("web compare")
+        check("a claim (web, the GUI tests) is refused too, naming the handoff", not cl.get("claimed")
+              and any("the user has the computer" in o for o in cl.get("others") or []), cl)
+        w.close()
+        open(owners.handoff_path(), "w").write("{garbage")
+        h = client(r, "sdk")
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        check("a handoff record that can't be read: refused (fails closed)", res.is_error
+              and (res.structured or {}).get("code") == "user_has_computer", res.text[:200])
+        handoff.write_record(rec)
+        handoff.end(rec["id"], "done", "process")
+        h = client(r, "sdk")
+        n0 = len(tool_calls("press_key"))
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        check("once the user hands it back, the same call acts", not res.is_error
+              and len(tool_calls("press_key")) == n0 + 1, res.text[:200])
+        clear_claims()
+        handoff.write_record({**rec, "id": "h-dddddddddddd", "opened": now - 200, "deadline": now - 1})
+        h = client(r, "call")
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        check("an open record past its time limit doesn't pause anything", not res.is_error, res.text[:200])
+    finally:
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+        clear_claims()
+        r.stop()
+
+
 def lessons_checks():
     print("approved lessons: in the instructions after the habits, never read by a guard")
     r = Running()
@@ -2281,6 +2342,7 @@ def main():
         lifecycle_checks()
         limit_checks()
         owner_checks()
+        handoff_checks()
         chrome_checks()
         bounded_checks()
         actionlog_checks()

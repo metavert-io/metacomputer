@@ -803,12 +803,16 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
         busy = []
         try:
             with owners.lock():
-                if not o["override"]:
+                # The user has the computer (metacomputer handoff): --override doesn't take it from them.
+                handoff = owners.open_handoff()
+                if not handoff and not o["override"]:
                     busy = [x for x in owners.others() if x["active"]]
-                if not busy:
+                if not busy and not handoff:
                     who = owners.claim_for_shell(tool)
         except (OSError, TimeoutError) as e:
             return refuse(f"couldn't record that this session is using the virtual computer ({e}); not running")
+        if handoff:
+            return refuse(owners.handoff_refusal(handoff))
         if busy:
             return refuse("the virtual computer is in use by another session:\n" +
                           "\n".join("  - " + owners.describe(x) for x in busy) +
