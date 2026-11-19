@@ -342,13 +342,15 @@ def chunks_claimed():
 
 def sync_before_delete():
     """reset, restore and baseline copy ~/metacomputer-runs first and stop before deleting unless the copy is whole;
-    --discard-unsynced (never --yes) or 'discard' typed at a terminal goes on; a missing or empty folder is whole."""
+    --discard-unsynced (never --yes) or 'discard' typed at a terminal goes on; a missing or empty folder is whole;
+    a listing that can't be had is never whole."""
     stop = function_text("sync_or_stop")
     return ('sync_or_stop "$evtype"' in function_text("restore_from")
             and function_text("restore_from").index('sync_or_stop "$evtype"')
             < function_text("restore_from").index('"$LUME" delete "$VM_NAME"')
             and "sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*'" in function_text("do_baseline")
             and "do_recordings --sync >/dev/null && whole=1" in stop and '[ $whole = 1 ] && [ $rc = 0 ] && return 0' in stop
+            and stop.count("$whole = 1") == 1   # both checks every time: no way out on the copy alone
             and 'recording.py" unsynced' in stop
             and '[ "${DISCARD_UNSYNCED:-0}" = 1 ]' in stop and "ASSUME_YES" not in stop
             and '[ "$a" = discard ]' in stop and stop.rstrip().endswith("}") and 'die "stopped before $what' in stop

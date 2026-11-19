@@ -884,7 +884,8 @@ vm_tar_copy() { # DEST REMOTE_COMMAND [guest_import options...]
 
 # Before reset, restore or baseline deletes the guest's ~/metacomputer-runs: copy it, and stop here (before
 # anything is deleted) unless the copy is whole: the copy came through (recordings --sync), and the VM's own
-# listing names no file this Mac doesn't have at that size (a copy can leave a file out). A folder that's missing
+# listing names no file this Mac doesn't have at that size (a copy can leave a file out), both checks every time:
+# a listing that can't be had (the VM unreachable, or the listing over 4 MB) is never whole. A folder that's missing
 # or empty is whole. Otherwise what's missing is listed, and it goes on only with --discard-unsynced, or when the
 # person at the terminal types 'discard' at a prompt that names the loss; --yes never does.
 sync_or_stop() { # WHAT (reset, restored, baseline)
@@ -895,8 +896,7 @@ sync_or_stop() { # WHAT (reset, restored, baseline)
   mkdir -p "$RUN_DIR"; listing="$(mktemp "$RUN_DIR/unsynced.XXXXXX")" || die "stopped before $what: nothing was deleted (cannot write in $RUN_DIR)"
   if ! vm_answer 4194304 60 'cd ~/metacomputer-runs 2>/dev/null || exit 0; find . -type f -printf "%s\t%P\0"' > "$listing" 2>/dev/null; then
     rm -f "$listing"
-    [ $whole = 1 ] && return 0          # the copy came through; the VM just can't list it now
-    listing="$listing.unavailable"      # recording.py says the VM couldn't be asked
+    listing="$listing.unavailable"      # recording.py says the VM couldn't be asked: never whole, even after a copy
   fi
   report="$("$PY" "$LAB_ROOT/lib/recording.py" unsynced "$LAB_ROOT/recordings/guest-runs" "$listing" 2>&1)" || rc=$?
   rm -f "${listing%.unavailable}"

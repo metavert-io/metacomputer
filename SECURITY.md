@@ -1082,9 +1082,11 @@ say which mode is.
   or inside it) only once that copy is whole. A folder that's missing or empty
   counts as whole, so a VM whose home was wiped resets as usual. Whole means the
   copy came through and the VM's own listing names no file this Mac doesn't have
-  at that size. When the copy stops short (the VM went quiet or can't be reached,
-  the disk reached its reserve, a file came through cut off or was left out), they
-  stop before deleting anything, list what the
+  at that size; both are checked every time, and a listing that can't be had (the
+  VM can't be reached, or it's over 4 MB) is never whole. When the copy stops
+  short (the VM went quiet or can't be reached, the disk reached its reserve, a
+  file came through cut off or was left out), they stop before deleting anything,
+  list what the
   VM holds that this Mac doesn't (from the VM's own listing), and go on only with
   `--discard-unsynced`, or when you type `discard` at the prompt that names the
   loss. `--yes` never does.

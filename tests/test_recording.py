@@ -527,13 +527,15 @@ def finalize_guard_checks():
 SYNC_SSH = r"""#!/usr/bin/env python3
 # A stand-in VM for the sync before reset/restore/baseline: `ssh ARGS... REMOTE_COMMAND` runs the command with HOME
 # set to FAKE_HOME. FAKE_SSH_MODE: home (as asked), stall (part of the stream, then nothing), slow (all of it, in
-# pieces with pauses shorter than the idle limit), down (unreachable). The listing (GNU find -printf) is emulated.
+# pieces with pauses shorter than the idle limit), down (unreachable), nolist (the copy works, the listing fails). The listing (GNU find -printf) is emulated.
 import os, subprocess, sys, time
 cmd, mode, home = sys.argv[-1], os.environ.get("FAKE_SSH_MODE", "home"), os.environ["FAKE_HOME"]
 if mode == "down":
     sys.exit(255)
 out = sys.stdout.buffer
 if "find . -type f -printf" in cmd:
+    if mode == "nolist":
+        sys.exit(255)
     root = os.path.join(home, "metacomputer-runs")
     for d, _, fs in os.walk(root):
         for f in fs:
@@ -623,6 +625,10 @@ def sync_guard_checks():
         check("a copy that came through but left a file out: reset stops too, naming it (escaped)",
               r.returncode != 0 and "LUME delete" not in log and "bad\\x01name.mp4" in r.stderr
               and "\x01" not in r.stderr, (r.returncode, log, r.stderr[-400:]))
+        r, log, _ = reset("nolist")
+        check("a copy that came through and a listing that couldn't be had: reset stops too (both checks, every time)",
+              r.returncode != 0 and "LUME delete" not in log and "couldn't be asked" in r.stderr,
+              (r.returncode, log, r.stderr[-400:]))
         r, log, _ = reset("down")
         check("a VM that can't be reached: reset stops too, and says it couldn't ask what the VM holds",
               r.returncode != 0 and "LUME delete" not in log and "couldn't be asked" in r.stderr,

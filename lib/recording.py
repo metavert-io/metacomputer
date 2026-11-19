@@ -584,8 +584,8 @@ def cmd_unsynced(a):
         with open(a.listing, "rb") as f:
             data = f.read(8 << 20)
     except OSError:
-        print("  the VM couldn't be asked what its ~/metacomputer-runs holds (it may be unreachable): treat everything "
-              "in it as not copied", file=sys.stderr)
+        print("  the VM couldn't be asked what its ~/metacomputer-runs holds (it may be unreachable, or its listing "
+              "was over 4 MB): treat everything in it as not copied", file=sys.stderr)
         return 1
     root = os.path.realpath(a.dest)
     missing, size = [], 0
