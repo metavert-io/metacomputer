@@ -966,6 +966,13 @@ update the row with the doc's new wording. What it pins:
   timing (the first after 5 quiet minutes at once, at most 6 an hour, the watcher looking every
   2 s, follow-ups once a minute up to once an hour); the shell's timeout
   and output limits;
+- the live view: forwarded to 127.0.0.1 only; `view --open` pipes the password from its
+  store to `pbcopy`'s stdin and opens a `vnc://` link with only the port; the clipboard is
+  cleared after `VIEW_CLIPBOARD_S` only while it still holds the password; `view --tailnet`
+  runs nothing through Tailscale but `status --json`;
+- handoffs: the hub's refusal and its code (`user_has_computer`), `sh` refusing before
+  `--override` is looked at, the fills guarded before they reach the vault, the 15-minute
+  default and 2-hour longest time limit, and the 2 hours an unreadable record counts;
 - the gateway: each refusal docs/guide.md, architecture.md and the README name is a
   refusing rule in config/netgw-rules.json and every refusing rule is named, nothing of
   the Mac is reachable, and `scripts/lib.sh` starts the gateway with that file;

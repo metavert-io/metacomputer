@@ -115,6 +115,7 @@ with clean_env():
     import vm_claude  # noqa: E402
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
+    import handoff  # noqa: E402
 
 PROXY, CMDS, IMPORT, APPROVALS, CRYPTO, SERVER = (f"vault/{f}.swift" for f in
                                                   ("Proxy", "Commands", "Import", "Approvals", "Crypto", "Server"))
@@ -577,6 +578,33 @@ CLAIMS = [
                     r"reported with the token's id", lambda m: claude_renew()),
     ("SECURITY.md", r"\*\*Claude Code comes from Anthropic's installer\*\* \(https://claude\.ai/install\.sh, over HTTPS, as the "
                     r"desktop user, saved whole before it runs\)", lambda m: claude_installer()),
+    # The live view (bin/metacomputer view, lib/liveview.py): loopback only, the password through a pipe
+    ("SECURITY.md", r"cua-netgw forwards it to `127\.0\.0\.1:VNC_PORT` on your Mac only",
+     lambda m: '"host": "127.0.0.1:$VNC_PORT"' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"It's never in the link, an argument, the environment, a log, an event or the command's output",
+     lambda m: view_open_pipes_password()),
+    ("SECURITY.md", r"empties the clipboard after `VIEW_CLIPBOARD_S` seconds \((\d+)\), if the clipboard still holds the "
+                    r"password then",
+     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and "hmac.compare_digest(hashlib.sha256(cur).digest(), digest)"
+     in raw("lib/liveview.py")),
+    ("SECURITY.md", r"`view --tailnet` prints the `tailscale serve` command that would publish the port to your own "
+                    r"tailnet, and its undo; metacomputer never runs it", lambda m: tailnet_runs_only_status()),
+    ("docs/guide.md", r"cleared from the clipboard after (\d+) seconds, if it's still there then",
+     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"])),
+    # Handoffs (lib/handoff.py, owners.py): what an open one pauses, and its limits
+    ("SECURITY.md", r'with "Paused: the user has the computer" \(code `(user_has_computer)`\)',
+     lambda m: f'"code": "{m[1]}"' in raw("lib/mcp_hub.py")
+     and owners.handoff_refusal({"why": "captcha", "opened": 0, "deadline": 1e12}).startswith(
+         "Paused: the user has the computer")),
+    ("SECURITY.md", r"`metacomputer sh` refuses every run that isn't `--read-only`, with or without `--override`",
+     lambda m: handoff_before_override()),
+    ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse", lambda m: fills_guarded()),
+    ("SECURITY.md", r"its time limit \((\d+) minutes by default, at most (\d+) hours\)",
+     lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
+    ("SECURITY.md", r"counts as open for up to (\d+) hours after it was written, so it fails closed",
+     lambda m: int(m[1]) * 3600 == owners.HANDOFF_MAX_S),
+    ("docs/guide.md", r"\((\d+) minutes unless Claude chose another, at most (\d+) hours\)",
+     lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
 ]
 
 
@@ -589,6 +617,37 @@ def health_categories_only():
     msgs = json.dumps(events.health_conditions({"vm": "running", "gateway": True, "ssh": True,
                                                 "guest": {"ready": True, "driver_doctor_rc": big, "disk_free_gb": 1.234567}}))
     return slots and g == {"ready": False, "doctor": "failed", "disk": "low"} and str(big) not in msgs and "1.2" not in msgs
+
+
+def view_open_pipes_password():
+    """view --open: the password goes from its store through a pipe to liveview.py, then pbcopy's stdin; the
+    vnc:// link has only the port."""
+    b, lv = raw("bin/metacomputer"), raw("lib/liveview.py")
+    return ('vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip' in b and 'open "vnc://127.0.0.1:$VNC_PORT"' in b
+            and 'subprocess.run(["pbcopy"], input=pw' in lv and "print(pw" not in lv)
+
+
+def tailnet_runs_only_status():
+    """view_tailnet's only command run through Tailscale is `status --json`."""
+    body = re.search(r"^view_tailnet\(\) \{\n(.*?)^\}", raw("bin/metacomputer"), re.S | re.M)
+    if not body:
+        return False
+    runs = re.findall(r'"\$ts" ([a-z-]+(?: [a-z-]+)?)', body.group(1))
+    return runs == ["status --json"], runs
+
+
+def handoff_before_override():
+    """vm_shell looks for an open handoff first, whatever --override says."""
+    src = raw("lib/vm_shell.py")
+    i, j = src.find("handoff = owners.open_handoff()"), src.find('if not handoff and not o["override"]')
+    return 0 <= i < j and "return refuse(owners.handoff_refusal(handoff))" in src
+
+
+def fills_guarded():
+    """bin/metacomputer runs the handoff guard before secrets fill, login and session load reach the vault."""
+    return re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \{ \[ "\$sub" = session \] && '
+                     r'\[ "\$\{1:-\}" = load \]; \}; then\s+"\$PY" "\$LAB_ROOT/lib/handoff\.py" guard \|\| exit 4',
+                     raw("bin/metacomputer")) is not None
 
 
 def fpr(full, head, tail):
