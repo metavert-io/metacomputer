@@ -1920,7 +1920,10 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       if [[ "$id" =~ ^[0-9a-f]{8}$ ]] && "$VAULT_BIN" requests --json 2>/dev/null | "$PY" -c 'import json,sys
 d = json.load(sys.stdin); want = sys.argv[1]
 sys.exit(0 if any(r.get("id") == want and r.get("kind") in ("code", "link") and r.get("needs_approval") for r in d.get("requests") or []) else 1)' "$id" 2>/dev/null; then
+        # ...and it's a request like a fill's: withdrawn if this is stopped, with its in-flight marker and `settle`.
         handoff_hold
+        secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"
+        return $?
       fi
       exec "$VAULT_BIN" approve "$@" ;;
     fill|login|session|token|code|relay|give)
@@ -1945,34 +1948,42 @@ sys.exit(0 if any(r.get("id") == want and r.get("kind") in ("code", "link") and 
       fi
       # give names a request (bound to its VM when it was made), so it takes no --vm.
       [ "$has_vm" = 1 ] || [ "$sub" = give ] || set -- "$@" --vm "$VM_NAME"
-      # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
-      # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
-      # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
-      trap ':' INT TERM HUP
-      # Until the unlock process is known to be done with this request, a marker says one may still be working: a
-      # handoff opened after this command ended without that knowledge settles the vault first.
-      if [ -n "$inflight" ]; then
-        ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
-      fi
-      out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
-      if [ -n "$inflight" ]; then
-        # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
-        # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error) or 64 (usage). Anything else (5:
-        # withdrawn without its confirmation; a crash, a signal) may leave it working: keep the dispatch lock while
-        # `settle` waits for it, and the marker if even that doesn't confirm.
-        case "$rc" in
-          0|1|2|3|4|6|7|64) rm -f "$inflight" ;;
-          *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
-        esac
-      fi
-      trap - INT TERM HUP
-      printf '%s\n' "$out"
-      # The action log gets metadata only: never the token itself.
-      printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
-      # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
-      return $rc ;;
+      secrets_run_acting "$kind" "$inflight" "$sub" "$@"
+      return $? ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_run_acting() { # KIND INFLIGHT VAULT_ARGS...: the vault client for a request that may act on the VM (a fill, a
+  # sign-in, a session load, a one-time code, an approval that fills), called with the dispatch lock held (handoff_hold)
+  # when INFLIGHT names a marker. Its output goes to stdout and, as metadata only, to the signed action log.
+  local kind="$1" inflight="$2" out rc
+  shift 2
+  # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
+  # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
+  # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
+  trap ':' INT TERM HUP
+  # Until the unlock process is known to be done with this request, a marker says one may still be working: a
+  # handoff opened after this command ended without that knowledge settles the vault first.
+  if [ -n "$inflight" ]; then
+    ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
+  fi
+  out="$("$VAULT_BIN" "$@")"; rc=$?
+  if [ -n "$inflight" ]; then
+    # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
+    # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error), 6 (expired), 7 (needs approval) or 64
+    # (usage). Anything else (5: withdrawn without its confirmation; a crash, a signal) may leave it working: keep the
+    # dispatch lock while `settle` waits for it, and the marker if even that doesn't confirm.
+    case "$rc" in
+      0|1|2|3|4|6|7|64) rm -f "$inflight" ;;
+      *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
+    esac
+  fi
+  trap - INT TERM HUP
+  printf '%s\n' "$out"
+  # The action log gets metadata only: never the token itself.
+  printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
+  # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
+  return $rc
 }
 secrets_vm_is_this() { # ARGS...: 0 when every --vm among them names this VM (the vault takes the last one)
   local a want=0

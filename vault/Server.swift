@@ -305,7 +305,7 @@ final class UnlockServer {
     func approve(_ kind: String, _ name: String, _ question: String, _ who: Requester, vm: String, site: String?,
                  use: String, summary: String, usernameHint: String? = nil, identityProvider: Bool = false,
                  proposedID: String? = nil, ruleUse: String? = nil, fixedID: String? = nil, singleUse: Bool = false,
-                 forceLocalAuth: Bool = false) -> ApprovalOutcome {
+                 forceLocalAuth: Bool = false, dialogSummary: String? = nil) -> ApprovalOutcome {
         if !identityProvider && !singleUse {
             if let g = granted(kind, name, who) { return ApprovalOutcome(yes: true, how: g, why: "") }
             if let ru = ruleUse, let r = coveringRule(ru, name: name, site: site, who) {
@@ -327,6 +327,8 @@ final class UnlockServer {
                                identityProvider: identityProvider, summary: fullSummary)
         p.singleUse = singleUse
         p.forceLocalAuth = forceLocalAuth
+        // macOS's dialog (the person's own) may say more than `requests` does: a given link's real host.
+        p.dialogSummary = dialogSummary.map { clean($0 + " on VM \(vm), asked by \(who.describe)", max: 400) }
         pendingRequests[id] = p
         defer { pendingRequests[id] = nil }
         var rec: [String: Any] = ["op": "request", "result": "pending", "request_id": id, "use": use, "name": name, "vm": vm,
@@ -420,7 +422,7 @@ final class UnlockServer {
     /// macOS's dialog for `p`, naming how far allowing it reaches; allowing it grants that and nothing more.
     func scopedLocalAuth(_ p: PendingRequest, _ scope: ApprovalScope) -> LocalAuthAttempt {
         let sc = reachable(p, scope)
-        return startLocalAuth("approve request \(p.id), \(scopeWords(sc, name: p.name)): \(p.summary)", scope: sc)
+        return startLocalAuth("approve request \(p.id), \(scopeWords(sc, name: p.name)): \(p.dialogSummary ?? p.summary)", scope: sc)
     }
 
     func waitForDecision(_ p: PendingRequest, prompt: String?, name: String, timeout: Int) -> Decision {
@@ -450,6 +452,7 @@ final class UnlockServer {
             checkVault()                    // a rekey or a damaged vault while the question waits locks it now
             if stopReason != nil { result = .denied("the vault was locked"); return result }
             if let d = p.decision { result = d; return d }
+            codeExpirySweep()               // one-time code requests expire on time, even while this question waits
             if requesterGone() {
                 // The program that asked went away (or withdrew it): nobody is left to act for, so no approval is taken.
                 say("  (request \(p.id) withdrawn: the program that asked went away)")
@@ -705,6 +708,7 @@ final class UnlockServer {
         let deadline = Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining()))))
         while !la.done {
             checkVault()
+            codeExpirySweep()
             if receivedSignal != 0 || stopReason != nil || Date() >= deadline { la.cancel(); break }
             var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
             if poll(&pfd, 1, 200) > 0, pfd.revents & Int16(POLLIN) != 0 {
@@ -1009,6 +1013,7 @@ final class UnlockServer {
             }
             if let s = stopReason { why = s; break }
             if Date() >= expires { why = "time is up"; break }
+            codeExpirySweep()
             // Requests that arrived while a question waited, in the order they came.
             if !deferred.isEmpty {
                 let d = deferred.removeFirst()
@@ -1075,7 +1080,10 @@ final class UnlockServer {
         // A fill, sign-in, session or token request stops when its requester goes away or withdraws it (closes its side
         // of the connection): checked before each step, while it waits for an approval and during each ssh, whose process
         // group is then killed. Its answer, written below once it has stopped, is the acknowledgement the requester waits for.
+        // An `approve` of a waiting one-time code request fills it once allowed: it's withdrawn like a fill when its
+        // client goes away (the wrapper keeps its in-flight marker and settles, as for a fill).
         let withdrawable = withdrawableOps.contains(op)
+            || (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }.map { $0.parked && pendingRequests[$0.id] == nil } == true)
         if withdrawable {
             requesterFD = c
             requesterWithdrew = false

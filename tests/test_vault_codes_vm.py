@@ -272,15 +272,20 @@ def run(td, procs):
     t = page_text(stgt, "Signed in")
     check("the site page got the code read from the mail page", "6 characters (matches)" in t, t[-300:])
     r = mc("secrets", "relay", "--from", MAIL + "/#two", "--to", SITE + "/#otp", "--site", SITE, "--json")
-    check("relay from an element with two codes: refused with the reason", r.returncode == 2 and "look like a code" in r.stdout, r.stdout[-300:])
+    check("relay from an element with two codes: refused with the reason", r.returncode == 2 and "more than one thing that looks like a code" in r.stdout, r.stdout[-300:])
     r = mc("secrets", "relay", "--kind", "link", "--from", MAIL + "/#signin-link", "--to", SITE, "--site", SITE, "--json")
     check("relay --kind link: the site's own link is opened in the site's tab", r.returncode == 0 and js(r.stdout).get("status") == "filled",
           (r.stdout[-300:], r.stderr[-300:]))
     t = page_text(stgt, "Signed in by link")
     check("...the site page says it was opened by the link", "Signed in by link" in t, t[-300:])
     r = mc("secrets", "relay", "--kind", "link", "--from", MAIL + "/#tracked-link", "--to", SITE, "--site", SITE, "--json")
-    check("relay --kind link to another host (a tracking redirect): refused under the rule, nothing opened",
-          r.returncode == 2 and "localhost" in r.stdout, r.stdout[-300:])
+    check("relay --kind link to another host (a tracking redirect): refused under the rule in fixed words (the host isn't "
+          "named), nothing opened", r.returncode == 2 and "aren't shown" in r.stdout and "localhost" not in r.stdout, r.stdout[-300:])
+    call("browser_navigate", dict(stgt, url=SITE + "/site.html"))
+    time.sleep(1.5)
+    r = mc("secrets", "relay", "--kind", "link", "--from", MAIL + "/#redirect-link", "--to", SITE, "--site", SITE, "--json")
+    check("relay --kind link to the site that then moves the tab to another site: reported (where it went isn't named)",
+          r.returncode == 2 and "led to another site" in r.stdout and "localhost" not in r.stdout, (r.stdout[-300:], r.stderr[-200:]))
     h.call("end_session", {"session": "vmcodes-s"})
     h.call("end_session", {"session": "vmcodes-m"})
 

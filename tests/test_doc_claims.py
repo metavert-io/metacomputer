@@ -1305,7 +1305,7 @@ CLAIMS = [
      lambda m: "if link.origin == site { return true }" in raw(CODES)
      and "parse_origin(value) != parse_origin(req.get(\"link_origin\") or \"\")" in raw(FILL)),
     ("SECURITY.md", r"\*\*A code is filled only into a tab whose origin is the request's site\*\*",
-     lambda m: 'var rq: [String: Any] = ["mode": "fill", "field": "otp", "origins": [cr.site]]' in raw(CODES)
+     lambda m: ': ["field": "otp", "origins": [cr.site]]' in raw(CODES) and 'rq["mode"] = "fill"' in raw(CODES)
      and "a code goes only into a tab on its own site" in raw(CODES)),
     ("SECURITY.md", r"`CODES_VIA=vault` \(the default\) is guidance for Claude", lambda m: D["CODES_VIA"] == "vault"),
     ("SECURITY.md", r"must agree with the address the browser\s+reports for the page's document \(AT-SPI's `DocURL`\)",
@@ -1321,6 +1321,30 @@ CLAIMS = [
      lambda m: "the field is inside a frame, whose site the address bar doesn't show" in human_script()),
     ("SECURITY.md", r"a bar with no scheme counts only when the page's own address is https",
      lambda m: 'if not doc.startswith("https://"):' in human_script()),
+    ("SECURITY.md", r"a link to any other host is refused in fixed words, its host never\s+named or asked about",
+     lambda m: "guard onSite.count == 1 else {" in raw(CODES) and "(other hosts aren't shown); nothing was opened" in raw(CODES)
+     and "pick = parsed[0]" not in raw(CODES)),
+    ("SECURITY.md", r"name a link's\s+host only when it's the site's or one a rule lists",
+     lambda m: 'd["link_host"] = h' not in raw(CODES).replace('if let h = reportedLinkHost { d["link_host"] = h }', "")
+     and raw(CODES).count("cr.linkHost {") == 0 and "return linkHostAllowed((o, h), site: site, extra: listedHosts) ? h : nil" in raw(CODES)),
+    ("SECURITY.md", r"`--link-host H` covers `https://H` only: not another port, not http",
+     lambda m: 'return link.origin.hasPrefix("https://") && link.origin == "https://" + link.host && extra.contains(link.host)' in raw(CODES)
+     and "covering.first { linkHostAllowed((o, h), site: cr.site, extra: $0.link_hosts ?? []) }" in raw(CODES)),
+    ("SECURITY.md", r"the fill account waits \(up to (\d+) seconds\) for the tab to\s+commit and settle \(the same site for a second\)",
+     lambda m: int(m[1]) == int(re.search(r"LAND_WAIT = (\d+)", raw(FILL))[1]) and "if landed not in finals:" in raw(FILL)
+     and 'rq["final_origins"] = lo == cr.site || lo.isEmpty ? [cr.site] : [cr.site, lo]' in raw(CODES)),
+    ("SECURITY.md", r"\*\*Once the value\s+is sent, the request is used\*\*, whatever the VM answers",
+     lambda m: 'chk["mode"] = "check"' in raw(CODES) and "// The value went to the VM: the request is used, whatever came back." in raw(CODES)),
+    ("SECURITY.md", r"an approval that came from a rule must still be covered by a live rule",
+     lambda m: "if !approvalStillHolds(cr) {" in raw(CODES) and "guard cr.approval.hasPrefix(\"rule:\") else { return cr.approved }" in raw(CODES)),
+    ("SECURITY.md", r"No step in the VM\s+may take longer than the request has left",
+     lambda m: "let left = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)" in raw(CODES)),
+    ("SECURITY.md", r"requests expire on\s+time even while the unlock process waits on a question or a dialog",
+     lambda m: "codeExpirySweep()               // one-time code requests expire on time, even while this question waits" in raw(SERVER)),
+    ("SECURITY.md", r"and stopping it \(Ctrl-C, a signal, its wrapper killed\) withdraws it",
+     lambda m: '|| (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }' in raw(SERVER)
+     and 'secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"' in raw("bin/metacomputer")
+     and "request(paths, req, timeout: 200, cancellable: fills)" in raw(APPROVALS)),
     ("docs/events.md", r"\| `needs_you` \| `code_requested` \| warn \|",
      lambda m: 'dropEvent(type: "code_requested", severity: "warn"' in raw(CODES)),
     ("docs/guide.md", r"With `INTERACTIVE_PROMPTS=on` in `config/local.env` \(off by default\)", lambda m: D["INTERACTIVE_PROMPTS"] == "off"),

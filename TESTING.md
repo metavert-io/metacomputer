@@ -1677,7 +1677,7 @@ fixture pages and a cookie-echo page in the VM, then:
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 
-`python3 tests/test_vault_codes.py` (110 checks, about 2 minutes; no VM) covers one-time codes and sign-in
+`python3 tests/test_vault_codes.py` (122 checks, about 3 minutes; no VM) covers one-time codes and sign-in
 links and human-mode fills, with its own ssh stub (the fill account's check, fill, read and open, and the
 desktop account's human-mode script) and a stand-in for osascript (`MCOMP_VAULT_TEST_OSASCRIPT`, test builds
 only), so no dialog is ever shown:
@@ -1704,9 +1704,16 @@ only), so no dialog is ever shown:
   with `INTERACTIVE_PROMPTS=on` the dialog's script is fixed and `why` (with quotes and an AppleScript
   injection attempt) arrives as one argument, nothing in it runs, and the dialog's answer is filled after the
   approval; the AppleScript compiles (`osacompile`, never run);
+- **a hostile VM** (each of these fails against the first version of this feature): a relayed link whose host spells a
+  code is refused and its host appears in no output, listing or audit record; how many codes an element held isn't
+  said; a given link to an unlisted host waits for approval without its host in `requests` or the audit log; a
+  rule's `--link-host` doesn't cover the same host on another port; a VM that answers "refused" after getting the
+  value can't have it sent again; a refused value-free check keeps the request and sends nothing; a rule that
+  expired while a request waited doesn't cover its retry; a slow step is cut at the request's expiry; a request
+  expires while a question waits at the unlock terminal; stopping `approve` while it fills ends the step in the VM;
 - no value in any output, the audit log or the events, and none of the test switches in a release build.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_codes_vm.py` (a test VM, 24 checks) serves a "mail" page
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_codes_vm.py` (a test VM, 25 checks) serves a "mail" page
 (a code and links, on `http://localhost:8000`) and a "site" page (a code field that says whether it got the
 right code, on `http://127.0.0.1:8000`) in the VM, then: `code` from a pipe (needs approval, then filled under
 a rule, and the page sees it), `relay` of the code and of the site's sign-in link from the mail page (another
@@ -1715,7 +1722,7 @@ refused on a text field and filled on the password field; a page whose title nam
 it). A VM built before the relay's read and the link's open has an older secret-fill: for those two modes
 only, the test's ssh stand-in runs this repository's secret-fill as the desktop user over the real ssh.
 
-`python3 tests/test_secret_fill.py` (169 checks) covers the VM side,
+`python3 tests/test_secret_fill.py` (179 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -1738,7 +1745,10 @@ only, the test's ssh stand-in runs this repository's secret-fill as the desktop 
     it (reported);
   - the keyboard route when a page won't take `execCommand`;
   - focus moving or lost, length limits and invalid selectors;
-  - no known desktop user (nothing filled), and a hung browser (the deadline).
+  - no known desktop user (nothing filled), and a hung browser (the deadline);
+  - open mode (a one-time sign-in link): a link that lands on the site, a redirect to another site at once or soon
+    after the page loads (reported, unnamed), a navigation that never commits, and a link to another origin than the
+    vault named (refused before anything is opened).
 - **The whole program against a real headless Chromium**, when one is found
   (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:
   - fills a dummy login page, through the element itself, with fields in a same-origin

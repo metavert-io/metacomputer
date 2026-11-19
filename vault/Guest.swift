@@ -281,7 +281,8 @@ final class GuestRunner {
         // named (this process's own copy, else none: a VM could spell a value in a host name); the count of characters
         // as this process counts the value (a fill that worked); mode and field the request's; the route one of two words.
         if let reason = out["reason"] as? String { out["reason"] = fillReason(reason) }
-        let allowed = request["origins"] as? [String] ?? []
+        // An opened link reports where it landed: kept only as one of the sites the request named for that.
+        let allowed = (request["final_origins"] as? [String]) ?? (request["origins"] as? [String] ?? [])
         out["origin"] = (out["origin"] as? String).flatMap { o in allowed.first { $0 == o } }
         out["chars"] = (ok && valueString != nil && request["mode"] as? String != "open") ? valueString!.utf16.count : nil
         out["mode"] = request["mode"] as? String
@@ -342,6 +343,8 @@ struct GuestRead {
 /// never copied, since the VM has every value it was ever given and could put one in any form into its answer.
 func fillReason(_ guest: String) -> String {
     let known: [(String, String)] = [
+        ("the link led to another site", "the link led to another site (not shown); nothing more was done (check the page)"),
+        ("the tab didn't settle on the link's page", "the tab didn't settle on the link's page in time; check the page"),
         ("the selector matches no element", "the selector matches no element on the page"),
         ("the element is in a frame", "the element is inside a frame; open what it shows in its own tab"),
         ("the link isn't one this", "the VM refused the link"),

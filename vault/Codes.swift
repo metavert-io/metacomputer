@@ -23,6 +23,10 @@ import Foundation
 let codeDefaultTTL = 600
 let codeMaxTTL = 900
 
+/// Why a link can't go ahead without a person: its host isn't the site's and no rule lists it. Fixed words: the host
+/// itself is never named (whoever chose it could have spelled a value in it).
+let unlistedLinkReason = "the link goes to a host that isn't the site's and that no rule lists (the host isn't shown); nothing was opened"
+
 /// The shortest a request may live: 30 s. Test builds take MCOMP_VAULT_TEST_CODE_MIN_TTL (seconds) so expiry can be
 /// checked quickly; release builds don't contain that switch.
 func codeMinTTL() -> Int {
@@ -106,7 +110,7 @@ func extractCode(fromText text: String, _ shape: CodeShape) -> (String?, String?
     flush()
     if found.count == 1 { return (found[0], nil) }
     if found.isEmpty { return (nil, "the element holds nothing that looks like a code (\(shape.words))") }
-    return (nil, "the element holds \(found.count) things that look like a code; point --from at the element that holds only the code (or narrow --pattern / --length)")
+    return (nil, "the element holds more than one thing that looks like a code; point --from at the element that holds only the code (or narrow --pattern / --length)")
 }
 
 /// The origin of a link (scheme://host[:port]) and its host, if it's one a sign-in link may be: https (http only for
@@ -348,8 +352,10 @@ final class CodeRequest {
     var approval = "-"
     var parked = false                  // waits for `approve ID` / `deny ID`
     var reason: String?
-    var linkHost: String?
-    var linkOK = true                   // the link's host is the site's (or listed): false shows the host in the question
+    var linkHost: String?               // a link's host: reported only when it's the site's or one a rule lists (reportedLinkHost)
+    var linkOrigin: String?
+    var linkOK = true                   // the link's origin is the site's
+    var listedHosts: [String] = []      // the covering rule's --link-host list (chosen by origin, linkHostAllowed)
     var fromOrigin: String?             // relay: the page it was read from
     var dialog: CodeDialog?
     var finishedAt: Date?
@@ -373,15 +379,31 @@ final class CodeRequest {
     var identityProvider: Bool { isIdentityProviderOrigin(site) || (linkHost.map(isIdentityProviderHost) ?? false) }
     var siteHost: String { originHost(site) }
 
-    /// What approving it allows: shown in the question, the dialog and `requests`, and signed by a passphrase proof.
-    var summary: String {
+    /// The link's host as it may be shown to anyone but the person at the unlock terminal or macOS's dialog: only when
+    /// the link goes to the site itself or to a host the person listed (`--link-host`, by origin). A host chosen by
+    /// anyone else, a VM above all, could spell a value in its labels, so it's never echoed: not in results, `requests`,
+    /// refusals, the audit log or events.
+    var reportedLinkHost: String? {
+        guard let h = linkHost, let o = linkOrigin else { return nil }
+        return linkHostAllowed((o, h), site: site, extra: listedHosts) ? h : nil
+    }
+
+    /// What approving it allows: shown in `requests`, and signed by a passphrase proof. Never an unlisted link host.
+    var summary: String { summaryText(showHost: false) }
+    /// The same for the person only (the unlock terminal's question and macOS's dialog): a given link's real host. A
+    /// relay never gets that far with an unlisted host (refused, unnamed), so this shows only a host someone gave.
+    var privateSummary: String { summaryText(showHost: source != "relay") }
+
+    func summaryText(showHost: Bool, tail: Bool = true) -> String {
+        let host = reportedLinkHost ?? (showHost ? linkHost : nil)
         var s = kind == "link"
-            ? "open a one-time sign-in link" + (linkHost.map { " to \($0)" } ?? "") + " in the tab on \(site)"
+            ? "open a one-time sign-in link" + (host.map { " to \($0)" } ?? (linkHost != nil ? " to another host" : "")) + " in the tab on \(site)"
             : "fill a one-time code into \(site)"
-        if kind == "link", !linkOK, let h = linkHost { s += " (the link goes to \(h), not \(siteHost))" }
+        if kind == "link", !linkOK, let h = host { s += " (the link goes to \(h), not \(siteHost))" }
+        if kind == "link", !linkOK, host == nil, linkHost != nil { s += " (the link doesn't go to \(siteHost))" }
         if let f = fromOrigin { s += ", read from a page on \(f)" }
         if let src = source, fromOrigin == nil { s += ", given " + (src == "stdin" ? "by a program (no terminal)" : (src == "dialog" ? "in the dialog" : "at a terminal")) }
-        return clean(s + " on VM \(vm), for: \(why), asked by \(who.describe)", max: 400)
+        return clean(s + (tail ? " on VM \(vm), for: \(why), asked by \(who.describe)" : ", for: \(why)"), max: 400)
     }
 
     var listing: [String: Any] {
@@ -393,7 +415,7 @@ final class CodeRequest {
         if let t = target { d["target"] = t.record }
         if let s = source { d["source"] = s }
         if let r = reason { d["reason"] = r }
-        if let h = linkHost { d["link_host"] = h }
+        if let h = reportedLinkHost { d["link_host"] = h }
         if let f = fromOrigin { d["from"] = f }
         if dialog != nil && !(dialog!.finished) { d["dialog"] = true }
         if let p = who.project { d["project"] = p }
@@ -471,7 +493,7 @@ extension UnlockServer {
         } else if let r = cr.reason, !["filled", "pending"].contains(cr.state) {
             out["reason"] = r
         }
-        if let h = cr.linkHost { out["link_host"] = h }
+        if let h = cr.reportedLinkHost { out["link_host"] = h }
         for (k, v) in extra { out[k] = v }
         return out
     }
@@ -606,6 +628,7 @@ extension UnlockServer {
                 return denied("that isn't a sign-in link this vault opens (https, at most \(codeLinkMax) characters); nothing was kept")
             }
             cr.linkHost = l.host
+            cr.linkOrigin = l.origin
             cr.linkOK = l.origin == cr.site
             normalized = Array(text.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
         }
@@ -617,33 +640,50 @@ extension UnlockServer {
         cr.state = "given"
         var rec: [String: Any] = ["op": "code_give", "result": "ok", "request_id": cr.id, "origin": cr.site, "kind": cr.kind, "vm": cr.vm,
                                   "source": source, "requester": (giver ?? cr.who).record]
-        if let h = cr.linkHost { rec["link_host"] = h }
+        if let h = cr.reportedLinkHost { rec["link_host"] = h }
         record(rec)
         return codeDecide(cr, interactive: interactive, presentAtMac: presentAtMac)
     }
 
     /// Approve (or park) a request that holds its value, then act on it.
+    /// The standing rule that covers this request now, if any: the right kind for its source, live, for its site, and,
+    /// for a link to another host, one that lists that link's origin (linkHostAllowed). Never for an identity provider.
+    func coveringCodeRule(_ cr: CodeRequest) -> UnattendedRule? {
+        guard !cr.identityProvider, let p = try? load() else { return nil }
+        let covering = (p.rules ?? []).filter { r in
+            cr.how == "relay" ? r.coversRelay(site: cr.site, fromHost: cr.fromOrigin.map(originHost) ?? "", who: cr.who)
+                : r.coversCode(site: cr.site, who: cr.who)
+        }
+        guard cr.kind == "link", !cr.linkOK else { return covering.first }
+        guard let o = cr.linkOrigin, let h = cr.linkHost else { return nil }
+        return covering.first { linkHostAllowed((o, h), site: cr.site, extra: $0.link_hosts ?? []) }
+    }
+
+    /// A rule-backed approval holds only while a rule still covers the request: checked again right before anything
+    /// is sent to the VM, since a rule can expire or be removed while a request waits to be filled (or retried).
+    func approvalStillHolds(_ cr: CodeRequest) -> Bool {
+        guard cr.approval.hasPrefix("rule:") else { return cr.approved }
+        guard let r = coveringCodeRule(cr) else { return false }
+        cr.approval = "rule:\(r.id)"
+        cr.listedHosts = r.link_hosts ?? []
+        return true
+    }
+
+    /// Why a link can't go ahead without a person: its host isn't the site's and no rule lists it. Fixed words: the host
+    /// itself is never named (whoever chose it could have spelled a value in it).
+
     func codeDecide(_ cr: CodeRequest, interactive: Bool, presentAtMac: Bool) -> [String: Any] {
-        var extraHosts: [String] = []
         if !cr.identityProvider && !interactive {
             // No terminal: only a standing rule the person made lets it go ahead without asking.
-            let p = try? load()
-            let covering = (p?.rules ?? []).filter { r in
-                cr.how == "relay" ? r.coversRelay(site: cr.site, fromHost: cr.fromOrigin.map(originHost) ?? "", who: cr.who)
-                    : r.coversCode(site: cr.site, who: cr.who)
-            }
-            // A link to another host needs a rule that lists that host; otherwise any covering rule will do.
-            let rule = (cr.kind == "link" && !cr.linkOK) ? (covering.first { r in cr.linkHost.map { (r.link_hosts ?? []).contains($0) } ?? false } ?? covering.first)
-                : covering.first
-            if let r = rule {
-                extraHosts = r.link_hosts ?? []
-                if cr.kind == "link", let h = cr.linkHost, !cr.linkOK, !extraHosts.contains(h) {
-                    // A tracking redirect's host that differs from the site's, and that the rule doesn't list: not without asking.
-                    codeFinish(cr, state: "refused", reason: "the link goes to \(h), not \(cr.siteHost), and rule \(r.id) doesn't list it (`rule add ... --link-host \(h)`)")
-                    return codeResult(cr)
-                }
+            if let r = coveringCodeRule(cr) {
                 cr.approved = true
                 cr.approval = "rule:\(r.id)"
+                cr.listedHosts = r.link_hosts ?? []
+            } else if cr.kind == "link", !cr.linkOK, cr.how == "relay" || coveringCodeRuleIgnoringLink(cr) {
+                // A tracking redirect's host that a covering rule doesn't list (or any unlisted host a relay read): refused,
+                // unnamed. A link someone gave with no rule at all waits for the person instead (below), who sees its host.
+                codeFinish(cr, state: "refused", reason: unlistedLinkReason)
+                return codeResult(cr)
             }
         }
         if !cr.approved && !interactive {
@@ -651,11 +691,15 @@ extension UnlockServer {
             return codeResult(cr)
         }
         if !cr.approved {
-            // A person is there (a terminal, or the dialog on this Mac): the vault's own question, as for any use.
-            let q = "  " + cr.summary.prefix(1).uppercased() + cr.summary.dropFirst() + "?"
+            // A person is there (a terminal, or the dialog on this Mac): the vault's own question, as for any use. The
+            // question and macOS's dialog name a given link's real host; `requests` and the passphrase proof don't.
+            let mine = cr.summaryText(showHost: cr.source != "relay", tail: false)
+            let q = "  " + mine.prefix(1).uppercased() + mine.dropFirst() + "?"
             let o = approve("code", cr.id, q, cr.who, vm: cr.vm, site: cr.site, use: cr.kind == "link" ? "link" : "code",
-                            summary: cr.summary, identityProvider: cr.identityProvider, fixedID: cr.id, singleUse: true,
-                            forceLocalAuth: presentAtMac)
+                            summary: cr.summaryText(showHost: false, tail: false), identityProvider: cr.identityProvider,
+                            fixedID: cr.id, singleUse: true, forceLocalAuth: presentAtMac,
+                            dialogSummary: cr.summaryText(showHost: cr.source != "relay", tail: false))
+            if cr.final { return codeResult(cr) }        // it expired (or was refused) while the question waited
             cr.approval = o.how
             guard o.yes else {
                 codeFinish(cr, state: "refused", reason: o.why)
@@ -664,6 +708,16 @@ extension UnlockServer {
             cr.approved = true
         }
         return codeAct(cr)
+    }
+
+    /// Whether a rule covers this request's source and site, whatever its link hosts say (to tell "a rule covers it but
+    /// doesn't list that host", refused, from "no rule at all", which waits for the person).
+    func coveringCodeRuleIgnoringLink(_ cr: CodeRequest) -> Bool {
+        guard let p = try? load() else { return false }
+        return (p.rules ?? []).contains { r in
+            cr.how == "relay" ? r.coversRelay(site: cr.site, fromHost: cr.fromOrigin.map(originHost) ?? "", who: cr.who)
+                : r.coversCode(site: cr.site, who: cr.who)
+        }
     }
 
     /// No rule and no person here: the request waits for `approve ID` (or `deny ID`, or its expiry). Nothing blocks.
@@ -689,13 +743,28 @@ extension UnlockServer {
             say("          -> request \(cr.id) given and approved; it waits for `metacomputer secrets fill --request \(cr.id)`")
             return codeResult(cr)
         }
-        if Date() >= cr.expires {
-            codeFinish(cr, state: "expired", reason: "it expired before it was filled")
-            return codeResult(cr)
-        }
         guard Date() < expires, receivedSignal == 0, stopReason == nil else {
             return lockedResult("the vault locked before the value was sent")
         }
+        /// Right before anything goes to the VM: the request hasn't expired, a rule that approved it still covers it, and
+        /// a step may take no longer than the request has left. nil (with the request finished or parked) otherwise.
+        func dispatchTime() -> TimeInterval? {
+            if cr.final { return nil }
+            let left = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)
+            if left < 1 {
+                codeFinish(cr, state: "expired", reason: "it expired before it was filled")
+                return nil
+            }
+            if !approvalStillHolds(cr) {
+                // The rule that let it go ahead expired or was removed meanwhile: now it waits for the person.
+                cr.approved = false
+                say("          request \(cr.id): the rule that covered it no longer does")
+                park(cr)
+                return nil
+            }
+            return left
+        }
+        guard dispatchTime() != nil else { return codeResult(cr) }
         let p: Payload
         do { p = try load() } catch { return failed("cannot read the vault") }
         guard let t = self.target(p, cr.vm) else { return failed("VM \(cr.vm) isn't bound to the vault (metacomputer secrets bind)") }
@@ -703,67 +772,100 @@ extension UnlockServer {
             return denied(why)
         }
         if let problem = runner.listenerProblem(t) { return problem.denied ? denied(problem.reason) : failed(problem.reason) }
-        var r: [String: Any]
-        if cr.kind == "link" {
-            if target.human {
-                r = denied("a sign-in link opens only in page-mode Chrome for now (human-mode browsers take codes)")
-            } else {
-                var rq: [String: Any] = ["mode": "open", "origins": [cr.site], "field": "text"]
-                // The link's own site, as checked here (and approved): the VM opens nothing else.
-                rq["link_origin"] = linkOrigin(String(decoding: cr.value, as: UTF8.self))?.origin ?? ""
-                if let pr = target.profile { rq["profile"] = pr }
-                if let bp = target.browserPID { rq["browser_pid"] = bp }
-                do { r = try runner.fill(t, request: rq, value: cr.value, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
-                    r = failed(e.message)
-                } catch { r = failed("opening the link failed") }
-            }
-        } else {
-            var rq: [String: Any] = ["mode": "fill", "field": "otp", "origins": [cr.site]]
-            do {
-                if target.human {
-                    if let w = target.windowID { rq["window_id"] = w }
-                    r = try runner.human(t, request: rq, value: cr.value, timeout: TimeInterval(min(60, remaining())))
-                } else {
-                    if let s = target.selector { rq["selector"] = s }
-                    if let pr = target.profile { rq["profile"] = pr }
-                    if let bp = target.browserPID { rq["browser_pid"] = bp }
-                    r = try runner.fill(t, request: rq, value: cr.value, timeout: TimeInterval(min(60, remaining())))
-                }
-            } catch let e as VaultError { r = failed(e.message) } catch { r = failed("the fill failed") }
+        if cr.kind == "link" && target.human {
+            return denied("a sign-in link opens only in page-mode Chrome for now (human-mode browsers take codes)")
         }
-        if r["ok"] as? Bool == true && !originOK(r, [cr.site]) { r = failed("the VM reported a site outside the request's site") }
+        // A code is checked first, without the value (the tab on the site, the field): a refusal there keeps the request
+        // for `fill --request ID`, since nothing reached the VM. Once the value is sent, the request is used, whatever
+        // the VM says next (it could answer "refused" after receiving the value, to have it sent again).
+        var rq: [String: Any] = cr.kind == "link" ? ["mode": "open", "origins": [cr.site], "field": "text"]
+                                                   : ["field": "otp", "origins": [cr.site]]
+        if target.human {
+            if let w = target.windowID { rq["window_id"] = w }
+        } else {
+            if let s = target.selector, cr.kind == "code" { rq["selector"] = s }
+            if let pr = target.profile { rq["profile"] = pr }
+            if let bp = target.browserPID { rq["browser_pid"] = bp }
+        }
+        func step(_ request: [String: Any], _ value: [UInt8]?, _ timeout: TimeInterval) -> [String: Any] {
+            do {
+                return target.human ? try runner.human(t, request: request, value: value, timeout: timeout)
+                                    : try runner.fill(t, request: request, value: value, timeout: timeout)
+            } catch let e as VaultError { return failed(e.message) } catch { return failed("the step in the VM failed") }
+        }
+        if cr.kind == "code" {
+            var chk = rq
+            chk["mode"] = "check"
+            guard let left = dispatchTime() else { return codeResult(cr) }
+            let c = step(chk, nil, left)
+            if cr.final { return codeResult(cr) }
+            guard c["ok"] as? Bool == true, originOK(c, [cr.site]) else {
+                let reason = (c["ok"] as? Bool == true) ? "the VM reported a site outside the request's site" : (c["reason"] as? String ?? "the check failed")
+                if c["status"] as? String == "cancelled" {
+                    codeFinish(cr, state: "refused", reason: requesterLeftReason)
+                    return codeResult(cr)
+                }
+                cr.reason = reason
+                record(["op": "code_fill", "result": c["status"] as? String == "denied" ? "denied" : "error", "request_id": cr.id, "origin": cr.site,
+                        "kind": cr.kind, "vm": cr.vm, "approval": cr.approval, "target": target.record, "requester": cr.who.record,
+                        "reason": reason, "step": "check"])
+                say("          -> request \(cr.id) not filled (\(reason)); the value wasn't sent, so `fill --request \(cr.id)` can try again until \(clockTime(cr.expires))")
+                flushSinks(force: true)
+                var out = codeResult(cr)
+                out["ok"] = false
+                out["status"] = "denied"
+                out["reason"] = reason
+                return out
+            }
+            rq["mode"] = "fill"
+        } else {
+            // The link's own site, as checked here (and approved): the VM opens nothing else, and the tab must land on the
+            // site or on that origin, after any redirect.
+            let lo = cr.linkOrigin ?? ""
+            rq["link_origin"] = lo
+            rq["final_origins"] = lo == cr.site || lo.isEmpty ? [cr.site] : [cr.site, lo]
+        }
+        guard let left = dispatchTime() else { return codeResult(cr) }
+        var r = step(rq, cr.value, left)
+        let landed = (rq["final_origins"] as? [String]) ?? [cr.site]
+        if r["ok"] as? Bool == true && !originOK(r, cr.kind == "link" ? landed : [cr.site]) {
+            r = failed(cr.kind == "link" ? "the link led to another site (not shown); check the page" : "the VM reported a site outside the request's site")
+        }
+        if r["ok"] as? Bool == true, cr.kind == "link", let o = r["origin"] as? String, o != cr.site, isIdentityProviderOrigin(o) {
+            r = failed("the link led to an identity provider's sign-in page, which always asks; nothing more was done")
+        }
         let status = r["status"] as? String ?? "error"
         var rec: [String: Any] = ["op": "code_fill", "result": status == "ok" ? "ok" : status, "request_id": cr.id, "origin": cr.site,
                                   "kind": cr.kind, "vm": cr.vm, "approval": cr.approval, "target": target.record, "requester": cr.who.record]
         if let route = r["route"] as? String, ["element", "keyboard"].contains(route) { rec["route"] = route }
-        if status == "ok", cr.kind == "code" { rec["chars"] = cr.value.count }
+        // A relayed code's length is the VM's choice: not recorded (a given one's is the giver's, and is).
+        if status == "ok", cr.kind == "code", cr.how != "relay" { rec["chars"] = cr.value.count }
         if let reason = r["reason"] as? String, status != "ok" { rec["reason"] = reason }
         if cr.how == "relay" { rec["op"] = "code_relay"; if let f = cr.fromOrigin { rec["from"] = f } }
-        if cr.kind == "link", let h = cr.linkHost { rec["link_host"] = h }
+        if cr.kind == "link", let h = cr.reportedLinkHost { rec["link_host"] = h }
         record(rec)
         var extra: [String: Any] = [:]
         if status == "ok" {
             let chars = cr.value.count
             codeFinish(cr, state: "filled", reason: nil)
-            if cr.kind == "code" { extra["chars"] = chars }
+            if cr.kind == "code" && cr.how != "relay" { extra["chars"] = chars }
             if let route = r["route"] as? String { extra["route"] = route }
             say("          -> request \(cr.id): " + (cr.kind == "link" ? "the link was opened in the tab on \(cr.site)" : "filled into \(cr.site)"))
-        } else if status == "denied" {
-            // A check refused it before anything was typed: it stays given (and approved) until it expires, for
-            // `fill --request ID` once the page is ready.
-            cr.reason = r["reason"] as? String
-            say("          -> request \(cr.id) not filled (\(cr.reason ?? "refused")); nothing was typed, so `fill --request \(cr.id)` can try again until \(clockTime(cr.expires))")
-            var out = codeResult(cr)
-            out["ok"] = false
-            out["status"] = "denied"
-            out["reason"] = cr.reason
-            flushSinks(force: true)
-            return out
         } else {
-            codeFinish(cr, state: "refused", reason: (r["reason"] as? String) ?? "the fill failed")
+            // The value went to the VM: the request is used, whatever came back.
+            codeFinish(cr, state: "refused", reason: status == "cancelled" ? requesterLeftReason : ((r["reason"] as? String) ?? "the fill failed"))
         }
         flushSinks(force: true)
         return codeResult(cr, extra)
+    }
+
+    /// Expire what's due, and nothing else: safe to call from any loop that waits (a question, a dialog), so a request
+    /// never outlives its time, or keeps its value, because the unlock process was busy waiting for an answer.
+    func codeExpirySweep() {
+        let now = Date()
+        for cr in codeRequests.values where !cr.final && now >= cr.expires {
+            codeFinish(cr, state: "expired", reason: "it expired before it was filled")
+        }
     }
 
     /// `relay`: the code or link read from an element of a page in the VM, checked, then filled or opened in the target.
@@ -793,7 +895,9 @@ extension UnlockServer {
         if let pr = from["profile"] as? String, validName(pr) { rq["profile"] = pr }
         if let bp = (from["browser_pid"] as? NSNumber)?.intValue, bp > 1 { rq["browser_pid"] = bp }
         let read: GuestRead
-        do { read = try runner.read(t, request: rq, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
+        let readTime = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)
+        guard readTime >= 1 else { codeFinish(cr, state: "expired", reason: "it expired before it was filled"); return codeResult(cr) }
+        do { read = try runner.read(t, request: rq, timeout: readTime) } catch let e as VaultError {
             codeFinish(cr, state: "refused", reason: e.message)
             return codeResult(cr)
         } catch { codeFinish(cr, state: "refused", reason: "reading the page failed"); return codeResult(cr) }
@@ -812,20 +916,20 @@ extension UnlockServer {
             let extra = rules.flatMap { $0.link_hosts ?? [] }
             var parsed: [(String, (origin: String, host: String))] = []
             for l in read.links { if let o = linkOrigin(l), !parsed.contains(where: { $0.0 == l }) { parsed.append((l, o)) } }
+            // Only links to the site or to a host a covering rule lists are candidates: the VM chose every other one, and
+            // its host is never shown or asked about. The refusals are fixed words (no counts, no hosts: the VM's choice).
             let onSite = parsed.filter { linkHostAllowed($0.1, site: cr.site, extra: extra) }
-            let pick: (String, (origin: String, host: String))
-            if onSite.count == 1 {
-                pick = onSite[0]
-            } else if onSite.isEmpty && parsed.count == 1 {
-                pick = parsed[0]       // one link, to another host: never without the person (below)
-            } else {
-                codeFinish(cr, state: "refused", reason: onSite.count > 1
-                           ? "the element holds \(onSite.count) different links to the site; point --from at the one link"
-                           : (parsed.isEmpty ? "the element holds no https link" : "the element holds \(parsed.count) links and none goes to \(cr.siteHost)"))
+            guard onSite.count == 1 else {
+                codeFinish(cr, state: "refused", reason: onSite.isEmpty
+                           ? "the element holds no link to the site, or to a host a rule lists (other hosts aren't shown); nothing was opened"
+                           : "the element holds more than one link to the site; point --from at the one link")
                 return codeResult(cr)
             }
+            let pick = onSite[0]
             cr.linkHost = pick.1.host
+            cr.linkOrigin = pick.1.origin
             cr.linkOK = pick.1.origin == cr.site
+            cr.listedHosts = extra
             value = Array(pick.0.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
         }
         cr.value = value
@@ -833,7 +937,7 @@ extension UnlockServer {
         cr.state = "given"
         var rec: [String: Any] = ["op": "code_give", "result": "ok", "request_id": cr.id, "origin": cr.site, "kind": cr.kind, "vm": cr.vm,
                                   "source": "relay", "from": fromOrigin, "requester": who.record]
-        if let h = cr.linkHost { rec["link_host"] = h }
+        if let h = cr.reportedLinkHost { rec["link_host"] = h }
         record(rec)
         return codeDecide(cr, interactive: false, presentAtMac: false)
     }
@@ -889,10 +993,18 @@ extension UnlockServer {
             cr.approval = "each:passphrase"
         case "local-auth":
             say("\(clockTime())  request \(cr.id): asking macOS for Touch ID or the login password (`approve` from \(who.describe))")
-            let la = startLocalAuth("approve request \(cr.id), for this one use: \(cr.summary)")
+            // macOS's dialog is the person's: it may name a given link's real host (privateSummary); nothing else does.
+            let la = startLocalAuth("approve request \(cr.id), for this one use: \(cr.privateSummary)")
             let deadline = min(cr.expires, Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining())))))
             while !la.done {
                 checkVault()
+                codeExpirySweep()
+                // The `approve` that asked went away (killed, or withdrawn): nothing is approved, nothing is filled.
+                if requesterGone() {
+                    la.cancel()
+                    say("          -> approval of request \(cr.id) withdrawn: the `approve` that asked went away; it still waits")
+                    return ["ok": false, "status": "cancelled", "reason": requesterLeftReason, "id": cr.id]
+                }
                 if receivedSignal != 0 || stopReason != nil || Date() >= deadline || cr.final { la.cancel(); break }
                 var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
                 if poll(&pfd, 1, 200) > 0, pfd.revents & Int16(POLLIN) != 0 {
@@ -914,6 +1026,12 @@ extension UnlockServer {
                 "vm": cr.vm, "origin": cr.site, "approval": cr.approval, "confirmed": cr.approval == "each:passphrase" ? "passphrase" : "local-auth",
                 "presence": requirePresence, "requester": cr.who.record])
         say("          allowed (\(cr.approval == "each:passphrase" ? "the vault passphrase" : "Touch ID or the login password")), for this one use")
+        if requesterGone() {
+            // Allowed, but the `approve` that asked has gone: the fill it would wait for isn't started (it stays approved
+            // for `fill --request ID` until it expires).
+            say("          -> not filled now: the `approve` that asked went away")
+            return ["ok": false, "status": "cancelled", "reason": requesterLeftReason, "id": cr.id]
+        }
         var out = codeAct(cr)
         if out["status"] as? String == "filled" || out["status"] as? String == "given" { out["ok"] = true; out["approved"] = true }
         out["id"] = cr.id

@@ -259,6 +259,7 @@ final class PendingRequest {
     var waiters: [Int32] = []           // `approve ID` clients waiting for the dialog's answer
     var singleUse = false               // a one-time code or link: only this use, never a grant
     var forceLocalAuth = false          // the person is at this Mac (the code dialog): macOS's dialog shows at once
+    var dialogSummary: String?          // what macOS's dialog says, when it may say more than `summary` (a given link's host)
 
     init(id: String, use: String, name: String, vm: String, site: String?, usernameHint: String?, who: Requester,
          identityProvider: Bool, summary: String) {
@@ -579,6 +580,10 @@ func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     guard let scope = parseScope(a.last("scope") ?? "use") else { throw usageError("--scope use, session or unlock (default: use, this one use)") }
     let id = a.positional[0]
     var req: [String: Any] = ["op": "approve", "id": id, "method": "local-auth", "scope": scopeName(scope)]
+    // Approving a waiting one-time code request fills it once allowed: like a fill, this client then withdraws it on a
+    // signal (or when its wrapper is killed) and waits for the unlock process to confirm that it stopped.
+    let fills = ((try? request(paths, ["op": "requests"], timeout: 15))?["requests"] as? [[String: Any]] ?? [])
+        .contains { ($0["id"] as? String) == id && ["code", "link"].contains($0["kind"] as? String ?? "") && $0["needs_approval"] as? Bool == true }
     if a.has("passphrase") {
         try requireTTY("approve --passphrase")
         installPromptSignalHandlers()
@@ -600,7 +605,7 @@ func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         req["proof"] = approvalProof(k, id: id, challenge: challenge, summary: summary, scope: scope)
     }
     let res: [String: Any]
-    do { res = try request(paths, req, timeout: 200) } catch ClientError.locked {
+    do { res = try request(paths, req, timeout: 200, cancellable: fills) } catch ClientError.locked {
         throw VaultError("the vault is locked: nothing waits for approval", code: Exit.locked)
     }
     if a.has("json") { printResult(res, ["ok", "id", "status", "state", "site", "kind", "reason"]); return exitFor(res) }

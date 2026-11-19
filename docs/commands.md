@@ -201,6 +201,7 @@ Refused rather than guessed (nothing runs):
 | `RUN_DIR`, `LOG_DIR` | `.run/`, `logs/` in the checkout (`.run-vms/NAME`, `logs-vms/NAME` for a `config/vms/` VM) | Runtime files and logs; a second VM needs its own |
 | `VNC_PASSWORD_STORE` | `file` (a new install writes `keychain`) | `keychain` (the login Keychain, item `metacomputer-vnc`), `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `VIEW_CLIPBOARD_S` | `45` | How long `view --open` leaves the live-view password on the clipboard; it's cleared then only if the clipboard still holds it (`0`: never) |
+| `INTERACTIVE_PROMPTS` | `off` | Allow metacomputer to show dialogs on this Mac that wait for you. `on`: `secrets ask` also shows a dialog with a hidden field for the one-time code (read when you unlock). `off`: nothing pops up by itself. A command without a terminal never prompts or opens a dialog itself, whatever this says |
 | `IMPORT_MIN_FREE_GB` | `10` | Copies from the VM, and read-write folder and S3 volumes, stop before the Mac's free space falls below this |
 
 **Skill defaults** (`metacomputer browser` changes them):
@@ -226,11 +227,10 @@ Refused rather than guessed (nothing runs):
 | `LESSONS` | `on` | `on`: the lessons you approved go in every new session's MCP instructions, as advice; `off`: kept, not sent |
 | `LESSONS_DIR` | `~/.local/share/metacomputer/lessons` | Their private store (a 0700 folder, 0600 files, read only when private) |
 
-**Dialogs and one-time codes** ([SECURITY.md](../SECURITY.md#one-time-codes-and-sign-in-links-ask-give-code-relay)):
+**One-time codes** ([SECURITY.md](../SECURITY.md#one-time-codes-and-sign-in-links-ask-give-code-relay)):
 
 | Key | Default | |
 | --- | --- | --- |
-| `INTERACTIVE_PROMPTS` | `off` | Allow metacomputer to show dialogs on this Mac that wait for you. `on`: `secrets ask` also shows a dialog with a hidden field for the code (read when you unlock). Without a terminal, a command never prompts or opens a dialog itself, whatever this says |
 | `CODES_VIA` | `vault` | `vault`: Claude uses `secrets code`, `relay` or `ask` and never reads or types a one-time code itself. `claude`: your opt-in to let it (the code lands in the transcript, and nothing ties it to the site). Guidance the skill follows, not enforced |
 
 **Shell channel** (`metacomputer sh`; [docs/shell.md](shell.md)):

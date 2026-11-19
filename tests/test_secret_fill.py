@@ -237,8 +237,23 @@ class FakeChrome:
         frames = page["frames"]
         ctx_of = {fid: 100 + i for i, fid in enumerate(frames)}
         fid_of = {v: k for k, v in ctx_of.items()}
+        if method == "Page.navigate":
+            # An opened link (secret-fill's open mode): the tab commits to the link's site, or to wherever the page's
+            # model says it redirects (at once, or a little after it loads); with no_commit it never commits.
+            page["navigated"] = params.get("url")
+            if not page.get("no_commit"):
+                f0 = frames["F0"]
+                land = page.get("redirect_to") or sf.parse_origin(params["url"])
+                f0.update({"origin": land, "url": land + "/", "loader": "L-nav"})
+                f0.pop("self_origin", None)
+                page["after_nav"] = 0
+            return {"frameId": "F0", "loaderId": "L-nav"}
         if method == "Page.getFrameTree":
             page["tree_calls"] = page.get("tree_calls", 0) + 1
+            if "after_nav" in page:
+                page["after_nav"] += 1
+                if page.get("redirect_later") and page["after_nav"] == 3:
+                    frames["F0"].update({"origin": page["redirect_later"], "url": page["redirect_later"] + "/", "loader": "L-nav2"})
             if page.get("hang"):
                 time.sleep(60)
             if page.get("reload_after") and page["tree_calls"] > page["reload_after"]:
@@ -418,6 +433,20 @@ def fake_suite(td):
              lambda r, c: r.get("denied") and "not a password field" in r["reason"] and not c.inserted)
     scenario("username into an email field", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": {"tag": "input", "type": "email"}}}})],
              {"field": "username", "value": "dummy-user-qx7"}, lambda r, c: r.get("ok") and c.inserted == [("A", "dummy-user-qx7")])
+    # Open mode (a one-time sign-in link): the tab must settle where the vault said, after any redirect.
+    link = SITE + "/verify?t=" + VALUE
+    opn = {"mode": "open", "field": "text", "value": link, "link_origin": SITE, "final_origins": [SITE]}
+    scenario("open: a link that lands on the site is opened, and says where it landed", [page()], opn,
+             lambda r, c: r.get("ok") is True and r.get("mode") == "open" and r.get("origin") == SITE and c.pages[0].get("navigated") == link)
+    scenario("open: a link that redirects to another site is reported as such, without naming it", [page(redirect_to=EVIL)], opn,
+             lambda r, c: r.get("ok") is False and "led to another site" in r.get("reason", "") and "evil" not in json.dumps(r))
+    scenario("open: a page that moves to another site soon after it loads is caught too", [page(redirect_later=EVIL)], opn,
+             lambda r, c: r.get("ok") is False and "led to another site" in r.get("reason", "") and "evil" not in json.dumps(r))
+    scenario("open: a navigation that never commits isn't reported as opened", [page(no_commit=True)], opn,
+             lambda r, c: r.get("ok") is False and "didn't settle" in r.get("reason", ""))
+    scenario("open: a link whose own site isn't the one the vault named is refused before anything is opened", [page()],
+             dict(opn, value=EVIL + "/x?t=" + VALUE),
+             lambda r, c: r.get("denied") and "the link isn't one" in r.get("reason", "") and not c.pages[0].get("navigated"))
     two = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
            "F1": {"origin": EVIL, "url": EVIL + "/f", "parent": "F0", "active": {"element": PW}}}
     scenario("field in a cross-origin frame refused", [page(frames=two)], {},

@@ -41,6 +41,7 @@ PW_VALUE = ts.PW_VALUE
 USERNAME = ts.USERNAME
 SITE = ts.SITE                      # http://127.0.0.1:8765
 SITE2 = ts.SITE2                    # http://127.0.0.1:8766
+SITE3 = "http://127.0.0.1:8767"
 MAIL = "http://localhost:8000"      # the page a relay reads from
 IDP = "https://accounts.google.com"
 CODE = "482913"
@@ -87,7 +88,7 @@ if rec["human"]:
     origin = val("human-origin", (req.get("origins") or ["?"])[0])
     if flag("human-deny-next"):
         out = {{"ok": False, "denied": True, "reason": val("human-deny-reason", "the focused element is a entry, not a password field")}}
-    elif flag("human-echo-next"):
+    elif v and flag("human-echo-next"):
         out = {{"ok": False, "denied": True, "reason": "the focused element is " + v}}
     elif origin not in (req.get("origins") or []):
         out = {{"ok": False, "denied": True, "reason": "the human-mode site is " + origin + ", which isn't allowed here"}}
@@ -105,16 +106,33 @@ elif user == "mcfill":
             out = {{"ok": True, "mode": "read", "origin": origin, "links": json.loads(val("read-links", "[]"))}}
         else:
             out = {{"ok": True, "mode": "read", "origin": origin, "text": val("read-text", "")}}
+    elif mode == "check" and flag("slow-check-next"):
+        import time
+        time.sleep(float(val("slow-check-s", "5")))
+        out = {{"ok": True, "mode": "check", "field": req.get("field"), "origin": origin}}
+    elif v and flag("slow-fill-next"):
+        # A step in the VM that takes a while once it has the value: it says it started, and finishes only if nobody
+        # ends it first.
+        import time
+        open(os.path.join(d, "slow-started"), "w").write(str(os.getpid()))
+        time.sleep(6)
+        open(os.path.join(d, "slow-done"), "w").write("done")
+        out = {{"ok": True, "mode": mode, "field": req.get("field"), "origin": origin, "chars": len(v), "route": "element"}}
+    elif mode == "check" and flag("deny-check-next"):
+        out = {{"ok": False, "denied": True, "reason": "no field is focused in the page; click into the field first"}}
+    elif v and flag("deny-after-value-next"):
+        # A hostile VM that got the value says "refused, nothing typed", to have it sent again.
+        out = {{"ok": False, "denied": True, "reason": "no field is focused in the page; click into the field first"}}
     elif flag("deny-next"):
         out = {{"ok": False, "denied": True, "reason": "no field is focused in the page; click into the field first"}}
-    elif flag("echo-next"):
+    elif v and flag("echo-next"):
         out = {{"ok": False, "denied": False, "reason": "saw " + v}}
     elif origin not in (req.get("origins") or []):
         out = {{"ok": True, "mode": mode, "field": req.get("field"), "origin": origin}}
     elif mode == "check":
         out = {{"ok": True, "mode": "check", "field": req.get("field"), "origin": origin}}
     elif mode == "open":
-        out = {{"ok": True, "mode": "open", "field": "text", "origin": origin}}
+        out = {{"ok": True, "mode": "open", "field": "text", "origin": val("open-landed", origin)}}
     else:
         out = {{"ok": True, "mode": "fill", "field": req.get("field"), "origin": origin, "chars": len(v), "route": "element"}}
 else:
@@ -385,8 +403,11 @@ def offline_checks(td):
     check("bin/metacomputer: code, relay and give wait for an open handoff like fills (handoff_hold)",
           re.search(r'\[ "\$sub" = code \] \|\| \[ "\$sub" = relay \] \|\| \[ "\$sub" = give \]', w) is not None
           and "fill|login|session|token|code|relay|give)" in w)
-    check("bin/metacomputer: approving a waiting code request (which then fills) waits for an open handoff too",
-          re.search(r'approve\)\n.*?handoff_hold\n.*?exec "\$VAULT_BIN" approve', w, re.S) is not None)
+    check("bin/metacomputer: approving a waiting code request (which then fills) waits for an open handoff, and runs like a "
+          "fill: an in-flight marker, and `settle` when it ends unconfirmed",
+          re.search(r'approve\)\n.*?handoff_hold\n\s+secrets_run_acting secrets_approve_code "\$RUN_DIR/owners/vault-inflight\.\$\$" approve "\$@"', w, re.S)
+          is not None and re.search(r'secrets_run_acting\(\) \{.*?0\|1\|2\|3\|4\|6\|7\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle', w, re.S)
+          is not None)
     d = open(os.path.join(LAB, "config", "defaults.env")).read()
     check("config/defaults.env: INTERACTIVE_PROMPTS=off and CODES_VIA=vault by default",
           re.search(r"^INTERACTIVE_PROMPTS=off\b", d, re.M) and re.search(r"^CODES_VIA=vault\b", d, re.M))
@@ -500,6 +521,14 @@ def run(td, procs):
         wait_for(lambda: os.path.exists(os.path.join(vdir, "vault.sock")), 5, 0.05)
         return p
 
+    def soft(p, text, timeout=2):
+        """Wait for text on a terminal without stopping the run when it doesn't come."""
+        try:
+            p.expect(text, timeout)
+            return True
+        except AssertionError:
+            return False
+
     def lock(p):
         p.send("\x03")
         try:
@@ -529,6 +558,9 @@ def run(td, procs):
     rc, out = tty([BIN, "set", "web", "--kind", "password", "--origin", SITE, "--username", USERNAME],
                   [("Vault passphrase", PASS + "\n"), ("Password for web", PW_VALUE + "\n"), ("same password again", PW_VALUE + "\n")])
     check("set a login (session approval) for the stand-in site", rc == 0, out)
+    rc, out = tty([BIN, "set", "web-each", "--kind", "password", "--origin", SITE2, "--username", USERNAME, "--approval", "each"],
+                  [("Vault passphrase", PASS + "\n"), ("Password for web-each", PW_VALUE + "\n"), ("same password again", PW_VALUE + "\n")])
+    check("set a login that asks at every use (each)", rc == 0, out)
     rc, out = tty([BIN, "bind", "cvm", "--port", str(port), "--host-key-line", hostkey, "--fill-key", sshdir + "/fill",
                    "--fill-user", "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua", "--gateway", my_exe],
                   [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
@@ -674,8 +706,10 @@ def run(td, procs):
           and "dummy-link-token-5521" not in r.stdout + r.stderr, (r.stdout[-300:], opens))
     n3 = len(calls())
     r = client("code", "--vm", "cvm", "--site", SITE, "--kind", "link", "--into", SITE, "--json", stdin=LINK_TRACKED + "\n")
-    check("a link to another host (a tracking redirect) that the rule doesn't list is refused without a prompt, nothing opened",
-          r.returncode == 2 and "links.example.net" in r.stdout and not [x for x in calls()[n3:] if x.get("mode") == "open"], r.stdout[-300:])
+    check("a link to another host (a tracking redirect) that the rule doesn't list is refused without a prompt, in fixed words "
+          "(the host isn't named), nothing opened",
+          r.returncode == 2 and "isn't shown" in r.stdout and "links.example.net" not in r.stdout + r.stderr
+          and not [x for x in calls()[n3:] if x.get("mode") == "open"], r.stdout[-300:])
     r = client("code", "--vm", "cvm", "--site", SITE, "--kind", "link", "--into", SITE, "--json", stdin="http://evil.example/x\n")
     check("a link that isn't https (or local) is refused", r.returncode == 2, r.stdout[-200:])
     r = client("rule", "add", "code", "--site", SITE, "--from", "stdin", "--link-host", "links.example.net", "--expires", "1h")
@@ -711,7 +745,7 @@ def run(td, procs):
     sflag("read-text", f"Codes: {CODE} and {CODE2}")
     r = client("relay", "--vm", "cvm", "--from", MAIL + "/#body", "--to", SITE + "/#otp", "--site", SITE, "--json")
     check("relay: an element with two code-like values is refused (failed, reason), nothing filled",
-          r.returncode == 2 and "2 things that look like a code" in r.stdout and CODE not in r.stdout + r.stderr, r.stdout[-300:])
+          r.returncode == 2 and "more than one thing that looks like a code" in r.stdout and CODE not in r.stdout + r.stderr, r.stdout[-300:])
     sflag("read-text", "Hello there, nothing here")
     r = client("relay", "--vm", "cvm", "--from", MAIL + "/#body", "--to", SITE + "/#otp", "--site", SITE, "--json")
     check("relay: an element with no code is refused", r.returncode == 2 and "nothing that looks like a code" in r.stdout, r.stdout[-300:])
@@ -761,6 +795,114 @@ def run(td, procs):
     sflag("human-echo-next")
     r = client("code", "--vm", "cvm", "--site", SITE, "--human", "--json", stdin=CODE2 + "\n")
     check("human mode: a VM answer that spells the value is withheld", CODE2 not in r.stdout + r.stderr and r.returncode != 0, r.stdout[-300:])
+
+    # --- 7b. a hostile VM, and things that change while a request waits (round-2 audit) ----------------------------
+    def value_calls(since, value):
+        return [x for x in calls()[since:] if json.loads(x["stdin"] or "{}").get("value") == value]
+
+    def clear_flags():
+        """One-shot stub flags a step didn't use (an older vault makes other calls) never carry over to the next."""
+        for f in ("deny-next", "deny-check-next", "deny-after-value-next", "slow-check-next", "slow-fill-next", "echo-next",
+                  "human-echo-next", "human-deny-next", "slow-started", "slow-done"):
+            sunflag(f)
+
+    # A host the VM chose is never echoed: it could spell a value it was given in its labels.
+    sflag("read-links", json.dumps([f"https://{CODE}.example.com/x"]))
+    n7 = len(calls())
+    r = client("relay", "--vm", "cvm", "--kind", "link", "--from", MAIL + "/#l", "--to", SITE, "--site", SITE, "--json")
+    q = client("requests", "--json").stdout
+    check("relay: a link to a host the VM chose (one that spells a code) is refused in fixed words: the host is in no output, "
+          "listing or audit record, and nothing is opened",
+          r.returncode == 2 and CODE not in r.stdout + r.stderr + q and "example.com" not in r.stdout + r.stderr
+          and CODE not in (open(alog).read() if os.path.exists(alog) else "") and not [x for x in calls()[n7:] if x.get("mode") == "open"],
+          (r.stdout[-300:], r.stderr[-200:]))
+    sflag("read-text", "codes 111222 333444 555666 777888 999000")
+    r = client("relay", "--vm", "cvm", "--from", MAIL + "/#body", "--to", SITE + "/#otp", "--site", SITE, "--json")
+    check("relay: how many code-like values the element held isn't said (the VM's choice): fixed words",
+          r.returncode == 2 and "more than one" in r.stdout and "5 things" not in r.stdout, r.stdout[-300:])
+    r = client("code", "--vm", "cvm", "--site", SITE2, "--kind", "link", "--into", SITE2, "--json", stdin=f"https://{CODE2}.tracker.example/x\n")
+    q = client("requests", "--json").stdout
+    check("a given link to an unlisted host that waits for approval: its host isn't in the output, `requests` or the audit log",
+          r.returncode == 7 and CODE2 not in r.stdout + r.stderr + q and "tracker.example" not in r.stdout + q
+          and CODE2 not in (open(alog).read() if os.path.exists(alog) else ""), (r.stdout[-300:], q[-300:]))
+    client("deny", js(r.stdout).get("request_id", "00000000"))
+    # Extra hosts are matched by origin: a listed host on another port (or over http) isn't the listed origin.
+    n7 = len(calls())
+    r = client("code", "--vm", "cvm", "--site", SITE, "--kind", "link", "--into", SITE, "--json", stdin="https://links.example.net:8443/c/x\n")
+    check("a rule's --link-host covers that https origin only: the same host on another port is refused, nothing opened",
+          r.returncode == 2 and not [x for x in calls()[n7:] if x.get("mode") == "open"] and "8443" not in r.stdout, r.stdout[-300:])
+    # Once the value is sent, the request is used, whatever the VM answers.
+    sflag("deny-after-value-next")
+    n7 = len(calls())
+    r = client("code", "--vm", "cvm", "--site", SITE, "--into", SITE + "/#otp", "--json", stdin=CODE + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    r2 = client("fill", "--request", rid, "--vm", "cvm")
+    check("a VM that answers 'refused' after getting the value can't have it sent again: the request is used (refused), "
+          "and fill --request sends nothing", js(r.stdout).get("state") == "refused" and r2.returncode in (2, 6)
+          and len(value_calls(n7, CODE)) == 1, (r.stdout[-300:], r2.stdout[-200:], len(value_calls(n7, CODE))))
+    # A refusal before the value is sent (the value-free check) keeps it, and the value never went to the VM.
+    sflag("deny-check-next")
+    n7 = len(calls())
+    r = client("code", "--vm", "cvm", "--site", SITE, "--into", SITE + "/#otp", "--json", stdin=CODE2 + "\n")
+    check("a code is checked without the value first: a refusal there keeps the request (given) and sends no value",
+          r.returncode == 2 and js(r.stdout).get("state") == "given" and not value_calls(n7, CODE2)
+          and [x.get("mode") for x in calls()[n7:]] == ["check"], (r.stdout[-300:], [x.get("mode") for x in calls()[n7:]]))
+    client("deny", js(r.stdout).get("request_id", "00000000"))
+    # A rule that lets a request go ahead is checked again before each dispatch.
+    r = client("rule", "add", "code", "--site", SITE3, "--from", "stdin", "--expires", "3s")
+    sflag("deny-check-next")
+    r = client("code", "--vm", "cvm", "--site", SITE3, "--into", SITE3 + "/#otp", "--json", stdin=CODE3 + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    time.sleep(3.5)
+    n7 = len(calls())
+    r2 = client("fill", "--request", rid, "--vm", "cvm", "--json")
+    check("a rule that expired while the request waited no longer covers its retry: needs approval (exit 7), nothing sent",
+          js(r.stdout).get("state") == "given" and r2.returncode == 7 and not value_calls(n7, CODE3), (r.stdout[-200:], r2.stdout[-200:]))
+    client("deny", rid)
+    # Expiry holds during a step: a step can't outlast the request's time.
+    sflag("slow-fill-next")
+    sunflag("slow-done")
+    t0 = time.time()
+    r = client("code", "--vm", "cvm", "--site", SITE, "--into", SITE + "/#otp", "--ttl", "3s", "--json", stdin=CODE + "\n")
+    took = time.time() - t0
+    time.sleep(3.5)
+    check("a step in the VM is cut at the request's expiry (not filled after it; the slow step was ended)",
+          js(r.stdout).get("status") != "filled" and took < 5.5 and not os.path.exists(os.path.join(stubdir, "slow-done")),
+          (r.stdout[-200:], round(took, 1)))
+    # ...and expiries happen while the unlock process waits on a question.
+    clear_flags()
+    r = client("ask", "--vm", "cvm", "--site", SITE2, "--kind", "code", "--why", "expires during a question", "--ttl", "2s", "--json")
+    rid = js(r.stdout).get("request_id", "00000000")
+    q_ = subprocess.Popen([BIN, "fill", "web-each", "--vm", "cvm", "--field", "password"], env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
+    asked = soft(u, "Type web-each", 20)
+    time.sleep(3.5)
+    expired_meanwhile = asked and any(x.get("op") == "code_expire" and x.get("request_id") == rid for x in audit_recs())
+    if asked:
+        u.send("no\n")
+    q_.communicate(timeout=90)
+    check("a request expires on time while a question waits at the unlock terminal (recorded before the question ended)",
+          expired_meanwhile)
+    # Approving a waiting request fills it, and is withdrawn like a fill: stopping `approve` stops the fill.
+    clear_flags()
+    r = client("code", "--vm", "cvm", "--site", SITE2, "--into", SITE2 + "/#otp", "--json", stdin=CODE2 + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    sunflag("slow-started")
+    sunflag("slow-done")
+    sflag("slow-fill-next")
+    ap_ = subprocess.Popen([BIN, "approve", rid], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                           stdin=subprocess.DEVNULL)
+    started = wait_for(lambda: os.path.exists(os.path.join(stubdir, "slow-started")), 20)
+    ap_.send_signal(signal.SIGTERM)
+    o, e = ap_.communicate(timeout=60)
+    outputs.append(o + e)
+    time.sleep(7)
+    check("stopping `approve` while it fills withdraws it: the unlock process ends the step in the VM (it never finishes), "
+          "and the client gets the confirmation (its answer: stopped)", started and ap_.returncode in (2, 4)
+          and "stopped" in e and not os.path.exists(os.path.join(stubdir, "slow-done")),
+          (started, ap_.returncode, o[-200:], e[-200:]))
+    q = state(rid)
+    check("...and the request is used up (the value had gone to the VM)", q is None or q.get("state") in ("refused", "expired"), q)
     lock(u)
 
     # --- 8. a person at a terminal: give follows the approval path (typed at the unlock terminal here) -------------

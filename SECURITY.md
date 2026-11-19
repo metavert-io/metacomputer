@@ -1821,9 +1821,12 @@ none after a new unlock). A page in the VM can't make one: requests come only th
    on `--from`'s site and the selector must match exactly one element in the page itself (not in a frame). At most
    8192 characters of its text (or 20 of its links) come back, to the unlock process's memory only, where the vault
    checks it. A code is the one run of letters and digits that fits the shape (4 to 10 long with at least one digit;
-   `--pattern digits|alnum` and `--length N` or `MIN-MAX`, 4 to 16, narrow it): none, or two or more different
-   ones, refuses, saying so. A link must be https and go to the site (below). Then it's filled into `--to`, or the
-   link opened in the tab on the site. Claude learns only `relayed: filled` or the failure and its reason.
+   `--pattern digits|alnum` and `--length N` or `MIN-MAX`, 4 to 16, narrow it): none, or more than one, refuses, in
+   fixed words (how many there were is the page's choice, so it isn't said). A link must go to the site, or to a
+   host a relay rule lists (by origin, below); a link to any other host is refused in fixed words, its host never
+   named or asked about, since the VM chose it and could spell a value in it. Then it's filled into `--to`, or the
+   link opened in the tab on the site. Claude learns only `relayed: filled` or the failure and its reason. A relayed
+   code's length isn't recorded either.
 
 **Where it goes.** `--into TAB/FIELD`: TAB is the site (`https://host[:port]`, a bare host meaning https, or
 `http://localhost:PORT` and `http://127.0.0.1:PORT` for testing), FIELD a CSS selector (empty: the focused field).
@@ -1833,12 +1836,27 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   site than `--site` is refused before anything is sent. `--human` sends it to a human-mode browser instead (below).
 - **A link is opened only if it's https and its host is the site's** (its origin equal to the site's), in the tab on
   the site, by navigating that tab (`Page.navigate`); the VM's secret-fill opens nothing but the origin the vault
-  checked. A link to another host, a tracking redirect, isn't opened without you: refused under a rule unless the
-  rule lists that host (`--link-host H`), and shown in the question (`the link goes to H, not S`) when you're asked.
-  Human-mode browsers take codes only, for now.
-- A fill that a check refused before anything was typed (no tab on the site yet, no field focused) leaves the request
-  `given`: `metacomputer secrets fill --request ID [--selector CSS | --human]` tries again until it expires. Without
-  `--into`, a given request waits for that command.
+  checked. A link to another host, a tracking redirect, isn't opened without you: refused under a rule unless the rule
+  lists that origin (`--link-host H` covers `https://H` only: not another port, not http), in fixed words that don't
+  name the host. When you're asked about a link someone gave, the unlock terminal's question and macOS's dialog show
+  its real host (`the link goes to H, not S`); `requests`, results, refusals, the audit log and events name a link's
+  host only when it's the site's or one a rule lists.
+- **Where a link lands is checked too.** After opening it, the fill account waits (up to 8 seconds) for the tab to
+  commit and settle (the same site for a second), and the tab must land on the site or on the link's own origin, as
+  the browser's frame tree reports it. A redirect, by the server or by the page's script soon after it loads, to any
+  other site (an identity provider's included) is reported as a failure, the site not named. The navigation itself
+  has happened by then: nothing is undone, and the request is used. Human-mode browsers take codes only, for now.
+- **A code is checked first, without the value**: the tab on the site and the field, as a fill's check. A refusal
+  there (no tab on the site yet, no field focused) leaves the request `given`, since nothing reached the VM:
+  `metacomputer secrets fill --request ID [--selector CSS | --human]` tries again until it expires. **Once the value
+  is sent, the request is used**, whatever the VM answers: a VM that says "refused" after it got the value can't have
+  it sent again. A link has no such check: it's used once it's sent. Without `--into`, a given request waits for
+  `fill --request`.
+- **Time and approval are checked at every step.** Right before anything goes to the VM (the check, the value), the
+  request must not have expired, and an approval that came from a rule must still be covered by a live rule: a rule
+  that expired or was removed while the request waited sends it back to waiting for `approve ID`. No step in the VM
+  may take longer than the request has left (its ssh is ended then, and the request expires), and requests expire on
+  time even while the unlock process waits on a question or a dialog.
 
 **Approvals.** Nothing a program does approves, here as anywhere in the vault.
 - A value given at a terminal (`give`, `code` typed at a prompt) or in the dialog follows the vault's approval path,
@@ -1860,7 +1878,10 @@ none after a new unlock). A page in the VM can't make one: requests come only th
 - **Without a rule, the command exits at once** with exit 7 ("needs approval"). It prints the request id and the one
   command you run: `metacomputer secrets approve ID` (Touch ID or your login password; `--passphrase` for the vault
   passphrase). It never waits for you, and the request expires on its own; `deny ID` refuses it. `approve` then
-  fills it (or opens the link) and says how that went. The question and the dialog name the site, the kind, a
+  fills it (or opens the link) and says how that went. Since it acts on the VM, that `approve` runs like a fill: it
+  waits for an open handoff, keeps the in-flight marker and the dispatch lock until the unlock process is done (with
+  `settle` when it ends unconfirmed), and stopping it (Ctrl-C, a signal, its wrapper killed) withdraws it: the unlock
+  process cancels the dialog, or ends the step in the VM, and confirms. The question and the dialog name the site, the kind, a
   link's real host and where it was read from. `secrets requests` lists what waits, and the
   `needs_you.approval_waiting` event says so.
 - **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its
@@ -2403,7 +2424,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
-| `kind`, `source`, `link_host`, `from`, `target`, `why` | a one-time code request's kind (`code` or `link`), where its value came from (`terminal`, `dialog`, `stdin`, `relay`), a link's host, the page a relay read from, where it goes (`page` or `human`), and why it was asked for (never the value) |
+| `kind`, `source`, `link_host`, `from`, `target`, `why`, `step` | a one-time code request's kind (`code` or `link`), where its value came from (`terminal`, `dialog`, `stdin`, `relay`), a link's host (only when it's the site's or one a rule lists), the page a relay read from, where it goes (`page` or `human`), why it was asked for, and `check` for a refusal before the value was sent (never the value) |
 | `token_id`, `ttl_s`, `renewer` | a token's id, and on `token` and `renew` the seconds it has to live then (the vault's own numbers); on `renew`, who renewed it: `same` (its own Claude Code session), `terminal` (you at a terminal) or `other` |
 | `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
@@ -2766,6 +2787,8 @@ something waits for you:
   can read the mail itself, and ask for codes). Use a dedicated automation mailbox that only receives sign-in mail.
   The vault binds where a relayed code goes, not where it came from: a code rule or relay rule is a standing approval
   for whatever can pose as the requester it names (any program, without `--project`), for that site, until it expires.
+  Where an opened link lands is watched for 8 seconds only: a page that moves on later, or after a click, isn't.
+  A hostile VM still chooses which of a few fixed outcomes a relay reports, and when.
 - **The code dialog isn't an approval.** It's `osascript`'s dialog, which an app with Accessibility access could type
   into; that's why a value given there still needs Touch ID, your login password or a typed line at the unlock terminal.
 - **`CODES_VIA` is guidance.** Nothing stops Claude from reading a code shown in the VM (a page, a screenshot) and
