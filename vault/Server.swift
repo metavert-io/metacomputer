@@ -164,7 +164,7 @@ struct ApprovalOutcome {
 /// Why a request stopped when the program that asked went away (or withdrew it) while it was being served.
 let requesterLeftReason = "stopped: the program that asked went away or withdrew the request, so nothing further was done (a step in progress was ended)"
 /// The requests whose requester may withdraw them while they run (Commands.swift, request(): cancellable).
-let withdrawableOps: Set<String> = ["fill", "login", "session_save", "session_load", "token"]
+let withdrawableOps: Set<String> = ["fill", "login", "session_save", "session_load", "token", "renew"]
 
 /// A connection read while the unlock process waited for an answer, served once it's free.
 struct DeferredRequest {
@@ -544,6 +544,9 @@ final class UnlockServer {
         case "requests": res = opRequests()
         case "rule_list": res = opRuleList()
         case "deny": res = opDeny(req, who)
+        // A revoke only restricts, and must win at once: it doesn't wait behind a question (a renewal that's waiting then
+        // finds its token gone). Its audit record is written now; the sinks get it on the next delivery.
+        case "revoke": res = opRevoke(req, who, flush: false)
         case "lock":
             stopReason = "locked with `lock` (from \(who.describe))"
             say("\(clockTime())  `lock` from \(who.describe)")
@@ -1048,6 +1051,7 @@ final class UnlockServer {
         case "session_save": res = opSessionSave(req, who)
         case "session_load": res = opSessionLoad(req, who)
         case "token": res = opToken(req, who)
+        case "renew": res = opRenew(req, who)
         case "tokens": res = opTokens()
         case "revoke": res = opRevoke(req, who)
         case "sinks": res = opSinks()
@@ -1136,6 +1140,7 @@ final class UnlockServer {
             if let pr = s.projects, !pr.isEmpty { d["projects"] = pr }
             if let h = s.api_host { d["api_host"] = h }
             if let pp = s.api_path_prefix { d["api_path_prefix"] = pp }
+            if s.kind == "api" { d["answer_timeout_s"] = Int(hub.answerLimit(s)) }
             if let t = s.api_header, let (name, _, _) = splitTemplate(t) { d["api_header"] = name }
             return d
         }
@@ -1543,7 +1548,7 @@ final class UnlockServer {
         do { listener = try hub.ensure(t) } catch let e as VaultError { return finish("token", fields, failed(e.message), who, approval: approval) } catch {
             return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
         }
-        let ttl = max(1, min(ttlAsked, 8 * 3600, remaining()))
+        let ttl = max(1, min(ttlAsked, tokenMaxTTL, remaining()))
         let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who.record, secret: s)
         let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
         var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
@@ -1574,21 +1579,162 @@ final class UnlockServer {
         if let p = try? load() { hub.prune(p) }   // a secret replaced or deleted ends its tokens
         let list: [[String: Any]] = hub.live().map { t in
             var d: [String: Any] = ["id": t.id, "name": t.name, "vm": t.vm, "expires": isoTime(t.expires),
-                                    "expires_in_s": max(0, Int(t.expires.timeIntervalSinceNow)), "requests": countClass(t.requests)]
+                                    "expires_in_s": max(0, Int(t.expires.timeIntervalSinceNow)), "requests": countClass(t.requests),
+                                    "renewals": t.renewals, "longest_until": isoTime(t.limit)]
             if let pr = t.requester["project"] as? String { d["project"] = pr }
             return d
         }
         return ["ok": true, "status": "ok", "tokens": list]
     }
 
-    func opRevoke(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+    /// flush: deliver the record to the audit sinks now (not while a question waits: the next delivery takes it).
+    func opRevoke(_ req: [String: Any], _ who: Requester, flush: Bool = true) -> [String: Any] {
         let id = req["id"] as? String
         guard id == nil || (id.map { matches($0, "^[0-9a-f]{8}$") } ?? false) else { return ["ok": false, "status": "error", "reason": "bad token id"] }
         let gone = hub.revoke(id)
         say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? " (all)") + ", asked by \(who.describe)")
         record(["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
-        flushSinks(force: true)
+        if flush { flushSinks(force: true) }
         return ["ok": true, "status": "ok", "revoked": gone.map { $0.id }]
+    }
+
+    // MARK: renewing api tokens
+
+    /// `token renew ID|--all`: a live token lives longer and the token in the VM stays the same, so a program there
+    /// doesn't restart. The same rules as a new token, checked again for each: the secret's --project limit, a required
+    /// audit sink's record first, the pinned gateway, and the approval: an `each` secret, an unlock with --confirm each
+    /// or an identity provider's host asks again (a `NAME session` / `NAME unlock` answer or an unattended rule for its
+    /// tokens covers it, as it covers a new token); a `session` secret doesn't. Never past the unlock, never past
+    /// tokenMaxLifetime after the token was issued, never shorter than it was. Whatever happened while it waited wins: a
+    /// revoke, an expiry, a changed secret or the vault locking, and it isn't renewed. Only the Mac side can renew: the
+    /// proxy in the VM has no way to ask.
+    func opRenew(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        guard let vm = req["vm"] as? String, validName(vm) else { return finish("renew", [:], failed("bad request"), who, approval: "-") }
+        let all = req["all"] as? Bool == true
+        let id = req["id"] as? String
+        var fields: [String: Any] = ["vm": vm]
+        if let id, matches(id, "^[0-9a-f]{8}$") { fields["token_id"] = id }
+        guard all != (id != nil), id.map({ matches($0, "^[0-9a-f]{8}$") }) ?? true else {
+            return finish("renew", fields, failed("bad request"), who, approval: "-")
+        }
+        var step: Int? = nil
+        if let n = req["ttl_s"] {
+            guard let v = (n as? NSNumber)?.intValue, v > 0, v <= tokenMaxTTL else { return finish("renew", fields, failed("bad request"), who, approval: "-") }
+            step = v
+        }
+        if let p = try? load() { hub.prune(p) }   // a secret replaced or deleted has ended its tokens
+        let mine = hub.live().filter { $0.vm == vm && (all || $0.id == id) }
+        if !all {
+            guard let t = mine.first else {
+                say("\(clockTime())  renew token \(id ?? "") on VM \(vm), asked by \(who.describe)")
+                return finish("renew", fields, denied("no live token \(id ?? "") on VM \(vm) (metacomputer secrets tokens): an ended token can't be renewed; get a new one"),
+                              who, approval: "-")
+            }
+            return renewOne(t, step: step, proposedID: req["request_id"] as? String, who)
+        }
+        say("\(clockTime())  renew every live token on VM \(vm) (\(mine.count)), asked by \(who.describe)")
+        var renewed: [[String: Any]] = [], notRenewed: [[String: Any]] = []
+        var worst = "ok"
+        for t in mine {
+            if requesterGone() {
+                notRenewed.append(["token_id": t.id, "name": t.name, "reason": requesterLeftReason])
+                worst = "cancelled"
+                continue
+            }
+            let r = renewOne(t, step: step, proposedID: nil, who)
+            if r["status"] as? String == "ok" {
+                var d: [String: Any] = ["token_id": t.id, "name": t.name]
+                for k in ["expires", "expires_in_s", "extended", "renewals", "longest_until"] { if let v = r[k] { d[k] = v } }
+                renewed.append(d)
+            } else {
+                notRenewed.append(["token_id": t.id, "name": t.name, "reason": r["reason"] as? String ?? "not renewed"])
+                let st = r["status"] as? String ?? "error"
+                if worst == "ok" || (worst == "denied" && st != "denied") { worst = st }
+            }
+        }
+        var out: [String: Any] = ["ok": worst == "ok", "status": worst, "vm": vm, "renewed": renewed, "not_renewed": notRenewed]
+        if mine.isEmpty { out["reason"] = "no live tokens on VM \(vm)" }
+        return out
+    }
+
+    /// One token's renewal (opRenew).
+    func renewOne(_ t: APIToken, step asked: Int?, proposedID: String?, _ who: Requester) -> [String: Any] {
+        let fields: [String: Any] = ["name": t.name, "vm": t.vm, "token_id": t.id]
+        say("\(clockTime())  renew token \(t.id) for \(t.name) on VM \(t.vm), asked by \(who.describe)")
+        let p: Payload
+        do { p = try load() } catch let e as VaultError { return finish("renew", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
+            return finish("renew", fields, failed("cannot read the vault"), who, approval: "-")
+        }
+        // A token covers its secret as it was approved: a secret replaced or deleted since has ended it.
+        guard let s = p.secrets[t.name], t.fits(s), let host = s.api_host else {
+            _ = hub.revoke(t.id)
+            return finish("renew", fields, denied("\(t.name) changed since this token was made (set --replace or delete); get a new token"), who, approval: "-")
+        }
+        if let why = projectProblem(t.name, s, who) { return finish("renew", fields, denied(why), who, approval: "-") }
+        guard let target = target(p, t.vm) else { return finish("renew", fields, failed("VM \(t.vm) isn't bound to the vault (metacomputer secrets bind)"), who, approval: "-") }
+        // How far it could reach from now: the step asked (else the lifetime it was issued for), never past the unlock or
+        // its own limit. Worked out again after any question, from the time then.
+        let step = min(asked ?? t.ttl, tokenMaxTTL)
+        func reach() -> (Date, String?) {
+            let byStep = Date().addingTimeInterval(TimeInterval(step))
+            let cap = min(expires, t.limit)
+            if cap <= byStep { return (cap, expires <= t.limit ? "the vault's unlock ends at \(clockTime(expires))" : "a token lives at most \(durationWords(Int(hub.maxLifetime))) after it was made (this one until \(clockTime(t.limit)))") }
+            return (byStep, nil)
+        }
+        let (first, capWhy) = reach()
+        if first <= t.expires.addingTimeInterval(1) {
+            if let why = capWhy {
+                return finish("renew", fields, denied("token \(t.id) can't live any longer: \(why). Get a new token after that (`metacomputer secrets token \(t.name)`)"), who, approval: "-")
+            }
+            // It already lives at least that long: nothing changes, so nothing is asked.
+            var res: [String: Any] = ["ok": true, "status": "ok", "token_id": t.id, "ttl_s": max(0, Int(t.expires.timeIntervalSinceNow))]
+            res = finish("renew", fields, res, who, approval: "-")
+            res["extended"] = false
+            res["expires"] = isoTime(t.expires)
+            res["expires_in_s"] = max(0, Int(t.expires.timeIntervalSinceNow))
+            res["renewals"] = t.renewals
+            res["longest_until"] = isoTime(t.limit)
+            return res
+        }
+        if let why = requiredSinkProblem("renew", fields, who) { return finish("renew", fields, denied(why), who, approval: "-") }
+        if let problem = runner.listenerProblem(target) {
+            return finish("renew", fields, problem.denied ? denied(problem.reason) : failed(problem.reason), who, approval: "-")
+        }
+        var approval = "session"
+        var requestID: String? = nil
+        let idp = isIdentityProviderHost(originHost(host))
+        if confirmEach || s.approval == "each" || idp {
+            let minutes = max(1, Int(first.timeIntervalSinceNow) / 60)
+            let o = approve("token", t.name, "  Keep token \(t.id) for \(t.name) (\(host)) on VM \(t.vm) working for \(minutes) more minutes (until \(clockTime(first)))?\n  Asked by \(who.describe).",
+                            who, vm: t.vm, site: "https://\(host)", use: "renew",
+                            summary: "renew API token \(t.id) for \(t.name) (\(host)) for \(minutes) more minutes",
+                            identityProvider: idp, proposedID: proposedID, ruleUse: "token")
+            approval = o.how
+            requestID = o.requestID
+            if !o.yes { return finish("renew", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
+        }
+        if requesterGone() { return finish("renew", fields, failed(requesterLeftReason), who, approval: approval, requestID: requestID) }
+        // What happened while it waited wins: the secret must still be the one it was made for...
+        guard let p2 = try? load(), let s2 = p2.secrets[t.name], t.fits(s2) else {
+            _ = hub.revoke(t.id)
+            return finish("renew", fields, denied("\(t.name) changed while the renewal waited; get a new token"), who, approval: approval, requestID: requestID)
+        }
+        // ...and the token still there, unexpired, at the moment it moves (a revoke or a lock that came first wins).
+        let (until, _) = reach()
+        let (nt, moved, why) = hub.renew(id: t.id, vm: t.vm, until: until)
+        guard let nt else {
+            return finish("renew", fields, denied("token \(t.id) \(why); it isn't renewed. Get a new one if it's still needed (`metacomputer secrets token \(t.name)`)"),
+                          who, approval: approval, requestID: requestID)
+        }
+        // The record's numbers are this process's own: the token's id and how long it now has, never anything the VM chose.
+        var res: [String: Any] = ["ok": true, "status": "ok", "token_id": nt.id, "ttl_s": max(0, Int(nt.expires.timeIntervalSinceNow))]
+        res = finish("renew", fields, res, who, approval: approval, requestID: requestID)
+        res["extended"] = moved
+        res["expires"] = isoTime(nt.expires)
+        res["expires_in_s"] = max(0, Int(nt.expires.timeIntervalSinceNow))
+        res["renewals"] = nt.renewals
+        res["longest_until"] = isoTime(nt.limit)
+        return res
     }
 
     // MARK: audit sinks, for list / show / test

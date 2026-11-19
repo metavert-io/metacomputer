@@ -35,6 +35,7 @@ struct Secret: Codable {
     var gen: String? = nil          // random, new with every set: API tokens are bound to it
     var totp_for: String? = nil     // totp: the `id` of the password secret whose account this code belongs to (import-passwords)
     var id: String? = nil           // random, made once and kept through --replace: what a 2FA code's totp_for names
+    var api_answer_timeout_s: Int? = nil   // api: how long one proxied answer may take (nil: the default, 600 s)
 }
 
 func newSecretID() -> String { randomBytes(8).map { String(format: "%02x", $0) }.joined() }

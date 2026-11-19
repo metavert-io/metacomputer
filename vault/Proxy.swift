@@ -11,9 +11,22 @@
 // follows a redirect to another host, drops hop-by-hop headers, streams the answer back and
 // audits each request (method, host, path without its query, status, bytes, token id; no
 // bodies, no headers). The real key never enters the VM. Tokens die at their TTL, on
-// revoke, or when the vault locks (this process ends).
+// revoke, or when the vault locks (this process ends). `token renew` moves a live token's
+// expiry later, the token in the VM unchanged: never past the unlock, never more than
+// tokenMaxLifetime after it was issued. An answer in flight ends with its token.
 import Darwin
 import Foundation
+
+/// The longest a token may be asked for (`token --ttl`, `token renew --ttl`).
+let tokenMaxTTL = 8 * 3600
+/// The longest a token may live from when it was issued, however often it's renewed: the
+/// longest unlock (`unlock --for` takes at most 12 h, and every token ends at lock anyway).
+let tokenMaxLifetime = 12 * 3600
+/// How long one proxied answer may take, from forwarding the request to its last byte: the
+/// default, and the range an api secret's `--answer-timeout` may set.
+let defaultAnswerTimeout = 600
+let maxAnswerTimeout = 3600
+let minAnswerTimeout = 10
 
 struct APIToken {
     let id: String
@@ -21,7 +34,10 @@ struct APIToken {
     let name: String
     let vm: String
     let issued: Date
-    let expires: Date
+    var expires: Date           // later with each renewal, never past `limit`
+    let ttl: Int                // the lifetime it was issued for: a renewal's step unless it names another
+    let limit: Date             // issued + the longest lifetime: the latest it may ever expire
+    var renewals: Int
     let requester: [String: Any]
     var requests: Int
     // What was approved: the secret's generation and its scope then. A token works only while
@@ -96,8 +112,11 @@ final class ProxyHub: @unchecked Sendable {
     let headDeadline: TimeInterval
     /// An authenticated request's body must arrive within this many seconds.
     let bodyDeadline: TimeInterval = 300
-    /// The whole upstream answer must be through within this many seconds.
+    /// The whole upstream answer must be through within this many seconds, unless the secret sets
+    /// its own (`--answer-timeout`, minAnswerTimeout to maxAnswerTimeout).
     let answerTimeout: TimeInterval
+    /// A token's longest life from its issue (tokenMaxLifetime; smaller in test builds).
+    let maxLifetime: TimeInterval
     // Set by the unlock process before the first token: write an audit record with the vault's
     // MAC, and get a request's pre-use record acknowledged by every required audit sink.
     var recorder: (([String: Any]) -> [String: Any]?)?
@@ -111,7 +130,8 @@ final class ProxyHub: @unchecked Sendable {
         var slots = 16
         var wait: TimeInterval = 15
         var head: TimeInterval = 10
-        var answer: TimeInterval = 600
+        var answer = TimeInterval(defaultAnswerTimeout)
+        var lifetime = TimeInterval(tokenMaxLifetime)
         #if MCOMP_VAULT_TESTING
         // Test builds only: plain http to a local stand-in API (no certificate to check), and
         // smaller limits so a test needn't wait long.
@@ -121,12 +141,20 @@ final class ProxyHub: @unchecked Sendable {
         if let s = env["MCOMP_VAULT_TEST_SLOT_WAIT"], let n = Double(s), n > 0 { wait = n }
         if let s = env["MCOMP_VAULT_TEST_HEAD_DEADLINE"], let n = Double(s), n > 0 { head = n }
         if let s = env["MCOMP_VAULT_TEST_ANSWER_TIMEOUT"], let n = Double(s), n > 0 { answer = n }
+        if let s = env["MCOMP_VAULT_TEST_TOKEN_MAX_LIFETIME"], let n = Double(s), n > 0 { lifetime = n }
         #endif
         upstreamScheme = scheme
         slotsPerVM = slots
         slotWait = wait
         headDeadline = head
         answerTimeout = answer
+        maxLifetime = lifetime
+    }
+
+    /// How long an answer for this secret may take: its own setting when it has a valid one, else the default.
+    func answerLimit(_ s: Secret) -> TimeInterval {
+        if let n = s.api_answer_timeout_s, n >= minAnswerTimeout, n <= maxAnswerTimeout { return TimeInterval(n) }
+        return answerTimeout
     }
 
     func withLock<T>(_ body: () -> T) -> T {
@@ -139,11 +167,36 @@ final class ProxyHub: @unchecked Sendable {
 
     func issue(name: String, vm: String, ttl: Int, requester: [String: Any], secret s: Secret) -> (APIToken, String) {
         let raw = "mct_" + base64url(randomBytes(24))
+        let now = Date()
+        let limit = now.addingTimeInterval(maxLifetime)
         let t = APIToken(id: randomBytes(4).map { String(format: "%02x", $0) }.joined(), hash: sha256Hex(Array(raw.utf8)), name: name, vm: vm,
-                         issued: Date(), expires: Date().addingTimeInterval(TimeInterval(ttl)), requester: requester, requests: 0,
+                         issued: now, expires: min(now.addingTimeInterval(TimeInterval(ttl)), limit), ttl: ttl, limit: limit, renewals: 0,
+                         requester: requester, requests: 0,
                          gen: secretGen(s), host: s.api_host ?? "", header: s.api_header ?? "", prefix: s.api_path_prefix)
         withLock { tokens[t.hash] = t }
         return (t, raw)
+    }
+
+    /// Move a live token's expiry to `until` (never past its limit, never earlier than it is). It must still be
+    /// there and unexpired at this moment, on that VM: a revoke, an expiry or a lock that came first wins.
+    /// Returns the token as it is now and whether its expiry moved, or nil and why not.
+    func renew(id: String, vm: String, until: Date) -> (APIToken?, Bool, String) {
+        withLock {
+            if closed { return (nil, false, "the vault is locking") }
+            guard var t = tokens.values.first(where: { $0.id == id }), t.vm == vm else {
+                return (nil, false, "was revoked before it could be renewed")
+            }
+            guard t.expires > Date() else {
+                tokens[t.hash] = nil
+                return (nil, false, "expired before it could be renewed")
+            }
+            let target = min(until, t.limit)
+            let moved = target > t.expires
+            if moved { t.expires = target }
+            t.renewals += 1
+            tokens[t.hash] = t
+            return (t, moved, "")
+        }
     }
 
     /// Is this token still live: present, unexpired, and the proxy not shutting down?
@@ -486,17 +539,37 @@ final class ProxyHub: @unchecked Sendable {
         if !body.isEmpty { u.httpBody = Data(body) }
         let stream = StreamBack(fd: c, upstreamHost: host, scheme: upstreamScheme,
                                 proxyBase: "http://127.0.0.1:\(l.guestPort)/\(name)", secret: Array(s2.value.utf8))
-        let session = URLSession(configuration: plainSessionConfig(timeout: 120), delegate: stream, delegateQueue: nil)
+        // The answer's time limit is the secret's own (--answer-timeout) or the default. The HTTP client's own limit for
+        // the whole answer is set past it, so this one decides; 120 s without a byte from the API still ends it.
+        let limit = answerLimit(s2)
+        let cfg = plainSessionConfig(timeout: 120)
+        cfg.timeoutIntervalForResource = limit + 30
+        let session = URLSession(configuration: cfg, delegate: stream, delegateQueue: nil)
         session.dataTask(with: u).resume()
-        if stream.done.wait(timeout: .now() + answerTimeout) == .timedOut {
-            session.invalidateAndCancel()
-            if stream.failure == nil { stream.failure = "the answer took over \(Int(answerTimeout)) s; cancelled" }
+        // Wait for the answer in short steps: it ends with its token (revoked, expired without a renewal, the vault
+        // locking) or at its time limit, whichever comes first.
+        let deadline = Date().addingTimeInterval(limit)
+        var cut: (code: Int, why: String)? = nil
+        while stream.done.wait(timeout: .now() + 0.25) == .timedOut {
+            if !stillLive(token) {
+                cut = withLock({ closed }) ? (503, "the vault locked during the answer; cancelled")
+                    : (401, "the token ended during the answer (revoked, or expired without a renewal); cancelled")
+                break
+            }
+            if Date() >= deadline {
+                cut = (504, "the answer took over \(Int(limit)) s; cancelled")
+                break
+            }
+        }
+        session.invalidateAndCancel()
+        if let c = cut {
+            if stream.failure == nil { stream.failure = c.why }
             // Give the cancelled task a moment to report its end (didCompleteWithError)...
             _ = stream.done.wait(timeout: .now() + 5)
-        } else {
-            session.invalidateAndCancel()
+            // ...and if nothing of the answer went back yet, say why (the cancelled task writes nothing more).
+            if !stream.headSent { stream.writeError(c.code, c.why) }
         }
-        // ...and whatever it does, no callback writes to this connection from here on: the caller
+        // Whatever it does, no callback writes to this connection from here on: the caller
         // closes the descriptor next, and its number could soon belong to another connection.
         stream.closeOutput()
         log(stream.status, stream.bytes, token, host, stream.failure, redacted: stream.redactions, upstream: true)

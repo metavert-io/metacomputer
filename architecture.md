@@ -514,7 +514,11 @@ The rest of the vault, briefly (details in SECURITY.md):
   as `mcproxy`, so the VM reaches it at `http://127.0.0.1:18765/NAME/`. It checks the
   short-lived token, puts the real key in the secret's header, calls `https://<api-host>`
   (no redirects followed, no proxies), streams the answer back with any copy of the key
-  blanked, and audits each request. Tokens and tunnels end with the unlock.
+  blanked, and audits each request. An answer ends with its token, or at its time limit
+  (10 minutes, or the secret's `--answer-timeout`). `token renew ID` (`Server.swift`,
+  `opRenew`) moves a live token's expiry under the same checks and approval as a new
+  token, never past the unlock or 12 hours after issue; the token in the VM is unchanged.
+  Tokens and tunnels end with the unlock.
 - **Requesters** (`vault/Util.swift`, `Requester`): the client's pid
   (`LOCAL_PEERPID`) and its parents up to the nearest Claude Code process name the
   session and project, for the prompt, the audit log, `NAME session` grants and

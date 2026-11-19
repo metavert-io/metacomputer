@@ -352,6 +352,7 @@ Then Claude asks for a token and points the program in the VM at the proxy:
 
 ```bash
 metacomputer secrets token openai --ttl 15m   # prints the token, its id and base_url http://127.0.0.1:18765/openai/ (inside the VM)
+metacomputer secrets token renew ID           # keep it going: the same token in the VM, so nothing there restarts (--all for every one)
 metacomputer secrets tokens                   # the live tokens
 metacomputer secrets revoke ID                # end one now (--all for every one)
 ```
@@ -364,6 +365,8 @@ only, over HTTPS. It never follows a redirect. If an answer contains the key, ev
 compressed, the proxy replaces it with `[key withheld by metacomputer secrets]`.
 
 - A token lasts 15 minutes by default and at most 8 hours, and every token ends when the vault locks. Changing or deleting the secret ends its tokens too, so a token never picks up a new value or a wider scope.
+- `token renew` moves a live token's expiry later under the same rules as a new token (an `each` secret asks you again), never past the unlock and never more than 12 hours after the token was made. A long job in the VM, Claude Code included, keeps working on the same token.
+- One answer may take 10 minutes; `--answer-timeout 30m` on `set` (or `policy NAME --answer-timeout 30m` later) allows longer, up to an hour. An answer still streaming when its token ends is cut off.
 - A token is a bearer credential: whatever holds it can call that API as you until it ends. It can't get the key or reach another host.
 - The key is withheld only as an exact copy; an API that sent it back transformed (in base64, say) would hand it over.
 - The VM needs the proxy account, which VMs built before API tokens don't have. `token` says so; rebuild the VM.

@@ -179,10 +179,26 @@ CLAIMS = [
      lambda m: int(m[1]) << 20 == swift_num(PROXY, r"let requestBodyLimit = ([^\n]+)")
      and int(m[2]) == swift_num(PROXY, r"let bodyDeadline: TimeInterval = (\d+)")),
     ("SECURITY.md", r"gives the whole answer at most (\d+) seconds from the moment it sends the request",
-     lambda m: int(m[1]) == swift_num(PROXY, r"var answer: TimeInterval = (\d+)")),
+     lambda m: int(m[1]) == swift_num(PROXY, r"let defaultAnswerTimeout = (\d+)")
+     and "var answer = TimeInterval(defaultAnswerTimeout)" in raw(PROXY)),
+    ("SECURITY.md", r"\(or the secret's own `--answer-timeout`, (\d+) seconds to (\d+)\)",
+     lambda m: (int(m[1]), int(m[2])) == (swift_num(PROXY, r"let minAnswerTimeout = (\d+)"),
+                                          swift_num(PROXY, r"let maxAnswerTimeout = (\d+)"))
+     and "n >= minAnswerTimeout, n <= maxAnswerTimeout" in raw(PROXY) and "n >= minAnswerTimeout, n <= maxAnswerTimeout" in raw(CMDS)),
+    ("SECURITY.md", r"`--answer-timeout 30m`; (\d+) minutes by default, at most an hour",
+     lambda m: int(m[1]) * 60 == swift_num(PROXY, r"let defaultAnswerTimeout = (\d+)")
+     and swift_num(PROXY, r"let maxAnswerTimeout = (\d+)") == 3600),
     ("SECURITY.md", r"`metacomputer secrets token openai \[--ttl 15m\]` \(at most (\d+) hours, and never past the unlock's end\)",
-     lambda m: int(m[1]) * 3600 == swift_num(CMDS, r"ttl <= ([0-9 *]+) else")
-     == swift_num(SERVER, r"min\(ttlAsked, ([0-9 *]+), remaining\(\)\)")),
+     lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
+     and "ttl <= tokenMaxTTL else" in raw(CMDS) and "min(ttlAsked, tokenMaxTTL, remaining())" in raw(SERVER)),
+    # Renewing a token: never more than tokenMaxLifetime after issue (the longest unlock), never past the unlock
+    ("SECURITY.md", r"more than \*\*(\d+) hours after the token was made\*\*, however often it's renewed \(the longest unlock",
+     lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxLifetime = ([^\n]+)")
+     == swift_num(CMDS, r"seconds <= ([0-9 *]+) else \{ throw usageError\(\"--for")
+     and "let cap = min(expires, t.limit)" in raw(SERVER) and "let target = min(until, t.limit)" in raw(PROXY)),
+    ("SECURITY.md", r"The new expiry is `--ttl` from now \(by default, the lifetime the token was made with, at most (\d+) hours\)",
+     lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
+     and "let step = min(asked ?? t.ttl, tokenMaxTTL)" in raw(SERVER)),
     ("SECURITY.md", r"the token \(`mct_` and (\d+) random bits\)",
      lambda m: int(m[1]) == 8 * swift_num(PROXY, r'"mct_" \+ base64url\(randomBytes\((\d+)\)\)')),
     ("SECURITY.md", r"\*\*127\.0\.0\.1:(\d+) inside the VM\*\* \(`SECRETS_PROXY_PORT`\)",
@@ -257,6 +273,16 @@ CLAIMS = [
      lambda m: (int(m[1]), int(m[2]) * 60) == (events.RATE_CAP, events.RATE_WINDOW)),
     ("docs/guide.md", r"\(10 per family in 10 minutes; a phone also (\d+) an hour\)",
      lambda m: (int(m[1]), 3600) in events.PHONE_LIMITS and (10, 600) in events.PHONE_LIMITS),
+    # Blocked connections: the first after a quiet spell at once, the rest batched (lib/events.py)
+    ("SECURITY.md", r"The first blocked connection after (\d+) quiet minutes is reported at once \(within a few seconds; at "
+                    r"most (\d+) such reports in any hour\); what follows it is batched, at most once a minute, and "
+                    r"repeated reports of the same destinations slow down \(up to once an hour\)",
+     lambda m: (int(m[1]) * 60, (int(m[2]), 3600)) == (events.NETGW_QUIET_S, events.NETGW_FIRST_CAP)
+     and events.NETGW_POLL_S <= 5 and (events.NETGW_BATCH_S, events.NETGW_MAX_S) == (60, 3600)),
+    ("docs/events.md", r"The first blocked connection after (\d+) minutes with none goes out at once \(the watcher looks every "
+                       r"(\d+) seconds\), at most (\d+) times in any hour\. What follows it is batched: at most one event a minute",
+     lambda m: (int(m[1]) * 60, int(m[2]), (int(m[3]), 3600), events.NETGW_BATCH_S)
+     == (events.NETGW_QUIET_S, events.NETGW_POLL_S, events.NETGW_FIRST_CAP, 60)),
     # The shell channel (lib/vm_shell.py)
     ("docs/guide.md", r"`--timeout SECONDS` \(default (\d+), at most (\d+)\)",
      lambda m: (int(m[1]), int(m[2])) == (vm_shell.DEFAULT_TIMEOUT, vm_shell.MAX_TIMEOUT)),

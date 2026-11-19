@@ -9,7 +9,7 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
 - **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
-- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`. `lock` only if the user asks you to lock the vault.
+- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `token renew`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`. `lock` only if the user asks you to lock the vault.
 
 ## First: what's stored
 
@@ -73,8 +73,9 @@ The key never goes into the VM. A program in the VM calls the API through the va
 3. In the VM, send requests to `base_url` + the API's path, with the token where the key would go:
    - `curl -H "Authorization: Bearer <token>" http://127.0.0.1:18765/NAME/v1/...` (or the secret's own header, such as `x-api-key: <token>`; `X-Metacomputer-Token: <token>` always works);
    - an SDK: set its base URL to `http://127.0.0.1:18765/NAME` (plus the version path it expects) and its API key to the token.
-4. Answers: 401 the token expired or was revoked (get a new one); 403 a path outside the secret's prefix; 502 the API redirected elsewhere or couldn't be reached; 503 the user's required audit sink is down (tell them).
-5. `metacomputer secrets revoke <token_id>` when done; `tokens` lists the live ones. Tokens also end when the vault locks.
+4. Answers: 401 the token expired or was revoked (get a new one); 403 a path outside the secret's prefix; 502 the API redirected elsewhere or couldn't be reached; 503 the user's required audit sink is down (tell them); 504 the answer took longer than the secret's time limit (10 minutes unless the user set `--answer-timeout`; only they can change it, with `metacomputer secrets policy NAME --answer-timeout 30m`).
+5. **Long jobs: renew, don't restart.** A program that runs on a token for a long time (Claude Code inside the VM, a batch job) keeps the same token if you renew it before it expires: `metacomputer secrets token renew <token_id> [--ttl 30m]` (or `--all` for every live token on the VM). Nothing changes in the VM, so don't restart the program or hand it a new token. Check `tokens` (`expires_in_s`) and renew while a few minutes are left; an answer still streaming when the token ends is cut off. A renewal follows the same rules as a new token: an `each` secret asks the user again (tell them, as for any approval), and the result says when it can't go further: never past the vault's unlock, never more than 12 hours after the token was made. Then tell the user; after they unlock again, get a new token (`renew` can't bring back an ended one).
+6. `metacomputer secrets revoke <token_id>` when done; `tokens` lists the live ones. Tokens also end when the vault locks.
 
 Never put a real key in the VM (no file, environment variable or command line there), and never ask the user to paste one. If an answer shows `[key withheld by metacomputer secrets]`, the API echoed the key and the proxy blanked it.
 

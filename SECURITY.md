@@ -825,8 +825,9 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
 - Values are typed with the echo off, never on a command line. A password is asked
   for twice. Changing an existing secret's value needs `--replace` (a rotation).
 - An API secret names its host (`--api-host`), the header it goes in (`--header
-  'x-api-key: {value}'`; the default is `Authorization: Bearer {value}`) and optionally
-  a path prefix (`--api-path-prefix /v1/`). See "API keys" below.
+  'x-api-key: {value}'`; the default is `Authorization: Bearer {value}`), optionally
+  a path prefix (`--api-path-prefix /v1/`) and how long one answer may take
+  (`--answer-timeout 30m`; 10 minutes by default, at most an hour). See "API keys" below.
 - `--project DIR` (repeatable) limits a secret to Claude Code sessions working in that
   folder or below it ("Who is asking" below).
 - Each secret names the exact sites it may go to (`--origin`, repeatable): scheme,
@@ -1326,7 +1327,7 @@ proxy, only for that secret's host, only while the vault is unlocked, and only u
 it expires.
 
 1. Claude runs `metacomputer secrets token openai [--ttl 15m]` (at most 8 hours, and
-   never past the unlock's end). An `each` secret asks you first: `Give the VM
+   never past the unlock's end), renewable (step 6). An `each` secret asks you first: `Give the VM
    metacomputer a 15-minute token for openai (api.openai.com)?`
 2. On the first token for a VM, the unlock process starts the proxy: a listener on the
    Mac's 127.0.0.1 (a random port), and an SSH reverse forward that makes it appear at
@@ -1364,8 +1365,13 @@ it expires.
    - streams the answer back, replacing every exact copy of the key in its headers
      and body with `[key withheld by metacomputer secrets]` (an echo endpoint such as
      httpbin.org/anything would otherwise hand the key to the VM);
-   - gives the whole answer at most 600 seconds from the moment it sends the request: a slower
-     one is cancelled and the connection to the VM closed, with nothing more written to it;
+   - gives the whole answer at most 600 seconds from the moment it sends the request (or the
+     secret's own `--answer-timeout`, 10 seconds to 3600): a slower one is cancelled and the
+     connection to the VM closed (with a 504 that says why if nothing of the answer was sent
+     yet), with nothing more written to it;
+   - ends the answer sooner when its token ends (revoked, expired without a renewal, the
+     vault locking: checked four times a second), or after 120 seconds without a byte from
+     the API;
    - with a required audit sink, first records the request (`begin`, use `api`) and
      waits for every required sink to acknowledge that record; otherwise 503;
    - checks again, just before forwarding, that the token is still live (not revoked,
@@ -1384,7 +1390,35 @@ it expires.
      Never bodies or headers.
 5. Tokens end at their expiry, at `metacomputer secrets revoke ID` (or `--all`), and
    when the vault locks: the proxy and its SSH forwards stop. `tokens` lists the live
-   ones (id, secret, VM, time left, requests in words, requester).
+   ones (id, secret, VM, time left, requests in words, renewals, the latest it may live
+   until, requester). A revoke is answered at once, even while a question waits in the
+   unlock terminal, and an answer the token is still streaming ends with it.
+6. **Renewing.** `metacomputer secrets token renew ID [--ttl 15m]` (or `--all` for every
+   live token on the VM) moves a live token's expiry later. The token in the VM stays the
+   same, so a program running there on it (Claude Code inside the VM, a long job) goes on
+   without a restart. Only the Mac side can renew, through the vault's socket: nothing in
+   the VM can ask for it. A renewal follows the same rules as a new token, checked again
+   each time:
+   - the secret's `--project` limit, against whoever renews;
+   - with a required audit sink, the renewal's own `begin` record first;
+   - the pinned VM and gateway;
+   - the approval: an `each` secret, an unlock with `--confirm each` or an identity
+     provider's host asks again (`Keep token 5f2c9a0e for openai (api.openai.com) on VM
+     metacomputer working for 15 more minutes?`). A `NAME session` or `NAME unlock` answer,
+     or an unattended rule for that secret's tokens, covers renewals as it covers new
+     tokens. A `session` secret doesn't ask.
+
+   The new expiry is `--ttl` from now (by default, the lifetime the token was made with,
+   at most 8 hours), and never:
+   - past the unlock's end;
+   - more than **12 hours after the token was made**, however often it's renewed (the
+     longest unlock; a token never outlives its unlock anyway);
+   - earlier than it was: asking for less changes nothing and asks nothing.
+
+   What happens while a renewal waits wins: a token revoked, expired or ended by a
+   changed secret meanwhile isn't renewed, and the vault locking ends it like every other.
+   An ended token can't be renewed. Each renewal is recorded (`op` `renew`: the token's
+   id, its new lifetime in the vault's own seconds, the approval, the requester).
 
 **The proxy account**, like the fill account, is always present on VMs built with this
 version, and does nothing else:
@@ -1463,7 +1497,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
 | `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
 | `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
@@ -1479,6 +1513,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
+| `token_id`, `ttl_s` | a token's id, and on `token` and `renew` the seconds it has to live then (the vault's own numbers) |
 | `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
 **What each check proves.** Claude Code runs as you, so it can edit any file of yours,
@@ -1596,7 +1631,7 @@ Application Activity). A suggested mapping; fields without a clear home go in
 
 | OCSF | From the event |
 | --- | --- |
-| `activity_id` | 2 Read for `fill`, `token`, `api`, `session_load`; 1 Create for `set`, `init`, `audit_sink_add`; 3 Update for `rotate`, `rekey`, `recover`, `rotate_session_key`, `bind`, `session_save`; 4 Delete for `delete`, `revoke`, `audit_sink_remove`; 99 Other for the rest |
+| `activity_id` | 2 Read for `fill`, `token`, `api`, `session_load`; 1 Create for `set`, `init`, `audit_sink_add`; 3 Update for `rotate`, `rekey`, `recover`, `rotate_session_key`, `bind`, `session_save`, `renew`; 4 Delete for `delete`, `revoke`, `audit_sink_remove`; 99 Other for the rest |
 | `api.operation` | `op` |
 | `time` | `ts` (as epoch milliseconds) |
 | `metadata.uid`, `metadata.sequence` | `id`, `seq` |
@@ -1673,7 +1708,7 @@ something waits for you:
 | Key policies, grant constraints and encryption context limit how a key is used | Each secret's sites (`--origin`), field kinds, API host and path prefix, `--project`; the pinned VM (host key, gateway program and contents, accounts) |
 | MFA-protected API calls (`aws:MultiFactorAuthPresent`) | Typing the secret's name in the unlock terminal (`--approval each`, `--confirm each`; not the default), with a scope: this use, this session, until lock. Not a second factor: a program that can type into that terminal can answer too |
 | Vault's seal and unseal | `unlock --for` (at most 12 h); everything stops at lock, including tokens |
-| Leases and TTLs, short-lived credentials from STS or the instance metadata service | API tokens: `--ttl`, at most 8 h and never past the unlock; `revoke`; usable only through the proxy |
+| Leases and TTLs, short-lived credentials from STS or the instance metadata service | API tokens: `--ttl`, at most 8 h and never past the unlock; `token renew` like a lease renewal (asked like a new token, at most 12 h from issue); `revoke`; usable only through the proxy |
 | Secrets Manager rotation | `set --replace` (recorded; `list` shows ages), `rekey`, `rotate-session-key`. You rotate; nothing rotates on a schedule |
 | CloudTrail; Vault's audit devices (with HMAC'd fields) | `audit.jsonl` (hash-chained), the unified log, and audit sinks with HMAC signatures; `--required` like an audit device that must succeed |
 | An IAM principal or a Vault token's identity | The macOS user; the requester (Claude Code process, project) is attribution |
@@ -1763,8 +1798,9 @@ something waits for you:
     while the vault is unlocked.
   - Sealed browser logins are encrypted with a random key kept inside the vault.
 - **API keys never enter the VM.** The VM gets a token that works only through the
-  proxy, for that one host, while the vault is unlocked and until it expires; a copy
-  of the key in an answer is withheld.
+  proxy, for that one host, while the vault is unlocked and until it expires (a renewal,
+  asked for on the Mac like a new token, moves that later, at most 12 hours from when it
+  was made); a copy of the key in an answer is withheld.
 - **The program resists other processes.**
   - It's signed with the hardened runtime, so your other processes can't load code
     into it.
@@ -1898,7 +1934,8 @@ something waits for you:
   A rule is a standing approval for whatever can pose as a session in its folder: keep
   its folder narrow and its time short.
 - **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac
-  (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends. The
+  (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends, renewals
+  included (at most 12 hours from when it was made, never past the unlock). The
   key is withheld from answers only as an exact copy. Compressed answers are
   decompressed before that check (the proxy asks for and unpacks gzip, deflate and
   Brotli itself), but an API that returned the key transformed (in base64, hashed into
@@ -1919,7 +1956,7 @@ something waits for you:
 
 | Command | Where | What it does |
 | --- | --- | --- |
-| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `policy NAME`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
+| `init [--no-enclave]`, `set ... [--replace]`, `delete`, `policy NAME [--approval session\|each] [--answer-timeout D]`, `bind`, `session policy`, `session delete` | your terminal | Create the vault and manage its contents (asks for the passphrase) |
 | `import-passwords --browser chrome [--profile N] \| --csv FILE [--site H ...] [--dry-run]`, `import-session --browser chrome --site H ... --name N --to-profile P [--allow-identity-provider]` | your terminal | Bring saved logins in, or a site's cookies from your Chrome (macOS asks about Chrome's key; asks for the passphrase) |
 | `rekey [--enclave\|--no-enclave]`, `recover [--no-enclave]`, `rotate-session-key` | your terminal | New keys; open with the recovery key ("Keys, the Secure Enclave and rotation") |
 | `audit-sink add\|remove NAME`, `audit-sink show NAME --key` | your terminal | Off-Mac copies of the audit log, and a sink's signing key |
@@ -1931,7 +1968,7 @@ something waits for you:
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
-| `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
+| `token NAME [--ttl 15m]`, `token renew ID\|--all [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; keep live ones going (the same token, asked like a new one); the live ones; end them |
 | `audit-sink list`, `audit-sink show NAME` | anywhere (while locked: each sink's delivery state only, not its settings) | Sinks, their backlog and last error (URLs masked) |
 | `audit-sink test NAME` | anywhere while unlocked; while locked, your terminal (it asks for the passphrase) | Deliver now |
 | `status`, `audit [--tail N]`, `audit --head`, `audit --verify`, `selftest` | anywhere (`--verify` while unlocked) | State; the audit log; its head as SEQ:HASH; every record's creation MAC and the chain checked by the vault; the program's own checks |
