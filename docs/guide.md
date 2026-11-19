@@ -932,8 +932,10 @@ every VM with its state, disk use, ports and baseline, and the runner's other VM
 When it isn't clear which VM is meant, commands refuse instead of guessing: a
 checkout with no `config/local.env` of its own (a second clone, a worktree) acts on
 a VM only when you say which with `--vm`, unless the runner has no VM but the
-default one. `MCOMP_CONFIG=FILE` still works as before, for settings files kept
-elsewhere.
+default one. `MCOMP_CONFIG=FILE` still works for settings files kept elsewhere;
+since v0.3.1 a file for another VM must set its own `SSH_DIR`, `RUN_DIR` and
+`LOG_DIR` (as `config/local.env.example` shows), or `build`, `reset`, `restore`,
+`checkpoint`, `baseline` and `vm delete` refuse it.
 
 Deleting one:
 

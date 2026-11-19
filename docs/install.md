@@ -228,7 +228,11 @@ the question.
 ```
 
 Each stage then prints its number, an estimate, and how long it took. At the
-end, a summary lists the time of each longer stage.
+end, a summary lists the time of each longer stage. The builds of mcomp-vm, the
+host tools and the vault print hundreds of harmless compiler warnings and download
+lines, so each shows one line instead and keeps its output in a log,
+`logs/build-mcomp-vm-…`, `build-tools-…` or `build-vault-….log` (in `LOG_DIR`
+if your settings set it); when a build fails, the end of its log is shown.
 
 ## Options
 
