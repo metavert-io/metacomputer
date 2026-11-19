@@ -49,10 +49,12 @@ From then on, `metacomputer start` also starts a small watcher process (below)
 and `metacomputer status` shows a line like
 `events  1 sink, watcher running, backlog 0`.
 
-When Claude is blocked on you (a sign-in, a CAPTCHA, a 2FA code, a dialog it
-won't accept, an approval), the `metacomputer` skill tells it to run
-`metacomputer notify "…" --why login --action "…"`. That reaches every sink
-that takes the `needs_you` family.
+When Claude is blocked on you (a dialog it won't accept, an approval), the
+`metacomputer` skill tells it to run `metacomputer notify "…" --why approval
+--action "…"`. For a CAPTCHA or bot check, a sign-in you do yourself or a 2FA
+prompt, it runs `metacomputer handoff`, which sends the same notice and pauses
+Claude's actions until you're done ([guide](guide.md#when-claude-needs-you-handoffs-and-the-live-view)).
+Either reaches every sink that takes the `needs_you` family.
 
 ## Commands
 
@@ -69,6 +71,7 @@ that takes the `needs_you` family.
 | `events drain [--now]` | Take the spool and retry every backlog (what the watcher does every 30 s); `--now` ignores the backoff. |
 | `events watcher start\|stop\|status` | The watcher by hand (`start` and `stop` do it for you). |
 | `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action "what to do"]` | A `needs_you` event: Claude is blocked on a human. The same message again within 5 minutes isn't sent. |
+| `handoff --why captcha\|login\|2fa\|other --say "TEXT"`, `handoff done\|cancel` | Claude hands the computer to you: the same `needs_you` event as `notify` (not sent when you ran it at your own terminal), then `lifecycle.handoff_opened`, and `handoff_done`, `handoff_cancelled` or `handoff_timed_out` when it ends. |
 
 Header values usually hold ingest tokens. `--header 'Authorization: Bearer …'`
 puts the token in your shell history; `--header-env` takes it from the
@@ -116,7 +119,7 @@ you about changes:
 
 | Family | Type | Severity | When | Data |
 | --- | --- | --- | --- | --- |
-| `needs_you` | `login`, `captcha`, `2fa`, `dialog`, `approval`, `other` | warn | Claude ran `metacomputer notify --why …` | `why`, `declared_by: claude`; the event's `action` says what to do |
+| `needs_you` | `login`, `captcha`, `2fa`, `dialog`, `approval`, `other` | warn | Claude ran `metacomputer notify --why …`, or `metacomputer handoff --why …` (not when you ran it at your own terminal) | `why`, `declared_by: claude`; from a handoff also `handoff_id` and `timeout_s`, and its `action` names `metacomputer view --open` and `metacomputer handoff done`. The message is Claude's `--say`, cleaned. |
 | `needs_you` | `in_use` | warn | Claude asked for the VM while another controller had it (the bridge refused the call); once per session per 5 min | the tool, the other controllers (project folder, idle time, last tool) |
 | `needs_you` | `refused` | warn | With `DRIVER_MODE=bounded`, Cua Driver refused the same tool twice within 5 min; then at most once per tool per 5 min. The message is fixed and names only the tool, since the driver's text comes from inside the VM | tool, count, `limit`: which kind of manifest limit (`app`, `path`, `site`, `tool` or `other`). None of the driver's text is sent. |
 | `needs_you` | `vault_locked` | warn | `metacomputer secrets fill`, `secrets session save\|load` or `secrets token` exited 3: the vault isn't unlocked, or doesn't exist yet (an exit hook in `bin/metacomputer`; it takes effect where the secrets vault is installed). Not when you ran the command at your own terminal; at most once in 5 min. The vault may also send its own events through the spool | the action says to run `metacomputer secrets unlock` (or `secrets init`) |
@@ -138,6 +141,7 @@ you about changes:
 | `task` | `s3_sync_failed` | error | An S3 volume didn't sync at start, on the interval or at stop (the network, the keys, or rclone's safety stop when every file changed) | the volume, when, and rclone's last error line, cleaned (never the keys) |
 | `lifecycle` | `storage_attached` | info | `start`, once the VM has mounted its volumes and reference disks ([storage.md](storage.md)) | each item's kind, name, mount point in the VM, `rw` and Mac path |
 | `lifecycle` | `controller_connected`, `controller_released` | info | A Claude Code session's first acting call; the session ending; `metacomputer release` | bridge and Claude Code process ids |
+| `lifecycle` | `handoff_opened`, `handoff_done`, `handoff_cancelled`, `handoff_timed_out` | info (timed out: warn) | `metacomputer handoff` gave you the computer (Claude's acting calls wait), and how it ended: `handoff done` or Enter, `handoff cancel` or Ctrl-C, or its time limit. Sent once, by the process that made the change. The message is fixed words | `handoff_id`, `why`, `timeout_s`; when it ends, `open_s`, `ended_from` (`terminal`, `enter`, `ctrl_c`, `claude_session`, `process`, `time_limit`) and `has_note`. Never the note itself. |
 | `lifecycle` | `health` | warn or error; info when it clears | The watcher's probe every 5 min, one event per change. A condition that comes back within 30 min of being announced stays quiet (and so does its recovery), so a flapping one doesn't ping you every probe. Nothing from inside the VM reaches the message or data, not even a number: the VM's report becomes fixed categories (the doctor's check failing or not reporting a result, under 3 GB free), since a VM could spell a value it was given in an "exit code" or a disk size | `condition`: `vm_off`, `gateway`, `ssh`, `not_ready`, `doctor`, `disk_low` (under 3 GB), `recording_failed`; `state`: `problem` or `ok` |
 | any | `suppressed` | info | The family limit held events back (below); sent before the next one that goes through, or by the watcher | how many, the limit |
 | `lifecycle` | `test` | info | `events sink test` | |
@@ -175,7 +179,7 @@ Every sink gets the same event, in its own wrapping:
 | `seq` | A number per user on this Mac, increasing. Each sink receives events in this order. |
 | `time` | UTC, RFC 3339 with microseconds. |
 | `family`, `type`, `severity` | As in the table above; severity is `info`, `warn` or `error`. |
-| `origin` | Which code path made it, set by that code and never by the caller: `cli` (a metacomputer command's own code: task finish, record stop, actions verify, open-untrusted, sink changes), `bridge` (Claude Code's bridge or the action-log relay), `watcher`, `spool` (another program), `claude` (`metacomputer notify`, Claude's own channel), or `script` (`metacomputer events emit`, used by your scripts and metacomputer's own shell hooks; anything that can run a command can call it). This tells apart metacomputer's code paths; it isn't proof against a program running as you. Types that only metacomputer's own code makes are refused from `events emit` and the spool: `suppressed` in any family, the `actions` family, `needs_you.in_use` and `refused`, `security.chrome_input_refused`, `blocked_connections`, `sink_added`, `sink_removed` and `sink_config_changed`, `lesson_approved`, `lesson_edited`, `lesson_removed` and `lessons_resealed`, `lifecycle.controller_connected`, `controller_released`, `health`, `test` and `storage_attached`, and the folder watcher's `security.symlink_neutralized`, `special_file_removed`, `quarantine_restored` and `storage_protection_failed`, and `task.s3_conflict` and `s3_sync_failed`. |
+| `origin` | Which code path made it, set by that code and never by the caller: `cli` (a metacomputer command's own code: task finish, record stop, actions verify, open-untrusted, sink changes), `bridge` (Claude Code's bridge or the action-log relay), `watcher`, `spool` (another program), `claude` (`metacomputer notify`, Claude's own channel), or `script` (`metacomputer events emit`, used by your scripts and metacomputer's own shell hooks; anything that can run a command can call it). This tells apart metacomputer's code paths; it isn't proof against a program running as you. Types that only metacomputer's own code makes are refused from `events emit` and the spool: `suppressed` in any family, the `actions` family, `needs_you.in_use` and `refused`, `security.chrome_input_refused`, `blocked_connections`, `sink_added`, `sink_removed` and `sink_config_changed`, `lesson_approved`, `lesson_edited`, `lesson_removed` and `lessons_resealed`, `lifecycle.controller_connected`, `controller_released`, `health`, `test`, `storage_attached` and the four `handoff_*` types, and the folder watcher's `security.symlink_neutralized`, `special_file_removed`, `quarantine_restored` and `storage_protection_failed`, and `task.s3_conflict` and `s3_sync_failed`. |
 | `vm` | The VM's name (`VM_NAME`). |
 | `project` | The folder of the Claude Code session that caused it, when known (its working folder); else the command's current folder. In real events this is the full path. |
 | `message` | One line for a person. |
@@ -192,8 +196,9 @@ Before anything is logged or sent:
 - these are replaced by `[redacted]` wherever they appear: any sink's header values, webhook signing keys, the secret-looking parts of sink URLs (ntfy topics, webhook paths, query values), and the live-view password when it's kept in `$SSH_DIR/vnc-pass`. When it lives in your own secret store (`VNC_PASSWORD_STORE=command`), the event code never fetches it and keeps nothing derived from it, and no code path puts it into an event; but the VM itself knows it (it runs the live view), so a hostile VM could still slip it into a name it controls, such as a file name in a task's data. One earlier build of this branch (f615a13) kept a short verifier of that password in `events-state/redact.json`; current builds delete that file. If yours lives in your own secret store and that build ran, consider changing the password;
 - sizes are capped: message 500 characters, action 300, each string in `data` 300, 50 keys or list items, 4 levels deep, `data` 4 KB (in bytes) in all.
 
-Typed text, passwords, tokens and page contents are never part of an event in
-the first place: the hooks pass tool names, counts, origins and paths.
+Typed text, passwords, tokens, page contents and the note you leave with
+`handoff done --note` are never part of an event in the first place: the hooks
+pass tool names, counts, origins and paths.
 
 ## Kinds
 
@@ -579,7 +584,8 @@ io.metavert.metacomputer.security.{blocked_connections,chrome_input_refused,acti
                                    lesson_approved,lesson_edited,lesson_removed,lessons_resealed}
 io.metavert.metacomputer.<family>.suppressed   (the rate limit's summary, in any family)
 io.metavert.metacomputer.lifecycle.{started,stopped,reset,restored,checkpoint,baseline,build_done,build_failed,
-                                    controller_connected,controller_released,health,test}
+                                    controller_connected,controller_released,health,test,storage_attached,
+                                    handoff_opened,handoff_done,handoff_cancelled,handoff_timed_out}
 io.metavert.metacomputer.actions.{start,call,result,refused,checkpoint,end,sign_failed}
 ```
 

@@ -40,7 +40,8 @@
 #                                  S3 volumes: a folder kept in step with a bucket (rclone bisync, on the Mac)
 #   refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
 #                                  read-only reference disks, attached with REFDISKS=name[:mountpoint]
-#   view                           how to watch / take over the desktop (VNC)
+#   view [--open | --tailnet]      how to watch / take over the desktop (VNC); --open: Screen Sharing on this Mac,
+#                                  the password on the clipboard for 45 s; --tailnet: how to publish it (you run it)
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
@@ -52,6 +53,10 @@
 #   ssh [ops|admin] [CMD...]       shell into the guest
 #   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
 #                                  tell the user Claude is blocked on them (through the event sinks)
+#   handoff --why captcha|login|2fa|other --say "what to do" [--timeout 15m] [--json]
+#                                  hand the computer to the user and wait (Claude's actions pause meanwhile);
+#                                  exit 0 done, 4 cancelled, 124 time limit
+#   handoff done [--note TEXT] | cancel [--note TEXT] | wait | status   (done: the user, in their own terminal)
 #   events [status | sink add|list|show|test|remove | tail [N] | emit FAMILY TYPE --message TEXT
 #          | drain | watcher start|stop|status]
 #                                  the optional event stream: webhook, OTLP, syslog-TLS, ntfy (docs/events.md)
@@ -166,9 +171,27 @@ parse_flags() {
 # One controller at a time: refuse while another session is using the computer.
 owners_check() {
   [ "$OVERRIDE" = 1 ] && return 0
-  "$PY" "$LAB_ROOT/lib/owners.py" check \
-    || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
+  local rc=0; "$PY" "$LAB_ROOT/lib/owners.py" check || rc=$?
+  [ $rc = 4 ] && die "the user has the computer (metacomputer handoff): wait until they run 'metacomputer handoff done' or 'cancel'"
+  [ $rc = 0 ] || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
 }
+
+# For a command that acts on the desktop from here (not through the hub): this VM's dispatch lock (lib/owners.py,
+# dispatch()) taken shared on descriptor 6, then one last look for a handoff. While the user has the computer
+# (metacomputer handoff) it stops with exit 4; otherwise the lock stays held until this command and what it runs
+# end (they inherit descriptor 6), so no handoff opens meanwhile: opening one takes the lock exclusively.
+handoff_hold() {
+  [ "${HANDOFF_HELD:-}" = 1 ] && return 0   # once per command: opening it again would let go of it meanwhile
+  local f="$RUN_DIR/owners/.dispatch"
+  { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
+    || die "couldn't open this VM's dispatch lock ($f)"
+  exec 6>>"$f" || die "couldn't open this VM's dispatch lock ($f)"
+  "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4
+  HANDOFF_HELD=1
+}
+# The lifecycle commands (stop, reset, restore, baseline, desktop-restart): after any question, right before they
+# change anything, and held until they're done; --override (you agreed) goes ahead as it does for another session.
+handoff_hold_unless_override() { [ "$OVERRIDE" = 1 ] || handoff_hold; }
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
   local p="$1"
@@ -365,6 +388,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   if vm_running "$VM_NAME"; then
     owners_check
+    handoff_hold_unless_override
     events_watcher_stop   # first, so its health probe doesn't report the shutdown as a problem
     hub_stop
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
@@ -703,6 +727,7 @@ do_reset() {
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"
+  handoff_hold_unless_override
   restore_from "$BASELINE_NAME" baseline reset
 }
 
@@ -762,6 +787,7 @@ do_restore() { # NAME [--yes] [--override]
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept)"
+  handoff_hold_unless_override
   RESTORE_VOLUMES="${vols:+$name}" restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
 }
 
@@ -770,6 +796,7 @@ do_baseline() {
   vm_lock_or_die "metacomputer baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
+  handoff_hold_unless_override
   local was_running=0; vm_running "$VM_NAME" && was_running=1
   [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
   local keep="$BASELINE_NAME-prev"
@@ -1029,12 +1056,14 @@ do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download sa
 
 do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (Chrome's keyboard)
   need_running
+  [ "${1:-}" = --check ] || handoff_hold   # removing them acts on the desktop: not while the user has it
   local n; n="$(gssh ops "/opt/metacomputer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
   printf '%s\n' "$n" | term_safe
 }
 
 do_desktop_restart() { # [--override]: log the desktop session out and back in (closes every app)
   parse_flags "$@"; owners_check; need_running
+  handoff_hold_unless_override
   say "restarting the desktop session (every open app closes)"
   gssh admin 'sudo /usr/local/sbin/metacomputer-admin restart-desktop' >/dev/null 2>&1 || true
   sleep 5
@@ -1329,22 +1358,101 @@ vnc_password_hint() {
   esac
 }
 
-do_view() {
-  local host; host="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+# The live-view password on stdout, for a pipe into lib/liveview.py only (never into a variable that's printed,
+# an argument, a file or a log). The same stores as above: your command, an earlier setup's file, the Keychain.
+vnc_password_get() {
+  case "$VNC_PASSWORD_STORE" in
+    command) [ -n "$VNC_PASSWORD_GET" ] || return 1
+             sh -c "$VNC_PASSWORD_GET" </dev/null 2>/dev/null ;;
+    keychain) vnc_file_io read 2>/dev/null && return 0
+              [[ "$VM_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+              run_until $(( SECONDS + ${MCOMP_KEYCHAIN_WAIT:-20} )) \
+                security find-generic-password -s "$VNC_KEYCHAIN_SERVICE" -a "$VM_NAME" -w </dev/null 2>/dev/null ;;
+    *) vnc_file_io read 2>/dev/null ;;
+  esac
+}
+
+view_host() { scutil --get LocalHostName 2>/dev/null || hostname -s; }
+
+do_view() { # [--open | --tailnet]
+  case "${1:-}" in
+    --open) view_open; return $? ;;
+    --tailnet) view_tailnet; return 0 ;;
+    "") ;;
+    *) die "usage: metacomputer view [--open | --tailnet]" ;;
+  esac
   cat <<EOF
 Live view of the guest desktop (VNC, view + take over):
-  on this Mac:          open vnc://127.0.0.1:$VNC_PORT        (Screen Sharing)
-  from another device:  ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $host
+  on this Mac:          metacomputer view --open
+                        (opens Screen Sharing and puts the live-view password on your clipboard)
+  from another device:  ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $(view_host)
                         then connect a VNC client to localhost:$VNC_PORT
   password:             $(vnc_password_hint)
+  over your tailnet:    metacomputer view --tailnet   (prints the command; publishing it is your choice)
 The port listens on 127.0.0.1 only (cua-netgw forward) and the guest firewall
 admits it only from the gateway.
 EOF
-  if command -v tailscale >/dev/null 2>&1; then
-    echo "To publish it to your tailnet instead:"
-    echo "  tailscale serve --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT   (undo: tailscale serve --tcp $VNC_PORT off)"
+}
+
+# --open: Screen Sharing on this Mac, with the password on the clipboard for a short while. Never in the URL.
+view_open() {
+  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}"
+  [[ "$secs" =~ ^[0-9]{1,4}$ ]] || secs=45
+  vm_running "$VM_NAME" || die "the virtual computer is off: metacomputer start, then metacomputer view --open"
+  if ! why="$("$PY" "$LAB_ROOT/lib/liveview.py" gui)"; then
+    cat <<EOF
+metacomputer view --open needs the Mac's own screen, and $why.
+  On the Mac's screen (in person, or through a remote-desktop app such as Screen Sharing
+  or Jump Desktop): open Terminal there and run  metacomputer view --open
+  From the device you're on:
+    ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $(view_host)
+    then connect a VNC client to localhost:$VNC_PORT
+    password: $(vnc_password_hint)
+  Over your own tailnet (your choice; you run it): metacomputer view --tailnet
+EOF
+    return 1
   fi
-  if [ "${1:-}" = "--open" ]; then open "vnc://127.0.0.1:$VNC_PORT"; fi
+  if vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip --clear-after "$secs"; then
+    echo "The live-view password is on your clipboard: paste it with Cmd+V when Screen Sharing asks (it isn't"
+    if [ "$secs" -gt 0 ]; then
+      echo "your Mac's password). It's cleared from the clipboard in $secs s, if it's still there then."
+    else
+      echo "your Mac's password)."
+    fi
+  else
+    warn "the password isn't on the clipboard; when Screen Sharing asks, read it with: $(vnc_password_hint)"
+  fi
+  open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
+  echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+}
+
+# --tailnet: the commands that would publish the port to your own tailnet. Printed, never run: it changes this
+# Mac's networking, so it's yours to run (and to undo).
+view_tailnet() {
+  local ts="" name=""
+  if command -v tailscale >/dev/null 2>&1; then ts=tailscale
+  elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale; fi
+  if [ -n "$ts" ]; then
+    name="$(run_until $(( SECONDS + 5 )) "$ts" status --json </dev/null 2>/dev/null | "$PY" -c 'import json, re, sys
+try:
+    n = str((json.load(sys.stdin).get("Self") or {}).get("DNSName") or "").rstrip(".")
+except Exception:
+    n = ""
+print(n if re.fullmatch(r"[A-Za-z0-9.-]{1,253}", n) else "")' 2>/dev/null)"
+  fi
+  cat <<EOF
+The live view listens on 127.0.0.1:$VNC_PORT only. To reach it from your other devices over
+Tailscale, publish it to your own tailnet. That's your choice: it changes this Mac's networking,
+so metacomputer doesn't run it for you.
+  while you need it (Ctrl-C stops it):  tailscale serve --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT
+  or until you undo it:                 tailscale serve --bg --tcp $VNC_PORT tcp://127.0.0.1:$VNC_PORT
+  undo:                                 tailscale serve --tcp $VNC_PORT off
+Then connect a VNC client on your other device to ${name:-<this Mac's tailnet name>}:$VNC_PORT
+(vnc://${name:-<this Mac's tailnet name>}:$VNC_PORT); the live-view password still guards it:
+  $(vnc_password_hint)
+Every device your tailnet's access rules let reach this Mac can then reach the port.
+EOF
+  [ -n "$ts" ] || echo "(Tailscale isn't installed on this Mac: tailscale.com.)"
 }
 
 new_vnc_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8; }
@@ -1487,6 +1595,16 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
     fill|login|session|token)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
+      # While the user has the computer (metacomputer handoff), a fill, login or session load waits like any acting
+      # call: checked under the dispatch lock, which stays held until the vault is done with the request (an approval
+      # can take minutes), so a handoff can't open while it's on its way. That check is this VM's, so --vm must
+      # name this VM; another VM is chosen by its own settings (MCOMP_CONFIG).
+      local inflight=""
+      if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
+        secrets_vm_is_this "$@" || die "secrets $sub acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
+        handoff_hold
+        inflight="$RUN_DIR/owners/vault-inflight.$$"
+      fi
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
         # The vault signs in for sealed sessions with the VM's static ops key, which a VM on
@@ -1498,7 +1616,22 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
       # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
       trap ':' INT TERM HUP
+      # Until the unlock process is known to be done with this request, a marker says one may still be working: a
+      # handoff opened after this command ended without that knowledge settles the vault first.
+      if [ -n "$inflight" ]; then
+        ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
+      fi
       out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
+      if [ -n "$inflight" ]; then
+        # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
+        # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error) or 64 (usage). Anything else (5:
+        # withdrawn without its confirmation; a crash, a signal) may leave it working: keep the dispatch lock while
+        # `settle` waits for it, and the marker if even that doesn't confirm.
+        case "$rc" in
+          0|1|2|3|4|64) rm -f "$inflight" ;;
+          *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
+        esac
+      fi
       trap - INT TERM HUP
       printf '%s\n' "$out"
       # The action log gets metadata only: never the token itself.
@@ -1507,6 +1640,14 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       return $rc ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_vm_is_this() { # ARGS...: 0 when every --vm among them names this VM (the vault takes the last one)
+  local a want=0
+  for a in "$@"; do
+    if [ "$want" = 1 ]; then [ "$a" = "$VM_NAME" ] || return 1; want=0; continue; fi
+    case "$a" in --vm) want=1 ;; --vm=*) [ "${a#--vm=}" = "$VM_NAME" ] || return 1 ;; esac
+  done
+  [ "$want" = 0 ]
 }
 secrets_metadata() { # the vault's result JSON (stdin) without the token value
   "$PY" -c 'import json,sys
@@ -1529,6 +1670,10 @@ case "$cmd" in
               export_options; MCOMP_OVERRIDE="$OVERRIDE" exec "$PY" "$LAB_ROOT/tests/run_tests.py" ${REST[@]+"${REST[@]}"} ;;
   who)        do_who "$@" ;;
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
+  handoff)    export_options
+              case "${1:-}" in done|cancel|wait|status|guard|-h|--help) ;;
+                *) MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE ;; esac
+              exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;;
   events)     export_options
               if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
               "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?

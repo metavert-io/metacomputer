@@ -12,17 +12,24 @@ recorded and never passed on to the driver:
   `metacomputer call`, a script) of the tools/call that follows it, since one hub
   connection carries every client's calls;
 - `notifications/metacomputer/refused` is a call the hub refused.
+
+It is the last hop on the Mac, and signing a record can take a while, so it looks for a handoff once more right
+before it forwards each acting call (under the dispatch lock, owners.acting(), held across the write): while the
+user has the computer (`metacomputer handoff`) it answers the call with the hub's refusal itself.
 """
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
+import mcp_hub  # noqa: E402  (READ_ONLY, the handoff refusal)
 import owners  # noqa: E402
 import wirelimits  # noqa: E402
 try:
@@ -40,6 +47,12 @@ TOO_COMPLEX = "the VM's answer was over the hub's value or depth limit; the hub 
 # The ids the hub gives its requests (mcp_hub.HUB_ID_RE): an answer too complex to parse is recorded for the request
 # its top-level "id" names (wirelimits.top_level_id), the one the hub answers; nested ids never count.
 HUB_ID_RE = re.compile(r"c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12}")
+# A message to the VM must be taken within this long (the hub's own WRITE_TIMEOUT_S); one that isn't ends the
+# connection: a VM that stops reading can't hold the relay, nor the dispatch lock an acting call is sent under.
+WRITE_TIMEOUT_S = float(os.environ.get("MCOMP_RELAY_WRITE_TIMEOUT_S") or 30)
+STALLED = ("The virtual computer didn't take this call within {} s, so the action-log relay closed its connection "
+           "(the call wasn't sent whole). Check `metacomputer status`; after a reconnect, element tokens from earlier "
+           "reads are stale.")
 
 
 def session_info():
@@ -77,10 +90,46 @@ def actions_listener():
 def main(cmd):
     log = actionlog.ActionLog(session_info(), listener=actions_listener())
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    up = proc.stdin.fileno()
+    os.set_blocking(up, False)          # writes go through to_vm(), with a deadline
+
+    def to_vm(data):
+        """data to the VM within WRITE_TIMEOUT_S: True, or False when it isn't taken (the connection is then ended)."""
+        view, end = memoryview(data), time.monotonic() + WRITE_TIMEOUT_S
+        while view:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                if not select.select([], [up], [], left)[1]:
+                    continue
+                view = view[os.write(up, view):]
+            except BlockingIOError:
+                continue
+            except (OSError, ValueError):
+                break
+        if not view:
+            return True
+        try:
+            proc.kill()                 # a partial message can't be taken back: this connection is over
+        except OSError:
+            pass
+        return False
     pending = {}            # json(id) -> tool
     clients = {}            # json(id) -> the hub's note on whose call it is
     plock = threading.Lock()
     out = sys.stdout.buffer
+    olock = threading.Lock()            # the relay's own answers and the VM's go out on the same stream
+
+    def to_client(data):
+        with olock:
+            out.write(data)
+            out.flush()
+
+    def refuse(mid, text):
+        to_client((json.dumps({"jsonrpc": "2.0", "id": mid, "result": {
+            "content": [{"type": "text", "text": text}], "isError": True,
+            "structuredContent": mcp_hub.HANDOFF_REFUSED}}) + "\n").encode())
 
     def finish(*_):
         with plock:
@@ -137,8 +186,7 @@ def main(cmd):
                     if tool:
                         log.result(msg["id"], tool, msg)
                 try:
-                    out.write(line)
-                    out.flush()
+                    to_client(line)
                 except (BrokenPipeError, OSError, ValueError):
                     break
         except Exception as e:   # whatever stops this thread, the connection ends below and the log is signed
@@ -161,9 +209,8 @@ def main(cmd):
             pass
         try:
             if why:
-                out.write((json.dumps({"jsonrpc": "2.0", "method": CLOSING,
+                to_client((json.dumps({"jsonrpc": "2.0", "method": CLOSING,
                                        "params": {"reason": why, "limit_mb": MAX_MSG >> 20}}) + "\n").encode())
-            out.flush()
         except (BrokenPipeError, OSError, ValueError):
             pass
         finish()
@@ -199,19 +246,48 @@ def main(cmd):
                 continue            # anything else of ours never reaches the driver
             if method == "tools/call" and "id" in msg:
                 p = msg.get("params") or {}
+                name = p.get("name", "")
+                client = clients.pop(json.dumps(msg["id"]), None)
+                acting = not isinstance(name, str) or name not in mcp_hub.READ_ONLY
+                h = owners.open_handoff() if acting else None
+                if h:                       # the user has the computer: not recorded as a call, nothing sent
+                    text = owners.handoff_refusal(h)
+                    log.refused(str(name), p.get("arguments") or {}, text, client=client)
+                    refuse(msg["id"], text)
+                    continue
                 with plock:
-                    pending[json.dumps(msg["id"])] = p.get("name", "")
-                log.call(msg["id"], p.get("name", ""), p.get("arguments") or {},
-                         client=clients.pop(json.dumps(msg["id"]), None))
-        try:
-            proc.stdin.write(line)
-            proc.stdin.flush()
-        except (BrokenPipeError, OSError):
+                    pending[json.dumps(msg["id"])] = name
+                log.call(msg["id"], name, p.get("arguments") or {}, client=client)
+                if acting:
+                    # Signing the record can take a while: look again right before it goes, holding the dispatch
+                    # lock across the write, so a handoff that opened meanwhile stops it here.
+                    sent = None
+                    try:
+                        with owners.acting():
+                            sent = to_vm(line)   # bounded: the lock is let go of within WRITE_TIMEOUT_S
+                        if sent:
+                            continue
+                        text = STALLED.format(int(WRITE_TIMEOUT_S))
+                    except owners.HandoffOpen as e:
+                        text = owners.handoff_refusal(e.rec)
+                    except (OSError, TimeoutError):
+                        text = ("The action-log relay couldn't check whether the user has the computer (a handoff "
+                                "being opened?), so it didn't pass the call on. Check `metacomputer handoff status`.")
+                    with plock:
+                        pending.pop(json.dumps(msg["id"]), None)
+                    log.result(msg["id"], name, {"error": {"message": text}})
+                    if sent is False:       # the VM stopped taking messages: fail the call, end the connection
+                        to_client((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                            "content": [{"type": "text", "text": text}], "isError": True}}) + "\n").encode())
+                        break
+                    refuse(msg["id"], text)
+                    continue
+        if not to_vm(line):
             break
     client_done.set()
     try:
-        proc.stdin.close()
-    except OSError:
+        proc.stdin.close()          # nothing was ever buffered in it: every write went through to_vm()
+    except (OSError, ValueError):
         pass
     rc = proc.wait()
     t.join(timeout=5)

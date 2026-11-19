@@ -40,7 +40,7 @@ alias). `metacomputer help` prints a summary.
 | `contact-sheet MP4 [OUT.png]` | 12 frames of a recording in one image |
 | `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model |
 | `browser [default firefox\|chrome] [mode human\|page\|hybrid] [profiles [--delete NAME]]` | The skill's defaults; named Chrome profiles |
-| `view [--open]` | Watch or take over the desktop (VNC on loopback) |
+| `view [--open \| --tailnet]` | Watch or take over the desktop (VNC on loopback). `--open`: Screen Sharing on this Mac, with the live-view password on the clipboard for 45 s (`VIEW_CLIPBOARD_S`); over SSH it says how instead. `--tailnet`: the `tailscale serve` command that would publish it to your tailnet, and its undo (printed, never run) |
 | `input-reset [--check]` | Remove the driver's leftover virtual input devices (when Chrome ignores typing) |
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
 | `security [apply] [--json]` | The optional hardening and the shell channel, as configured and as the VM has them |
@@ -55,6 +55,9 @@ alias). `metacomputer help` prints a summary.
 | `secrets token NAME [--ttl 15m]`, `secrets token renew ID\|--all [--ttl 15m]`, `secrets tokens`, `secrets revoke ID\|--all` | A short-lived API token and the proxy's URL in the VM; keep live ones going (the same token in the VM); the live tokens; end them |
 | `secrets status\|audit\|selftest`, `secrets audit --verify\|--head`, `secrets audit-sink list\|test NAME` | State, the audit history (no values) and its checks, the vault's self-test; the sinks and their backlog |
 | `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action TEXT]` | Tell your event sinks that Claude is blocked on you |
+| `handoff --why captcha\|login\|2fa\|other --say "TEXT" [--timeout 15m] [--json] [--override]` | Claude hands the computer to you and waits: it notifies you, and every acting call waits until you're done. Exit 0 done, 4 cancelled, 124 time limit (at most 2 h), 5 stopped waiting (still open), 3 refused (one is open, another session is acting, or an action is still on its way, such as a fill waiting for approval) |
+| `handoff done [--note TEXT]`, `handoff cancel [--note TEXT]` | You: hand the computer back (Claude carries on), or call the handoff off (Claude stops and asks). The session that asked can't say "done" for you without a terminal |
+| `handoff wait [--json]`, `handoff status [--json]` | Wait again for the open handoff (or see how the last one ended); show it |
 | `events sink add\|remove NAME ...` | Add or remove an event sink (your own terminal) |
 | `events sink list\|show\|test`, `events status\|tail`, `events emit`, `events drain`, `events watcher start\|stop\|status` | The sinks, the stream's state and local log, an event from a script, a retry now, the watcher |
 | `learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude]` | Mine your sessions with the VM for repeated mistakes and time sinks; propose lessons with their evidence |
@@ -106,6 +109,7 @@ instead.
 | `SSH_PORT`, `VNC_PORT` | `2277`, `5977` | Loopback ports for the VM's SSH and live view |
 | `RUN_DIR`, `LOG_DIR` | `.run/`, `logs/` in the checkout | Runtime files and logs; a second VM needs its own |
 | `VNC_PASSWORD_STORE` | `file` (a new install writes `keychain`) | `keychain` (the login Keychain, item `metacomputer-vnc`), `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
+| `VIEW_CLIPBOARD_S` | `45` | How long `view --open` leaves the live-view password on the clipboard; it's cleared then only if the clipboard still holds it (`0`: never) |
 | `IMPORT_MIN_FREE_GB` | `10` | Copies from the VM, and read-write folder and S3 volumes, stop before the Mac's free space falls below this |
 
 **Skill defaults** (`metacomputer browser` changes them):

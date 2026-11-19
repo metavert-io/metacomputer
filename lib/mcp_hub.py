@@ -36,6 +36,7 @@ With MCP_HUB=off the same core runs inside each client process instead
   mcp_hub.py refresh-cache [--seed]   connect once and save the driver's handshake
 """
 import collections
+import contextlib
 import ctypes
 import fcntl
 import hashlib
@@ -131,7 +132,10 @@ HABITS = (
     "- Two failures, or two routes with no effect: stop, look once and check the premise (window, focus, mode, "
     "an open dialog, a frozen app), then change mechanism. Never a third identical call.\n"
     "- Pixel input needs a screenshot as that window's last read; any read without one cancels it.\n"
-    "- A refusal from the hub is the user's control: follow the route it names, or report it."
+    "- A refusal from the hub is the user's control: follow the route it names, or report it.\n"
+    "- A CAPTCHA or \"verify you are human\" check, or a sign-in or 2FA prompt that's the user's to do: never try to "
+    "pass it, switch browsers or retry it. Run `metacomputer handoff --why captcha|login|2fa|other --say \"...\"` "
+    "and wait for it to return."
 )
 OVERSIZE_MSG = ("The virtual computer sent a message larger than the hub accepts ({} MB), so the hub closed its "
                 "connection to it. Call again; element tokens from earlier reads are stale.").format(MAX_UPSTREAM_MSG >> 20)
@@ -142,6 +146,10 @@ LIMIT_MSG = ("The call reached the virtual computer, but its answer was too comp
              "its outcome with a small read. Ask for less: a query or a smaller region instead of the whole tree, or "
              "read a file through `metacomputer sh`.").format(
                  wirelimits.MAX_JSON_NODES, wirelimits.MAX_JSON_DEPTH)
+# While the user has the computer (metacomputer handoff, lib/handoff.py): what an acting call gets.
+HANDOFF_REFUSED = {"code": "user_has_computer", "effect": "refused",
+                   "hint": "wait for the handoff to end (metacomputer handoff wait); read-only tools work"}
+DEFERRED_MAX = 256                  # driver sessions waiting to be ended until a handoff ends
 # The ids the hub gives its own requests (forward: c<client>.<n>; ask_up: mcomp-hub-<n>). A message too complex to
 # parse answers the request its top-level "id" names (wirelimits.top_level_id), which then gets LIMIT_MSG instead of
 # waiting until it times out; ids anywhere else in it (a page's element ids, say) never count.
@@ -664,6 +672,9 @@ class Hub:
         self._direct = (0.0, None)
         self.owner_lock = threading.Lock()
         self.chrome_lock = threading.Lock()
+        self.deferred, self.deferred_lock, self.deferred_thread = [], threading.Lock(), None   # end_session later
+        self.local_done = threading.Event()   # MCP_HUB=off: set once the core's own teardown has run
+        self._lease_retry = set()   # lease teardowns put off by a handoff: the keeper tries them again
         self.leases = {}            # client id -> its acting calls still running after it disconnected (detach)
         self.lease_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
@@ -813,12 +824,20 @@ class Hub:
             differs = sorted(k for k in set(mine) | set(theirs) if str(mine.get(k, "")) != str(theirs.get(k, "")))
             if differs:
                 others = [c for c in self.active_clients() if c is not client]
+                if self.server and not others and not self.pending and not self.recordings and self.held_for_handoff():
+                    client.send({"jsonrpc": "2.0", "id": mid, "error": {
+                        "code": -32002, "data": {"code": "hub_settings_differ", "differs": differs},
+                        "message": ("The metacomputer hub for this VM has other settings (" + ", ".join(differs) +
+                                    ") and keeps its connection while the user has the computer (metacomputer "
+                                    "handoff): restarting it now could close what they're working in. Try again once "
+                                    "the handoff has ended.")}})
+                    return False
                 if self.server and not others and not self.pending and not self.recordings:
                     client.send({"jsonrpc": "2.0", "id": mid, "error": {
                         "code": -32001, "message": "the hub is restarting with this client's settings",
                         "data": {"code": "hub_restarting", "differs": differs}}})
                     self.note(f"settings changed ({', '.join(differs)}); restarting for client pid {client.peer_pid}")
-                    threading.Timer(0.3, self.server.stop, args=("settings changed",)).start()
+                    self.server.stop("settings changed", gated=True)   # under the dispatch lock, if no handoff opened
                 else:
                     client.send({"jsonrpc": "2.0", "id": mid, "error": {
                         "code": -32002, "data": {"code": "hub_settings_differ", "differs": differs},
@@ -869,6 +888,14 @@ class Hub:
         with self.clock:
             if self.clients.pop(client.cid, None) is None:
                 return
+            last_local = self.local and not self.clients
+        try:
+            self._detach(client)
+        finally:
+            if last_local:                  # MCP_HUB=off: this core's connection ends with its one client
+                threading.Thread(target=self._end_local_when_free, daemon=True, name="hub-local-end").start()
+
+    def _detach(self, client):
         if not client.hello or (client.kind == "status" and not client.has_claim):
             return
         self.last_activity = time.time()
@@ -881,9 +908,9 @@ class Hub:
         if self.server is not None and self.server.stopping:
             return                          # the hub is going away, not the client: its claim stays
         if client.auto_session and client.used_auto and self.connected():
-            # The session's own driver session ends with it, as its own connection used to.
-            self.ask_up_async("tools/call", {"name": "end_session", "arguments": {"session": client.auto_session}},
-                              lambda _m: None)
+            # The session's own driver session ends with it, as its own connection used to; while the user has the
+            # computer (a handoff), only once it ends: ending a session can close the browser they're working in.
+            self.end_session_later(client.auto_session)
             self.recordings.pop(client.auto_session, None)
         # Every kind of client: calls still running keep the computer held (a lease). The client's own claim goes
         # when it was held in the client's name; a one-shot `call` held by its Claude Code session or shell keeps it.
@@ -893,8 +920,85 @@ class Hub:
                        f"The Claude Code session in {owners.short(client.cwd)} let go of the virtual computer",
                        data={"bridge_pid": client.peer_pid, "claude_pid": client.claude})
         self.note(f"client {client.cid} detached ({client.close_reason or 'closed'})")
-        if self.local and not self.active_clients():
-            self.shutdown()
+
+    def end_session_later(self, session):
+        """End a driver session the hub started for a client that's gone: now, or, while a handoff is open, when it
+        ends (a thread looks every second). For the connection it was made on only; at most DEFERRED_MAX wait."""
+        with self.deferred_lock:
+            self.deferred.append((session, self.up_gen, time.monotonic()))
+            if len(self.deferred) > DEFERRED_MAX:
+                self.note(f"{len(self.deferred) - DEFERRED_MAX} driver session(s) left to end with the connection")
+                del self.deferred[:-DEFERRED_MAX]
+        if not self.flush_deferred():
+            with self.deferred_lock:
+                start = self.deferred_thread is None
+                if start:
+                    self.deferred_thread = threading.Thread(target=self._deferred_run, daemon=True,
+                                                            name="hub-deferred-cleanup")
+            if start:
+                self.deferred_thread.start()
+
+    def flush_deferred(self):
+        """Send the waiting end_session calls unless a handoff is open. True when nothing is left waiting."""
+        with self.deferred_lock:
+            items, self.deferred = self.deferred, []
+        if not items:
+            return True
+        try:
+            with owners.acting():
+                for session, gen, _t in items:
+                    if gen == self.up_gen and self.connected():
+                        self.ask_up_async("tools/call", {"name": "end_session", "arguments": {"session": session}},
+                                          lambda _m: None)
+            return True
+        except (owners.HandoffOpen, OSError, TimeoutError):
+            limit = time.monotonic() - owners.HANDOFF_MAX_S - 60      # none waits longer than the longest handoff
+            with self.deferred_lock:
+                self.deferred[:0] = [(s, g, t) for s, g, t in items if g == self.up_gen and t > limit]
+                del self.deferred[:-DEFERRED_MAX]
+                return not self.deferred
+
+    def end_local_now(self):
+        """MCP_HUB=off: one try at ending the core's driver connection, deciding and ending under the dispatch lock (a
+        handoff can't open in between). True once it has ended; False while a handoff is open or the lock can't be
+        had. The only way the core's connection ends while it's held for a handoff is the bound past the longest one."""
+        try:
+            with owners.acting():
+                self.shutdown()
+            return True
+        except (owners.HandoffOpen, OSError, TimeoutError):
+            return False
+
+    def _end_local_when_free(self):
+        """MCP_HUB=off: the core's one client has gone. End its driver connection under the dispatch lock (no handoff
+        can open while it ends), once no handoff is open: at most the longest handoff later, then regardless. A process
+        that exits meanwhile takes its connection with it (documented). local_done is set when it has run."""
+        try:
+            end = time.monotonic() + owners.HANDOFF_MAX_S + 60
+            while True:
+                if self.end_local_now():
+                    return
+                if time.monotonic() >= end:
+                    self.shutdown()
+                    return
+                self.flush_deferred()
+                time.sleep(1.0)
+        finally:
+            self.local_done.set()
+
+    def _deferred_run(self):
+        try:
+            while not (self.server is not None and self.server.stopping):
+                time.sleep(1.0)
+                if self.flush_deferred():
+                    with self.deferred_lock:
+                        if not self.deferred:
+                            self.deferred_thread = None
+                            return
+        finally:
+            with self.deferred_lock:
+                if self.deferred_thread is threading.current_thread():
+                    self.deferred_thread = None
 
     # --- a claim outliving its client's calls ----------------------------------------------
     def hand_over_claim(self, client, running, drop_own=True):
@@ -981,8 +1085,17 @@ class Hub:
                             self._refresh_leases()
                     except (OSError, TimeoutError):
                         self._refresh_leases()
+            # Ending a connection could close the browser the user is working in: while a handoff is open, it waits
+            # (at most the longest handoff, HANDOFF_MAX_S, past the usual limit; the lease's claim stays meanwhile).
+            handoff = None
+            if any(now - l["t0"] > LEASE_MAX_S for _c, l in leases):
+                try:
+                    handoff = owners.open_handoff()
+                except Exception:
+                    handoff = None
             for cid, lease in leases:
-                if now - lease["t0"] <= LEASE_MAX_S:
+                age = now - lease["t0"]
+                if age <= LEASE_MAX_S or (handoff is not None and age <= LEASE_MAX_S + owners.HANDOFF_MAX_S):
                     continue
                 with self.lease_lock:                # what is still running, looked at now (not at the snapshot)
                     gens = {self.pending[k].get("gen") for k in lease["keys"] if k in self.pending}
@@ -998,9 +1111,28 @@ class Hub:
                     ending.add(gen)
                     self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending driver "
                               f"connection {gen} (its whole process tree) before letting the computer go")
-                    threading.Thread(target=self._end_transport, args=(proc, True), daemon=True,
+                    hard = age > LEASE_MAX_S + owners.HANDOFF_MAX_S
+                    threading.Thread(target=self._end_leased_transport, args=(proc, gen, hard), daemon=True,
                                      name=f"hub-end-{gen}").start()
+            with self.lease_lock:
+                retry, self._lease_retry = self._lease_retry, set()
+            ending -= retry                          # put off by a handoff: looked at again on the next tick
             ending &= set(self.gen_procs)
+
+    def _end_leased_transport(self, proc, gen, hard):
+        """A lease past its life ends its connection under the dispatch lock, so a handoff can't open while it ends,
+        and not while one is open (the keeper tries again); past the hard bound (the longest handoff on top of the
+        lease's life) it ends regardless."""
+        if not hard:
+            try:
+                with owners.acting():
+                    self._end_transport(proc, True)
+                return
+            except (owners.HandoffOpen, OSError, TimeoutError):
+                with self.lease_lock:
+                    self._lease_retry.add(gen)
+                return
+        self._end_transport(proc, True)
 
     def _end_transport(self, proc, term):
         """End a driver connection's process tree, bounded, once: with term, SIGTERM to its process group first (the
@@ -1689,6 +1821,11 @@ class Hub:
                                          "virtual computer, so it didn't pass the call on. Check "
                                          f"`{CLI} who`, then call again.")
                 return
+            handoff = next((o for o in busy or () if o["kind"] == "handoff"), None)
+            if handoff:
+                # The user has the computer (metacomputer handoff): every client waits, this session included.
+                self.refuse(client, msg, owners.handoff_refusal(handoff), HANDOFF_REFUSED)
+                return
             if busy:
                 lines = "\n".join("  - " + owners.describe(o) for o in busy)
                 self.event(client, "needs_you", "in_use",
@@ -1743,8 +1880,22 @@ class Hub:
         if self.coord_on and name == "get_window_state" and args.get("include_screenshot", True) is not False \
                 and not args.get("display_only"):
             pre = lambda key: self.capture_layout(key)  # noqa: E731  (list_windows goes just before the read)
-        self.forward(client, msg, {"tool": name, "args": args, "session": sess, "note": note, "acting": acting},
-                     pre=pre)
+        extra = {"tool": name, "args": args, "session": sess, "note": note, "acting": acting}
+        if not acting:
+            self.forward(client, msg, extra, pre=pre)
+            return
+        # The guards above can wait on the VM (window lists, an input reset), and a handoff can open meanwhile: look
+        # once more right before the call leaves, under the dispatch lock, held across the send (owners.acting).
+        try:
+            with owners.acting():
+                self.forward(client, msg, extra, pre=pre)
+        except owners.HandoffOpen as e:
+            self.refuse(client, msg, owners.handoff_refusal(e.rec), HANDOFF_REFUSED)
+        except (OSError, TimeoutError) as e:
+            self.note(f"dispatch lock: {e!r}")
+            self.refuse(client, msg, "The metacomputer bridge couldn't check whether the user has the computer (a "
+                                     "handoff being opened?), so it didn't pass the call on. Check "
+                                     f"`{CLI} handoff status`, then call again.")
 
     def session_for(self, client, name, args):
         """The driver session a call runs in: its own `session`, else the client's (`call --session`, or the
@@ -1957,10 +2108,15 @@ class Hub:
         return bool(self.chrome_target(args))
 
     def input_reset(self):
-        """Remove leftover virtual device pairs in the guest. Returns a note or None."""
+        """Remove leftover virtual device pairs in the guest. Returns a note or None. It acts on the desktop, so
+        not while the user has the computer: the call it was for is refused at its dispatch then."""
         try:
-            out = subprocess.run([MCOMP_CLI, "input-reset"], capture_output=True, text=True, timeout=30, env=self.env)
-        except (OSError, subprocess.TimeoutExpired) as e:
+            with owners.acting():
+                out = subprocess.run([MCOMP_CLI, "input-reset"], capture_output=True, text=True, timeout=30,
+                                     env=self.env)
+        except owners.HandoffOpen:
+            return None
+        except (OSError, TimeoutError, subprocess.TimeoutExpired) as e:
             return f"could not check for leftover virtual input devices ({e})"
         if out.returncode != 0:
             return ("could not check for leftover virtual input devices "
@@ -2272,8 +2428,22 @@ class Hub:
     def busy(self):
         return bool(self.active_clients()) or bool(self.pending)
 
+    def held_for_handoff(self):
+        """True while the driver connection should stay for the user: a handoff is open (ending the connection could
+        close the browser they're working in), or cleanup waits for one to end. Bounded by the handoff's own limit."""
+        with self.deferred_lock:
+            if self.deferred:
+                return True
+        try:
+            return owners.open_handoff() is not None
+        except Exception:
+            return False
+
     def idle_for(self):
         if self.busy() or self.recording_active():
+            return 0.0
+        if self.held_for_handoff():
+            self.last_activity = time.time()     # the idle time starts again once the handoff has ended
             return 0.0
         return time.time() - self.last_activity
 
@@ -2713,11 +2883,40 @@ class Server:
         self.why = None
         self.lsock = None
         self.lock_fd = None
+        self.gated_why = None       # a stop the hub decided on itself (a restart for other settings), not yet made
+        self.teardown_hold = None   # the dispatch lock, held from that decision through close()
 
-    def stop(self, why="stopped"):
+    def stop(self, why="stopped", gated=False):
+        """Stop serving. gated: the hub's own decision (a restart for other settings; idle exit goes the same way): the
+        run loop makes it only under the dispatch lock with no handoff open, and keeps the lock through the
+        connection's end; with a handoff open, the restart is dropped and idle exit waits. An explicit stop (a
+        signal: `metacomputer hub stop`, `metacomputer stop`, which look for a handoff themselves) isn't gated."""
+        if gated:
+            self.gated_why = why
+            return
         if not self.stopping:
             self.why = why
             self.stopping = True
+
+    def _gated_stop(self, why):
+        """True once the stop is made: the dispatch lock held (until close()) and no handoff open."""
+        hold = contextlib.ExitStack()
+        try:
+            hold.enter_context(owners.acting())
+        except owners.HandoffOpen:
+            hold.close()
+            if self.gated_why:
+                self.hub.note(f"not stopping ({self.gated_why}): the user has the computer (a handoff)")
+                self.gated_why = None
+            return False
+        except (OSError, TimeoutError):
+            hold.close()
+            return False
+        if self.hub.pending or self.hub.recordings or (why.startswith("idle") and self.hub.idle_for() < self.idle_s):
+            hold.close()                         # it's no longer idle, or a call started meanwhile
+            return False
+        self.teardown_hold, self.why, self.stopping = hold, why, True
+        return True
 
     def run(self):
         private_dir(self.paths["dir"])
@@ -2762,11 +2961,14 @@ class Server:
                       f"{'on' if self.hub.coord_on else 'off'})")
         try:
             while not self.stopping:
+                why = self.gated_why
+                if why and self._gated_stop(why):
+                    break
                 try:
                     conn, _ = s.accept()
                 except socket.timeout:
                     if self.hub.idle_for() >= self.idle_s:
-                        self.stop(f"idle for {int(self.idle_s)} s")
+                        self._gated_stop(f"idle for {int(self.idle_s)} s")
                     continue
                 except OSError:
                     if self.stopping:
@@ -2795,7 +2997,11 @@ class Server:
             pass
         for c in list(self.hub.clients.values()):
             c.close("the hub stopped")
-        self.hub.shutdown()
+        try:
+            self.hub.shutdown()
+        finally:
+            if self.teardown_hold is not None:
+                self.teardown_hold.close()   # the connection has ended: a handoff may open now
         if self.lock_fd is not None:
             try:
                 os.ftruncate(self.lock_fd, 0)

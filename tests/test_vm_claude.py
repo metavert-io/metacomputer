@@ -862,6 +862,82 @@ def keeper_group(td):
           "claim back", r.returncode == 0 and waited >= 1.5, (waited, r.stdout + r.stderr))
 
 
+# --- an open handoff (metacomputer handoff, lib/handoff.py) pauses Claude inside the VM too -------------------------
+HANDOFF_OPEN = ("import os, sys, time; sys.path.insert(0, sys.argv[1]); import owners, handoff\n"
+                "def write():\n"
+                "    now = time.time()\n"
+                "    handoff.write_record({'v': 1, 'id': 'h-' + sys.argv[3], 'status': 'open', 'why': 'captcha', "
+                "'say': 'x', 'opened': now, 'deadline': now + 300, 'timeout_s': 300, 'cwd': '/', 'claude_pid': None})\n"
+                "if sys.argv[2] == 'open':\n"
+                "    write()\n"
+                "else:   # a handoff being opened: the dispatch lock held exclusively while the record is written\n"
+                "    with owners.dispatch(shared=False, timeout=10):\n"
+                "        open(sys.argv[2], 'w').close(); time.sleep(2.5); write()\n")
+
+
+def handoff_group(td):
+    """While the user has the computer, `send`, `keys`, `show` and `start` are refused whatever --override says
+    (start before any token is asked for), nothing reaches the inner Claude, its keeper renews nothing (though
+    its screen changes), and `send` waits for a handoff being opened (the dispatch lock) and then sees it."""
+    setup(td)
+    set_mode(td, "oauth")
+    lib = os.path.join(LAB, "lib")
+    rec_path = os.path.join(td, "run", "owners", "handoff.state")
+    tmux_env = dict(os.environ, TMUX_TMPDIR=os.path.join(td, "tmux"))
+    runs = os.path.join(td, "vault", "claude-runs.log")
+    probes = lambda: sum(1 for x in open(runs) if json.loads(x) == ["claude", "_probe", "--session", "hof"]) \
+        if os.path.exists(runs) else 0   # noqa: E731
+    r = mc(td, "--session", "hof")
+    srec = json.load(open(os.path.join(td, "run", "claude", "hof.json")))
+    kpid = srec.get("keeper_pid")
+    settled = wait_for(lambda: probes() >= 2, 15)    # the keeper's first looks: its claim renewed, the screen known
+    check("handoff: a session and its keeper to pause", r.returncode == 0 and bool(kpid) and vc.owners.alive(kpid)
+          and claim_of(td, kpid) is not None and settled, (r.stderr[-300:], kpid))
+    subprocess.run([sys.executable, "-c", HANDOFF_OPEN, lib, "open", "aaaaaaaaaaaa"], env=env_for(td), check=True, timeout=30)
+    n_in, calls0 = len(inbox(td)), len(vault_calls(td))
+    for args, what in ((["send", "during the handoff"], "send"), (["send", "during the handoff", "--override"], "send --override"),
+                       (["keys", "Enter", "--override"], "keys --override"), (["show"], "show")):
+        r = mc(td, *args, "--session", "hof")
+        check(f"handoff: claude {what} is refused (125): Paused, the user has the computer",
+              r.returncode == vc.EXIT_REFUSED and "Paused: the user has the computer" in r.stdout + r.stderr,
+              (r.returncode, r.stdout[-300:], r.stderr[-300:]))
+    check("handoff: ... and nothing reached the inner Claude", len(inbox(td)) == n_in, inbox(td)[n_in:])
+    r = mc(td, "--session", "hof2", "--override")
+    check("handoff: claude start --override is refused before any token is asked for",
+          r.returncode == vc.EXIT_REFUSED and "Paused: the user has the computer" in r.stdout + r.stderr
+          and not any(c[:2] == ["secrets", "token"] for c in vault_calls(td)[calls0:]),
+          (r.returncode, r.stderr[-300:], vault_calls(td)[calls0:]))
+    # The user works in the inner Claude's terminal: its screen changes, and the keeper looks, but renews nothing.
+    before, p0 = (claim_of(td, kpid) or {}).get("last_call"), probes()
+    for keys in (["-l", "typed by the user"], ["Enter"]):
+        subprocess.run([tmux_real(), "-L", "metacomputer-claude", "send-keys", "-t", "=hof:", *keys], env=tmux_env,
+                       capture_output=True, timeout=30)
+    looked = wait_for(lambda: probes() >= p0 + 3, 20)
+    check("handoff: the keeper renews nothing while the user has the computer, though the screen changed (it looked)",
+          looked and "typed by the user" in inbox(td)[-1:] and (claim_of(td, kpid) or {}).get("last_call") == before
+          and vc.owners.alive(kpid), (looked, inbox(td)[-1:], before, claim_of(td, kpid)))
+    os.remove(rec_path)
+    check("handoff: ... and renews once it's handed back (the screen differs from its last renewal)",
+          wait_for(lambda: ((claim_of(td, kpid) or {}).get("last_call") or 0) > (before or 0), 15),
+          (before, claim_of(td, kpid)))
+    # A handoff being opened holds the dispatch lock: a send admitted meanwhile waits for it, then sees the handoff.
+    flag = os.path.join(td, "opening")
+    holder = subprocess.Popen([sys.executable, "-c", HANDOFF_OPEN, lib, flag, "bbbbbbbbbbbb"], env=env_for(td))
+    try:
+        wait_for(lambda: os.path.exists(flag), 10)
+        t0 = time.time()
+        r = mc(td, "send", "raced", "--session", "hof")
+        waited = time.time() - t0
+    finally:
+        holder.wait(15)
+    check("handoff: send admitted while a handoff is being opened waits for the dispatch lock, then is refused; "
+          "nothing reached the inner Claude", r.returncode == vc.EXIT_REFUSED and "Paused: the user has the computer"
+          in r.stdout + r.stderr and waited >= 1.5 and "raced" not in inbox(td),
+          (r.returncode, round(waited, 2), r.stderr[-300:], inbox(td)[-2:]))
+    os.remove(rec_path)
+    mc(td, "stop", "--session", "hof", "--revoke")
+
+
 def guest_checks(td):
     """The VM's half on its own: arguments it refuses, and a token it's handed is gone from the environment."""
     open(os.path.join(td, "probe.py"), "w").write(ENV_PROBE)
@@ -903,7 +979,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="mcc-", dir="/tmp") as td:
         guest_checks(td)
     if tmux_real():
-        for fn in (session_checks, refusal_checks, install_checks, keeper_group):
+        for fn in (session_checks, refusal_checks, install_checks, keeper_group, handoff_group):
             td = tempfile.mkdtemp(prefix="mcc-", dir="/tmp")
             try:
                 fn(td)

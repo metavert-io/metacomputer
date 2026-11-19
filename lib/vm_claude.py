@@ -593,6 +593,13 @@ def precheck(transport, o):
                      "That's the user's setting; ask them if they want it on.")
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
         raise Failed(EXIT_FAILED, "the virtual computer is off (metacomputer start)")
+    # The user has the computer (metacomputer handoff): refused whatever --override says, before a token is asked for.
+    try:
+        handoff = owners.open_handoff()
+    except OSError:
+        handoff = None                       # each step's own check (run_guarded) still refuses
+    if handoff:
+        raise Failed(EXIT_REFUSED, owners.handoff_refusal(handoff))
     if not o["override"]:
         try:
             busy = [x for x in owners.others() if x["active"]]
@@ -1030,19 +1037,24 @@ def run_keeper(o):
             fails = 0
             if fields.get("state") != "running":
                 return 0
+            if fields.get("hash") == last:
+                continue
             try:
-                with owners.lock():
+                # A renewal holds the computer for Claude, so it's an acting step: under the dispatch lock (taken
+                # before the owners lock), and never while the user has the computer (metacomputer handoff). The
+                # screen's change is kept for after the handoff: the first look then renews if it still differs.
+                with owners.acting(), owners.lock():
                     try:
                         c = json.load(open(owners.claim_path(me)))
                     except (OSError, ValueError):
                         return 0              # released (or dropped by stop): gone for good
-                    if fields.get("hash") != last:
-                        owners.write_claim(me, c.get("claude_pid"), c.get("cwd"), KEEP_TOOL, c.get("started"),
-                                           kind="inner", sid=c.get("sid"),
-                                           extra={"session": session, "vm": c.get("vm", "")})
-                        last = fields.get("hash")
+                    owners.write_claim(me, c.get("claude_pid"), c.get("cwd"), KEEP_TOOL, c.get("started"),
+                                       kind="inner", sid=c.get("sid"), extra={"session": session, "vm": c.get("vm", "")})
+                    last = fields.get("hash")
+            except owners.HandoffOpen:
+                pass                          # paused: nothing renewed while the handoff is open
             except (OSError, TimeoutError):
-                pass                          # the lock or the write failed: try again next time
+                pass                          # the locks or the write failed: try again next time
         return 0
     finally:
         owners.drop_claim(me)

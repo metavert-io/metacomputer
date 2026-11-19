@@ -6,34 +6,40 @@ What the stream is for: getting the user's attention, and telling them about sin
 
 ## When you're blocked on the user: `metacomputer notify`
 
-Run it the moment you stop to wait for a person, every time:
+Run it the moment you stop to wait for a person, every time. For a CAPTCHA or bot check, a sign-in the user does themselves or a 2FA prompt, use `metacomputer handoff` instead (next section): it sends this notice for you and pauses your actions until they're done.
 
 ```
-~/.local/bin/metacomputer notify "Sign-in needed at example.com to download the March report" --why login --action "Sign in through the live view (metacomputer view), then tell Claude to carry on"
+~/.local/bin/metacomputer notify "Approval needed to send the order at example.com" --why approval --action "Run metacomputer view --open (the live-view password goes on your clipboard: paste with Cmd+V), check the order, then tell Claude to carry on"
 ```
 
 | You hit | `--why` |
 | --- | --- |
-| A sign-in page, an expired session, "create an account" | `login` |
-| A CAPTCHA or an "are you human" check | `captcha` |
-| A one-time code, 2FA, "approve on your phone" | `2fa` |
+| A sign-in page, an expired session, "create an account" | `login` (with `handoff` when the user signs in) |
+| A CAPTCHA or an "are you human" check | `captcha` (always with `handoff`) |
+| A one-time code, 2FA, "approve on your phone" | `2fa` (with `handoff` when the vault can't fill it) |
 | A dialog you won't accept yourself: permissions, terms, payment, a destructive confirmation, a download or security warning | `dialog` |
 | A decision only the user can make: a purchase, sending a message, deleting something that matters | `approval` |
 | The computer is in use by another session (`metacomputer who` shows it ACTIVE) and the user isn't answering; anything else | `other` |
 
 - **The message:** one line saying what you need, where, and why. Write "Sign-in needed at example.com to download the March report", not "I'm stuck".
-- **`--action`:** what the user should do, short and concrete. For example:
-  - "Sign in through the live view (metacomputer view), then tell Claude to carry on";
-  - "Solve the CAPTCHA in the live view";
+- **`--action`:** what the user should do, short and concrete. When it's in the live view, give the exact command and say where the password is. For example:
+  - "Run metacomputer view --open (the live-view password goes on your clipboard: paste with Cmd+V), accept the dialog, then tell Claude to carry on";
   - "Run metacomputer secrets unlock in your own terminal".
 - **Never put a secret in either.** That means no passwords, codes, tokens, cookies, personal data from the page, or full links. Name the site, not the URL: queries are cut off anyway, but don't rely on that.
 - **Say it in your reply too.** `notify` adds to the chat; it doesn't replace it. Its output says which sinks took it. "Nobody was pinged" means no sink is set up. On a phone it starts with "[from Claude]", so the user knows who asked.
 - **Then wait sensibly.**
   - In a conversation, stop and ask. When the user says go on, read the screen again: it changed while you waited, and element tokens from before are stale.
   - In an unattended run, do the parts of the task that don't depend on the blocked step, or end the run with a clear report of where you stopped. If you check back, wait minutes between checks, not seconds.
-  - Never work around the block: no other sign-in route, no CAPTCHA services, no clicking through a dialog you wouldn't accept.
+  - Never work around the block: no other sign-in route, no CAPTCHA services, no other browser or profile to get past a check, no clicking through a dialog you wouldn't accept.
 - **Once per block.** Don't send the same notify again while you wait (the same text within 5 minutes isn't sent anyway). Send a new one only when something changes, for example the sign-in worked and a 2FA prompt followed.
 - **Limits.** At most 10 events of a family reach the sinks in any 10 minutes (the rest stay in the local log and are summed up later), and a phone gets at most 10 messages in any 10 minutes and 30 in an hour, whatever they are; those wait their turn and arrive late rather than not at all. Another reason to notify only when it matters.
+
+## When the step is the user's: `metacomputer handoff`
+
+[SKILL.md](SKILL.md) has the steps. For events, what matters:
+- `handoff` sends the `needs_you` notice itself (as `notify` does: your `--say` text, cleaned, with the live-view command as its action and the same 5-minute repeat rule), plus `lifecycle.handoff_opened`, and later `handoff_done`, `handoff_cancelled` or `handoff_timed_out`. Don't `notify` about the same step.
+- `--say`: one line, what to do and where ("Tick the 'Verify you are human' box on example.com in Chrome"). No secrets, codes or full links. The user's `handoff done --note` comes back to you, never into an event.
+- In an unattended run, pick a `--timeout` that fits (15 minutes by default, at most 2 hours). At the limit it returns 124 and your actions are no longer paused: carry on with what doesn't depend on that step, or end the run with a clear report.
 
 ## Sent automatically: don't duplicate
 
@@ -41,6 +47,7 @@ metacomputer sends these itself, so don't call `notify` for them:
 - **The bridge refused a call because another controller is using the computer** (its error says "in use by another controller"). `needs_you.in_use` went out. Ask in chat.
 - **Bounded mode keeps refusing the same call.** `needs_you.refused` goes out once it repeats. Tell the user what was refused, as the Rules in SKILL.md say.
 - **`metacomputer secrets fill`, `secrets session save|load` or `secrets token` exits 3** (the vault isn't unlocked, or doesn't exist yet). `needs_you.vault_locked` went out. Ask in chat for the unlock (or `secrets init`).
+- **A handoff and how it ended** (`metacomputer handoff`): its `needs_you` notice and the `lifecycle.handoff_*` events.
 - **The secrets vault waiting for the user's typed confirmation.** The vault sends its own event (`needs_you.approval_waiting`). Tell the user in chat that a confirmation is waiting.
 - **Finished work:** `metacomputer task finish` (the task, how long it took, its videos and files) and `metacomputer record stop` (the recording saved, or failed). When the user asked to hear when it's done, finishing the task is the message. Only if the work had no task folder, send `~/.local/bin/metacomputer events emit task finished --message "what is done and where the results are"`. Don't use `notify` for that: it's for being blocked.
 - **Security signals:** connections from the VM that the gateway blocked, the Chrome guard's refusals, a failed `actions verify`, and what `web open-untrusted` found (password prompts, downloads, a redirect to another site).

@@ -136,7 +136,10 @@ class Connection:
                 except Exception:
                     pass
 
-    def close(self):
+    def close(self, keep_for_handoff=False):
+        """With MCP_HUB=off this ends the core's own driver connection too. keep_for_handoff (Claude Code's bridge):
+        while the user has the computer (a handoff), wait until it has ended first, at most its longest time limit:
+        ending the connection could close the browser they're working in."""
         self.alive = False
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
@@ -147,10 +150,23 @@ class Connection:
         except OSError:
             pass
         if self.core is not None:
-            end = time.monotonic() + 2
-            while self.core.active_clients() and time.monotonic() < end:
-                time.sleep(0.02)                 # the core lets go of this client (its claim, its event) first
-            self.core.shutdown()
+            # The core lets go of this client (its claim, its event) and ends its own connection under the dispatch
+            # lock once no handoff is open (Hub._end_local_when_free, started by its detach whichever way it goes).
+            done = self.core.local_done
+            if keep_for_handoff:
+                end = time.monotonic() + mcp_hub.owners.HANDOFF_MAX_S + 120
+                settled = time.monotonic() + 5
+                while not done.wait(0.5):
+                    now = time.monotonic()
+                    if now >= end:
+                        break                    # past the longest handoff: it ends regardless (below)
+                    # The core's own teardown hasn't run yet (a late detach, or between its tries): make it here, the
+                    # same way, deciding and ending under the dispatch lock, so a handoff open by then stops it.
+                    if now >= settled and self.core.end_local_now():
+                        break
+            else:
+                done.wait(2)
+            self.core.shutdown()             # already ended (it's idempotent), or past the bound, or a one-shot client
 
 
 def open_connection(env=None, kind="sdk", session=None, tools_hash=None, timeout=20.0, spawn=None):

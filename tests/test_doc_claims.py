@@ -115,6 +115,7 @@ with clean_env():
     import vm_claude  # noqa: E402
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
+    import handoff  # noqa: E402
 
 PROXY, CMDS, IMPORT, APPROVALS, CRYPTO, SERVER = (f"vault/{f}.swift" for f in
                                                   ("Proxy", "Commands", "Import", "Approvals", "Crypto", "Server"))
@@ -189,7 +190,8 @@ def claude_keeper():
     changed (the probe's hash), never logged; who/status show it; it ends with stop, the session's end, release."""
     k, p, s = vc_fn("run_keeper"), vc_fn("probe"), vc_fn("start_keeper")
     return ('kind="inner"' in s and "owners.claude_of(" in s and "start_new_session=True" in s and "close_fds=True" in s
-            and 'if fields.get("hash") != last:' in k and 'if fields.get("state") != "running":' in k
+            and 'if fields.get("hash") == last:\n                continue' in k
+            and 'if fields.get("state") != "running":' in k
             and "if not os.path.exists(owners.claim_path(me)):" in k and "owners.drop_claim(me)" in k
             and "vm_shell.execute(" in p and "run_guarded" not in p and vm_claude.KEEP_S == 60
             and 'if o.get("claim") == "inner":' in raw("lib/owners.py") and "stop_keeper(" in vc_fn("do_stop")
@@ -206,7 +208,7 @@ def claude_release_locked():
     rel = o[o.index('if cmd == "release":'):]
     rel = rel[:rel.index("return 0")]
     k = vc_fn("run_keeper")
-    held = k[k.index("with owners.lock():"):]
+    held = k[k.index("with owners.acting(), owners.lock():"):]
     return ("with lock():" in rel and rel.index("with lock():") < rel.index("drop_claim(")
             and held.index("json.load(open(owners.claim_path(me)))") < held.index("owners.write_claim(")
             and "return 0              # released" in held[:held.index("owners.write_claim(")])
@@ -577,6 +579,84 @@ CLAIMS = [
                     r"reported with the token's id", lambda m: claude_renew()),
     ("SECURITY.md", r"\*\*Claude Code comes from Anthropic's installer\*\* \(https://claude\.ai/install\.sh, over HTTPS, as the "
                     r"desktop user, saved whole before it runs\)", lambda m: claude_installer()),
+    # The live view (bin/metacomputer view, lib/liveview.py): loopback only, the password through a pipe
+    ("SECURITY.md", r"cua-netgw forwards it to `127\.0\.0\.1:VNC_PORT` on your Mac only",
+     lambda m: '"host": "127.0.0.1:$VNC_PORT"' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"It's never in the link, an argument, the environment, a log, an event or the command's output",
+     lambda m: view_open_pipes_password()),
+    ("SECURITY.md", r"only that change count \(not the password\) empties the clipboard after `VIEW_CLIPBOARD_S` "
+                    r"seconds \((\d+)\) if nothing was copied since, comparing and emptying in one run of one process",
+     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
+    ("SECURITY.md", r"The copy takes the pasteboard's change count from its own `clearContents` and checks, once the "
+                    r"password is in place, that nothing else was copied in between",
+     lambda m: "var n = pb.clearContents;" in raw("lib/liveview.py")
+     and "String(pb.changeCount) === String(n) ? String(n) : 'raced'" in raw("lib/liveview.py")
+     and 'if count == "raced":' in raw("lib/liveview.py")),
+    ("SECURITY.md", r"marked concealed and transient \(nspasteboard\.org's markers\)",
+     lambda m: all(t in raw("lib/liveview.py") for t in ("org.nspasteboard.ConcealedType",
+                                                          "org.nspasteboard.TransientType"))),
+    ("SECURITY.md", r"`view --tailnet` prints the `tailscale serve` command that would publish the port to your own "
+                    r"tailnet, and its undo; metacomputer never runs it", lambda m: tailnet_runs_only_status()),
+    ("docs/guide.md", r"cleared from the clipboard after (\d+) seconds, if nothing else was copied since",
+     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
+    # Handoffs (lib/handoff.py, owners.py): what an open one pauses, and its limits
+    ("SECURITY.md", r'with "Paused: the user has the computer" \(code `(user_has_computer)`\)',
+     lambda m: f'"code": "{m[1]}"' in raw("lib/mcp_hub.py")
+     and owners.handoff_refusal({"why": "captcha", "opened": 0, "deadline": 1e12}).startswith(
+         "Paused: the user has the computer")),
+    ("SECURITY.md", r"`metacomputer sh` refuses every run that isn't `--read-only`, with or without `--override`",
+     lambda m: handoff_before_override()),
+    ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse, and so does `input-reset`",
+     lambda m: fills_guarded() and input_reset_guarded()),
+    ("SECURITY.md", r"The fills check this VM's handoff, so their `--vm` must name this VM",
+     lambda m: 'secrets_vm_is_this "$@" || die' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"Opening a handoff holds the lock exclusively, so it waits for those to finish \(up to (\d+) s, "
+                    r"then it refuses and says why\)",
+     lambda m: int(m[1]) == handoff.OPEN_WAIT_S and "owners.dispatch(shared=False, timeout=OPEN_WAIT_S)"
+     in raw("lib/handoff.py")),
+    ("SECURITY.md", r"held shared by the hub while it sends a call, by `sh` and `metacomputer claude`'s acting steps until "
+                    r"the whole script has been written to SSH, by the inner Claude's keeper while it renews its claim, "
+                    r"by the hub's cleanup and input reset and the GUI tests' commands while they run, by the lifecycle "
+                    r"commands from their last look to their end",
+     lambda m: dispatch_gates() and lifecycle_held() and keeper_renewal_gated()),
+    ("SECURITY.md", r"The hub's own teardown is decided under it too, from its last look until the connection is closed: "
+                    r"the exit when idle, the restart for a client with other settings, the end of a connection whose "
+                    r"leased calls outlived their limit, and, with `MCP_HUB=off`, the end of the bridge's own connection "
+                    r"once its last client has gone, whether the core's own teardown or the bridge's close ends it",
+     lambda m: teardown_gated()),
+    ("SECURITY.md", r"its write to SSH has a deadline \(`MCOMP_RELAY_WRITE_TIMEOUT_S`, (\d+) s\), so a VM that stops "
+                    r"reading can't keep the lock: the call fails and the connection ends",
+     lambda m: int(m[1]) == 30 and 'WRITE_TIMEOUT_S = float(os.environ.get("MCOMP_RELAY_WRITE_TIMEOUT_S") or 30)'
+     in raw("lib/mcp_relay.py") and "text = STALLED.format(int(WRITE_TIMEOUT_S))" in raw("lib/mcp_relay.py")),
+    ("SECURITY.md", r"A fill or session load that ends without an answer from the vault's unlock process \(`secrets` exit "
+                    r"5, when the vault withdrew the request unconfirmed, or a crash or a signal\)",
+     lambda m: re.search(r'case "\$rc" in\n\s+0\|1\|2\|3\|4\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle ',
+                         raw("bin/metacomputer")) is not None),
+    ("SECURITY.md", r"`metacomputer claude` refuses the steps that act \(`start`, `send`, `keys`, `show`, `stop`\), with "
+                    r"or without `--override` \(`start` before any token is asked for",
+     lambda m: handoff_before_override() and claude_start_checks_handoff()),
+    ("SECURITY.md", r"A renewal holds the computer for Claude, so it's made under the dispatch lock and never while a "
+                    r"handoff is open", lambda m: keeper_renewal_gated()),
+    ("SECURITY.md", r"the relay that signs each call is the last hop on the Mac, and signing can take a while, so it looks "
+                    r"again too, under the same lock, right before it forwards an acting call",
+     lambda m: "with owners.acting():\n                            sent = to_vm(line)" in raw("lib/mcp_relay.py")
+     and "name not in mcp_hub.READ_ONLY" in raw("lib/mcp_relay.py")),
+    ("SECURITY.md", r"keeps the lock while `secrets settle` waits for the unlock process \(up to 2 minutes\)",
+     lambda m: 'settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}"' in raw("bin/metacomputer")
+     and "marks = vault_unsettled()" in raw("lib/handoff.py")),
+    ("SECURITY.md", r"if that can't be recorded either, nothing would bound it, so such a record doesn't count",
+     lambda m: "return now - HANDOFF_MAX_S - 1" in raw("lib/owners.py")),
+    ("SECURITY.md", r"doesn't end a connection whose leased calls outlived their limit \(it waits for the handoff, at "
+                    r"most 2 hours longer\)",
+     lambda m: "age <= LEASE_MAX_S + owners.HANDOFF_MAX_S" in raw("lib/mcp_hub.py") and owners.HANDOFF_MAX_S == 7200),
+    ("SECURITY.md", r"The 2 hours run from the file's change time, which the kernel sets",
+     lambda m: "t = st.st_ctime" in raw("lib/owners.py") and "_first_failure(now)" in raw("lib/owners.py")),
+    ("SECURITY.md", r"its time limit \((\d+) minutes by default, at most (\d+) hours\)",
+     lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
+    ("SECURITY.md", r"counts as open for up to (\d+) hours after it was written, so it fails closed",
+     lambda m: int(m[1]) * 3600 == owners.HANDOFF_MAX_S),
+    ("docs/guide.md", r"\((\d+) minutes unless Claude chose another, at most (\d+) hours\)",
+     lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
 ]
 
 
@@ -589,6 +669,108 @@ def health_categories_only():
     msgs = json.dumps(events.health_conditions({"vm": "running", "gateway": True, "ssh": True,
                                                 "guest": {"ready": True, "driver_doctor_rc": big, "disk_free_gb": 1.234567}}))
     return slots and g == {"ready": False, "doctor": "failed", "disk": "low"} and str(big) not in msgs and "1.2" not in msgs
+
+
+def view_open_pipes_password():
+    """view --open: the password goes from its store through a pipe to liveview.py, then osascript's stdin (its
+    arguments are the script and "copy"); the vnc:// link has only the port."""
+    b, lv = raw("bin/metacomputer"), raw("lib/liveview.py")
+    return ('vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip' in b and 'open "vnc://127.0.0.1:$VNC_PORT"' in b
+            and 'count = pasteboard(["copy"], pw)' in lv and '"-e", PASTEBOARD_JS] + args, input=data' in lv
+            and "print(pw" not in lv)
+
+
+def clear_compares_change_count():
+    """The clearing compares the pasteboard's change count and empties it in the same osascript run."""
+    js = raw("lib/liveview.py")
+    return ("if (String(pb.changeCount) !== argv[1]) { return 'kept'; }\n    pb.clearContents;" in js
+            and 'pasteboard(["clear", count])' in js and "pbpaste" not in js)
+
+
+def lifecycle_held():
+    """stop, reset, restore, baseline and desktop-restart take the dispatch lock after their question, before they act."""
+    b = raw("bin/metacomputer")
+    return (b.count("handoff_hold_unless_override\n") >= 5 and '[ "${HANDOFF_HELD:-}" = 1 ] && return 0' in b
+            and re.search(r"confirm \"Replace the working VM '\$VM_NAME' with a fresh copy[^\n]*\n"
+                          r"\s+handoff_hold_unless_override\n\s+restore_from", b) is not None)
+
+
+def input_reset_guarded():
+    """bin/metacomputer's input-reset (but --check) holds the dispatch lock and looks for a handoff first."""
+    return '[ "${1:-}" = --check ] || handoff_hold' in raw("bin/metacomputer")
+
+
+def dispatch_gates():
+    """Each of the places the doc names wraps its step in owners.acting(), the dispatch lock held shared."""
+    hub, sh, bt = raw("lib/mcp_hub.py"), raw("lib/vm_shell.py"), raw("lib/browser_tools.py")
+    return (hub.count("with owners.acting():") >= 3 and "with owners.acting():\n                self.forward(" in hub
+            and "with owners.acting():\n                yield" in sh and "with owners.acting():" in bt)
+
+
+def keeper_renewal_gated():
+    """vm_claude's keeper renews its claim under owners.acting() (the dispatch lock, then the owners lock), and an
+    open handoff skips the renewal."""
+    k = vc_fn("run_keeper")
+    return ("with owners.acting(), owners.lock():" in k and "except owners.HandoffOpen:\n                pass" in k
+            and k.index("with owners.acting(), owners.lock():") < k.index("owners.write_claim("))
+
+
+def claude_start_checks_handoff():
+    """`claude start` looks for an open handoff before --override and before a token is asked for."""
+    pre, start = vc_fn("precheck"), vc_fn("do_start")
+    return (pre.index("owners.open_handoff()") < pre.index('if not o["override"]:')
+            and "raise Failed(EXIT_REFUSED, owners.handoff_refusal(handoff))" in pre
+            and start.index("precheck(transport, o)") < start.index("get_token("))
+
+
+def teardown_gated():
+    """The hub's idle exit and restart, a lease's end and MCP_HUB=off's own end (the core's teardown and the bridge's
+    close) each run under owners.acting()."""
+    hub = raw("lib/mcp_hub.py")
+    fn = lambda name: hub[hub.index(f"    def {name}("):hub.index("\n    def ", hub.index(f"    def {name}(") + 1)]  # noqa: E731
+    return ("hold.enter_context(owners.acting())" in fn("_gated_stop") and 'self.server.stop("settings changed", gated=True)'
+            in hub and "self._gated_stop(f\"idle for" in hub
+            and "with owners.acting():\n                    self._end_transport(proc, True)" in fn("_end_leased_transport")
+            and "with owners.acting():\n                self.shutdown()\n            return True" in fn("end_local_now")
+            and "if self.end_local_now():" in fn("_end_local_when_free") and local_close_gated())
+
+
+def local_close_gated():
+    """MCP_HUB=off: the bridge's close ends the core's connection only through end_local_now (under the dispatch
+    lock) until the bound past the longest handoff; it no longer decides on a look of its own."""
+    sdk = raw("lib/mcomp_sdk.py")
+    body = sdk[sdk.index("    def close(self, keep_for_handoff=False):"):sdk.index("\ndef open_connection(")]
+    keep = body[body.index("if keep_for_handoff:"):body.index("else:\n                done.wait(2)")]
+    return ("if now >= settled and self.core.end_local_now():" in keep and "held_for_handoff" not in body
+            and "end = time.monotonic() + mcp_hub.owners.HANDOFF_MAX_S + 120" in keep)
+
+
+def tailnet_runs_only_status():
+    """view_tailnet's only command run through Tailscale is `status --json`."""
+    body = re.search(r"^view_tailnet\(\) \{\n(.*?)^\}", raw("bin/metacomputer"), re.S | re.M)
+    if not body:
+        return False
+    runs = re.findall(r'"\$ts" ([a-z-]+(?: [a-z-]+)?)', body.group(1))
+    return runs == ["status --json"], runs
+
+
+def handoff_before_override():
+    """vm_shell looks for an open handoff first, whatever --override says."""
+    src = raw("lib/vm_shell.py")
+    i, j = src.find("handoff = owners.open_handoff()"), src.find('if not handoff and not o["override"]')
+    return 0 <= i < j and "return refuse(owners.handoff_refusal(handoff))" in src
+
+
+def fills_guarded():
+    """bin/metacomputer checks --vm and takes the dispatch lock with the handoff guard (handoff_hold) before secrets
+    fill, login and session load reach the vault."""
+    b = raw("bin/metacomputer")
+    hold = re.search(r"^handoff_hold\(\) \{\n(.*?)^\}", b, re.S | re.M)
+    return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \{ \[ "\$sub" = session \] && '
+                      r'\[ "\$\{1:-\}" = load \]; \}; then\n\s+secrets_vm_is_this "\$@" \|\| die [^\n]*\n\s+handoff_hold\n',
+                      b) is not None and hold is not None
+            and 'exec 6>>"$f"' in hold.group(1)
+            and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4' in hold.group(1))
 
 
 def fpr(full, head, tail):

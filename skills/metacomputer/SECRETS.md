@@ -46,7 +46,7 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
    - Or let the fill focus it: add `--selector '#username'` (an id or name from a `dom_refs_v1` snapshot). It must match exactly one element. A selector searches the page itself, not frames or shadow roots; for a field in a frame, click into it.
 3. `metacomputer secrets fill NAME --field username`.
 4. Focus the password field, then `metacomputer secrets fill NAME --field password`.
-5. For a 2FA code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp` (the vault works out the current code).
+5. For a 2FA code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp` (the vault works out the current code). A 2FA prompt the vault can't fill (an SMS or email code, "approve on your phone") or a CAPTCHA on the way: hand over with `metacomputer handoff --why 2fa|captcha --say "..."` ([SKILL.md](SKILL.md), "When a step is the user's"). While a handoff is open, fills wait like any other action.
 6. With a named profile, add `--profile P` to each fill.
 7. Submit with a click, then check the signed-in page with a fresh snapshot.
 
@@ -57,7 +57,7 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 ## Keeping the user signed in (sealed sessions)
 
 1. Use a named profile (`isolated_named`, for example `x`).
-2. Sign in: fill as above, or let the user sign in once through `metacomputer view`.
+2. Sign in: fill as above, or let the user sign in once themselves: `metacomputer handoff --why login --say "Sign in to example.com in the Chrome window"`.
 3. End the browser session (`end_session`): a profile Chrome is using can't be saved.
 4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
 5. Later, with no Chrome on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`. A session loads only under the profile name it was saved from.

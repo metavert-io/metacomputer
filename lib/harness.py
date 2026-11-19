@@ -30,6 +30,7 @@ import traceback
 
 import guest_import
 import mcomp_sdk
+import owners
 import termsafe
 from mcp_client import LAB_ROOT
 
@@ -39,8 +40,18 @@ from labconfig import GUEST_RUNS  # noqa: E402  (guest home of the configured us
 
 def guest(cmd: str, timeout=60, check=False) -> subprocess.CompletedProcess:
     """Run a shell command in the guest as the automation user (out-of-band:
-    used only for setup, artifact verification and copying evidence)."""
-    p = subprocess.run(SSH + [cmd], capture_output=True, text=True, timeout=timeout)
+    used only for setup, artifact verification and copying evidence). These
+    don't go through the hub, so each looks for a handoff itself, under the
+    dispatch lock held while it runs (owners.acting()): while the user has the
+    computer nothing is run, and the test stops (Step)."""
+    try:
+        with owners.acting():
+            p = subprocess.run(SSH + [cmd], capture_output=True, text=True, timeout=timeout)
+    except owners.HandoffOpen:
+        raise Step("the user has the computer (metacomputer handoff): the test's own commands in the VM wait "
+                   "until they hand it back")
+    except TimeoutError as e:
+        raise Step(f"couldn't check whether the user has the computer ({e}); not running a command in the VM")
     if check and p.returncode != 0:
         raise RuntimeError(f"guest command failed ({p.returncode}): {cmd}\n{p.stderr}")
     return p

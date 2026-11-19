@@ -9,6 +9,7 @@ also shows that lessons can't switch a guard.
 
     python3 tests/test_hub.py
 """
+import fcntl
 import json
 import os
 import shutil
@@ -685,6 +686,429 @@ def owner_checks():
     h.close()
     clear_claims()
     r.stop()
+
+
+def handoff_checks():
+    """`metacomputer handoff` (lib/handoff.py): while the user has the computer, the hub refuses every client's acting
+    calls, the session that asked for the handoff included, and its claims (web, the GUI tests)."""
+    print("a handoff: the user has the computer, and every client waits")
+    import handoff
+    clear_claims()
+    r = Running()
+    now = time.time()
+    me = owners.claude_of(os.getpid(), owners.ps_table())      # this process's clients are the session that asked
+    rec = {"v": 1, "id": "h-cccccccccccc", "status": "open", "why": "captcha", "say": "Tick the box",
+           "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": "/handoff/project", "claude_pid": me}
+    handoff.write_record(rec)
+    in_use = len([e for e in local_events() if e.get("type") == "in_use"])
+    try:
+        for kind in ("claude-code", "call", "sdk"):
+            h = client(r, kind)
+            n0 = len(tool_calls("press_key"))
+            res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+            look = h.call("list_windows", {})
+            check(f"{kind}: an acting call is refused while the user has the computer; nothing reaches the driver",
+                  res.is_error and "Paused: the user has the computer" in res.text and "handoff done" in res.text
+                  and (res.structured or {}).get("code") == "user_has_computer"
+                  and len(tool_calls("press_key")) == n0, (res.text[:200], res.structured))
+            check(f"{kind}: read-only calls still work", not look.is_error)
+            h.close()
+        check("no needs_you.in_use for it: the user isn't another session",
+              len([e for e in local_events() if e.get("type") == "in_use"]) == in_use)
+        w = client(r, "web")
+        cl = w.claim("web compare")
+        check("a claim (web, the GUI tests) is refused too, naming the handoff", not cl.get("claimed")
+              and any("the user has the computer" in o for o in cl.get("others") or []), cl)
+        w.close()
+        open(owners.handoff_path(), "w").write("{garbage")
+        h = client(r, "sdk")
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        check("a handoff record that can't be read: refused (fails closed)", res.is_error
+              and (res.structured or {}).get("code") == "user_has_computer", res.text[:200])
+        handoff.write_record(rec)
+        handoff.end(rec["id"], "done", "process")
+        h = client(r, "sdk")
+        n0 = len(tool_calls("press_key"))
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        check("once the user hands it back, the same call acts", not res.is_error
+              and len(tool_calls("press_key")) == n0 + 1, res.text[:200])
+        clear_claims()
+        handoff.write_record({**rec, "id": "h-dddddddddddd", "opened": now - 200, "deadline": now - 1})
+        h = client(r, "call")
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        check("an open record past its time limit doesn't pause anything", not res.is_error, res.text[:200])
+        clear_claims()
+
+        # A handoff that opens after the call was admitted, while its guards wait on the VM (the coordinate
+        # guard's window list here), is still seen: the last look is at dispatch, under the dispatch lock.
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+        late = {**rec, "id": "h-eeeeeeeeeeee", "opened": time.time(), "deadline": time.time() + 120}
+        guard = r.hub.coord_guard
+
+        def opening_meanwhile(*a, **kw):
+            handoff.write_record(late)
+            return guard(*a, **kw)
+        r.hub.coord_guard = opening_meanwhile
+        h = client(r, "sdk")
+        n0 = len(tool_calls("press_key"))
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        r.hub.coord_guard = guard
+        check("a handoff that opens after admission, while the guards run, still stops the call at dispatch",
+              res.is_error and (res.structured or {}).get("code") == "user_has_computer"
+              and len(tool_calls("press_key")) == n0, (res.text[:200], res.structured))
+        dispatch_held = []
+
+        def sending(*a, **kw):              # what the dispatch lock looks like to a handoff opening during the send
+            fd = os.open(owners.dispatch_path(), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                dispatch_held.append(False)
+            except BlockingIOError:
+                dispatch_held.append(True)
+            finally:
+                os.close(fd)
+            return forward(*a, **kw)
+        handoff.end(late["id"], "done", "process")
+        forward = r.hub.forward
+        r.hub.forward = sending
+        h = client(r, "sdk")
+        h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        r.hub.forward = forward
+        check("the acting call is sent while it holds the dispatch lock (a handoff can't open in between)",
+              dispatch_held == [True], dispatch_held)
+        clear_claims()
+
+        # The hub's own cleanup of a disconnected Claude Code session (end_session) waits for the handoff to end.
+        cc = mcomp_sdk.open_connection(r.env, kind="claude-code")
+        replies = []
+        cc.on_message = replies.append
+        cc.start()
+        cc.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}})
+        end = time.time() + 5
+        while not replies and time.time() < end:
+            time.sleep(0.05)
+        label = json.loads(replies[0]["result"]["content"][0]["text"])["session"] if replies else ""
+        later = {**rec, "id": "h-ffffffffffff", "opened": time.time(), "deadline": time.time() + 120}
+        handoff.write_record(later)
+        n0 = len(calls())
+        cc.close()
+        time.sleep(1.5)
+        early = [c for c in tool_calls("end_session", n0) if c["msg"]["params"]["arguments"].get("session") == label]
+        handoff.end(later["id"], "done", "process")
+        end = time.time() + 5
+        ended = []
+        while not ended and time.time() < end:
+            ended = [c for c in tool_calls("end_session", n0) if c["msg"]["params"]["arguments"].get("session") == label]
+            time.sleep(0.1)
+        check("a disconnected session's driver session isn't ended while the user has the computer, and is after",
+              label.startswith("mcp-") and not early and len(ended) == 1, (label, len(early), len(ended)))
+
+        # The Chrome guard's input reset acts on the desktop: not while the user has the computer.
+        ran = []
+        real_run = mcp_hub.subprocess.run
+        mcp_hub.subprocess.run = lambda *a, **kw: ran.append(a) or subprocess.CompletedProcess(a, 0, "0\n", "")
+        try:
+            handoff.write_record({**later, "id": "h-111111111111", "status": "open", "ended": None})
+            note = r.hub.input_reset()
+            during = list(ran)
+            handoff.end("h-111111111111", "done", "process")
+            r.hub.input_reset()
+        finally:
+            mcp_hub.subprocess.run = real_run
+        check("the hub's input reset doesn't run while the user has the computer, and does after",
+              note is None and not during and len(ran) == 1, (note, during, ran))
+    finally:
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+        clear_claims()
+        r.stop()
+
+
+def handoff_teardown_checks():
+    """While the user has the computer: the action-log relay (the last hop on the Mac) looks again before it
+    forwards; nothing that would end the driver connection runs (idle exit, a restart for other settings, a lease's
+    end, MCP_HUB=off's last disconnect)."""
+    print("a handoff: the last hop looks again, and the driver connection stays")
+    import handoff
+    clear_claims()
+    now = time.time()
+    rec = {"v": 1, "id": "h-222222222222", "status": "open", "why": "captcha", "say": "Tick the box", "opened": now,
+           "deadline": now + 300, "timeout_s": 300, "cwd": "/handoff/project", "claude_pid": None}
+
+    def clear_handoff():
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+
+    # The relay (ACTION_LOG=on) signs before it forwards; a handoff that opens after the hub's last look is caught there.
+    adir = os.path.join(TD, "actions-handoff")
+    key = os.path.join(TD, "keys", "alog")
+    r = Running(MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=adir, MCOMP_ACTION_LOG_KEY=key)
+    r.hub.spawn = lambda: subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_relay.py"), PY, FAKE, STATE],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           env=dict(r.env, MCOMP_ACTION_LOG="on"))
+    r.hub.input_reset = lambda: None
+    h = client(r, "sdk")
+    h.call("list_windows", {})
+    forward = r.hub.forward
+
+    def opening_on_the_way(c, msg, *a, **kw):
+        if (msg.get("params") or {}).get("name") == "press_key":
+            handoff.write_record(rec)            # after the hub's own last look, before the relay forwards
+        return forward(c, msg, *a, **kw)
+    r.hub.forward = opening_on_the_way
+    n0 = len(tool_calls("press_key"))
+    res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+    r.hub.forward = forward
+    h.close()
+    r.stop()
+    clear_handoff()
+    check("the action-log relay refuses an acting call when a handoff opened while it was on its way",
+          res.is_error and (res.structured or {}).get("code") == "user_has_computer"
+          and len(tool_calls("press_key")) == n0, (res.text[:200], res.structured))
+    clear_claims()
+
+    # Idle exit: an open handoff keeps the hub (and its driver connection), and the idle time starts again after.
+    r = Running()
+    r.hub.last_activity = time.time() - 5000
+    handoff.write_record(rec)
+    held = r.hub.idle_for()
+    clear_handoff()
+    after = r.hub.idle_for()
+    check("an open handoff keeps the hub from its idle exit, and its idle time starts over afterwards",
+          held == 0.0 and after < 60, (held, after))
+    # A client with other settings doesn't restart an otherwise idle hub while the user has the computer.
+    handoff.write_record(rec)
+    try:
+        other = mcomp_sdk.Hub(env=dict(r.env, MCOMP_COORD_GUARD="off"), timeout=20).connect()
+        refused = None
+        other.close()
+    except mcp_hub.HubError as e:
+        refused = str(e)
+    alive = r.t.is_alive()
+    clear_handoff()
+    check("a client with other settings doesn't restart the hub while the user has the computer",
+          refused and "while the user has the computer" in refused and alive, (refused, alive))
+    r.stop()
+    mcp_hub.stop_hub(r.env)
+    clear_claims()
+
+    # A lease past its life ends its connection, but not while a handoff is open; once the handoff ends, it does.
+    saved = (mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S)
+    mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S = 0.2, 2, 1.0
+    try:
+        r = Running()
+        hl = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        driver = hl.call("whoami", {}).structured["driver_pid"]
+        hl.call("slow", {"s": 60})
+        hl.close()
+        wait_until(lambda: r.hub.leases, 5)
+        handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+        time.sleep(3.5)
+        kept = owners.alive(driver)
+        clear_handoff()
+        ended = wait_until(lambda: not owners.alive(driver), 15)
+        check("a lease's end doesn't end the driver connection while the user has the computer; it does after",
+              kept and ended, (kept, ended))
+        r.stop()
+    finally:
+        mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S = saved
+        clear_handoff()
+        clear_claims()
+
+    # MCP_HUB=off: Claude Code's bridge ending (its stdin closed) keeps its own connection until the handoff ends.
+    off = dict(env(), MCOMP_MCP_HUB="off")
+    p = subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_lazy.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, env=off, text=True, bufsize=1)
+    for m in ({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}}):
+        p.stdin.write(json.dumps(m) + "\n")
+    p.stdin.flush()
+    lines = [json.loads(p.stdout.readline()), json.loads(p.stdout.readline())]
+    driver = json.loads(lines[1]["result"]["content"][0]["text"]).get("driver_pid")
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    p.stdin.close()
+    time.sleep(2.0)
+    waiting = p.poll() is None and owners.alive(driver)
+    clear_handoff()
+    try:
+        p.wait(15)
+    except subprocess.TimeoutExpired:
+        p.kill()
+    gone = wait_until(lambda: not owners.alive(driver), 10)
+    check("MCP_HUB=off: the bridge keeps its own driver connection while the user has the computer, ends it after",
+          waiting and p.returncode == 0 and gone, (waiting, p.returncode, gone))
+    clear_handoff()
+    clear_claims()
+
+
+def handoff_teardown_race_checks():
+    """Teardown decided before a handoff opened is made only under the dispatch lock, so it sees one that opened
+    meanwhile; and the action-log relay can't hold that lock on a VM that stopped reading."""
+    print("a handoff: teardown decided just before it opened, and a VM that stops reading")
+    import handoff
+    clear_claims()
+    now = time.time()
+    rec = {"v": 1, "id": "h-555555555555", "status": "open", "why": "captcha", "say": "x", "opened": now,
+           "deadline": now + 300, "timeout_s": 300, "cwd": "/handoff/project", "claude_pid": None}
+
+    def clear_handoff():
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+
+    # A restart for other settings, decided as no handoff was open (the check said so), with one opening right after.
+    r = Running()
+    handoff.write_record(rec)
+    r.hub.held_for_handoff = lambda: False       # the decision's own look came just before it opened
+    try:
+        other = mcomp_sdk.Hub(env=dict(r.env, MCOMP_COORD_GUARD="off"), timeout=5).connect()
+        other.close()
+    except mcp_hub.HubError:
+        pass
+    time.sleep(2.0)
+    alive = r.t.is_alive()
+    del r.hub.held_for_handoff
+    clear_handoff()
+    check("a restart for other settings that a handoff overtook isn't made (the dispatch lock says it's open)",
+          alive, alive)
+    r.stop()
+    mcp_hub.stop_hub(r.env)
+
+    # Idle exit decided just before a handoff opened.
+    r = Running(idle_s=1)
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    r.hub.idle_for = lambda: 9999.0
+    time.sleep(2.5)
+    kept = r.t.is_alive()
+    del r.hub.idle_for
+    clear_handoff()
+    r.hub.last_activity = time.time() - 100
+    exited = wait_until(lambda: not r.t.is_alive(), 10)
+    check("idle exit decided just before a handoff opened isn't made; it is once the handoff is gone",
+          kept and exited, (kept, exited))
+
+    # A lease's teardown looks under the dispatch lock itself, and is tried again later.
+    r = Running()
+    h = client(r, "sdk")
+    driver = h.call("whoami", {}).structured["driver_pid"]
+    gen, proc = r.hub.up_gen, r.hub.gen_procs.get(r.hub.up_gen)
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    try:
+        r.hub._end_leased_transport(proc, gen, False)
+        deferred = owners.alive(driver) and gen in r.hub._lease_retry
+    except Exception as e:
+        deferred = repr(e)
+    clear_handoff()
+    h.close()
+    r.stop()
+    check("a lease's teardown checks for a handoff under the dispatch lock and is put off (tried again later)",
+          deferred is True, deferred)
+    clear_claims()
+
+    # MCP_HUB=off: the close waits for the core's own teardown, even when its client went inactive before detach ran.
+    off = dict(env(), MCOMP_MCP_HUB="off")
+    conn = mcomp_sdk.open_connection(off, kind="claude-code")
+    replies = []
+    conn.on_message = replies.append
+    conn.start()
+    conn.send({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}})
+    end = time.time() + 10
+    while not replies and time.time() < end:
+        time.sleep(0.05)
+    driver = json.loads(replies[0]["result"]["content"][0]["text"]).get("driver_pid") if replies else None
+    core, real = conn.core, conn.core.detach
+    core.detach = lambda c: (time.sleep(1.0), real(c))[1]          # detach still running after the client is gone
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    t = threading.Thread(target=conn.close, kwargs={"keep_for_handoff": True}, daemon=True)
+    t.start()
+    time.sleep(3.0)
+    waiting = t.is_alive() and driver and owners.alive(driver)
+    clear_handoff()
+    t.join(20)
+    gone = wait_until(lambda: not owners.alive(driver), 10)
+    check("MCP_HUB=off: a graceful close keeps the connection while the user has the computer, even when detach is "
+          "late", waiting and not t.is_alive() and gone, (waiting, t.is_alive(), gone))
+    clear_claims()
+
+    # MCP_HUB=off: the close's own fallback, once it has waited a while for the core's teardown, ends the connection
+    # under the dispatch lock too. Here its look said no handoff (as when one opens right after it looked), and the
+    # handoff is open by the time it would end the connection: it waits instead.
+    conn = mcomp_sdk.open_connection(off, kind="claude-code")
+    replies = []
+    conn.on_message = replies.append
+    conn.start()
+    conn.send({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}})
+    end = time.time() + 10
+    while not replies and time.time() < end:
+        time.sleep(0.05)
+    driver = json.loads(replies[0]["result"]["content"][0]["text"]).get("driver_pid") if replies else None
+    conn.core.held_for_handoff = lambda: False     # the look came just before the handoff opened
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    t = threading.Thread(target=conn.close, kwargs={"keep_for_handoff": True}, daemon=True)
+    t.start()
+    time.sleep(8.0)                                 # past the close's 5 s wait for the core's own teardown
+    waiting = t.is_alive() and bool(driver) and owners.alive(driver)
+    clear_handoff()
+    t.join(20)
+    gone = wait_until(lambda: not owners.alive(driver), 10)
+    check("MCP_HUB=off: the close's fallback ends the connection only under the dispatch lock, so a handoff open by "
+          "then keeps it; it ends once the handoff does", waiting and not t.is_alive() and gone,
+          (waiting, t.is_alive(), gone))
+    clear_claims()
+
+    # The relay's write to the VM is bounded: a VM that stops reading can't keep the dispatch lock (or the call).
+    adir = os.path.join(TD, "actions-stall")
+    key = os.path.join(TD, "keys", "alog")
+    renv = dict(env(), MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=adir, MCOMP_ACTION_LOG_KEY=key,
+                MCOMP_RELAY_WRITE_TIMEOUT_S="2")
+    relay = subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_relay.py"), "/bin/sh", "-c", "sleep 600"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=renv)
+    big = {"jsonrpc": "2.0", "id": "c1.1", "method": "tools/call",
+           "params": {"name": "type_text", "arguments": {"pid": 50, "text": "x" * 400000}}}
+    threading.Thread(target=lambda: (relay.stdin.write((json.dumps(big) + "\n").encode()), relay.stdin.flush()),
+                     daemon=True).start()
+    out = []
+    threading.Thread(target=lambda: out.append(relay.stdout.readline()), daemon=True).start()
+    free = False
+    end = time.time() + 8
+    while time.time() < end and not free:
+        time.sleep(0.2)
+        try:
+            fd = os.open(owners.dispatch_path(), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = time.time() > end - 8 + 1.0           # free after it started writing (not before)
+            except BlockingIOError:
+                pass
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+    time.sleep(1.0)
+    answered = out and b'"isError": true' in out[0] and b"didn't take this call" in out[0]
+    try:
+        relay.wait(5)
+        ended = True
+    except subprocess.TimeoutExpired:
+        relay.kill()
+        relay.wait()
+        ended = False
+    check("the relay lets go of the dispatch lock and fails the call when the VM stops reading (bounded write)",
+          free and answered and ended, (free, out[:1], ended))
+    clear_claims()
 
 
 def lessons_checks():
@@ -2281,6 +2705,9 @@ def main():
         lifecycle_checks()
         limit_checks()
         owner_checks()
+        handoff_checks()
+        handoff_teardown_checks()
+        handoff_teardown_race_checks()
         chrome_checks()
         bounded_checks()
         actionlog_checks()

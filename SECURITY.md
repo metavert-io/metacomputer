@@ -19,7 +19,8 @@ Each one is independent; turn on any of them in `config/local.env`. It also
 covers the shell channel, `metacomputer sh`: what it can reach, how bounded
 mode turns it off, and its optional logging; the hub, which applies the
 guards (one controller at a time, the Chrome guard, bounded mode, the coordinate
-guard) to every way in, through a socket only you can use; and the lessons
+guard) to every way in, through a socket only you can use; the live view and
+handoffs, where Claude gives the computer to you and waits; and the lessons
 channel (`metacomputer learn`), which can't carry text from the VM into future
 sessions.
 
@@ -328,6 +329,8 @@ the hub, and the hub applies, to each one:
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
+- a handoff ([below](#handing-the-computer-to-you-metacomputer-handoff)): while the user has the
+  computer, every acting call waits, from every client, the session that asked included;
 - the action log's notes (which client made each call) and the event stream.
 
 `metacomputer mcp` without `MCOMP_DIRECT_BRIDGE=1` is the same guarded bridge,
@@ -461,6 +464,146 @@ own checks.
   Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
   kept for the activity window after the last call even when that shell exits,
   and the same controller for later calls from the same terminal session.
+
+## The live view (`metacomputer view`)
+
+The VM runs a VNC server (x11vnc) for its desktop. cua-netgw forwards it to
+`127.0.0.1:VNC_PORT` on your Mac only, and the VM's firewall admits it only from
+the gateway. Lume's own VNC server, which listens on every interface, is never
+started.
+
+**The password** is random, 8 characters (VNC's own authentication uses at most
+8), made at each build and kept where `VNC_PASSWORD_STORE` says: the login
+Keychain (item `metacomputer-vnc`, account the VM's name), a 0600 file in
+`SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin.
+
+**`metacomputer view --open`**, on the Mac's own screen, reads the password from
+that store into a pipe, puts it on the clipboard and opens Screen Sharing at
+`vnc://127.0.0.1:PORT`. It's never in the link, an argument, the environment, a
+log, an event or the command's output. The clipboard is macOS's pasteboard,
+written through osascript's bridge to AppKit with the password on its stdin, and
+marked concealed and transient (nspasteboard.org's markers), which clipboard
+managers that follow them don't keep. The copy takes the pasteboard's change count
+from its own `clearContents` and checks, once the password is in place, that
+nothing else was copied in between (if something was, nothing is cleared later,
+since the clipboard may hold someone else's copy). A detached helper that keeps
+only that change count (not the password) empties the clipboard after
+`VIEW_CLIPBOARD_S` seconds (45) if nothing was copied since, comparing and
+emptying in one run of one process. Where it ends: the comparison and the
+clearing are two steps, so something you copy in the instant between them can
+still be cleared; while the password is on the clipboard, any app you run can
+read it; a clipboard manager that ignores the markers may keep a copy; Universal
+Clipboard can pass it to your other Apple devices nearby. Run from an SSH session,
+`view --open` touches nothing and says how to connect instead.
+
+**From another device.** The port stays on 127.0.0.1. `metacomputer view`
+prints an SSH tunnel. `view --tailnet` prints the `tailscale serve` command that
+would publish the port to your own tailnet, and its undo; metacomputer never
+runs it, since it changes your Mac's networking. Publishing it is your choice,
+and then every device your tailnet's access rules let reach this Mac can reach
+the port, guarded only by the VNC password (VNC's own authentication is weak, and
+VNC doesn't encrypt the session itself; Tailscale encrypts it between your
+devices). Prefer the foreground form, published only while it runs; undo the
+background form when you're done (`tailscale serve --tcp PORT off`).
+
+## Handing the computer to you (`metacomputer handoff`)
+
+When Claude reaches a step that's yours (a CAPTCHA or bot check, a sign-in you do
+yourself, a 2FA prompt the vault can't fill), the skill tells it to run
+`metacomputer handoff --why … --say "…"` and wait. That sends the `needs_you`
+notice (`--say` cleaned like every event) and writes a record,
+`RUN_DIR/owners/handoff.state` (0600), under the owners lock. While it's open:
+- the hub refuses every client's acting calls, the session that asked included,
+  with "Paused: the user has the computer" (code `user_has_computer`), and refuses
+  claims from `web` and the GUI tests; reads still work;
+- the hub's own cleanup and teardown wait too: the driver session of a Claude
+  Code session that disconnected is ended only when the handoff ends (ending it
+  could close the browser you're in); the Chrome guard's input reset doesn't run;
+  the hub doesn't exit when idle, doesn't restart for a client with other
+  settings, and doesn't end a connection whose leased calls outlived their limit
+  (it waits for the handoff, at most 2 hours longer); with `MCP_HUB=off`, Claude
+  Code's bridge keeps its own connection until the handoff ends;
+- `metacomputer sh` refuses every run that isn't `--read-only`, with or without
+  `--override`;
+- `metacomputer claude` refuses the steps that act (`start`, `send`, `keys`, `show`,
+  `stop`), with or without `--override` (`start` before any token is asked for;
+  `stop --revoke` still revokes the token), and the inner Claude's keeper renews
+  nothing, so its claim isn't kept fresh by what changes on its screen meanwhile;
+- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`;
+  `metacomputer web` leaves the Firefox windows it opened instead of closing them,
+  and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
+- `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
+  unless you add `--override`, and look again right before they change anything,
+  after any question they ask; `release` doesn't end it.
+
+**No action slips in while it opens.** A call is checked when the hub takes it,
+but its guards can then wait on the VM (a window list, an input reset). So every
+action looks once more right before it leaves the Mac, under a per-VM dispatch
+lock (`RUN_DIR/owners/.dispatch`): held shared by the hub while it sends a call,
+by `sh` and `metacomputer claude`'s acting steps until the whole script has been
+written to SSH, by the inner Claude's keeper while it renews its claim, by the
+hub's cleanup and input reset and the GUI tests' commands while they run, by the
+lifecycle commands from their last look to their end, and by `secrets fill`,
+`login`, `session load` and `input-reset` for the whole command, including a wait
+for your approval. The hub's own teardown is decided under it too, from its last
+look until the connection is closed: the exit when idle, the restart for a client
+with other settings, the end of a connection whose leased calls outlived their
+limit, and, with `MCP_HUB=off`, the end of the bridge's own connection once its
+last client has gone, whether the core's own teardown or the bridge's close ends
+it (only past the longest handoff does it end regardless). With `ACTION_LOG=on` the relay that signs each call is the
+last hop on the Mac, and signing can take a while, so it looks again too, under
+the same lock, right before it forwards an acting call, and answers with the same
+refusal; its write to SSH has a deadline (`MCOMP_RELAY_WRITE_TIMEOUT_S`, 30 s), so
+a VM that stops reading can't keep the lock: the call fails and the connection
+ends. Opening a handoff holds the lock exclusively, so it waits for those to
+finish (up to 40 s, then it refuses and says why). An action is therefore either
+on its way before the handoff opens or sees it. The fills check this VM's
+handoff, so their `--vm` must name this VM; another VM is chosen by its own
+settings. A fill or session load that ends without an answer from the vault's
+unlock process (`secrets` exit 5, when the vault withdrew the request unconfirmed,
+or a crash or a signal) keeps the lock while `secrets settle` waits for the unlock
+process (up to 2 minutes); if that doesn't confirm either, or the command itself
+was stopped, a marker (`RUN_DIR/owners/vault-inflight.*`) makes the next handoff
+run `secrets settle` first, and refuse until it confirms.
+
+It ends with `handoff done` (you're finished; Claude carries on), `handoff
+cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
+most 2 hours), and each ending is an event. A record that can't be read (not
+valid, or a link in its place, which is never followed) counts as open for up to
+2 hours after it was written, so it fails closed; `handoff cancel` removes it.
+The 2 hours run from the file's change time, which the kernel sets (a modification
+time moved into the future doesn't stretch them), or, when not even that can be
+read, from when that was first noticed (kept in `RUN_DIR/handoff-unreadable`); if
+that can't be recorded either, nothing would bound it, so such a record doesn't
+count, and Claude's actions aren't paused by it.
+
+**What it is and isn't.** It's a cooperative pause of Claude's actions, so it
+doesn't fight you for the mouse, and an honest handoff: metacomputer doesn't
+disguise its browser or try to get past bot checks, and the skill tells Claude
+never to (no other browser, mode or profile, no retrying in a loop). Your
+`handoff done --note` reaches only Claude's output, never an event. These limits
+are accepted, not oversights:
+- It isn't a barrier against a program running as you, which can run `handoff
+  done`, remove the record or the vault marker, or use the raw driver connection.
+  The Claude Code session that asked can't say "done" for you from its shell
+  without a terminal (it can cancel its own request); another process running as
+  you can.
+- What has already left the Mac when the handoff opens goes on: a call written to
+  the driver's connection (or forwarded by the relay), a shell run whose script
+  was written to SSH, a lease's call. metacomputer has no acknowledgement from
+  the VM that a script started, and doesn't stop a run that's under way.
+- `--override` on the lifecycle commands goes ahead, as it does for another
+  session: that's you deciding. So do `metacomputer hub stop`, a signal to the
+  hub and the Mac shutting down, which end the hub and its driver connection
+  whatever is open.
+- With `MCP_HUB=off`, a client process that ends (a one-shot `metacomputer call`,
+  a script, a bridge that is killed) takes its own driver connection with it.
+- An inner Claude (`metacomputer claude`) that's working goes on with what it was
+  given: it's a program in the VM, and the handoff stops new prompts and keys
+  reaching it, not the program. Stop it in its terminal yourself if it's in your
+  way, or have Claude run `claude stop` before it hands over.
+- Two settings files that name the same VM with different `RUN_DIR`s don't see
+  each other's handoff (the same holds for the one-controller rule).
 
 ## The shell channel (`metacomputer sh`)
 
@@ -1545,6 +1688,9 @@ what that user can:
 - `start`, `send`, `keys`, `show` and `stop` act, so the one-controller rule refuses them
   while another session uses the computer (unless you agree to `--override`). `read`,
   `wait` and `status` only look;
+- while you have the computer (`metacomputer handoff`), those acting steps are refused
+  whatever `--override` says (`start` before any token is asked for), and the keeper
+  below renews nothing;
 - the inner Claude keeps working after those commands return, so a **keeper** on the Mac
   holds the computer for it. That's an owners claim of kind `inner`, in the name of the
   session that started it. The keeper looks once a minute (read-only, and not in the
@@ -1554,7 +1700,8 @@ what that user can:
   inner Claude works and for 10 minutes after. `metacomputer who` and `claude status` show
   it. It ends with `claude stop`, the inner Claude's exit, `metacomputer release` or the VM
   going away. Both `release` and the keeper's check-and-renew hold the owners lock, so a
-  released claim stays released;
+  released claim stays released. A renewal holds the computer for Claude, so it's made
+  under the dispatch lock and never while a handoff is open;
 - `stop --revoke` revokes the token from the Mac even when the VM can't be reached or
   refuses, and keeps the session's record (and exits non-zero) until both are done, so
   running it again finishes the job;

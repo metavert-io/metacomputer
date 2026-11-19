@@ -169,7 +169,9 @@ class Front:
         self.stopping = True
         c = self.conn
         if c is not None:
-            c.close()                            # the hub drops this session's claim and ends its driver session
+            # The hub drops this session's claim and ends its driver session; with MCP_HUB=off, while the user has the
+            # computer (a handoff), this bridge's own connection ends only once it has ended (bounded).
+            c.close(keep_for_handoff=True)
         os._exit(0)
 
     def watch_parent(self):

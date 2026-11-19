@@ -96,7 +96,17 @@ These hold in every app. [DESKTOP.md](DESKTOP.md) has the details.
 
 ## Getting the user's attention
 
-Blocked on the user (a sign-in, a CAPTCHA, a 2FA code, a dialog you won't accept, an approval, or the computer in use by someone not answering): run `metacomputer notify "what you need, and where" --why login|captcha|2fa|dialog|approval|other --action "what they should do"`, say it in your reply too, then wait or do what doesn't depend on it. One line each; no secrets, codes or full URLs. Refusals, finished tasks, lifecycle and health are sent automatically. Sinks change only from the user's own terminal. Details: [EVENTS.md](EVENTS.md).
+A CAPTCHA or bot check, a sign-in the user does themselves or a 2FA prompt: hand the computer over with `metacomputer handoff` (next section). Blocked on the user otherwise (a dialog you won't accept, an approval, the computer in use by someone not answering, a step you'll leave for later in an unattended run): run `metacomputer notify "what you need, and where" --why login|captcha|2fa|dialog|approval|other --action "what they should do"`, say it in your reply too, then wait or do what doesn't depend on it. One line each; no secrets, codes or full URLs. When they have to act in the live view, say it this way, in the action and in your reply: "Run `metacomputer view --open` (the live-view password goes on your clipboard: paste it with Cmd+V when Screen Sharing asks)". Refusals, finished tasks, lifecycle and health are sent automatically. Sinks change only from the user's own terminal. Details: [EVENTS.md](EVENTS.md).
+
+## When a step is the user's: `metacomputer handoff`
+
+A CAPTCHA, Cloudflare's "Verify you are human" or another bot check; a sign-in the user wants to do themselves; a 2FA prompt the vault can't fill. Hand the computer over and wait:
+1. Run `metacomputer handoff --why captcha|login|2fa|other --say "what to do, and where"` with the Bash tool's `run_in_background` (or a 10-minute tool timeout and `--timeout 9m`). It notifies the user (no separate `notify`), prints the steps, and returns when they're done.
+2. Say it in your reply: what to do, then "Run `metacomputer view --open` (Screen Sharing opens, and the live-view password is on your clipboard: paste it with Cmd+V). When you're done, run `metacomputer handoff done` in your terminal (or `metacomputer handoff cancel`)."
+3. While it's open, your acting calls are refused ("Paused: the user has the computer"), `metacomputer claude send/keys` included; reads still work. Don't act, and don't reach the desktop another way. An inner Claude (`metacomputer claude`) that's working isn't paused: if it could get in the user's way, `claude stop` it before you hand over.
+4. When it returns: exit 0, the user is done: read the screen again (it changed, and old element tokens are stale) and carry on. 4: cancelled: stop and ask. 124: its time limit passed: ask; don't try the check yourself. 5: your wait was stopped and the handoff is still open: `metacomputer handoff wait`.
+
+Never try to pass a human check yourself, switch browsers, modes or profiles to get around one, retry it in a loop, or run `handoff done` for the user. If a site's check keeps failing even when the user ticks it, the site is refusing the VM's automated browser: say so and ask how to go on ([BROWSER.md](BROWSER.md)).
 
 ## Also available
 
@@ -105,7 +115,7 @@ Blocked on the user (a sign-in, a CAPTCHA, a 2FA code, a dialog you won't accept
 - **Testing a web app the user is building** (the VM can't reach the Mac): `metacomputer put` its static files, serve them with `metacomputer sh -c 'cd ~/Inbox/DIR && setsid -f python3 -m http.server 8000 </dev/null >/dev/null 2>&1'`, open `http://localhost:8000`.
 - **The VM without the GUI:** `metacomputer inspect [system|windows|processes|ports|files|browser] [--json]`, read-only, fine while another session controls it.
 - **Recovery:** `metacomputer status` when something fails; `input-reset` when Chrome ignores typing; `desktop-restart` closes every app (ask first); `rename GUEST_PATH NEW_NAME` for a download saved under its id.
-- **Live view and takeover for the user:** `metacomputer view`.
+- **Live view and takeover for the user:** they run `metacomputer view --open` on the Mac (Screen Sharing, with the password on their clipboard for 45 s); `metacomputer view` shows the SSH tunnel for another device, and `view --tailnet` the `tailscale serve` command, which only the user runs (it changes their Mac's networking). Never read the clipboard.
 
 ## References
 
@@ -115,6 +125,6 @@ Blocked on the user (a sign-in, a CAPTCHA, a 2FA code, a dialog you won't accept
 - [SHELL.md](SHELL.md): `metacomputer sh`, which work goes to the shell and which to the apps, and what the VM has for format-aware work.
 - [STORAGE.md](STORAGE.md): volumes and reference disks (where they're mounted, that `reset` keeps them), `put`'s collision names, checkpoints with volumes.
 - [SECRETS.md](SECRETS.md): signing in, 2FA codes, keeping a login, and API keys from the user's vault (`metacomputer secrets`); Claude Code inside the VM (`metacomputer claude`).
-- [EVENTS.md](EVENTS.md): `metacomputer notify`, what's sent automatically, and event sinks.
+- [EVENTS.md](EVENTS.md): `metacomputer notify` and `handoff`, what's sent automatically, and event sinks.
 - Cua Driver's own guidance: `get_guide({topic})` (overview, batching, menus, browser, drag) and `.claude/skills/cua-driver/` in the project folder.
 - The project's `README.md` (usage) and `architecture.md` (design, network isolation).
