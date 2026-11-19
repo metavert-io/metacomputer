@@ -292,7 +292,7 @@ HANDOFF_FILE = "handoff.state"
 HANDOFF_MAX_S = 7200          # the longest time limit; a record that can't be read counts as open this long
 HANDOFF_WHY = ("captcha", "login", "2fa", "other")
 HANDOFF_STATUS = ("open", "done", "cancelled", "timed_out")
-HANDOFF_ID_RE = re.compile(r"^h-[0-9a-f]{12}$")
+HANDOFF_ID_RE = re.compile(r"h-[0-9a-f]{12}")
 
 
 def handoff_path():
@@ -304,10 +304,15 @@ def _finite(v):
 
 
 def handoff_valid(rec):
+    """Every field the guards and their messages use, with its type (a record that isn't one fails closed)."""
+    def opt(k, t):
+        return rec.get(k) is None or (isinstance(rec.get(k), t) and not isinstance(rec.get(k), bool))
     return (isinstance(rec, dict) and rec.get("v") == 1 and isinstance(rec.get("id"), str)
-            and HANDOFF_ID_RE.match(rec["id"]) is not None and rec.get("status") in HANDOFF_STATUS
+            and HANDOFF_ID_RE.fullmatch(rec["id"]) is not None and rec.get("status") in HANDOFF_STATUS
             and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
-            and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S)
+            and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S + 1    # + 1: float rounding of a 2 h limit
+            and opt("say", str) and opt("cwd", str) and opt("note", str) and opt("ended_from", str)
+            and opt("claude_pid", int) and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
 def handoff_record():

@@ -24,6 +24,7 @@ active), 2 usage, 1 couldn't record it. The record (.run/owners/handoff.state, o
 under the owners lock; each change of state is made once, by whoever makes it, and that process sends its event.
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -52,11 +53,42 @@ LIVE_VIEW = ("Run `metacomputer view --open` on your Mac: Screen Sharing opens t
 # The needs_you event's action (at most 300 characters after cleaning).
 ACTION = ("Run `metacomputer view --open` (it puts the live-view password on your clipboard: paste with Cmd+V), "
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
-UNSAFE_TEXT = re.compile(r"\s+")
+SPACES = re.compile(r"\s+")
 
 
-class Stop(Exception):
-    pass
+class Stop(BaseException):
+    """A signal stopped this command (an agent's tool ended it). Not an Exception, so best-effort code (events)
+    can't swallow it."""
+
+
+@contextlib.contextmanager
+def stoppable(interactive):
+    """SIGTERM and SIGHUP (and SIGINT without a terminal: Ctrl-C at one is "cancel") raise Stop, for as long as
+    the handoff is being opened or waited for, so the command always says where it stopped."""
+    def stop(signum, frame):
+        raise Stop(signum)
+    sigs = [signal.SIGTERM, signal.SIGHUP] + ([] if interactive else [signal.SIGINT])
+    old = {s: signal.signal(s, stop) for s in sigs}
+    try:
+        yield
+    finally:
+        for s, h in old.items():
+            try:
+                signal.signal(s, h)
+            except (OSError, ValueError):
+                pass
+
+
+def stopped(hid, as_json):
+    rec = owners.open_handoff()
+    still = bool(rec and rec.get("id") == hid)
+    left = f", or its time limit at {until(rec['deadline'])}" if still else ""
+    if as_json:
+        out(json.dumps({"status": "waiting_stopped", "id": hid, "open": still}))
+    else:
+        out("handoff stopped waiting; the handoff stays open (Claude's actions stay paused) until the user hands "
+            f"the computer back or cancels it{left}. `metacomputer handoff wait` waits again.")
+    return EXIT_STOPPED
 
 
 def out(text=""):
@@ -70,7 +102,7 @@ def err(text):
 def clean_text(s):
     """One line of at most TEXT_MAX characters, without control characters or bidi overrides."""
     s = termsafe.UNSAFE.sub(" ", str(s or ""))
-    s = UNSAFE_TEXT.sub(" ", s).strip()
+    s = SPACES.sub(" ", s).strip()
     return s if len(s) <= TEXT_MAX else s[:TEXT_MAX - 1] + "\N{HORIZONTAL ELLIPSIS}"
 
 
@@ -216,11 +248,8 @@ def instructions(rec, interactive):
 # --- waiting --------------------------------------------------------------------------------------
 def wait_for(hid, interactive, as_json):
     """Until the handoff hid ends: the user's `handoff done|cancel`, Enter at this terminal, or its time limit.
-    A signal (the agent's tool stopped this command) stops only the waiting: the handoff stays open."""
-    def stop(signum, frame):
-        raise Stop(signum)
-    sigs = [signal.SIGTERM, signal.SIGHUP] + ([] if interactive else [signal.SIGINT])
-    old = {s: signal.signal(s, stop) for s in sigs}
+    A signal (the agent's tool stopped this command) stops only the waiting: the handoff stays open. The caller
+    holds stoppable()."""
     reading = interactive
     try:
         while True:
@@ -262,21 +291,7 @@ def wait_for(hid, interactive, as_json):
         rec = owners.handoff_record()
         return report(rec if rec and rec.get("id") == hid else None, as_json, hid)
     except Stop:
-        rec = owners.open_handoff()
-        left = f", or its time limit at {until(rec['deadline'])}" if rec and rec.get("id") == hid else ""
-        msg = ("stopped waiting; the handoff stays open (Claude's actions stay paused) until the user hands the "
-               f"computer back or cancels it{left}. `metacomputer handoff wait` waits again.")
-        if as_json:
-            out(json.dumps({"status": "waiting_stopped", "id": hid, "open": bool(left)}))
-        else:
-            out("handoff " + msg)
-        return EXIT_STOPPED
-    finally:
-        for s, h in old.items():
-            try:
-                signal.signal(s, h)
-            except (OSError, ValueError):
-                pass
+        return stopped(hid, as_json)
 
 
 # --- commands -------------------------------------------------------------------------------------
@@ -322,6 +337,29 @@ def cmd_open(a):
         err("the virtual computer is off, so there's nothing to hand over: `metacomputer start` first")
         return EXIT_ERROR
     interactive = sys.stdin.isatty()
+    opened = {}
+    with stoppable(interactive):
+        try:
+            return open_and_wait(a, say, timeout, interactive, opened)
+        except Stop:
+            h = owners.open_handoff()
+            if opened.get("id") and h and h.get("id") == opened["id"]:
+                return stopped(opened["id"], a.json)
+            err("stopped before anything was handed over")
+            return EXIT_ERROR
+        except KeyboardInterrupt:                # Ctrl-C at this terminal before the wait began: called off
+            rec = owners.handoff_record()
+            if not opened.get("id") or not rec or rec.get("id") != opened["id"]:
+                err("stopped before anything was handed over")
+                return EXIT_ERROR
+            try:
+                rec = end(opened["id"], "cancelled", "ctrl_c")[0] or rec
+            except (OSError, TimeoutError):
+                pass
+            return report(rec, a.json, opened["id"])
+
+
+def open_and_wait(a, say, timeout, interactive, opened):
     settle()
     table = owners.ps_table()
     claude = owners.claude_of(os.getpid(), table)
@@ -347,6 +385,7 @@ def cmd_open(a):
                    "opened": now, "deadline": now + timeout, "timeout_s": int(timeout), "opener_pid": os.getpid(),
                    "claude_pid": claude, "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
                    "ended": None, "ended_from": None, "note": None}
+            opened["id"] = rec["id"]             # before the write: a signal during it still finds the record
             write_record(rec)
     except (OSError, TimeoutError) as e:
         err(f"couldn't record the handoff ({e}); nothing was handed over")
@@ -419,7 +458,12 @@ def cmd_wait(a):
         return EXIT_ERROR
     if rec["status"] != "open":
         return report(rec, a.json)               # it ended while nobody waited: how
-    return wait_for(rec.get("id"), sys.stdin.isatty(), a.json)
+    interactive = sys.stdin.isatty()
+    with stoppable(interactive):
+        try:
+            return wait_for(rec.get("id"), interactive, a.json)
+        except Stop:
+            return stopped(rec.get("id"), a.json)
 
 
 def cmd_status(a):

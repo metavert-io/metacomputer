@@ -252,6 +252,13 @@ def limit_checks():
         e["type"] for e in events_log()[n1:]].count("handoff_timed_out") == 1, rec)
     r = run("done", claude=None)
     check("a late done finds nothing open", r.returncode == 1 and "timed out" in r.stderr, r.stderr)
+    clear()
+    p = start("--why", "captcha", "--say", SAY, "--timeout", "2h")
+    h = wait_open()
+    run("cancel", claude=None)
+    finish(p)
+    check("the longest time limit (2h) makes a valid record, not an unreadable one", h and not h.get("unreadable")
+          and h.get("id"), h)
     r = run("--why", "captcha", "--say", "x", "--timeout", "3h")
     r2 = run("--why", "captcha", "--say", "x", "--timeout", "soon")
     r3 = run("--why", "captcha")
@@ -371,7 +378,14 @@ def unreadable_checks():
                       ("an id that isn't one", {"v": 1, "id": "../../x", "status": "open", "why": "other",
                                                 "opened": now, "deadline": now + 60}),
                       ("a deadline that isn't a number", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "open",
-                                                          "why": "other", "opened": now, "deadline": float("nan")})):
+                                                          "why": "other", "opened": now, "deadline": float("nan")}),
+                      ("an id with a newline after it", {"v": 1, "id": "h-aaaaaaaaaaaa\n", "status": "open",
+                                                         "why": "other", "opened": now, "deadline": now + 60}),
+                      ("a folder that isn't text", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "open", "why": "other",
+                                                    "opened": now, "deadline": now + 60, "cwd": 7}),
+                      ("a session that isn't a pid", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "open",
+                                                      "why": "other", "opened": now, "deadline": now + 60,
+                                                      "claude_pid": "424242"})):
         json.dump(bad, open(owners.handoff_path(), "w"))
         h = owners.open_handoff()
         check(f"a record with {what} reads as unreadable: open, for at most 2 h",

@@ -526,14 +526,14 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (75 checks, about 1 min): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (79 checks, about 30 s): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
   `c` and Ctrl-C at a terminal, the asking session refused "done" without a terminal,
   one at a time, refused while another session acts (unless `--override` or a person at
-  a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and
-  invalid records failing closed for at most 2 hours, `sh` refused with or without
+  a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and records
+  with a field of the wrong type failing closed for at most 2 hours, `sh` refused with or without
   `--override`; its events (the `needs_you` notice cleaned of escapes, URL queries and
   the live-view password; the note never in an event; the `handoff_*` types reserved;
   the 5-minute repeat rule). The live view, with stand-ins for pbcopy, pbpaste, open,
@@ -543,6 +543,13 @@ Each of these needs no VM and takes seconds.
   password; over SSH or outside the screen session it prints instructions and touches
   nothing; with the VM off it opens nothing; `--tailnet` prints the commands and runs
   only `tailscale status`.
+- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (16 checks, a test VM only; it starts the VM if
+  it's off and stops it again): Claude's handoff opens without a terminal and waits; meanwhile an acting call
+  through the hub is refused ("Paused: the user has the computer"), reads work, `sh` is refused with or
+  without `--override` (`--read-only` runs), `secrets fill` and `stop` are refused, `release` leaves it and
+  the asking session can't say done; then the user's done at a pseudo-terminal ends it, the waiting command
+  returns 0 with the note, the same acting call goes through, and the events are there without the note.
+  Events go to a temporary folder, never your sinks.
 - `python3 tests/test_owners.py` (14 checks): a `metacomputer sh` claim made outside
   Claude Code outlives its short-lived shell for the activity window, counts as the same
   controller from the same terminal session and as another one from a different

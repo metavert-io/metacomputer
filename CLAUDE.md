@@ -107,7 +107,8 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   browsers or profiles to get around one, or run `handoff done` for the user. Live
   view for the user: `metacomputer view --open` (the password goes on the clipboard,
   never into argv, output, logs or events); `view --tailnet` only prints the command.
-  Tests: `python3 tests/test_handoff.py` (no VM) and test_hub.py's handoff checks.
+  Tests: `python3 tests/test_handoff.py` (no VM), test_hub.py's handoff checks, and
+  `tests/test_handoff_vm.py` (test VM only: `MCOMP_CONFIG`).
 - Optional event stream (docs/events.md): `metacomputer notify` when blocked
   on the user; `metacomputer events sink …` only when the user asks (it
   decides what leaves the Mac). Off by default and best effort: an emitter
