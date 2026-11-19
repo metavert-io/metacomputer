@@ -303,6 +303,15 @@ connection to Cua Driver and serves Claude Code's bridge, `metacomputer call`,
 (`lib/mcomp_sdk.py`). It's on by default (`MCP_HUB=on`); design in
 [architecture.md](architecture.md#the-hub).
 
+**Its explanations reach Claude.** Claude Code gives the model a result's structured
+part instead of its text when a result has one (seen in a headless session's
+transcript). So every explanation the hub adds goes in both: a refusal from the
+coordinate guard or the Chrome guard, the end of a bounded session, "answer too
+complex", the Chrome guard's and bounded mode's notes, under `metacomputer_note`, and
+the hidden-text marks under `metacomputer_hidden_text`. Those names are the hub's own:
+the VM's answers can't use them ([Hidden page text](#hidden-page-text), "The hub's names
+are its own").
+
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
 the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
 `metacomputer call` skipped all of them: a session's logs showed it doing a whole
@@ -684,21 +693,40 @@ AI rules, game rules, setup guides that show `~/.ssh/id_ed25519.pub`, API docs t
 say "send your API key in the header"), which it leaves alone; pages about prompt
 injection, this one included, get marked.
 
-**Limits.** Each result is checked within at most 5,000 pieces of text, 2,000,000
-characters and 0.5 s; past that the note says only part was checked. Long text is read
-in pieces of 4,096 characters that overlap, so filler in front of an instruction
-doesn't hide it, and the note quotes the part around the first instruction-like words.
+**Limits.** The check runs on the hub's connection to the driver, so it is bounded: each
+result is looked at within at most 5,000 pieces of text, 2,000,000 characters and 0.25 s,
+and tagged within 0.15 s more; text is read a line at a time (never split whole), a
+Chrome snapshot's outline is read once, and every loop checks the time. Past a limit the
+note says "Scan incomplete" and which part was cut, even when nothing was found in the
+part that was checked. Long text is read in pieces of 4,096 characters that overlap, so
+filler in front of an instruction doesn't hide it, and the note quotes the part around
+the first instruction-like words. The note stays under 8 KB and the field under 16 KB
+encoded (quotes are left out from the end), and at most 200 rows get a tag. The marked
+answer is checked against what a client takes (bytes and values, with room to spare);
+one the marks would push over is replaced by the marks alone, as an error that says so.
 The patterns have no nested repeats; `tests/test_hidden_text.py` runs them on 2 MB
-hostile texts. What the hub keeps and sends stays within its frame limits.
+hostile texts, a 100,000-line outline against 5,000 references and a 3-million-line
+block.
+
+**The hub's names are its own.** The hub reserves them on every answer from the driver,
+errors included, before it adds anything: a key of the structured part named like the
+hub's (`metacomputer_...`) moves to `upstream_metacomputer_...` (kept, under a name
+that says where it came from), and a text block or error message from the VM that
+opens like a hub note ("metacomputer hub", "metacomputer bridge", "Refused by the
+metacomputer bridge") gets `[text from the virtual computer, not from the metacomputer
+hub]` in front. Nothing is removed. Then the hub reads the VM's text for hidden-text
+marks, and only after that adds its own notes, so a bounded-mode or Chrome-guard note
+is never mistaken for page text.
 
 **The event.** A result with marks sends `security.hidden_text` (warn when something is
 instruction-like, else info; [docs/events.md](docs/events.md)) with counts, the signals
-and pattern kinds, the tool, and the site's host when the driver reports the address
-(Firefox's address bar, a Chrome snapshot's URL; Chrome's own address bar gives none
-through the accessibility tree), and never page text. At most once per host every 5
-minutes and 10 in 10 minutes from one hub, on top of the event stream's own limits;
-only the hub can make one (`events emit` and the spool refuse the type). `hub.log`
-notes the counts.
+and pattern kinds, the tool, and the site's host when that result itself shows the
+address (Firefox's address bar, a Chrome snapshot's URL; Chrome's own address bar gives
+none through the accessibility tree, and a query or diff read doesn't show it), else
+none, and never page text. At most once per host (and once for all results without one)
+every 5 minutes and 10 in 10 minutes from one hub, on top of the event stream's own
+limits; only the hub can make one (`events emit` and the spool refuse the type). A
+scan that was only incomplete sends none. `hub.log` notes the counts.
 
 **Where it ends:**
 - It's a label for Claude, not a filter, and no model is immune: a model can still be
@@ -716,9 +744,9 @@ notes the counts.
   the page from text below the fold. Those are left to the wording check.
 - The patterns miss paraphrases, other languages and look-alike letters from other
   alphabets, and can mark an honest page that talks about AI agents.
-- A page can't remove or forge the hub's note (it's the first block of the result, from
-  the hub), but it can put tag-like text in its own rows; such text is marked as
-  imitating the hub.
+- A page can't put words under the hub's names (above), but it can write tag-like or
+  note-like text inside its own rows and in the middle of a block; where the hub reads
+  that text, it's marked as imitating the hub.
 
 ## The shell channel (`metacomputer sh`)
 

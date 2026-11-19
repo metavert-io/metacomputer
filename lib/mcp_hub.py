@@ -61,6 +61,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import driver_profiles  # noqa: E402
 import hidden_text  # noqa: E402
+import hub_notes  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
 import wirelimits  # noqa: E402
@@ -1557,7 +1558,8 @@ class Hub:
                 if pend.get("method") == "tools/call":
                     pend["client"].send({"jsonrpc": "2.0", "id": pend["id"], "result": {
                         "content": [{"type": "text", "text": LIMIT_MSG}], "isError": True,
-                        "structuredContent": {"code": "answer_too_complex", "effect": "unknown"}}})
+                        "structuredContent": {hub_notes.NOTE_KEY: LIMIT_MSG, "code": "answer_too_complex",
+                                              "effect": "unknown"}}})
                 else:
                     pend["client"].send({"jsonrpc": "2.0", "id": pend["id"],
                                          "error": {"code": -32603, "message": LIMIT_MSG}})
@@ -1645,6 +1647,9 @@ class Hub:
             if not pend:
                 return True
             self._pend_finished(key, pend)
+            if hub_notes.reserve(msg):               # first: nothing from the VM may speak in the hub's name
+                self.note("an answer used the hub's names (keys or note openings); marked as the VM's",
+                          kind="answer used the hub's names")
             try:
                 self.observe(pend, msg, key)
             except Exception as e:  # never let bookkeeping break the relay
@@ -1689,8 +1694,8 @@ class Hub:
 
     def tool_error(self, client, msg, text, structured=None):
         res = {"content": [{"type": "text", "text": text}], "isError": True}
-        if structured:
-            res["structuredContent"] = structured
+        if structured:      # the whole explanation in the structured part too: it's what Claude Code shows the model
+            res["structuredContent"] = {hub_notes.NOTE_KEY: text, **structured}
         self.reply(client, msg, res)
 
     def client_info(self, client):
@@ -2355,7 +2360,7 @@ class Hub:
             return
         blob = json.dumps(res.get("content") or [])[:4000]
         if res.get("isError") and BOUNDED_END_RE.search(blob):
-            res.setdefault("content", []).append({"type": "text", "text": BOUNDED_END})
+            hub_notes.add(res, BOUNDED_END, front=False)
             self.bounded_ended()
         elif res.get("isError") and self.bounded_mode and BOUNDED_REFUSED_RE.search(blob):
             self.bounded_refused(client, tool or "a tool", res)
@@ -2376,13 +2381,11 @@ class Hub:
             self.recordings.pop(args["session"], None)
         if self.coord_on:
             self.note_layout(tool, res, sc, sess, args, rec)
+        if self.hidden_on and not pend.get("orphan"):
+            self.mark_hidden_text(pend, res)     # the VM's own words only: before the hub adds its notes
         note = pend.get("note")
         if note:
-            res.setdefault("content", []).insert(0, {"type": "text", "text": note})
-            if isinstance(res.get("structuredContent"), dict):
-                res["structuredContent"] = {"metacomputer_note": note, **res["structuredContent"]}
-        if self.hidden_on and not pend.get("orphan"):
-            self.mark_hidden_text(pend, res)
+            hub_notes.add(res, note, front=True)
 
     # --- hidden page text (HIDDEN_TEXT; lib/hidden_text.py, SECURITY.md "Hidden page text") -------------------------
     def hidden_text_prepare(self, name, args):
@@ -2401,10 +2404,10 @@ class Hub:
         summary = hidden_text.apply(pend.get("tool"), res, pend.get("hidden_text"))
         if not summary:
             return
-        self.hidden_events.fill_host(summary, (pend.get("args") or {}).get("window_id"))
         self.note(f"marked page text in a {clean(summary['tool'], 40)} result: {summary['hidden']} hidden, "
-                  f"{summary['instruction_like']} instruction-like", kind="hidden text")
-        if self.hidden_events.allow(summary["host"]):
+                  f"{summary['instruction_like']} instruction-like" + ("" if summary["complete"] else
+                                                                      " (checked in part)"), kind="hidden text")
+        if (summary["hidden"] or summary["instruction_like"]) and self.hidden_events.allow(summary["host"]):
             message, severity, data = hidden_text.event_of(summary)
             self.event(pend.get("client"), "security", "hidden_text", message, severity, data=data,
                        debounce=summary["host"] or "unknown")

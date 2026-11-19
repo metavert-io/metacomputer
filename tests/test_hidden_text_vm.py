@@ -225,9 +225,12 @@ def run(env_on, env_off, base, td):
             break
         time.sleep(0.5)
     blob = json.dumps(ev)
-    check("one security.hidden_text event (this test's own events folder): warn, host 127.0.0.1, counts",
-          len(ev) == 1 and ev[0]["severity"] == "warn" and ev[0]["data"].get("host") == "127.0.0.1"
-          and ev[0]["data"].get("hidden", 0) >= 7 and ev[0]["data"].get("instruction_like", 0) >= 3, ev)
+    site = [e for e in ev if e["data"].get("host") == "127.0.0.1"]
+    check("one security.hidden_text event for the site (this test's own events folder): warn, host 127.0.0.1, "
+          "counts; reads that don't show the address (a query) report no host",
+          len(site) == 1 and site[0]["severity"] == "warn" and site[0]["data"].get("hidden", 0) >= 7
+          and site[0]["data"].get("instruction_like", 0) >= 3
+          and all(e["data"].get("host") is None for e in ev if e not in site), [e["data"] for e in ev])
     check("the event carries none of the page's words", not any(w.lower() in blob.lower() for w in PAGE_WORDS),
           [w for w in PAGE_WORDS if w.lower() in blob.lower()])
 

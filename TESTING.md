@@ -975,6 +975,15 @@ the other usual ways of hiding text, beside visible text), kept in `tests/fixtur
 - limits: 5,000 rows of 4 KB trigger words within the time budget, the note under 8 KB with at most 20
   quotes, nothing dropped, 2 MB pathological texts, wording after filler found and quoted, control and
   direction characters out of the quotes, the event limiter;
+- the first audit's findings, each failing on the audited code: answers that use the hub's names (structured
+  `metacomputer_*` keys on reads, clicks, zooms and errors; text and JSON-RPC errors opening like a hub note)
+  are marked as the VM's through the hub's own path (`on_upstream`); the hub's bridge note keeps its key and
+  isn't scanned as page text; the full explanation of every coordinate-guard and Chrome-target refusal, the
+  end of a bounded session and "answer too complex" is in the structured part; a 100,000-line Chrome outline
+  against 5,000 references, a 3-million-line block and 60,000 instruction-like rows stay under a second; a
+  scan cut short says so with nothing found; a tree row missing from the element list is read; a VM `ref`
+  is escaped; the note and field byte caps with 4-byte characters; an answer the marks would push past a
+  client's limit is replaced by the marks alone; a query read reports no host;
 - through a hub with a stand-in driver: the request asks for the element list only where it helps (not for
   `elements`, `full_output`, more than 2,000 elements or Mousepad), the client gets the note, tags and field,
   `HIDDEN_TEXT=off` changes nothing, one `security.hidden_text` event per host with counts and no page text,
