@@ -405,6 +405,65 @@ settings work, and that a GUI app started with `setsid -f` outlives the run
 with an accessibility tree the driver can read. It changes no VM settings: the
 `VM_SHELL`, bounded-driver and logging cases are config variants on the Mac.
 
+## Claude inside the VM: `tests/test_vm_claude.py`, `tests/test_vm_claude_vm.py`
+
+`python3 tests/test_vm_claude.py` needs no VM (117 checks). `bash -c` stands in
+for SSH, so the shell channel's VM half and `lib/vm_claude_guest.sh` run locally,
+with a temp folder as the VM's home. A fake `metacomputer` answers `secrets
+list|token|token renew|tokens|revoke` with a dummy token (or, as a vault from before
+`token renew`, a usage error), a fake `claude` records its
+arguments and environment (hashes) and every prompt it gets, and a fake `curl`
+plays Anthropic's installer. tmux is the real one (Homebrew's) when the Mac has
+it, on a private socket folder; without it the session checks are skipped. It
+checks:
+- arguments: actions, options per action, session names, `--ttl` (a minute to 8
+  hours), `--model`, `--cwd` (no `..`, no shell characters), `keys` (named keys,
+  `C-x`, single characters, nothing else), `send` from an argument, `--file`,
+  stdin or after `--`, its size cap and UTF-8;
+- the header: `Authorization: Bearer <token>` becomes `CLAUDE_CODE_OAUTH_TOKEN`,
+  `x-api-key: <token>` becomes `ANTHROPIC_API_KEY`, anything else is refused (and
+  the token revoked); which secret is used without `--token`;
+- a session: the token reaches Claude Code's environment (by hash) with the proxy's
+  base URL and nonessential traffic off, the first-run choices in `~/.claude.json`
+  (the API-key answer is the token's last 20 characters, only for x-api-key), the
+  token's file gone after Claude Code read it, the PATH line once, `--skip-permissions`
+  and its settings, `--cwd` with a space, a second session;
+- `send` (one line, many lines as one paste, nothing expanded, `--no-enter`,
+  `--wait`), `keys`, `read`, `wait`, `show`, `status`, `stop` with and without
+  `--revoke`, a start while one runs (refused before the vault is asked);
+- `renew`: `secrets token renew ID [--ttl]` for the session's token and its new expiry
+  recorded, a vault without it reported (255), no renewal after `stop` (6), and the
+  warning on `send` and `status` when fewer than 10 minutes are left;
+- the VM's text: field-like lines in a screen stay text, and a VM whose tmux hands
+  back OSC 52, a screen clear or a bidi override has them shown escaped, plain and
+  `--json`;
+- the token is in no command line (`ps`, tmux's arguments), no file but the fake
+  vault's (the signed action log with `ACTION_LOG_TEXT=keep` included), no output;
+- refusals before any token: a locked vault (3), no usable secret, two candidates,
+  an unbound VM, the vault's refusal, `VM_SHELL=off`, the bounded driver, the VM
+  off, another session acting (while `status` still answers); Claude Code ending at
+  once (6, its token revoked); installing Claude Code once with the native
+  installer; the shell channel's header `env` (accepted values, and the VM's half
+  refusing bad names, NUL, too many, non-text).
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (29 checks with a vault
+that has `secrets token renew`, 28 without; `MCOMP_VAULT_TEST_BIN` picks the build) runs it
+for real on a test VM, with no real key: a TEST build of the vault in a temp folder,
+bound to the VM, whose proxy goes to a stand-in Anthropic API on the Mac
+(`MCOMP_VAULT_TEST_API_HTTP=1`). It removes Claude Code and its settings from the VM
+first, then checks the native install, no first-run screen, the terminal on the
+desktop, both header kinds reaching the stand-in API with the dummy keys the proxy
+put in (and the oauth beta for Bearer), one-line and three-line prompts arriving
+whole, `--no-enter` + `keys Enter`, `read`, `status`, `renew` (the same token lives
+longer and the same Claude Code keeps answering; or, with an older vault, the refusal), `--model` and
+`--skip-permissions`, that neither dummy key is anywhere in the VM (files, any
+process's environment or command line), that the token is on no command line on the
+Mac or in the VM and in no file written on the Mac during the test (the signed action
+log with text kept, events, the vault's audit log, the session record), the proxy
+taking the token before `revoke` (200) and refusing it after (401), and the session
+and its terminal gone after `stop`. `MCOMP_TEST_SHOT_DIR=DIR` keeps a screenshot of
+the terminal on the desktop.
+
 ## What the VM hands back, and other boundaries (no VM)
 
 Each of these needs no VM and takes seconds.

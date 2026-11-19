@@ -36,9 +36,10 @@ sessions.
 A fourth section, [Secrets and logins](#secrets-and-logins-metacomputer-secrets),
 covers `metacomputer secrets`: letting Claude sign in to sites in the VM without your
 passwords or codes passing through the conversation, and use API keys without the keys
-ever entering the VM; how its keys, approvals and audit log work (including off-Mac
-copies, and how it compares with AWS KMS, Secrets Manager and HashiCorp Vault); and
-what that does and doesn't protect against.
+ever entering the VM, Claude Code inside the VM included
+([Claude inside the VM](#claude-inside-the-vm-metacomputer-claude)); how its keys,
+approvals and audit log work (including off-Mac copies, and how it compares with AWS KMS,
+Secrets Manager and HashiCorp Vault); and what that does and doesn't protect against.
 
 ## What these protect against
 
@@ -1462,6 +1463,106 @@ until it ends: that's its purpose. It can't get the key out of the proxy, reach 
 other host or path prefix, or outlive the unlock. The proxy's Mac end listens on
 127.0.0.1, where your other processes can reach it too, with the token.
 
+### Claude inside the VM (`metacomputer claude`)
+
+`metacomputer claude` runs Claude Code inside the VM, signed in with one of your api
+secrets through the proxy above: a Claude subscription token (from `claude setup-token`,
+stored with the default `Authorization: Bearer` header) or an API key (stored with
+`--header 'x-api-key: {value}'`). The outer Claude starts it, then drives it with `send`,
+`read`, `wait` and `keys`, in a tmux session in the VM (lib/vm_claude.py, and its VM half
+lib/vm_claude_guest.sh).
+
+**The credential never enters the VM.** The VM gets a proxy token, as with `secrets token`:
+- `start` asks the vault for it through `metacomputer secrets token NAME --ttl D` (default
+  1 hour, at most 8 hours, never past the unlock), so the usual rules apply: nothing
+  without your unlock, an `each` secret asks you, `--project` limits hold, and the audit
+  log records it.
+- It works only through the proxy, only for that secret's host (api.anthropic.com) and
+  path prefix, and only until it expires, is revoked (`claude stop --revoke`,
+  `secrets revoke ID`), the vault locks, or the secret is replaced or deleted.
+- `claude renew [--ttl D]` asks the vault to move that same token's expiry later
+  (`metacomputer secrets token renew ID`), so Claude Code keeps running. A renewal goes
+  through the vault like a new token: an `each` secret asks you again. It's made only
+  for a session that still runs, and only from the Mac: nothing in the VM can ask for
+  one. A vault without `token renew` answers with a usage error, which `claude renew`
+  reports. It never reads that as a request for a new token, since the token's id is
+  always given.
+- The secret's header decides how Claude Code is given the token, and nothing else is
+  accepted: `Authorization: Bearer <token>` becomes `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key:
+  <token>` becomes `ANTHROPIC_API_KEY`. A token whose header is anything else is revoked
+  at once. `ANTHROPIC_BASE_URL` is the proxy inside the VM
+  (`http://127.0.0.1:18765/NAME`), and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns
+  off Claude Code's telemetry, error reports and update checks.
+
+**How the token travels, and where it never goes.**
+1. The vault's answer comes to `vm_claude.py` on a pipe.
+2. From there it goes in the request header that the shell channel's VM half reads from
+   SSH's stdin (`env` in that header), which puts it in the environment of the start script.
+3. The script copies it into an unexported shell variable and takes it out of the
+   environment before running anything, so tmux's server and the programs it starts never
+   inherit it.
+4. The script writes it with `printf` (a shell builtin) into a file in a 0700 folder,
+   under umask 077. Claude Code's launcher reads that file once and deletes it as Claude
+   Code starts.
+
+So the token is never on a command line on the Mac or in the VM (`ps`), never in tmux's
+arguments or environment, and never in the action log. The call record holds the secret's
+name, the token's id and the kind of header; the request header isn't logged, even with
+`ACTION_LOG_TEXT=keep`. It's never in an event, never in the command's output (that names
+the token's id), and never in the session record on the Mac (`RUN_DIR/claude/NAME.json`:
+the id, the secret's name, the expiry). `tests/test_vm_claude.py` and
+`tests/test_vm_claude_vm.py` check each of these. For an API key, Claude Code's own record
+of the key it was told to trust, the token's last 20 characters, goes in the VM's
+`~/.claude.json`, as it does for any key Claude Code accepts.
+
+**What the inner Claude can do.** It is a program running as the VM's desktop user, so it can do
+what that user can:
+- read and write that user's files;
+- run programs, open apps on the desktop (it has the desktop's display);
+- use the VM's browsers and reach the public internet;
+- run the commands its own tools allow. `--skip-permissions` turns off Claude Code's own
+  permission prompts, and then only the VM's isolation limits it.
+
+**What it can't reach:**
+- your Mac, your network, the tailnet or the vault (the gateway and the rest of this page
+  apply to it as to any program in the VM);
+- the key itself;
+- any API host but the secret's, through the token;
+- root in the VM.
+
+**Controls that apply.** Every step runs through the shell channel's guarded runner:
+- it's refused while `VM_SHELL=off`, or under the bounded driver with `VM_SHELL=auto`,
+  before any token is asked for;
+- `start`, `send`, `keys`, `show` and `stop` act, so the one-controller rule refuses them
+  while another session uses the computer (unless you agree to `--override`). `read`,
+  `wait` and `status` only look;
+- with `ACTION_LOG=on`, each step is a signed `vm_claude` record. The prompt text and the
+  screens read back are kept only with `ACTION_LOG_TEXT=keep`;
+- what comes back from the VM (its screen, its fields) is parsed strictly and escaped
+  before it is printed, on a terminal or not.
+
+**Where it ends:**
+- **The token is in the VM for its whole life.** It sits in Claude Code's environment,
+  readable by anything running as the desktop user: the inner Claude itself, its tools, a
+  script it was tricked into running. Whoever copies it can call the API as you, through
+  the proxy (from the VM, or from your Mac's loopback where the proxy listens), until it
+  ends. Prompt injection in what the inner Claude reads could lead it to misuse the token
+  or the VM, within that API and that VM. Keep `--ttl` short, renew it only while you
+  want it working, and stop with `--revoke`.
+- **A screen can show the token.** If the inner Claude prints its own environment, `read`
+  shows it, and with `ACTION_LOG_TEXT=keep` the action log keeps that screen. The Mac
+  doesn't hold the token after `start`, so it can't blank it.
+- **Claude Code comes from Anthropic's installer** (https://claude.ai/install.sh, over
+  HTTPS, as the desktop user, saved whole before it runs). Its integrity is the installer's
+  and Anthropic's. In a VM that is already compromised it's just another program the VM
+  controls.
+- **Other traffic goes straight out.** With nonessential traffic off, Claude Code's model
+  calls go through the proxy, and so does nothing else of the key's. What its tools fetch
+  (web pages, git, packages, plugins) goes to the public internet from the VM, like any
+  program's.
+- **The inner Claude's answers are the VM's text.** The outer Claude treats them as data,
+  never as your instructions (the skill says so), but no model is immune.
+
 ### Keys, the Secure Enclave and rotation
 
 - **How the vault is keyed.** `vault.json` is encrypted (AES-256-GCM) with a random
@@ -1968,7 +2069,9 @@ something waits for you:
   decompressed before that check (the proxy asks for and unpacks gzip, deflate and
   Brotli itself), but an API that returned the key transformed (in base64, hashed into
   a URL, inside a compressed file it serves as data) would hand it over. What the API
-  itself does with your requests is up to the API.
+  itself does with your requests is up to the API. Claude Code inside the VM holds its
+  token for the token's whole life, where anything running as the desktop user can read it
+  ([Claude inside the VM](#claude-inside-the-vm-metacomputer-claude)).
 - **A sealed login is a login.** Anyone who loads it is signed in, so treat it like
   the password. That includes cookies imported from your own Chrome: once loaded, the VM's
   desktop account (and so Claude's shell) can read them, as with any sealed session.
@@ -1997,6 +2100,7 @@ something waits for you:
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `token renew ID\|--all [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; keep live ones going (the same token, asked like a new one); the live ones; end them |
+| `metacomputer claude [--token NAME] [--ttl 1h] ...`, `claude stop [--revoke]` | anywhere | Claude Code inside the VM, signed in with such a token ("Claude inside the VM") |
 | `audit-sink list`, `audit-sink show NAME` | anywhere (while locked: each sink's delivery state only, not its settings) | Sinks, their backlog and last error (URLs masked) |
 | `audit-sink test NAME` | anywhere while unlocked; while locked, your terminal (it asks for the passphrase) | Deliver now |
 | `status`, `audit [--tail N]`, `audit --head`, `audit --verify`, `selftest` | anywhere (`--verify` while unlocked) | State; the audit log; its head as SEQ:HASH; every record's creation MAC and the chain checked by the vault; the program's own checks |

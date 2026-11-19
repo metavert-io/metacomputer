@@ -73,6 +73,8 @@ PKGS=(
   python3-venv python3-pip
   # capture / diagnostics / clipboard / live view
   ffmpeg x11vnc xdotool wmctrl xclip imagemagick xinput
+  # metacomputer claude runs Claude Code in a tmux session (Ubuntu's base image has it; named so it stays)
+  tmux
   # maintenance + containment
   unattended-upgrades ufw curl ca-certificates jq locales
 )

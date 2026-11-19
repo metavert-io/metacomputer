@@ -441,6 +441,25 @@ up to a fixed limit under one deadline, accepts only an answer that fits a
 strict schema, and escapes control characters before they reach a terminal
 ([docs/shell.md](docs/shell.md#a-vm-that-misbehaves)).
 
+### Claude inside the VM
+
+`metacomputer claude` (`lib/vm_claude.py`, with `lib/vm_claude_guest.sh` as the
+script it sends) is built on the shell channel: each step (`start`, `send`, `read`,
+`wait`, `keys`, `show`, `status`, `stop`) is one run through `vm_shell.run_guarded`,
+logged as a `vm_claude` call.
+- `start` gets a token from the vault (`metacomputer secrets token`, on a pipe) and
+  passes it in the request header's `env`. The script takes it out of its environment
+  at once and writes it to a 0600 file that Claude Code's launcher reads and deletes.
+- Claude Code then runs in a tmux server on its own socket (`tmux -L
+  metacomputer-claude`), with `ANTHROPIC_BASE_URL` at the vault's proxy in the VM.
+- `send` pastes the prompt with `load-buffer` and `paste-buffer -p` (a bracketed
+  paste), then sends Enter; `read` is `capture-pane`; `wait` polls the pane until it
+  holds still.
+- `show` attaches an `xfce4-terminal` on the desktop to the same session.
+- The Mac keeps a record per session in `RUN_DIR/claude/` (the token's id, never the
+  token).
+- SECURITY.md, "Claude inside the VM", has what it can reach.
+
 ## Observation and accessibility
 
 AT-SPI2 runs on the session bus; `toolkit-accessibility` is on (dconf system

@@ -463,10 +463,11 @@ def result_fields(res, keep_text):
 class Log:
     """One action-log file per run, when logging applies (else every method does nothing)."""
 
-    def __init__(self, s):
+    def __init__(self, s, tool=TOOL):
         self.log = None
         self.keep = s["action_log_text"] == "keep"
         self.s = s
+        self.tool = tool
 
     def open(self):
         import actionlog
@@ -480,18 +481,18 @@ class Log:
 
     def refused(self, args, reason):
         if self.log:
-            self.log.refused(TOOL, args, reason)
+            self.log.refused(self.tool, args, reason)
 
     def call(self, args):
         if self.log:
-            self.log.call(1, TOOL, args)
+            self.log.call(1, self.tool, args)
 
     def sign_now(self):
         return self.log.sign_now() if self.log else True
 
     def result(self, ms, fields):
         if self.log:
-            self.log.event("result", id=1, tool=TOOL, ms=ms, result=fields)
+            self.log.event("result", id=1, tool=self.tool, ms=ms, result=fields)
 
     def close(self):
         """True when the log (if any) ended with a good final signature."""
@@ -727,6 +728,20 @@ def main(argv):
     if not transport:
         return finish(o, {"status": "error", "message": "no way to reach the VM (run it as metacomputer sh)"}, EXIT_FAILED)
 
+    res, code = run_guarded(o, transport, script)
+    return finish(o, res, code)
+
+
+def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=None):
+    """Run a script in the VM under every rule `metacomputer sh` keeps, and return (result, exit code)
+    without printing anything: VM_SHELL and the bounded driver, the one-controller check and claim (unless
+    o["read_only"]), the action log (the call signed before anything runs, the result after), the deadline
+    and the reply's schema. o needs cwd, timeout, max_output, read_only, override and args (and source and
+    file for the default log record). vm_claude.py runs its steps through this too, under its own tool name:
+    - log_args(keep_text) gives the call record's arguments, for a caller whose script and arguments
+      the default record (call_args) shouldn't hold;
+    - header_extra is merged into the request header the VM's half reads. It is never logged or shown:
+      vm_claude.py passes a token there ("env"), which the VM's half puts in the script's environment."""
     s = settings()
     user = os.environ.get("MCOMP_GUEST_USER") or "cua"
     cwd = guest_cwd(o["cwd"], user)
@@ -735,11 +750,11 @@ def main(argv):
 
     log_on = logging_on(s["shell_log"], s["action_log"])
     if log_on is None:
-        return finish(o, {**base, "status": "refused", "message":
-                          f"SHELL_LOG={s['shell_log']!r} isn't one of auto, off; refusing to run without knowing "
-                          "whether it should be logged (fix it in the config)"}, EXIT_REFUSED)
-    log = Log(s)
-    args = call_args(o, script, cwd, log.keep)
+        return {**base, "status": "refused", "message":
+                f"SHELL_LOG={s['shell_log']!r} isn't one of auto, off; refusing to run without knowing "
+                "whether it should be logged (fix it in the config)"}, EXIT_REFUSED
+    log = Log(s, tool)
+    args = log_args(log.keep) if log_args else call_args(o, script, cwd, log.keep)
 
     def open_log():
         """None, or why the log (required here) couldn't be opened."""
@@ -756,7 +771,7 @@ def main(argv):
         if open_log() is None:
             log.refused(args, msg)
             log.close()
-        return finish(o, {**base, "status": "refused", "message": msg}, EXIT_REFUSED)
+        return {**base, "status": "refused", "message": msg}, EXIT_REFUSED
 
     allowed, why = shell_allowed(s["vm_shell"], s["driver_mode"])
     if allowed is None:
@@ -770,8 +785,8 @@ def main(argv):
                       "VM_SHELL=on: the shell isn't limited by the driver's manifest. That's the user's setting; "
                       "ask them if you need it, and don't use `metacomputer ssh` to get around it.")
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
-        return finish(o, {**base, "status": "error", "kind": "vm_off",
-                          "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED)
+        return {**base, "status": "error", "kind": "vm_off",
+                "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED
 
     # One controller at a time: look for others and claim the computer as one step.
     who = None
@@ -782,7 +797,7 @@ def main(argv):
                 if not o["override"]:
                     busy = [x for x in owners.others() if x["active"]]
                 if not busy:
-                    who = owners.claim_for_shell(TOOL)
+                    who = owners.claim_for_shell(tool)
         except (OSError, TimeoutError) as e:
             return refuse(f"couldn't record that this session is using the virtual computer ({e}); not running")
         if busy:
@@ -794,7 +809,7 @@ def main(argv):
 
     def refresh():   # the holder found above: no process table, so it can't stall the run
         try:
-            owners.claim_for_shell(TOOL, who)
+            owners.claim_for_shell(tool, who)
         except OSError as e:
             w = f"couldn't refresh this session's claim on the virtual computer ({e.strerror or e})"
             if w not in warnings:
@@ -802,16 +817,17 @@ def main(argv):
 
     err = open_log()
     if err:
-        return finish(o, {**base, "status": "refused", "message": err}, EXIT_REFUSED)
+        return {**base, "status": "refused", "message": err}, EXIT_REFUSED
     log.call(args)
     if not log.sign_now():
         msg = "the action log couldn't be signed (ACTION_LOG_KEY); not running unsigned"
         log.result(0, {"status": "refused", "kind": "log", "error": True, "message": msg})
         log.close()
-        return finish(o, {**base, "status": "refused", "kind": "log", "message": msg}, EXIT_REFUSED)
+        return {**base, "status": "refused", "kind": "log", "message": msg}, EXIT_REFUSED
 
     header = {"cwd": cwd, "timeout": o["timeout"], "max_output": o["max_output"], "desktop": not o["read_only"],
               "args": o["args"], "script_bytes": len(script)}
+    header.update(header_extra or {})
     t0 = time.monotonic()
     deadline = t0 + o["timeout"] + GRACE_S    # starts before ssh does
 
@@ -856,7 +872,7 @@ def main(argv):
         refresh()
     if warnings:
         res["warnings"] = warnings
-    return finish(o, res, code)
+    return res, code
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

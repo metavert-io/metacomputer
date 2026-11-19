@@ -83,6 +83,14 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   as an acting call for the one-controller rule. The VM is untrusted: keep the
   Mac side's wire limits, deadline, strict reply schema and terminal escaping
   (docs/shell.md, "A VM that misbehaves").
+- Claude inside the VM (`metacomputer claude`, `lib/vm_claude.py` + `lib/vm_claude_guest.sh`;
+  SECURITY.md "Claude inside the VM"): every step goes through `vm_shell.run_guarded`, so it keeps
+  the shell channel's refusals, claim and action log. The token comes from `secrets token` on a pipe
+  and reaches the VM only in the request header's `env`; never put it in a script, an argument, a
+  log record, an event, output or the session record (`RUN_DIR/claude/`, ids only), and keep the
+  guest script taking it out of the environment before tmux starts. Drive the inner Claude with
+  `send`/`read`/`keys` (tmux), never its window. Tests: `python3 tests/test_vm_claude.py` (no VM),
+  `tests/test_vm_claude_vm.py` (test VM).
 - Storage (docs/storage.md; `lib/storage.py`, the guest's `storage-helper`): volumes, Mac folders,
   S3-backed folders and reference disks, attached at `start` from `VOLUMES` / `REFDISKS`. Create,
   attach, delete or restore them only when the user asks; only the user runs `volume keys`. The VM
@@ -117,6 +125,7 @@ metacomputer security [apply] | actions list|show|verify   # optional hardening,
 metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop user (docs/shell.md)
 metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
 metacomputer secrets list | fill NAME --field password | token NAME | status   # logins and API keys without seeing values
+metacomputer claude --token NAME [--show] | send "PROMPT" --wait | read | keys KEY | status | stop --revoke   # Claude Code in the VM
 metacomputer call [--session NAME] [--json|--raw] TOOL '{json}'   # through the hub; or: python3 lib/mcp_client.py --tools | --describe TOOL
 metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
 metacomputer learn report | review | approve ID | list   # lessons from your own sessions (docs/learn.md)
@@ -176,6 +185,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   never a published one (publishing is the owner's call). Each step has `--dry-run`. Tests: `tests/test_release.py`.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
+  `python3 tests/test_vm_claude.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
@@ -183,7 +193,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `test_install`, `test_events`, `test_doc_claims`, `test_release` (no VM; `scripts/release.sh` runs exactly these),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
-  `tests/test_chrome_guard.py` and `tests/test_vault_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
+  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py` and `tests/test_vm_claude_vm.py` (test VM only:
+  `MCOMP_CONFIG`). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
   it with `scripts/build-vault.sh`. Values must never reach output, logs or a

@@ -4,7 +4,10 @@ Runs INSIDE the virtual computer as the desktop user. The Mac sends it over
 the ops SSH connection's stdin, so nothing is quoted on either side:
 
   1. its length and this file (read by the one-line bootstrap in vm_shell.py);
-  2. one JSON line: cwd, timeout, max_output, desktop, args, script_bytes;
+  2. one JSON line: cwd, timeout, max_output, desktop, args, script_bytes, and
+     optionally env (more environment variables for the script: how
+     `metacomputer claude` hands over a token without putting it in the script,
+     its arguments or a command line);
   3. the script itself (script_bytes bytes).
 
 The Mac then keeps stdin open until the answer arrives. The script runs with
@@ -36,6 +39,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -51,6 +55,7 @@ CHUNK = 1 << 16
 KILL_AFTER = 3.0   # SIGTERM grace for the script's process group
 KILL_WAIT = 2.0    # after SIGKILL, how long to wait for the group to be gone
 DRAIN_S = 0.5      # output still read after the script's own process ends
+ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")   # header "env": names a script may be given
 
 
 def build_env(desktop):
@@ -241,6 +246,11 @@ def main():
             raise ValueError(f"expected {n} bytes of script, got {len(script)}")
         cap = int(hdr["max_output"])
         timeout = float(hdr["timeout"])
+        extra = hdr.get("env") or {}
+        if not isinstance(extra, dict) or len(extra) > 16 or not all(
+                isinstance(k, str) and ENV_NAME.fullmatch(k) and isinstance(v, str) and len(v) <= 65536 and "\0" not in v
+                for k, v in extra.items()):
+            raise ValueError("env: at most 16 NAME=value pairs (names in capitals, values without NUL)")
     except (ValueError, KeyError, TypeError) as e:
         emit({"status": "error", "code": "bad_request", "message": str(e)[:300]})
         return 2
@@ -249,6 +259,7 @@ def main():
         emit({"status": "error", "code": "no_such_folder", "message": cwd[:300]})
         return 2
     env, desktop = build_env(bool(hdr.get("desktop", True)))
+    env.update(extra)
     base = tempfile.gettempdir()
     sweep(base)
     d = tempfile.mkdtemp(prefix="mcsh.", dir=base)

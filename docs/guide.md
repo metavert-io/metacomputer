@@ -53,6 +53,8 @@ package to add to `EXTRA_PACKAGES` (and the VM then needs a rebuild; see
 | "Use my GitHub session from my own Chrome on the virtual computer, so it doesn't have to sign in again." | You bring that one site's cookies in from your terminal (`import-session`); Claude loads them into a VM profile, with your approval. Cookies only. |
 | "Let this project use the staging login without asking me for the next 8 hours." | Claude gives you the `metacomputer secrets rule add ... --for 8h` command; making the rule takes Touch ID or the passphrase. Google, Microsoft, Apple and Okta sign-ins still ask every time. |
 | "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there." | Claude gets a 15-minute token; the script calls the proxy inside the VM, and the proxy on your Mac adds the real key. |
+| "Give me Claude inside the metacomputer, signed in with my subscription, and show it on the desktop." | `metacomputer claude --token claude-sub --show`: Claude Code installed in the VM and started in a terminal you can watch, signed in through the vault's proxy with a 1-hour token; your subscription token stays on the Mac. Claude talks to it with `claude send` and `claude read`. |
+| "Have the Claude in the VM try this stranger's repo with permissions skipped, and tell me what it does." | `--skip-permissions` inside the disposable VM: the inner Claude works without asking, the VM's isolation is the limit, and the outer Claude reports what it saw. `claude stop --revoke` ends the token; `reset` (with your OK) cleans the VM. |
 | "Keep me signed in to the admin site between runs." | Claude seals the signed-in Chrome profile into the vault and loads it next time; each load asks you, since a whole profile can hold any sign-in. (Sealed sessions need `SSH_AUTH=key`, the default, for now.) |
 
 **Files that outlive the computer**
@@ -370,6 +372,77 @@ compressed, the proxy replaces it with `[key withheld by metacomputer secrets]`.
 - A token is a bearer credential: whatever holds it can call that API as you until it ends. It can't get the key or reach another host.
 - The key is withheld only as an exact copy; an API that sent it back transformed (in base64, say) would hand it over.
 - The VM needs the proxy account, which VMs built before API tokens don't have. `token` says so; rebuild the VM.
+
+### Claude inside the metacomputer
+
+- "Give me Claude inside the metacomputer, and show it on the desktop."
+- "Ask the Claude in the VM to build this in its own folder, and tell me when it's done."
+- "Let the Claude in the VM run with permissions skipped and try this repo; then stop it and revoke its token."
+
+`metacomputer claude` runs Claude Code inside the VM, signed in through the vault's API
+proxy, so your subscription token or API key stays on the Mac. It's the API-key setup
+above, done for Claude Code.
+
+**Once, in your own terminal:** store the credential as an api secret for
+`api.anthropic.com`.
+
+```bash
+claude setup-token                      # on the Mac: prints a long-lived subscription token
+metacomputer secrets set claude-sub --kind api --api-host api.anthropic.com           # paste it here
+# or an API key, which Claude Code sends as x-api-key:
+metacomputer secrets set claude-key --kind api --api-host api.anthropic.com --header 'x-api-key: {value}'
+metacomputer secrets bind                # if this VM isn't bound yet
+metacomputer secrets unlock --for 2h     # keep this terminal open
+```
+
+**Then Claude (or you) runs:**
+
+```bash
+metacomputer claude --token claude-sub --show      # install if needed, a 1-hour token, start it in tmux
+metacomputer claude send "Write a CSV parser in ~/claude-work/parse.py, with tests" --wait
+metacomputer claude read --lines 80                # its screen and history, escaped
+metacomputer claude keys 1                         # answer a question it asks (or Enter, Escape, BTab, y, n)
+metacomputer claude status                         # running? the token's time left
+metacomputer claude renew --ttl 1h                 # the same token lives longer; Claude Code keeps running
+metacomputer claude stop --revoke                  # end it and its token
+```
+
+- **Start** installs Claude Code with Anthropic's native installer if the VM doesn't have
+  it (about 10 seconds, into the desktop user's `~/.local/bin`, which it adds to that
+  user's PATH). It then asks the vault for a token: approval as usual, 1 hour by default
+  (`--ttl`, at most 8 hours, never past the unlock).
+  - It sets Claude Code's first-run choices in the VM's `~/.claude.json`: onboarding done,
+    the working folder trusted, and an API key approved. Claude Code starts ready to use.
+  - It runs in a tmux session, in `~/claude-work` (`--cwd DIR`). `--model M`,
+    `--skip-permissions`, `--session NAME` (several at once) and `-- ARGS` (Claude Code's
+    own, such as `-- --continue`) are there when you need them.
+- **The header decides how Claude Code is signed in.** With `Authorization: Bearer` (the
+  default, for a subscription token) the token goes in `CLAUDE_CODE_OAUTH_TOKEN`; with
+  `x-api-key` it goes in `ANTHROPIC_API_KEY`. Either way `ANTHROPIC_BASE_URL` points at the
+  proxy inside the VM, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps telemetry and
+  update checks off.
+- **Talking to it goes through tmux, not the screen.** `send` pastes the prompt (so it
+  arrives whole, newlines included) and presses Enter; `--wait` returns once the screen
+  has held still for a few seconds, with the screen. `read` captures the screen and its
+  history. Keystrokes sent to its window through the desktop get lost, so Claude doesn't
+  use them.
+- **Watching it:** `--show` (or `claude show` later) opens a terminal on the VM's desktop
+  attached to the same session, so it's in the live view (`metacomputer view`) and in
+  recordings. You can type into it yourself there.
+- **Keeping it going.** When the token ends (its time is up, or you lock the vault),
+  Claude Code can't reach the API, and an answer it's in the middle of stops.
+  `metacomputer claude renew [--ttl 1h]` moves the same token's expiry later without a
+  restart. It goes through the vault like a new token, so an `each` secret asks you again.
+  `send`, `wait` and `status` warn when fewer than 10 minutes are left. With a vault that
+  can't renew tokens, `claude stop` and start again with `-- --continue` to pick up the
+  conversation.
+- It runs through the shell channel, so `VM_SHELL=off` and bounded mode turn it off, and
+  starting it, sending to it and stopping it count as using the computer (one session at a
+  time).
+- What the inner Claude can and can't reach, and where the token goes:
+  [SECURITY.md](../SECURITY.md#claude-inside-the-vm-metacomputer-claude). In short, it can do
+  what the VM's desktop user can do, its token works only through the proxy until it ends,
+  and anything in the VM can read that token while it lives.
 
 ### Rotate keys and keep an audit trail
 
