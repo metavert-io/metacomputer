@@ -990,6 +990,16 @@ the other usual ways of hiding text, beside visible text), kept in `tests/fixtur
   pushed over by the mark, a result with a bridge note, a marked read, the value limit), keeping the hub's notes;
   the combined-refs and windows cuts are reported; a lone surrogate no longer stops the note; a failed check
   says so; a clean read restores the token line whatever time tagging had left;
+- the third audit's findings, each failing on its audited code: a hub note's opening in a structured key (an
+  error result, a JSON-RPC error's data) and keys named like the hub's in another case or with look-alike or
+  invisible letters are marked or moved; the opening split by default-ignorable characters that count as
+  letters (the Hangul fillers) or by other format characters, tags and variation selectors, in a block, a value
+  and a key, is marked; mathematical and circled letters and an underscore for the space are marked (best
+  effort); the table of those characters covers every format character in all of Unicode and the rest of
+  Default_Ignorable_Code_Point; the letter classes stay apart from the spacing, and hostile texts of millions of
+  such characters stay quick (guards); an error of 64 blocks with the bounded session's end added as block 65,
+  and 300 blocks with notes at both ends, keep every hub note when replaced, and the VM's copy of the hub's
+  words isn't kept;
 - through a hub with a stand-in driver: the request asks for the element list only where it helps (not for
   `elements`, `full_output`, more than 2,000 elements or Mousepad), the client gets the note, tags and field,
   `HIDDEN_TEXT=off` changes nothing, one `security.hidden_text` event per host with counts and no page text,

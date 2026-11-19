@@ -39,6 +39,8 @@ import time
 import unicodedata
 from urllib.parse import urlsplit
 
+import hub_notes
+
 MIN_HIDDEN_CHARS = 40           # hidden text shorter than this (screen-reader labels: "Skip to content") isn't reported
 TINY_PX = 6                     # a row under this height or width can't be read
 ABOVE_GAP_PX = 1000             # "far above the page": this far above the median of the page's first rows
@@ -148,8 +150,9 @@ TRIGGERS = ("ignore", "disregard", "forget", "override", "bypass", "instruction"
             "hidden prompt", "metacomputer", "hidden-text", "\u27e6hub", ".ssh", "claude.json", "credentials", ".netrc",
             "id_rsa", "id_ed25519", "id_ecdsa", "keychain", "private key", ".kube", ".config/gh", ".docker")
 
-INVISIBLE_RE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
-                          "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\U000e0000-\U000e007f]")
+# What a reader doesn't see (Unicode's default-ignorable characters and every format character; built in
+# lib/hub_notes.py from unicodedata and Unicode's list): taken out before matching and quoting.
+INVISIBLE_RE = hub_notes.IGNORABLE_RE
 CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 WS_RE = re.compile(r"\s+")
 SURROGATE_RE = re.compile("[\ud800-\udfff]")
@@ -795,7 +798,7 @@ def apply(tool, res, prep=None):
         _tag_rows(found, scan, state, content, Mark(scan))
         restore(tool, res, prep)
         field = _field(found, scan)
-        content.insert(0, {"type": "text", "text": note_text(found, scan)})
+        content.insert(0, hub_notes.block(note_text(found, scan)))    # the hub's own: fit() keeps it
         res["content"] = content
         if isinstance(res.get("structuredContent"), dict):     # in place and first (the state below may be this dict)
             rest = list(sc.items())

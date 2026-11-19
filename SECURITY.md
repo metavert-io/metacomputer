@@ -681,8 +681,8 @@ Mousepad, Thunar, the calculator, the terminal and others) and reads that ask fo
 than 2,000 elements keep their own format, and get the wording check only.
 
 **What marks text as instruction-like,** visible or not: a short, conservative list of
-patterns, matched after removing invisible characters and folding look-alike forms
-(fullwidth letters): text that addresses AI agents ("AI assistants reading this
+patterns, matched after removing characters a reader doesn't see (the table below) and
+folding look-alike forms (fullwidth letters): text that addresses AI agents ("AI assistants reading this
 page", "Note to AI agents", "If you are an AI"), tries to override instructions
 ("ignore all previous instructions", "new instructions:"), asks to keep something from
 the user ("do not tell the user"), uses chat-prompt markup (`<|im_start|>`, `[INST]`),
@@ -713,14 +713,29 @@ outline against 5,000 references and a 3-million-line block.
 (results, errors and progress notifications) before it adds anything, by going through
 all of it: every content block and every string and key at any depth, with no limit on
 how many it looks at. A key named like the hub's (`metacomputer_...`) moves to
-`upstream_metacomputer_...` (kept, under a name that says where it came from), and a
-string with a hub note's opening anywhere in it ("metacomputer hub", "metacomputer
-bridge"; matched across spacing, invisible characters, punctuation and look-alike
-fullwidth, Cyrillic and Greek letters) gets `[text from the virtual computer, not from
-the metacomputer hub]` in front. The driver's own MCP instructions, which follow the
-hub's, are marked the same way. Nothing is removed. Then the hub reads the VM's text
-for hidden-text marks, and only after that adds its own notes, so a bounded-mode or
-Chrome-guard note is never mistaken for page text.
+`upstream_metacomputer_...` (kept, under a name that says where it came from), in any
+case and with look-alike or invisible letters too, and a string or a key with a hub
+note's opening anywhere in it ("metacomputer hub", "metacomputer bridge") gets `[text
+from the virtual computer, not from the metacomputer hub]` in front. The opening is
+matched across spacing, punctuation and underscores; across characters a reader
+doesn't see, taken out first: Unicode's default-ignorable characters (zero-width
+spaces, joiners, variation selectors, tags, and the Hangul fillers, which count as
+letters to a regular expression) and every other format character, from a table built
+from Python's `unicodedata` plus Unicode's list of the rest; and across look-alike
+letters (every compatibility form that folds to the letter, such as fullwidth, circled
+and mathematical letters, and common Cyrillic and Greek ones). The driver's own MCP
+instructions, which follow the hub's, are marked the same way. Nothing is removed. Then
+the hub reads the VM's text for hidden-text marks, and only after that adds its own
+notes, so a bounded-mode or Chrome-guard note is never mistaken for page text.
+
+**What counts as the hub's.** The hub's channel is the reserved structured fields,
+`metacomputer_note` and `metacomputer_hidden_text`: only the hub writes them (every key
+of that name from the VM, in any disguise, has moved before the hub adds anything), and
+they're what Claude Code shows the model of a result that has a structured part. The
+skill tells Claude that a hub note counts only there; a result with no structured part
+carries the hub's notes in its text only. The mark on the VM's text that names the hub is
+best effort against impersonation: letters that look alike are endless, and only the
+common ones are covered, so text claiming to be the hub anywhere else is the VM's.
 
 **The final answer fits a client.** After every change (the marks above, the
 hidden-text note and tags, the hub's own notes), each answer, errors and notifications
@@ -728,7 +743,9 @@ included, is checked against what a client takes, bytes and values, with room to
 spare: an answer whose size on the wire could come near the limit is measured as it
 will be sent. A result past it is replaced by the hub's own notes and marks alone, as an
 error that says so; an error, by a fixed message with its code; a notification is
-dropped.
+dropped. The replacement keeps every note the hub added, wherever it sat among the
+VM's blocks: the hub knows its own blocks by having made them, not by their place or
+their words.
 
 **The event.** A result with marks sends `security.hidden_text` (warn when something is
 instruction-like, else info; [docs/events.md](docs/events.md)) with counts, the signals
@@ -756,10 +773,11 @@ scan that was only incomplete sends none. `hub.log` notes the counts.
   the page from text below the fold. Those are left to the wording check.
 - The patterns miss paraphrases, other languages and look-alike letters from other
   alphabets, and can mark an honest page that talks about AI agents.
-- A page can't put words under the hub's names, or text naming the hub without the
-  VM's mark (above). It can still claim authority in other words (a "system notice"
-  that doesn't name the hub); only the wording check, where it applies, and the skill's
-  rule that page text is data meet that.
+- A page can't put words under the hub's reserved names (above). Its text that names
+  the hub is marked as the VM's, best effort: letters that look alike beyond the common
+  ones pass unmarked, which is why only the reserved fields count. A page can still
+  claim authority in other words (a "system notice" that doesn't name the hub); only the
+  wording check, where it applies, and the skill's rule that page text is data meet that.
 
 ## The shell channel (`metacomputer sh`)
 
