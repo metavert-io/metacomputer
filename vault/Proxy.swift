@@ -225,17 +225,32 @@ final class ProxyHub: @unchecked Sendable {
 
     /// When the vault file changed (a `set --replace`, a `delete`, any write), read it again and end the tokens whose
     /// secret is gone or changed, so an answer streaming on one ends too. A stat each time; a read only on a change.
-    func refreshIfVaultChanged() {
+    /// Fails closed: a vault file that's missing, or that this unlock's key can't open and verify (a rekey, a recover, a
+    /// damaged file), ends every token at once, and the change is read again next time (the file's stamp is kept only
+    /// after it opened). Returns false then; the unlock process locks (UnlockServer.checkVault).
+    @discardableResult
+    func refreshIfVaultChanged() -> Bool {
         var st = stat()
-        guard stat(paths.vault, &st) == 0 else { return }
+        guard stat(paths.vault, &st) == 0 else {
+            endAll()
+            return false
+        }
         let stamp = [Int(st.st_ino), Int(st.st_size), Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec)]
-        guard refreshLock.try() else { return }       // another thread is checking right now
+        guard refreshLock.try() else { return true }  // another thread is checking this very change right now
         defer { refreshLock.unlock() }
-        guard stamp != vaultStamp else { return }
+        guard stamp != vaultStamp else { return true }
+        guard let p = try? loadPayload(paths, key) else {
+            endAll()
+            return false
+        }
         vaultStamp = stamp
-        // One that can't be read with this key (a rekey) is the unlock process's to notice: it locks, which ends them all.
-        guard let p = try? loadPayload(paths, key) else { return }
         prune(p)
+        return true
+    }
+
+    /// Every token ends (the proxy keeps running; the unlock process decides whether to lock).
+    func endAll() {
+        withLock { tokens = [:] }
     }
 
     /// Drop tokens whose secret is gone or changed (set --replace, delete); returns them.

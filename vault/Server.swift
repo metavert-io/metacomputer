@@ -247,6 +247,19 @@ final class UnlockServer {
     /// The vault is on its way to locking: `lock`, a signal, or its time is up. Nothing more is handed out or renewed.
     var stopping: Bool { stopReason != nil || receivedSignal != 0 || Date() >= expires }
 
+    /// The vault file, checked for changes (a stat; a read only on a change), from the main loop and while a question
+    /// waits: a secret replaced or deleted ends its tokens; a vault this unlock can no longer open and verify (a rekey, a
+    /// recover, a damaged or missing file) ends every token at once and locks.
+    func checkVault() {
+        guard stopReason == nil, !hub.refreshIfVaultChanged() else { return }
+        hub.lockdown()
+        _ = try? load()                     // a changed key says so itself (and locks)
+        if stopReason == nil {
+            stopReason = "the vault file can't be read and verified with this unlock's key any more"
+            say("\(clockTime())  the vault file can't be read and verified with this unlock's key any more: locking; unlock again")
+        }
+    }
+
     // MARK: approvals
 
     func granted(_ kind: String, _ name: String, _ who: Requester) -> String? {
@@ -422,6 +435,7 @@ final class UnlockServer {
         }
         while true {
             if receivedSignal != 0 { return result }
+            checkVault()                    // a rekey or a damaged vault while the question waits locks it now
             if stopReason != nil { result = .denied("the vault was locked"); return result }
             if let d = p.decision { result = d; return d }
             if requesterGone() {
@@ -654,7 +668,8 @@ final class UnlockServer {
         let la = startLocalAuth(text)
         let deadline = Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining()))))
         while !la.done {
-            if receivedSignal != 0 || Date() >= deadline { la.cancel(); break }
+            checkVault()
+            if receivedSignal != 0 || stopReason != nil || Date() >= deadline { la.cancel(); break }
             var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
             if poll(&pfd, 1, 200) > 0, pfd.revents & Int16(POLLIN) != 0 {
                 let c = accept(listenFD, nil, nil)
@@ -977,7 +992,7 @@ final class UnlockServer {
                 }
             }
             sinkTick()
-            hub.refreshIfVaultChanged()     // a secret replaced or deleted meanwhile ends its tokens (and their answers)
+            checkVault()                    // a secret replaced or deleted meanwhile ends its tokens (and their answers)
         }
         for d in deferred {
             reply(d.fd, ["ok": false, "status": "locked", "reason": "the vault is locked"])

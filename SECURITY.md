@@ -1373,7 +1373,10 @@ it expires.
      one, within 120 seconds, whatever the limit (`--answer-timeout` doesn't change that);
    - ends the answer sooner when its token ends: revoked, expired without a renewal, its
      secret replaced or deleted (the vault file is checked for changes four times a second
-     while an answer streams), or the vault locking. The connection is then shut at once,
+     while an answer streams), or the vault locking. A vault file this unlock can no longer
+     open and verify (a rekey, a recover, a damaged or missing file) ends every token at once
+     and locks the vault, checked in the unlock loop and while a question waits too. The
+     connection is then shut at once,
      so a VM that stops reading can't keep a write, and the answer, going: every write to it
      also gives up at the answer's deadline;
    - with a required audit sink, first records the request (`begin`, use `api`) and
@@ -1486,7 +1489,8 @@ other host or path prefix, or outlive the unlock. The proxy's Mac end listens on
   secret's age: `created 40 days ago, rotated today` or `never rotated`.
 - `rekey` (old passphrase, then the new one twice): new passphrase, new salt, new data
   key, new Enclave key and a new recovery key; the old recovery key stops working. A
-  running unlock notices the key change and locks itself. `rekey --enclave` moves a
+  running unlock notices the key change within a second, even while a question waits, ends every
+  token and locks itself. `rekey --enclave` moves a
   passphrase-only vault onto this Mac's Enclave; `--no-enclave` the other way. The new
   keys are made first; then one lock covers reading the latest contents and writing
   them under the new key, so a change made meanwhile (a `set`, a saved session) is

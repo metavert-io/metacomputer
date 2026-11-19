@@ -656,6 +656,38 @@ def main():
             except subprocess.TimeoutExpired:
                 wp.kill()
             wlog.close()
+
+        # Q6: ...and when the cycle itself reads that first blocked connection (not the poller), it goes out at once too,
+        # not after the cycle's health probe (12 s here) and deliveries.
+        refill()
+        st6 = {}
+        tail6 = events.NetgwTail(ng, st6)
+        with open(ng, "a") as fh:
+            fh.write(json.dumps({"t": "2026-11-17T10:07:00Z", "event": "blocked", "reason": "lab:private-lan",
+                                 "proto": "tcp", "dst": "10.7.7.7:22"}) + "\n")
+        real_probe = events.probe_health
+
+        def slow_probe():
+            time.sleep(12)
+            return {"vm": "running", "gateway": True, "ssh": True, "recording": {"expected": False},
+                    "guest": {"ready": True, "driver_doctor_rc": 0, "disk_free_gb": 20}}
+        events.probe_health = slow_probe
+        base = len(web.reqs)
+        try:
+            cyc = threading.Thread(target=events.watch_cycle, args=(st6, tail6, "testvm"), kwargs={"health": True})
+            t6 = time.time()
+            cyc.start()
+
+            def got6():
+                return [b["data"] for b in web.bodies()[base:] if b["data"]["type"] == "blocked_connections"]
+            g6 = wait_for(got6, 8)
+            took6 = time.time() - t6
+            check("Q6 a first blocked connection the watcher's own cycle reads goes out at once, not after the cycle's 12 s "
+                  "health probe", g6 and took6 < 6 and cyc.is_alive() and g6[0]["data"].get("first") is True
+                  and g6[0]["data"]["destinations"][0]["host"] == "10.7.7.7", (round(took6, 1), g6, cyc.is_alive()))
+            cyc.join(30)
+        finally:
+            events.probe_health = real_probe
         hst = {}
         good = {"vm": "running", "gateway": True, "ssh": True, "guest": {"ready": True, "driver_doctor_rc": 0, "disk_free_gb": 20},
                 "recording": {"expected": False}}

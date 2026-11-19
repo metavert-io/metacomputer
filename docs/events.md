@@ -480,7 +480,8 @@ runs starts it too. Every 30 seconds it:
 
 On a thread of its own, whatever its cycle is doing (a health probe or a slow sink can take minutes),
 it also looks at the gateway's log every 2 seconds (one `stat`; the file is read only when it grew). The first blocked connection after 5 minutes with none is sent from there at once,
-so it reaches the sinks within a few seconds of the gateway refusing it. Only that first one: the
+so it reaches the sinks within a few seconds of the gateway refusing it. When the cycle itself happens to
+read that first one, it's sent at once too, before the cycle's health probe and deliveries. Only that first one: the
 follow-ups wait for their batch (at most one event a minute, slowing down for the same destinations),
 the 5 quiet minutes are measured on this Mac's clock from when the watcher last saw a blocked
 connection, and at most 6 such first reports go out in any hour (more wait like follow-ups). The family

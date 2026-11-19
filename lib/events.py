@@ -2131,7 +2131,9 @@ def blocked_step(st, tail, vm, deliver_now=False, lock=None):
         ev = blocked_event(st, vm)
         if ev:
             emit_dict(ev, origin="watcher")
-    if ev and deliver_now:
+    # A first report goes out now whichever reader recorded it: the cycle's own read would otherwise leave it queued
+    # behind the cycle's health probe and deliveries, and the poller wouldn't see it again (the log didn't grow).
+    if ev and (deliver_now or (ev.get("data") or {}).get("first") is True):
         flush_all(config_safe())
     return ev
 

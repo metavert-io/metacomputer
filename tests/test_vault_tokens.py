@@ -20,6 +20,8 @@ pseudo-terminal, every value a dummy. Covered:
   - an answer in flight ends with its token (revoked, expired without a renewal, its secret replaced); a renewal
     keeps it going; a VM that stops reading can't hold one open past a revoke;
   - the longest life (MCOMP_VAULT_TEST_TOKEN_MAX_LIFETIME here) and the unlock's end are never passed;
+  - a vault the unlock can't open any more (damaged, or rekeyed while a question waits) ends every token and answer
+    and locks, with no other request;
   - `set|policy --answer-timeout`: its range, `list`, and the proxy honouring it per secret;
   - `renew --all`, and `metacomputer secrets token renew` (the action log's kind);
   - the audit records of renewals hold only the vault's own words and numbers; no value or token anywhere.
@@ -48,9 +50,10 @@ import test_vault_ops as tvo  # noqa: E402
 LAB = ts.LAB
 check = ts.check
 PASS = "dummy passphrase for tokens 58"
+PASS2 = "dummy passphrase for tokens two 61"
 # Invented keys, put together here so no line looks like a real credential to a secret scanner.
 KEY1, KEY2, KEY3, KEY4, KEY5 = ("-".join(("dummy", "api", "key", w, "not", "real")) for w in ("renew", "each", "long", "proj", "new"))
-VALUES = [PASS, KEY1, KEY2, KEY3, KEY4, KEY5]
+VALUES = [PASS, PASS2, KEY1, KEY2, KEY3, KEY4, KEY5]
 outputs = []
 RENEW_FIELDS = {"id", "seq", "ts", "prev", "hash", "mac", "op", "result", "name", "vm", "token_id", "ttl_s", "approval",
                 "requester", "reason", "request_id", "requester_left", "renewer"}
@@ -755,6 +758,61 @@ def run(td, procs):
           and res.get("expires_in_s", 99) <= 15 and rc2 == 2 and "unlock ends" in res2.get("reason", ""), (q, out, text2))
     lock(u)
 
+    # --- 7. a vault this unlock can't open any more fails closed: tokens and answers end, and it locks ---------------
+    vfile = os.path.join(vdir, "vault.json")
+    u = start_unlock(["--for", "20m"])
+    tokK = js(client("token", "api-long", "--vm", "opsvm", "--ttl", "10m").stdout)
+    proxy_port()
+    hold = {}
+    thk = threading.Thread(target=stream, args=("/api-long/v1/drip", tokK, hold, "k"))
+    thk.start()
+    time.sleep(1.5)
+    good = open(vfile, "rb").read()
+    open(vfile + ".tmp", "wb").write(b'{"damaged": true}\n')
+    os.replace(vfile + ".tmp", vfile)                 # damaged, as an atomic write would leave it
+    t_bad = time.time()
+    thk.join(30)
+    cut_after = time.time() - t_bad
+    locked = tvo.wait_for(lambda: not os.path.exists(sock), 10, 0.1)
+    lock_after = time.time() - t_bad
+    kt, kgot = hold.get("k", (0, b""))
+    try:
+        u.wait(15)
+    except AssertionError:
+        pass
+    open(vfile + ".tmp", "wb").write(good)
+    os.replace(vfile + ".tmp", vfile)
+    check("a vault file the unlock can no longer open and verify ends the answers streaming on its tokens at once and locks "
+          "the vault, with no other request needed", b"tick" in kgot and b"DRIP-END" not in kgot and cut_after < 3 and locked
+          and lock_after < 5 and "can't be read and verified" in u.text(), (round(cut_after, 1), locked, round(lock_after, 1),
+                                                                          u.text()[-300:]))
+    u = start_unlock(["--for", "20m"])
+    tokK2 = js(client("token", "api-long", "--vm", "opsvm", "--ttl", "10m").stdout)
+    proxy_port()
+    hold = {}
+    thk = threading.Thread(target=stream, args=("/api-long/v1/drip", tokK2, hold, "k2"))
+    thk.start()
+    h = detached_start("token", "api-each", "--vm", "opsvm", "--ttl", "10m")
+    q = seen(u, "Type api-each to allow")
+    rc, out = tty([BIN, "rekey"], [("Vault passphrase", PASS + "\n"), ("New vault passphrase", PASS2 + "\n"),
+                                   ("same passphrase again", PASS2 + "\n")])
+    t_rk = time.time()
+    rc_q, out_q = detached_wait(h, 30)
+    q_after = time.time() - t_rk
+    thk.join(30)
+    cut_after = time.time() - t_rk
+    locked = tvo.wait_for(lambda: not os.path.exists(sock), 10, 0.1)
+    lock_after = time.time() - t_rk
+    k2t, k2got = hold.get("k2", (0, b""))
+    try:
+        u.wait(15)
+    except AssertionError:
+        pass
+    check("a rekey while a question waits: the question ends (refused), the answer streaming on a token ends, and the unlock "
+          "locks within seconds, without waiting for the question's time or another request", q and rc == 0 and rc_q != 0
+          and q_after < 4 and b"DRIP-END" not in k2got and cut_after < 4 and locked and lock_after < 5
+          and "key changed" in u.text(), (q, rc, rc_q, round(q_after, 1), round(cut_after, 1), locked, round(lock_after, 1)))
+
     # --- the guarantees that hold throughout -------------------------------------------------------------------
     recs = audit_recs()
     ren = [x for x in recs if x.get("op") == "renew"]
@@ -763,7 +821,7 @@ def run(td, procs):
           and all(x.get("renewer") in (None, "same", "terminal", "other") for x in ren),
           [sorted(set(x) - RENEW_FIELDS) for x in ren if not set(x) <= RENEW_FIELDS][:3])
     toks = [t.get("token") for t in (tok, tokE, tokR, tokS, tokA, tokW, tokZ, tokB, tokB2, tokC, tokP, tokD, tokX, tokY, tokV, tokL, tokG,
-                                     tokQ, tokT, tokM, tokU) if t.get("token")]
+                                     tokQ, tokT, tokM, tokU, tokK, tokK2) if t.get("token")]
     raw = open(alog).read()
     term_text = "".join(p.text() for p in unlocks)
     check("the audit log holds no key and no token", not any(v in raw for v in VALUES) and not any(t in raw for t in toks))

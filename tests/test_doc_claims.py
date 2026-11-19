@@ -215,6 +215,11 @@ CLAIMS = [
      lambda m: f"plainSessionConfig(timeout: {m[1]})" in raw(PROXY) and "cfg.timeoutIntervalForResource = limit + 30" in raw(PROXY)),
     ("SECURITY.md", r"the API must still send its first byte, and each next one, within (\d+) seconds, whatever the limit",
      lambda m: f"plainSessionConfig(timeout: {m[1]})" in raw(PROXY)),
+    ("SECURITY.md", r"A vault file this unlock can no longer open and verify \(a rekey, a recover, a damaged or missing file\) ends "
+                    r"every token at once and locks the vault, checked in the unlock loop and while a question waits too",
+     lambda m: "guard let p = try? loadPayload(paths, key) else {\n            endAll()" in raw(PROXY)
+     and "guard stat(paths.vault, &st) == 0 else {\n            endAll()" in raw(PROXY)
+     and raw(SERVER).count("checkVault()") >= 4 and "stopReason = \"the vault file can't be read and verified" in raw(SERVER)),
     ("SECURITY.md", r"the vault file is checked for changes four times a second while an answer streams",
      lambda m: "while stream.done.wait(timeout: .now() + 0.25) == .timedOut {\n            refreshIfVaultChanged()" in raw(PROXY)),
     ("SECURITY.md", r"the token \(`mct_` and (\d+) random bits\)",
@@ -297,6 +302,9 @@ CLAIMS = [
                     r"repeated reports of the same destinations slow down \(up to once an hour\)",
      lambda m: (int(m[1]) * 60, (int(m[2]), 3600)) == (events.NETGW_QUIET_S, events.NETGW_FIRST_CAP)
      and events.NETGW_POLL_S <= 5 and (events.NETGW_BATCH_S, events.NETGW_MAX_S) == (60, 3600)),
+    ("docs/events.md", r"When the cycle itself happens to read that first one, it's sent at once too, before the cycle's health probe",
+     lambda m: 'if ev and (deliver_now or (ev.get("data") or {}).get("first") is True):' in raw("lib/events.py")
+     and raw("lib/events.py").index('step("blocked connections", blocked)') < raw("lib/events.py").index('step("health", probe)')),
     ("docs/events.md", r"The first blocked connection after (\d+) minutes with none goes out at once \(the watcher looks every "
                        r"(\d+) seconds\), at most (\d+) times in any hour\. What follows it is batched: at most one event a minute",
      lambda m: (int(m[1]) * 60, int(m[2]), (int(m[3]), 3600), events.NETGW_BATCH_S)

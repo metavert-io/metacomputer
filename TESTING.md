@@ -237,7 +237,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (186 checks, about two minutes). It keeps
+`python3 tests/test_events.py` needs no VM (187 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -248,7 +248,7 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the spool, including invalid and oversized files;
 - a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
 - eight processes emitting at once; debounce; `notify`;
-- the watcher's pieces (the first blocked connection after a quiet spell sent at once, also by a running watcher within seconds, even while its cycle is busy with a 20 s health probe, the follow-ups batched a minute at a time, floods and repeated quiet-spell reports still limited; health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
+- the watcher's pieces (the first blocked connection after a quiet spell sent at once, also by a running watcher within seconds, even while its cycle is busy with a 20 s health probe, and at once when the cycle reads it itself, the follow-ups batched a minute at a time, floods and repeated quiet-spell reports still limited; health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
 - the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
 - the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds;
 - the review's fixes, one or more checks each:
@@ -1048,7 +1048,7 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_tokens.py` (59 checks, about two minutes) reuses that stub, the
+`python3 tests/test_vault_tokens.py` (61 checks, about two and a half minutes) reuses that stub, the
 stand-in Claude Code and a local plain-HTTP API for renewable tokens and the answer time
 limit, in a throwaway vault. "You at a terminal" is the client in a pseudo-terminal of its
 own, started by an orphaned helper so no Claude Code process is among its parents, whoever
@@ -1078,6 +1078,9 @@ runs the test:
   without a renewal cuts it there, and one renewed in time streams on to the end; an answer
   the VM stops reading ends within seconds of a revoke; `set --replace` cuts an answer
   streaming on one of its tokens with no other request;
+- **a vault it can't open fails closed:** a damaged vault file ends the answers streaming on
+  its tokens and locks the vault, and a rekey while a question waits ends the question, the
+  answer streaming on a token and the unlock within seconds;
   `set --answer-timeout` (its range, api secrets only, `list`, `policy NAME
   --answer-timeout D|default`) and the proxy honouring it per secret;
 - renewal records hold only the vault's own fields; no key, passphrase or token in any
