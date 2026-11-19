@@ -43,7 +43,11 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:   # Python before 3.11 (Apple's python3 is 3.9)
+    sys.exit("bench.py needs Python 3.11 or later: run it with Homebrew's python3 (brew install python), "
+             "or through metacomputer learn bench, which picks one")
 import uuid
 
 BENCH = os.path.dirname(os.path.abspath(__file__))

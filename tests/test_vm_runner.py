@@ -143,6 +143,14 @@ def lib_cases(td):
     home, r = resolve(["mcomp-vm"], script=f'bash -c \'. "{LIB}"; printf "%s" "$PY"\'', drop=keep,
                       extra_env={"MCOMP_BREW_PYTHON": sys.executable})
     check("Python: a script the command runs inherits the choice", r.returncode == 0 and r.stdout == sys.executable, (r.stdout, r.stderr))
+    # The benchmark run directly with a Python older than 3.11: one clear line, no traceback.
+    old39 = "/usr/bin/python3"
+    if os.path.exists(old39) and subprocess.run([old39, "-c", "import sys; sys.exit(sys.version_info >= (3, 11))"],
+                                                capture_output=True).returncode == 0 and subprocess.run(
+                                                    ["xcode-select", "-p"], capture_output=True).returncode == 0:
+        r = subprocess.run([old39, "-B", os.path.join(LAB, "bench", "bench.py"), "--help"], capture_output=True, text=True, timeout=60)
+        check("bench.py under Python 3.9: says it needs 3.11 and how to get it, no traceback",
+              r.returncode != 0 and "needs Python 3.11 or later" in r.stderr and "Traceback" not in r.stderr, (r.returncode, r.stderr[-300:]))
 
 
 # --- install.sh -------------------------------------------------------------------
