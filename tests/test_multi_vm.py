@@ -1156,6 +1156,15 @@ def final2_fixes(td):
               and "create " not in open(b.log).read() and not os.path.exists(marker), out[-400:])
         drop(other)
         os.remove(os.path.join(b.app, "other"))
+        # An MCOMP_CONFIG file that sets no folders of its own (the main VM's, as before v0.3.1): refused, saying how to fix it.
+        bare = os.path.join(root, "bare.env")
+        write(bare, "VM_NAME=bare\nBASELINE_NAME=bare-baseline\nSSH_PORT=2393\nVNC_PORT=6093\n")
+        r = build(MCOMP_CONFIG=bare)
+        out = r.stdout + r.stderr
+        check("building an MCOMP_CONFIG VM whose folders are the main VM's: refused, naming the fix (its own SSH_DIR, RUN_DIR, LOG_DIR)",
+              r.returncode != 0 and "not building bare" in out and "is the same folder as the main VM" in out
+              and "set SSH_DIR, RUN_DIR and LOG_DIR in " in out and "config/local.env.example" in out
+              and "create " not in open(b.log).read() and not os.path.exists(os.path.join(co, ".run", "build-unfinished-bare")), out[-600:])
     finally:
         b.close()
 

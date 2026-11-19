@@ -227,7 +227,13 @@ mc_identity_check() {
   case "$MC_IDENTITY_OUT" in
     *@mc-refused)
       MC_IDENTITY_OUT="$(printf '%s' "${MC_IDENTITY_OUT%@mc-refused}")"   # without the trailing newlines
-      MC_REFUSAL="${MC_IDENTITY_OUT:-its identity could not be checked}"; return 1 ;;
+      MC_REFUSAL="${MC_IDENTITY_OUT:-its identity could not be checked}"
+      # An MCOMP_CONFIG file for another VM that doesn't set its folders gets the main VM's, refused since v0.3.1: say how to fix it.
+      case "${MC_SETTINGS_KIND:-}:$MC_REFUSAL" in
+        config:*"is the same folder as the main VM"*)
+          MC_REFUSAL="$MC_REFUSAL. To fix it, set SSH_DIR, RUN_DIR and LOG_DIR in $(mc_tilde "${LOCAL_CONFIG:-${MCOMP_CONFIG:-}}") to folders of this VM's own (see config/local.env.example, \"A second VM beside the first\"), or use metacomputer vm create NAME" ;;
+      esac
+      return 1 ;;
   esac
 }
 # The resolution's own Python (scripts/lib.sh sets PY again once the settings are read: a settings file may set it).
