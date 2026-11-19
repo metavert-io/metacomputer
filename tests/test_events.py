@@ -574,6 +574,120 @@ def main():
         check("watch --once: a new blocked connection becomes a security event in one cycle",
               r1.returncode == 0 and r2.returncode == 0 and len(got) == 1 and got[0]["data"]["destinations"][0]["host"] == "192.0.2.10",
               (r1.stderr, r2.stderr, got))
+
+        # Q4: the running watcher looks at the gateway's log between its 30-second cycles, so the first blocked
+        # connection after a quiet spell reaches the sinks within seconds; the follow-ups wait for the batch.
+        refill()
+        if os.path.exists(wst):
+            os.remove(wst)
+        wlog = open(os.path.join(TD, "q4-watcher.log"), "w")
+        wp = subprocess.Popen([PY, EV, "watch"], stdout=wlog, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        try:
+            cycled = wait_for(lambda: os.path.exists(wst), 20)
+            time.sleep(0.5)
+            base = len(web.reqs)
+            t_block = time.time()
+            with open(ng, "a") as fh:
+                fh.write(json.dumps({"t": "2026-11-17T10:05:00Z", "event": "blocked", "reason": "lab:private-lan",
+                                     "proto": "tcp", "dst": "10.9.9.9:22"}) + "\n")
+
+            def blocked_got():
+                return [b["data"] for b in web.bodies()[base:] if b["data"]["type"] == "blocked_connections"]
+            first_got = wait_for(blocked_got, 12)
+            took = time.time() - t_block
+            check("Q4 the running watcher sends the first blocked connection after a quiet spell within seconds "
+                  "(not at its next 30-second cycle), marked first",
+                  cycled and first_got and took < 8 and first_got[0]["data"].get("first") is True
+                  and first_got[0]["data"]["destinations"][0]["host"] == "10.9.9.9", (cycled, round(took, 1), first_got))
+            with open(ng, "a") as fh:
+                for k in range(5):
+                    fh.write(json.dumps({"t": "2026-11-17T10:05:01Z", "event": "blocked", "reason": "lab:private-lan",
+                                         "proto": "tcp", "dst": f"10.9.9.{k + 10}:445"}) + "\n")
+            time.sleep(6)
+            wst_now = events.read_json(wst, {})
+            pend = sum(int(e.get("count") or 0) for e in wst_now.get("netgw_pending") or [])
+            check("Q4 the burst that follows is batched: nothing more is sent at once, the 5 wait in the watcher's state",
+                  len(blocked_got()) == 1 and pend == 5, (len(blocked_got()), pend))
+        finally:
+            wp.terminate()
+            try:
+                wp.wait(15)
+            except subprocess.TimeoutExpired:
+                wp.kill()
+            wlog.close()
+
+        # Q5: ...also while the watcher's own cycle is busy: here a health probe that takes 20 s (a stand-in for the real
+        # one, which may take minutes) holds the cycle, and the gateway's log is still watched on its own thread.
+        refill()
+        if os.path.exists(wst):
+            os.remove(wst)
+        slow = os.path.join(TD, "q5-slow-watcher.py")
+        with open(slow, "w") as fh:
+            fh.write("import sys, time\n"
+                     f"sys.path.insert(0, {os.path.join(LAB, 'lib')!r})\n"
+                     "import events\n"
+                     "def probe():\n"
+                     "    time.sleep(20)\n"
+                     "    return {'vm': 'running', 'gateway': True, 'ssh': True, 'recording': {'expected': False},\n"
+                     "            'guest': {'ready': True, 'driver_doctor_rc': 0, 'disk_free_gb': 20}}\n"
+                     "events.probe_health = probe\n"
+                     "sys.exit(events.watch(health=True))\n")
+        wlog = open(os.path.join(TD, "q5-watcher.log"), "w")
+        wp = subprocess.Popen([PY, slow], stdout=wlog, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        try:
+            time.sleep(3)                        # the first cycle is in its 20 s probe now
+            base = len(web.reqs)
+            t_block = time.time()
+            with open(ng, "a") as fh:
+                fh.write(json.dumps({"t": "2026-11-17T10:06:00Z", "event": "blocked", "reason": "lab:private-lan",
+                                     "proto": "tcp", "dst": "10.8.8.8:22"}) + "\n")
+
+            def blocked_got5():
+                return [b["data"] for b in web.bodies()[base:] if b["data"]["type"] == "blocked_connections"]
+            got5 = wait_for(blocked_got5, 15)
+            took = time.time() - t_block
+            check("Q5 while the watcher's cycle is busy (a 20 s health probe), the first blocked connection still reaches "
+                  "the sinks within seconds", got5 and took < 8 and got5[0]["data"].get("first") is True
+                  and wp.poll() is None, (round(took, 1), got5, wp.poll()))
+        finally:
+            wp.terminate()
+            try:
+                wp.wait(30)
+            except subprocess.TimeoutExpired:
+                wp.kill()
+            wlog.close()
+
+        # Q6: ...and when the cycle itself reads that first blocked connection (not the poller), it goes out at once too,
+        # not after the cycle's health probe (12 s here) and deliveries.
+        refill()
+        st6 = {}
+        tail6 = events.NetgwTail(ng, st6)
+        with open(ng, "a") as fh:
+            fh.write(json.dumps({"t": "2026-11-17T10:07:00Z", "event": "blocked", "reason": "lab:private-lan",
+                                 "proto": "tcp", "dst": "10.7.7.7:22"}) + "\n")
+        real_probe = events.probe_health
+
+        def slow_probe():
+            time.sleep(12)
+            return {"vm": "running", "gateway": True, "ssh": True, "recording": {"expected": False},
+                    "guest": {"ready": True, "driver_doctor_rc": 0, "disk_free_gb": 20}}
+        events.probe_health = slow_probe
+        base = len(web.reqs)
+        try:
+            cyc = threading.Thread(target=events.watch_cycle, args=(st6, tail6, "testvm"), kwargs={"health": True})
+            t6 = time.time()
+            cyc.start()
+
+            def got6():
+                return [b["data"] for b in web.bodies()[base:] if b["data"]["type"] == "blocked_connections"]
+            g6 = wait_for(got6, 8)
+            took6 = time.time() - t6
+            check("Q6 a first blocked connection the watcher's own cycle reads goes out at once, not after the cycle's 12 s "
+                  "health probe", g6 and took6 < 6 and cyc.is_alive() and g6[0]["data"].get("first") is True
+                  and g6[0]["data"]["destinations"][0]["host"] == "10.7.7.7", (round(took6, 1), g6, cyc.is_alive()))
+            cyc.join(30)
+        finally:
+            events.probe_health = real_probe
         hst = {}
         good = {"vm": "running", "gateway": True, "ssh": True, "guest": {"ready": True, "driver_doctor_rc": 0, "disk_free_gb": 20},
                 "recording": {"expected": False}}
@@ -783,6 +897,66 @@ def main():
         check("M5 the same blocked destinations again: the wait doubles (1, 2, 4 min ...); a new set starts over",
               b1 and b2 is None and b3 and b3["data"]["count"] == 1 and b3["data"]["same_as_before"] and b4 is None
               and b5 and b6 and not b6["data"]["same_as_before"], [bool(x) for x in (b1, b2, b3, b4, b5, b6)])
+
+        # Q1-Q3: the first blocked connection after a quiet spell goes out at once; follow-ups are batched; repeats
+        # and floods are still limited.
+        st, t0 = {}, 2_000_000.0
+        a = [{"dst": "10.0.0.7:22", "reason": "r", "proto": "tcp", "t": "x"}]
+        events.add_blocked(st, a)
+        q1 = events.blocked_event(st, "testvm", now=t0)
+        events.add_blocked(st, a * 5)
+        q2 = events.blocked_event(st, "testvm", now=t0 + 2)
+        q3 = events.blocked_event(st, "testvm", now=t0 + 100)
+        q4 = events.blocked_event(st, "testvm", now=t0 + 125)
+        events.add_blocked(st, a)
+        q5 = events.blocked_event(st, "testvm", now=t0 + 135)      # 133 s after the last one seen: not a quiet spell
+        q5b = events.blocked_event(st, "testvm", now=t0 + 370)     # the doubled wait (4 min) is over: batched
+        st_old = json.loads(json.dumps(st))
+        events.add_blocked(st, a)
+        q6 = events.blocked_event(st, "testvm", now=t0 + 440)      # 305 s after the last one seen: a quiet spell
+        check("Q1 the first blocked connection goes at once (first: true); the burst after it is batched (one event "
+              "after the wait, first: false); after 5 quiet minutes the same destinations go at once again, though "
+              "the doubled wait (8 min) isn't over",
+              q1 and q1["data"]["first"] is True and q1["data"]["count"] == 1 and q2 is None and q3 is None
+              and q4 and q4["data"]["first"] is False and q4["data"]["count"] == 5 and q5 is None
+              and q5b and q5b["data"]["first"] is False and q5b["data"]["count"] == 1
+              and q6 and q6["data"]["first"] is True and q6["data"]["count"] == 1 and q6["data"]["same_as_before"],
+              [x and (x["data"]["first"], x["data"]["count"]) for x in (q1, q2, q3, q4, q5, q5b, q6)])
+        st_cmp = json.loads(json.dumps(st_old))
+        events.add_blocked(st_cmp, a)
+        st_cmp["netgw_seen"] = t0 + 439
+        check("Q1 (without the quiet spell, the same moment waits for the doubled wait, as every report did before)",
+              events.blocked_event(st_cmp, "testvm", now=t0 + 440) is None)
+        st, t0, sent = {}, 3_000_000.0, []
+        for k in range(300):                                        # a flood: a new destination every 2 s for 10 min
+            events.add_blocked(st, [{"dst": f"10.1.{k // 250}.{k % 250}:80", "reason": "r", "proto": "tcp"}])
+            ev = events.blocked_event(st, "testvm", now=t0 + 2 * k)
+            if ev:
+                sent.append((2 * k, ev["data"]["first"]))
+        gaps = [b[0] - a_[0] for a_, b in zip(sent, sent[1:])]
+        check("Q2 a flood of blocked connections: one first event at once, then at most one batched event a minute",
+              sent and sent[0] == (0, True) and all(not f for _, f in sent[1:]) and all(g >= 60 for g in gaps)
+              and len(sent) <= 11, sent)
+        st, t0, firsts = {}, 4_000_000.0, []
+        for k in range(8):                                          # a quiet spell, then one blocked connection, 8 times
+            events.add_blocked(st, a)
+            ev = events.blocked_event(st, "testvm", now=t0 + 301 * k)
+            firsts.append(ev["data"]["first"] if ev else None)
+        events.add_blocked(st, a)
+        later = events.blocked_event(st, "testvm", now=t0 + 301 * 7 + 3600)
+        check("Q3 repeats after quiet spells: at most 6 go at once in any hour; the rest wait like follow-ups (the same "
+              "destinations: the doubled wait), and an hour on they go at once again",
+              firsts == [True] * 6 + [None, None] and later and later["data"]["first"] is True, (firsts, later and later["data"]))
+        refill()
+        for k in range(12):
+            st_k = {}
+            events.add_blocked(st_k, [{"dst": f"10.2.0.{k}:80", "reason": "r", "proto": "tcp"}])
+            events.emit_dict(events.blocked_event(st_k, "testvm"), origin="watcher")
+        sec = [e for e in local_log() if e.get("type") == "blocked_connections"][-12:]
+        check("Q3 and the family limit still holds over first events from separate watchers: 10 in 10 minutes reach the "
+              "sinks, the rest only the local log", sum(1 for e in sec if e.get("rate_limited")) == 2, [e.get("rate_limited") for e in sec])
+        events.flush_all(events.config_safe(), 10)                  # what was queued goes now, not into later checks
+        refill()
         hst = {}
         sick = {**base_h, "guest": {"ready": True, "driver_doctor_rc": 2}}
         good = {**base_h, "guest": {"ready": True, "driver_doctor_rc": 0}}

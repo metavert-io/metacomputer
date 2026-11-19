@@ -689,21 +689,39 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 // MARK: - command: policy (a secret's approval, without retyping its value)
 
 func cmdPolicy(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["approval"], flags: [])
-    guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
-        throw usageError("usage: policy NAME --approval session|each")
+    let usage = "usage: policy NAME [--approval session|each] [--answer-timeout 30m|default]"
+    let a = try parseArgs(argv, values: ["approval", "answer-timeout"], flags: [])
+    let ap = a.last("approval"), at = a.last("answer-timeout")
+    guard a.positional.count == 1, validName(a.positional[0]), ap != nil || at != nil, ap.map({ ["session", "each"].contains($0) }) ?? true else {
+        throw usageError(usage)
     }
+    // --answer-timeout D (an api secret's limit for one proxied answer) or `default` (back to the default).
+    var timeout: Int? = nil
+    if let t = at, t != "default" { timeout = try parseAnswerTimeout(t) }
     let name = a.positional[0]
     try requireTTY("policy")
     installPromptSignalHandlers()
     let (key, existing) = try unlockKey(paths)
     defer { key.wipeKey() }
     guard let s = existing.secrets[name] else { throw VaultError("no secret named \(name)") }
-    try updateVault(paths, key) { p in p.secrets[name]?.approval = ap }
-    audit(paths, ["op": "policy", "result": "ok", "name": name, "approval_mode": ap], macKey: vaultAuditKey(paths, key))
-    let idp = s.kind == "api" ? isIdentityProviderHost(originHost(s.api_host ?? "")) : s.origins.contains(where: isIdentityProviderOrigin)
-    oprint(ap == "session"
-           ? "Uses of \(name) no longer ask (unless the unlock says --confirm each)" + (idp ? "; on an identity provider's site they still ask, every time." : ".")
-           : "Every use of \(name) asks first.")
+    if at != nil && s.kind != "api" { throw usageError("--answer-timeout is for api secrets (\(name) is a \(s.kind) secret)") }
+    try updateVault(paths, key) { p in
+        if let ap { p.secrets[name]?.approval = ap }
+        if at != nil { p.secrets[name]?.api_answer_timeout_s = timeout }
+    }
+    var rec: [String: Any] = ["op": "policy", "result": "ok", "name": name]
+    if let ap { rec["approval_mode"] = ap }
+    if at != nil { rec["answer_timeout_s"] = timeout ?? defaultAnswerTimeout }
+    audit(paths, rec, macKey: vaultAuditKey(paths, key))
+    if let ap {
+        let idp = s.kind == "api" ? isIdentityProviderHost(originHost(s.api_host ?? "")) : s.origins.contains(where: isIdentityProviderOrigin)
+        oprint(ap == "session"
+               ? "Uses of \(name) no longer ask (unless the unlock says --confirm each)" + (idp ? "; on an identity provider's site they still ask, every time." : ".")
+               : "Every use of \(name) asks first.")
+    }
+    if at != nil {
+        oprint("Each proxied answer for \(name) may take up to \(durationWords(timeout ?? defaultAnswerTimeout))"
+               + (timeout == nil ? " (the default)." : ". Tokens already given use it from their next request."))
+    }
     return Exit.ok
 }

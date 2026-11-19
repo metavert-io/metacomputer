@@ -514,7 +514,11 @@ The rest of the vault, briefly (details in SECURITY.md):
   as `mcproxy`, so the VM reaches it at `http://127.0.0.1:18765/NAME/`. It checks the
   short-lived token, puts the real key in the secret's header, calls `https://<api-host>`
   (no redirects followed, no proxies), streams the answer back with any copy of the key
-  blanked, and audits each request. Tokens and tunnels end with the unlock.
+  blanked, and audits each request. An answer ends with its token, or at its time limit
+  (10 minutes, or the secret's `--answer-timeout`). `token renew ID` (`Server.swift`,
+  `opRenew`) moves a live token's expiry under the same checks and approval as a new
+  token, never past the unlock or 12 hours after issue; the token in the VM is unchanged.
+  Tokens and tunnels end with the unlock.
 - **Requesters** (`vault/Util.swift`, `Requester`): the client's pid
   (`LOCAL_PEERPID`) and its parents up to the nearest Claude Code process name the
   session and project, for the prompt, the audit log, `NAME session` grants and
@@ -739,7 +743,7 @@ lib/mcp_relay.py (action-log records)  │     else retry with backoff, in order
 actionlog verify, web open-untrusted   │
 metacomputer notify (Claude)           ┘
 spool files (the secrets vault, …)  ──▶ taken on every emission and by the watcher
-events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
+events watcher (30 s): spool, backlogs, netgw-blocked.jsonl (checked every 2 s), health every 5 min
 ```
 
 - **Where it runs.** In the process that emits: commands emit before they
@@ -792,8 +796,10 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl, health every 5 min
   neither holds), pid in `$RUN_DIR/events-watcher.pid`. Every 30 s: the
   configuration check, the spool, pending announcements, due
   backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
-  (destination, port, protocol, reason; batched to one event a minute, slowing
-  to once an hour for the same destinations). Every 5 min: `metacomputer
+  (destination, port, protocol, reason). A thread of its own stats that log every
+  2 s, whatever the cycle is doing: the first blocked connection after 5 quiet minutes is sent at once (at
+  most 6 an hour); the follow-ups are batched to one event a minute, slowing
+  to once an hour for the same destinations. Every 5 min: `metacomputer
   _health` (Lume state, gateway, SSH, `guest-status`, the desktop recording),
   with one event per change and a 30-minute quiet period for a condition that
   comes back. Each step runs on its own, so one failing doesn't stop the others.

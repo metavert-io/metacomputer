@@ -99,8 +99,11 @@ WATCH_BUDGET = 20.0     # per sink, per watcher cycle
 WATCH_INTERVAL = 30
 HEALTH_INTERVAL = 300
 HEALTH_RENOTIFY_S = 1800  # a health condition that comes back within 30 min isn't announced again
-NETGW_BATCH_S = 60        # at most one blocked-connections event a minute ...
+NETGW_BATCH_S = 60        # follow-ups: at most one blocked-connections event a minute ...
 NETGW_MAX_S = 3600        # ... and, for the same destinations again and again, doubling up to once an hour
+NETGW_QUIET_S = 300       # the first blocked connection after 5 minutes with none goes out at once ...
+NETGW_FIRST_CAP = (6, 3600)   # ... at most 6 times in any hour; past that it waits like a follow-up
+NETGW_POLL_S = 2          # between its cycles, the watcher looks at the gateway's log this often
 DEBOUNCE_S = 300
 EMIT_DUP_S = 60           # `events emit`: the same event again within a minute is dropped
 RATE_CAP, RATE_WINDOW = 10, 600   # per family: at most 10 events in any 10 minutes reach the sinks
@@ -1887,6 +1890,16 @@ class NetgwTail:
             except OSError:
                 st["netgw_offset"], st["netgw_inode"] = 0, None
 
+    def grew(self):
+        """Whether the log changed since the last poll (a cheap stat, for the watcher's quick looks between
+        its cycles). Compared with what the last poll saw, not where it got to, so a half-written last line
+        isn't read again every few seconds."""
+        try:
+            s = os.stat(self.path)
+        except OSError:
+            return False
+        return (s.st_ino, s.st_size) != getattr(self, "seen", (self.st.get("netgw_inode"), self.st.get("netgw_offset")))
+
     def poll(self):
         try:
             s = os.stat(self.path)
@@ -1900,6 +1913,7 @@ class NetgwTail:
             data = f.read(4 * 2**20)
         cut = data.rfind(b"\n") + 1
         self.st["netgw_offset"], self.st["netgw_inode"] = off + cut, s.st_ino
+        self.seen = (s.st_ino, s.st_size if len(data) < 4 * 2**20 else -1)   # -1: more to read, look again
         out = []
         for line in data[:cut].split(b"\n"):
             try:
@@ -1951,23 +1965,43 @@ def add_blocked(st, recs):
                 index[k] = e
         e["count"] = int(e.get("count") or 0) + 1
         e["last"] = r.get("t") if isinstance(r.get("t"), str) else e.get("last")
+        st["netgw_new"] = True                 # blocked_event decides whether these open a quiet spell's report
     st["netgw_pending"] = list(index.values())
 
 
+def _num(v, default=0.0):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v else default
+
+
 def blocked_event(st, vm=None, now=None):
-    """The batched security event for the pending blocked connections, or None (then they wait).
-    At most one a minute; when the same destinations come back each time, the wait doubles, up to an hour."""
+    """The security event for the pending blocked connections, or None (then they wait).
+    - The first blocked connection after NETGW_QUIET_S with none goes out at once (`first`), at most
+      NETGW_FIRST_CAP times in any hour; the watcher looks at the gateway's log every few seconds.
+    - Everything after it, until the next quiet spell, is batched: at most one event a minute, and when the
+      same destinations come back each time, the wait doubles, up to an hour.
+    The family limit and each phone's cap still apply on top (record(), phone_slot())."""
     pend = [e for e in (st.get("netgw_pending") or []) if isinstance(e, dict)]
     now = now or time.time()
+    new = st.pop("netgw_new", False) is True
+    seen_before = st.get("netgw_seen")
+    if new:
+        st["netgw_seen"] = now                 # the watcher's own clock, never the gateway's record times
     if not pend:
         return None
+    firsts = [t for t in (st.get("netgw_firsts") or [])
+              if isinstance(t, (int, float)) and not isinstance(t, bool) and 0 <= now - t < NETGW_FIRST_CAP[1]]
+    quiet = new and (seen_before is None or now - _num(seen_before) >= NETGW_QUIET_S)
+    first = quiet and len(firsts) < NETGW_FIRST_CAP[0]
     sig = hashlib.sha256(dumps(sorted([str(e.get("host")), str(e.get("port")), str(e.get("proto")),
                                        str(e.get("reason"))] for e in pend)).encode()).hexdigest()[:16]
     same = sig == st.get("netgw_sig")
-    repeat = int(st.get("netgw_repeat") or 0) if same else 0
+    repeat = int(_num(st.get("netgw_repeat"))) if same else 0
     wait = min(NETGW_BATCH_S * 2 ** min(repeat + 1, 10), NETGW_MAX_S) if same else NETGW_BATCH_S
-    if now - float(st.get("netgw_last") or 0) < wait:
+    st["netgw_firsts"] = firsts
+    if not first and now - _num(st.get("netgw_last")) < wait:
         return None
+    if first:
+        firsts.append(now)
     dests = sorted(pend, key=lambda e: -int(e.get("count") or 0))
     total = sum(int(d.get("count") or 0) for d in dests)
     top = ", ".join(f"{safe_host(d.get('host'))}{':' + str(d['port']) if d.get('port') else ''} ({safe_word(d.get('reason'))})"
@@ -1978,7 +2012,7 @@ def blocked_event(st, vm=None, now=None):
             "message": f"The VM tried {total} connection(s) its gateway blocks: {top}"
                        + (f" and {len(dests) - 3} more destination(s)" if len(dests) > 3 else ""),
             "data": {"count": total, "destinations": dests[:20], "log": "logs/netgw-blocked.jsonl",
-                     "same_as_before": same}}
+                     "same_as_before": same, "first": first}}
 
 
 IP_RE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:.]{2,45})$")
@@ -2082,14 +2116,41 @@ def probe_health():
     return h if isinstance(h, dict) else {}
 
 
-def emit_dict(e, project=None, origin="cli"):
+def emit_dict(e, project=None, origin="cli", deliver_now=False):
     return emit(e["family"], e["type"], e["message"], e.get("severity"), e.get("action"), e.get("data"),
-                e.get("vm"), project, deliver_now=False, origin=origin)
+                e.get("vm"), project, deliver_now=deliver_now, origin=origin)
 
 
-def watch_cycle(st, tail, vm, health=False):
+def blocked_step(st, tail, vm, deliver_now=False, lock=None):
+    """New gateway records into the pending counts, and the event they make now, if any (blocked_event).
+    lock: held while the state is read and changed and the event recorded (the watcher's own thread for the gateway's
+    log shares the state with its cycle). deliver_now: then send it at once, outside the lock (the watcher's poller),
+    not at the cycle's delivery step."""
+    with (lock if lock is not None else _NoLock()):
+        add_blocked(st, tail.poll())
+        ev = blocked_event(st, vm)
+        if ev:
+            emit_dict(ev, origin="watcher")
+    # A first report goes out now whichever reader recorded it: the cycle's own read would otherwise leave it queued
+    # behind the cycle's health probe and deliveries, and the poller wouldn't see it again (the log didn't grow).
+    if ev and (deliver_now or (ev.get("data") or {}).get("first") is True):
+        flush_all(config_safe())
+    return ev
+
+
+class _NoLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def watch_cycle(st, tail, vm, health=False, lock=None):
     """One cycle. Each step is on its own, so a problem in one (an odd gateway record, a failed probe)
-    doesn't stop the others."""
+    doesn't stop the others. lock: held while the shared state changes (never during the probe or deliveries)."""
+    lk = lock if lock is not None else _NoLock()
+
     def step(name, fn):
         try:
             fn()
@@ -2103,14 +2164,15 @@ def watch_cycle(st, tail, vm, health=False):
             flush_suppressed(cfg)
 
     def blocked():
-        add_blocked(st, tail.poll())
-        ev = blocked_event(st, vm)
-        if ev:
-            emit_dict(ev, origin="watcher")
+        blocked_step(st, tail, vm, lock=lock)
 
     def probe():
-        st["health_last"] = time.time()
-        for e in health_events(st, probe_health(), vm):
+        with lk:
+            st["health_last"] = time.time()
+        h = probe_health()                      # up to minutes: the gateway's log is watched meanwhile (watch())
+        with lk:
+            evs = health_events(st, h, vm)
+        for e in evs:
             emit_dict(e, origin="watcher")
     step("configuration", config_guard)
     step("spool", spool)
@@ -2174,12 +2236,39 @@ def watch(once=False, health=False):
     if not once or "health_last" not in st:
         st["health_last"] = time.time()           # the first probe 5 minutes after start
     tail = NetgwTail(os.path.join(log_dir(), "netgw-blocked.jsonl"), st)
+    lk = threading.Lock()                       # the state, the gateway log's place, recording a blocked report
+
+    def save():
+        with lk:
+            write_private(sp, json.dumps(st))   # where it got to, so nothing is reported twice
+
+    def poll_blocked():
+        """The gateway's log, on a thread of its own: every NETGW_POLL_S seconds, whatever the cycle is doing (a health
+        probe or a slow sink can take minutes), so the first blocked connection after a quiet spell goes out within
+        seconds. blocked_event decides; follow-ups stay batched."""
+        while not stop["now"]:
+            for _ in range(NETGW_POLL_S * 4):
+                if stop["now"]:
+                    return
+                time.sleep(0.25)
+            try:
+                with lk:
+                    grown = tail.grew()
+                if grown:
+                    blocked_step(st, tail, vm, deliver_now=True, lock=lk)
+                    save()
+            except Exception as e:
+                note_error(f"watcher blocked connections (poller): {e!r}")
+    poller = None
+    if not once:
+        poller = threading.Thread(target=poll_blocked, name="netgw-poller", daemon=True)
+        poller.start()
     try:
         while not stop["now"]:
             due = health or (not once and time.time() - float(st.get("health_last") or 0) >= HEALTH_INTERVAL)
-            watch_cycle(st, tail, vm, health=due)
+            watch_cycle(st, tail, vm, health=due, lock=lk)
             try:
-                write_private(sp, json.dumps(st))
+                save()
             except Exception as e:
                 note_error(f"watcher state: {e!r}")
             if once:
@@ -2193,6 +2282,9 @@ def watch(once=False, health=False):
                     break
                 time.sleep(1)
     finally:
+        stop["now"] = True
+        if poller is not None:
+            poller.join(10)                     # let a report it's recording reach the state first
         if pid_fd is not None:
             try:
                 if open(pf).read().strip() == str(os.getpid()):

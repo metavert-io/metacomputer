@@ -171,6 +171,27 @@ func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
     return true
 }
 
+/// writeAll that gives up at an absolute deadline, however slowly the other side reads: each write waits at most a
+/// second (and never past the deadline), and one that times out is tried again only while time is left.
+func writeAllBefore(_ fd: Int32, _ bytes: [UInt8], _ deadline: Date) -> Bool {
+    var off = 0
+    while off < bytes.count {
+        let left = deadline.timeIntervalSinceNow
+        guard left > 0 else { return false }
+        let wait = min(left, 1)
+        var tv = timeval(tv_sec: Int(wait), tv_usec: Int32((wait - wait.rounded(.down)) * 1_000_000))
+        if tv.tv_sec == 0 && tv.tv_usec < 1000 { tv.tv_usec = 1000 }
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let n = bytes.withUnsafeBytes { p in write(fd, p.baseAddress! + off, bytes.count - off) }
+        if n < 0 {
+            if errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { continue }
+            return false
+        }
+        off += n
+    }
+    return true
+}
+
 /// Write a file atomically (temporary file in the same folder, fsync, rename), mode 0600.
 /// Write a file so that, after a crash or power loss, it holds either the old contents or
 /// the new, and once this returns the new contents and the rename are on disk: the data goes
@@ -550,6 +571,18 @@ struct ProcEntry {
     let ppid: pid_t
     let name: String
     let start: Double
+}
+
+/// Whether a process runs in the foreground of a terminal, as the kernel reports it: it has a controlling terminal,
+/// and its process group is that terminal's foreground group. Attribution only: any program of yours can start one in
+/// a pseudo-terminal it makes.
+func inTerminalForeground(_ pid: pid_t) -> Bool {
+    var k = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    guard pid > 1, sysctl(&mib, 4, &k, &size, nil, 0) == 0, size > 0, k.kp_proc.p_pid == pid else { return false }
+    guard k.kp_proc.p_flag & P_CONTROLT != 0, k.kp_eproc.e_tdev != -1 else { return false }   // -1: NODEV
+    return k.kp_eproc.e_tpgid > 0 && k.kp_eproc.e_tpgid == k.kp_eproc.e_pgid
 }
 
 func procEntry(_ pid: pid_t) -> ProcEntry? {

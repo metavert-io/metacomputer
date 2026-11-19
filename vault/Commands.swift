@@ -12,8 +12,9 @@ In your own terminal (these ask for the vault passphrase):
   set NAME --kind password|totp|text --origin https://site [--origin ...]
       [--username U] [--approval session|each] [--project DIR ...] [--replace]
   set NAME --kind api --api-host api.example.com [--header 'Authorization: Bearer {value}']
-      [--api-path-prefix /v1] [--approval session|each] [--project DIR ...] [--replace]
-                                         store a secret (the value is typed, not echoed); --replace rotates it
+      [--api-path-prefix /v1] [--answer-timeout 30m] [--approval session|each] [--project DIR ...] [--replace]
+                                         store a secret (the value is typed, not echoed); --replace rotates it;
+                                         --answer-timeout: how long one proxied answer may take (default 10m, at most 1h)
   delete NAME                            remove a secret
   bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U
       [--proxy-key PATH --proxy-user U --proxy-port N] --gateway PATH
@@ -27,7 +28,9 @@ In your own terminal (these ask for the vault passphrase):
       [--ca FILE] [--required]           send every audit event off this Mac (prints its key once;
                                          `ask` and {ask} are typed with the echo off)
   audit-sink show NAME --key | remove NAME
-  policy NAME --approval session|each    whether a secret's uses ask first (without typing its value again)
+  policy NAME [--approval session|each] [--answer-timeout 30m|default]
+                                         whether a secret's uses ask first; an api secret's answer time limit
+                                         (without typing its value again)
   presence on|off|auto                   presence mode by default (auto: on where this Mac has Touch ID)
   import-passwords --browser chrome [--profile NAME] [--site HOST ...] [--dry-run]
   import-passwords --csv FILE [--site HOST ...] [--dry-run]
@@ -59,6 +62,9 @@ From anywhere (Claude uses these; they work only while the vault is unlocked):
                                          put a sealed profile back, under its own name (--site: only those
                                          sites' cookies, from an imported session)
   token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
+  token renew ID|--all --vm VM [--ttl 15m]
+                                         keep live tokens going (the same token in the VM): asks like a new token,
+                                         never past the unlock or 12 h after the token was made
   tokens [--json]   revoke ID|--all      live tokens; end them
   requests [--json]                      uses waiting for your approval: id, who asked, site, masked username, age
   settle [--timeout S]                   wait until the unlock process has finished every request it got before this
@@ -225,7 +231,8 @@ func age(_ iso: String?) -> String? {
 // MARK: - set / delete
 
 func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix"],
+    let a = try parseArgs(argv, values: ["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix",
+                                         "answer-timeout"],
                           flags: ["replace"])
     guard a.positional.count == 1 else {
         throw usageError("usage: set NAME --kind password|totp|text|api ... (mcomp-vault help)")
@@ -241,8 +248,9 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         }
         if !origins.contains(c) { origins.append(c) }
     }
-    var apiHost: String?, apiHeader: String?, apiPrefix: String?
+    var apiHost: String?, apiHeader: String?, apiPrefix: String?, answerTimeout: Int?
     if kind == "api" {
+        if let t = a.last("answer-timeout") { answerTimeout = try parseAnswerTimeout(t) }
         guard origins.isEmpty else { throw usageError("--origin is for secrets typed into pages; api secrets name --api-host") }
         guard let h = a.last("api-host")?.lowercased(), matches(h, "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$") else {
             throw usageError("--api-host: the API's host name, like api.example.com (no scheme or path; :port allowed)")
@@ -264,8 +272,8 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
             apiPrefix = norm.isEmpty ? nil : norm
         }
     } else {
-        guard a.last("api-host") == nil, a.last("header") == nil, a.last("api-path-prefix") == nil else {
-            throw usageError("--api-host, --header and --api-path-prefix go with --kind api")
+        guard a.last("api-host") == nil, a.last("header") == nil, a.last("api-path-prefix") == nil, a.last("answer-timeout") == nil else {
+            throw usageError("--api-host, --header, --api-path-prefix and --answer-timeout go with --kind api")
         }
         guard !origins.isEmpty else { throw usageError("at least one --origin https://site is needed: a secret fills only into the sites it names") }
     }
@@ -334,12 +342,14 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                                  api_host: apiHost, api_header: apiHeader, api_path_prefix: apiPrefix,
                                  gen: randomBytes(8).map { String(format: "%02x", $0) }.joined(),
                                  totp_for: (sameKind && kind == "totp") ? old?.totp_for : nil,
-                                 id: sameKind ? (old?.id ?? newSecretID()) : newSecretID())
+                                 id: sameKind ? (old?.id ?? newSecretID()) : newSecretID(),
+                                 api_answer_timeout_s: answerTimeout)
     }
     unlinked.sort()
     var rec: [String: Any] = ["op": old == nil ? "set" : "rotate", "result": "ok", "name": name, "kind": kind, "approval_mode": approval]
     if !origins.isEmpty { rec["origins"] = origins }
     if let h = apiHost { rec["api_host"] = h }
+    if let t = answerTimeout { rec["answer_timeout_s"] = t }
     if !projects.isEmpty { rec["projects"] = projects }
     if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
     audit(paths, rec, macKey: vaultAuditKey(paths, key))
@@ -347,8 +357,22 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
     oprint((old == nil ? "Saved" : "Rotated") + " \(name) (\(kind)) for \(where_)"
            + (projects.isEmpty ? "" : ", only for Claude Code sessions in \(projects.map(tildePath).joined(separator: ", "))")
+           + (answerTimeout.map { ", each answer within \(durationWords($0))" } ?? "")
            + (approval == "each" ? "; every use asks at the unlock terminal." : "."))
     return Exit.ok
+}
+
+/// `--answer-timeout`: how long one proxied answer for an api secret may take, minAnswerTimeout to maxAnswerTimeout.
+func parseAnswerTimeout(_ s: String) throws -> Int {
+    guard let n = parseDuration(s), n >= minAnswerTimeout, n <= maxAnswerTimeout else {
+        throw usageError("--answer-timeout: like 90s, 30m or 1h (at least \(minAnswerTimeout)s, at most \(maxAnswerTimeout / 3600)h; the default is \(defaultAnswerTimeout / 60)m)")
+    }
+    return n
+}
+
+/// 1800 -> "30 min", 90 -> "90 s", 3600 -> "1 h".
+func durationWords(_ s: Int) -> String {
+    s % 3600 == 0 ? "\(s / 3600) h" : (s % 60 == 0 ? "\(s / 60) min" : "\(s) s")
 }
 
 func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
@@ -763,11 +787,17 @@ func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    // `token renew ID|--all`: a token id (8 hex digits) or --all after "renew" makes it a renewal. Anything else after
+    // it is a token for a secret named "renew", as before this command existed.
+    if argv.first == "renew" {
+        let rest = Array(argv.dropFirst())
+        if rest.contains("--all") || rest.contains(where: { matches($0, "^[0-9a-f]{8}$") }) { return try cmdTokenRenew(paths, rest) }
+    }
     let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"])
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
-        throw usageError("usage: token NAME --vm VM [--ttl 15m]")
+        throw usageError("usage: token NAME --vm VM [--ttl 15m] | token renew ID|--all --vm VM [--ttl 15m]")
     }
-    guard let ttl = parseDuration(a.last("ttl") ?? "15m"), ttl <= 8 * 3600 else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }
+    guard let ttl = parseDuration(a.last("ttl") ?? "15m"), ttl <= tokenMaxTTL else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }
     let name = a.positional[0]
     var req: [String: Any] = ["op": "token", "name": name, "vm": vm, "ttl_s": ttl]
     try useOptions(a, &req)
@@ -776,6 +806,34 @@ func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         return lockedUse(paths, "token", ["name": name, "vm": vm])
     }
     printResult(res, ["ok", "name", "vm", "token_id", "token", "base_url", "header", "api_host", "expires", "expires_in_s", "reason"])
+    return exitFor(res)
+}
+
+/// token renew ID|--all --vm VM [--ttl D]: a live token (or every live token on that VM) lives longer; the token in the
+/// VM stays the same. The unlock process applies the same rules as for a new token, and asks where one would.
+func cmdTokenRenew(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let usage = "usage: token renew ID|--all --vm VM [--ttl 15m]"
+    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"], flags: ["all"])
+    guard let vm = a.last("vm"), validName(vm), a.has("all") != (a.positional.count == 1), a.positional.count <= 1,
+          a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }) else { throw usageError(usage) }
+    // Whether this runs at a terminal (you typing it): the unlock process checks the kernel's view too, and a renewal
+    // of another requester's token from anywhere else asks.
+    var req: [String: Any] = ["op": "renew", "vm": vm, "interactive": isatty(0) == 1 && isatty(2) == 1]
+    if let id = a.positional.first { req["id"] = id } else { req["all"] = true }
+    if let t = a.last("ttl") {
+        guard let ttl = parseDuration(t), ttl <= tokenMaxTTL else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }
+        req["ttl_s"] = ttl
+    }
+    if a.has("all") && a.last("request-id") != nil { throw usageError("--request-id goes with one token id, not --all") }
+    try useOptions(a, &req)
+    let res: [String: Any]
+    do { res = try request(paths, req, timeout: a.has("all") ? 1800 : 300, cancellable: true) } catch ClientError.locked {
+        var f: [String: Any] = ["vm": vm]
+        if let id = a.positional.first { f["token_id"] = id }
+        return lockedUse(paths, "renew", f)
+    }
+    printResult(res, ["ok", "name", "vm", "token_id", "expires", "expires_in_s", "extended", "renewals", "longest_until",
+                      "renewed", "not_renewed", "request_id", "reason"])
     return exitFor(res)
 }
 

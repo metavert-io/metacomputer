@@ -43,14 +43,14 @@ alias). `metacomputer help` prints a summary.
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
 | `security [apply] [--json]` | The optional hardening and the shell channel, as configured and as the VM has them |
 | `actions list\|show\|verify` | The signed action log (`ACTION_LOG=on`) |
-| `secrets init\|set\|delete\|policy\|bind\|unlock` | The credentials vault: commands you run in your own terminal (they ask for the vault passphrase or a value); `set` on an existing name needs `--replace`; `policy NAME --approval session\|each` changes whether a secret asks; `unlock [--for 30m] [--confirm each] [--touch-id] [--require-presence\|--no-require-presence]` |
+| `secrets init\|set\|delete\|policy\|bind\|unlock` | The credentials vault: commands you run in your own terminal (they ask for the vault passphrase or a value); `set` on an existing name needs `--replace`; `policy NAME --approval session\|each` changes whether a secret asks (`--answer-timeout 30m` an api secret's answer time limit); `unlock [--for 30m] [--confirm each] [--touch-id] [--require-presence\|--no-require-presence]` |
 | `secrets import-passwords --browser chrome [--profile N] \| --csv FILE [--site H] [--dry-run]`, `secrets import-session --browser chrome --site H --name N --to-profile P` | Bring logins in from Chrome or a Chrome, Passwords app, 1Password or Bitwarden export, or one site's cookies from your Chrome (your own terminal; macOS asks about Chrome's key) |
 | `secrets rekey\|recover\|rotate-session-key` | New keys, or opening the vault with its recovery key (your own terminal) |
 | `secrets audit-sink add\|remove\|show NAME --key` | Off-Mac copies of the audit log, and a sink's signing key (your own terminal) |
 | `secrets approve ID [--passphrase] [--scope session\|unlock]`, `secrets rule add ... --for D`, `secrets presence on\|off\|auto` | Approve a waiting use, make an unattended rule, or set presence mode: you, from any terminal, with Touch ID, your login password or the passphrase |
 | `secrets requests`, `secrets deny ID`, `secrets rule list\|remove ID`, `secrets lock`, `secrets settle` | What waits for you; refuse one; the rules; lock now; wait until the vault has finished what it was sent |
 | `secrets list\|fill\|login\|session save\|session load` | What Claude uses while the vault is unlocked (`login NAME --password-selector CSS [--username-selector CSS]` fills both fields under one approval); values never come back |
-| `secrets token NAME [--ttl 15m]`, `secrets tokens`, `secrets revoke ID\|--all` | A short-lived API token and the proxy's URL in the VM; the live tokens; end them |
+| `secrets token NAME [--ttl 15m]`, `secrets token renew ID\|--all [--ttl 15m]`, `secrets tokens`, `secrets revoke ID\|--all` | A short-lived API token and the proxy's URL in the VM; keep live ones going (the same token in the VM); the live tokens; end them |
 | `secrets status\|audit\|selftest`, `secrets audit --verify\|--head`, `secrets audit-sink list\|test NAME` | State, the audit history (no values) and its checks, the vault's self-test; the sinks and their backlog |
 | `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action TEXT]` | Tell your event sinks that Claude is blocked on you |
 | `events sink add\|remove NAME ...` | Add or remove an event sink (your own terminal) |

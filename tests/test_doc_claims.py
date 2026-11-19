@@ -179,10 +179,49 @@ CLAIMS = [
      lambda m: int(m[1]) << 20 == swift_num(PROXY, r"let requestBodyLimit = ([^\n]+)")
      and int(m[2]) == swift_num(PROXY, r"let bodyDeadline: TimeInterval = (\d+)")),
     ("SECURITY.md", r"gives the whole answer at most (\d+) seconds from the moment it sends the request",
-     lambda m: int(m[1]) == swift_num(PROXY, r"var answer: TimeInterval = (\d+)")),
+     lambda m: int(m[1]) == swift_num(PROXY, r"let defaultAnswerTimeout = (\d+)")
+     and "var answer = TimeInterval(defaultAnswerTimeout)" in raw(PROXY)),
+    ("SECURITY.md", r"\(or the secret's own `--answer-timeout`, (\d+) seconds to (\d+)\)",
+     lambda m: (int(m[1]), int(m[2])) == (swift_num(PROXY, r"let minAnswerTimeout = (\d+)"),
+                                          swift_num(PROXY, r"let maxAnswerTimeout = (\d+)"))
+     and "n >= minAnswerTimeout, n <= maxAnswerTimeout" in raw(PROXY) and "n >= minAnswerTimeout, n <= maxAnswerTimeout" in raw(CMDS)),
+    ("SECURITY.md", r"`--answer-timeout 30m`; (\d+) minutes by default, at most an hour",
+     lambda m: int(m[1]) * 60 == swift_num(PROXY, r"let defaultAnswerTimeout = (\d+)")
+     and swift_num(PROXY, r"let maxAnswerTimeout = (\d+)") == 3600),
     ("SECURITY.md", r"`metacomputer secrets token openai \[--ttl 15m\]` \(at most (\d+) hours, and never past the unlock's end\)",
-     lambda m: int(m[1]) * 3600 == swift_num(CMDS, r"ttl <= ([0-9 *]+) else")
-     == swift_num(SERVER, r"min\(ttlAsked, ([0-9 *]+), remaining\(\)\)")),
+     lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
+     and "ttl <= tokenMaxTTL else" in raw(CMDS) and "min(ttlAsked, tokenMaxTTL, remaining())" in raw(SERVER)),
+    # Renewing a token: never more than tokenMaxLifetime after issue (the longest unlock), never past the unlock
+    ("SECURITY.md", r"more than \*\*(\d+) hours after the token was made\*\*, however often it's renewed \(the longest unlock",
+     lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxLifetime = ([^\n]+)")
+     == swift_num(CMDS, r"seconds <= ([0-9 *]+) else \{ throw usageError\(\"--for")
+     and "let cap = min(expires, t.limit)" in raw(SERVER) and "let target = min(until, t.limit)" in raw(PROXY)),
+    ("SECURITY.md", r"The new expiry is `--ttl` from now \(by default, the lifetime the token was made with, at most (\d+) hours\)",
+     lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
+     and "let step = min(asked ?? t.ttl, tokenMaxTTL)" in raw(SERVER)),
+    # Who renews: another requester asks, even for a `session` secret; the token's own session and you at a terminal don't
+    ("SECURITY.md", r"renewing a token made for another requester asks at the unlock terminal, like an `each` secret, even for a "
+                    r"`session` secret",
+     lambda m: 'let otherRequester = by == "other"' in raw(SERVER)
+     and "if confirmEach || s.approval == \"each\" || idp || otherRequester {" in raw(SERVER)
+     and 'return "same"' in raw(SERVER) and 'who.claudePID == nil && interactive && inTerminalForeground(who.clientPID)' in raw(SERVER)
+     and "func inTerminalForeground" in raw("vault/Util.swift")),
+    ("SECURITY.md", r"A renewal that was asked about gets the expiry its question named, never a later one",
+     lambda m: "hub.renew(id: t.id, vm: t.vm, until: first)" in raw(SERVER)),
+    ("SECURITY.md", r"So is `lock`: every token ends when it's accepted, before the unlock process has stopped the proxy",
+     lambda m: raw(SERVER).count("hub.lockdown()          // every token ends now") == 2),
+    # The answer: 120 s without a byte, whatever --answer-timeout says; the vault file checked while it streams
+    ("SECURITY.md", r"The API must send its first byte, and each next one, within (\d+) seconds, whatever the limit",
+     lambda m: f"plainSessionConfig(timeout: {m[1]})" in raw(PROXY) and "cfg.timeoutIntervalForResource = limit + 30" in raw(PROXY)),
+    ("SECURITY.md", r"the API must still send its first byte, and each next one, within (\d+) seconds, whatever the limit",
+     lambda m: f"plainSessionConfig(timeout: {m[1]})" in raw(PROXY)),
+    ("SECURITY.md", r"A vault file this unlock can no longer open and verify \(a rekey, a recover, a damaged or missing file\) ends "
+                    r"every token at once and locks the vault, checked in the unlock loop and while a question waits too",
+     lambda m: "guard let p = try? loadPayload(paths, key) else {\n            endAll()" in raw(PROXY)
+     and "guard stat(paths.vault, &st) == 0 else {\n            endAll()" in raw(PROXY)
+     and raw(SERVER).count("checkVault()") >= 4 and "stopReason = \"the vault file can't be read and verified" in raw(SERVER)),
+    ("SECURITY.md", r"the vault file is checked for changes four times a second while an answer streams",
+     lambda m: "while stream.done.wait(timeout: .now() + 0.25) == .timedOut {\n            refreshIfVaultChanged()" in raw(PROXY)),
     ("SECURITY.md", r"the token \(`mct_` and (\d+) random bits\)",
      lambda m: int(m[1]) == 8 * swift_num(PROXY, r'"mct_" \+ base64url\(randomBytes\((\d+)\)\)')),
     ("SECURITY.md", r"\*\*127\.0\.0\.1:(\d+) inside the VM\*\* \(`SECRETS_PROXY_PORT`\)",
@@ -257,6 +296,19 @@ CLAIMS = [
      lambda m: (int(m[1]), int(m[2]) * 60) == (events.RATE_CAP, events.RATE_WINDOW)),
     ("docs/guide.md", r"\(10 per family in 10 minutes; a phone also (\d+) an hour\)",
      lambda m: (int(m[1]), 3600) in events.PHONE_LIMITS and (10, 600) in events.PHONE_LIMITS),
+    # Blocked connections: the first after a quiet spell at once, the rest batched (lib/events.py)
+    ("SECURITY.md", r"The first blocked connection after (\d+) quiet minutes is reported at once \(within a few seconds; at "
+                    r"most (\d+) such reports in any hour\); what follows it is batched, at most once a minute, and "
+                    r"repeated reports of the same destinations slow down \(up to once an hour\)",
+     lambda m: (int(m[1]) * 60, (int(m[2]), 3600)) == (events.NETGW_QUIET_S, events.NETGW_FIRST_CAP)
+     and events.NETGW_POLL_S <= 5 and (events.NETGW_BATCH_S, events.NETGW_MAX_S) == (60, 3600)),
+    ("docs/events.md", r"When the cycle itself happens to read that first one, it's sent at once too, before the cycle's health probe",
+     lambda m: 'if ev and (deliver_now or (ev.get("data") or {}).get("first") is True):' in raw("lib/events.py")
+     and raw("lib/events.py").index('step("blocked connections", blocked)') < raw("lib/events.py").index('step("health", probe)')),
+    ("docs/events.md", r"The first blocked connection after (\d+) minutes with none goes out at once \(the watcher looks every "
+                       r"(\d+) seconds\), at most (\d+) times in any hour\. What follows it is batched: at most one event a minute",
+     lambda m: (int(m[1]) * 60, int(m[2]), (int(m[3]), 3600), events.NETGW_BATCH_S)
+     == (events.NETGW_QUIET_S, events.NETGW_POLL_S, events.NETGW_FIRST_CAP, 60)),
     # The shell channel (lib/vm_shell.py)
     ("docs/guide.md", r"`--timeout SECONDS` \(default (\d+), at most (\d+)\)",
      lambda m: (int(m[1]), int(m[2])) == (vm_shell.DEFAULT_TIMEOUT, vm_shell.MAX_TIMEOUT)),

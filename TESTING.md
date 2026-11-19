@@ -237,7 +237,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (178 checks, about a minute and a half). It keeps
+`python3 tests/test_events.py` needs no VM (187 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -248,7 +248,7 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the spool, including invalid and oversized files;
 - a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
 - eight processes emitting at once; debounce; `notify`;
-- the watcher's pieces (blocked connections batched a minute at a time, health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
+- the watcher's pieces (the first blocked connection after a quiet spell sent at once, also by a running watcher within seconds, even while its cycle is busy with a 20 s health probe, and at once when the cycle reads it itself, the follow-ups batched a minute at a time, floods and repeated quiet-spell reports still limited; health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
 - the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
 - the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds;
 - the review's fixes, one or more checks each:
@@ -838,9 +838,13 @@ update the row with the doc's new wording. What it pins:
   `--confirm session`; rules at most 30 days; 600,000 PBKDF2 rounds; SECURITY.md's
   identity-provider table is exactly vault/Approvals.swift's list;
 - the API proxy: 16 connections per VM, a 15 s wait for a slot, a 64 KB head within 10 s,
-  a 32 MB body within 300 s, 600 s for the whole answer, tokens of at most 8 hours (both
-  where they're asked for and where they're made), 192 random bits, port 18765 in the
-  defaults and the VM's sshd;
+  a 32 MB body within 300 s, 600 s for the whole answer by default and a secret's own
+  `--answer-timeout` from 10 s to an hour, tokens of at most 8 hours (both where they're asked
+  for and where they're made), renewals at most 12 hours after issue (the longest unlock) and
+  stepping by at most 8 hours, another requester's renewal asking even for a `session` secret,
+  the expiry a renewal's question named, `lock` ending every token when it's accepted, 120 s
+  without a byte from the API whatever `--answer-timeout` says, the vault checked for changes
+  while an answer streams, 192 random bits, port 18765 in the defaults and the VM's sshd;
 - what recordings show of a filled login: the VM's fill puts a password only into a
   password field and never a username or code into one (secret-fill), and every doc that
   says passwords show as dots says usernames are visible;
@@ -851,7 +855,9 @@ update the row with the doc's new wording. What it pins:
 - the hub's limits (frame, write deadline, JSON depth and size, unusable messages,
   client message and backlog, tools refresh, windows per layout, stderr tail, the
   activity window and the kill grace, the socket's modes), the coordinate guard's codes and
-  which tools it checks and doesn't; the event stream's rate limits; the shell's timeout
+  which tools it checks and doesn't; the event stream's rate limits, and blocked connections'
+  timing (the first after 5 quiet minutes at once, at most 6 an hour, the watcher looking every
+  2 s, follow-ups once a minute up to once an hour); the shell's timeout
   and output limits;
 - the gateway: each refusal docs/guide.md, architecture.md and the README name is a
   refusing rule in config/netgw-rules.json and every refusing rule is named, nothing of
@@ -906,7 +912,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -1056,6 +1062,44 @@ pseudo-terminal for the rest of the vault:
   folder made if missing); on exit 3 through `bin/metacomputer`, one `vault_locked`
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
+
+`python3 tests/test_vault_tokens.py` (61 checks, about two and a half minutes) reuses that stub, the
+stand-in Claude Code and a local plain-HTTP API for renewable tokens and the answer time
+limit, in a throwaway vault. "You at a terminal" is the client in a pseudo-terminal of its
+own, started by an orphaned helper so no Claude Code process is among its parents, whoever
+runs the test:
+- **renewing:** `token renew ID` keeps the same token working past its first expiry and
+  counts it in `tokens`; an unknown, expired or revoked token isn't renewed; a shorter
+  `--ttl` never shortens one; `renew --all`; through `bin/metacomputer`, with
+  `secrets_token_renew` in the signed action log;
+- **who renews:** the token's own Claude Code session and you at a terminal renew a
+  `session` secret's token without a question; another session, or a program that isn't
+  Claude Code and isn't at a terminal, is asked about (told whose token it is), refused with
+  no and renewed with yes; the record's `renewer` says which;
+- **approval:** an `each` secret's renewal asks again (no leaves the expiry as it was, yes
+  renews it, each step in the audit log), `NAME session` covers the next renewal from that
+  session; a renewal answered 4 s late gets the expiry its question named; `unlock --confirm each` makes a `session` secret's renewal ask; `--project`
+  applies to whoever renews; a required audit sink that's down refuses a renewal, and
+  once it's back the renewal's own `begin` record reaches it first;
+- **revocation and lock win:** `revoke` is answered at once while a question waits (a new
+  token's or a renewal's), and the renewal allowed afterwards is refused; `lock` while
+  `renew --all` waits on a question stops the batch (the token after it isn't renewed) and
+  ends every token as soon as it's answered; a renewal's refusal written while locked
+  isn't taken for a forgery (`audit --verify`);
+- **limits:** the longest life after issue (8 s in this test build,
+  `MCOMP_VAULT_TEST_TOKEN_MAX_LIFETIME`; 12 hours otherwise) and the unlock's end are
+  never passed, and a renewal with nothing left to give says which;
+- **answers in flight:** a revoke cuts a streaming answer at once, a token that expires
+  without a renewal cuts it there, and one renewed in time streams on to the end; an answer
+  the VM stops reading ends within seconds of a revoke; `set --replace` cuts an answer
+  streaming on one of its tokens with no other request;
+- **a vault it can't open fails closed:** a damaged vault file ends the answers streaming on
+  its tokens and locks the vault, and a rekey while a question waits ends the question, the
+  answer streaming on a token and the unlock within seconds;
+  `set --answer-timeout` (its range, api secrets only, `list`, `policy NAME
+  --answer-timeout D|default`) and the proxy honouring it per secret;
+- renewal records hold only the vault's own fields; no key, passphrase or token in any
+  output, the audit log or the unlock terminal.
 
 `python3 tests/test_vault_approvals.py` (123 checks, about 5 minutes) reuses the same stub
 and pseudo-terminal for approvals beyond the unlock terminal. A test build never shows
