@@ -672,7 +672,8 @@ metacomputer vm delete demo          # the VM, its baseline and its settings, af
 Each extra VM has one settings file, `config/vms/NAME.env`, with its own names and
 ports; its SSH keys, runtime folders, vault folder and event spool are fixed by its
 name, beside the main VM's, so `--vm NAME` needs nothing else. A bare `metacomputer` still means `config/local.env`'s VM,
-and `MCOMP_CONFIG=FILE` still works. Commands that change a VM say which one first,
+and `MCOMP_CONFIG=FILE` still works; since v0.3.1 a file for another VM must set its own
+`SSH_DIR`, `RUN_DIR` and `LOG_DIR`, or building, resetting or deleting that VM is refused. Commands that change a VM say which one first,
 and anything unclear is refused rather than guessed: a checkout with no settings of
 its own, with other VMs in the runner, makes you say which with `--vm`. `vm delete`
 never takes the VM in use without `--force`, and keeps volumes and the vault folder

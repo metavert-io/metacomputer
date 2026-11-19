@@ -22,6 +22,14 @@ All notable changes to metacomputer are recorded here. The format follows
 - The audit log records `code_request`, `code_give`, `code_fill`, `code_relay`, `code_refuse` and `code_expire` (never a value). SECURITY.md and the guide recommend a dedicated automation mailbox for relays.
 - Tests: `tests/test_vault_codes.py` (no VM, in the release's suites) and `tests/test_vault_codes_vm.py` (a test VM).
 
+### Changed
+
+- `./install.sh` is quieter: the builds of mcomp-vm, the host tools and the vault, which printed hundreds of harmless lines (Swift's compiler warnings, Go's downloads), each show one line and keep their whole output in a log in the logs folder (`logs/build-mcomp-vm-…`, `build-tools-…` and `build-vault-….log`, or `LOG_DIR`). A build that fails shows the end of its log (escaped) and the log's path, then stops the install or (the vault) warns, as before.
+
+### Fixed
+
+- An `MCOMP_CONFIG` file for another VM whose folders are the main VM's is now refused with how to fix it (set its own `SSH_DIR`, `RUN_DIR` and `LOG_DIR`, as `config/local.env.example` shows); `install.sh` no longer suggests `--replace-vm` or a VM to look at when the VM build stopped before it began; and the README and guide no longer say `MCOMP_CONFIG=FILE` works as before (since v0.3.1 such a file must set those folders).
+
 ## [0.3.1] - 2026-11-19
 
 ### Added
