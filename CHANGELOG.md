@@ -22,6 +22,8 @@ All notable changes to metacomputer are recorded here. The format follows
 - The audit log records `code_request`, `code_give`, `code_fill`, `code_relay`, `code_refuse` and `code_expire` (never a value). SECURITY.md and the guide recommend a dedicated automation mailbox for relays.
 - Tests: `tests/test_vault_codes.py` (no VM, in the release's suites) and `tests/test_vault_codes_vm.py` (a test VM).
 
+## [0.3.2] - 2026-11-19
+
 ### Changed
 
 - `./install.sh` is quieter: the builds of mcomp-vm, the host tools and the vault, which printed hundreds of harmless lines (Swift's compiler warnings, Go's downloads), each show one line and keep their whole output in a log in the logs folder (`logs/build-mcomp-vm-…`, `build-tools-…` and `build-vault-….log`, or `LOG_DIR`). A build that fails shows the end of its log (escaped) and the log's path, then stops the install or (the vault) warns, as before.
