@@ -7,7 +7,7 @@
     "commit": "1cceb9b338a21baf53005fe9508aea43d28c8209",
     "uncommitted_changes": false,
     "on_main": false,
-    "rebased_as": "266d57e (branch learn-bench-tasks, rebased onto 3da8e2c)"
+    "rebased_as": "266d57e (branch learn-bench-tasks, rebased onto 3da8e2c; PR #55)"
   },
   "task_set": "lessons",
   "switches": {
