@@ -746,7 +746,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (144 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (155 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -775,9 +775,12 @@ Each of these needs no VM and takes seconds.
   only `tailscale status`. Screen Sharing's remembered password, with a stand-in osascript
   keychain: asked once at a terminal (Enter saves, a no writes `VIEW_REMEMBER=off`), the
   password only on osascript's stdin, then no clipboard; refreshed in place without a
-  terminal; nothing saved for the first time without one (`--remember` refused there),
-  `--no-remember`, `off`, `on`, `--forget`, a locked keychain falling back to the
-  clipboard; plain `view` opening at a terminal on the Mac and printing over SSH. Then
+  terminal; nothing saved for the first time without one; `--remember` and `--forget`
+  refused without a terminal even when an item is there, `off` refusing every write
+  (`--remember` at a terminal too), an explicit save that fails (a locked keychain, no
+  login keychain) an error with its reason, `--open --remember` then opening with the
+  clipboard and failing; `--no-remember`, `on`, a locked keychain falling back to the
+  clipboard for `--open`; plain `view` opening at a terminal on the Mac and printing over SSH. Then
   the real osascript and Security framework in a keychain the test makes in its own
   folder, with HOME there too (the login keychain and the search list untouched;
   `security` is a stand-in that only names that keychain; nothing reads a password
@@ -787,7 +790,10 @@ Each of these needs no VM and takes seconds.
   a stand-in osascript gets the fixed script and the `--say` text as an argument (quotes,
   backslashes, `do shell script`, `end run` and `tell`, verbatim, and the real osascript's
   compose mode runs none of it), handoff doesn't wait for it, it's taken down when the
-  handoff ends, Open live view runs `view --open` and Later nothing.
+  handoff ends, Open live view runs `view --open` and Later nothing; `handoff.py _dialog ID`
+  run directly shows nothing when the setting is off or unset, over SSH, outside the
+  screen session, for another id or for a handoff the record says was opened at a
+  terminal, and shows it when the rules allow.
 - `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (18 checks, a test VM only; it starts the VM if
   it's off and stops it again): Claude's handoff opens without a terminal and waits; meanwhile an acting call
   through the hub is refused ("Paused: the user has the computer"), reads work, `sh` is refused with or

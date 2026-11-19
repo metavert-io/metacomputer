@@ -1718,9 +1718,12 @@ EOF
 
 # Screen Sharing's remembered password (SECURITY.md, "The live view"; lib/liveview.py remember): the login keychain
 # item Screen Sharing reads for vnc://127.0.0.1:VNC_PORT, written by osascript with the password on its stdin (never
-# an argument, the environment, a log or the output). It's made only with the user's yes: typed at a terminal here,
-# `--remember` typed at one, or VIEW_REMEMBER=on. Once it's there, each view --open writes the current password into
-# it (updated in place), so a rebuilt VM's new password reaches Screen Sharing too.
+# an argument, the environment, a log or the output). Who may write it:
+#   - an explicit save (`view --remember`, `view --open --remember`): only typed at a terminal, and never while
+#     VIEW_REMEMBER=off; a failure is an error with its reason;
+#   - view --open without the flag: the first save only with a yes typed at a terminal here, or VIEW_REMEMBER=on;
+#     an item that's already there is brought up to date in place (a rebuilt VM's new password), unless off.
+# VIEW_REMEMBER=off means no writes at all. Removing it (`view --forget`) is typed at a terminal too.
 view_remember_setting() { case "${VIEW_REMEMBER:-ask}" in on|off) echo "$VIEW_REMEMBER" ;; *) echo ask ;; esac; }
 view_remembered() { "$PY" "$LAB_ROOT/lib/liveview.py" remembered --port "$VNC_PORT" </dev/null >/dev/null 2>&1; }
 view_save() { # 0 = Screen Sharing's item holds the current live-view password; prints what happened
@@ -1732,29 +1735,30 @@ view_save() { # 0 = Screen Sharing's item holds the current live-view password; 
   esac
   return 0
 }
+view_off_note() { echo "VIEW_REMEMBER=off in $LOCAL_CONFIG: nothing is saved for Screen Sharing while it's off. To save it, set VIEW_REMEMBER=ask (or remove that line), then run metacomputer view --remember"; }
 # FLAG (remember | no-remember | ""): sets VIEW_SAVE=1 when the remembered password is to be written now (made or
-# refreshed), else 0; VIEW_HINT=1 when it could be, once the user says so.
+# refreshed), else 0; VIEW_HINT=1 when it could be, once the user says so. An explicit --remember that isn't allowed
+# stops here with the reason.
 view_remember_decide() {
   local flag="$1" setting a rc=0
   VIEW_SAVE=0 VIEW_HINT=0
   setting="$(view_remember_setting)"
   [ "$flag" = no-remember ] && return 0
-  view_remembered || rc=$?
-  if [ $rc = 0 ]; then
-    if [ "$setting" = off ] && [ "$flag" != remember ]; then
-      echo "Screen Sharing still has the live-view password saved earlier (VIEW_REMEMBER=off doesn't remove it;"
-      echo "metacomputer view --forget does)."
-    else
-      VIEW_SAVE=1
-    fi
+  if [ "$flag" = remember ]; then
+    [ -t 0 ] || die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal"
+    [ "$setting" = off ] && die "$(view_off_note)"
+    VIEW_SAVE=1                                   # made or updated; lib/liveview.py says why if it can't
     return 0
   fi
-  [ $rc = 1 ] || return 0                         # the keychain couldn't say: the clipboard, as before
-  if [ "$flag" = remember ] || [ "$setting" = on ]; then
-    if [ "$setting" = on ] || [ -t 0 ]; then VIEW_SAVE=1; return 0; fi
-    die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal"
+  view_remembered || rc=$?
+  if [ "$setting" = off ]; then
+    [ $rc = 0 ] && { echo "Screen Sharing still has the live-view password saved earlier (VIEW_REMEMBER=off doesn't remove it;"
+                     echo "metacomputer view --forget does)."; }
+    return 0
   fi
-  [ "$setting" = off ] && return 0
+  [ $rc = 0 ] && { VIEW_SAVE=1; return 0; }       # there already, with the user's yes: brought up to date
+  [ $rc = 1 ] || return 0                         # the keychain couldn't say: the clipboard, as before
+  [ "$setting" = on ] && { VIEW_SAVE=1; return 0; }
   if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi
   echo "Screen Sharing can remember the live-view password, so the live view opens without asking for it:"
   echo "metacomputer saves it in your login keychain, where Screen Sharing (and osascript, which writes it) can"
@@ -1764,19 +1768,20 @@ view_remember_decide() {
   case "$a" in
     ""|y|Y|yes|Yes) VIEW_SAVE=1 ;;
     *) browser_set VIEW_REMEMBER off
-       echo "Not saved, and not asked again (VIEW_REMEMBER=off in $LOCAL_CONFIG). To save it later: metacomputer view --remember" ;;
+       echo "Not saved, and not asked again (VIEW_REMEMBER=off in $LOCAL_CONFIG). To save it later, set VIEW_REMEMBER=ask"
+       echo "there (or remove that line), then run metacomputer view --remember." ;;
   esac
 }
 
 view_remember_now() { # view --remember: save it now, without opening anything
   view_remember_decide remember
-  [ "$VIEW_SAVE" = 1 ] || return 0
-  view_save || die "the live-view password wasn't saved for Screen Sharing (above)"
+  view_save || die "the live-view password wasn't saved for Screen Sharing (the reason is above)"
   echo "Screen Sharing now connects to the live view without asking for the password: metacomputer view --open"
 }
 
 view_forget() { # view --forget: remove Screen Sharing's saved live-view password (only the item metacomputer made)
   local how
+  [ -t 0 ] || die "view --forget changes your login keychain, so it's yours to run: in your own terminal"
   how="$("$PY" "$LAB_ROOT/lib/liveview.py" forget --port "$VNC_PORT" </dev/null)" || die "couldn't remove it (above)"
   case "$how" in
     removed) echo "Removed the live-view password metacomputer saved for Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
@@ -1788,7 +1793,7 @@ view_forget() { # view --forget: remove Screen Sharing's saved live-view passwor
 # --open: Screen Sharing on this Mac, with the password it remembers, or on the clipboard for a short while. Never in
 # the URL. FLAG: remember | no-remember | "".
 view_open() {
-  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}" saved=0
+  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}" saved=0 failed=0
   [[ "$secs" =~ ^[0-9]{1,4}$ ]] || secs=45
   vm_running "$VM_NAME" || die "the virtual computer is off: metacomputer start, then metacomputer view --open"
   if ! why="$("$PY" "$LAB_ROOT/lib/liveview.py" gui)"; then
@@ -1807,7 +1812,10 @@ EOF
   view_remember_decide "${1:-}"
   if [ "$VIEW_SAVE" = 1 ]; then
     if view_save; then saved=1
-    else warn "Screen Sharing's saved password couldn't be brought up to date (above); using the clipboard instead"; fi
+    else
+      warn "Screen Sharing's saved password couldn't be saved or brought up to date (the reason is above); using the clipboard instead"
+      [ "${1:-}" = remember ] && failed=1         # asked for explicitly: the command fails, after opening the live view
+    fi
   fi
   if [ "$saved" = 1 ]; then
     echo "Screen Sharing connects with the live-view password saved in your login keychain: nothing to paste."
@@ -1825,6 +1833,7 @@ EOF
   fi
   open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
   echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+  return $failed
 }
 
 # --tailnet: the commands that would publish the port to your own tailnet. Printed, never run: it changes this

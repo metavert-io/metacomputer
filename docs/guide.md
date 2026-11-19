@@ -714,7 +714,8 @@ running. Command lines are masked.
   say yes and it's saved in your login keychain, where Screen Sharing finds it,
   so from then on the live view opens without asking for a password (each
   `view --open` keeps it up to date after a rebuild; `view --forget` removes it;
-  `VIEW_REMEMBER=off` never saves it). Say no, or run it where nobody can answer,
+  `VIEW_REMEMBER=off` never saves it, or updates one saved before; `--remember`
+  and `--forget` run only in your own terminal). Say no, or run it where nobody can answer,
   and the live-view password is on your clipboard instead: paste it with Cmd+V
   when Screen Sharing asks for a password (it isn't your Mac's password). It's
   cleared from the clipboard after 45 seconds, if nothing else was copied since

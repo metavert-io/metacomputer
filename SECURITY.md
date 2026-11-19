@@ -548,8 +548,12 @@ settings so it isn't asked again; `view --remember` typed in your terminal, or
 `VIEW_REMEMBER=on`, also say yes. Without a terminal (Claude, a script, a
 dialog's button) nothing is saved for the first time; an item you agreed to is
 updated, in place, at each `view --open`, so a rebuilt VM's new password
-reaches it. `view --forget` removes it (only the item metacomputer made); `off`
-never saves one. No Screen Sharing setting is changed.
+reaches it. `view --remember` and `view --forget` (which removes only the item
+metacomputer made) refuse without a terminal, whether or not an item is there,
+and an explicit save that fails is an error with its reason (`view --open`
+falls back to the clipboard). `off` means no writes at all: nothing is saved,
+`view --remember` refuses, and an item saved earlier is no longer updated. No
+Screen Sharing setting is changed.
 
 The item is written by osascript (Apple's scripting tool) through the Security
 framework, with the password on osascript's stdin: never in an argument, the
@@ -650,7 +654,8 @@ characters), with **Open live view** (it runs `metacomputer view --open`) and
 never as part of one, so nothing in it runs. A detached helper shows it, so
 `handoff` goes on at once, and takes it down when the handoff ends. It isn't
 shown over SSH, without your screen session, or for a handoff you opened at your
-own terminal.
+own terminal; the helper checks all of that again itself, whoever starts it,
+from the handoff's own record.
 
 It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at

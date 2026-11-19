@@ -118,7 +118,7 @@ Never try to pass a human check yourself, switch browsers, modes or profiles to 
 - **Testing a web app the user is building** (the VM can't reach the Mac): `metacomputer put` its static files, serve them with `metacomputer sh -c 'cd ~/Inbox/DIR && setsid -f python3 -m http.server 8000 </dev/null >/dev/null 2>&1'`, open `http://localhost:8000`.
 - **The VM without the GUI:** `metacomputer inspect [system|windows|processes|ports|files|browser] [--json]`, read-only, fine while another session controls it.
 - **Recovery:** `metacomputer status` when something fails; `input-reset` when Chrome ignores typing; `desktop-restart` closes every app (ask first); `rename GUEST_PATH NEW_NAME` for a download saved under its id.
-- **Live view and takeover for the user:** they run `metacomputer view --open` on the Mac (Screen Sharing, with the password it remembers, or on their clipboard for 45 s); `metacomputer view --print` shows the SSH tunnel for another device, and `view --tailnet` the `tailscale serve` command, which only the user runs (it changes their Mac's networking). Saving the password for Screen Sharing (`view --remember`) is theirs too: never run it, and never read the clipboard or the keychain.
+- **Live view and takeover for the user:** they run `metacomputer view --open` on the Mac (Screen Sharing, with the password it remembers, or on their clipboard for 45 s); `metacomputer view --print` shows the SSH tunnel for another device, and `view --tailnet` the `tailscale serve` command, which only the user runs (it changes their Mac's networking). Saving or removing the password for Screen Sharing (`view --remember`, `view --forget`) is theirs too: never run them, and never read the clipboard or the keychain.
 
 ## References
 

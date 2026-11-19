@@ -399,9 +399,16 @@ def start_dialog(hid):
 
 def run_dialog(hid):
     """The detached helper: the dialog while handoff hid is open (taken down when it ends); Open live view runs
-    `metacomputer view --open` (no terminal: Screen Sharing's remembered password, else the clipboard)."""
+    `metacomputer view --open` (no terminal: Screen Sharing's remembered password, else the clipboard). It applies the
+    rules itself, whoever started it (`metacomputer handoff _dialog ID` included): INTERACTIVE_PROMPTS=on, not over
+    SSH, the user's screen session, and a handoff that wasn't opened at a terminal (the record's own `interactive`;
+    a record without it counts as opened at one). Exit 0 whether or not it showed one."""
+    if not re.fullmatch(r"h-[0-9a-f]{12}", hid or ""):
+        return 0
     rec = owners.open_handoff()
-    if not rec or rec.get("id") != hid or not re.fullmatch(r"h-[0-9a-f]{12}", hid):
+    if not rec or rec.get("id") != hid:
+        return 0
+    if dialog_off_reason(rec.get("interactive") is not False) is not None:
         return 0
     secs = str(max(1, min(int(rec["deadline"] - time.time()), owners.HANDOFF_MAX_S)))
     try:

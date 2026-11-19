@@ -1089,12 +1089,30 @@ def remember_checks():
     check("VIEW_REMEMBER=off with one saved earlier: not touched, says --forget removes it, the clipboard instead",
           r.returncode == 0 and clipped() and not any(" save " in x for x in lines("osascript "))
           and "view --forget" in r.stdout, r.stdout)
+    tag = read(item).splitlines()[2]
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--remember", extra_cfg="VIEW_REMEMBER=off\n")
+    check("an item already there, VIEW_REMEMBER=off, view --remember without a terminal: refused, the item untouched",
+          r.returncode != 0 and "yours to run" in r.stderr and read(item).splitlines()[2] == tag
+          and not any(" save " in x for x in lines("osascript ")), (r.returncode, r.stderr))
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember", extra_cfg="VIEW_REMEMBER=off\n")
+    check("…and at a terminal too: VIEW_REMEMBER=off means no writes at all, and it says how to change that",
+          rc != 0 and "VIEW_REMEMBER=off" in out and "VIEW_REMEMBER=ask" in out and read(item).splitlines()[2] == tag,
+          (rc, out))
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", "--remember", extra_cfg="VIEW_REMEMBER=off\n")
+    check("…and view --open --remember with it off: refused before anything opens", rc != 0
+          and read(item).splitlines()[2] == tag and not lines("open "), (rc, out))
+    r = view(vd, stub, lume, ssh, "--remember")
+    check("an item already there, view --remember without a terminal (VIEW_REMEMBER=ask): refused, untouched",
+          r.returncode != 0 and "yours to run" in r.stderr and read(item).splitlines()[2] == tag, r.stderr)
     r = view(vd, stub, lume, ssh, "--forget")
-    check("--forget removes it (and says so)", r.returncode == 0 and not os.path.exists(item)
-          and "Removed the live-view password" in r.stdout, (r.stdout, r.stderr))
-    r = view(vd, stub, lume, ssh, "--forget")
-    check("--forget with none: says there's none", r.returncode == 0 and "has no live-view password" in r.stdout,
-          r.stdout)
+    check("--forget without a terminal: refused, the item stays", r.returncode != 0 and "yours to run" in r.stderr
+          and os.path.exists(item), (r.returncode, r.stderr))
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--forget")
+    check("--forget at a terminal removes it (and says so)", rc == 0 and not os.path.exists(item)
+          and "Removed the live-view password" in out, (rc, out))
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--forget")
+    check("--forget with none: says there's none", rc == 0 and "has no live-view password" in out, out)
     open(argv, "w").close()
     r = view(vd, stub, lume, ssh, "--open")
     check("no terminal and nothing saved (Claude, a script, the dialog's button): nothing saved, the clipboard, and "
@@ -1119,6 +1137,21 @@ def remember_checks():
     rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember")
     check("view --remember at a terminal: saved, no question, nothing opened", rc == 0 and not asked
           and os.path.exists(item) and not lines("open ") and "view --open" in out, (rc, out))
+    tag = read(item).splitlines()[2]
+    open(os.path.join(stub, "kc.fail"), "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember")
+    check("an explicit --remember the keychain refuses (locked): an error, with the reason", rc != 0
+          and "locked" in out and "wasn't saved" in out and read(item).splitlines()[2] == tag, (rc, out))
+    open(argv, "w").close()
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", "--remember")
+    check("view --open --remember that can't save: the live view opens with the clipboard, and the command fails",
+          rc != 0 and "locked" in out and clipped() and lines("open ") == ["open vnc://127.0.0.1:59871"], (rc, out))
+    os.remove(os.path.join(stub, "kc.fail"))
+    os.rename(os.path.join(stub, "kcpath"), os.path.join(stub, "kcpath.off"))
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember")
+    os.rename(os.path.join(stub, "kcpath.off"), os.path.join(stub, "kcpath"))
+    check("an explicit --remember when the login keychain can't be found: an error, with the reason", rc != 0
+          and "login keychain" in out and "wasn't saved" in out, (rc, out))
     open(os.path.join(stub, "kc.fail"), "w").close()
     open(argv, "w").close()
     r = view(vd, stub, lume, ssh, "--open")
@@ -1342,6 +1375,42 @@ def dialog_checks():
     rc, o, e = finish(p)
     os.close(m)
     check("a handoff the person at this terminal opened: no dialog", not dfile("dialog.args") and rc == 4, (rc, o))
+
+    # handoff.py _dialog ID (also reachable as `metacomputer handoff _dialog ID`) applies the same rules itself.
+    p = opened(SAY, prompts="off")
+    hid = owners.open_handoff()["id"]
+    common = dict(MCOMP_CONFIG=cfg, STUB=stub, PATH=path)
+    r1 = run("_dialog", hid, MCOMP_INTERACTIVE_PROMPTS="off", **common)
+    r2 = run("_dialog", hid, MCOMP_INTERACTIVE_PROMPTS=None, **common)
+    r3 = run("_dialog", hid, MCOMP_INTERACTIVE_PROMPTS="on", SSH_CONNECTION="10.0.0.2 5000 10.0.0.1 22", **common)
+    open(os.path.join(stub, "manager"), "w").write("Background\n")
+    r4 = run("_dialog", hid, MCOMP_INTERACTIVE_PROMPTS="on", **common)
+    os.remove(os.path.join(stub, "manager"))
+    r5 = run("_dialog", "h-000000000000", MCOMP_INTERACTIVE_PROMPTS="on", **common)
+    r6 = run("_dialog", "../" + hid, MCOMP_INTERACTIVE_PROMPTS="on", **common)
+    check("_dialog run directly shows nothing when INTERACTIVE_PROMPTS is off or unset, over SSH, outside the screen "
+          "session, or for an id that isn't the open handoff's", not dfile("dialog.args")
+          and all(x.returncode == 0 for x in (r1, r2, r3, r4, r5, r6)),
+          [(x.returncode, x.stderr[-200:]) for x in (r1, r2, r3, r4, r5, r6)])
+    d = start("_dialog", hid, claude=None, MCOMP_INTERACTIVE_PROMPTS="on", **common)
+    shown = wait_for(lambda: dfile("dialog.args"))
+    rc, o, e = end_it(p)
+    finish(d)
+    check("…and shows it when the rules allow (on, the screen session, a handoff Claude opened), until it ends",
+          shown and d.returncode == 0, (shown, d.returncode))
+    clear()
+    reset_stub()
+    m, s = pty.openpty()
+    p = start("--why", "captcha", "--say", SAY, stdin=s, claude=None, MCOMP_INTERACTIVE_PROMPTS="off", **common)
+    os.close(s)
+    rec = wait_open()
+    r = run("_dialog", rec["id"], MCOMP_INTERACTIVE_PROMPTS="on", **common)
+    time.sleep(0.5)
+    os.write(m, b"c\n")
+    finish(p)
+    os.close(m)
+    check("…and nothing for a handoff the record says was opened at a terminal, whatever runs _dialog",
+          rec.get("interactive") is True and r.returncode == 0 and not dfile("dialog.args"), (rec, r.returncode))
 
 
 def pid_alive(pid):

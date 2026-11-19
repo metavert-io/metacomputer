@@ -1038,7 +1038,17 @@ CLAIMS = [
      lambda m: "SecTrustedApplicationCreateFromPath('/usr/bin/osascript', me)" in raw("lib/liveview.py")
      and 'SS_APP = "/System/Applications/Utilities/Screen Sharing.app"' in raw("lib/liveview.py")
      and "trusted.addObject(me[0]); trusted.addObject(ss[0]);" in raw("lib/liveview.py")),
-    ("docs/guide.md", r"`VIEW_REMEMBER=off` never saves it", lambda m: remember_needs_a_person()),
+    ("docs/guide.md", r"`VIEW_REMEMBER=off` never saves it, or updates one saved before; `--remember` and `--forget` "
+                      r"run only in your own terminal", lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"`view --remember` and `view --forget` \(which removes only the item metacomputer made\) refuse "
+                    r"without a terminal, whether or not an item is there, and an explicit save that fails is an error "
+                    r"with its reason", lambda m: remember_flag_gated()),
+    ("SECURITY.md", r"`off` means no writes at all: nothing is saved, `view --remember` refuses, and an item saved "
+                    r"earlier is no longer updated", lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"the helper checks all of that again itself, whoever starts it, from the handoff's own record",
+     lambda m: 'if dialog_off_reason(rec.get("interactive") is not False) is not None:\n        return 0'
+     in raw("lib/handoff.py") and raw("lib/handoff.py").index("if dialog_off_reason(rec.get(")
+     < raw("lib/handoff.py").index('p = subprocess.Popen(["osascript", "-e", DIALOG_SCRIPT')),
     # The handoff's dialog (lib/handoff.py; INTERACTIVE_PROMPTS)
     ("SECURITY.md", r"\*\*A dialog on the Mac \(`INTERACTIVE_PROMPTS`, `(\w+)` by default\)\.\*\* That setting allows "
                     r"metacomputer to show dialogs on this Mac that wait for you",
@@ -1314,11 +1324,24 @@ def remembered_item_shape():
 
 def remember_needs_a_person():
     """The item is made only with a person's yes: a terminal for the question and for --remember, or
-    VIEW_REMEMBER=on; off never makes one."""
+    VIEW_REMEMBER=on; off never writes."""
     b = raw("bin/metacomputer")
     return ('if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi' in b
-            and 'if [ "$setting" = on ] || [ -t 0 ]; then VIEW_SAVE=1; return 0; fi' in b
-            and '[ "$setting" = off ] && return 0' in b)
+            and '[ "$setting" = on ] && { VIEW_SAVE=1; return 0; }' in b and remember_flag_gated()
+            and re.search(r'view_remembered \|\| rc=\$\?\n  if \[ "\$setting" = off \]; then\n(?:    [^\n]*\n)+?'
+                          r'    return 0\n  fi\n  \[ \$rc = 0 \] && \{ VIEW_SAVE=1', b) is not None)
+
+
+def remember_flag_gated():
+    """An explicit --remember: a terminal, and never while VIEW_REMEMBER=off, before anything is looked up or
+    written; --forget needs a terminal too."""
+    b = raw("bin/metacomputer")
+    return ('  if [ "$flag" = remember ]; then\n    [ -t 0 ] || die "view --remember saves the live-view password in '
+            'your login keychain, so it\'s yours to run: in your own terminal"\n    [ "$setting" = off ] && die '
+            '"$(view_off_note)"\n    VIEW_SAVE=1' in b
+            and '[ -t 0 ] || die "view --forget changes your login keychain, so it\'s yours to run: in your own '
+            'terminal"' in b
+            and 'view_save || die "the live-view password wasn\'t saved for Screen Sharing (the reason is above)"' in b)
 
 
 def remember_pipes_password():
