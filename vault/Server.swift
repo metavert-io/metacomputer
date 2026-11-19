@@ -1008,7 +1008,8 @@ final class UnlockServer {
             reply(c, ["ok": false, "status": "locked", "reason": "the vault is locked"])
             return
         }
-        // A program outside Claude Code may pass on a request for a Claude Code process (recorded as a claim only).
+        // A program outside Claude Code may pass on a request for a Claude Code process (recorded as a claim only; the
+        // metacomputer hub does, and asks as itself: Requester.of).
         let onBehalf = (req["on_behalf_pid"] as? NSNumber).map { pid_t(truncatingIfNeeded: $0.intValue) }
         let who = Requester.of(pid, onBehalf: onBehalf)
         // A fill, sign-in, session or token request stops when its requester goes away or withdraws it (closes its side
@@ -1396,8 +1397,11 @@ final class UnlockServer {
         let browserPID = (req["browser_pid"] as? NSNumber)?.intValue
         if let bp = browserPID { fields["browser_pid"] = bp }
         if let why = browserBindingProblem(req, profile: profile, who) { return finish("login", fields, denied(why), who, approval: "-") }
+        // What the agent calls itself (request_site_login's `agent`): shown and recorded as its claim, never trusted.
+        let agent = (req["agent"] as? String).flatMap { validAgentName($0) ? $0.trimmingCharacters(in: .whitespaces) : nil }
         fields["password_selector"] = clean(passSel, max: 300)
         if let u = userSel { fields["username_selector"] = clean(u, max: 300) }
+        if let ag = agent { fields["agent"] = ag }
         say("\(clockTime())  sign in with \(name) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
             + ", password '\(promptText(passSel, max: 60))'" + (userSel.map { ", username '\(promptText($0, max: 60))'" } ?? "")
             + ", asked by \(who.describe)")
@@ -1457,7 +1461,8 @@ final class UnlockServer {
         var requestID: String?
         if idp || confirmEach || s.approval == "each" {
             let o = approve("fill", name, "  Sign in with \(name) (" + (userSel == nil ? "password" : "username and password") + ") on \(origin), VM \(vm)"
-                            + (profile.map { ", Chrome profile \($0)" } ?? "") + "?\n  Asked by \(who.describe).", who, vm: vm, site: origin,
+                            + (profile.map { ", Chrome profile \($0)" } ?? "") + "?\n  Asked by \(who.describe)"
+                            + (agent.map { "; the agent calls itself \"\($0)\" (unverified)" } ?? "") + ".", who, vm: vm, site: origin,
                             use: "login", summary: "sign in with \(name) on \(origin)", usernameHint: hint, identityProvider: idp,
                             proposedID: req["request_id"] as? String, ruleUse: "fill")
             approval = o.how
@@ -1896,13 +1901,17 @@ final class UnlockServer {
     }
 }
 
-/// A fill or sign-in may name the Chrome it's for: its profile, its browser process id (`--browser-pid`), or both.
-/// In any case the VM refuses when more than one tab there is on the site (secret-fill). nil: fine.
+/// A fill or sign-in may name the Chrome it's for: its profile, its browser process id (`--browser-pid`), or both. One
+/// through the metacomputer hub must name it (the hub checked a tab in one Chrome, and the value goes only to that
+/// Chrome). In any case the VM refuses when more than one tab there is on the site (secret-fill). nil: fine.
 func browserBindingProblem(_ req: [String: Any], profile: String?, _ who: Requester) -> String? {
     if let raw = req["browser_pid"] {
         guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.intValue > 1, n.intValue < Int(Int32.max) else {
             return "--browser-pid: a process id"
         }
+    }
+    if who.hubPID != nil && profile == nil && req["browser_pid"] == nil {
+        return "a request through the metacomputer hub must name the Chrome it checked (--profile or --browser-pid)"
     }
     return nil
 }

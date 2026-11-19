@@ -232,6 +232,7 @@ gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'
 vm_stop "$VM_NAME"
 "$LUME" clone "$VM_NAME" "$BASELINE_NAME"
 rm -f "$RUN_DIR/seed.iso"
+rm -f "$RUN_DIR/vm-may-hold-values"   # a new VM holds no value from the vault (lib/vmtaint.py)
 ok "baseline $BASELINE_NAME created"
 rm -f "$BUILD_MARKER"
 # The VM's private host key now lives only in its disk and the baseline (reset restores

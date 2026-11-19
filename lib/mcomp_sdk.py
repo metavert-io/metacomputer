@@ -29,6 +29,10 @@ of its own that ends with close().
 script starts acting (an acting call does the same on its own); it returns
 {"claimed": bool, "others": [...]}.
 
+`h.request_site_login(url, options)` signs in with a login saved in `metacomputer
+secrets`, as Cua Spaces' `space.request_site_login(url, options)` does (the hub's
+request_site_login tool; SiteLoginOptions, SiteLoginReport, SiteLoginError).
+
 CLI (what `metacomputer call` runs, and the status probe):
   mcomp_sdk.py call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON']
   mcomp_sdk.py probe | tools | describe TOOL
@@ -194,6 +198,37 @@ def open_connection(env=None, kind="sdk", session=None, tools_hash=None, timeout
     raise HubError("the metacomputer hub kept restarting")
 
 
+class SiteLoginOptions:
+    """Options for Hub.request_site_login, named as Cua Spaces' SiteLoginOptions record names them."""
+
+    def __init__(self, username=None, agent=None, session=None, target_id=None, tab_id=None, request_id=None,
+                 wait_secs=None, profile=None, submit=None, pid=None):
+        self.username, self.agent, self.session = username, agent, session
+        self.target_id, self.tab_id, self.request_id, self.wait_secs = target_id, tab_id, request_id, wait_secs
+        self.profile, self.submit, self.pid = profile, submit, pid
+
+
+class SiteLoginReport:
+    """What request_site_login did. Never the password, and nothing the page chose: same_site says whether it's still
+    on the login's origin (no page address comes back)."""
+    FIELDS = ("status", "request_id", "site", "origin", "username_hint", "submitted", "same_site", "session",
+              "target_id", "tab_id")
+
+    def __init__(self, **kw):
+        for k in self.FIELDS:
+            setattr(self, k, kw.get(k))
+        self.submitted = bool(self.submitted)
+
+    def __repr__(self):
+        return "SiteLoginReport(" + ", ".join(f"{k}={getattr(self, k)!r}" for k in self.FIELDS if getattr(self, k) is not None) + ")"
+
+
+class SiteLoginError(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(f"{code}: {message}")
+        self.code, self.message = code, message
+
+
 class Hub:
     """A connection to the virtual computer through the metacomputer hub. See the module's docstring."""
 
@@ -282,6 +317,25 @@ class Hub:
 
     def tools(self):
         return (self.request("tools/list") or {}).get("tools") or []
+
+    def request_site_login(self, url, options=None, **kw):
+        """Sign in to url in the VM's page-mode Chrome with a login saved in `metacomputer secrets`, the way Cua
+        Spaces' `space.request_site_login(url, options)` is called (synchronous here). options: a dict or a
+        SiteLoginOptions (username, agent, session, target_id, tab_id, request_id, wait_secs; profile, pid and
+        submit are this project's own: a tab given needs its Chrome's pid or named profile), and keyword arguments
+        override it. Returns a SiteLoginReport: status "pending"
+        (with request_id: call again with it once the user approved) or "filled"; never a password. Raises
+        SiteLoginError (its .code: not_found, invalid_argument, login_refused, locked, ...) otherwise."""
+        args = dict(options.__dict__ if isinstance(options, SiteLoginOptions) else (options or {}))
+        args.update(kw)
+        args = {k: v for k, v in args.items() if v is not None}
+        args["url"] = url
+        wait = int(args.get("wait_secs") or 20)
+        res = self.call("request_site_login", args, timeout=max(self.timeout, wait + 60))
+        sc = res.structured or {}
+        if res.is_error:
+            raise SiteLoginError(sc.get("error") or "error", sc.get("message") or res.text)
+        return SiteLoginReport(**{k: sc.get(k) for k in SiteLoginReport.FIELDS})
 
     def status(self):
         return self.request("metacomputer/status")

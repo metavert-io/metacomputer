@@ -11,6 +11,9 @@
    with a test key) is loaded with `metacomputer secrets session load --site localhost` into a driver profile's cookie
    store (opened and closed once first, so it has one); the VM's Chrome then sends that cookie to a page served in the
    VM, which shows only a hash of its value.
+3. The same sign-in through the hub's own `request_site_login` tool (it opens Chrome, the vault asks and fills, the
+   hub submits), and 4. the same session through `teleport_browser_session`. The VM is marked as one that may hold a
+   value (lib/vmtaint.py), and no value reaches a tool result, the unlock terminal or hub.log.
 
 It uses a TEST build of the vault (scripts/build-vault.sh --test) with its own vault folder in /tmp, binds it to the
 test VM from MCOMP_CONFIG, and never touches the installed vault, its data, or a real Chrome profile. A test VM only:
@@ -142,7 +145,8 @@ def run(td, procs):
     open(srv, "w").write(ECHO_SERVER)
     r2 = subprocess.run([MC, "sh", "--override", "-"], input=(
         "pkill -f 'echo_server.py|http.server 8000' 2>/dev/null; sleep 0.5\n"
-        "rm -rf ~/.local/state/cua-driver/browser-profiles/vmtest-login ~/.local/state/cua-driver/browser-profiles/vmtest-cookies\n"
+        "rm -rf ~/.local/state/cua-driver/browser-profiles/vmtest-login ~/.local/state/cua-driver/browser-profiles/vmtest-login2 "
+        "~/.local/state/cua-driver/browser-profiles/vmtest-cookies\n"
         f"cat > /tmp/echo_server.py <<'EOF'\n{ECHO_SERVER}\nEOF\n"
         "(setsid nohup python3 /tmp/echo_server.py ~/metacomputer-runs/site >/tmp/echo.log 2>&1 &)\n"
         "sleep 1; curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/login.html\n"), env=venv, capture_output=True, text=True, timeout=120)
@@ -279,6 +283,64 @@ def run(td, procs):
         time.sleep(0.5)
     check("the VM's Chrome sends the imported cookie: the page sees mc_session with the right value (as a hash)", want in seen, seen[-500:])
     h.call("end_session", {"session": "vmcookie"})
+    run_dir = env.get("MCOMP_RUN_DIR") or os.path.join(LAB, ".run")
+    check("the VM is marked as one that may hold a value (lib/vmtaint.py), by `metacomputer secrets` before the vault ran",
+          os.path.exists(os.path.join(run_dir, "vm-may-hold-values")))
+
+    # --- 3. request_site_login: the same sign-in through the hub's own tool ------------------------------------
+    r = call("request_site_login", {"url": SITE + "/login.html", "profile": "vmtest-login2", "agent": "vm-test"})
+    rid = r.structured.get("request_id")
+    check("request_site_login: pending with a request id while the vault asks", not r.is_error
+          and r.structured.get("status") == "pending" and rid, r.raw)
+    u.expect("Request " + (rid or "none"), timeout=90)
+    ra = subprocess.run([BIN, "approve", rid or "00000000"], env=venv, capture_output=True, text=True, timeout=120)
+    r = call("request_site_login", {"url": SITE + "/login.html", "request_id": rid, "wait_secs": 90})
+    sc = r.structured
+    check("after `approve ID`: filled and submitted by the hub, on the test site, with a masked username; no page "
+          "address and no value in the result", ra.returncode == 0 and not r.is_error and sc.get("status") == "filled"
+          and sc.get("origin") == SITE and sc.get("submitted") is True and sc.get("username_hint") == "v***@example.com"
+          and sc.get("same_site") is True and "page_url" not in sc and not any(v in json.dumps(r.raw) for v in VALUES),
+          (ra.stderr, r.raw))
+    tgt3 = {"target_id": sc.get("target_id"), "tab_id": sc.get("tab_id"), "session": sc.get("session")}
+    text = ""
+    for _ in range(20):
+        s_ = h.call("get_browser_state", dict(tgt3, snapshot_format="semantic_v2", query="Signed in"))
+        text = s_.text + json.dumps(s_.structured)
+        if "Signed in" in text:
+            break
+        time.sleep(0.5)
+    m = re.search(r"username (\d+) characters, password (\d+) characters", text)
+    check("the page itself says it got a username and a password of the right lengths (the VM's Chrome, the fill account)",
+          m is not None and int(m.group(1)) == len(USER) and int(m.group(2)) == len(PW), text[-400:])
+    term = u.text()
+    check("the unlock terminal asked for it as the hub's request, named the agent as unverified, and showed no value",
+          "the metacomputer hub (pid" in term and '"vm-test" (unverified)' in term and not any(v in term for v in VALUES),
+          term[-800:])
+    h.call("end_session", {"session": sc.get("session") or "vmtest"})
+
+    # --- 4. teleport_browser_session: the imported session again, through the hub's own tool -------------------
+    r = call("teleport_browser_session", {"sites": ["localhost"], "browser": "chrome"})
+    rid = r.structured.get("request_id")
+    check("teleport_browser_session: consent_required with a request id", not r.is_error
+          and r.structured.get("consent_required") is True and rid, r.raw)
+    u.expect("Request " + (rid or "none"), timeout=90)
+    ra = subprocess.run([BIN, "approve", rid or "00000000"], env=venv, capture_output=True, text=True, timeout=120)
+    r = call("teleport_browser_session", {"sites": ["localhost"], "request_id": rid, "wait_secs": 90})
+    check("after `approve ID`: moved into the driver profile", ra.returncode == 0 and not r.is_error
+          and r.structured.get("moved") is True and r.structured.get("profile") == "vmtest-cookies", r.raw)
+    pid, t4, prep = open_chrome("vmcookie2", "vmtest-cookies", SITE + "/cookie-check")
+    seen = ""
+    for _ in range(20):
+        s_ = h.call("get_browser_state", dict(t4, snapshot_format="semantic_v2"))
+        seen = s_.text + json.dumps(s_.structured)
+        if "end" in seen and "mc_session" in seen:
+            break
+        time.sleep(0.5)
+    check("...and the VM's Chrome sends the cookie (as a hash)", bool(pid) and want in seen, (prep[-200:], seen[-400:]))
+    h.call("end_session", {"session": "vmcookie2"})
+    hub_log = os.path.join(env.get("MCOMP_LOG_DIR") or os.path.join(LAB, "logs"), "hub.log")
+    hub_text = open(hub_log, errors="replace").read() if os.path.exists(hub_log) else ""
+    check("no value in hub.log", not any(v in hub_text for v in VALUES))
 
     h.close()
     u.send("\x03")

@@ -673,6 +673,8 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
   if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force >/dev/null || die "lume delete failed"; fi
   say "cloning $src -> $VM_NAME"
   "$LUME" clone "$src" "$VM_NAME" >/dev/null || die "lume clone failed"
+  # A fresh copy of the baseline holds no value from the vault (lib/vmtaint.py); a checkpoint may.
+  if [ "$evtype" = reset ]; then "$PY" "$LAB_ROOT/lib/vmtaint.py" clear || true; fi
   ok "restored from $label"
   emit_event lifecycle "$evtype" info "The virtual computer $VM_NAME was replaced by $label" "" "from=$src"
   do_start
@@ -1430,9 +1432,13 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
     *) [ "${MCOMP_VAULT_ALLOW_TEST_BUILD:-}" = 1 ] \
          || die "$VAULT_BIN isn't a release build of the vault; reinstall it with scripts/build-vault.sh --force" ;;
   esac
-  local sub="${1:-status}" a has_vm=0 out rc
+  local sub="${1:-status}" a has_vm=0 out rc vm_arg="" prev=""
   [ $# -gt 0 ] && shift
-  for a in "$@"; do case "$a" in --vm|--vm=*) has_vm=1 ;; esac; done
+  for a in "$@"; do
+    case "$a" in --vm) has_vm=1 ;; --vm=*) has_vm=1; vm_arg="${a#--vm=}" ;; esac
+    [ "$prev" = --vm ] && vm_arg="$a"
+    prev="$a"
+  done
   case "$sub" in
     bind)
       local vm="$VM_NAME" hk
@@ -1465,6 +1471,15 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      # The VM is marked before anything of the vault's can reach it (lib/vmtaint.py): from then until it's reset,
+      # nothing it chooses is kept on the Mac (the action log, hub.log, its stderr, its tool list). The mark goes in
+      # this VM's run folder, so these commands act on this config's VM only.
+      if [ "$has_vm" = 1 ] && [ "$vm_arg" != "$VM_NAME" ]; then
+        die "metacomputer secrets $sub acts on this config's VM ($VM_NAME); for another, run it with MCOMP_CONFIG set to that VM's config"
+      fi
+      if [ "$sub" != session ] || [ "${1:-}" = load ]; then
+        export_options; "$PY" "$LAB_ROOT/lib/vmtaint.py" mark "secrets $sub" || exit 4
+      fi
       # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
       # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
       # (Killed outright, the client sees its parent gone and withdraws the request all the same.)

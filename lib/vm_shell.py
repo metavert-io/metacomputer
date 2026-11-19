@@ -43,6 +43,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import owners  # noqa: E402
+import vmtaint  # noqa: E402
 from termsafe import UNSAFE, escape_for_terminal  # noqa: E402,F401
 
 LAB = owners.LAB
@@ -437,14 +438,31 @@ def call_args(o, script, cwd, keep_text):
     return args
 
 
-def result_fields(res, keep_text):
+def result_fields(res, keep_text, tainted=None):
     """The result record. Only fixed text written here and checked values; what the
-    VM said in its own words (output, diagnostics) only as size and hash unless keep."""
+    VM said in its own words (output, diagnostics) only as size and hash unless keep.
+    Once the VM may hold a value from the vault (lib/vmtaint.py), nothing it chose is kept,
+    whatever keep says: its streams by size class only (no hash, no text), its exit code as
+    zero or not."""
+    if tainted is None:
+        tainted = vmtaint.tainted()
     out = {"status": res["status"], "kind": res.get("kind"), "exit_code": res.get("exit_code"),
            "error": res["status"] != "exited" or res.get("exit_code") != 0 or bool(res.get("kind")),
            "desktop": res.get("desktop"), "held_open": res.get("held_open")}
     if res.get("message"):
         out["message"] = res["message"][:300]
+    if tainted:
+        out["secret_adjacent"] = True
+        if out["exit_code"] is not None:
+            out["exit_code"] = 0 if out["exit_code"] == 0 else "nonzero"
+        for k in ("stdout", "stderr"):
+            st = (res.get("_streams") or {}).get(k)
+            if st:
+                out[k] = {"size": vmtaint.size_class(st["bytes"]), "truncated": bool(st["truncated"])}
+        remote = res.get("_remote") or b""
+        if remote:
+            out["remote"] = {"size": vmtaint.size_class(len(remote))}
+        return out
     for k in ("stdout", "stderr"):
         st = (res.get("_streams") or {}).get(k)
         if st:

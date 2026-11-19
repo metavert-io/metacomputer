@@ -605,6 +605,43 @@ def run(td, procs):
     u.send("no\n")
     res = claude_results(p, outs)
     check("...nor does a command from another Claude Code session that names one there", res[0][0] == 2, res)
+    # The metacomputer hub serves every session from one process, which may sit under the session that started it: a
+    # request from it (recognised by its command line, which only takes standing away) is the hub's own.
+    hubfile = os.path.join(td, "hubfake", "lib", "mcp_hub.py")
+    os.makedirs(os.path.dirname(hubfile), exist_ok=True)
+    open(hubfile, "w").write("import subprocess, sys\nsys.exit(subprocess.call(sys.argv[2:]))\n")
+    hp = subprocess.Popen([fake, proj1, sys.executable, hubfile, "serve", BIN, *fill, "--profile", "p1"], env=env,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(hp)
+    try:
+        asked = next_request(u, 10)
+        u.send("no\n")
+    except AssertionError:
+        asked = None
+    hp.wait(60)
+    rec = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"][-1]
+    req_ = rec.get("requester", {})
+    check("a request from the metacomputer hub started inside a Claude Code session in the rule's project: the hub asks as "
+          "itself (no session, no project), so the rule doesn't cover it", asked and req_.get("hub_pid")
+          and "claude_pid" not in req_ and "project" not in req_ and hp.returncode == 2, (req_, hp.returncode))
+    # A fill through the hub names the Chrome the hub checked (--profile or --browser-pid), or it's refused.
+    hout = os.path.join(td, "hub-nobind.out")
+    hp = subprocess.Popen([fake, proj1, "/bin/sh", "-c", shlex.join([sys.executable, hubfile, "serve", BIN, *fill]) + " >" + shlex.quote(hout) + " 2>&1"],
+                          env=env, stdin=subprocess.DEVNULL)
+    procs.append(hp)
+    try:
+        asked_nb = next_request(u, 6)
+        u.send("no\n")
+    except AssertionError:
+        asked_nb = None
+    hp.wait(60)
+    nb = open(hout).read() if os.path.exists(hout) else ""
+    check("a fill through the hub that doesn't name the Chrome it checked (--profile or --browser-pid) is refused before "
+          "anyone is asked", hp.returncode == 2 and not asked_nb and "must name the Chrome it checked" in nb, (nb[-300:], asked_nb))
+    r = client("login", "web-each", "--vm", "avm", "--password-selector", "#pw", "--agent", "bad\x1bname")
+    r2 = client("login", "web-each", "--vm", "avm", "--password-selector", "#pw", "--agent", "x" * 65)
+    check("login --agent: only 1 to 64 plain characters (a terminal escape or a long name is refused before anything)",
+          r.returncode == 64 and r2.returncode == 64 and "--agent" in r.stderr, (r.stderr[-200:], r2.stderr[-200:]))
     r = client(*fill, "--browser-pid", "notapid")
     check("...and --browser-pid takes a process id", r.returncode == 64 and "--browser-pid" in r.stderr, r.stderr)
     # --origin and --browser-pid: the caller narrows where the value may go (one of the login's sites, one Chrome)
@@ -1187,6 +1224,20 @@ def run(td, procs):
     check("R6-B: killing the wrapper that ran the client (SIGKILL; the client itself lives on) withdraws the request too: "
           "the client sees its parent gone, and the unlock process withdraws the question", bool(wait_for(lambda: cancel_recs(rid), 8))
           and wait_for(no_pending, 5), (rid, open(sh_out).read()[-300:] if os.path.exists(sh_out) else ""))
+
+    sleeper = subprocess.Popen(["/bin/sleep", "60"])
+    procs.append(sleeper)
+    proc = background(*fill, "--while-pid", str(sleeper.pid))
+    rid = nreq(5)
+    sleeper.kill()
+    sleeper.wait()
+    try:
+        rc, out, err = finish(proc, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc, out, err = 999, "", "no exit"
+    check("--while-pid PID (the hub passes its own): the request is withdrawn when that process ends, and confirmed",
+          rid is not None and rc == 4 and cancel_recs(rid) and wait_for(no_pending, 5), (rid, rc, out[-200:], err[-300:]))
 
     proc = background(*fill, extra={"MCOMP_VAULT_TEST_CLIENT_TIMEOUT": "2"})
     rid = nreq()
