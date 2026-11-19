@@ -1370,9 +1370,14 @@ CLAIMS = [
     ("SECURITY.md", r"every paused request is\s+refused and loading is stopped \(`Page.stopLoading`\) before the interception is turned off",
      lambda m: 0 < raw(FILL).find('dt.on_event = fail_all') < raw(FILL).find('dt.send("Page.stopLoading")')
      < raw(FILL).find("dt.wait_events(0.5)") < raw(FILL).rfind('dt.call("Fetch.disable")')),
-    ("SECURITY.md", r"each request must arrive whole within (\d+)\s+seconds of its connection, however slowly the bytes come",
+    ("SECURITY.md", r"each request must arrive whole within (\d+)\s+seconds of its connection, however slowly the bytes come, "
+                    r"and expiries are serviced while it's read, every ([\d.]+)\s+seconds whether or not bytes arrive meanwhile",
      lambda m: int(m[1]) == int(swift_num(SERVER, r"let clientMessageSeconds: TimeInterval = (\d+)"))
-     and raw(SERVER).count("readMessage(c, within: clientMessageSeconds)") == 2 and "let deadline = within.map { Date().addingTimeInterval($0) }" in raw(SERVER)),
+     and float(m[2]) == float(swift(SERVER, r"let readHookEvery: TimeInterval = ([\d.]+)"))
+     and raw(SERVER).count("readMessage(c, within: clientMessageSeconds)") == 2
+     and "let deadline = within.map { now() + $0 }" in raw(SERVER) and "ProcessInfo.processInfo.systemUptime" in raw(SERVER)
+     # the hook's turn comes before the wait for bytes, on its own clock, not only when a wait ends with nothing read
+     and 0 < raw(SERVER).find("if now() - hookRan >= readHookEvery {") < raw(SERVER).find("let r = poll(&pfd, 1, Int32(Swift.max(1, wait * 1000)))")),
     ("docs/events.md", r"\| `needs_you` \| `code_requested` \| warn \|",
      lambda m: 'dropEvent(type: "code_requested", severity: "warn"' in raw(CODES)),
     ("docs/guide.md", r"With `INTERACTIVE_PROMPTS=on` in `config/local.env` \(off by default\)", lambda m: D["INTERACTIVE_PROMPTS"] == "off"),

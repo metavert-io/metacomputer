@@ -41,28 +41,36 @@ func setTimeouts(_ fd: Int32, seconds: Int) {
 /// however slowly the bytes come.
 let clientMessageSeconds: TimeInterval = 10
 
+/// How often waitHook runs while the unlock process reads a client's request, whether or not bytes arrive meanwhile.
+let readHookEvery: TimeInterval = 0.2
+
 /// One newline-terminated message (at most max bytes). With `within`, an absolute deadline for the whole message (a
-/// client that sends part of one and stalls, or trickles it, gets nil at that time), and waitHook runs while it waits
-/// (one-time code requests expire on time meanwhile): the unlock process's reads of its clients use it.
+/// client that sends part of one and stalls, or trickles it, gets nil at that time), and waitHook runs at least every
+/// readHookEvery seconds while it reads, however the bytes come (one-time code requests expire on time meanwhile): the
+/// unlock process's reads of its clients use it. Both clocks are monotonic (the system's uptime).
 func readMessage(_ fd: Int32, max: Int = 1 << 20, within: TimeInterval? = nil) -> [UInt8]? {
     var out = [UInt8]()
     var buf = [UInt8](repeating: 0, count: 4096)
-    let deadline = within.map { Date().addingTimeInterval($0) }
+    let now = { ProcessInfo.processInfo.systemUptime }
+    let deadline = within.map { now() + $0 }
+    var hookRan = now()
     while true {
         if let d = deadline {
-            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let left = d.timeIntervalSinceNow
-            if left <= 0 { return nil }
-            let r = poll(&pfd, 1, Int32(Swift.min(250, Swift.max(1, left * 1000))))
-            if r < 0 && errno == EINTR { continue }
-            if r == 0 {
+            if now() - hookRan >= readHookEvery {
+                hookRan = now()
                 if Thread.isMainThread, let hook = waitHook {
                     waitHook = nil
                     hook()
                     waitHook = hook
                 }
-                continue
             }
+            let left = d - now()
+            if left <= 0 { return nil }
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let wait = Swift.min(left, Swift.max(0.001, readHookEvery - (now() - hookRan)))
+            let r = poll(&pfd, 1, Int32(Swift.max(1, wait * 1000)))
+            if r < 0 && errno == EINTR { continue }
+            if r == 0 { continue }
         }
         let n = read(fd, &buf, buf.count)
         if n < 0 && errno == EINTR { continue }

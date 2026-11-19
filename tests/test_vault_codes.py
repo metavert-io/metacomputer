@@ -944,8 +944,9 @@ def run(td, procs):
     stop = [False]
 
     def trickle():
-        for _ in range(15):
-            time.sleep(1.5)
+        # A byte every 100 ms: every wait of the read sees data, so expiry must run on its own clock, not on idle waits.
+        for _ in range(250):
+            time.sleep(0.1)
             if stop[0]:
                 return
             try:
@@ -957,14 +958,16 @@ def run(td, procs):
     t0 = time.time()
     st_ = subprocess.Popen([BIN, "status", "--json"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                            stdin=subprocess.DEVNULL)
-    time.sleep(4.0)
+    # The request had 2 s to live when it was made, just before the stall: it must be expired (its value wiped) within
+    # about a second of that, long before the stalled read ends at 10 s.
+    time.sleep(3.5)
     expired_while_stalled = any(x.get("op") == "code_expire" and x.get("request_id") == rid for x in audit_recs())
     o, e = st_.communicate(timeout=60)
     answered_after = time.time() - t0
     stop[0] = True
     trick.close()
-    check("a client trickling half a request holds the unlock process at most about 10 s (another client is answered then), "
-          "and a request expires on time meanwhile", r.returncode == 7 and expired_while_stalled and answered_after < 13
+    check("a client trickling half a request (a byte every 100 ms) holds the unlock process at most about 10 s (another "
+          "client is answered then), and a waiting request's value is wiped within about a second of its expiry meanwhile", r.returncode == 7 and expired_while_stalled and answered_after < 13
           and '"unlocked":true' in o, (r.returncode, expired_while_stalled, round(answered_after, 1), o[-150:]))
 
     # Approving a waiting request fills it, and is withdrawn like a fill: stopping `approve` stops the fill.

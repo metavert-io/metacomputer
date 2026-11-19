@@ -1866,7 +1866,8 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   may take longer than the request has left (its ssh is ended then, and the request expires), and requests expire on
   time even while the unlock process waits on a question or a dialog, or on a step in the VM for another request
   (checked several times a second), or on a client's request arriving: each request must arrive whole within 10
-  seconds of its connection, however slowly the bytes come, and expiries are serviced while it's read. An expired
+  seconds of its connection, however slowly the bytes come, and expiries are serviced while it's read, every 0.2
+  seconds whether or not bytes arrive meanwhile. An expired
   request's value is wiped within about a second. Only a delivery to a slow audit sink, at most 20 seconds a round,
   can hold it longer.
 
