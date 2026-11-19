@@ -288,11 +288,15 @@ def run(td, procs):
           os.path.exists(os.path.join(run_dir, "vm-may-hold-values")))
 
     # --- 3. request_site_login: the same sign-in through the hub's own tool ------------------------------------
-    r = call("request_site_login", {"url": SITE + "/login.html", "profile": "vmtest-login2", "agent": "vm-test"})
+    # A driver session of its own: Cua Driver keeps an ended session's name ended for the connection's life, and
+    # section 1 ended "vmtest".
+    r = call("request_site_login", {"url": SITE + "/login.html", "profile": "vmtest-login2", "agent": "vm-test",
+                                    "session": "vmtest-rsl"})
     rid = r.structured.get("request_id")
     check("request_site_login: pending with a request id while the vault asks", not r.is_error
           and r.structured.get("status") == "pending" and rid, r.raw)
-    u.expect("Request " + (rid or "none"), timeout=90)
+    if rid:
+        u.expect("Request " + rid, timeout=90)
     ra = subprocess.run([BIN, "approve", rid or "00000000"], env=venv, capture_output=True, text=True, timeout=120)
     r = call("request_site_login", {"url": SITE + "/login.html", "request_id": rid, "wait_secs": 90})
     sc = r.structured
@@ -316,14 +320,15 @@ def run(td, procs):
     check("the unlock terminal asked for it as the hub's request, named the agent as unverified, and showed no value",
           "the metacomputer hub (pid" in term and '"vm-test" (unverified)' in term and not any(v in term for v in VALUES),
           term[-800:])
-    h.call("end_session", {"session": sc.get("session") or "vmtest"})
+    h.call("end_session", {"session": sc.get("session") or "vmtest-rsl"})
 
     # --- 4. teleport_browser_session: the imported session again, through the hub's own tool -------------------
     r = call("teleport_browser_session", {"sites": ["localhost"], "browser": "chrome"})
     rid = r.structured.get("request_id")
     check("teleport_browser_session: consent_required with a request id", not r.is_error
           and r.structured.get("consent_required") is True and rid, r.raw)
-    u.expect("Request " + (rid or "none"), timeout=90)
+    if rid:
+        u.expect("Request " + rid, timeout=90)
     ra = subprocess.run([BIN, "approve", rid or "00000000"], env=venv, capture_output=True, text=True, timeout=120)
     r = call("teleport_browser_session", {"sites": ["localhost"], "request_id": rid, "wait_secs": 90})
     check("after `approve ID`: moved into the driver profile", ra.returncode == 0 and not r.is_error
