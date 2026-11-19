@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-19
+
 ### Changed
 
 - `./install.sh` is quieter: the builds of mcomp-vm, the host tools and the vault, which printed hundreds of harmless lines (Swift's compiler warnings, Go's downloads), each show one line and keep their whole output in a log in the logs folder (`logs/build-mcomp-vm-…`, `build-tools-…` and `build-vault-….log`, or `LOG_DIR`). A build that fails shows the end of its log (escaped) and the log's path, then stops the install or (the vault) warns, as before.
