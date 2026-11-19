@@ -164,7 +164,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   Code must read settings from there, never hard-code a machine's names,
   paths or hosts. Other VMs: one file each, `config/vms/NAME.env` (never committed),
   picked with `--vm NAME` / `MCOMP_VM`; `MCOMP_CONFIG=FILE` still names any file.
-  `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults and
+  `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
+  settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
   whose names, ports or folders are another VM's: `lib/vms.py identity`, folders by device
   and inode; a settings-less checkout with other VMs in the runner: `vm_target_check`);

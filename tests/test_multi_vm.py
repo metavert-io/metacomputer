@@ -922,6 +922,43 @@ def recheck2_fixes(td):
         b.close()
 
 
+def recheck3_fixes(td):
+    """The third re-check's finding (on 83bfcac), failing before its fix: a readable settings file that reads one it
+    can't loaded as if fine, and deleting the main VM trusted its guessed folders."""
+    b = Box(td, "recheck3")
+    try:
+        co, root = b.co, b.root
+        mainvault = os.path.join(b.app, "vms", "metacomputer")
+        inner = os.path.join(mainvault, "inner")
+        os.makedirs(inner)
+        write(os.path.join(inner, "vault.json"), "{}")
+        b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{mainvault}"\n')
+        helper = os.path.join(root, "helper.env")
+        write(helper, f'VAULT_DIR="{inner}"\n')
+        os.chmod(helper, 0)
+        b.settings("config/vms/other.env", f'. "{helper}"\nSSH_PORT=2402\nVNC_PORT=6102\n')
+        b.set_vms([vm("metacomputer"), vm("metacomputer-baseline"), vm("other")])
+        try:
+            rc, s, err = b.resolve("other")
+            check("a readable settings file that reads one it can't: refused when it's loaded (never its guessed folders)",
+                  rc == 1 and "went wrong" in err, err[-300:])
+            r = b.run("vm", "list", "--json")
+            rows = {v.get("settings"): v for v in json.loads(r.stdout or "{}").get("vms", [])}
+            check("...and vm list shows it refused", bool(rows.get("config/vms/other.env", {}).get("error")), rows.get("config/vms/other.env"))
+            r = b.run("vm", "delete", "metacomputer", "--confirm", "metacomputer", "--force", "--delete-vault")
+            check("deleting the main VM --delete-vault beside it: refused, the other VM's vault (inside) kept, nothing deleted",
+                  r.returncode == 1 and "can't be read cleanly" in r.stderr and os.path.exists(os.path.join(inner, "vault.json"))
+                  and b.deletes() == [], (r.stderr[-300:], b.deletes()))
+        finally:
+            os.chmod(helper, 0o600)
+        r = b.run("vm", "delete", "metacomputer", "--confirm", "metacomputer", "--force", "--delete-vault")
+        check("...once that file reads cleanly (its vault is inside the main one): refused as holding another VM's folder",
+              r.returncode == 1 and "is or holds" in r.stderr and os.path.exists(os.path.join(inner, "vault.json")) and b.deletes() == [],
+              (r.stderr[-300:], b.deletes()))
+    finally:
+        b.close()
+
+
 HUB_SCRIPT = r'''
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -1004,6 +1041,7 @@ def main():
         audit_fixes(td)
         recheck_fixes(td)
         recheck2_fixes(td)
+        recheck3_fixes(td)
         hub_pin(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)

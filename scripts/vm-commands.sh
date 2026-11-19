@@ -319,6 +319,16 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   done
   return 0
 }
+# Every settings file of this checkout but this VM's own, as identity records (scripts/lib.sh mc_identity_records):
+# the main VM's (unless this is it) and every other config/vms/ VM's.
+vm_other_identities() {
+  local n
+  case "$MC_SETTINGS_KIND" in local|defaults) ;; *) mc_identity_records "the main VM's settings (config/local.env)" main ;; esac
+  for n in $(mc_vm_files); do
+    [ "$MC_SETTINGS_KIND" = vm ] && [ "$n" = "$VM_NAME" ] && continue
+    mc_identity_records "config/vms/$n.env" vm "$n"
+  done
+}
 # BASE REL [--check]: lib/vms.py rmtree on this VM's own folder BASE/REL (never through a link, never one that is or
 # holds another VM's folder, this account's home or the checkout); the settings rows on stdin. Prints present|absent.
 vm_rmtree() {
@@ -351,6 +361,12 @@ vm_delete_plan() {
   DP_ROWS="$(vm_all_settings)"
   w="$(printf '%s\n' "$DP_ROWS" | "$PY" "$LAB_ROOT/lib/vms.py" delete-check --target "$VM_NAME" --baseline "$BASELINE_NAME")" \
     || die "not deleting $VM_NAME: $w"
+  # Before any folder is deleted (whichever VM this is, the main one included): every other settings file must read
+  # cleanly, read the strict way every command reads them; a folder of one that can't be known can't be kept safe.
+  if { [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run/vms/$VM_NAME" ]; } || [ "$del_vault" = 1 ]; then
+    w="$(vm_other_identities | "$PY" "$LAB_ROOT/lib/vms.py" all-known)" \
+      || die "not deleting $VM_NAME: ${w:-another settings file} can't be read cleanly, so its folders aren't known and none could be kept safe; fix it first. Nothing was deleted"
+  fi
   # Its runtime folder (the default one in this checkout) and its vault folder (--delete-vault): only its own,
   # reached without links, holding no other VM's folder.
   if [ -n "$settings_file" ] && [ "$RUN_DIR" = "$LAB_ROOT/.run/vms/$VM_NAME" ]; then

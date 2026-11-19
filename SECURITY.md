@@ -1250,9 +1250,10 @@ another VM:
   not be another VM's folder, however spelled: they're compared as the folders they are
   (device and inode, with links, `.` and `//` resolved), so a link or another spelling
   can't reach the main VM's keys, gateway or vault. Anything that clashes is refused, and
-  nothing runs. A settings file that can't be read is never taken for the defaults: the
-  command refuses, and so does a per-VM command while another VM's file can't be read (it
-  can't be checked against a guess).
+  nothing runs. Every settings file is read one strict way: it must be readable, parse, and
+  say nothing on stderr while it's read (a file it sources but can't read counts). One that
+  isn't is never taken for the defaults: the command refuses, and so does a per-VM command
+  while another VM's file can't be read (it can't be checked against a guess).
 - **A command only goes ahead when it's clear which VM is meant.** A checkout with no
   `config/local.env` and no `--vm` refuses to act on a VM while the runner has others, and
   so does an `MCOMP_CONFIG` file that's gone. Vault folders reach the vault as the folders
@@ -1275,6 +1276,8 @@ another VM:
     `.../metacomputer/vms/`. When another settings file's folders can't be known (one it
     can't read, one that reads a file it can't, or one that isn't an absolute path), nothing
     is deleted recursively, and `--delete-volumes` refuses while any file's volumes are unknown.
+    Before any folder is deleted, every other settings file must read cleanly, whichever VM is
+    being deleted (the main one included).
   - After you confirm, it holds the VM's owners lock (so no session can claim it), checks
     everything again, and refuses if anything changed. Only then does it stop what runs for
     the VM (its event watcher, its hub), so a refusal leaves a session that started meanwhile

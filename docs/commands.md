@@ -136,8 +136,9 @@ Refused rather than guessed (nothing runs):
   VM while `config/vms/` has files, or the runner has a VM besides the default one,
   or its list can't be read; and an `MCOMP_CONFIG` file that doesn't exist. `help`,
   `where`, `setup`, `vm`, `events`, `notify`, `learn` and `actions` still work there;
-- a settings file that can't be read (never taken for the defaults), and a
-  `config/vms/` VM while another VM's settings file can't be read;
+- a settings file that can't be read cleanly (readable, parses, nothing on stderr while it's
+  read, including from a file it sources): never taken for the defaults; and a `config/vms/`
+  VM while another VM's settings file can't be read;
 - `install.sh` with `MCOMP_VM` set (it sets up `config/local.env`'s VM), and `setup`
   for a VM chosen by name;
 - any command a hub runs (its reconnects, `input-reset`) when its settings no longer

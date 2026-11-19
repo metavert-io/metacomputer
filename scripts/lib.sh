@@ -41,6 +41,24 @@ mc_main_identity() { # the main VM's VM_NAME BASELINE_NAME SSH_DIR SSH_PORT VNC_
 mc_vm_files() { # the VM names config/vms/ has settings for, one per line
   local f; for f in "$MC_VMS_DIR"/*.env; do [ -f "$f" ] && basename "$f" .env; done; return 0
 }
+# FILE: source a settings file here, strictly: the one way every settings file is read (the settings loaded for a
+# command, `vm list`'s rows, the identities of the other VMs). It must be a readable file that parses (bash -n), and
+# reading it must say nothing on stderr (a file it sources but can't read, a command that fails). Otherwise status 1
+# with the reason in MC_REFUSAL: what's set may be guesses (the defaults), so nothing may rely on it.
+mc_source_strict() {
+  local __mcss_f="$1" __mcss_e
+  { [ -f "$__mcss_f" ] && [ -r "$__mcss_f" ] && /bin/bash -n "$__mcss_f"; } >/dev/null 2>&1 \
+    || { MC_REFUSAL="can't read the settings file $(mc_tilde "$__mcss_f") (or it doesn't parse); nothing was done"; return 1; }
+  __mcss_e="$(mktemp "${TMPDIR:-/tmp}/mcomp-settings.XXXXXX" 2>/dev/null)" \
+    || { MC_REFUSAL="can't read the settings file $(mc_tilde "$__mcss_f") (no temporary file); nothing was done"; return 1; }
+  # shellcheck source=/dev/null
+  . "$__mcss_f" 2>"$__mcss_e" || :
+  if [ -s "$__mcss_e" ]; then
+    MC_REFUSAL="reading the settings file $(mc_tilde "$__mcss_f") went wrong ($(head -c 160 "$__mcss_e" | tr '\n' ' ')); nothing was done"
+    rm -f "$__mcss_e"; return 1
+  fi
+  rm -f "$__mcss_e"
+}
 mc_abs_dir() { # SETTING VALUE -> MC_ABS: VALUE as an absolute folder (~/ is the account's home); status 1 otherwise
   case "$2" in "~") MC_ABS="$MC_SYS_HOME" ;; "~/"*) MC_ABS="$MC_SYS_HOME/${2#\~/}" ;; /*) MC_ABS="$2" ;;
     *) MC_REFUSAL="$1 must be an absolute folder, not '$2'"; return 1 ;; esac
@@ -71,18 +89,13 @@ mc_identity_records() {
     ifile="$MC_MAIN_CONFIG"
     [ "$ikind" != file ] || ifile="$iname"
     [ "$ikind" != vm ] || ifile="$MC_VMS_DIR/$iname.env"
-    # A file that should be read and can't be, completely and without complaint, has no known identity: say so
-    # (UNREADABLE) instead of the defaults, which would only be guesses. (The main VM's config/local.env may be
-    # absent: then the defaults are what it is.)
+    # A file that should be read and can't be, completely and without complaint (mc_source_strict, the same reading
+    # as every command's), has no known identity: say so (UNREADABLE) instead of the defaults, which would only be
+    # guesses. (The main VM's config/local.env may be absent: then the defaults are what it is.)
     unreadable() { printf '%s\0' "$owner" UNREADABLE 1; exit 0; }
-    ierr=""
-    if [ -e "$ifile" ] || [ "$ikind" != main ]; then
-      { [ -f "$ifile" ] && [ -r "$ifile" ] && /bin/bash -n "$ifile"; } >/dev/null 2>&1 || unreadable
-      ierr="$(mktemp "${TMPDIR:-/tmp}/mcomp-ident.XXXXXX" 2>/dev/null)" || unreadable
-    fi
     if [ "$ikind" = vm ]; then
       VM_NAME=""; BASELINE_NAME=""; SSH_DIR=""; SSH_PORT=""; VNC_PORT=""; RUN_DIR=""; LOG_DIR=""
-      . "$ifile" >/dev/null 2>"$ierr"
+      mc_source_strict "$ifile" >/dev/null || unreadable
       [ -n "$VM_NAME" ] || VM_NAME="$iname"
       [ -n "$BASELINE_NAME" ] || BASELINE_NAME="$VM_NAME-baseline"
       [ -n "$SSH_DIR" ] || SSH_DIR="$HOME/.ssh/metacomputer-$VM_NAME"
@@ -91,18 +104,13 @@ mc_identity_records() {
       [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
       [ -n "${EVENTS_SPOOL:-}" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
     else
-      [ -z "$ierr" ] || . "$ifile" >/dev/null 2>"$ierr"
+      if [ -e "$ifile" ] || [ "$ikind" != main ]; then mc_source_strict "$ifile" >/dev/null || unreadable; fi
       RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"; LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
       [ -n "${VAULT_DIR:-}" ] || VAULT_DIR="$MC_SYS_HOME/Library/Application Support/metacomputer"
-    fi
-    # Anything it said on stderr while being read (a file it reads that can't be, a command that failed): unknown.
-    if [ -n "$ierr" ]; then
-      if [ -s "$ierr" ]; then rm -f "$ierr"; unreadable; fi
-      rm -f "$ierr"
-    fi
-    if [ "$ikind" != vm ] && [ -z "${EVENTS_SPOOL:-}" ]; then
-      printf '%s\0' "$owner" EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool"
-      EVENTS_SPOOL="$MC_SYS_HOME/Library/Application Support/metacomputer/events/spool"
+      if [ -z "${EVENTS_SPOOL:-}" ]; then
+        printf '%s\0' "$owner" EVENTS_SPOOL "$HOME/Library/Application Support/metacomputer/events/spool"
+        EVENTS_SPOOL="$MC_SYS_HOME/Library/Application Support/metacomputer/events/spool"
+      fi
     fi
     for k in VM_NAME BASELINE_NAME SSH_PORT VNC_PORT SSH_DIR RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL VOLUMES; do
       eval "printf '%s\0' \"\$owner\" \"\$k\" \"\${$k:-}\""
@@ -158,7 +166,7 @@ mc_load_settings() {
   else
     MC_IMPLICIT=1    # the defaults, unasked for: vm_target_check decides whether that's clear enough
   fi
-  # A settings file that can't be read is refused, never replaced by the defaults (which would name another VM).
+  # A settings file that can't be read (or read cleanly) is refused, never replaced by the defaults (another VM).
   if [ -n "$file" ] && [ ! -r "$file" ]; then MC_REFUSAL="can't read the settings file $(mc_tilde "$file"); nothing was done"; return 1; fi
   # A file in config/vms/ (however it was chosen) is one VM's own settings.
   kind=defaults; [ -n "$file" ] && kind=config
@@ -171,7 +179,7 @@ mc_load_settings() {
     # What makes a VM itself starts empty, so nothing of the default VM's is used by accident.
     VM_NAME=""; BASELINE_NAME=""; SSH_DIR=""; SSH_PORT=""; VNC_PORT=""; RUN_DIR=""; LOG_DIR=""
     # shellcheck source=/dev/null
-    . "$file"
+    mc_source_strict "$file" || return 1
     [ -n "$VM_NAME" ] || VM_NAME="$name"
     [ "$VM_NAME" = "$name" ] || { MC_REFUSAL="config/vms/$name.env names the VM '$VM_NAME'; a file in config/vms/ is for the VM of its own name"; return 1; }
     # A name shaped like a VM's copy (a baseline, its previous one, a checkpoint) could be another VM's: refused.
@@ -226,7 +234,7 @@ mc_load_settings() {
     [ -n "$VAULT_DIR" ] && [ -n "$EVENTS_SPOOL" ] || { MC_REFUSAL="config/vms/$name.env: its identity couldn't be checked"; return 1; }
   elif [ -n "$file" ]; then
     # shellcheck source=/dev/null
-    . "$file"
+    mc_source_strict "$file" || return 1
   fi
   # The vault folder and the event spool (handed to mcomp-vault as MCOMP_VAULT_DIR and MCOMP_EVENTS_SPOOL), as the
   # folders they really are. Empty for the main VM and MCOMP_CONFIG files unless set: the vault's and the event

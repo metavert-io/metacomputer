@@ -454,7 +454,16 @@ def main(argv=None):
     p.add_argument("--home", required=True)
     p.add_argument("--guard", action="append", default=[])
     p.add_argument("--check", action="store_true")
+    sub.add_parser("all-known")
     a = ap.parse_args(argv)
+    if a.cmd == "all-known":
+        # Every other settings file must read cleanly (mc_identity_records): one that can't is unknown, and nothing
+        # that might be one of its folders may be deleted.
+        bad = [o for o, ids in read_records(sys.stdin).items() if ids.get("UNREADABLE")]
+        if bad:
+            print(", ".join(bad))
+            return 1
+        return 0
     if a.cmd == "error-row":
         print(json.dumps(error_row(read_records(sys.stdin), a.file, a.vm, a.error)))
         return 0

@@ -1112,9 +1112,15 @@ CLAIMS = [
     ("SECURITY.md", r"When another settings file's folders can't be known \(one it can't read, one that reads a file it can't, or one that isn't an absolute path\), nothing is deleted recursively, and `--delete-volumes` refuses while any file's volumes are unknown",
      lambda m: "its folders can't be read" in raw("lib/vms.py") and "isn't an absolute path, so" in raw("lib/vms.py")
      and 'known = bool(ids) and not ids.get("UNREADABLE")' in raw("lib/vms.py") and 'print("UNKNOWN "' in vm_delete_src()
-     and 'if [ -s "$ierr" ]; then rm -f "$ierr"; unreadable; fi' in raw("scripts/lib.sh")),
-    ("SECURITY.md", r"A settings file that can't be read is never taken for the defaults: the command refuses, and so does a per-VM command while another VM's file can't be read",
-     lambda m: "can't read the settings file" in raw("scripts/lib.sh") and "can't be read, so this VM can't be checked against it" in raw("lib/vms.py")),
+     and 'mc_source_strict "$ifile" >/dev/null || unreadable' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"Every settings file is read one strict way: it must be readable, parse, and say nothing on stderr while it's read \(a file it sources but can't read counts\)\. One that isn't is never taken for the defaults: the command refuses, and so does a per-VM command while another VM's file can't be read",
+     lambda m: "can't be read, so this VM can't be checked against it" in raw("lib/vms.py")
+     and raw("scripts/lib.sh").count('mc_source_strict "$file" || return 1') == 2
+     and 'mc_source_strict "$ifile" >/dev/null || unreadable' in raw("scripts/lib.sh")
+     and '/bin/bash -n "$__mcss_f"' in raw("scripts/lib.sh") and 'if [ -s "$__mcss_e" ]; then' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"Before any folder is deleted, every other settings file must read cleanly, whichever VM is being deleted \(the main one included\)",
+     lambda m: 'vm_other_identities | "$PY" "$LAB_ROOT/lib/vms.py" all-known' in vm_delete_src()
+     and "local|defaults) ;; *) mc_identity_records" in raw("scripts/vm-commands.sh")),
     ("SECURITY.md", r"Only then does it stop what runs for the VM \(its event watcher, its hub\)",
      lambda m: 0 <= vm_delete_src().find('[ "$DP_SIG" = "$first" ] || die') < vm_delete_src().find("events_watcher_stop")
      and vm_delete_src().find("lock_fd_take 6") < vm_delete_src().find("hub_stop")),
