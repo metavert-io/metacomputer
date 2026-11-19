@@ -407,7 +407,7 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 
 ## Claude inside the VM: `tests/test_vm_claude.py`, `tests/test_vm_claude_vm.py`
 
-`python3 tests/test_vm_claude.py` needs no VM (134 checks). `bash -c` stands in
+`python3 tests/test_vm_claude.py` needs no VM (144 checks). `bash -c` stands in
 for SSH, so the shell channel's VM half and `lib/vm_claude_guest.sh` run locally,
 with a temp folder as the VM's home. A fake `metacomputer` answers `secrets
 list|token|token renew|tokens|revoke` with a dummy token (or a refused
@@ -447,6 +447,11 @@ checks:
   `metacomputer claude _probe`), renewed when the screen changes, `status` showing
   it; it ends, with its claim, when Claude Code quits, when its claim is released, and
   at `stop`; `release` waiting for the owners lock the keeper renews under;
+- a handoff (`metacomputer handoff`): `send`, `keys` and `show` refused (125, "Paused") with or
+  without `--override` and nothing reaching the inner Claude, `start --override` refused before the
+  vault is asked, the keeper renewing nothing while the user types in the inner Claude's terminal
+  (and renewing once the handoff ends), and a `send` admitted while a handoff is being opened waiting
+  for the dispatch lock, then refused;
 - `stop --revoke` when the vault doesn't confirm (255, record kept, then a second run
   finishes) and with the VM unreachable (revoked from the Mac all the same, record
   kept);
@@ -526,7 +531,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (98 checks, about a minute): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (99 checks, about a minute): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -539,7 +544,8 @@ Each of these needs no VM and takes seconds.
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
   stopped (exit 4) with the vault never asked, a fill naming another VM refused, a handoff that can't open
   while a fill is still on its way (a stand-in vault that waits) or while one that ended unconfirmed (exit 5) is
-  settling, and the marker that makes the next handoff settle first when that didn't confirm; `sh` holding the
+  settling, and the marker that makes the next handoff settle first when that didn't confirm, kept for any exit
+  that isn't an answer from the unlock process (a crash too); `sh` holding the
   lock while its script is written; the GUI tests' own commands stopped; `reset` stopped by a handoff that opened
   while it asked (exit 4, nothing changed); an unreadable record that can't be bounded not counting; its events (the `needs_you` notice cleaned of escapes, URL queries and
   the live-view password; the note never in an event; the `handoff_*` types reserved;
@@ -776,7 +782,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (207 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (212 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -829,9 +835,12 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   was admitted, while its guards run, still stops it at dispatch, and the call is sent
   holding the dispatch lock; a disconnected session's `end_session` and the Chrome
   guard's input reset wait until the handoff ends; the action-log relay refuses an
-  acting call when a handoff opened while it was on its way; no idle exit, no
-  restart for other settings, no lease kill and (with `MCP_HUB=off`) no end of the
-  bridge's own connection while the user has the computer;
+  acting call when a handoff opened while it was on its way, and its write to a VM that
+  stops reading ends at its deadline (the call failed, the dispatch lock let go); no idle
+  exit, no restart for other settings, no lease kill and (with `MCP_HUB=off`) no end of the
+  bridge's own connection while the user has the computer, also when the handoff opens
+  after that teardown was decided (it's made under the dispatch lock, and waits), and a
+  graceful close of a client marked inactive before its detach still waits;
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
 - bounded mode: `launch_app` by path; when the session ends its clients stay

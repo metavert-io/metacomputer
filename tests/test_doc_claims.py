@@ -190,7 +190,8 @@ def claude_keeper():
     changed (the probe's hash), never logged; who/status show it; it ends with stop, the session's end, release."""
     k, p, s = vc_fn("run_keeper"), vc_fn("probe"), vc_fn("start_keeper")
     return ('kind="inner"' in s and "owners.claude_of(" in s and "start_new_session=True" in s and "close_fds=True" in s
-            and 'if fields.get("hash") != last:' in k and 'if fields.get("state") != "running":' in k
+            and 'if fields.get("hash") == last:\n                continue' in k
+            and 'if fields.get("state") != "running":' in k
             and "if not os.path.exists(owners.claim_path(me)):" in k and "owners.drop_claim(me)" in k
             and "vm_shell.execute(" in p and "run_guarded" not in p and vm_claude.KEEP_S == 60
             and 'if o.get("claim") == "inner":' in raw("lib/owners.py") and "stop_keeper(" in vc_fn("do_stop")
@@ -207,7 +208,7 @@ def claude_release_locked():
     rel = o[o.index('if cmd == "release":'):]
     rel = rel[:rel.index("return 0")]
     k = vc_fn("run_keeper")
-    held = k[k.index("with owners.lock():"):]
+    held = k[k.index("with owners.acting(), owners.lock():"):]
     return ("with lock():" in rel and rel.index("with lock():") < rel.index("drop_claim(")
             and held.index("json.load(open(owners.claim_path(me)))") < held.index("owners.write_claim(")
             and "return 0              # released" in held[:held.index("owners.write_claim(")])
@@ -613,14 +614,32 @@ CLAIMS = [
                     r"then it refuses and says why\)",
      lambda m: int(m[1]) == handoff.OPEN_WAIT_S and "owners.dispatch(shared=False, timeout=OPEN_WAIT_S)"
      in raw("lib/handoff.py")),
-    ("SECURITY.md", r"held shared by the hub while it sends a call, by `sh` until its whole script has been written to "
-                    r"SSH, by the hub's cleanup and input reset and the GUI tests' commands while they run, by the "
-                    r"lifecycle commands from their last look to their end",
-     lambda m: dispatch_gates() and lifecycle_held()),
+    ("SECURITY.md", r"held shared by the hub while it sends a call, by `sh` and `metacomputer claude`'s acting steps until "
+                    r"the whole script has been written to SSH, by the inner Claude's keeper while it renews its claim, "
+                    r"by the hub's cleanup and input reset and the GUI tests' commands while they run, by the lifecycle "
+                    r"commands from their last look to their end",
+     lambda m: dispatch_gates() and lifecycle_held() and keeper_renewal_gated()),
+    ("SECURITY.md", r"The hub's own teardown is decided under it too, from its last look until the connection is closed: "
+                    r"the exit when idle, the restart for a client with other settings, the end of a connection whose "
+                    r"leased calls outlived their limit, and, with `MCP_HUB=off`, the end of the bridge's own connection",
+     lambda m: teardown_gated()),
+    ("SECURITY.md", r"its write to SSH has a deadline \(`MCOMP_RELAY_WRITE_TIMEOUT_S`, (\d+) s\), so a VM that stops "
+                    r"reading can't keep the lock: the call fails and the connection ends",
+     lambda m: int(m[1]) == 30 and 'WRITE_TIMEOUT_S = float(os.environ.get("MCOMP_RELAY_WRITE_TIMEOUT_S") or 30)'
+     in raw("lib/mcp_relay.py") and "text = STALLED.format(int(WRITE_TIMEOUT_S))" in raw("lib/mcp_relay.py")),
+    ("SECURITY.md", r"A fill or session load that ends without an answer from the vault's unlock process \(`secrets` exit "
+                    r"5, when the vault withdrew the request unconfirmed, or a crash or a signal\)",
+     lambda m: re.search(r'case "\$rc" in\n\s+0\|1\|2\|3\|4\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle ',
+                         raw("bin/metacomputer")) is not None),
+    ("SECURITY.md", r"`metacomputer claude` refuses the steps that act \(`start`, `send`, `keys`, `show`, `stop`\), with "
+                    r"or without `--override` \(`start` before any token is asked for",
+     lambda m: handoff_before_override() and claude_start_checks_handoff()),
+    ("SECURITY.md", r"A renewal holds the computer for Claude, so it's made under the dispatch lock and never while a "
+                    r"handoff is open", lambda m: keeper_renewal_gated()),
     ("SECURITY.md", r"the relay that signs each call is the last hop on the Mac, and signing can take a while, so it looks "
                     r"again too, under the same lock, right before it forwards an acting call",
-     lambda m: "with owners.acting():\n                            try:\n                                proc.stdin.write(line)"
-     in raw("lib/mcp_relay.py") and "name not in mcp_hub.READ_ONLY" in raw("lib/mcp_relay.py")),
+     lambda m: "with owners.acting():\n                            sent = to_vm(line)" in raw("lib/mcp_relay.py")
+     and "name not in mcp_hub.READ_ONLY" in raw("lib/mcp_relay.py")),
     ("SECURITY.md", r"keeps the lock while `secrets settle` waits for the unlock process \(up to 2 minutes\)",
      lambda m: 'settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}"' in raw("bin/metacomputer")
      and "marks = vault_unsettled()" in raw("lib/handoff.py")),
@@ -685,6 +704,32 @@ def dispatch_gates():
     hub, sh, bt = raw("lib/mcp_hub.py"), raw("lib/vm_shell.py"), raw("lib/browser_tools.py")
     return (hub.count("with owners.acting():") >= 3 and "with owners.acting():\n                self.forward(" in hub
             and "with owners.acting():\n                yield" in sh and "with owners.acting():" in bt)
+
+
+def keeper_renewal_gated():
+    """vm_claude's keeper renews its claim under owners.acting() (the dispatch lock, then the owners lock), and an
+    open handoff skips the renewal."""
+    k = vc_fn("run_keeper")
+    return ("with owners.acting(), owners.lock():" in k and "except owners.HandoffOpen:\n                pass" in k
+            and k.index("with owners.acting(), owners.lock():") < k.index("owners.write_claim("))
+
+
+def claude_start_checks_handoff():
+    """`claude start` looks for an open handoff before --override and before a token is asked for."""
+    pre, start = vc_fn("precheck"), vc_fn("do_start")
+    return (pre.index("owners.open_handoff()") < pre.index('if not o["override"]:')
+            and "raise Failed(EXIT_REFUSED, owners.handoff_refusal(handoff))" in pre
+            and start.index("precheck(transport, o)") < start.index("get_token("))
+
+
+def teardown_gated():
+    """The hub's idle exit and restart, a lease's end and MCP_HUB=off's own end each run under owners.acting()."""
+    hub = raw("lib/mcp_hub.py")
+    fn = lambda name: hub[hub.index(f"    def {name}("):hub.index("\n    def ", hub.index(f"    def {name}(") + 1)]  # noqa: E731
+    return ("hold.enter_context(owners.acting())" in fn("_gated_stop") and 'self.server.stop("settings changed", gated=True)'
+            in hub and "self._gated_stop(f\"idle for" in hub
+            and "with owners.acting():\n                    self._end_transport(proc, True)" in fn("_end_leased_transport")
+            and "with owners.acting():\n                        self.shutdown()" in fn("_end_local_when_free"))
 
 
 def tailnet_runs_only_status():

@@ -741,7 +741,10 @@ past them. It hands the computer to you and waits:
 
 While a handoff is open, Claude's actions on the desktop wait: the hub refuses
 every acting call, from every session and script, with "Paused: the user has
-the computer", and so do `metacomputer sh` (but `--read-only`), fills and
+the computer", and so do `metacomputer sh` (but `--read-only`), `metacomputer
+claude`'s `start`, `send`, `keys`, `show` and `stop` (an inner Claude that's
+working carries on with what it was given; its keeper stops renewing its hold on
+the computer), fills and
 session loads from the vault, `input-reset`, and `stop`, `reset` and the other
 commands that check for other controllers (`--override` still goes ahead on
 those, as it does for another session). The hub's own cleanup waits too, and it

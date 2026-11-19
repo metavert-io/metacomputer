@@ -525,6 +525,10 @@ notice (`--say` cleaned like every event) and writes a record,
   Code's bridge keeps its own connection until the handoff ends;
 - `metacomputer sh` refuses every run that isn't `--read-only`, with or without
   `--override`;
+- `metacomputer claude` refuses the steps that act (`start`, `send`, `keys`, `show`,
+  `stop`), with or without `--override` (`start` before any token is asked for;
+  `stop --revoke` still revokes the token), and the inner Claude's keeper renews
+  nothing, so its claim isn't kept fresh by what changes on its screen meanwhile;
 - `secrets fill`, `login` and `session load` refuse, and so does `input-reset`;
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
@@ -536,22 +540,30 @@ notice (`--say` cleaned like every event) and writes a record,
 but its guards can then wait on the VM (a window list, an input reset). So every
 action looks once more right before it leaves the Mac, under a per-VM dispatch
 lock (`RUN_DIR/owners/.dispatch`): held shared by the hub while it sends a call,
-by `sh` until its whole script has been written to SSH, by the hub's cleanup and
-input reset and the GUI tests' commands while they run, by the lifecycle
-commands from their last look to their end, and by `secrets fill`, `login`,
-`session load` and `input-reset` for the whole command, including a wait for
-your approval. With `ACTION_LOG=on` the relay that signs each call is the last
-hop on the Mac, and signing can take a while, so it looks again too, under the
-same lock, right before it forwards an acting call, and answers with the same
-refusal. Opening a handoff holds the lock exclusively, so it waits for those to
+by `sh` and `metacomputer claude`'s acting steps until the whole script has been
+written to SSH, by the inner Claude's keeper while it renews its claim, by the
+hub's cleanup and input reset and the GUI tests' commands while they run, by the
+lifecycle commands from their last look to their end, and by `secrets fill`,
+`login`, `session load` and `input-reset` for the whole command, including a wait
+for your approval. The hub's own teardown is decided under it too, from its last
+look until the connection is closed: the exit when idle, the restart for a client
+with other settings, the end of a connection whose leased calls outlived their
+limit, and, with `MCP_HUB=off`, the end of the bridge's own connection once its
+last client has gone. With `ACTION_LOG=on` the relay that signs each call is the
+last hop on the Mac, and signing can take a while, so it looks again too, under
+the same lock, right before it forwards an acting call, and answers with the same
+refusal; its write to SSH has a deadline (`MCOMP_RELAY_WRITE_TIMEOUT_S`, 30 s), so
+a VM that stops reading can't keep the lock: the call fails and the connection
+ends. Opening a handoff holds the lock exclusively, so it waits for those to
 finish (up to 40 s, then it refuses and says why). An action is therefore either
 on its way before the handoff opens or sees it. The fills check this VM's
 handoff, so their `--vm` must name this VM; another VM is chosen by its own
-settings. A fill or session load whose request the vault withdrew without its
-unlock process confirming that it stopped (`secrets` exit 5) keeps the lock
-while `secrets settle` waits for the unlock process (up to 2 minutes); if that
-doesn't confirm either, a marker (`RUN_DIR/owners/vault-inflight.*`) makes the
-next handoff run `secrets settle` first, and refuse until it confirms.
+settings. A fill or session load that ends without an answer from the vault's
+unlock process (`secrets` exit 5, when the vault withdrew the request unconfirmed,
+or a crash or a signal) keeps the lock while `secrets settle` waits for the unlock
+process (up to 2 minutes); if that doesn't confirm either, or the command itself
+was stopped, a marker (`RUN_DIR/owners/vault-inflight.*`) makes the next handoff
+run `secrets settle` first, and refuse until it confirms.
 
 It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
@@ -580,9 +592,15 @@ are accepted, not oversights:
   was written to SSH, a lease's call. metacomputer has no acknowledgement from
   the VM that a script started, and doesn't stop a run that's under way.
 - `--override` on the lifecycle commands goes ahead, as it does for another
-  session: that's you deciding.
+  session: that's you deciding. So do `metacomputer hub stop`, a signal to the
+  hub and the Mac shutting down, which end the hub and its driver connection
+  whatever is open.
 - With `MCP_HUB=off`, a client process that ends (a one-shot `metacomputer call`,
   a script, a bridge that is killed) takes its own driver connection with it.
+- An inner Claude (`metacomputer claude`) that's working goes on with what it was
+  given: it's a program in the VM, and the handoff stops new prompts and keys
+  reaching it, not the program. Stop it in its terminal yourself if it's in your
+  way, or have Claude run `claude stop` before it hands over.
 - Two settings files that name the same VM with different `RUN_DIR`s don't see
   each other's handoff (the same holds for the one-controller rule).
 
@@ -1669,6 +1687,9 @@ what that user can:
 - `start`, `send`, `keys`, `show` and `stop` act, so the one-controller rule refuses them
   while another session uses the computer (unless you agree to `--override`). `read`,
   `wait` and `status` only look;
+- while you have the computer (`metacomputer handoff`), those acting steps are refused
+  whatever `--override` says (`start` before any token is asked for), and the keeper
+  below renews nothing;
 - the inner Claude keeps working after those commands return, so a **keeper** on the Mac
   holds the computer for it. That's an owners claim of kind `inner`, in the name of the
   session that started it. The keeper looks once a minute (read-only, and not in the
@@ -1678,7 +1699,8 @@ what that user can:
   inner Claude works and for 10 minutes after. `metacomputer who` and `claude status` show
   it. It ends with `claude stop`, the inner Claude's exit, `metacomputer release` or the VM
   going away. Both `release` and the keeper's check-and-renew hold the owners lock, so a
-  released claim stays released;
+  released claim stays released. A renewal holds the computer for Claude, so it's made
+  under the dispatch lock and never while a handoff is open;
 - `stop --revoke` revokes the token from the Mac even when the VM can't be reached or
   refuses, and keeps the session's record (and exits non-zero) until both are done, so
   running it again finishes the job;
