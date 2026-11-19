@@ -278,7 +278,7 @@ the MP4 must be on the Mac, decode whole and cover the time after the wipe, and
 and `recordings --sync` must still work. Then a task with a real driver recording
 (`metacomputer call`): finished turns must reach the Mac while it runs, and after
 the same wipe `task finish` must work and still list them, and `sh` too. Last run:
-on a test VM built from this change (2026-11-18), all 110 checks of `--vm --wipe`
+on a test VM built from this change (2026-11-18), all 115 checks of `--vm --wipe`
 passed, and `tests/test_options.py B D` (SSH certificates, the secrets accounts) 33/33.
 
 Sync between sound and picture was measured separately, by recording a full-screen
