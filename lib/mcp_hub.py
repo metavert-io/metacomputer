@@ -2140,6 +2140,8 @@ class Hub:
         """chrome_verdict for the apps whose names match rx (BROWSER_RE: Firefox or Chrome, for pacing)."""
         if not isinstance(args, dict):
             return False, None
+        args = window_keys(args)                 # a nested window target names the window too; only read here
+        outer = window_keys(outer) if isinstance(outer, dict) else outer
         own = names_target(args)
         layer = args if own or not isinstance(outer, dict) else outer
         for k in ("app", "window"):
@@ -2324,12 +2326,18 @@ class Hub:
         check naming another app or window (wait_for, expect, or a step that is only a check) end what may be added
         from there on: a check can only take pacing away, never bring it."""
         def elsewhere(checks):
-            """Does a check name an app or window that isn't a browser?"""
+            """Does a check name an app or window that isn't a browser (by app name or title, or by pid and
+            window_id, which the driver then also uses as the window for the steps after it)?"""
             for c in checks:
+                if not isinstance(c, dict):
+                    continue
                 for k in ("app", "window"):
-                    v = c.get(k) if isinstance(c, dict) else None
+                    v = c.get(k)
                     if isinstance(v, str) and v and not BROWSER_RE.search(v):
                         return True
+                ids = {k: c[k] for k in ("pid", "window_id") if k in c}
+                if ids and self.app_verdict(ids, None, BROWSER_RE)[0] is not True:
+                    return True
             return False
 
         inherited = names_target(args) and self.app_verdict(args, None, BROWSER_RE)[0] is True
@@ -2753,25 +2761,35 @@ def _wait_exit_unreaped(proc, timeout):
 TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
 
 
-def names_target(a):
-    """Does a call or a run_steps step name its own target (else a step runs in the window it inherits)?"""
-    return isinstance(a, dict) and any(a.get(k) not in (None, "") for k in TARGET_KEYS)
-
-
-def target_view(a):
-    """For human pacing: a call's or step's target as the keys names_target reads, with a `target: {kind: "window",
-    pid, window_id}` folded into pid and window_id; None when it's aimed at the desktop (a desktop target, or
-    scope "desktop" with no window), which pacing leaves alone."""
-    t = a.get("target") if isinstance(a.get("target"), dict) else None
-    if t is not None and t.get("kind") != "window":
-        return None
-    if t is None:
-        return None if a.get("scope") == "desktop" and not names_target(a) else a
+def window_keys(a):
+    """A call's or step's target keys with a nested `target: {kind: "window", pid, window_id}` folded into pid and
+    window_id, so every guard reads the window it names (a copy when it folds anything; the original isn't changed,
+    and the guards write their changes, such as delivery_mode, to the original)."""
+    t = a.get("target") if isinstance(a, dict) and isinstance(a.get("target"), dict) else None
+    if t is None or t.get("kind") != "window" or all(t.get(k) is None for k in ("pid", "window_id")):
+        return a
     v = dict(a)
     for k in ("pid", "window_id"):
         if v.get(k) is None and t.get(k) is not None:
             v[k] = t[k]
     return v
+
+
+def names_target(a):
+    """Does a call or a run_steps step name its own target (else a step runs in the window it inherits)? A nested
+    `target: {kind: "window", ...}` counts."""
+    return isinstance(a, dict) and any(window_keys(a).get(k) not in (None, "") for k in TARGET_KEYS)
+
+
+def target_view(a):
+    """For human pacing: a call's or step's target keys (window_keys); None when it's aimed at the desktop (a desktop
+    target, or scope "desktop" with no window), which pacing leaves alone."""
+    t = a.get("target") if isinstance(a.get("target"), dict) else None
+    if t is not None and t.get("kind") != "window":
+        return None
+    if t is None and a.get("scope") == "desktop" and not names_target(a):
+        return None
+    return window_keys(a)
 
 
 def stricter(v1, v2):

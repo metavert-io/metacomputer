@@ -11,7 +11,8 @@ What it keeps, since anything in the VM may have changed these folders:
   `..`), and must be a real folder, not a link.
 - It's deleted through the profiles folder's descriptor with an rmtree that doesn't follow links inside it.
 - `check` and `delete` refuse a profile a running browser uses: Firefox with `--profile DIR`, `-profile DIR` or
-  `--profile=DIR`, Chrome with `--user-data-dir=DIR` or `--user-data-dir DIR`, compared as the folders they are.
+  `--profile=DIR`, Chrome with `--user-data-dir=DIR` or `--user-data-dir DIR`, compared as the folders they are (a
+  relative DIR against that browser's own working folder, /proc/PID/cwd; one that can't be read counts as in use).
 
 Exit status: 0 done, 2 bad usage or name, 3 no such profile, 4 a running browser uses it, 5 refused (a link or
 something other than a folder on the way, or this Python can't delete without following links).
@@ -87,6 +88,7 @@ def in_use(kind, path):
                 args = f.read(1 << 20).decode("utf-8", "replace").split("\0")
         except OSError:
             continue
+        cwd = None
         for i, a in enumerate(args):
             val = None
             for fl in flags:
@@ -94,7 +96,16 @@ def in_use(kind, path):
                     val = args[i + 1]
                 elif a.startswith(fl + "="):
                     val = a[len(fl) + 1:]
-            if val and (val == path or os.path.realpath(val) == want):
+            if not val:
+                continue
+            if not os.path.isabs(val):                  # relative to the browser's own folder, not this one's
+                if cwd is None:
+                    try:
+                        cwd = os.readlink(os.path.join(proc, pid, "cwd"))
+                    except OSError:
+                        return True                      # can't tell where it points: refuse
+                val = os.path.join(cwd, val)
+            if val == path or os.path.realpath(val) == want:
                 return True
     return False
 

@@ -86,6 +86,12 @@ def own_delay(a):
     return isinstance(a, dict) and "delay_ms" in a
 
 
+def seconds(ms):
+    """A delay_ms as seconds (0 for anything that isn't a number)."""
+    return max(0.0, float(ms)) / 1000 if isinstance(ms, (int, float)) and not isinstance(ms, bool) \
+        and math.isfinite(ms) else 0.0
+
+
 def split_runs(text, r, runs=None):
     """The text in 1-3 runs, split at random places between two ASCII characters (never inside a character
     sequence such as an accent or an emoji, never between CR and LF), each run at least RUN_MIN characters."""
@@ -143,7 +149,7 @@ def pace_type(args, r, cap_s=CAP_S):
 
 # Keys that name the element a step acts on (re-resolved on every run if they were copied to each one) or a
 # window by app name or title (which can resolve differently once the page changes).
-ELEMENT_TARGET_KEYS = ("x", "y", "element_token", "role", "name", "nth", "app", "window")
+ELEMENT_TARGET_KEYS = ("x", "y", "element_token", "role", "name", "label", "nth", "app", "window")   # label: name's alias
 
 
 def _plan(steps, browser, targets, r, split, moves_on, limit):
@@ -205,8 +211,11 @@ def pace_batch(args, browser, targets, r, cap_s=CAP_S, moves_on=True, limit=None
         return None
     limit = len(steps) if limit is None else limit
     own = args.get("delay_ms") if own_delay(args) else None
-    own_s = max(0.0, float(own)) / 1000 if isinstance(own, (int, float)) and not isinstance(own, bool) else 0.0
-    base = len(steps) * STEP_COST_S + (len(steps) - 1) * own_s
+    own_s = seconds(own)
+    # The batch's own time: its steps, its pauses, and the typing pauses its steps set themselves.
+    base = len(steps) * STEP_COST_S + (len(steps) - 1) * own_s + sum(
+        len(a["text"]) * seconds(a.get("delay_ms")) for t, a in map(step_parts, steps)
+        if t == "type_text" and own_delay(a) and isinstance(a.get("text"), str))
     cap = min(cap_s, BATCH_LIMIT_S - BATCH_MARGIN_S - base)
     if cap <= 0:
         return None

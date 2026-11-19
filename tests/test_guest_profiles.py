@@ -6,7 +6,8 @@ profiles --new|--delete`), run here against a temporary home folder and a stand-
 
 It checks that a link anywhere on the way to the profiles folder, or a profile that is a link, is refused and nothing
 outside is touched; that a running Firefox using the profile blocks the delete whichever way it names it
-(`--profile DIR`, `-profile DIR`, `--profile=DIR`), and Chrome with `--user-data-dir`; that bad names are refused;
+(`--profile DIR`, `-profile DIR`, `--profile=DIR`, a relative DIR from its own working folder), and Chrome with
+`--user-data-dir`; that bad names are refused;
 and that a delete removes the profile without following links inside it.
 """
 import os
@@ -84,6 +85,17 @@ def main():
             got = (w.run("check", "firefox", "shop"), w.run("delete", "firefox", "shop"))
             check(f"a running Firefox with {argv[1].split('=')[0]} {'(another spelling of the path) ' if i == 3 else ''}"
                   "blocks check and delete (4), and the profile stays", got == (4, 4) and os.path.isdir(p), got)
+        w.clear_procs()
+        w.process(110, "/usr/lib/firefox/firefox", "-profile", "shop")
+        os.symlink(w.ff, os.path.join(w.proc, "110", "cwd"))   # started from the profiles folder
+        got = w.run("delete", "firefox", "shop")
+        check("a relative -profile counts from that Firefox's own working folder (/proc/PID/cwd): blocked",
+              got == 4 and os.path.isdir(p), got)
+        w.clear_procs()
+        w.process(111, "/usr/lib/firefox/firefox", "-profile", "shop")
+        os.symlink(w.home, os.path.join(w.proc, "111", "cwd"))  # the same words from another folder: another profile
+        check("…and the same relative name from another folder is another profile (not blocked)",
+              w.run("check", "firefox", "shop") == 0)
         w.clear_procs()
         os.makedirs(os.path.join(w.cr, "work"))
         w.process(200, "/opt/google/chrome/chrome", "--user-data-dir=" + os.path.join(w.cr, "work"))

@@ -362,7 +362,9 @@ the hub, and the hub applies, to each one:
   driver doesn't list (`window_unknown`) and a pid, window id and token that
   don't all belong to one app (`target_conflict`). A `run_steps` step that names
   no window is judged by the window it inherits from the last step that named one
-  (or the batch's), as the driver runs it;
+  (or the batch's), as the driver runs it. A nested `target: {kind: "window", pid,
+  window_id}` names the window as pid and window_id do, on a call or a step (`set_value`
+  doesn't take a nested target, and `run_script` can't run inside `run_steps`);
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
@@ -518,13 +520,13 @@ as a person meets it. It isn't a protection, and it isn't a way past bot defence
 **Human pacing (`BROWSER_PACING=human`, the default).** The hub (`lib/pacing.py`) paces `type_text` and
 `run_steps` calls aimed at a Firefox or Chrome window, for every client, after every guard has passed the call.
 It changes only the call's delays (`delay_ms`: a random 60-140 ms per key, 120-320 ms between batch steps),
-splits a long text typed into the focus into two or three typing runs (never a step that names its field, or its
-window by app or title: each run would resolve it again), and adds `move_cursor` steps (desktop scope, the real
+splits a long text typed into the focus into two or three typing runs (never a step that names its field, by role
+and name or label, token or x,y, or its window by app or title: each run would resolve it again), and adds `move_cursor` steps (desktop scope, the real
 pointer) toward a pixel click that has no `wait_for`; nothing else in the call changes, and a `delay_ms` the call
 sets is kept. Every added step also waits the batch's pause, the caller's own included, and that counts: at most
-15 s is added per call, and a batch whose own steps and pauses leave no room under the driver's 60 s limit isn't
-paced. From a step aimed at another app, the desktop or a target the hub can't tell, or a check naming another
-app, nothing more is split or added. Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came.
+15 s is added per call, and a batch whose own steps, pauses and typing pauses leave no room under the driver's 60 s
+limit isn't paced. From a step aimed at another app, the desktop or a target the hub can't tell, or a check naming
+another app (by name, title, or pid and window_id), nothing more is split or added. Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came.
 What it keeps:
 - **No values in new places.** `hub.log` gets each plan as counts and milliseconds, never text. The action log
   records the call as sent to the driver: with `ACTION_LOG_TEXT=redact` a text split into runs shows as two or
@@ -539,7 +541,8 @@ What it keeps:
 `lib/guest_profiles.py`: the profiles folder is reached from the home folder without following a link (a link
 anywhere on the way is refused), a profile is only ever a real folder directly inside it, named by letters, digits,
 `.`, `_` and `-`, and it's deleted by descriptor without following links inside it. A profile a running browser
-uses (`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome) isn't deleted.
+uses (`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome; a relative path counted
+from that browser's own working folder) isn't deleted.
 
 ## The live view (`metacomputer view`)
 

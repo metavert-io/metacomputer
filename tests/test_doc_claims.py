@@ -598,6 +598,15 @@ def caller_pause_counted():
     return none is None and json.dumps(b) == keep and bool(plain and plain["moves"])
 
 
+def own_typing_counted():
+    """The typing pauses a batch's own steps set count against the driver's limit: 250 characters at 200 ms, then
+    250 more to pace, leave no room, so the batch goes as it came."""
+    b = {"steps": [{"tool": "type_text", "args": {"text": "a" * 250, "delay_ms": 200}},
+                   {"tool": "type_text", "args": {"text": "b" * 250}}]}
+    keep = json.dumps(b)
+    return pacing.pace_batch(b, {0, 1}, {}, pacing.rng(1)) is None and json.dumps(b) == keep
+
+
 def profiles_deleted_in_the_vm():
     """`browser profiles --new|--delete` go through lib/guest_profiles.py in the VM (no rm -rf on a path), which
     opens the way with O_NOFOLLOW and deletes a direct child by descriptor."""
@@ -622,9 +631,20 @@ CLAIMS = [
     ("SECURITY.md", r"for every client, after every guard has passed the call", lambda m: pacing_after_guards()),
     ("SECURITY.md", r"a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between batch steps",
      lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))),
-    ("SECURITY.md", r"at most (\d+) s is added per call, and a batch whose own steps and pauses leave no room under the "
-                    r"driver's (\d+) s limit isn't paced",
-     lambda m: pacing.CAP_S == int(m[1]) and pacing.BATCH_LIMIT_S == int(m[2])),
+    ("SECURITY.md", r"at most (\d+) s is added per call, and a batch whose own steps, pauses and typing pauses leave no "
+                    r"room under the driver's (\d+) s limit isn't paced",
+     lambda m: pacing.CAP_S == int(m[1]) and pacing.BATCH_LIMIT_S == int(m[2]) and own_typing_counted()),
+    ("SECURITY.md", r"never a step that names its field, by role and name or label, token or x,y, or its window by app or title",
+     lambda m: {"role", "name", "label", "element_token", "x", "y", "app", "window"} <= set(pacing.ELEMENT_TARGET_KEYS)),
+    ("SECURITY.md", r"or a check naming another app \(by name, title, or pid and window_id\), nothing more is split or added",
+     lambda m: 'ids = {k: c[k] for k in ("pid", "window_id") if k in c}' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"a relative path counted from that browser's own working folder\) isn't deleted",
+     lambda m: 'os.readlink(os.path.join(proc, pid, "cwd"))' in raw("lib/guest_profiles.py")),
+    ("SECURITY.md", r"A nested `target: \{kind: \"window\", pid, window_id\}` names the window as pid and window_id do",
+     lambda m: mcp_hub.names_target({"target": {"kind": "window", "pid": 7, "window_id": 9}})
+     and mcp_hub.window_keys({"target": {"kind": "window", "pid": 7, "window_id": 9}})["pid"] == 7
+     and "args = window_keys(args)" in raw("lib/mcp_hub.py")
+     and not mcp_hub.names_target({"target": {"kind": "desktop", "display_id": "primary"}})),
     ("SECURITY.md", r"`hub\.log` gets each plan as counts and milliseconds, never text",
      lambda m: pacing_keeps_text_and_own_delay()),
     ("SECURITY.md", r"Fills type on the vault's own path \(SSH to the VM\), never through the hub",
@@ -645,7 +665,7 @@ CLAIMS = [
      lambda m: caller_pause_counted()),
     ("SECURITY.md", r"the profiles folder is reached from the home folder without following a link",
      lambda m: profiles_deleted_in_the_vm()),
-    ("SECURITY.md", r"\(`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome\)",
+    ("SECURITY.md", r"\(`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome;",
      lambda m: '("--profile", "-profile")' in raw("lib/guest_profiles.py") and '("--user-data-dir",)' in raw("lib/guest_profiles.py")
      and 'a.startswith(fl + "=")' in raw("lib/guest_profiles.py")),
     ("skills/metacomputer/BROWSER.md", r"the result starts with a note `(metacomputer hub \(human pacing\):)",

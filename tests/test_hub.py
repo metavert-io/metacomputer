@@ -1317,6 +1317,29 @@ def pacing_checks():
         worst = max(worst, added if total <= pacing.BATCH_LIMIT_S - pacing.BATCH_MARGIN_S + 1e-6 else 1e9)
     check(f"…over 100 batches with caller pauses up to 1.45 s: never more than {pacing.CAP_S:g} s added, and never past the "
           "driver's limit (its margin kept)", worst <= pacing.CAP_S + 1e-6, worst)
+    slow = {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"tool": "type_text", "args": {"text": "a" * 250, "delay_ms": 200}},
+        {"tool": "type_text", "args": {"text": "b" * 250}}]}
+    n0 = len(calls())
+    h.call("run_steps", json.loads(json.dumps(slow)))
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("the typing pauses a batch's steps set themselves count too: 250 characters at 200 ms leave no room, so "
+          "the batch goes as it came", {k: v for k, v in fwd.items() if k != "session"} == slow,
+          [(len(t), d) for t, d in typed_steps(fwd.get("steps") or [])])
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"tool": "type_text", "args": {"label": "Email", "text": "labelled-field@example.com and more"}}]})
+    typed = typed_steps((sent_args("run_steps", n0) or [{}])[-1].get("steps") or [])
+    check("a step that names its field by label (the driver's alias for name) is typed in one run",
+          len(typed) == 1 and typed[0][1], typed)
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"tool": "type_text", "args": {"text": "short"}},
+        {"wait_for": {"pid": 50, "window_id": W, "text": "Untitled"}},
+        {"tool": "type_text", "args": {"text": "after a check on Mousepad's window by id, long text"}}]})
+    typed = typed_steps((sent_args("run_steps", n0) or [{}])[-1].get("steps") or [])
+    check("a check naming another app's window by pid and window_id ends pacing for the steps after it",
+          typed[:1] and typed[0][1] and typed[-1] == ("after a check on Mousepad's window by id, long text", None), typed)
     n0 = len(calls())
     h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
         {"tool": "type_text", "args": {"role": "entry", "name": "Email", "text": "named-field@example.com and more"}},
@@ -1395,6 +1418,42 @@ def pacing_checks():
     clear_claims()
     r.stop()
     set_windows(BASE_WINDOWS)
+
+
+def chrome_nested_checks():
+    """The Chrome guard reads a nested `target: {kind: "window", pid, window_id}` too: input aimed at Chrome that way,
+    alone or in a batch with no default window, goes in the foreground (on the caller's own arguments), and keys get
+    the input reset first."""
+    print("the Chrome guard and nested window targets")
+    clear_claims()
+    set_windows(BASE_WINDOWS)
+    r = Running(MCOMP_BROWSER_PACING="fast")
+    resets = []
+    r.hub.input_reset = lambda: resets.append(1)
+    h = client(r, "call")
+    tg = {"kind": "window", "pid": 77, "window_id": CHROME}
+    n0 = len(calls())
+    h.call("type_text", {"target": dict(tg), "text": "abc"})
+    h.call("click", {"target": dict(tg), "x": 10, "y": 10})
+    s = [c["msg"]["params"] for c in tool_calls(None, n0) if c["msg"]["params"]["name"] in ("type_text", "click")]
+    check("type_text and click aimed at Chrome only through target: {kind: window, ...} go in the foreground",
+          len(s) == 2 and all(p["arguments"].get("delivery_mode") == "foreground" and p["arguments"].get("target") == tg
+                              for p in s), s)
+    check("…and the keys got the input reset first", len(resets) >= 1, resets)
+    n0, r0 = len(calls()), len(resets)
+    h.call("run_steps", {"steps": [{"tool": "type_text", "args": {"target": dict(tg), "text": "abc"}},
+                                   {"tool": "press_key", "args": {"target": dict(tg), "key": "Tab"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    modes = [st["args"].get("delivery_mode") for st in fwd.get("steps") or []]
+    check("a batch with no default window: steps aimed at Chrome through a nested target go in the foreground, with "
+          "the input reset", modes == ["foreground", "foreground"] and len(resets) > r0, (modes, len(resets) - r0))
+    n0 = len(calls())
+    h.call("type_text", {"target": {"kind": "window", "pid": 50, "window_id": W}, "text": "abc"})
+    s = sent_args("type_text", n0)
+    check("a nested target on another app is left as it was", s and "delivery_mode" not in s[-1], s)
+    h.close()
+    clear_claims()
+    r.stop()
 
 
 def bounded_checks():
@@ -2908,6 +2967,7 @@ def main():
         handoff_teardown_race_checks()
         chrome_checks()
         pacing_checks()
+        chrome_nested_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()
