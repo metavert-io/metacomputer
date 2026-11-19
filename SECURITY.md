@@ -1276,7 +1276,8 @@ moment until the VM is reset, nothing the VM chooses is kept on your Mac.
     count from the VM.
   - **The tool list.** The hub doesn't ask the driver for its tool list or handshake
     again, doesn't save one, and doesn't pass `tools/list_changed` on: the list from
-    before stays. A tool's description is the VM's to write.
+    before stays. A tool's description is the VM's to write. Its resources and prompts
+    listings come from the saved copy too.
   - **`metacomputer sh`** records each output stream by its size class only (no hash, no
     text), and the exit code as zero or not.
 - **What's left** to a hostile VM is a few bits per call: which fixed outcome, which size

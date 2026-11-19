@@ -23,7 +23,7 @@ All notable changes to metacomputer are recorded here. The format follows
   - the action log records every call, answer and refusal as `secret_adjacent` (tool, client, argument names and size class; failed or not, an image count, a text size class; a refusal's code), whatever `ACTION_LOG_TEXT` says;
   - the driver connection's stderr is withheld;
   - hub.log names exceptions by type only;
-  - the hub neither asks for, saves nor serves a new tool list;
+  - the hub neither asks for, saves nor serves a new tool list, handshake or resources and prompts listing;
   - `metacomputer sh` records output streams by size class only.
 - `metacomputer secrets fill|login|session|token` refuse `--vm` naming a VM other than the config's (use `MCOMP_CONFIG`).
 - A sign-in or session load holds the computer until its work has provably stopped (its vault call answered or `settle` returned; every driver call answered or its connection's process tree ended). That holds while its client stays connected, under the client's lease if it leaves, and across the hub stopping. The hub doesn't idle out, or restart for another client's settings, while one runs. architecture.md, "Tools the hub serves itself", lists every way a job ends. `metacomputer hub stop` waits up to 75 s for them.

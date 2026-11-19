@@ -289,7 +289,7 @@ What the readers do once it's there:
 | `actions` events | Built from the records | The same records, so nothing of the VM's |
 | `upstream.stderr` and its memory tail (`wirelimits.StderrTail`) | Kept, capped | Nothing more kept; one fixed line instead. Only whether the Mac side said the VM isn't running is still noticed (a fixed phrase). |
 | hub.log | Exceptions by `repr`; a failed connect quotes stderr | Exceptions by type only; no stderr text; no window ids or VM-side counts in notes |
-| The tool list and handshake (`refresh_cache`) | Asked for at connect and on `tools/list_changed`; saved to `driver-mcp-cache.json`; served | Not asked for, saved or served again: the list and handshake from before stay, and `tools/list_changed` isn't passed on |
+| The tool list and handshake (`refresh_cache`), resources and prompts listings | Asked for at connect and on `tools/list_changed`; saved to `driver-mcp-cache.json`; served (listings passed on to the driver) | Not asked for, saved or served again: the list, handshake and listings from before stay, and `tools/list_changed` isn't passed on |
 | `metacomputer sh` records (`vm_shell.result_fields`) | Each stream's size and hash (and text with `keep`) | Each stream's size class only; the exit code as zero or not |
 | The tool's own answer | Its own words, the vault's, fixed outcomes | The same |
 
