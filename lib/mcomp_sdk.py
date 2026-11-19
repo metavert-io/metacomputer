@@ -136,7 +136,10 @@ class Connection:
                 except Exception:
                     pass
 
-    def close(self):
+    def close(self, keep_for_handoff=False):
+        """With MCP_HUB=off this ends the core's own driver connection too. keep_for_handoff (Claude Code's bridge):
+        while the user has the computer (a handoff), wait until it has ended first, at most its longest time limit:
+        ending the connection could close the browser they're working in."""
         self.alive = False
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
@@ -150,6 +153,9 @@ class Connection:
             end = time.monotonic() + 2
             while self.core.active_clients() and time.monotonic() < end:
                 time.sleep(0.02)                 # the core lets go of this client (its claim, its event) first
+            waiting = self.core.local_end
+            if keep_for_handoff and waiting is not None:
+                waiting.join(mcp_hub.owners.HANDOFF_MAX_S + 120)
             self.core.shutdown()
 
 

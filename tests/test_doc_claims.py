@@ -583,10 +583,14 @@ CLAIMS = [
      lambda m: '"host": "127.0.0.1:$VNC_PORT"' in raw("scripts/lib.sh")),
     ("SECURITY.md", r"It's never in the link, an argument, the environment, a log, an event or the command's output",
      lambda m: view_open_pipes_password()),
-    ("SECURITY.md", r"the pasteboard's change count from right after the copy \(not the password\) empties the "
-                    r"clipboard after `VIEW_CLIPBOARD_S` seconds \((\d+)\) if nothing was copied since, comparing and "
-                    r"emptying in one step of one process",
+    ("SECURITY.md", r"only that change count \(not the password\) empties the clipboard after `VIEW_CLIPBOARD_S` "
+                    r"seconds \((\d+)\) if nothing was copied since, comparing and emptying in one run of one process",
      lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
+    ("SECURITY.md", r"The copy takes the pasteboard's change count from its own `clearContents` and checks, once the "
+                    r"password is in place, that nothing else was copied in between",
+     lambda m: "var n = pb.clearContents;" in raw("lib/liveview.py")
+     and "String(pb.changeCount) === String(n) ? String(n) : 'raced'" in raw("lib/liveview.py")
+     and 'if count == "raced":' in raw("lib/liveview.py")),
     ("SECURITY.md", r"marked concealed and transient \(nspasteboard\.org's markers\)",
      lambda m: all(t in raw("lib/liveview.py") for t in ("org.nspasteboard.ConcealedType",
                                                           "org.nspasteboard.TransientType"))),
@@ -605,13 +609,26 @@ CLAIMS = [
      lambda m: fills_guarded() and input_reset_guarded()),
     ("SECURITY.md", r"The fills check this VM's handoff, so their `--vm` must name this VM",
      lambda m: 'secrets_vm_is_this "$@" || die' in raw("bin/metacomputer")),
-    ("SECURITY.md", r"Opening a handoff holds it exclusively, so it waits for those to finish \(up to (\d+) s, then it "
-                    r"refuses and says why\)",
+    ("SECURITY.md", r"Opening a handoff holds the lock exclusively, so it waits for those to finish \(up to (\d+) s, "
+                    r"then it refuses and says why\)",
      lambda m: int(m[1]) == handoff.OPEN_WAIT_S and "owners.dispatch(shared=False, timeout=OPEN_WAIT_S)"
      in raw("lib/handoff.py")),
-    ("SECURITY.md", r"held shared by the hub while it sends a call, by `sh` while it starts a run, by the hub's cleanup "
-                    r"and input reset while they run",
-     lambda m: dispatch_gates()),
+    ("SECURITY.md", r"held shared by the hub while it sends a call, by `sh` until its whole script has been written to "
+                    r"SSH, by the hub's cleanup and input reset and the GUI tests' commands while they run, by the "
+                    r"lifecycle commands from their last look to their end",
+     lambda m: dispatch_gates() and lifecycle_held()),
+    ("SECURITY.md", r"the relay that signs each call is the last hop on the Mac, and signing can take a while, so it looks "
+                    r"again too, under the same lock, right before it forwards an acting call",
+     lambda m: "with owners.acting():\n                            try:\n                                proc.stdin.write(line)"
+     in raw("lib/mcp_relay.py") and "name not in mcp_hub.READ_ONLY" in raw("lib/mcp_relay.py")),
+    ("SECURITY.md", r"keeps the lock while `secrets settle` waits for the unlock process \(up to 2 minutes\)",
+     lambda m: 'settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}"' in raw("bin/metacomputer")
+     and "marks = vault_unsettled()" in raw("lib/handoff.py")),
+    ("SECURITY.md", r"if that can't be recorded either, nothing would bound it, so such a record doesn't count",
+     lambda m: "return now - HANDOFF_MAX_S - 1" in raw("lib/owners.py")),
+    ("SECURITY.md", r"doesn't end a connection whose leased calls outlived their limit \(it waits for the handoff, at "
+                    r"most 2 hours longer\)",
+     lambda m: "age <= LEASE_MAX_S + owners.HANDOFF_MAX_S" in raw("lib/mcp_hub.py") and owners.HANDOFF_MAX_S == 7200),
     ("SECURITY.md", r"The 2 hours run from the file's change time, which the kernel sets",
      lambda m: "t = st.st_ctime" in raw("lib/owners.py") and "_first_failure(now)" in raw("lib/owners.py")),
     ("SECURITY.md", r"its time limit \((\d+) minutes by default, at most (\d+) hours\)",
@@ -648,6 +665,14 @@ def clear_compares_change_count():
     js = raw("lib/liveview.py")
     return ("if (String(pb.changeCount) !== argv[1]) { return 'kept'; }\n    pb.clearContents;" in js
             and 'pasteboard(["clear", count])' in js and "pbpaste" not in js)
+
+
+def lifecycle_held():
+    """stop, reset, restore, baseline and desktop-restart take the dispatch lock after their question, before they act."""
+    b = raw("bin/metacomputer")
+    return (b.count("handoff_hold_unless_override\n") >= 5 and '[ "${HANDOFF_HELD:-}" = 1 ] && return 0' in b
+            and re.search(r"confirm \"Replace the working VM '\$VM_NAME' with a fresh copy[^\n]*\n"
+                          r"\s+handoff_hold_unless_override\n\s+restore_from", b) is not None)
 
 
 def input_reset_guarded():

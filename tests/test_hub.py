@@ -834,6 +834,125 @@ def handoff_checks():
         r.stop()
 
 
+def handoff_teardown_checks():
+    """While the user has the computer: the action-log relay (the last hop on the Mac) looks again before it
+    forwards; nothing that would end the driver connection runs (idle exit, a restart for other settings, a lease's
+    end, MCP_HUB=off's last disconnect)."""
+    print("a handoff: the last hop looks again, and the driver connection stays")
+    import handoff
+    clear_claims()
+    now = time.time()
+    rec = {"v": 1, "id": "h-222222222222", "status": "open", "why": "captcha", "say": "Tick the box", "opened": now,
+           "deadline": now + 300, "timeout_s": 300, "cwd": "/handoff/project", "claude_pid": None}
+
+    def clear_handoff():
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+
+    # The relay (ACTION_LOG=on) signs before it forwards; a handoff that opens after the hub's last look is caught there.
+    adir = os.path.join(TD, "actions-handoff")
+    key = os.path.join(TD, "keys", "alog")
+    r = Running(MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=adir, MCOMP_ACTION_LOG_KEY=key)
+    r.hub.spawn = lambda: subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_relay.py"), PY, FAKE, STATE],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           env=dict(r.env, MCOMP_ACTION_LOG="on"))
+    r.hub.input_reset = lambda: None
+    h = client(r, "sdk")
+    h.call("list_windows", {})
+    forward = r.hub.forward
+
+    def opening_on_the_way(c, msg, *a, **kw):
+        if (msg.get("params") or {}).get("name") == "press_key":
+            handoff.write_record(rec)            # after the hub's own last look, before the relay forwards
+        return forward(c, msg, *a, **kw)
+    r.hub.forward = opening_on_the_way
+    n0 = len(tool_calls("press_key"))
+    res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+    r.hub.forward = forward
+    h.close()
+    r.stop()
+    clear_handoff()
+    check("the action-log relay refuses an acting call when a handoff opened while it was on its way",
+          res.is_error and (res.structured or {}).get("code") == "user_has_computer"
+          and len(tool_calls("press_key")) == n0, (res.text[:200], res.structured))
+    clear_claims()
+
+    # Idle exit: an open handoff keeps the hub (and its driver connection), and the idle time starts again after.
+    r = Running()
+    r.hub.last_activity = time.time() - 5000
+    handoff.write_record(rec)
+    held = r.hub.idle_for()
+    clear_handoff()
+    after = r.hub.idle_for()
+    check("an open handoff keeps the hub from its idle exit, and its idle time starts over afterwards",
+          held == 0.0 and after < 60, (held, after))
+    # A client with other settings doesn't restart an otherwise idle hub while the user has the computer.
+    handoff.write_record(rec)
+    try:
+        other = mcomp_sdk.Hub(env=dict(r.env, MCOMP_COORD_GUARD="off"), timeout=20).connect()
+        refused = None
+        other.close()
+    except mcp_hub.HubError as e:
+        refused = str(e)
+    alive = r.t.is_alive()
+    clear_handoff()
+    check("a client with other settings doesn't restart the hub while the user has the computer",
+          refused and "while the user has the computer" in refused and alive, (refused, alive))
+    r.stop()
+    mcp_hub.stop_hub(r.env)
+    clear_claims()
+
+    # A lease past its life ends its connection, but not while a handoff is open; once the handoff ends, it does.
+    saved = (mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S)
+    mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S = 0.2, 2, 1.0
+    try:
+        r = Running()
+        hl = mcomp_sdk.Hub(env=r.env, kind="sdk", timeout=1).connect()
+        driver = hl.call("whoami", {}).structured["driver_pid"]
+        hl.call("slow", {"s": 60})
+        hl.close()
+        wait_until(lambda: r.hub.leases, 5)
+        handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+        time.sleep(3.5)
+        kept = owners.alive(driver)
+        clear_handoff()
+        ended = wait_until(lambda: not owners.alive(driver), 15)
+        check("a lease's end doesn't end the driver connection while the user has the computer; it does after",
+              kept and ended, (kept, ended))
+        r.stop()
+    finally:
+        mcp_hub.LEASE_TICK_S, mcp_hub.LEASE_MAX_S, mcp_hub.TRANSPORT_GRACE_S = saved
+        clear_handoff()
+        clear_claims()
+
+    # MCP_HUB=off: Claude Code's bridge ending (its stdin closed) keeps its own connection until the handoff ends.
+    off = dict(env(), MCOMP_MCP_HUB="off")
+    p = subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_lazy.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, env=off, text=True, bufsize=1)
+    for m in ({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}}):
+        p.stdin.write(json.dumps(m) + "\n")
+    p.stdin.flush()
+    lines = [json.loads(p.stdout.readline()), json.loads(p.stdout.readline())]
+    driver = json.loads(lines[1]["result"]["content"][0]["text"]).get("driver_pid")
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    p.stdin.close()
+    time.sleep(2.0)
+    waiting = p.poll() is None and owners.alive(driver)
+    clear_handoff()
+    try:
+        p.wait(15)
+    except subprocess.TimeoutExpired:
+        p.kill()
+    gone = wait_until(lambda: not owners.alive(driver), 10)
+    check("MCP_HUB=off: the bridge keeps its own driver connection while the user has the computer, ends it after",
+          waiting and p.returncode == 0 and gone, (waiting, p.returncode, gone))
+    clear_handoff()
+    clear_claims()
+
+
 def lessons_checks():
     print("approved lessons: in the instructions after the habits, never read by a guard")
     r = Running()
@@ -2429,6 +2548,7 @@ def main():
         limit_checks()
         owner_checks()
         handoff_checks()
+        handoff_teardown_checks()
         chrome_checks()
         bounded_checks()
         actionlog_checks()

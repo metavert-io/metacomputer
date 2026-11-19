@@ -346,7 +346,6 @@ def handoff_valid(rec):
 
 
 UNREADABLE_FILE = "handoff-unreadable"     # in RUN_DIR: when the record was first found impossible to look at
-_first_failure_memo = []
 
 
 def _unreadable_path():
@@ -356,7 +355,8 @@ def _unreadable_path():
 def _first_failure(now):
     """When the record was first found impossible even to look at (no metadata), kept in RUN_DIR so the 2 hours
     count from then for every process that looks; a time there that's missing, not a number or later than now
-    starts over from now. If it can't be kept on disk, this process remembers it."""
+    starts over from now. If even that can't be written, nothing bounds the state, so it doesn't count at all:
+    a time that has already passed (the pause ends rather than renewing itself with every look)."""
     p = _unreadable_path()
     try:
         with open(p) as f:
@@ -372,13 +372,10 @@ def _first_failure(now):
         os.replace(tmp, p)
         return now
     except OSError:
-        if not _first_failure_memo:
-            _first_failure_memo.append(now)
-        return min(_first_failure_memo[0], now)
+        return now - HANDOFF_MAX_S - 1
 
 
 def _forget_failure():
-    _first_failure_memo.clear()
     try:
         os.remove(_unreadable_path())
     except OSError:

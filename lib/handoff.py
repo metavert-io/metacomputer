@@ -34,6 +34,7 @@ import secrets
 import select
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -364,10 +365,35 @@ def cmd_open(a):
             return report(rec, a.json, opened["id"])
 
 
+VAULT_MARK = "vault-inflight."     # bin/metacomputer's marker: a vault request not yet known to have ended
+
+
+def vault_unsettled():
+    """The markers of vault fills and session loads whose end the unlock process didn't confirm. Found under the
+    exclusive dispatch lock, so none belongs to a command that's still running (those hold it shared)."""
+    try:
+        return sorted(f for f in os.listdir(owners.OWNERS_DIR) if f.startswith(VAULT_MARK))
+    except OSError:
+        return []
+
+
+def settle_vault(budget):
+    """`metacomputer secrets settle`: True once the unlock process has finished everything it was sent (or none
+    runs), within budget seconds (at least 5)."""
+    budget = max(5.0, budget)
+    try:
+        r = subprocess.run([os.path.join(owners.LAB, "bin", "metacomputer"), "secrets", "settle", "--timeout",
+                            str(int(budget))], stdin=subprocess.DEVNULL, capture_output=True, timeout=budget + 10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
 def open_and_wait(a, say, timeout, interactive, opened):
     settle()
     table = owners.ps_table()
     claude = owners.claude_of(os.getpid(), table)
+    t0 = time.monotonic()
     try:
         # Exclusive: every action still on its way to the VM (a call being sent, a shell run starting, a vault fill
         # or session load until it ends) gets there first, and each one after this looks and finds the record.
@@ -382,6 +408,18 @@ def open_and_wait(a, say, timeout, interactive, opened):
         err(f"couldn't record the handoff ({e}); nothing was handed over")
         return EXIT_ERROR
     try:
+        marks = vault_unsettled()
+        if marks and not settle_vault(OPEN_WAIT_S - (time.monotonic() - t0)):
+            err("a vault fill or session load ended without the unlock process confirming that it stopped, and it "
+                "hasn't confirmed since (`metacomputer secrets settle` waits for it); nothing was handed over. Run "
+                f"`metacomputer secrets settle`, then the handoff again. (Marked by {', '.join(marks)} in "
+                f"{owners.short(owners.OWNERS_DIR)}.)")
+            return EXIT_REFUSED
+        for m in marks:
+            try:
+                os.remove(os.path.join(owners.OWNERS_DIR, m))
+            except OSError:
+                pass
         with owners.lock():
             cur = owners.open_handoff()
             if cur:

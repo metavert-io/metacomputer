@@ -6,8 +6,8 @@
                                         say why on stdout
   liveview.py clip [--clear-after 45]   the live-view password, one line on stdin -> the clipboard. A detached
                                         helper empties the clipboard after that many seconds, but only if nothing
-                                        was copied since: it keeps the pasteboard's change count from right after
-                                        the copy (never the password), and compares and empties in one step.
+                                        was copied since: it keeps the change count the copy's own clearContents
+                                        returned (never the password), and compares and empties in one run.
 
 The clipboard is macOS's general pasteboard, through osascript's JavaScript bridge to AppKit (NSPasteboard), so
 the copy and its change count, and later the comparison and the clearing, each happen inside one process. The
@@ -24,8 +24,9 @@ import time
 
 MAX_PASSWORD = 256
 CLEAR_DEFAULT_S = 45
-# run(argv): "copy" (the text on stdin -> the pasteboard; prints the change count after it) or "clear N" (empties
-# the pasteboard only if its change count is still N; prints "cleared" or "kept").
+# run(argv): "copy" (the text on stdin -> the pasteboard; prints the change count its clearContents returned, so
+# it is this copy's own, or "raced" when the count moved before the text was in place: something else was copied
+# in between) or "clear N" (empties the pasteboard only if its change count is still N; "cleared" or "kept").
 PASTEBOARD_JS = r"""
 ObjC.import('AppKit');
 function run(argv) {
@@ -34,11 +35,12 @@ function run(argv) {
     var data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
     var s = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
     if (s.isNil() || !ObjC.unwrap(s)) { return 'error'; }
-    pb.clearContents;
+    var n = pb.clearContents;
     var ok = pb.setStringForType(s, 'public.utf8-plain-text');
     pb.setStringForType($(''), 'org.nspasteboard.ConcealedType');
     pb.setStringForType($(''), 'org.nspasteboard.TransientType');
-    return ok ? String(pb.changeCount) : 'error';
+    if (!ok) { return 'error'; }
+    return String(pb.changeCount) === String(n) ? String(n) : 'raced';
   }
   if (argv[0] === 'clear' && argv.length === 2) {
     if (String(pb.changeCount) !== argv[1]) { return 'kept'; }
@@ -129,6 +131,12 @@ def clip(clear_after):
         return 1
     count = pasteboard(["copy"], pw)
     del pw
+    if count == "raced":
+        # Something else was copied while the password went on: which is on the clipboard now is unclear, so
+        # nothing is cleared later (it could be someone else's).
+        print("something else was copied at the same moment, so the clipboard won't be cleared by itself; copy "
+              "something else when you're done", file=sys.stderr)
+        return 0
     if count is None or not COUNT_RE.fullmatch(count):
         print("couldn't put the live-view password on the clipboard (osascript failed)", file=sys.stderr)
         return 1

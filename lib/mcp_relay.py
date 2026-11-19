@@ -12,6 +12,10 @@ recorded and never passed on to the driver:
   `metacomputer call`, a script) of the tools/call that follows it, since one hub
   connection carries every client's calls;
 - `notifications/metacomputer/refused` is a call the hub refused.
+
+It is the last hop on the Mac, and signing a record can take a while, so it looks for a handoff once more right
+before it forwards each acting call (under the dispatch lock, owners.acting(), held across the write): while the
+user has the computer (`metacomputer handoff`) it answers the call with the hub's refusal itself.
 """
 import json
 import os
@@ -23,6 +27,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
+import mcp_hub  # noqa: E402  (READ_ONLY, the handoff refusal)
 import owners  # noqa: E402
 import wirelimits  # noqa: E402
 try:
@@ -81,6 +86,17 @@ def main(cmd):
     clients = {}            # json(id) -> the hub's note on whose call it is
     plock = threading.Lock()
     out = sys.stdout.buffer
+    olock = threading.Lock()            # the relay's own answers and the VM's go out on the same stream
+
+    def to_client(data):
+        with olock:
+            out.write(data)
+            out.flush()
+
+    def refuse(mid, text):
+        to_client((json.dumps({"jsonrpc": "2.0", "id": mid, "result": {
+            "content": [{"type": "text", "text": text}], "isError": True,
+            "structuredContent": mcp_hub.HANDOFF_REFUSED}}) + "\n").encode())
 
     def finish(*_):
         with plock:
@@ -137,8 +153,7 @@ def main(cmd):
                     if tool:
                         log.result(msg["id"], tool, msg)
                 try:
-                    out.write(line)
-                    out.flush()
+                    to_client(line)
                 except (BrokenPipeError, OSError, ValueError):
                     break
         except Exception as e:   # whatever stops this thread, the connection ends below and the log is signed
@@ -161,9 +176,8 @@ def main(cmd):
             pass
         try:
             if why:
-                out.write((json.dumps({"jsonrpc": "2.0", "method": CLOSING,
+                to_client((json.dumps({"jsonrpc": "2.0", "method": CLOSING,
                                        "params": {"reason": why, "limit_mb": MAX_MSG >> 20}}) + "\n").encode())
-            out.flush()
         except (BrokenPipeError, OSError, ValueError):
             pass
         finish()
@@ -199,10 +213,42 @@ def main(cmd):
                 continue            # anything else of ours never reaches the driver
             if method == "tools/call" and "id" in msg:
                 p = msg.get("params") or {}
+                name = p.get("name", "")
+                client = clients.pop(json.dumps(msg["id"]), None)
+                acting = not isinstance(name, str) or name not in mcp_hub.READ_ONLY
+                h = owners.open_handoff() if acting else None
+                if h:                       # the user has the computer: not recorded as a call, nothing sent
+                    text = owners.handoff_refusal(h)
+                    log.refused(str(name), p.get("arguments") or {}, text, client=client)
+                    refuse(msg["id"], text)
+                    continue
                 with plock:
-                    pending[json.dumps(msg["id"])] = p.get("name", "")
-                log.call(msg["id"], p.get("name", ""), p.get("arguments") or {},
-                         client=clients.pop(json.dumps(msg["id"]), None))
+                    pending[json.dumps(msg["id"])] = name
+                log.call(msg["id"], name, p.get("arguments") or {}, client=client)
+                if acting:
+                    # Signing the record can take a while: look again right before it goes, holding the dispatch
+                    # lock across the write, so a handoff that opened meanwhile stops it here.
+                    broken = False
+                    try:
+                        with owners.acting():
+                            try:
+                                proc.stdin.write(line)
+                                proc.stdin.flush()
+                            except (OSError, ValueError):
+                                broken = True
+                        if broken:
+                            break
+                        continue
+                    except owners.HandoffOpen as e:
+                        text = owners.handoff_refusal(e.rec)
+                    except (OSError, TimeoutError):
+                        text = ("The action-log relay couldn't check whether the user has the computer (a handoff "
+                                "being opened?), so it didn't pass the call on. Check `metacomputer handoff status`.")
+                    with plock:
+                        pending.pop(json.dumps(msg["id"]), None)
+                    log.result(msg["id"], name, {"error": {"message": text}})
+                    refuse(msg["id"], text)
+                    continue
         try:
             proc.stdin.write(line)
             proc.stdin.flush()

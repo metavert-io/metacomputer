@@ -525,15 +525,27 @@ def run_remote(transport, payload, deadline, limits, on_tick=None, gate=None):
     """Send the payload and read the answer, never past the deadline or a stream's limit.
     The transport's stdin stays open until the end: the VM's half stops the script if it
     closes first. Returns (stdout, stderr, problem), problem being None, "timeout",
-    "overflow:stdout", "overflow:stderr" or "spawn". gate: a context manager the start of the
-    transport runs in (the last look for a handoff, main()); what it raises goes to the caller."""
+    "overflow:stdout", "overflow:stderr" or "spawn". gate: a context manager held from before the
+    transport starts until the whole payload (the script) has been handed to it, or the run ends
+    sooner (the last look for a handoff, main()); what it raises goes to the caller."""
     out = {"stdout": bytearray(), "stderr": bytearray()}
-    with (gate() if gate else contextlib.nullcontext()):
-        try:
-            p = subprocess.Popen(transport + [BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE)
-        except OSError as e:
-            return b"", str(e).encode(), "spawn"
+    held = contextlib.ExitStack()
+    if gate:
+        held.enter_context(gate())
+    try:
+        p = subprocess.Popen(transport + [BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+    except OSError as e:
+        held.close()
+        return b"", str(e).encode(), "spawn"
+    try:
+        return _exchange(p, payload, deadline, limits, on_tick, out, held)
+    finally:
+        held.close()
+
+
+def _exchange(p, payload, deadline, limits, on_tick, out, held):
+    """run_remote's conversation with the started transport; held is released once all of payload is written."""
     problem = None
     sel = selectors.DefaultSelector()
     try:
@@ -566,6 +578,7 @@ def run_remote(transport, payload, deadline, limits, on_tick=None, gate=None):
                         continue
                     if sent >= len(payload):
                         sel.unregister(fin)  # all sent; it stays open
+                        held.close()         # the script is on its way: a handoff from now on doesn't stop it
                     continue
                 try:
                     data = os.read(key.fd, CHUNK)

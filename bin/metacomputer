@@ -181,12 +181,17 @@ owners_check() {
 # (metacomputer handoff) it stops with exit 4; otherwise the lock stays held until this command and what it runs
 # end (they inherit descriptor 6), so no handoff opens meanwhile: opening one takes the lock exclusively.
 handoff_hold() {
+  [ "${HANDOFF_HELD:-}" = 1 ] && return 0   # once per command: opening it again would let go of it meanwhile
   local f="$RUN_DIR/owners/.dispatch"
   { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
     || die "couldn't open this VM's dispatch lock ($f)"
   exec 6>>"$f" || die "couldn't open this VM's dispatch lock ($f)"
   "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4
+  HANDOFF_HELD=1
 }
+# The lifecycle commands (stop, reset, restore, baseline, desktop-restart): after any question, right before they
+# change anything, and held until they're done; --override (you agreed) goes ahead as it does for another session.
+handoff_hold_unless_override() { [ "$OVERRIDE" = 1 ] || handoff_hold; }
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
   local p="$1"
@@ -383,6 +388,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   if vm_running "$VM_NAME"; then
     owners_check
+    handoff_hold_unless_override
     events_watcher_stop   # first, so its health probe doesn't report the shutdown as a problem
     hub_stop
     say "stopping $VM_NAME (graceful, then forced after 90 s)"
@@ -721,6 +727,7 @@ do_reset() {
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"
+  handoff_hold_unless_override
   restore_from "$BASELINE_NAME" baseline reset
 }
 
@@ -780,6 +787,7 @@ do_restore() { # NAME [--yes] [--override]
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept)"
+  handoff_hold_unless_override
   RESTORE_VOLUMES="${vols:+$name}" restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
 }
 
@@ -788,6 +796,7 @@ do_baseline() {
   vm_lock_or_die "metacomputer baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
+  handoff_hold_unless_override
   local was_running=0; vm_running "$VM_NAME" && was_running=1
   [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
   local keep="$BASELINE_NAME-prev"
@@ -1054,6 +1063,7 @@ do_input_reset() { # [--check]: remove the driver's leftover virtual input devic
 
 do_desktop_restart() { # [--override]: log the desktop session out and back in (closes every app)
   parse_flags "$@"; owners_check; need_running
+  handoff_hold_unless_override
   say "restarting the desktop session (every open app closes)"
   gssh admin 'sudo /usr/local/sbin/metacomputer-admin restart-desktop' >/dev/null 2>&1 || true
   sleep 5
@@ -1589,9 +1599,11 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # call: checked under the dispatch lock, which stays held until the vault is done with the request (an approval
       # can take minutes), so a handoff can't open while it's on its way. That check is this VM's, so --vm must
       # name this VM; another VM is chosen by its own settings (MCOMP_CONFIG).
+      local inflight=""
       if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
         secrets_vm_is_this "$@" || die "secrets $sub acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
         handoff_hold
+        inflight="$RUN_DIR/owners/vault-inflight.$$"
       fi
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
@@ -1604,7 +1616,19 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
       # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
       trap ':' INT TERM HUP
+      # Until the unlock process is known to be done with this request, a marker says one may still be working: a
+      # handoff opened after this command ended without that knowledge settles the vault first.
+      if [ -n "$inflight" ]; then
+        ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
+      fi
       out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
+      if [ -n "$inflight" ]; then
+        # Exit 5: the request was withdrawn but the unlock process didn't confirm that it stopped. Keep the dispatch
+        # lock until it has finished what it was doing (settle), so no handoff opens while it could still type.
+        if [ "$rc" != 5 ] || "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1; then
+          rm -f "$inflight"
+        fi
+      fi
       trap - INT TERM HUP
       printf '%s\n' "$out"
       # The action log gets metadata only: never the token itself.

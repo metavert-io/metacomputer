@@ -526,7 +526,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (91 checks, about 40 s): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (98 checks, about a minute): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -537,8 +537,11 @@ Each of these needs no VM and takes seconds.
   future modification time doesn't stretch it, or from the first failure when nothing about the file can be
   read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
-  stopped (exit 4) with the vault never asked, a fill naming another VM refused, and a handoff that can't open
-  while a fill is still on its way (a stand-in vault that waits); its events (the `needs_you` notice cleaned of escapes, URL queries and
+  stopped (exit 4) with the vault never asked, a fill naming another VM refused, a handoff that can't open
+  while a fill is still on its way (a stand-in vault that waits) or while one that ended unconfirmed (exit 5) is
+  settling, and the marker that makes the next handoff settle first when that didn't confirm; `sh` holding the
+  lock while its script is written; the GUI tests' own commands stopped; `reset` stopped by a handoff that opened
+  while it asked (exit 4, nothing changed); an unreadable record that can't be bounded not counting; its events (the `needs_you` notice cleaned of escapes, URL queries and
   the live-view password; the note never in an event; the `handoff_*` types reserved;
   the 5-minute repeat rule). The live view, with stand-ins for pbcopy, pbpaste, open,
   launchctl, security, tailscale and the VM runner: the password from the file,
@@ -773,7 +776,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (198 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (207 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -825,7 +828,10 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   done, or past its time limit, the same call acts; a handoff that opens after a call
   was admitted, while its guards run, still stops it at dispatch, and the call is sent
   holding the dispatch lock; a disconnected session's `end_session` and the Chrome
-  guard's input reset wait until the handoff ends;
+  guard's input reset wait until the handoff ends; the action-log relay refuses an
+  acting call when a handoff opened while it was on its way; no idle exit, no
+  restart for other settings, no lease kill and (with `MCP_HUB=off`) no end of the
+  bridge's own connection while the user has the computer;
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
 - bounded mode: `launch_app` by path; when the session ends its clients stay

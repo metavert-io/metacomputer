@@ -397,6 +397,17 @@ def unreadable_checks():
     check("no metadata at all: open from the first time that was noticed, for at most 2 h, not from each look",
           first and first.get("unreadable") and still and later is None, (first, still, later))
     clear()
+    real_path = owners._unreadable_path
+    try:
+        os.open, os.lstat = deny_open, deny_lstat
+        owners._unreadable_path = lambda: os.path.join(TD, "no-such-folder", "handoff-unreadable")
+        unbounded = owners.open_handoff()
+    finally:
+        os.open, os.lstat = real_open, real_lstat
+        owners._unreadable_path = real_path
+    check("...and when even that first failure can't be recorded, it doesn't count (nothing would bound it)",
+          unbounded is None, unbounded)
+    clear()
     check("once the record is gone, that first failure is forgotten", owners.handoff_record() is None
           and not os.path.lexists(os.path.join(os.path.dirname(owners.OWNERS_DIR), "handoff-unreadable")))
     target = os.path.join(TD, "elsewhere.json")
@@ -497,6 +508,116 @@ def shell_checks():
     clear()
 
 
+def shell_write_checks():
+    print("metacomputer sh: the dispatch lock is held until the script is written")
+    code = ("import contextlib, fcntl, json, os, sys, time; sys.path.insert(0, os.path.join(%r, 'lib'))\n"
+            "import owners, vm_shell\n"
+            "seen = []\n"
+            "real = os.write\n"
+            "def write(fd, data):\n"
+            "    if len(data) > 200:\n"
+            "        probe = os.open(owners.dispatch_path(), os.O_RDWR)\n"
+            "        try:\n"
+            "            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB); fcntl.flock(probe, fcntl.LOCK_UN); seen.append(False)\n"
+            "        except BlockingIOError:\n"
+            "            seen.append(True)\n"
+            "        finally:\n"
+            "            os.close(probe)\n"
+            "    return real(fd, data)\n"
+            "os.write = write\n"
+            "@contextlib.contextmanager\n"
+            "def gate():\n"
+            "    with owners.acting():\n"
+            "        yield\n"
+            "raw, remote, problem = vm_shell.run_remote(['/bin/sh', '-c', 'head -c 5000 >/dev/null; echo done'], "
+            "b'y' * 5000, time.monotonic() + 10, {'stdout': 1 << 20, 'stderr': 1 << 20}, None, gate)\n"
+            "print(json.dumps({'held': seen, 'out': raw.decode(), 'problem': problem}))\n") % LAB
+    r = subprocess.run([sys.executable, "-c", code], env=env(), capture_output=True, text=True, timeout=60)
+    res = json.loads(r.stdout or "{}")
+    check("the script is written to SSH while the dispatch lock is held (a handoff can't open in between)",
+          res.get("held") and all(res["held"]) and "done" in res.get("out", ""), (res, r.stderr[-300:]))
+
+
+def harness_checks():
+    print("the GUI tests' own commands in the VM")
+    clear()
+    code = ("import os, sys, json; sys.path.insert(0, os.path.join(%r, 'lib')); import harness\n"
+            "ran = []\n"
+            "harness.subprocess.run = lambda *a, **k: ran.append(a) or harness.subprocess.CompletedProcess(a, 0, '', '')\n"
+            "try:\n"
+            "    harness.guest(\"pkill -u $(id -u) -f 'mousepad' 2>/dev/null; true\")\n"
+            "    print(json.dumps({'step': None, 'ran': len(ran)}))\n"
+            "except harness.Step as e:\n"
+            "    print(json.dumps({'step': str(e), 'ran': len(ran)}))\n") % LAB
+    now = time.time()
+    handoff.write_record({"v": 1, "id": "h-333333333333", "status": "open", "why": "captcha", "say": "x",
+                          "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
+    r = subprocess.run([sys.executable, "-c", code], env=env(), capture_output=True, text=True, timeout=60)
+    during = json.loads(r.stdout or "{}")
+    clear()
+    r = subprocess.run([sys.executable, "-c", code], env=env(), capture_output=True, text=True, timeout=60)
+    after = json.loads(r.stdout or "{}")
+    check("a GUI test's preparation in the VM (pkill, rm) stops while the user has the computer, and runs after",
+          during.get("step") and "the user has the computer" in during["step"] and during.get("ran") == 0
+          and after.get("step") is None and after.get("ran") == 1, (during, after, r.stderr[-200:]))
+
+
+LIFECYCLE_LUME = """#!/bin/sh
+echo "lume $*" >> "$LUME_LOG"
+case "$1" in
+  ls) echo '[{"name": "lctest", "status": "running"}, {"name": "lctest-baseline", "status": "stopped"}]' ;;
+  get) case "$2" in lctest) echo '{"name": "lctest", "status": "running"}' ;;
+                     *) echo "{\\"name\\": \\"$2\\", \\"status\\": \\"stopped\\"}" ;; esac ;;
+esac
+exit 0
+"""
+
+
+def lifecycle_checks():
+    print("stop, reset, restore, baseline, desktop-restart: one more look after the question")
+    clear()
+    ld = os.path.join(TD, "lifecycle")
+    os.makedirs(ld)
+    lume, llog = os.path.join(ld, "lume"), os.path.join(ld, "lume.log")
+    open(lume, "w").write(LIFECYCLE_LUME)
+    os.chmod(lume, 0o755)
+    cfg = os.path.join(ld, "test.env")
+    open(cfg, "w").write(f'VM_NAME=lctest\nBASELINE_NAME=lctest-baseline\nSSH_DIR="{ld}/ssh"\nSSH_PORT=59875\n'
+                         f'VNC_PORT=59876\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{ld}/logs"\nLUME="{lume}"\n')
+    e = env(MCOMP_CONFIG=cfg, LUME_LOG=llog, MCOMP_LOCK_DIR=os.path.join(ld, "locks"), MCOMP_STOP_DEADLINE="3")
+    for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
+        e.pop(k, None)
+    m, sl = pty.openpty()
+    p = subprocess.Popen([os.path.join(LAB, "bin", "metacomputer"), "reset"], env=e, stdin=sl,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.close(sl)
+    os.set_blocking(p.stdout.fileno(), False)
+    seen, end = b"", time.time() + 20
+    while b"[y/N]" not in seen and time.time() < end and p.poll() is None:
+        try:
+            seen += os.read(p.stdout.fileno(), 4096) or b""
+        except BlockingIOError:
+            time.sleep(0.05)
+    asked = b"[y/N]" in seen
+    now = time.time()
+    handoff.write_record({"v": 1, "id": "h-444444444444", "status": "open", "why": "login", "say": "x",
+                          "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
+    open(llog, "w").close()
+    os.write(m, b"y\n")
+    try:
+        p.wait(60)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+    err = p.stderr.read().decode("utf-8", "replace")
+    os.close(m)
+    acted = [x for x in read(llog).splitlines() if x.split()[1:2] and x.split()[1] not in ("ls", "get")]
+    check("reset: a handoff that opens while it asks stops it after the answer (exit 4), before it changes anything",
+          asked and p.returncode == 4 and "the user has the computer" in err and not acted,
+          (asked, p.returncode, err[-300:], acted))
+    clear()
+
+
 def web_cleanup_checks():
     print("metacomputer web's cleanup while the user has the computer")
     clear()
@@ -523,9 +644,15 @@ def web_cleanup_checks():
 
 
 VAULT_STUB = """#!/bin/sh
-case "$1" in version) echo '{"build":"test"}'; exit 0 ;; esac
+case "$1" in
+  version) echo '{"build":"test"}'; exit 0 ;;
+  settle) echo "settle $*" >> "$VAULT_LOG"; sleep "${STUB_SETTLE_S:-0}"
+          if [ -n "$STUB_SETTLE_FAIL" ] && [ -f "$STUB_SETTLE_FAIL" ]; then echo '{"ok":false,"settled":false}'; exit 1; fi
+          echo "settled" >> "$VAULT_LOG"; echo '{"ok":true,"settled":true}'; exit 0 ;;
+esac
 echo "start $*" >> "$VAULT_LOG"
 sleep "${STUB_FILL_S:-0}"
+if [ -n "$STUB_FILL_RC" ]; then echo "withdrawn $*" >> "$VAULT_LOG"; exit "$STUB_FILL_RC"; fi
 echo "sent $*" >> "$VAULT_LOG"
 echo '{"ok":true,"chars":8}'
 """
@@ -594,6 +721,49 @@ def fill_checks():
           (r.returncode, r.stderr[-300:]))
     clear()
 
+    # The vault withdrew the request but its unlock process didn't confirm it stopped (exit 5): the wrapper keeps the
+    # dispatch lock while `settle` waits for the unlock process, so no handoff opens meanwhile.
+    marks = lambda: [f for f in os.listdir(owners.OWNERS_DIR) if f.startswith("vault-inflight.")]  # noqa: E731
+    open(log, "w").close()
+    p = subprocess.Popen([mc, "secrets", "fill", "site", "--field", "password"],
+                         env=dict(e, STUB_FILL_RC="5", STUB_SETTLE_S="3"), stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    end = time.time() + 15
+    while not any(x.startswith("settle") for x in lines()) and time.time() < end:
+        time.sleep(0.05)
+    h = start("--why", "captcha", "--say", SAY, TEST_OPEN_WAIT="1")
+    rc_h, o_h, e_h = finish(h, 6)
+    opened_during = owners.open_handoff() is not None
+    clear()
+    p.wait(30)
+    check("an unconfirmed vault request keeps the lock while it settles: a handoff can't open meanwhile",
+          rc_h == 3 and "still on its way" in e_h and not opened_during
+          and p.returncode == 5 and "settled" in lines() and not marks(),
+          (rc_h, e_h[-200:], opened_during, p.returncode, lines(), marks()))
+    clear()
+    # ...and when it can't confirm even then, a marker stays: opening a handoff settles first, and refuses until it can.
+    fail = os.path.join(fd, "settle-fails")
+    open(fail, "w").close()
+    open(log, "w").close()
+    r = subprocess.run([mc, "secrets", "fill", "site", "--field", "password"],
+                       env=dict(e, STUB_FILL_RC="5", STUB_SETTLE_FAIL=fail), capture_output=True, text=True, timeout=60)
+    left = marks()
+    he = dict(e, STUB_SETTLE_FAIL=fail)
+    h = start("--why", "captcha", "--say", SAY, TEST_OPEN_WAIT="5", **{k: v for k, v in he.items()
+                                                                     if k.startswith(("MCOMP_", "STUB_", "VAULT_"))})
+    rc_h, o_h, e_h = finish(h, 20)
+    refused = rc_h == 3 and "hasn't confirmed" in e_h and owners.open_handoff() is None
+    clear()
+    os.remove(fail)
+    p = start("--why", "captcha", "--say", SAY, **{k: v for k, v in e.items() if k.startswith(("MCOMP_", "VAULT_"))})
+    opened = wait_open() is not None
+    run("cancel", claude=None)
+    finish(p)
+    check("an unconfirmed request whose settle fails leaves a marker; a handoff settles first and refuses until "
+          "it can, then opens", r.returncode == 5 and left and refused and opened and not marks(),
+          (r.returncode, left, rc_h, e_h[-200:], opened, marks()))
+    clear()
+
 
 # --- the live view ----------------------------------------------------------------------------------
 # osascript stands in for the pasteboard (lib/liveview.py's PASTEBOARD_JS): "copy" puts stdin on it and prints the
@@ -602,7 +772,8 @@ OSASCRIPT = r"""#!/bin/sh
 printf 'osascript %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$STUB/argv.log"
 n=$(cat "$STUB/count" 2>/dev/null || echo 7)
 case "$5" in
-  copy) cat > "$STUB/clip"; n=$((n + 1)); echo "$n" > "$STUB/count"; echo "$n" ;;
+  copy) cat > "$STUB/clip"; n=$((n + 1)); echo "$n" > "$STUB/count"
+        if [ -f "$STUB/race" ]; then echo raced; else echo "$n"; fi ;;
   clear) echo "clear $6 at $n" >> "$STUB/clears.log"
          if [ "$6" = "$n" ]; then : > "$STUB/clip"; echo $((n + 1)) > "$STUB/count"; echo cleared; else echo kept; fi ;;
 esac
@@ -768,6 +939,17 @@ def view_checks():
     r = view(vd, stub, lume, ssh, "--bogus")
     check("an unknown option is a usage error", r.returncode != 0 and "usage" in r.stderr, r.stderr)
 
+    open(os.path.join(stub, "race"), "w").close()
+    open(os.path.join(stub, "clears.log"), "w").close()
+    r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "liveview.py"), "clip", "--clear-after", "1"],
+                       input=VNC_PW + "\n", env=env(STUB=stub, PATH=stub + os.pathsep + os.environ["PATH"]),
+                       capture_output=True, text=True, timeout=30)
+    time.sleep(2)
+    os.remove(os.path.join(stub, "race"))
+    check("a copy that raced another one isn't cleared later (the clipboard may hold someone else's copy), and it "
+          "says so", r.returncode == 0 and "won't be cleared" in r.stderr
+          and read(os.path.join(stub, "clears.log")) == "", (r.returncode, r.stderr))
+
     print("liveview.py clip: what it takes")
     r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "liveview.py"), "clip", "--clear-after", "0"],
                        input="bad\x1bpass\n", env=env(STUB=stub, PATH=stub + os.pathsep + os.environ["PATH"]),
@@ -790,6 +972,9 @@ def main():
         unreadable_checks()
         event_checks()
         shell_checks()
+        shell_write_checks()
+        harness_checks()
+        lifecycle_checks()
         web_cleanup_checks()
         fill_checks()
         view_checks()

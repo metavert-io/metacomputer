@@ -483,14 +483,17 @@ that store into a pipe, puts it on the clipboard and opens Screen Sharing at
 log, an event or the command's output. The clipboard is macOS's pasteboard,
 written through osascript's bridge to AppKit with the password on its stdin, and
 marked concealed and transient (nspasteboard.org's markers), which clipboard
-managers that follow them don't keep. A detached helper that keeps only the
-pasteboard's change count from right after the copy (not the password) empties
-the clipboard after `VIEW_CLIPBOARD_S` seconds (45) if nothing was copied since,
-comparing and emptying in one step of one process. Where it ends: something you
-copy in the instant between that comparison and the clearing can still be
-cleared; while the password is on the clipboard, any app you run can read it; a
-clipboard manager that ignores the markers may keep a copy; Universal Clipboard
-can pass it to your other Apple devices nearby. Run from an SSH session,
+managers that follow them don't keep. The copy takes the pasteboard's change count
+from its own `clearContents` and checks, once the password is in place, that
+nothing else was copied in between (if something was, nothing is cleared later,
+since the clipboard may hold someone else's copy). A detached helper that keeps
+only that change count (not the password) empties the clipboard after
+`VIEW_CLIPBOARD_S` seconds (45) if nothing was copied since, comparing and
+emptying in one run of one process. Where it ends: the comparison and the
+clearing are two steps, so something you copy in the instant between them can
+still be cleared; while the password is on the clipboard, any app you run can
+read it; a clipboard manager that ignores the markers may keep a copy; Universal
+Clipboard can pass it to your other Apple devices nearby. Run from an SSH session,
 `view --open` touches nothing and says how to connect instead.
 
 **From another device.** The port stays on 127.0.0.1. `metacomputer view`
@@ -513,27 +516,42 @@ notice (`--say` cleaned like every event) and writes a record,
 - the hub refuses every client's acting calls, the session that asked included,
   with "Paused: the user has the computer" (code `user_has_computer`), and refuses
   claims from `web` and the GUI tests; reads still work;
-- the hub's own cleanup waits too: the driver session of a Claude Code session
-  that disconnected is ended only when the handoff ends (ending it could close
-  the browser you're in), and the Chrome guard's input reset doesn't run;
+- the hub's own cleanup and teardown wait too: the driver session of a Claude
+  Code session that disconnected is ended only when the handoff ends (ending it
+  could close the browser you're in); the Chrome guard's input reset doesn't run;
+  the hub doesn't exit when idle, doesn't restart for a client with other
+  settings, and doesn't end a connection whose leased calls outlived their limit
+  (it waits for the handoff, at most 2 hours longer); with `MCP_HUB=off`, Claude
+  Code's bridge keeps its own connection until the handoff ends;
 - `metacomputer sh` refuses every run that isn't `--read-only`, with or without
   `--override`;
 - `secrets fill`, `login` and `session load` refuse, and so does `input-reset`;
-  `metacomputer web` leaves the Firefox windows it opened instead of closing them;
+  `metacomputer web` leaves the Firefox windows it opened instead of closing them,
+  and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
-  unless you add `--override`; `release` doesn't end it.
+  unless you add `--override`, and look again right before they change anything,
+  after any question they ask; `release` doesn't end it.
 
 **No action slips in while it opens.** A call is checked when the hub takes it,
 but its guards can then wait on the VM (a window list, an input reset). So every
 action looks once more right before it leaves the Mac, under a per-VM dispatch
 lock (`RUN_DIR/owners/.dispatch`): held shared by the hub while it sends a call,
-by `sh` while it starts a run, by the hub's cleanup and input reset while they
-run, and by `secrets fill`, `login`, `session load` and `input-reset` for the
-whole command, including a wait for your approval. Opening a handoff holds it
-exclusively, so it waits for those to finish (up to 40 s, then it refuses and
-says why). An action is therefore either on its way before the handoff opens or
-sees it. The fills check this VM's handoff, so their `--vm` must name this VM;
-another VM is chosen by its own settings.
+by `sh` until its whole script has been written to SSH, by the hub's cleanup and
+input reset and the GUI tests' commands while they run, by the lifecycle
+commands from their last look to their end, and by `secrets fill`, `login`,
+`session load` and `input-reset` for the whole command, including a wait for
+your approval. With `ACTION_LOG=on` the relay that signs each call is the last
+hop on the Mac, and signing can take a while, so it looks again too, under the
+same lock, right before it forwards an acting call, and answers with the same
+refusal. Opening a handoff holds the lock exclusively, so it waits for those to
+finish (up to 40 s, then it refuses and says why). An action is therefore either
+on its way before the handoff opens or sees it. The fills check this VM's
+handoff, so their `--vm` must name this VM; another VM is chosen by its own
+settings. A fill or session load whose request the vault withdrew without its
+unlock process confirming that it stopped (`secrets` exit 5) keeps the lock
+while `secrets settle` waits for the unlock process (up to 2 minutes); if that
+doesn't confirm either, a marker (`RUN_DIR/owners/vault-inflight.*`) makes the
+next handoff run `secrets settle` first, and refuse until it confirms.
 
 It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
@@ -542,18 +560,31 @@ valid, or a link in its place, which is never followed) counts as open for up to
 2 hours after it was written, so it fails closed; `handoff cancel` removes it.
 The 2 hours run from the file's change time, which the kernel sets (a modification
 time moved into the future doesn't stretch them), or, when not even that can be
-read, from when that was first noticed (kept in `RUN_DIR/handoff-unreadable`).
+read, from when that was first noticed (kept in `RUN_DIR/handoff-unreadable`); if
+that can't be recorded either, nothing would bound it, so such a record doesn't
+count, and Claude's actions aren't paused by it.
 
-**What it is and isn't.** It's a pause, so Claude doesn't fight you for the
-mouse, and an honest handoff: metacomputer doesn't disguise its browser or try
-to get past bot checks, and the skill tells Claude never to (no other browser,
-mode or profile, no retrying in a loop). It isn't a barrier against a program
-running as you, which can run `handoff done`, remove the record, or use the raw
-driver connection. The Claude Code session that asked can't say "done" for you
-from its shell without a terminal (it can cancel its own request); another
-process running as you can. A call already sent to the driver, or a shell run
-already started, when the handoff opens finishes. Your `handoff done --note`
-reaches only Claude's output, never an event.
+**What it is and isn't.** It's a cooperative pause of Claude's actions, so it
+doesn't fight you for the mouse, and an honest handoff: metacomputer doesn't
+disguise its browser or try to get past bot checks, and the skill tells Claude
+never to (no other browser, mode or profile, no retrying in a loop). Your
+`handoff done --note` reaches only Claude's output, never an event. These limits
+are accepted, not oversights:
+- It isn't a barrier against a program running as you, which can run `handoff
+  done`, remove the record or the vault marker, or use the raw driver connection.
+  The Claude Code session that asked can't say "done" for you from its shell
+  without a terminal (it can cancel its own request); another process running as
+  you can.
+- What has already left the Mac when the handoff opens goes on: a call written to
+  the driver's connection (or forwarded by the relay), a shell run whose script
+  was written to SSH, a lease's call. metacomputer has no acknowledgement from
+  the VM that a script started, and doesn't stop a run that's under way.
+- `--override` on the lifecycle commands goes ahead, as it does for another
+  session: that's you deciding.
+- With `MCP_HUB=off`, a client process that ends (a one-shot `metacomputer call`,
+  a script, a bridge that is killed) takes its own driver connection with it.
+- Two settings files that name the same VM with different `RUN_DIR`s don't see
+  each other's handoff (the same holds for the one-controller rule).
 
 ## The shell channel (`metacomputer sh`)
 

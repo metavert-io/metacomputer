@@ -744,14 +744,20 @@ every acting call, from every session and script, with "Paused: the user has
 the computer", and so do `metacomputer sh` (but `--read-only`), fills and
 session loads from the vault, `input-reset`, and `stop`, `reset` and the other
 commands that check for other controllers (`--override` still goes ahead on
-those, as it does for another session). The hub's own cleanup waits too, and
-`metacomputer web` leaves its Firefox windows open. Claude can still read the
-screen. `metacomputer who` and `metacomputer handoff status` show it.
+those, as it does for another session). The hub's own cleanup waits too, and it
+keeps its connection to the VM (no idle exit, no restart), so the browser you're
+working in stays; `metacomputer web` leaves its Firefox windows open, and the GUI
+tests stop. Claude can still read the screen. `metacomputer who` and
+`metacomputer handoff status` show it. It's a cooperative pause with stated
+limits: something that had already left your Mac when it opened (a call, a shell
+run) finishes ([SECURITY.md](../SECURITY.md#handing-the-computer-to-you-metacomputer-handoff)).
 
 Opening a handoff waits for anything already on its way to the VM: a call being
 sent, a shell run starting, or a fill from the vault, which counts from its start
 until it ends, approval included. After 40 seconds it gives up and says why;
-Claude then waits for that to finish and hands over again.
+Claude then waits for that to finish and hands over again. If a fill ended
+without the vault confirming that it stopped, the handoff first runs
+`metacomputer secrets settle`, and refuses until that confirms.
 
 It ends when you run `handoff done` or `handoff cancel`, or at its time limit
 (15 minutes unless Claude chose another, at most 2 hours); then the computer is
