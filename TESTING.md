@@ -246,6 +246,13 @@ VM, and checks:
   VM that goes quiet or drips bytes, keeping what arrived; in guest mode, `record
   start`, `record status` and the copy at `record stop` end at their deadlines with a
   VM that never answers or goes quiet;
+- the copy before `reset`, `restore` and `baseline`, with a stand-in VM: a copy cut off (the VM goes quiet) and an
+  unreachable VM stop `reset` before anything is deleted and list what wasn't copied, and so does a copy that came
+  through but left out a file (a name the importer refuses, shown escaped); `--yes` doesn't go on,
+  `--discard-unsynced` does; a wiped home (no folder) and an empty folder go on with no flag; a copy that keeps
+  moving, with pauses under the idle limit, is never cut off; `baseline` deletes the VM's recordings only after a
+  whole copy. Two copies with room for one stretch: the first claims it, the second stops until it's released; a
+  real copy holds its 65 MiB claim while it writes and none after;
 - finalize under pressure, with a stand-in ffmpeg that ignores `-fs`: free space that
   falls while it writes (stubbed) stops it before the reserve (exit 3); a TERM stops
   it; an MP4 past its limit, or one that ends at it, isn't kept; each time the partial
@@ -1106,8 +1113,10 @@ update the row with the doc's new wording. What it pins:
   `RECORD_TO=guest`; `record stop` cutting the stream at once when the VM can't be
   reached; the VM's answers read through `vm_answer` (a byte limit and a deadline);
   finalize's space claim and watchdog (512 MiB, five times a second) and every copy
-  counting claims; the deadlines SECURITY.md lists (guest-mode start, status and copy,
-  the copier, `task finish`, `recordings --sync`) and the stream without one;
+  counting claims and each copy claiming its next stretch; the deadlines SECURITY.md lists
+  (guest-mode start, status and copy, the copier, the 120 s idle limit of `task finish` and
+  `recordings --sync`) and the stream without one; `reset`, `restore` and `baseline`
+  stopping before they delete an incomplete copy (`--discard-unsynced`, never `--yes`);
   the task copier every `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest,
   once, taking only the folders it asked for and keeping what the Mac has; `task
   finish` keeping those copies under any spelling (`--keep-existing`); `stop`,

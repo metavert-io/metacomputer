@@ -320,9 +320,40 @@ def finalize_keeps_reserve():
     return (recording.FINALIZE_GUARD == 512 << 20 and recording.FINALIZE_POLL == 0.2
             and "space_claim(folder, limit + 2 * FINALIZE_GUARD, min_free" in fin
             and "free_bytes(folder) < min_free + FINALIZE_GUARD" in fin and "os.killpg(proc.pid, signal.SIGKILL)" in fin
-            and "os.unlink(a.mp4)" in fin and "min_free + claims_by_others(a.out)" in save
-            and "claimed=lambda: claimed_space(dest)" in gi and "min_free + held" in gi
-            and "storage.claims_on(storage.space_pool(path))" in gi)
+            and "os.unlink(a.mp4)" in fin and chunks_claimed())
+
+
+def chunks_claimed():
+    """Every copy from the VM (guest_import's unpack) and every stream (recording.py save) claims its next stretch
+    through guest_import.ChunkClaim before writing it, under the claims' lock, counting every other claim."""
+    import recording
+    import inspect
+    import guest_import
+    save, take = inspect.getsource(recording.cmd_save), inspect.getsource(guest_import.ChunkClaim.take)
+    gi = raw("lib/guest_import.py")
+    return ('claim.take(SAVE_CHECK_EVERY, min_free, lambda: free_bytes(fd))' in save and "claim.release()" in save
+            and "need = FREE_CHECK_EVERY + WRITE_CHUNK" in gi and "claim.take(need, min_free" in gi
+            and "claim = ChunkClaim(dest)" in gi and "claim.release()" in gi
+            and "with storage.GlobalLock():" in take and "storage.claims_on(self.pool) - mine" in take
+            and "free() - nbytes - others < reserve" in take
+            and guest_import.FREE_CHECK_EVERY == 64 << 20 and guest_import.WRITE_CHUNK == 1 << 20
+            and recording.SAVE_CHECK_EVERY == 64 << 20)
+
+
+def sync_before_delete():
+    """reset, restore and baseline copy ~/metacomputer-runs first and stop before deleting unless the copy is whole;
+    --discard-unsynced (never --yes) or 'discard' typed at a terminal goes on; a missing or empty folder is whole."""
+    stop = function_text("sync_or_stop")
+    return ('sync_or_stop "$evtype"' in function_text("restore_from")
+            and function_text("restore_from").index('sync_or_stop "$evtype"')
+            < function_text("restore_from").index('"$LUME" delete "$VM_NAME"')
+            and "sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*'" in function_text("do_baseline")
+            and "do_recordings --sync >/dev/null && whole=1" in stop and '[ $whole = 1 ] && [ $rc = 0 ] && return 0' in stop
+            and 'recording.py" unsynced' in stop
+            and '[ "${DISCARD_UNSYNCED:-0}" = 1 ]' in stop and "ASSUME_YES" not in stop
+            and '[ "$a" = discard ]' in stop and stop.rstrip().endswith("}") and 'die "stopped before $what' in stop
+            and "--discard-unsynced) DISCARD_UNSYNCED=1" in function_text("parse_flags")
+            and "tar -cf - -T /dev/null" in function_text("do_recordings"))
 
 
 def recording_deadlines():
@@ -333,8 +364,10 @@ def recording_deadlines():
             and "run_until $((SECONDS + ${MCOMP_RECORD_WAIT:-60})) gssh ops /opt/metacomputer/bin/desktop-record status" in rec
             and '--idle-timeout "${MCOMP_RECORD_WAIT:-60}" --timeout 3600' in function_text("vm_copy_video")
             and "--only-top \"$wantf\" --timeout 300" in sync
-            and 'run_until $((SECONDS + 3600)) gssh ops "test -d' in function_text("do_task")
-            and "run_until $((SECONDS + 3600)) gssh ops 'if cd ~/metacomputer-runs" in function_text("do_recordings")
+            and 'vm_tar_copy "$host/guest" "test -d' in function_text("do_task")
+            and "vm_tar_copy \"$dest\" 'if cd ~/metacomputer-runs" in function_text("do_recordings")
+            and '--idle-timeout "${MCOMP_SYNC_IDLE:-120}" -- ssh' in function_text("vm_tar_copy")
+            and "timeout = 600.0 if idle is None or \"--timeout\" in args else None" in raw("lib/guest_import.py")
             and "--timeout" not in function_text("do_record_pipe"))
 
 
@@ -622,9 +655,22 @@ CLAIMS = [
      lambda m: int(m[1]) << 20 == __import__("recording").FINALIZE_GUARD and finalize_keeps_reserve()),
     ("SECURITY.md", r"Everything else a recording asks of the VM has a deadline too: `record start` and `record status` in "
                     r"guest mode \(a minute\), the guest-mode copy at `record stop` \(a minute without a byte, or an hour "
-                    r"in all\), the task copier's copies \(5 minutes\), and `task finish` and `recordings --sync` \(an hour "
-                    r"each\)",
-     lambda m: recording_deadlines()),
+                    r"in all\), the task copier's copies \(5 minutes\), and `task finish` and `recordings --sync`, which "
+                    r"stop only once the VM has sent nothing for (\d+) s: a copy that keeps moving, however large or slow, "
+                    r"is never cut off",
+     lambda m: m[1] == "120" and recording_deadlines()),
+    ("SECURITY.md", r"`reset`, `restore` and `baseline` copy the VM's `~/metacomputer-runs` first, and delete it \(with the "
+                    r"VM, or inside it\) only once that copy is whole\. A folder that's missing or empty counts as whole",
+     lambda m: sync_before_delete()),
+    ("SECURITY.md", r"and go on only with `--discard-unsynced`, or when you type `discard` at the prompt that names the "
+                    r"loss\. `--yes` never does",
+     lambda m: sync_before_delete()),
+    ("SECURITY.md", r"Each copy from the VM and each stream claims the next stretch it writes \((\d+) MiB for a copy, (\d+) "
+                    r"MiB for a stream\) before writing it",
+     lambda m: int(m[1]) << 20 == (64 << 20) + (1 << 20) and int(m[2]) << 20 == 64 << 20 and chunks_claimed()),
+    ("docs/commands.md", r"`--discard-unsynced` goes on without what wasn't copied \(`--yes` doesn't\)",
+     lambda m: sync_before_delete()),
+    ("skills/metacomputer/SKILL.md", r"never add `--discard-unsynced` yourself", lambda m: sync_before_delete()),
     ("SECURITY.md", r"The one exchange without a deadline is the stream itself", lambda m: recording_deadlines()),
     ("SECURITY.md", r"from the VM's answer it takes only those folders \(anything else the VM slips in is left out\) and "
                     r"never replaces a file the Mac already has, with a file or a folder",

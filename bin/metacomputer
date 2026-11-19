@@ -4,7 +4,7 @@
 #
 # Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
 #
-#   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes]
+#   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes] [--discard-unsynced]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
 #   call [--session NAME] TOOL ['JSON']
@@ -32,7 +32,7 @@
 #                                  desktop recording (RECORD_FPS, RECORD_QUALITY, RECORD_TO, RECORD_DIR);
 #                                  streamed to the Mac as it records unless RECORD_TO=guest
 #   recordings [--sync] [N]
-#   checkpoint NAME [--replace] [--with-volumes] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes]
+#   checkpoint NAME [--replace] [--with-volumes] | checkpoint --delete NAME [--yes] | checkpoints | restore NAME [--yes] [--discard-unsynced]
 #   volume create NAME --size 20G [--dir PATH] | create NAME --folder PATH | list [--json] | delete NAME [--yes]
 #          | resize NAME --size 40G
 #                                  disk volumes (kept outside the VM) and Mac folders (shared, read-only unless
@@ -70,7 +70,7 @@
 #                                  From the Claude Code plugin with no checkout yet: download it and set
 #                                  everything up (get.sh; says what it will do and asks first)
 #   build [--replace]              build the VM + baseline from scratch
-#   baseline [--yes]               re-snapshot the current VM as the baseline
+#   baseline [--yes] [--discard-unsynced]  re-snapshot the current VM as the baseline
 #   logs [N]                       tail host + guest logs
 #   security [apply] [--json]      the optional hardening: action log, SSH certificates, bounded driver;
 #                                  and the shell channel (VM_SHELL, SHELL_LOG)
@@ -161,12 +161,13 @@ confirm() { # PROMPT
   printf '%s [y/N] ' "$1"; read -r a; [ "$a" = y ] || [ "$a" = Y ] || die "cancelled"
 }
 
-# --override / --yes anywhere in the arguments; the rest stays in REST.
+# --override / --yes / --discard-unsynced anywhere in the arguments; the rest stays in REST.
 OVERRIDE=0
+DISCARD_UNSYNCED=0
 parse_flags() {
   REST=()
   for a in "$@"; do
-    case "$a" in --override) OVERRIDE=1 ;; --yes) ASSUME_YES=1 ;; *) REST+=("$a") ;; esac
+    case "$a" in --override) OVERRIDE=1 ;; --yes) ASSUME_YES=1 ;; --discard-unsynced) DISCARD_UNSYNCED=1 ;; *) REST+=("$a") ;; esac
   done
 }
 
@@ -732,11 +733,12 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
     ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
   fi
   if vm_exists "$VM_NAME" && vm_running "$VM_NAME"; then
+    sync_or_stop "$evtype"   # stops here, before anything is deleted, unless the copy is whole
     events_watcher_stop   # start brings it back; meanwhile the replacement isn't a health problem
-    say "saving guest recordings to the host first"
-    do_recordings --sync >/dev/null || warn "could not sync guest recordings"
     vm_stop "$VM_NAME"
     storage_release --quiet
+  elif vm_exists "$VM_NAME"; then
+    warn "the VM is stopped, so recordings still inside it (~/metacomputer-runs) aren't copied before it's replaced"
   fi
   if [ -n "${RESTORE_VOLUMES:-}" ]; then
     storage_py checkpoint restore "$RESTORE_VOLUMES" || die "the volumes couldn't be rolled back; the VM wasn't replaced"
@@ -756,7 +758,7 @@ do_reset() {
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
-  confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept)"
+  confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept$(unsynced_note))"
   handoff_hold_unless_override
   restore_from "$BASELINE_NAME" baseline reset
 }
@@ -816,7 +818,7 @@ do_restore() { # NAME [--yes] [--override]
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
-  confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept)"
+  confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept$(unsynced_note))"
   handoff_hold_unless_override
   RESTORE_VOLUMES="${vols:+$name}" restore_from "$CKPT_PREFIX$name" "checkpoint '$name'" restored
 }
@@ -828,7 +830,8 @@ do_baseline() {
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   handoff_hold_unless_override
   local was_running=0; vm_running "$VM_NAME" && was_running=1
-  [ $was_running = 1 ] && { events_watcher_stop; do_recordings --sync >/dev/null || true; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
+  # The baseline mustn't carry recordings, so they're copied and then deleted in the VM: only once the copy is whole.
+  [ $was_running = 1 ] && { sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     vm_exists "$keep" && "$LUME" delete "$keep" --force >/dev/null
@@ -868,6 +871,54 @@ vm_copy_video() { # GUEST_PATH OUT
   "$PY" "$LAB_ROOT/lib/recording.py" save "$2" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" \
     --max-bytes "${VM_DISK_BYTES:-0}" --idle-timeout "${MCOMP_RECORD_WAIT:-60}" --timeout 3600 \
     -- ssh -T "${SSH_ARGS[@]}" "cat '$1'" 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
+}
+
+# A tar stream from the VM (REMOTE_COMMAND over SSH) into DEST through guest_import (task finish, recordings
+# --sync). It ends only when the VM has sent nothing for MCOMP_SYNC_IDLE seconds (120): a copy that keeps moving is
+# never cut off, however large or slow. A VM that sends a byte now and then keeps it going until you stop it.
+vm_tar_copy() { # DEST REMOTE_COMMAND [guest_import options...]
+  local dest="$1" cmd="$2"; shift 2
+  ssh_base ops
+  guest_import "$dest" "$@" --idle-timeout "${MCOMP_SYNC_IDLE:-120}" -- ssh -T "${SSH_ARGS[@]}" "$cmd"
+}
+
+# Before reset, restore or baseline deletes the guest's ~/metacomputer-runs: copy it, and stop here (before
+# anything is deleted) unless the copy is whole: the copy came through (recordings --sync), and the VM's own
+# listing names no file this Mac doesn't have at that size (a copy can leave a file out). A folder that's missing
+# or empty is whole. Otherwise what's missing is listed, and it goes on only with --discard-unsynced, or when the
+# person at the terminal types 'discard' at a prompt that names the loss; --yes never does.
+sync_or_stop() { # WHAT (reset, restored, baseline)
+  local what="$1" listing whole=0 rc=0 report
+  [ "$what" = restored ] && what=restore
+  say "saving guest recordings to the host first"
+  do_recordings --sync >/dev/null && whole=1
+  mkdir -p "$RUN_DIR"; listing="$(mktemp "$RUN_DIR/unsynced.XXXXXX")" || die "stopped before $what: nothing was deleted (cannot write in $RUN_DIR)"
+  if ! vm_answer 4194304 60 'cd ~/metacomputer-runs 2>/dev/null || exit 0; find . -type f -printf "%s\t%P\0"' > "$listing" 2>/dev/null; then
+    rm -f "$listing"
+    [ $whole = 1 ] && return 0          # the copy came through; the VM just can't list it now
+    listing="$listing.unavailable"      # recording.py says the VM couldn't be asked
+  fi
+  report="$("$PY" "$LAB_ROOT/lib/recording.py" unsynced "$LAB_ROOT/recordings/guest-runs" "$listing" 2>&1)" || rc=$?
+  rm -f "${listing%.unavailable}"
+  [ $whole = 1 ] && [ $rc = 0 ] && return 0
+  warn "the recordings in the VM (~/metacomputer-runs) weren't copied in full, and $what would delete them"
+  [ -z "$report" ] || printf '%s\n' "$report" >&2
+  if [ "${DISCARD_UNSYNCED:-0}" = 1 ]; then
+    warn "going on without them (--discard-unsynced)"; return 0
+  fi
+  if [ -t 0 ] && [ -t 2 ]; then
+    local a=""
+    printf '%s' "Go on with $what and lose what wasn't copied? Type 'discard' to go on, anything else to stop: " >&2
+    read -r a || a=""
+    [ "$a" = discard ] && { warn "going on without them"; return 0; }
+  fi
+  die "stopped before $what: nothing was deleted. Try the copy again (metacomputer recordings --sync), or run metacomputer $what again with --discard-unsynced to go on without what wasn't copied"
+}
+# For reset's and restore's prompt: a VM that isn't running can't be asked for its recordings.
+unsynced_note() {
+  vm_exists "$VM_NAME" && ! vm_running "$VM_NAME" \
+    && printf '; the VM is stopped, so recordings still inside it are not copied: start it and run metacomputer recordings --sync first to keep them'
+  return 0
 }
 
 record_env() { # what status and security show about recordings (lib/recording.py settings_summary)
@@ -1034,14 +1085,13 @@ do_recordings() {
   local sync=0 n=20
   for a in "$@"; do case "$a" in --sync) sync=1 ;; [0-9]*) n="$a" ;; esac; done
   if [ $sync = 1 ]; then
-    # A failed sync returns non-zero instead of exiting: reset, stop and checkpoint call this first and must
-    # go on (a VM whose home was wiped has no ~/metacomputer-runs to copy).
+    # Returns 0 only when the copy is whole (a folder that's missing or empty is whole: a wiped home has nothing
+    # to copy), non-zero otherwise without exiting: reset, restore and baseline decide (sync_or_stop).
     vm_running "$VM_NAME" || { warn "VM is not running; nothing to sync"; return 1; }
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
     # Plain files and folders only: links and special files from the VM are left out (lib/guest_import.py).
     # No ~/metacomputer-runs (a wiped home) is nothing to copy, not a failure: an empty archive and a note.
-    # The copy has a deadline (an hour): a VM that stops sending can't hold up reset, stop or checkpoint.
-    run_until $((SECONDS + 3600)) gssh ops 'if cd ~/metacomputer-runs 2>/dev/null; then tar -cf - . 2>/dev/null; else echo "no ~/metacomputer-runs in the VM: nothing to copy" >&2; tar -cf - -T /dev/null; fi' | guest_import "$dest" \
+    vm_tar_copy "$dest" 'if cd ~/metacomputer-runs 2>/dev/null; then tar -cf - . 2>/dev/null; else echo "no ~/metacomputer-runs in the VM: nothing to copy" >&2; tar -cf - -T /dev/null; fi' \
       || { warn "could not sync ~/metacomputer-runs from the guest"; return 1; }
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
@@ -1366,10 +1416,8 @@ EOF
         # contact sheets below can't be written through a link it planted (lib/guest_import.py).
         # Recording turns copied while the task ran stay as they were copied: the VM can't swap them now,
         # and any it changed since are named (--keep-existing), and counted for the event below.
-        # The copy has a deadline (an hour): a VM that stops sending can't hold up task finish.
         export MCOMP_IMPORT_KEEP_REPORT="$keeprep"
-        run_until $((SECONDS + 3600)) gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." \
-          | guest_import "$host/guest" --quiet --keep-existing recording/turn- \
+        vm_tar_copy "$host/guest" "test -d '$guest' && tar -C '$guest' -cf - ." --quiet --keep-existing recording/turn- \
           || { warn "nothing (or not everything) could be copied from $guest"; copied=no; }
         unset MCOMP_IMPORT_KEEP_REPORT
       else

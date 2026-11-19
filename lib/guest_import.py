@@ -1,7 +1,7 @@
 """Copy files from the VM to the Mac without trusting what the VM sends.
 
     ... | python3 lib/guest_import.py DEST [--quiet] [--keep-existing PREFIX] [--only-top FILE]
-    python3 lib/guest_import.py DEST [options] [--timeout S] -- CMD...   (CMD writes the stream)
+    python3 lib/guest_import.py DEST [options] [--timeout S] [--idle-timeout S] -- CMD...   (CMD writes the stream)
 
 reads a tar stream (made in the VM: `metacomputer get`, `task finish`,
 `recordings --sync`, the test harness) on stdin and puts its plain files and
@@ -30,13 +30,18 @@ folders under DEST. The VM is untrusted, so:
   (one per line) are taken: the VM can't slip anything else into a copy it was
   asked for (the task copier asks for a few turn folders at a time);
 - with `-- CMD`, CMD's output is the stream, and CMD is stopped after `--timeout`
-  seconds (default 600) or at any limit;
+  seconds (default 600; none when only `--idle-timeout` is given), when nothing has
+  arrived for `--idle-timeout` seconds, or at any limit. A copy that keeps moving is
+  never cut off by `--idle-timeout`. CMD's stderr (the VM's words) is shown escaped,
+  its last few KB, unless `--quiet`;
 - the copy stops, keeping the files that arrived whole, when the files pass
   MCOMP_IMPORT_MAX_BYTES (bin/metacomputer passes VM_DISK_BYTES: a VM can't hold
   more real files than its disk), when the Mac's free space at DEST would fall
   below MCOMP_IMPORT_MIN_FREE_GB (IMPORT_MIN_FREE_GB, default 10) plus the
-  space other operations have claimed (lib/storage.py's claims: a recording
-  being converted to MP4, an S3 sync), after
+  space other operations have claimed (lib/storage.py's claims: other copies, a
+  recording being converted to MP4, an S3 sync). Before each 64 MiB it writes,
+  the copy claims that much itself (ChunkClaim), so two copies never count on
+  the same headroom. It stops after
   MAX_MEMBERS entries, or after MAX_OBJECTS files and folders made (folders a
   path implies count too), so a VM can't fill the Mac's disk or memory;
 - the stream is read as plain tar only (the VM's `tar -cf -`; nothing is
@@ -58,6 +63,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from termsafe import UNSAFE, escape_for_terminal  # noqa: E402
@@ -72,6 +78,7 @@ MAX_DROPPED_KEPT = 1000          # left-out names kept for the report (the count
 MAX_EXT_HEADER = 64 << 10        # one GNU long name / pax header (a name is used only up to MAX_NAME)
 MAX_EXT_CHAIN = 8                # extension headers in a row before an entry
 MAX_EXT_TOTAL = 64 << 20         # every extension header in a stream together (the metadata budget)
+WRITE_CHUNK = 1 << 20           # what unpack writes at a time
 OBJECT_COST = 4096               # what a file or folder costs the disk before any data, for the free-space check
 FREE_CHECK_EVERY = 64 << 20      # bytes written (objects at OBJECT_COST) between free-space checks
 STREAM_SLACK = 64 << 20          # with max_bytes: what headers and padding may add to the stream
@@ -234,9 +241,8 @@ def free_bytes(fd):
 
 
 def claimed_space(path):
-    """Bytes other live operations hold on the disk holding path (lib/storage.py's free-space claims: a recording
-    being converted to MP4, an S3 sync), which every copy from the VM counts against the reserve too. 0 when the
-    claims can't be read (the reserve itself still holds)."""
+    """Bytes live operations hold on the disk holding path (lib/storage.py's free-space claims: copies from the VM,
+    a recording being converted to MP4, an S3 sync). 0 when the claims can't be read."""
     try:
         import storage
         return storage.claims_on(storage.space_pool(path))
@@ -244,11 +250,55 @@ def claimed_space(path):
         return 0
 
 
-def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None, claimed=lambda: 0):
+class ChunkClaim:
+    """A copy's claim on the next stretch it writes, in lib/storage.py's free-space claims, which every copy, the MP4
+    conversion and S3 syncs count against the reserve. take() runs under the claims' lock: the stretch is claimed
+    only when it fits above the reserve beside everything the others hold, and it replaces this copy's previous
+    claim (by then that stretch is written and shows in the free space). So two copies can't both count on the same
+    headroom. When the claims can't be used (no state folder), the plain check against the reserve stands."""
+
+    def __init__(self, path, what="copy"):
+        self.path, self.what = path, what
+        self.file, self.held, self.pool, self.pstart = None, 0, None, ""
+
+    def take(self, nbytes, reserve, free):
+        """free() -> bytes free now. Returns (fits, bytes others hold); when it fits, nbytes are this copy's."""
+        try:
+            import storage
+            if self.pool is None:
+                self.pool = storage.space_pool(self.path)
+            with storage.GlobalLock():
+                mine = self.held if self.file and os.path.exists(self.file) else 0
+                others = max(0, storage.claims_on(self.pool) - mine)
+                if free() - nbytes - others < reserve:
+                    self.release()
+                    return False, others
+                if self.file is None:
+                    import uuid
+                    self.file = os.path.join(storage.space_dir(),
+                                             f"{self.what}-{os.getpid()}-{uuid.uuid4().hex[:8]}.json")
+                    self.pstart = storage.proc_start(os.getpid())
+                storage.atomic_json(self.file, {"pool": self.pool, "bytes": int(nbytes), "pid": os.getpid(),
+                                                "pstart": self.pstart, "what": self.what, "since": storage.now()})
+                self.held = nbytes
+                return True, others
+        except Exception:  # noqa: BLE001 - without the claims, the reserve alone
+            return free() - nbytes >= reserve, 0
+
+    def release(self):
+        if self.file:
+            try:
+                os.unlink(self.file)
+            except OSError:
+                pass
+        self.held = 0
+
+
+def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None, claim=None):
     """Unpack the tar stream into the staging folder: regular files and folders only, and with only (a set of
     names) only entries under those top-level names. Raises ImportLimit when the stream passes max_bytes,
-    MAX_MEMBERS or MAX_OBJECTS, or when the free space would fall below min_free plus what claimed() says other
-    operations hold."""
+    MAX_MEMBERS or MAX_OBJECTS, or when the next stretch wouldn't fit above min_free (with a ChunkClaim, beside
+    what other operations hold; the claim then covers that stretch)."""
     members = 0
     budget = {"since_check": FREE_CHECK_EVERY}       # check before the first byte or folder
 
@@ -257,8 +307,13 @@ def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None, clai
         budget["since_check"] += n
         if budget["since_check"] >= FREE_CHECK_EVERY:
             budget["since_check"] = 0
-            held = claimed()
-            if free_bytes(stage_fd) - FREE_CHECK_EVERY < min_free + held:
+            # Until the next check: what's left of this stretch and one more write (the one that ends it).
+            need = FREE_CHECK_EVERY + WRITE_CHUNK
+            if claim is not None:
+                fits, held = claim.take(need, min_free, lambda: free_bytes(stage_fd))
+            else:
+                fits, held = free_bytes(stage_fd) - need >= min_free, 0
+            if not fits:
                 raise ImportLimit(f"the Mac would have less than {min_free / GIB:.0f} GiB free (IMPORT_MIN_FREE_GB)"
                                   + (" beside the space other operations have claimed" if held else ""))
 
@@ -315,7 +370,7 @@ def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None, clai
                     src = tf.extractfile(m)
                     with os.fdopen(ffd, "wb", closefd=False) as out:
                         while True:
-                            b = src.read(1 << 20)
+                            b = src.read(WRITE_CHUNK)
                             if not b:
                                 break
                             if max_bytes is not None and report.bytes + len(b) > max_bytes:
@@ -456,12 +511,13 @@ def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None, only=None):
     name = os.path.basename(stage)
     # Everything read counts, including entries left out (tar skips over their data by reading it).
     capped = _Capped(stream, max_bytes + MAX_MEMBERS * 2560 + STREAM_SLACK if max_bytes is not None else None)
+    claim = ChunkClaim(dest)
     try:
         stage_fd = os.open(name, DIR_FLAGS, dir_fd=dest_fd)
         try:
             failure = None
             try:
-                unpack(capped, stage_fd, report, max_bytes, min_free, only, claimed=lambda: claimed_space(dest))
+                unpack(capped, stage_fd, report, max_bytes, min_free, only, claim=claim)
             except (tarfile.TarError, OSError, EOFError, ImportLimit, ValueError, RecursionError) as e:
                 failure = e         # what arrived whole before the stream broke is still kept
             sweep(stage_fd, "", report)
@@ -471,6 +527,7 @@ def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None, only=None):
         finally:
             os.close(stage_fd)
     finally:
+        claim.release()
         shutil.rmtree(stage, ignore_errors=True)
         os.close(dest_fd)
     return report
@@ -487,22 +544,55 @@ def limits_from_config(config=None):
     return limits_from_env(env)
 
 
-def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=None, keep=None, only=None):
+class _Watched:
+    """A command's stdout that notes when bytes last arrived (read1: whatever has arrived, at once)."""
+
+    def __init__(self, f, last):
+        self.f, self.last = f, last
+
+    def read(self, n=-1):
+        b = self.f.read1(n if n and n > 0 else 1 << 16)
+        self.last[0] = time.monotonic()
+        return b
+
+
+def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=None, keep=None, only=None,
+                        idle=None):
     """Run cmd (an SSH command that writes a tar stream from the VM) and unpack its output into dest as it
     arrives, never holding the stream in memory. Its stderr is kept to a short tail (wirelimits.StderrTail).
-    The command is stopped and reaped when a limit is reached, the stream ends or breaks, or after timeout
-    seconds. Returns (Report, returncode, stderr tail); raises OSError when the command can't start."""
+    The command is stopped and reaped when a limit is reached, the stream ends or breaks, after timeout seconds
+    (None: no total limit), or once nothing has arrived for idle seconds (None: no such limit); a copy that keeps
+    moving is never cut off by idle. Returns (Report, returncode, stderr tail); raises OSError when the command
+    can't start."""
     import wirelimits
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     tail = wirelimits.StderrTail(proc.stderr)
-    timer = threading.Timer(timeout, proc.kill)
-    timer.daemon = True
-    timer.start()
+    timer = None
+    if timeout is not None:
+        timer = threading.Timer(timeout, proc.kill)
+        timer.daemon = True
+        timer.start()
+    last, quiet, done = [time.monotonic()], [], threading.Event()
+    stream = proc.stdout
+    if idle is not None:
+        stream = _Watched(proc.stdout, last)
+
+        def watch():
+            while not done.wait(0.5):
+                if time.monotonic() - last[0] > idle:
+                    quiet.append(True)
+                    proc.kill()
+                    return
+        threading.Thread(target=watch, daemon=True, name="import-idle").start()
     report = None
     try:
-        report = import_tar(proc.stdout, dest, max_bytes, min_free, keep, only)
+        report = import_tar(stream, dest, max_bytes, min_free, keep, only)
+        if quiet:
+            report.failure = ImportLimit(f"the VM sent nothing for {idle:g} s")
     finally:
-        timer.cancel()
+        done.set()
+        if timer is not None:
+            timer.cancel()
         whole = report is not None and report.failure is None
         try:
             rc = proc.wait(timeout=5 if whole else 0.05)
@@ -526,7 +616,18 @@ def main(argv):
             return 2
     quiet = "--quiet" in argv
     args = [a for a in argv if a != "--quiet"]
-    timeout = 600.0
+    idle = None
+    if "--idle-timeout" in args:
+        i = args.index("--idle-timeout")
+        try:
+            idle = float(args[i + 1])
+        except (IndexError, ValueError):
+            idle = -1
+        del args[i:i + 2]
+        if not 0 < idle <= 86400:
+            print("guest_import.py: --idle-timeout takes seconds", file=sys.stderr)
+            return 2
+    timeout = 600.0 if idle is None or "--timeout" in args else None
     if "--timeout" in args:
         i = args.index("--timeout")
         try:
@@ -561,7 +662,7 @@ def main(argv):
             return 2
     if len(args) != 1:
         print("usage: ... | guest_import.py DEST [--quiet] [--keep-existing PREFIX] [--only-top FILE] "
-              "[--timeout S -- CMD...]", file=sys.stderr)
+              "[--timeout S] [--idle-timeout S] [-- CMD...]", file=sys.stderr)
         return 2
     max_bytes, min_free = limits_from_env()
     cmd_rc = 0
@@ -569,7 +670,11 @@ def main(argv):
         if cmd is None:
             report = import_tar(sys.stdin.buffer, args[0], max_bytes, min_free, keep, only)
         else:
-            report, cmd_rc, _ = import_from_command(cmd, args[0], max_bytes, min_free, timeout, keep=keep, only=only)
+            report, cmd_rc, said = import_from_command(cmd, args[0], max_bytes, min_free, timeout, keep=keep, only=only,
+                                                       idle=idle)
+            said = said.strip()
+            if said and not quiet:       # the VM's own words (a note such as "nothing to copy"), escaped
+                print(f"metacomputer: the VM said: {escape_for_terminal(said[-2000:])}", file=sys.stderr)
     except OSError as e:
         print(f"metacomputer: copying from the VM failed: {escape_for_terminal(str(e))}", file=sys.stderr)
         return 1

@@ -776,8 +776,8 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    listings, after an hour without a new turn, or after a day. `task start
    --no-sync` starts none (`web` checks without `--record`, which never call
    `task finish`). `task finish` then copies the folder with
-   `guest_import --keep-existing recording/turn-` (within an hour: `run_until`): a
-   turn file the Mac already has
+   `guest_import --keep-existing recording/turn-` (`vm_tar_copy`: it ends only once the VM has sent
+   nothing for 120 s): a turn file the Mac already has
    stays as it is, and one the VM changed since is named and counted in the
    `task.finished` event. The video is only whole at `stop_recording`, so it
    arrives at `task finish`.
@@ -818,8 +818,8 @@ streamed recording whose stream had ended before it starts a new one.
 | `start` | check and lock the storage (`VOLUMES`, `REFDISKS`; none with `--no-volumes`), start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags) and the storage's `--disk`/`--mount`/`--usb-storage`, wait for SSH, mount the storage, wait for the XFCE session and an MCP handshake |
 | `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw, release the storage locks |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe (through the hub, as a status client), the hub (pid, clients, idle time) |
-| `reset` | finish a desktop recording → sync guest recordings → stop → `lume delete` working VM → `lume clone` baseline → start |
-| `baseline` | re-snapshot the working VM (previous baseline kept as `-prev`) |
+| `reset` | finish a desktop recording → sync guest recordings (`sync_or_stop`: stop here, deleting nothing, unless the copy is whole or `--discard-unsynced`) → stop → `lume delete` working VM → `lume clone` baseline → start |
+| `baseline` | sync guest recordings (`sync_or_stop`, as for `reset`) and remove them from the VM, then re-snapshot the working VM (previous baseline kept as `-prev`) |
 
 The VMs are not started at login and no LaunchAgent or daemon was added.
 With an event sink configured (or a sink-change announcement still waiting),

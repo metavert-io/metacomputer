@@ -1060,8 +1060,10 @@ say which mode is.
   (Checked on a test VM: `rm -rf ~` in the middle of a recording, which came back
   whole, including what happened on screen after the wipe.) A VM built before
   this reads `~/.ssh/authorized_keys`, so there a wipe locks the desktop account
-  out until `metacomputer reset`; `record stop` then cuts the stream on the Mac at
-  once, saves what arrived and says why. `SSH_AUTH=cert` never used `~/.ssh`.
+  out until `metacomputer reset --discard-unsynced` (the copy before a reset can't
+  reach the VM, so reset stops without the flag); `record stop` then cuts the
+  stream on the Mac at once, saves what arrived and says why. `SSH_AUTH=cert` never
+  used `~/.ssh`.
 - **Copies made during a task stay as they were copied.** The copier uses only
   names of the form `turn-<digits>` from the VM's listing and asks for a few of them
   at a time; from the VM's answer it takes only those folders (anything else the VM
@@ -1074,7 +1076,18 @@ say which mode is.
   terminal and counted in the `task.finished` event (`recording_changed_in_vm`),
   which is then a warning. All of it goes through the importer every copy from the
   VM uses (plain files and folders, never written through a link, within the disk
-  reserve), and each copy has a deadline.
+  reserve), and each copy has a deadline (below).
+- **It deletes nothing in the VM that wasn't copied.** `reset`, `restore` and
+  `baseline` copy the VM's `~/metacomputer-runs` first, and delete it (with the VM,
+  or inside it) only once that copy is whole. A folder that's missing or empty
+  counts as whole, so a VM whose home was wiped resets as usual. Whole means the
+  copy came through and the VM's own listing names no file this Mac doesn't have
+  at that size. When the copy stops short (the VM went quiet or can't be reached,
+  the disk reached its reserve, a file came through cut off or was left out), they
+  stop before deleting anything, list what the
+  VM holds that this Mac doesn't (from the VM's own listing), and go on only with
+  `--discard-unsynced`, or when you type `discard` at the prompt that names the
+  loss. `--yes` never does.
 - **It keeps its reserve while it converts.** The MP4 is made only if a copy of the
   stream fits above `IMPORT_MIN_FREE_GB`, and that space is claimed while ffmpeg
   writes it: every copy from the VM (the task copier's included), every stream
@@ -1084,16 +1097,21 @@ say which mode is.
   already writing, another program), or the MP4 grows past its limit, ffmpeg is
   stopped. Whatever stops it, the partial MP4 is deleted, the `.mkv` is kept, and
   `record stop` says which happened.
+- **Copies share that reservation.** Each copy from the VM and each stream claims
+  the next stretch it writes (65 MiB for a copy, 64 MiB for a stream) before
+  writing it, and only if it fits above the reserve beside every other claim, so
+  two copies at once can't both count on the same headroom.
 - **It bounds what the VM says, and how long it waits.** The VM's short answers
   (the recorder's replies, a task folder's listing) are read with a byte limit and
   a deadline, so a VM that answers without end, or never, can't grow or stall the
   command reading them. Everything else a recording asks of the VM has a deadline
   too: `record start` and `record status` in guest mode (a minute), the guest-mode
   copy at `record stop` (a minute without a byte, or an hour in all), the task
-  copier's copies (5 minutes), and `task finish` and `recordings --sync` (an hour
-  each). What arrived before a deadline is kept. The one exchange without a
-  deadline is the stream itself, which runs until `record stop` (or until the
-  Mac's free space reaches its reserve).
+  copier's copies (5 minutes), and `task finish` and `recordings --sync`, which
+  stop only once the VM has sent nothing for 120 s: a copy that keeps moving,
+  however large or slow, is never cut off. What arrived before a deadline is kept.
+  The one exchange without a deadline is the stream itself, which runs until
+  `record stop` (or until the Mac's free space reaches its reserve).
 - **Its events carry nothing the VM chose.** A VM that holds a value from the vault
   could spell it in a file name, a size, a video's own length or its recorder's
   reply. So `task.recording_failed` gives a fixed reason category, never what the
@@ -1116,6 +1134,14 @@ say which mode is.
   record the whole desktop as well.
 - `recordings --sync` replaces what it copied before with what the VM has now; only
   the task copier and `task finish` keep earlier copies.
+- A VM that sends a byte now and then keeps `task finish` and `recordings --sync`
+  going until you stop them (Ctrl-C); what arrived whole stays on the Mac.
+- A VM that's stopped when `reset` or `restore` runs isn't started to copy its
+  recordings: what's only inside it goes with it (the prompt says so).
+  `install.sh --replace-vm` deletes the VM without copying anything.
+- The reservation covers metacomputer's own writers. Another program filling the
+  disk at the same time isn't counted; each copy still checks the real free space
+  before every stretch, and the MP4 conversion's watchdog stops it.
 - Before the copier's first pass, and for the newest turn throughout, a turn exists
   only in the VM; the VM can also simply never list a turn, or send nothing. What it
   can't do is change a turn file the Mac already has.

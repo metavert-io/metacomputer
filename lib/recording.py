@@ -15,6 +15,8 @@ The description file written beside each recording, the Mac's half of a streamed
   recording.py finalize MKV MP4 [--min-free-gb G]
                                          the streamed .mkv as an MP4 (no re-encoding), only if
                                          the Mac keeps its reserve; exit 3 (MKV kept) if it can't
+  recording.py unsynced DEST LISTING      what the VM's listing names that DEST doesn't have whole
+                                         (before reset, restore or baseline deletes it)
   recording.py capture [--max-bytes N] [--timeout S] -- CMD...
                                          CMD's output (a VM's answer), at most N bytes within S
                                          seconds: past either, CMD is stopped and nothing is printed
@@ -284,11 +286,11 @@ FINALIZE_POLL = 0.2               # seconds between finalize's looks at the free
 STOP_GRACE = 10                   # seconds save waits for a stopped stream's last bytes
 
 
-def claims_by_others(path):
-    """Bytes other live operations have claimed on the disk holding path (guest_import.claimed_space)."""
+def chunk_claim(path, what):
+    """This copy's claim on the next stretch it writes (guest_import.ChunkClaim, the claims every copy shares)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import guest_import
-    return guest_import.claimed_space(path)
+    return guest_import.ChunkClaim(path, what)
 
 
 @contextlib.contextmanager
@@ -348,6 +350,7 @@ def cmd_save(a):
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda *_: stop("signal"))
     rc, since, total = 0, SAVE_CHECK_EVERY, 0
+    claim = chunk_claim(a.out, "stream")     # the next SAVE_CHECK_EVERY bytes, claimed before they're written
     import selectors
     sel = selectors.DefaultSelector()
     try:
@@ -357,7 +360,7 @@ def cmd_save(a):
         while True:
             if since >= SAVE_CHECK_EVERY:
                 since = 0
-                if free_bytes(fd) - SAVE_CHECK_EVERY < min_free + claims_by_others(a.out):
+                if not claim.take(SAVE_CHECK_EVERY, min_free, lambda: free_bytes(fd))[0]:
                     print(f"metacomputer: the recording stopped saving here: the Mac would have less than "
                           f"{min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB, with what other copies have claimed); "
                           "what arrived before is kept", file=sys.stderr, flush=True)
@@ -396,6 +399,7 @@ def cmd_save(a):
                       "what arrived before is kept", file=sys.stderr, flush=True)
                 break
     finally:
+        claim.release()
         sel.close()
         os.close(fd)
         try:
@@ -569,6 +573,50 @@ def cmd_moments(a):
         print(esc(f"{fmt_t(m['t']):>8}  {m['tool']}{how}  {m.get('what', '')}".rstrip()))
 
 
+def cmd_unsynced(a):
+    """What the VM's ~/metacomputer-runs holds that DEST doesn't have whole, from the VM's own listing in a.listing
+    ("SIZE\tPATH" records ending in NUL, as `find . -type f -printf '%s\t%P\0'` writes them; empty: no such folder
+    or nothing in it). Prints a count and up to 20 names, escaped (the names are the VM's). Exit 0: everything is
+    on the Mac; 1: something isn't, or the listing couldn't be had (a.listing missing)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from termsafe import escape_for_terminal as esc
+    try:
+        with open(a.listing, "rb") as f:
+            data = f.read(8 << 20)
+    except OSError:
+        print("  the VM couldn't be asked what its ~/metacomputer-runs holds (it may be unreachable): treat everything "
+              "in it as not copied", file=sys.stderr)
+        return 1
+    root = os.path.realpath(a.dest)
+    missing, size = [], 0
+    for rec in data.split(b"\0"):
+        if not rec:
+            continue
+        n, _, name = rec.partition(b"\t")
+        try:
+            want = int(n)
+        except ValueError:
+            want = -1
+        rel = name.decode("utf-8", "surrogateescape")
+        path = os.path.normpath(os.path.join(root, rel))
+        try:
+            st = os.lstat(path) if path.startswith(root + os.sep) else None
+        except OSError:
+            st = None
+        if st is None or not os.path.isfile(path) or os.path.islink(path) or st.st_size != want:
+            missing.append(rel)
+            size += max(0, want)
+    if not missing:
+        return 0
+    amount = f"{size / GIB:.1f} GiB" if size >= GIB else f"{size / (1 << 20):.1f} MiB"
+    print(f"  not on this Mac ({len(missing)} file(s), {amount}, as the VM lists them):", file=sys.stderr)
+    for rel in missing[:20]:
+        print(f"    {esc(rel[:300])}{' ...' if len(rel) > 300 else ''}", file=sys.stderr)
+    if len(missing) > 20:
+        print(f"    ... and {len(missing) - 20} more", file=sys.stderr)
+    return 1
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -600,6 +648,9 @@ def main():
     m.add_argument("json")
     pr = sub.add_parser("probe")
     pr.add_argument("file")
+    us = sub.add_parser("unsynced")
+    us.add_argument("dest")
+    us.add_argument("listing")
     argv, command = sys.argv[1:], []
     if argv[:1] in (["save"], ["capture"]) and "--" in argv:   # their command: everything after the first --
         i = argv.index("--")
@@ -607,7 +658,7 @@ def main():
     a = p.parse_args(argv)
     a.command = command
     return {"sidecar": cmd_sidecar, "moments": cmd_moments, "probe": cmd_probe, "save": cmd_save,
-            "finalize": cmd_finalize, "capture": cmd_capture}[a.cmd](a)
+            "finalize": cmd_finalize, "capture": cmd_capture, "unsynced": cmd_unsynced}[a.cmd](a)
 
 
 if __name__ == "__main__":

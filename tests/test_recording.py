@@ -524,6 +524,198 @@ def finalize_guard_checks():
         shutil.rmtree(td, ignore_errors=True)
 
 
+SYNC_SSH = r"""#!/usr/bin/env python3
+# A stand-in VM for the sync before reset/restore/baseline: `ssh ARGS... REMOTE_COMMAND` runs the command with HOME
+# set to FAKE_HOME. FAKE_SSH_MODE: home (as asked), stall (part of the stream, then nothing), slow (all of it, in
+# pieces with pauses shorter than the idle limit), down (unreachable). The listing (GNU find -printf) is emulated.
+import os, subprocess, sys, time
+cmd, mode, home = sys.argv[-1], os.environ.get("FAKE_SSH_MODE", "home"), os.environ["FAKE_HOME"]
+if mode == "down":
+    sys.exit(255)
+out = sys.stdout.buffer
+if "find . -type f -printf" in cmd:
+    root = os.path.join(home, "metacomputer-runs")
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            q = os.path.join(d, f)
+            out.write(b"%d\t%s\0" % (os.path.getsize(q), os.path.relpath(q, root).encode()))
+    sys.exit(0)
+env = dict(os.environ, HOME=home, COPYFILE_DISABLE="1")
+if mode in ("stall", "slow"):
+    data = subprocess.run(["bash", "-c", cmd], env=env, capture_output=True).stdout
+    if mode == "stall":
+        out.write(data[:3000]); out.flush()
+        time.sleep(30)
+    else:
+        step = max(1, len(data) // 6)
+        for i in range(0, len(data), step):
+            out.write(data[i:i + step]); out.flush()
+            time.sleep(0.5)
+    sys.exit(0)
+os.execvpe("bash", ["bash", "-c", cmd], env)
+"""
+
+
+def sync_guard_checks():
+    """The copy before reset/restore/baseline: an idle deadline only (a copy that keeps moving is never cut off),
+    and nothing is deleted unless it's whole, --discard-unsynced or no; and each copy claims its next stretch."""
+    td = tempfile.mkdtemp(prefix="mcomp-rec-guard-")
+    calls = os.path.join(td, "calls")
+    try:
+        src = open(CLI).read()
+        have = lambda f: re.search(r"^%s\(\) \{" % re.escape(f), src, re.M) is not None   # noqa: E731
+        bindir, home = os.path.join(td, "bin"), os.path.join(td, "vmhome")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "ssh"), "w") as f:
+            f.write(SYNC_SSH)
+        with open(os.path.join(bindir, "lume"), "w") as f:
+            f.write(f'#!/bin/sh\necho "LUME $*" >> "{calls}"\n')
+        for n in ("ssh", "lume"):
+            os.chmod(os.path.join(bindir, n), 0o755)
+        stubs = ('ssh_base() { SSH_ARGS=(x); }\nvm_lock_or_die() { :; }\nexpect_guard() { :; }\n'
+                 'vm_exists() { return 0; }\nvm_running() { return 0; }\nevents_watcher_stop() { :; }\n'
+                 'storage_py() { :; }\nstorage_release() { :; }\nvm_stop() { echo "VMSTOP" >> "$TD/calls"; }\n'
+                 'do_start() { echo STARTED; }\nowners_check() { :; }\nhandoff_hold_unless_override() { :; }\n'
+                 f'LUME="{bindir}/lume"\n')
+        funcs = tuple(f for f in ("proc_tree", "run_until", "vm_answer", "guest_import", "vm_tar_copy", "do_recordings", "sync_or_stop",
+                                  "unsynced_note", "parse_flags", "confirm", "restore_from", "do_baseline") if have(f))
+        env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "FAKE_HOME": home, "MCOMP_SYNC_IDLE": "1",
+               "MCOMP_EVENTS_DIR": os.path.join(td, "events")}
+
+        def vm_runs(files):
+            shutil.rmtree(home, ignore_errors=True)
+            os.makedirs(home)
+            if files is not None:
+                runs = os.path.join(home, "metacomputer-runs")
+                os.makedirs(runs)
+                for name, size in files.items():
+                    os.makedirs(os.path.dirname(os.path.join(runs, name)), exist_ok=True)
+                    with open(os.path.join(runs, name), "wb") as f:
+                        f.write(os.urandom(size))
+
+        def reset(mode, extra="", body="restore_from base baseline reset"):
+            for f in (calls,):
+                if os.path.exists(f):
+                    os.remove(f)
+            shutil.rmtree(os.path.join(td, "lab", "recordings", "guest-runs"), ignore_errors=True)
+            t0 = time.time()
+            r = run_bash(cli_script(td, funcs, stubs + extra + body), dict(env, FAKE_SSH_MODE=mode), timeout=120)
+            log = open(calls).read() if os.path.exists(calls) else ""
+            return r, log, time.time() - t0
+
+        # A copy cut off (the VM stops sending): reset stops before anything is deleted and lists what's missing.
+        vm_runs({"demo-1/recording.mp4": 300_000, "demo-1/turn-00001/action.json": 50})
+        r, log, took = reset("stall")
+        check("sync cut off (the VM went quiet), then reset: it stops before deleting the VM",
+              r.returncode != 0 and "LUME delete" not in log and "VMSTOP" not in log and took < 30,
+              (r.returncode, log, round(took, 1), r.stderr[-400:]))
+        check("...lists what wasn't copied (from the VM's listing) and says how to go on",
+              "demo-1/recording.mp4" in r.stderr and "not on this Mac" in r.stderr and "--discard-unsynced" in r.stderr
+              and "nothing was deleted" in r.stderr, r.stderr[-600:])
+        r, log, _ = reset("stall", extra="ASSUME_YES=1\n")
+        check("...--yes doesn't make it go on", r.returncode != 0 and "LUME delete" not in log, (r.returncode, log))
+        r, log, _ = reset("stall", extra="DISCARD_UNSYNCED=1\n")
+        check("...--discard-unsynced does: the VM is replaced", r.returncode == 0 and "LUME delete" in log
+              and "going on without them" in r.stderr, (r.returncode, log, r.stderr[-300:]))
+        # A copy that came through but left a file out (a name the importer refuses): the VM's listing shows it.
+        vm_runs({"demo-4/ok.mp4": 1000, "demo-4/bad\x01name.mp4": 1000})
+        r, log, _ = reset("home")
+        check("a copy that came through but left a file out: reset stops too, naming it (escaped)",
+              r.returncode != 0 and "LUME delete" not in log and "bad\\x01name.mp4" in r.stderr
+              and "\x01" not in r.stderr, (r.returncode, log, r.stderr[-400:]))
+        r, log, _ = reset("down")
+        check("a VM that can't be reached: reset stops too, and says it couldn't ask what the VM holds",
+              r.returncode != 0 and "LUME delete" not in log and "couldn't be asked" in r.stderr,
+              (r.returncode, log, r.stderr[-400:]))
+        # Whole copies go on with no flag: a wiped home (no folder), an empty folder, files that arrive slowly.
+        vm_runs(None)
+        r, log, _ = reset("home")
+        check("reset after a wiped home (no ~/metacomputer-runs): goes on with no flag", r.returncode == 0
+              and "LUME delete" in log and "STARTED" in r.stdout, (r.returncode, log, r.stderr[-300:]))
+        vm_runs({})
+        r, log, _ = reset("home")
+        check("...and with an empty one", r.returncode == 0 and "LUME delete" in log, (r.returncode, r.stderr[-300:]))
+        vm_runs({"demo-2/recording.mp4": 400_000})
+        r, log, took = reset("slow")
+        got = os.path.join(td, "lab", "recordings", "guest-runs", "demo-2", "recording.mp4")
+        check("a copy that keeps moving is never cut off by the idle limit (pauses under it, longer than it in all)",
+              r.returncode == 0 and "LUME delete" in log and os.path.isfile(got) and os.path.getsize(got) == 400_000
+              and took > 2, (r.returncode, round(took, 1), r.stderr[-300:]))
+        # baseline: the recordings are deleted in the VM only after a whole copy.
+        vm_runs({"demo-3/recording.mp4": 300_000})
+        r, log, _ = reset("stall", body="ASSUME_YES=1\ndo_baseline")
+        check("baseline with the copy cut off: stops before deleting the VM's recordings or touching the baseline",
+              r.returncode != 0 and "rm -rf ~/metacomputer-runs" not in log and "LUME" not in log
+              and "stopped before baseline" in r.stderr, (r.returncode, log, r.stderr[-300:]))
+        r, log, _ = reset("home", body="ASSUME_YES=1\ndo_baseline")
+        check("...and with a whole copy it goes on", r.returncode == 0 and "rm -rf ~/metacomputer-runs" in log
+              and "LUME clone" in log, (r.returncode, log, r.stderr[-300:]))
+
+        # Concurrent copies: each claims its next stretch before writing it, so two can't count on the same headroom.
+        import guest_import
+        import storage
+        state = os.path.join(td, "state")
+        old = os.environ.get("MCOMP_STORAGE_HOME")
+        os.environ["MCOMP_STORAGE_HOME"] = state
+        try:
+            Claim = getattr(guest_import, "ChunkClaim", None)
+            ok = False
+            if Claim is not None:
+                chunk, reserve = 64 << 20, 1 << 30
+                free = lambda: reserve + chunk + chunk // 2        # noqa: E731 - room for one stretch, not two
+                a, b = Claim(td), Claim(td)
+                first, second = a.take(chunk, reserve, free)[0], b.take(chunk, reserve, free)[0]
+                held = storage.claims_on(storage.space_pool(td))
+                a.release()
+                third = b.take(chunk, reserve, free)[0]
+                b.release()
+                ok = first and not second and held == chunk and third
+            check("two copies with room for one stretch: the first claims it, the second stops until it's released",
+                  ok, Claim)
+            # A real copy: its claim is there while it writes, gone after.
+            srcdir = os.path.join(td, "vmfiles")
+            os.makedirs(os.path.join(srcdir, "run"))
+            with open(os.path.join(srcdir, "run", "big.bin"), "wb") as f:
+                f.write(os.urandom(2 << 20))
+            tar = subprocess.run(["tar", "-C", srcdir, "-cf", "-", "."], capture_output=True, check=True,
+                                 env=dict(os.environ, COPYFILE_DISABLE="1")).stdout
+            dest = os.path.join(td, "copied")
+            feeder = (f"import sys, time\nd = open({os.path.join(td, 'feed.tar')!r}, 'rb').read()\n"
+                      "for i in range(0, len(d), 1 << 18):\n    sys.stdout.buffer.write(d[i:i + (1 << 18)]); "
+                      "sys.stdout.flush(); time.sleep(0.2)\n")
+            with open(os.path.join(td, "feed.tar"), "wb") as f:
+                f.write(tar)
+            p = subprocess.Popen(f"{sys.executable} -c {shlex_quote(feeder)} | {sys.executable} "
+                                 f"{shlex_quote(os.path.join(LAB, 'lib', 'guest_import.py'))} {shlex_quote(dest)}",
+                                 shell=True, env=dict(os.environ, MCOMP_IMPORT_MIN_FREE_GB="0"),
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            seen = []
+            while p.poll() is None:
+                d = os.path.join(state, "space")
+                for n in (os.listdir(d) if os.path.isdir(d) else []):
+                    rec = storage.read_json(os.path.join(d, n))
+                    if n.startswith("copy-") and isinstance(rec, dict):
+                        seen.append(rec.get("bytes"))
+                time.sleep(0.05)
+            p.communicate(timeout=30)
+            left = os.listdir(os.path.join(state, "space")) if os.path.isdir(os.path.join(state, "space")) else []
+            check("a copy holds a claim on its next stretch while it writes (64 MiB and one write), none after",
+                  seen and max(seen) == (64 << 20) + (1 << 20) and not [n for n in left if n.startswith("copy-")]
+                  and os.path.isfile(os.path.join(dest, "run", "big.bin")), (seen[:3], left, p.returncode))
+        finally:
+            if old is None:
+                os.environ.pop("MCOMP_STORAGE_HOME", None)
+            else:
+                os.environ["MCOMP_STORAGE_HOME"] = old
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def shlex_quote(x):
+    import shlex
+    return shlex.quote(x)
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
@@ -647,9 +839,11 @@ def record_cli_checks():
               rec_src.count("vm_answer 4096"))
         check("stop asks the VM about a running recorder through vm_answer (bounded), not a raw ssh",
               "vm_answer 64 15 'pgrep -x ffmpeg" in function(src, "do_stop") and "gssh ops 'pgrep" not in function(src, "do_stop"))
-        check("task finish and recordings --sync copy from the VM with a deadline (run_until)",
-              'run_until $((SECONDS + 3600)) gssh ops "test -d' in function(src, "do_task")
-              and "run_until $((SECONDS + 3600)) gssh ops 'if cd ~/metacomputer-runs" in function(src, "do_recordings"))
+        check("task finish and recordings --sync copy through vm_tar_copy: an idle deadline, no total one",
+              'vm_tar_copy "$host/guest" "test -d' in function(src, "do_task")
+              and "vm_tar_copy \"$dest\" 'if cd ~/metacomputer-runs" in function(src, "do_recordings")
+              and '--idle-timeout "${MCOMP_SYNC_IDLE:-120}"' in function(src, "vm_tar_copy")
+              and "--timeout" not in function(src, "vm_tar_copy").replace("--idle-timeout", ""))
         bindir = os.path.join(td, "floodbin")
         os.makedirs(bindir, exist_ok=True)
         with open(os.path.join(bindir, "ssh"), "w") as f:
@@ -1132,6 +1326,7 @@ def main():
         where_checks()
         save_checks()
         finalize_guard_checks()
+        sync_guard_checks()
         record_cli_checks()
         task_sync_checks()
     finally:
