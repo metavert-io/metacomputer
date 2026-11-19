@@ -12,6 +12,11 @@ recorded and never passed on to the driver:
   `metacomputer call`, a script) of the tools/call that follows it, since one hub
   connection carries every client's calls;
 - `notifications/metacomputer/refused` is a call the hub refused.
+
+Once the VM may hold a value from the vault (lib/vmtaint.py: its mark exists, looked at before each record is
+written, and sticky for this connection), every call, answer and refusal is recorded as secret-adjacent: the tool,
+whose call, argument names and size class, whether it failed; no text, no error message, no hash, whatever
+ACTION_LOG_TEXT says.
 """
 import json
 import os
@@ -24,6 +29,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
 import owners  # noqa: E402
+import vmtaint  # noqa: E402
 import wirelimits  # noqa: E402
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
@@ -81,11 +87,20 @@ def main(cmd):
     clients = {}            # json(id) -> the hub's note on whose call it is
     plock = threading.Lock()
     out = sys.stdout.buffer
+    mark = vmtaint.path()
+    taint = [vmtaint.tainted(mark_path=mark)]
+
+    def adjacent():
+        """May the VM hold a value? Looked at when each record is written (the mark is made before a value is
+        sent, so anything the VM sends after it arrives is read after the mark exists), and sticky from then on."""
+        if not taint[0] and vmtaint.tainted(mark_path=mark):
+            taint[0] = True
+        return taint[0]
 
     def finish(*_):
         with plock:
             for key, tool in list(pending.items()):
-                log.result(json.loads(key), tool, {"error": {"message": DROPPED}})
+                log.result(json.loads(key), tool, {"error": {"message": DROPPED}}, secret=adjacent())
             pending.clear()
         log.close()
         if events is not None:
@@ -127,7 +142,7 @@ def main(cmd):
                         with plock:
                             tool = pending.pop(json.dumps(key), None)
                         if tool:
-                            log.result(key, tool, {"error": {"message": TOO_COMPLEX}})
+                            log.result(key, tool, {"error": {"message": TOO_COMPLEX}}, secret=adjacent())
                 except ValueError:
                     msg = None
                 if isinstance(msg, dict) and "method" not in msg and "id" in msg:
@@ -135,7 +150,7 @@ def main(cmd):
                     with plock:
                         tool = pending.pop(key, None)
                     if tool:
-                        log.result(msg["id"], tool, msg)
+                        log.result(msg["id"], tool, msg, secret=adjacent())
                 try:
                     out.write(line)
                     out.flush()
@@ -188,7 +203,8 @@ def main(cmd):
             if method == REFUSED:
                 p = msg.get("params") or {}
                 log.refused(str(p.get("tool", "")), p.get("args") or {}, str(p.get("reason", "")),
-                            client=p.get("client") if isinstance(p.get("client"), dict) else None)
+                            client=p.get("client") if isinstance(p.get("client"), dict) else None,
+                            secret=adjacent(), code=p.get("code"))
                 continue
             if method == CLIENT:
                 p = msg.get("params") or {}
@@ -202,7 +218,7 @@ def main(cmd):
                 with plock:
                     pending[json.dumps(msg["id"])] = p.get("name", "")
                 log.call(msg["id"], p.get("name", ""), p.get("arguments") or {},
-                         client=clients.pop(json.dumps(msg["id"]), None))
+                         client=clients.pop(json.dumps(msg["id"]), None), secret=adjacent())
         try:
             proc.stdin.write(line)
             proc.stdin.flush()

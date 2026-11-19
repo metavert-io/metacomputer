@@ -206,9 +206,14 @@ def loads(data, max_depth=None, max_nodes=None):
 class StderrTail:
     """Drain a child's stderr on a thread of its own. The last `keep` bytes stay in memory (text()); at most
     `file_max` bytes go to the file at `path` (0600; appended to when append is true), then one line says the
-    rest was left out. The child never blocks on a full pipe, and nothing grows without limit."""
+    rest was left out. The child never blocks on a full pipe, and nothing grows without limit.
 
-    def __init__(self, stream, path=None, keep=None, file_max=None, append=False):
+    Withheld (withhold(), or withhold_when() answering true when a chunk arrives; sticky): from then on nothing read
+    is kept, in memory or the file, and text() is empty; the file gets one fixed line saying so. `watch` (a few fixed
+    phrases) still says which of them appeared (saw()): a fixed answer, never the stream's own words. For a stream from
+    a VM that may hold a value (lib/vmtaint.py)."""
+
+    def __init__(self, stream, path=None, keep=None, file_max=None, append=False, withhold_when=None, watch=()):
         self.stream = stream
         self.path = path
         self.keep = STDERR_KEEP if keep is None else keep
@@ -216,6 +221,11 @@ class StderrTail:
         self.append = append
         self.buf = bytearray()
         self.total = 0
+        self.withheld = None        # why nothing read is kept any more, else None
+        self.withhold_when = withhold_when
+        self.watch = tuple(w.lower() for w in watch if w)
+        self.seen = set()           # which of `watch` appeared
+        self._carry = b""
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True, name="stderr-tail")
@@ -230,20 +240,60 @@ class StderrTail:
         except OSError:
             return None
 
+    def withhold(self, why):
+        """Keep nothing read from now on (sticky), and forget what's in memory."""
+        with self.lock:
+            if self.withheld is None:
+                self.withheld = str(why)[:120]
+            self.buf = bytearray()
+
+    def saw(self, phrase):
+        with self.lock:
+            return phrase.lower() in self.seen
+
+    def _look(self, chunk):
+        if not self.watch:
+            return
+        hay = (self._carry + chunk).lower()
+        for w in self.watch:
+            if w in hay:
+                self.seen.add(w)
+        n = max(len(w) for w in self.watch) - 1
+        self._carry = hay[-n:] if n > 0 else b""
+
     def _run(self):
         f = self._open()
-        written, cut = 0, False
+        written, cut, marked = 0, False, False
         try:
             fd = self.stream.fileno()
             while True:
                 chunk = os.read(fd, 65536)
                 if not chunk:
                     break
+                if self.withheld is None and self.withhold_when is not None:
+                    try:
+                        if self.withhold_when():
+                            self.withhold("the VM may hold a value")
+                    except Exception:
+                        self.withhold("the VM may hold a value")
                 with self.lock:
                     self.total += len(chunk)
-                    self.buf += chunk
-                    if len(self.buf) > self.keep:
-                        del self.buf[:len(self.buf) - self.keep]
+                    self._look(chunk)
+                    withheld = self.withheld
+                    if withheld is None:
+                        self.buf += chunk
+                        if len(self.buf) > self.keep:
+                            del self.buf[:len(self.buf) - self.keep]
+                if withheld is not None:
+                    if f is not None and not marked and not cut:
+                        try:
+                            f.write(f"\n[metacomputer: from here on this stream is withheld ({withheld}); none of it "
+                                    "is kept]\n".encode())
+                            f.flush()
+                        except (OSError, ValueError):
+                            pass
+                    marked = True
+                    continue
                 if f is not None and not cut:
                     room = self.file_max - written
                     try:
@@ -273,8 +323,8 @@ class StderrTail:
             self.done.set()
 
     def text(self, wait=0.0):
-        """The last bytes read, as text. wait: seconds to wait for the stream's end first."""
+        """The last bytes read, as text ("" once withheld). wait: seconds to wait for the stream's end first."""
         if wait:
             self.done.wait(wait)
         with self.lock:
-            return bytes(self.buf).decode("utf-8", "replace")
+            return "" if self.withheld is not None else bytes(self.buf).decode("utf-8", "replace")

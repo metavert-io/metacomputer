@@ -84,6 +84,13 @@ Typed text, values and scripts are recorded as their length only.
 the log as safe as the passwords that might be typed. Results are never stored,
 only their hash, so a log doesn't copy what was on the screen.
 
+Once the VM may hold a value from the vault (a fill, a sign-in, a session load or a
+token reached it), every record on its connections is `secret_adjacent`, until the VM
+is reset: a call's tool, client, argument names and their size class; whether an answer
+failed, its image count and text size class; a refusal's code. No arguments, text, error
+message or hash, whatever `ACTION_LOG_TEXT` says, since the VM could spell that value
+in any of them ("After a value reaches the VM", under "Secrets and logins").
+
 ```
 metacomputer actions list            # recent sessions
 metacomputer actions show latest     # one session, readable
@@ -870,7 +877,7 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
      has the contents pinned at bind.
 4. If the secret or the unlock says `each`, it first asks the VM to check the page
    without the value. It then asks in your terminal, naming the real site, the Chrome
-   profile, any selector and who asked, for example:
+   profile and who asked, for example:
    `Fill x-login (password) into https://x.com on VM metacomputer?`
    `Asked by Claude Code in ~/Projects/foo (pid 4242).`
    - You type the secret's name to allow this use, `NAME session` for this Claude
@@ -994,6 +1001,13 @@ and folder (its project) are the **requester**:
   false` in the audit log), and nothing more: any program of yours can name any live
   process, so the claim never satisfies a `--project` limit, an unattended rule or a
   grant. Those always see the client itself.
+- the metacomputer hub, which serves every Claude Code session from one process (and may
+  sit under the session that started it), asks as itself. A request from the hub or a
+  process it started has no Claude Code session and no project, whichever session
+  started the hub, so `--project` limits, unattended rules and `NAME session` grants
+  never cover it. It's recognised by its command line, which only takes standing away (a
+  process copying it gives up its own session). The session the hub names is shown as
+  the unverified claim above.
 
 When a use needs your approval, what you type decides how long it lasts:
 
@@ -1199,6 +1213,15 @@ the site, which must be one of the secret's, and the username field must be on t
 site), then both are typed through the same path as `fill`, to that site only. The
 answer lists the fields filled, the site and a masked username.
 
+A selector (`--selector`, `--password-selector`, `--username-selector`) and a browser
+process id (`--browser-pid`) choose where a value goes, and that's all they do. (So does
+`--origin`: it's recorded only once it's known to be one of the secret's own sites, and a
+refusal doesn't repeat it.) They're
+read off the page, by Claude or the hub, and a VM that holds a value from an earlier fill
+could spell it in a field's id. So none of them is shown in your terminal, answered or
+recorded: the audit log says only that one was given (`selector_given`,
+`selectors_given`, `browser_pid_given`).
+
 ### A request whose requester goes away stops
 
 While the unlock process serves a `fill`, `login`, `session save|load` or `token`
@@ -1207,7 +1230,8 @@ dies, the vault stops the request:
 
 - **What withdraws it.** The client closes its side when it gets SIGINT, SIGTERM or
   SIGHUP, when the program that ran it ends (the `metacomputer secrets` wrapper killed
-  outright), or at its own deadline. A client killed outright simply disconnects.
+  outright), when the process `--while-pid` names ends (the hub passes its own), or at
+  its own deadline. A client killed outright simply disconnects.
 - **What the unlock process does.**
   - A question still waiting is withdrawn: the dialog is cancelled and `approve ID` finds
     nothing.
@@ -1223,6 +1247,62 @@ dies, the vault stops the request:
 - **Limit.** A step the VM has already started may still finish there. Killing ssh ends
   the connection, not the VM's side of it. No later step is sent, and nothing it does
   afterwards can reach the vault.
+
+### After a value reaches the VM
+
+The VM keeps every value it was ever given: a password, a code, a session's cookies, a
+token. Once it may hold one, it could spell it in anything it sends afterwards: an
+error message, a page's text, a tool's description, its stderr, a size. So from that
+moment until the VM is reset, nothing the VM chooses is kept on your Mac.
+- **The mark.** "May hold a value" is one file per VM, `RUN_DIR/vm-may-hold-values`
+  (`lib/vmtaint.py`; `metacomputer secrets` and the hub's sign-in tools share it). It's
+  written before anything can be sent:
+  - by `metacomputer secrets fill`, `login`, `session load` and `token`, before they ask
+    the vault. They act on their config's VM only: `--vm` naming another is refused
+    (set `MCOMP_CONFIG` to that VM's config instead);
+  - by the hub, before a `request_site_login` or `teleport_browser_session` asks the
+    vault.
+
+  If it can't be written, nothing is sent.
+- **It travels with copies of the VM.** Each saved image has a record,
+  `RUN_DIR/vm-taint/IMAGE`:
+  - `metacomputer baseline` and `checkpoint` record the working VM's mark for the copy
+    they make, and `baseline` keeps the old baseline's record with it as `-prev`;
+  - a build records a clean VM and baseline;
+  - `reset` and `restore` set the working VM's mark from the image they copy.
+
+  An image with no record (made before this) counts as holding a value if any VM of
+  this run folder was ever marked (`RUN_DIR/vm-taint/.ever`, which is never removed), and
+  a record that can't be read counts as holding one. So the mark goes away only with a
+  copy of an image that's known to hold no value: a fresh baseline, or one made before
+  any value was sent.
+- **No race.** Whatever the VM sends after the value arrives is read after the file
+  exists, and each place below looks at it when it records, not when its connection
+  started. It stays that way for the rest of that connection.
+- **What changes once it's there:**
+  - **The action log** records every call, answer and refusal on the VM's connections
+    as `secret_adjacent`, whatever `ACTION_LOG_TEXT` says.
+    - A call keeps its tool, its client, its argument names and their size class.
+    - An answer keeps whether it failed, how many images (in words) and its text's size
+      class.
+    - A refusal keeps the hub's code (`windows_changed_since_screenshot`), not its
+      words, which can quote a window's title.
+    - There's no text, no error message and no hash: a hash can be ground to carry a few
+      bits.
+  - **The driver connection's stderr** (`upstream.stderr`, and what error messages
+    quote) keeps nothing more. One fixed line says so.
+  - **hub.log** names exceptions by their type only, and quotes no stderr, window id or
+    count from the VM.
+  - **The tool list.** The hub doesn't ask the driver for its tool list or handshake
+    again, doesn't save one, and doesn't pass `tools/list_changed` on: the list from
+    before stays. A tool's description is the VM's to write. Its resources and prompts
+    listings come from the saved copy too.
+  - **`metacomputer sh`** records each output stream by its size class only (no hash, no
+    text), and the exit code as zero or not.
+- **What's left** to a hostile VM is a few bits per call: which fixed outcome, which size
+  or count class, and when (records are timestamped). Claude still reads what the VM
+  shows, as it always does: a VM that has a value can put it on its screen, as "What
+  doesn't hold" says.
 
 ### Bringing logins in: Chrome, CSV exports, a site's cookies
 
@@ -1305,8 +1385,10 @@ plain text: delete it once it's imported.
 - `session load NAME --site HOST` (repeatable) sends only the cookies a browser would send to
   those sites, filtered on the Mac before anything goes to the VM. The question and the audit
   record (`sites`) name that scope; an answer that reaches further (`NAME session`) covers
-  loads of exactly those sites; a site the session doesn't hold, and `--site` on a whole
-  browser profile (which loads whole), are refused.
+  loads of exactly those sites; a site the session wasn't imported for (a subdomain of
+  one included), and `--site` on a whole browser profile (which loads whole), are refused.
+  The refusal doesn't repeat the site asked for, and the record names sites only once
+  they're the session's own: the caller may have read them off a page.
 
 Test builds never read your Chrome or ask the Keychain: `MCOMP_VAULT_TEST_CHROME_DIR` (a
 folder of synthetic profiles, outside `~/Library`) and `MCOMP_VAULT_TEST_CHROME_KEY` (the
@@ -1317,6 +1399,113 @@ contain them (`tests/test_vault_import.py`).
 restricts). `init --passphrase` and `unlock --passphrase` are accepted as other vaults
 spell them; `--passphrase-stdin` is refused, since a passphrase piped in by a script could
 be piped in by any program running as you.
+
+### Tools for agents written for Cua Spaces: `request_site_login`, `teleport_browser_session`
+
+The hub serves two MCP tools itself, with the names and parameters Cua Spaces' Keyvault
+documents (docs/moving-from-spaces.md maps the rest). They add no new way to a value: the
+vault does the asking and the typing, as for `metacomputer secrets login`.
+- **They go through the hub's guards.** The hub serves them after its one-controller
+  check, like any acting tool. The browser calls they make (`browser_prepare`,
+  `list_windows`, `get_browser_state`, `browser_navigate`, `browser_click`,
+  `browser_type`) are the hub's own calls on that client's behalf: the action log names
+  the client, and bounded mode's manifest applies to them as to any call. In bounded
+  mode the vault behaves as it does for `metacomputer secrets fill`: its fill path
+  doesn't go through the driver, so a site outside the manifest stops at the navigation,
+  not at the fill.
+- **`request_site_login`** finds the saved login for the URL's exact origin, by name,
+  sites and username, from `list`.
+  - It opens page-mode Chrome on the page, or uses the tab given, and refuses if the tab
+    is on any other site.
+  - It reads the page's fields from a `dom_refs_v1` snapshot, then runs `metacomputer
+    secrets login` (or `fill --field username` on a username-only page) with those
+    fields' selectors and that origin (`--origin`).
+  - The vault checks both fields in the VM against that one origin, not the login's other
+    sites, asks you as for any fill, and types the values through its fill account to
+    that site only.
+  - Before clicking the submit button the hub reads the tab again, and doesn't submit if
+    it has left the site.
+  - The answer carries status, the site, a masked username, the driver session and
+    `same_site`: whether the page is still on the login's origin. Nothing of the page's
+    address comes back, not its path or query and not its host: a page, or the VM, could
+    spell the password or a token in any of them. No tab or target id comes back either,
+    since those are the VM's to choose too: Claude finds the tab with `list_windows` and
+    `get_browser_state`.
+  - The field selectors and the Chrome's process id the hub read off the page go to the
+    vault to choose where the values go, and the vault neither shows nor records them
+    ("Signing in with one approval" above).
+- **The vault call is pinned to the hub's VM.**
+  - The hub passes the VM it drives: its name (`--vm`), and the SSH port and host key
+    its driver connection uses (`--expect-port`, `--expect-host-key`). The vault refuses
+    a binding under that name with another port or host key.
+  - `metacomputer secrets` refuses when its config file now names another VM than the
+    hub's (the file repointed while the hub runs), so the vault never acts on a VM the
+    hub hasn't checked and doesn't hold.
+  - With any of these unknown, the hub sends nothing.
+- **The Chrome is bound, the tab isn't.**
+  - The hub tells the vault which Chrome it read, by its browser process id
+    (`--browser-pid`): the one it opened, or the one a tab passed in belongs to.
+  - A tab passed in needs that pid. The hub checks through the driver that the tab is
+    one of that Chrome's: it binds each of that process's windows and looks for the
+    target and tab. A tab elsewhere, or one passed with only a profile, is refused
+    before anything is typed.
+  - The vault refuses a request through the hub that names no Chrome.
+  - In that Chrome, the fill goes only to a tab that's alone on the site. Two or more
+    are refused outright, never chosen between by focus or visibility (the pages' own
+    answers).
+  - The tab itself can't be bound: the driver's tab ids aren't the ones Chrome's
+    DevTools uses. The process id and the profile are Chrome's own answers, like
+    everything secret-fill reads from DevTools.
+- **`teleport_browser_session`** finds a session you imported with `import-session` for
+  those exact sites, and runs `metacomputer secrets session load NAME --site ...` for it.
+  - Only the cookies a browser sends to those sites go to the VM, filtered on the Mac,
+    whatever else the session holds. The question and the audit record name that scope.
+  - If the profile has no cookie store yet, the vault says so before asking you, in its
+    own words, never the VM's. The hub then has the driver open and close the profile
+    once.
+- **The requester is the hub, not the calling session.** The hub serves every session
+  from one process, so the vault sees these requests as the hub's own: no Claude Code
+  session and no project.
+  - A login limited with `--project`, an unattended rule and a `NAME session` grant
+    never cover them: they ask, or are refused.
+  - The hub passes on the client's process id (`--on-behalf-pid`). The unlock terminal
+    and the audit log show it as an unverified claim (`for Claude Code in ~/Projects/foo
+    (pid 4242) as it says (unverified)`), and nothing more.
+  - `agent`, what the asking agent calls itself, is shown in the question and recorded,
+    marked unverified: 1 to 64 letters, digits, spaces and `. _ @ : ( ) / + -`.
+- **Two steps, as Keyvault has them.** The first call starts the use and answers
+  `pending` (or `consent_required`) with the vault's own request id while you decide.
+  The use goes ahead the moment you approve, and a later call with that `request_id`
+  collects the outcome. Outcomes are kept in the hub for 10 minutes, for the session that
+  asked only.
+- **Nothing the VM says comes back or is kept.**
+  - The tools' errors are their own words, or the vault's. A driver error or refusal,
+    the page's address and an exception's text are never passed to the client.
+  - Before the vault is asked, the VM is marked ("After a value reaches the VM" above).
+    From then on the action log, hub.log, `upstream.stderr`, the events and the tool
+    list keep nothing of the VM's, for the rest of that connection and every later one,
+    until the VM is reset.
+- **The work holds the computer until it has provably stopped.** From the call until
+  the fill, the submit or the load is done, the work counts as the client's acting call.
+  - Other controllers are refused, and the client's claim is kept fresh, however long
+    the steps take.
+  - If the client disconnects (a script that got `pending` and exited), the hub keeps the
+    computer for it under the client's lease, as for any call a client leaves running,
+    so no other controller can act on the page meanwhile.
+  - The computer is let go only once nothing the job started can still act. Its vault
+    call has answered (the unlock process answers only after the request has stopped
+    there), or `mcomp-vault settle` has said that everything sent before it finished.
+    Every driver call it made has answered, or the connection that call went on has been
+    ended with its whole process tree.
+  - A driver call that doesn't answer in time (60 s; all the steps before the vault call
+    have 180 s together, and those after it 60 s) ends that connection first. So does a
+    lease past its life.
+  - A job that's stopped (the lease past its life, the hub stopping) withdraws its vault
+    call. The vault withdraws the question, starts no further step and kills a step in
+    progress (its ssh), then confirms. The vault client also withdraws when the hub's
+    process ends (`--while-pid`).
+  - architecture.md, "Tools the hub serves itself", lists every way a job ends and what
+    proves each one stopped.
 
 ### API keys: short-lived tokens through a proxy
 
@@ -1782,6 +1971,18 @@ something waits for you:
 - **The unlock process killed outright (SIGKILL).** It ends its requests when told to
   stop (Ctrl-C, `lock` or SIGTERM). SIGKILL, from you or a program running as you, skips
   that: an ssh it started runs on until that step ends.
+- **The hub killed outright (SIGKILL), or stopped while a sign-in can't confirm.** Its
+  hold on the computer ends with its process. Its vault clients see it gone
+  (`--while-pid`) and withdraw, and the unlock process ends the step in progress; a step
+  the VM already started may finish. Stopped normally, the hub waits up to 60 s for each
+  sign-in to confirm it stopped, and keeps its hold until then.
+- **A VM that was given values without the mark.** A VM that got a fill, a session or a
+  token from an earlier version has no mark, so its records aren't secret-adjacent yet.
+  The first value sent through this version marks it. Its images made before that have
+  no record, and count as clean until some VM of its run folder is marked: `reset` to
+  such a baseline after the first mark keeps the VM marked. The same goes for a program
+  that runs `mcomp-vault` itself instead of `metacomputer secrets`: the vault program
+  doesn't know which VM folder to mark.
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
   sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:
@@ -1929,6 +2130,7 @@ something waits for you:
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
+| MCP `request_site_login`, `teleport_browser_session` | Claude, through the hub | Sign in to a site with a saved login; load an imported session ("Tools for agents written for Cua Spaces") |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; the live ones; end them |
 | `audit-sink list`, `audit-sink show NAME` | anywhere (while locked: each sink's delivery state only, not its settings) | Sinks, their backlog and last error (URLs masked) |

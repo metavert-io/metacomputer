@@ -147,8 +147,9 @@ server, the CLI and an SDK share, so references and state carry over.
   `DRIVER_MODE`, `COORD_GUARD`, …) is refused while others use the hub; when
   it's alone the hub restarts with that client's settings.
 - **When it ends.** After `HUB_IDLE` (10 minutes) with no client, no call in
-  flight and no driver recording (it asks the driver before exiting while one
-  was started through it), on `metacomputer stop`, or on `metacomputer hub stop`.
+  flight, no sign-in or session load at work ("Tools the hub serves itself") and no
+  driver recording (it asks the driver before exiting while one was started through
+  it), on `metacomputer stop`, or on `metacomputer hub stop`.
 - **Multiplexing.** Each client's JSON-RPC ids are rewritten on the way to the
   driver (`c<client>.<n>`) and restored on the way back, so each answer reaches
   only its client. `initialize`, `tools/list`, `ping` and `logging/setLevel` are
@@ -230,6 +231,134 @@ coordinate guard" below). Neither cost anything measurable in the benchmark
 against 20.2 turns, no refusals; per-task records in
 [bench/runs/](bench/runs/)), and the GUI and option tests pass with both on.
 
+### Tools the hub serves itself
+
+Two tools in the tool list aren't Cua Driver's: `request_site_login` and
+`teleport_browser_session` (`lib/site_login.py`), named and shaped like Cua Spaces'
+Keyvault tools so an agent written for Spaces finds them. The hub adds them to the
+driver's list (and the lazy bridge to its cached one) and serves them after its
+one-controller check, like any acting tool.
+
+- **What they do.** `request_site_login` finds the saved login for the URL's exact
+  origin (`metacomputer secrets list`), opens page-mode Chrome on the page or checks the
+  tab it's given (which must be in the Chrome process passed with it, as the driver
+  binds that process's windows), reads the page's fields from a `dom_refs_v1` snapshot,
+  and runs `metacomputer secrets login` (or `fill --field username`) with those
+  selectors. It binds what it checked: `--origin`, `--browser-pid`, the request id,
+  and the client's pid as an unverified `--on-behalf-pid`. The vault uses the selectors
+  and the pid to choose the field and the Chrome, and never shows or records them (they
+  come off the page). The call is pinned to the hub's VM (`site_login.vm_pin`): `--vm`,
+  `--expect-port` and `--expect-host-key` (the host key its driver connection pinned,
+  `Hub.vm_identity`), and `MCOMP_HUB_IDENTITY` for `metacomputer secrets`, which refuses
+  a config that now names another VM. It then reads the tab again
+  and submits only if it's still on that origin. `teleport_browser_session` runs
+  `metacomputer secrets session load NAME --site ...` for a session imported with
+  `import-session` for those exact sites. If the profile has no cookie store yet, it
+  has the driver open and close that profile first.
+- **What comes back.** Status, the site, a masked username, `submitted`, `same_site`
+  (whether the page is still on the login's origin), and the driver session. No tab or
+  target id: the VM chooses those. Its errors are its own
+  words or the vault's (already free of the VM's). Never a page address, a driver error
+  or an exception's text.
+- **Who asks.** The vault sees these requests as the hub's own, with no Claude Code
+  session and no project (`Requester.hubAncestor`: the hub's command line only takes
+  standing away), so `--project` limits, unattended rules and `NAME session` grants
+  never cover them. It refuses a hub request that names no Chrome.
+- **Two steps.** The first call starts the use and answers `pending` (or
+  `consent_required`) with the vault's request id while the user decides. A later call
+  with that `request_id` collects the outcome, for the same session only, for 10
+  minutes.
+
+Each call is a **job** (`site_login.Hold`; `Hub.job_start`, `job_end`). Two invariants
+hold for every job.
+
+**A: once a value may have reached the VM, nothing the VM chooses is kept on the Mac,
+until the VM is reset.** The VM keeps every value it was ever given and could spell
+one in anything it sends. So "may hold a value" is a fact about the VM, not about one
+job or one connection: one file, `RUN_DIR/vm-may-hold-values` (`lib/vmtaint.py`).
+- **Who writes it.** The hub writes it before a job's vault call that can send a
+  value (`site_login.mark_vm`), and `metacomputer secrets fill|login|session
+  load|token` writes it before it runs the vault. Those commands act on their config's
+  VM only, and refuse `--vm` naming another. If the file can't be written, nothing is
+  sent.
+- **It travels with copies.** Each image (the baseline, `-prev`, a checkpoint) has a
+  record, `RUN_DIR/vm-taint/IMAGE`: `baseline` and `checkpoint` record the working VM's
+  mark, a build records clean, and `reset` / `restore` set the mark from the image they
+  copy (`bin/metacomputer`, `vm_taint`). An image with no record counts as holding a
+  value once any VM of the run folder was ever marked (`.ever`); an unreadable record
+  counts as holding one.
+- **Why there's no race.** Whatever the VM sends after it got the value arrives after
+  the file exists. Each reader looks at the file when it records, not when the
+  connection started, and stays tainted from then on.
+
+What the readers do once it's there:
+
+| Where | Before the mark | From the mark on |
+|---|---|---|
+| Action log (`mcp_relay.py`, `actionlog.py`) | Arguments (typed text as its length unless `ACTION_LOG_TEXT=keep`); a result's hash and sizes; an error's message; a refusal's words | Every call, answer and refusal on that connection is `secret_adjacent`. A call keeps its tool, its client, its argument names and their size class. An answer keeps error yes or no, an image count in words and a text size class. A refusal keeps the hub's code. No text, message or hash, whatever `ACTION_LOG_TEXT` says. |
+| `actions` events | Built from the records | The same records, so nothing of the VM's |
+| `upstream.stderr` and its memory tail (`wirelimits.StderrTail`) | Kept, capped | Nothing more kept; one fixed line instead. Only whether the Mac side said the VM isn't running is still noticed (a fixed phrase). |
+| hub.log | Exceptions by `repr`; a failed connect quotes stderr | Exceptions by type only; no stderr text; no window ids or VM-side counts in notes |
+| The tool list and handshake (`refresh_cache`), resources and prompts listings | Asked for at connect and on `tools/list_changed`; saved to `driver-mcp-cache.json`; served (listings passed on to the driver) | Not asked for, saved or served again: the list, handshake and listings from before stay, and `tools/list_changed` isn't passed on |
+| `metacomputer sh` records (`vm_shell.result_fields`) | Each stream's size and hash (and text with `keep`) | Each stream's size class only; the exit code as zero or not |
+| The tool's own answer | Its own words, the vault's, fixed outcomes | The same |
+
+What's left to a hostile VM is a few bits per call: which fixed outcome, which size or
+count class, and when (records are timestamped, and `ms` is a duration).
+
+**B: the computer is let go only once the job's work has provably stopped.** While a
+job runs, it holds the computer for its client like an acting call:
+- other controllers are refused (`busy_others` counts it);
+- the client's claim is kept fresh (every 60 s, or a third of `ACTIVE_S` if that's
+  shorter), so other readers
+  of the claims (`metacomputer sh`, `who`) see the computer in use however long the
+  job's steps take;
+- the hub doesn't idle out (`busy`).
+
+If the client leaves, the job goes on under the client's lease (`hand_over_claim`),
+written before the client's own claim is dropped. `job_end` runs only when two things
+hold:
+- **The vault call has stopped.** `site_login.vault` returns only with the unlock
+  process's own answer, which it writes after the request has stopped there, or after
+  `mcomp-vault settle`. The unlock process answers `settle` only once everything sent
+  before has finished, or when it isn't running.
+- **Every driver call has stopped.** `Hub.call_for` returns only with an answer, or
+  after the connection that very call went on (its process, not whichever is current
+  by then) has been ended with its whole process tree (`_end_transport`).
+
+The driver calls have time limits:
+- each call at most 60 s;
+- all of them before the vault call, 180 s together;
+- all of them after it, 60 s together (90 s for a session load).
+
+| How a job ends | What proves its work stopped | When the computer is let go |
+|---|---|---|
+| Refused before the vault (bad arguments, vault locked, no saved login, the tab elsewhere, no fields) | No value-bearing vault call was made; each driver call it made answered, or its connection was ended | At `job_end`, when the call returns |
+| Success | The vault answered `ok` (written after its last step); each later driver call answered, or its connection was ended | At `job_end` |
+| Denied by the user, or refused by the vault | The vault answered `denied` or `error`; no driver call follows | At `job_end` |
+| The vault call past its time (the client's 300 s, the hub's 330 s) | The client withdraws the request; the unlock process withdraws the question, starts no further step, kills a step in progress (its ssh's process group) and answers `cancelled`. No answer within 45 s: `settle` | After the answer, or after `settle` returns |
+| The vault client or its wrapper killed | No answer, so `settle` (the unlock process also sees the requester gone, as above) | After `settle` returns |
+| The vault locks (`lock`, Ctrl-C, its time up) | The unlock process ends the request (a question denied, a step interrupted) and answers before it exits; else `settle` finds no unlock process | After the answer, or `settle` |
+| A driver call past its time (60 s, or what's left of the steps' time) | `call_for` ends that call's connection: SIGTERM to its process group, 3 s, SIGKILL, the leader reaped last | After `call_for` returns; at `job_end` |
+| A driver call that couldn't be sent whole | `call_for` ends that connection the same way | The same |
+| The steps' time used up | The next driver call isn't sent | At `job_end` |
+| The driver dies, or the bounded session ends | The connection's reader ends its process tree (`_upstream_closed`) before its calls fail | At `job_end`, right after |
+| The driver reconnects between two calls | Each call is bound to the connection it went on, and only that one is ended if it doesn't answer | As above |
+| A connected client's job outlasts `ACTIVE_S` | Nothing to stop: `busy_others` counts the job, and the keeper refreshes the client's claim | At `job_end` |
+| The client disconnects | Nothing stops: the job goes on under the client's lease and ends by another row | At `job_end` (the lease ends with its last job or call) |
+| The lease past `LEASE_MAX_S` (the client gone) | The keeper stops the job (vault call withdrawn and confirmed, as above; no further driver call) and ends the connections its calls went on | At `job_end`, after the vault's confirmation |
+| The hub stops (SIGTERM, `metacomputer hub stop` or `stop`) | `shutdown` stops every job as above, ends the driver connections, and waits up to 60 s (`JOB_STOP_S`; `stop_hub` waits 75 s) | The lease claim is dropped only if every job ended; otherwise it ends with the hub's process (next row) |
+| The hub exits with a job unconfirmed, or is killed (SIGKILL) | Residual. Its vault clients withdraw when it's gone (`--while-pid`), and the unlock process kills the step in progress | When the process ends, since a dead hub's claim no longer counts |
+| A `request_id` retry | Nothing runs but the wait for the outcome | At `job_end`, when it returns |
+
+Residuals, accepted and documented in SECURITY.md:
+- a hub killed outright, or one that exits with a job unconfirmed (last-but-one row);
+- the unlock process killed outright: the ssh it started runs to the end of that step;
+- a step the VM has already started may finish there, but no later step is sent;
+- `settle` doesn't give up: an unlock process that never answers keeps the computer
+  held until the user ends it (Ctrl-C in its terminal), and the hub's own stop gives
+  up after 60 s, as above.
+
 ### Guards (in the hub, for every client)
 
 - **One controller at a time** (`lib/owners.py`). Acting calls are refused
@@ -300,7 +429,9 @@ against 20.2 turns, no refusals; per-task records in
   the hub's connection is one file; before each `tools/call` the hub sends the
   relay a note naming the client (kind, pid, Claude Code pid, folder, driver
   session), which the relay records in the call's record and never passes on.
-  Calls the hub refuses are recorded with their client too.
+  Calls the hub refuses are recorded with their client too. Once the VM may hold a
+  value from the vault, every record is secret-adjacent ("Tools the hub serves
+  itself", invariant A).
 - **Events** (docs/events.md): `in_use`, `chrome_input_refused`, `refused`
   (bounded) and the controller events, with the client's own folder.
 
@@ -518,7 +649,9 @@ The rest of the vault, briefly (details in SECURITY.md):
 - **Requesters** (`vault/Util.swift`, `Requester`): the client's pid
   (`LOCAL_PEERPID`) and its parents up to the nearest Claude Code process name the
   session and project, for the prompt, the audit log, `NAME session` grants and
-  `--project` limits. Attribution, not isolation.
+  `--project` limits. Attribution, not isolation. A request from the metacomputer hub
+  (`hubAncestor`: `.../lib/mcp_hub.py serve` among its parents, below any Claude Code
+  process) has no session and no project, and must name the Chrome it checked.
 - **Audit** (`vault/Util.swift`, `Sinks.swift`, `SinkCommands.swift`): `audit.jsonl`
   is hash-chained (`seq`, `prev`, `hash`, `id`), each record the vault writes carries a
   creation MAC under the vault's audit key (inside the encrypted vault), and every
@@ -537,9 +670,14 @@ The rest of the vault, briefly (details in SECURITY.md):
     withdraws a question still waiting. It starts no further step: `runProcess` checks
     `requesterProbe`. It kills a step in progress, the ssh's process group.
   - It then answers `cancelled`, which is the requester's confirmation.
-  - The client withdraws on SIGINT, SIGTERM or SIGHUP, when its parent ends, or at its
-    deadline. With no confirmation it exits 5.
+  - The client withdraws on SIGINT, SIGTERM or SIGHUP, when its parent ends, when the
+    process `--while-pid` names ends (the hub's), or at its deadline. With no
+    confirmation it exits 5.
   - `mcomp-vault settle` is answered only after everything sent before it has finished.
+- **The VM's mark** (`lib/vmtaint.py`): `metacomputer secrets fill|login|session
+  load|token` and the hub's sign-in tools write `RUN_DIR/vm-may-hold-values` before the
+  vault can send anything; from then until `reset`, nothing the VM chooses is kept on
+  the Mac ("Tools the hub serves itself" has the table).
 - **Needs-you events**: while a question waits, the unlock process drops a
   `needs_you.approval_waiting` file into the event spool
   (`~/Library/Application Support/metacomputer/events/spool/`, under the "Event spool"

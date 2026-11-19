@@ -201,7 +201,9 @@ with Claude Code's normal tools.
   `get` move files.
 - **Sign-ins:** saved passwords and 2FA codes typed by the vault into page-mode
   Chrome, signed-in profiles sealed and restored, or you sign in yourself through
-  the live view.
+  the live view. Agents written for Cua Spaces' Keyvault find its
+  `request_site_login` and `teleport_browser_session` tools here too
+  ([docs/moving-from-spaces.md](docs/moving-from-spaces.md)).
 - **API keys:** short-lived tokens for a proxy on your Mac that adds the real key.
 - **Storage:** disk volumes, shared Mac folders, S3-backed folders and reference
   disks.

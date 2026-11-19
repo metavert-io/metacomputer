@@ -9,7 +9,7 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
 - **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
-- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`. `lock` only if the user asks you to lock the vault.
+- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`, and the MCP tools `request_site_login` and `teleport_browser_session`. `lock` only if the user asks you to lock the vault.
 
 ## First: what's stored
 
@@ -37,6 +37,26 @@ In presence mode (the default on a Mac with Touch ID; `metacomputer secrets stat
 
 On an identity provider's page, and for a whole-profile session load, every use asks and `session` / `unlock` cover only that use: don't suggest them there. Inside tmux or screen typed answers are refused unless the user unlocked with `--allow-multiplexer` or `--touch-id`; the reason says so. If the user set up an unattended rule for this project (`rule list`), covered uses don't ask. A rule or an earlier answer never changes where a value goes: each fill is still checked against the focused page's site.
 
+## Signing in: the MCP tool or the command
+
+**`request_site_login {url}`** (the `metacomputer` server's own tool, in Cua Spaces' shape) does a standard sign-in in one step. Use it when the vault has a login for that exact site (`list`) and the page has an ordinary form: a username and a password field on the page itself, or a username-only first step.
+- It opens page-mode Chrome on `url`, or uses your tab: pass `session`, `target_id`, `tab_id` and `pid` (the Chrome process you bound it with in `get_browser_state`); the tab must be in that Chrome.
+- It finds the fields, has the vault fill them under one approval, and submits (`submit: false` to submit yourself). Pass `username` when the site has several logins, and `agent` (a short name for yourself) if you like: the user sees it marked unverified.
+- If the user must approve, it answers `status: "pending"` with a `request_id`. Tell them the id and how to approve (below), then call again with `{url, request_id, wait_secs: 60}`.
+- `status: "filled"` gives the driver `session` and `same_site` (whether the page is still on the login's site). No address of the page and no tab id comes back: find the tab with `list_windows` and `get_browser_state` (in that session), then read the page itself with a snapshot. `denied` means the user said no; don't retry.
+- The fill refuses when another tab in that Chrome is on the same site: close it. A multi-step sign-in needs one call per page.
+- Through this tool the vault sees the request as the hub's, not your session's, so a login limited to your project, an unattended rule or a `NAME session` answer doesn't cover it: it asks (or is refused). Use `secrets login` when the user set those up for this project.
+
+**Use the commands below instead** for:
+- a field inside a frame (the tool reads the page itself only);
+- a 2FA code (`fill --field otp`) or a `text` secret;
+- a form the tool can't read (custom widgets), or a page where you must control each step;
+- uses the user covered for this project with `--project`, a rule or a `session` answer.
+
+**`teleport_browser_session {sites: ["github.com"]}`** loads a session the user imported from their own Chrome, with the same two steps (`consent_required`, then `moved: true` with the profile to open with `browser_prepare`). Only the cookies those sites get are loaded. If there's none, its error names the `import-session` command for the user. For a profile you saved from the VM yourself, use `session load` (below).
+
+Either way the VM may hold a value from then on, so until the VM is reset the action log and the hub's logs keep nothing the VM says (SECURITY.md, "After a value reaches the VM"). That's expected: don't reset the VM to get them back unless the user asks.
+
 ## Signing in to a site (fill)
 
 Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mode Chrome.
@@ -62,7 +82,7 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
 4. `metacomputer secrets session save NAME --profile x`. The user confirms it in their terminal.
 5. Later, with no Chrome on that profile: `metacomputer secrets session load NAME`, then `browser_prepare` with `{mode: "isolated_named", name: "x"}`. A session loads only under the profile name it was saved from.
 
-A session the user imported from their own Chrome (`list` shows it as cookies for its sites) loads into its profile's own cookie store: open that profile once first (`browser_prepare` with `{mode: "isolated_named", name: P}`, then `end_session`), then `session load NAME`, then `browser_prepare` with the same profile. If the reason says the profile has no cookie store yet, do that first step. One whose cookies reach an identity provider asks at every load. When you need only some of its sites, add `--site HOST` (repeatable): only the cookies those sites get go to the VM.
+A session the user imported from their own Chrome (`list` shows it as cookies for its sites) loads into its profile's own cookie store: open that profile once first (`browser_prepare` with `{mode: "isolated_named", name: P}`, then `end_session`), then `session load NAME`, then `browser_prepare` with the same profile. If the reason says the profile has no cookie store yet, do that first step. One whose cookies reach an identity provider asks at every load. When you need only some of its sites, add `--site HOST` (repeatable, each exactly as `list` shows it): only the cookies those sites get go to the VM.
 
 ## Using an API key from the VM (tokens)
 

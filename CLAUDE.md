@@ -46,7 +46,11 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   password|username|otp` in page-mode Chrome, and `token NAME` (a short-lived token and
   the proxy URL inside the VM) for API keys; never put a real key in the VM
   (`skills/metacomputer/SECRETS.md`). If it says locked, ask the user to run
-  `metacomputer secrets unlock` in their own terminal. Only the user runs `init`,
+  `metacomputer secrets unlock` in their own terminal. The hub's own `request_site_login` and
+  `teleport_browser_session` tools (`lib/site_login.py`; architecture.md, "Tools the hub serves
+  itself") go through the same vault; keep their two invariants: nothing the VM chooses is kept once
+  it may hold a value (`lib/vmtaint.py`), and a job holds the computer until its work has provably
+  stopped (`tests/test_site_login.py`). Only the user runs `init`,
   `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add`,
   `import-passwords`, `import-session` and `audit-sink add|remove` (`approve` and `rule add`
   show a Touch ID dialog: never trigger it). Tests never read the real Chrome profile or its
@@ -177,7 +181,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
-  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
+  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_site_login.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
   `test_install`, `test_events`, `test_doc_claims`, `test_release` (no VM; `scripts/release.sh` runs exactly these),

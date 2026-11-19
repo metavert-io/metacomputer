@@ -906,7 +906,7 @@ connection to the VM and checks:
 - `metacomputer sh` hands its transport exactly these arguments (captured
   through a stand-in Python, without connecting).
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_site_login.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -1168,8 +1168,87 @@ release build contains neither switch. It covers:
   link refused;
 - the audit records, and no value or unmasked username in any output or the audit log.
 
+`python3 tests/test_site_login.py` (about 65 checks, a few minutes) checks the hub's own
+sign-in tools (`lib/site_login.py`). It runs the hub with a stand-in driver (page-mode Chrome's
+tools, with `login.html`'s `dom_refs_v1` snapshot as Cua Driver 0.53 returns it) and a TEST
+build of the vault behind `metacomputer secrets`, with the ssh stub standing in for the VM.
+- **Invariant A's pieces on their own:**
+  - the VM's mark (`lib/vmtaint.py`);
+  - size and count classes;
+  - the action log's secret-adjacent records, even with `ACTION_LOG_TEXT=keep`;
+  - a withheld stderr that still notices a fixed phrase;
+  - `metacomputer sh`'s record.
+- **The two tools in `tools/list`**, with Keyvault's parameters.
+- **`request_site_login`, refused or asked:**
+  - locked, a bad url, no saved login (naming the import command), several logins (a
+    masked list);
+  - the main path: pending with the vault's own request id, the question naming the agent
+    as unverified, `approve ID`, then filled with a masked username and the tab. The
+    fields are filled through the vault's path with the snapshot's selectors, the submit
+    is clicked, and the audit record names the hub as the requester, with the calling
+    session only as an unverified claim;
+  - a login limited to the session's project, refused through the hub; declined; an
+    unknown request id.
+- **`request_site_login`, bound to what the hub checked:**
+  - a tab on another site, a tab given without `pid`, or with another Chrome's `pid`:
+    refused before anything is typed;
+  - every request to the VM names the Chrome the hub opened, by its browser process id;
+  - a login saved for two sites is filled only on the one asked for, even when the VM
+    reports the other;
+  - a VM spelling the username it got in the site it reports for a failed fill reaches
+    neither the answer nor the audit log;
+  - no page address after the sign-in, only `same_site` (true when the page put a token in
+    its URL, false and nothing more when it went to a host spelling a value);
+  - no submit when the tab leaves the site after the fill;
+  - the SDK's `request_site_login`; another controller refused by the hub.
+- **Invariant A on the whole path**, with the action log on (the logging relay around the
+  stand-in driver), text redacted and kept: a VM spelling the value in the refs, the text and
+  an error message after the fill reaches neither the action log, hub.log, upstream.stderr,
+  the events nor the client. Then, for round 6's findings:
+  - ordinary calls after the sign-in has ended, answered with the value in an error message
+    and in an answer's text (`ACTION_LOG_TEXT=keep`), on the same connection and on a later
+    hub's new connection, are all secret-adjacent;
+  - a VM that announces new tools and describes one with the value: not asked for, saved or
+    served.
+- **Invariant B, every way a job ends** (architecture.md, "Tools the hub serves itself"):
+  - a client that disconnects while its sign-in waits: another controller is refused until
+    the job ends, and acts once it has;
+  - a Claude Code client that leaves while its sign-in waits, or after it finished: the
+    hub's end of its driver session is secret-adjacent, and its stderr withheld;
+  - a post-fill click that doesn't answer in its time (`MCOMP_SITE_LOGIN_CALL_S=3`; the
+    stand-in would act at 8 s): the driver's process is gone by the time the computer is
+    free, another controller then acts, and the delayed click never happens;
+  - a lease past its life (`MCOMP_ACTIVE_S=6`) withdraws the vault call: the vault records
+    it as cancelled before the computer is let go, and approving afterwards finds nothing;
+  - stopping the hub while a sign-in waits withdraws the vault call, confirmed before the
+    hub exits;
+  - the driver dying at the post-fill click: the job ends, filled and not submitted;
+  - a connected client's sign-in whose steps outlast the claims' activity window
+    (`MCOMP_ACTIVE_S=4`, a VM slow to list windows): another controller is refused, and
+    `owners.py check` from outside still finds the computer in use.
+- **`teleport_browser_session`:** no imported session (naming `import-session`), Firefox
+  refused, a profile with no cookie store (the hub has the driver create it before the vault
+  asks, and the VM's words from that check reach no result or record), then moved, with only
+  the requested site's cookies sent though the session holds two sites'.
+- **The mark from the command line:** `secrets list` makes none; `secrets fill` makes it
+  before the vault answers; another VM's `--vm` is refused before anything; `vmtaint.py
+  clear` removes it.
+- **The mark travels with copies of the VM:** the real `baseline`, `checkpoint`, `reset`
+  and `restore` from `bin/metacomputer` under /bin/bash with a stand-in runner. A baseline
+  made while marked keeps the VM marked after `reset`; a checkpoint taken while marked is
+  marked again on `restore`; images with no record count as holding a value once any VM
+  was marked; `-prev` keeps its record; an unreadable record counts as holding a value.
+- **Round 8 (the re-check of PR #53):**
+  - field ids a VM chose to spell a value reach the VM as selectors and nowhere else (the
+    unlock terminal, the audit log, the answers), for a sign-in and a username-only page;
+  - tab ids a VM chose to spell a value aren't in the answer;
+  - a config repointed to another VM while the hub runs: refused, nothing reaches either
+    VM; the vault refuses a binding with another port or host key than the asker's;
+  - a request still at work is never dropped from the hub's outcomes.
+
 `MCOMP_CONFIG=test-vm.env python3 tests/test_vault_vm.py` (a test VM) signs in and loads a
-session end to end, the way Claude does (skills/metacomputer/SECRETS.md). It serves the
+session end to end, the way Claude does (skills/metacomputer/SECRETS.md), first with the
+commands and then with the hub's own tools. It serves the
 fixture pages and a cookie-echo page in the VM, then:
 - **a sign-in:** page-mode Chrome opened through the hub, then `metacomputer secrets login`
   with the page's selectors, `--origin` and `--browser-pid`. The test build's stand-in
@@ -1179,6 +1258,14 @@ fixture pages and a cookie-echo page in the VM, then:
   localhost under a test key) loads with `secrets session load --site localhost` into a
   driver profile opened once first, and the VM's Chrome sends that cookie: the page sees
   its value's hash.
+- **`request_site_login`:** the same sign-in through the hub's tool: it opens page-mode
+  Chrome, the vault asks as the hub's request (the agent named as unverified), the fill
+  account types both fields and the hub submits. The page's own result line shows the
+  right lengths, and the answer carries no page address.
+- **`teleport_browser_session`:** the same session loaded through the hub's tool, and the
+  VM's Chrome sends the cookie again.
+- The VM is marked as one that may hold a value, and no value reaches a tool result, the
+  unlock terminal or hub.log.
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 

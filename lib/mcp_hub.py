@@ -59,7 +59,9 @@ sys.path.insert(0, LIB)
 import driver_profiles  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
+import vmtaint  # noqa: E402  (whether the VM may hold a value from the vault: what of its words may be kept)
 import wirelimits  # noqa: E402
+import site_login  # noqa: E402  (request_site_login, teleport_browser_session: tools the hub serves itself)
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
 except Exception:  # never let it stop the hub
@@ -86,6 +88,8 @@ LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub en
                                                                # lets the computer go
 TRANSPORT_GRACE_S = 3.0             # ending a driver connection: SIGTERM to its process group (the relay signs its log),
                                     # this long to exit, then SIGKILL to whatever of the group is left
+JOB_STOP_S = 60.0                   # the hub stopping: how long it waits for its sign-ins and session loads to stop
+                                    # (each vault call withdrawn and confirmed) before it ends anyway
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
 LIVE_WINDOWS_TTL_S = 1.0            # list_windows reused within one batch, never across an action
 DIRECT_TTL_S = 3.0                  # direct SSH connections (owners.py) are looked up at most this often
@@ -594,7 +598,7 @@ class Client:
                 try:
                     self.hub.handle(self, msg)
                 except Exception as e:  # never let one message take the hub down
-                    self.hub.note(f"client {self.cid}: error handling {msg.get('method')}: {e!r}")
+                    self.hub.note(f"client {self.cid}: error handling {clean(msg.get('method'), 60)}: {self.hub.why(e)}")
                     if msg.get("id") is not None and msg.get("method"):
                         self.send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": str(e)}})
         finally:
@@ -665,6 +669,7 @@ class Hub:
         self.owner_lock = threading.Lock()
         self.chrome_lock = threading.Lock()
         self.leases = {}            # client id -> its acting calls still running after it disconnected (detach)
+        self.jobs = {}              # ("job", n) -> a tool the hub serves itself still at work (site_login.py)
         self.lease_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
         self._refreshing = False    # one tools/list refresh at a time (schedule_refresh)
@@ -674,6 +679,7 @@ class Hub:
         self.gen_procs = {}         # driver connection generation -> its process, until that connection's reader is done
                                     # (a lease's calls run in their own generation, which may no longer be self.up)
         self._bad_upstream = {}     # driver connection generation -> times of its unusable messages (BAD_UPSTREAM_*)
+        self._kept_tools_noted = False   # said once in hub.log: the tool list stays as it was (tainted())
         self.log_lock = threading.Lock()
         self._note_kinds = {}       # kind -> its window: start, written, left out, examples, timer (NOTE_REPEAT_MAX)
         self.log = None
@@ -773,6 +779,17 @@ class Hub:
         if self.log_bytes > LOG_MAX:
             self.rotate_log()
 
+    def tainted(self):
+        """May the VM hold a value from the vault (lib/vmtaint.py)? Then nothing it chooses is kept: hub.log names
+        exceptions by type only, the connection's stderr is withheld, and its tool list and handshake aren't asked for,
+        saved or served again. Looked at each time (the mark is made before a value is sent, and only `reset` clears it)."""
+        return vmtaint.tainted(self.env)
+
+    def why(self, e):
+        """An exception for hub.log: its repr, or only its type once the VM may hold a value (handling a driver message,
+        an exception can quote it)."""
+        return type(e).__name__ if self.tainted() else repr(e)
+
     def event(self, client, family, type_, message, severity=None, action=None, data=None, debounce=None):
         """The optional event stream (docs/events.md), on a background thread: never delays a call."""
         if events is None:
@@ -813,7 +830,8 @@ class Hub:
             differs = sorted(k for k in set(mine) | set(theirs) if str(mine.get(k, "")) != str(theirs.get(k, "")))
             if differs:
                 others = [c for c in self.active_clients() if c is not client]
-                if self.server and not others and not self.pending and not self.recordings:
+                # (not while a sign-in or session load runs: restarting would stop it, site_login.py)
+                if self.server and not others and not self.pending and not self.recordings and not self.jobs:
                     client.send({"jsonrpc": "2.0", "id": mid, "error": {
                         "code": -32001, "message": "the hub is restarting with this client's settings",
                         "data": {"code": "hub_restarting", "differs": differs}}})
@@ -822,9 +840,12 @@ class Hub:
                 else:
                     client.send({"jsonrpc": "2.0", "id": mid, "error": {
                         "code": -32002, "data": {"code": "hub_settings_differ", "differs": differs},
-                        "message": (f"The metacomputer hub for this VM serves {len(others)} other client(s) with different "
-                                    f"settings ({', '.join(differs)}). Let them finish, or ask the user before running "
-                                    f"`{CLI} hub stop` (it disconnects them).")}})
+                        "message": ((f"The metacomputer hub for this VM serves {len(others)} other client(s) with different "
+                                     f"settings ({', '.join(differs)}). Let them finish, or ask the user before running "
+                                     f"`{CLI} hub stop` (it disconnects them).") if others else
+                                    (f"The metacomputer hub for this VM, with different settings ({', '.join(differs)}), "
+                                     "is finishing calls or a sign-in another client started. Try again when it's done, or "
+                                     f"ask the user before running `{CLI} hub stop` (it stops them)."))}})
                 return False
         sess = p.get("session")
         if sess is not None and (not isinstance(sess, str) or not SESSION_RE.match(sess)):
@@ -878,6 +899,9 @@ class Hub:
                 pend["orphan"] = True       # its answer has nowhere to go; the call itself runs on
                 if pend.get("acting"):
                     running.append((key, pend.get("tool")))
+        with self.lease_lock:
+            # A sign-in or session load the hub runs for this client (site_login.py) holds the computer like a call.
+            running += [(key, job["tool"]) for key, job in self.jobs.items() if job["client"] is client]
         if self.server is not None and self.server.stopping:
             return                          # the hub is going away, not the client: its claim stays
         if client.auto_session and client.used_auto and self.connected():
@@ -909,7 +933,7 @@ class Hub:
             with self.lease_lock:                    # the same lock as removing a pending request (on_upstream)
                 keys = set()
                 for key, _tool in running:
-                    pend = self.pending.get(key)
+                    pend = self.pending.get(key) if key in self.pending else self.jobs.get(key)
                     if pend is not None and not self.local:     # in-process: the connection ends with the client
                         pend["lease"] = client.cid
                         keys.add(key)
@@ -968,10 +992,11 @@ class Hub:
         while True:
             time.sleep(LEASE_TICK_S)
             with self.lease_lock:
-                if not self.leases:
+                if not self.leases and not self.jobs:
                     self._lease_keeper = None
                     return
                 leases = list(self.leases.items())
+                here = [j for j in self.jobs.values() if j.get("lease") is None]
             now = time.monotonic()
             every = min(LEASE_REFRESH_S, max(1.0, owners.ACTIVE_S / 3))    # well inside the activity window
             if any(now - l["refreshed"] >= every or not l["written"] or l["drop_pid"] for _c, l in leases):
@@ -981,16 +1006,33 @@ class Hub:
                             self._refresh_leases()
                     except (OSError, TimeoutError):
                         self._refresh_leases()
+            due = [j for j in here if now - j["refreshed"] >= every]
+            if due:
+                self._refresh_job_claims(due)
             for cid, lease in leases:
                 if now - lease["t0"] <= LEASE_MAX_S:
                     continue
                 with self.lease_lock:                # what is still running, looked at now (not at the snapshot)
                     gens = {self.pending[k].get("gen") for k in lease["keys"] if k in self.pending}
-                    gone = not gens and self.leases.get(cid) is lease
+                    jobs = [self.jobs[k] for k in lease["keys"] if k in self.jobs]
+                    gone = not gens and not jobs and self.leases.get(cid) is lease
                 if gone:                             # its calls ended meanwhile: nothing to stop
                     lease["keys"].clear()
                     self._end_lease(cid)
                     continue
+                for j in jobs:
+                    # A sign-in or session load the lease holds (site_login.py): stopped (its vault call withdrawn and
+                    # confirmed, no further driver call), and the connections its driver calls went on ended like a
+                    # call's own. The lease ends when the job does (job_end), not before.
+                    if not j.get("stopping"):
+                        j["stopping"] = True
+                        self.note(f"a disconnected client's {j['tool']} is past {int(LEASE_MAX_S)} s; stopping it "
+                                  "(its vault call withdrawn) before letting the computer go")
+                        try:
+                            j["stop"]()
+                        except Exception:
+                            pass
+                    gens |= {getattr(p, "mcomp_gen", None) for p in list(j["procs"])} - {None}
                 for gen in gens - ending:
                     proc = self.gen_procs.get(gen)
                     if proc is None:
@@ -1091,6 +1133,61 @@ class Hub:
                 return
         threading.Thread(target=self._end_lease, args=(cid,), daemon=True, name="hub-lease").start()
 
+    # --- tools the hub serves itself (site_login.py) ------------------------------------------
+    def job_start(self, client, tool, stop):
+        """A tool the hub serves itself starts work for client that may outlive the call. Until job_end it holds the
+        computer for that client like an acting call: other controllers are refused (busy_others), the client's claim
+        is kept fresh while the client stays (the keeper, _refresh_job_claims), and if the client leaves the job goes
+        on under its lease (detach). stop() ends the work early (a lease past its life, the hub stopping): its vault
+        call is withdrawn and no further driver call is made. Returns the job's key."""
+        key = ("job", next(self.ids))
+        now = time.monotonic()
+        with self.lease_lock:
+            self.jobs[key] = {"key": key, "client": client, "tool": str(tool)[:60], "stop": stop, "lease": None,
+                              "procs": set(), "t0": now, "refreshed": now}
+        self._start_lease_keeper()
+        return key
+
+    def job_end(self, key):
+        """The job's work has provably stopped (site_login.Hold.end: its vault call answered or `settle` returned, and
+        every driver call answered or its connection's whole process tree was ended): forget it, and end the lease it
+        belonged to once that lease holds nothing else."""
+        end = None
+        with self.lease_lock:
+            job = self.jobs.pop(key, None)
+            cid = job.get("lease") if job else None
+            lease = self.leases.get(cid) if cid is not None else None
+            if lease is not None:
+                lease["keys"].discard(key)
+                if not lease["keys"]:
+                    end = cid
+        if end is not None:
+            threading.Thread(target=self._end_lease, args=(end,), daemon=True, name="hub-lease").start()
+
+    def _refresh_job_claims(self, due):
+        """Keep the claims of clients whose job runs fresh (as each acting call refreshes its own), so the computer
+        stays in use for every reader of the claims (`metacomputer sh`, `who`), however long the job's steps take. Only
+        while the client is attached: once it leaves, its lease (written by the keeper) holds the computer instead."""
+        def write():
+            for j in due:
+                c = j["client"]
+                with self.lease_lock:
+                    if j.get("lease") is not None or self.jobs.get(j["key"]) is not j:
+                        continue                 # left meanwhile (its lease holds it), or ended
+                if self.clients.get(c.cid) is not c:
+                    continue
+                try:
+                    self.claim(c, j["tool"])
+                    j["refreshed"] = time.monotonic()
+                except OSError as e:
+                    self.note(f"could not refresh the claim of client {c.cid}'s {j['tool']}: {e!r}", kind="claim refresh failed")
+        with self.owner_lock:
+            try:
+                with owners.lock():
+                    write()
+            except (OSError, TimeoutError):
+                write()
+
     def _end_lease(self, cid):
         with self.owner_lock:
             def drop():
@@ -1122,17 +1219,52 @@ class Hub:
 
     def _spawn_bridge(self):
         os.makedirs(self.paths["dir"], exist_ok=True)
-        env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
+        # MCOMP_VM_MARK: the action log's relay looks at the very mark the hub writes and reads (lib/vmtaint.py).
+        env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid), MCOMP_VM_MARK=vmtaint.path(self.env))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
+        host_key = self._known_host_key()
         # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, close_fds=True, start_new_session=True)
         proc.mcomp_pgid = proc.pid
         # SSH carries the VM's stderr: drained with a fixed memory tail and a capped log file, so a VM that writes
-        # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail).
-        self.stderr_tail = wirelimits.StderrTail(proc.stderr, self._stderr_path())
+        # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail). Once the VM may hold a value
+        # (the mark, looked at as each chunk arrives), nothing more of it is kept, and only whether the Mac side said
+        # the VM isn't running is still noticed.
+        # The host key this connection pins (SSH_DIR/known_hosts, as `metacomputer mcp` reads it now): the sign-in tools
+        # pin their vault call to it (vm_identity).
+        proc.mcomp_host_key = host_key
+        mark = vmtaint.path(self.env)
+        self.stderr_tail = proc.mcomp_stderr = wirelimits.StderrTail(
+            proc.stderr, self._stderr_path(), withhold_when=lambda: vmtaint.tainted(mark_path=mark),
+            watch=(b"not running",))
         return proc
+
+    def _known_host_key(self):
+        """The VM's pinned host key (TYPE BASE64) from SSH_DIR/known_hosts' [127.0.0.1]:SSH_PORT line, or None."""
+        d, port = self.settings.get("ssh_dir"), self.settings.get("ssh_port")
+        if not d or not str(port).isdigit():
+            return None
+        try:
+            with open(os.path.join(d, "known_hosts")) as f:
+                for line in f.read(1 << 20).splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[0] == f"[127.0.0.1]:{port}":
+                        return parts[1] + " " + parts[2]
+        except OSError:
+            return None
+        return None
+
+    def vm_identity(self):
+        """The VM this hub drives: its name, SSH port and SSH folder from the settings it started with, and the host key
+        its current driver connection pinned. None when any is unknown (the sign-in tools then send nothing)."""
+        proc = self.up
+        hk = getattr(proc, "mcomp_host_key", None) if proc is not None else None
+        vm, port, d = self.settings.get("vm_name"), str(self.settings.get("ssh_port") or ""), self.settings.get("ssh_dir")
+        if not (vm and port.isdigit() and d and hk):
+            return None
+        return {"vm": vm, "port": int(port), "ssh_dir": d, "host_key": hk}
 
     def _stderr_text(self):
         tail = self.stderr_tail
@@ -1144,9 +1276,10 @@ class Hub:
         return (up is not None and self.ready and not getattr(up, "mcomp_eof", False)
                 and not getattr(up, "mcomp_ended", False) and up.returncode is None)
 
-    def send_up(self, *msgs):
-        """Write messages to the driver as one unit (a client note goes right before its call)."""
-        proc = self.up
+    def send_up(self, *msgs, proc=None):
+        """Write messages to the driver (or to proc, that connection) as one unit (a client note goes right before its
+        call)."""
+        proc = proc or self.up
         if proc is None:
             return False
         data = memoryview(b"".join(json.dumps(m, separators=(",", ":")).encode() + b"\n" for m in msgs))
@@ -1203,6 +1336,7 @@ class Hub:
                 pass
             self.up_gen += 1
             gen = self.up_gen
+            proc.mcomp_gen = gen
             self.gen_procs[gen] = proc               # until its reader is done (_upstream_closed)
             self.up, self.ready = proc, False
             self._reset_runtime()
@@ -1217,13 +1351,15 @@ class Hub:
                 self._end_transport(proc, False)     # (its reader may be doing the same: it's done once)
                 if self.up is proc:
                     self.up = None
-                err = self._stderr_text()
-                self.note(f"connect failed: {err[:200]}")
-                if "not running" in err:
+                err = self._stderr_text()            # "" once withheld (the VM may hold a value)
+                tail = getattr(proc, "mcomp_stderr", None)
+                self.note(f"connect failed: {err[:200] or '(no stderr kept)'}")
+                if "not running" in err or (tail is not None and tail.saw(b"not running")):
                     return OFF_MSG
                 return ("Could not connect to the virtual computer (" + (err[-300:] or "no answer from Cua Driver")
                         + f"). Check `{CLI} status`.")
-            self.live_init = r["result"]
+            if not self.tainted():
+                self.live_init = r["result"]         # else the handshake kept from before stays (refresh_cache)
             self.send_up({"jsonrpc": "2.0", "method": "notifications/initialized"})
             self.ready = True
             self.up_since = time.time()
@@ -1252,7 +1388,7 @@ class Hub:
             try:
                 self.refresh_cache(DEFAULT_INIT)
             except Exception as e:  # never let it take the hub down
-                self.note(f"tools refresh failed: {e!r}")
+                self.note(f"tools refresh failed: {self.why(e)}")
             with self.refresh_lock:
                 if not self._refresh_again:
                     self._refreshing = False
@@ -1261,7 +1397,15 @@ class Hub:
 
     def refresh_cache(self, params):
         """Ask the driver for its tools (every page) and save the handshake. Pages, tools, bytes, time and repeated
-        cursors are capped: past any of them the earlier list stays."""
+        cursors are capped: past any of them the earlier list stays. Not once the VM may hold a value: a tool's
+        description is the VM's to write, so the list (and handshake) from before is kept and served, and nothing is
+        saved, until the VM is reset."""
+        if self.tainted():
+            if not self._kept_tools_noted:
+                self._kept_tools_noted = True
+                self.note("the VM may hold a value from the vault: its tool list isn't asked for or saved again "
+                          "(the one from before stays) until it's reset")
+            return
         tools, cursor, seen, size, pages = [], None, set(), 0, 0
         end = time.monotonic() + REFRESH_DEADLINE_S
         while True:
@@ -1288,6 +1432,8 @@ class Hub:
             if not cursor:
                 break
             seen.add(cursor)
+        if self.tainted():
+            return                                   # marked while the pages came in: none of it is kept
         old = self.cache if self.cache.get("driver_version") == pinned_version() else {}
         inits = dict(old.get("initialize") or {})
         inits[params.get("protocolVersion") or "default"] = self.live_init
@@ -1298,6 +1444,8 @@ class Hub:
             if kind in caps:
                 rr = self.ask_up(method, {})
                 cache[kind] = rr.get("result") if rr and "result" in rr else None
+        if self.tainted():
+            return
         try:
             tmp = self.paths["cache"] + f".{self.pid}.tmp"
             with open(tmp, "w") as f:
@@ -1336,6 +1484,60 @@ class Hub:
             callback(None)
         return iid
 
+    def call_for(self, client, tool, args, timeout=60, job=None):
+        """A driver tool call the hub makes on a client's behalf, inside a job (site_login.py): the action log names
+        the client, as for the client's own calls. It returns only once the call can no longer act: with its answer,
+        or, when none came in time or it couldn't be sent whole, after the connection it went on (that very process,
+        not whichever is current by then) has been ended with its whole process tree (_end_transport). The answer
+        message, or None."""
+        proc = self.up
+        gen = getattr(proc, "mcomp_gen", None)
+        if proc is None or gen is None or not self.connected():
+            return None
+        if job is not None:
+            with self.lease_lock:                    # the connections this job's calls went on (a lease past its life)
+                j = self.jobs.get(job)
+                if j is not None:
+                    j["procs"].add(proc)
+        iid = f"mcomp-hub-{next(self.ids)}"
+        ev, box = threading.Event(), []
+        self.internal[iid] = (ev, box, None, gen)
+        if getattr(proc, "mcomp_eof", False):        # closed meanwhile: its reader may have failed its calls already
+            self.internal.pop(iid, None)
+            return None
+        msgs = []
+        if self.action_log:
+            msgs.append({"jsonrpc": "2.0", "method": "notifications/metacomputer/client",
+                         "params": {"id": iid, "client": self.client_info(client)}})
+        msgs.append({"jsonrpc": "2.0", "id": iid, "method": "tools/call", "params": {"name": tool, "arguments": args}})
+        name = clean(tool, 40)
+        if not self.send_up(*msgs, proc=proc):
+            # Maybe written in part: the connection is ended (its whole process tree) before the job may go on.
+            self._end_proc(proc, f"{name} couldn't be sent whole for a sign-in or session load")
+            self.internal.pop(iid, None)
+            return box[0] if box else None
+        self.last_activity = time.time()
+        if not ev.wait(timeout) and not box:
+            # No answer in time: the call may still run in the driver. Its job keeps the computer while the connection it
+            # went on is ended, its whole process tree, and only then goes on (and may let go).
+            self._end_proc(proc, f"{name} made for a sign-in or session load didn't answer in {int(timeout)} s")
+            ev.wait(TRANSPORT_GRACE_S + 5)           # the reader fails the connection's calls once its output ends
+        self.internal.pop(iid, None)
+        return box[0] if box else None
+
+    def _end_proc(self, proc, why):
+        """End that driver connection (its whole process tree, _end_transport) now, on this thread."""
+        if not getattr(proc, "mcomp_ended", False):
+            self.note(f"{why}; ending driver connection {getattr(proc, 'mcomp_gen', '?')} (its whole process tree) "
+                      "before the computer is let go")
+        self._end_transport(proc, True)
+
+    def note_driver_refusal(self, client, tool, res):
+        """A refusal of a call made with call_for: bounded mode's events, as for a client's own call."""
+        text = json.dumps((res or {}).get("content") or [])[:4000]
+        if self.bounded_mode and BOUNDED_REFUSED_RE.search(text):
+            self.bounded_refused(client, tool, res)
+
     def _reader(self, proc, gen):
         why = None
         try:
@@ -1370,7 +1572,7 @@ class Hub:
                         bad = None if usable else "the wrong shape"
                     except Exception as e:
                         bad = f"an error handling it: {type(e).__name__}"
-                        self.note(f"error handling a message from the driver: {e!r}"[:300],
+                        self.note(f"error handling a message from the driver: {self.why(e)}"[:300],
                                   kind=f"driver message error ({type(e).__name__})")
                 elif msg is not None:
                     bad = "not a JSON object"
@@ -1381,7 +1583,7 @@ class Hub:
                     break
         except Exception as e:  # whatever ends the reading, the connection is closed and its calls fail
             if not isinstance(e, (OSError, ValueError)):
-                self.note(f"the driver connection's reader stopped: {e!r}"[:300])
+                self.note(f"the driver connection's reader stopped: {self.why(e)}"[:300])
         finally:
             proc.mcomp_eof = True                    # (connected() looks here, never at the process itself)
             self._upstream_closed(proc, gen, why)
@@ -1497,7 +1699,7 @@ class Hub:
                     try:
                         slot[2](msg)
                     except Exception as e:
-                        self.note(f"internal callback failed: {e!r}"[:300], kind="internal callback failed")
+                        self.note(f"internal callback failed: {self.why(e)}"[:300], kind="internal callback failed")
                 return True
             with self.lease_lock:                    # removed, leased and finished under one lock (_pend_finished)
                 pend = self.pending.pop(key, None)
@@ -1507,7 +1709,7 @@ class Hub:
             try:
                 self.observe(pend, msg, key)
             except Exception as e:  # never let bookkeeping break the relay
-                self.note(f"observe failed: {e!r}")
+                self.note(f"observe failed: {self.why(e)}")
             if pend.get("orphan"):
                 return True
             out = dict(msg)
@@ -1525,8 +1727,9 @@ class Hub:
             return True
         if method == "notifications/tools/list_changed":
             # The driver's own tools changed: one refresh, and everyone asks again. Repeats while a refresh is
-            # under way fold into it (no new thread, no new notice to the clients).
-            if self.schedule_refresh():
+            # under way fold into it (no new thread, no new notice to the clients). Not once the VM may hold a value:
+            # the list from before stays (refresh_cache), so nobody needs to ask again.
+            if not self.tainted() and self.schedule_refresh():
                 for c in self.active_clients():
                     c.send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
         elif method == "notifications/progress":
@@ -1562,6 +1765,7 @@ class Hub:
             p = msg.get("params") or {}
             self.send_up({"jsonrpc": "2.0", "method": "notifications/metacomputer/refused",
                           "params": {"tool": p.get("name", ""), "args": p.get("arguments") or {}, "reason": text,
+                                     "code": (structured or {}).get("code") if isinstance(structured, dict) else None,
                                      "client": self.client_info(client)}})
         self.tool_error(client, msg, text, structured)
 
@@ -1579,7 +1783,8 @@ class Hub:
         elif method == "ping":
             self.reply(client, msg, {})
         elif method == "tools/list":
-            tools = self.live_tools if self.live_tools is not None else (self.cache.get("tools") or {}).get("tools") or []
+            tools = site_login.with_tools(self.live_tools if self.live_tools is not None
+                                          else (self.cache.get("tools") or {}).get("tools") or [])
             if client.tools_hash is not None:
                 client.tools_hash = tool_names_hash(tools)
             self.reply(client, msg, {"tools": tools})
@@ -1590,7 +1795,8 @@ class Hub:
             cached = self.cache.get(key) if method != "resources/templates/list" else None
             empty = {"resources": []} if method == "resources/list" else (
                 {"resourceTemplates": []} if method == "resources/templates/list" else {"prompts": []})
-            if self.connected():
+            # Once the VM may hold a value, its listings (the VM's to write, like the tool list) aren't asked for again.
+            if self.connected() and not self.tainted():
                 self.forward(client, msg)
             else:
                 self.reply(client, msg, cached or empty)
@@ -1708,6 +1914,13 @@ class Hub:
                 return
         elif client.has_claim:
             self.claim(client, name)
+        if name in site_login.TOOL_NAMES:
+            # Served here, after the one-controller check; its driver calls go through call_for (bounded mode's
+            # manifest and the action log apply), the vault does the approvals, and the work is a job that holds the
+            # computer until it has provably stopped (job_start / job_end).
+            self.act_seq += 1
+            site_login.call(self, client, msg)
+            return
         sess = self.session_for(client, name, args)
         note = None
         if acting:
@@ -1786,6 +1999,19 @@ class Hub:
             busy.append({"kind": "session", "claim": "pending", "active": True, "bridge_pid": c.holder,
                          "claude_pid": c.claude, "cwd": c.cwd, "last_tool": pend.get("tool"),
                          "idle_s": int(time.time() - pend.get("t0", time.time()))})
+        # A sign-in or session load the hub runs for another client (site_login.py) holds the computer for as long as it
+        # runs, whatever its claim file says by then: its driver calls are the hub's own (call_for), not pending calls,
+        # and its vault step can take minutes. (Once its client has left, its lease counts instead, below.)
+        with self.lease_lock:
+            jobs = [j for j in self.jobs.values() if j.get("lease") is None]
+        for j in jobs:
+            c = j["client"]
+            if (c is client or c.holder == client.holder or c.peer_pid in mine or client.peer_pid in c.mine
+                    or (client.claude and c.claude == client.claude)):
+                continue
+            busy.append({"kind": "session", "claim": "job", "active": True, "bridge_pid": c.holder,
+                         "claude_pid": c.claude, "cwd": c.cwd, "last_tool": j["tool"],
+                         "idle_s": int(time.monotonic() - j["t0"])})
         # A lease whose claim couldn't be written isn't in any file, and the client's own claim may be gone with its
         # process: the hub's own record of it counts. (A written lease is its file, which `release` may drop.)
         with self.lease_lock:
@@ -1972,7 +2198,7 @@ class Hub:
             removed = 0
         self.mpx_dirty = False
         if removed:
-            self.note(f"input-reset removed {removed} pair(s)")
+            self.note("input-reset removed leftover pairs" if self.tainted() else f"input-reset removed {removed} pair(s)")
             return (f"removed {removed} leftover virtual input device pair(s) so Chrome accepts "
                     "the keyboard. Background typing without an element token into other apps fails on this "
                     "connection from now on; use delivery_mode \"foreground\" there.")
@@ -2127,7 +2353,8 @@ class Hub:
             if rec is None:
                 continue                         # no screenshot the hub saw: the driver's own checks apply
             if not rec["ready"].wait(LAYOUT_WAIT_S) or rec.get("windows") is None or not rec.get("bounds"):
-                self.note(f"coordinate guard: no layout for {key}; passing {t} on unchecked")
+                self.note(f"coordinate guard: no layout for {'that window' if self.tainted() else key}; passing "
+                          f"{clean(t, 40)} on unchecked")
                 continue
             if live is None:
                 live = self.live_windows()
@@ -2270,7 +2497,7 @@ class Hub:
         return bool(self.recordings)
 
     def busy(self):
-        return bool(self.active_clients()) or bool(self.pending)
+        return bool(self.active_clients()) or bool(self.pending) or bool(self.jobs)
 
     def idle_for(self):
         if self.busy() or self.recording_active():
@@ -2285,12 +2512,25 @@ class Hub:
                 "clients": [c.describe() for c in self.active_clients()],
                 "driver": {"connected": self.connected(), "since": self.up_since if self.connected() else None,
                            "pending": len(self.pending),
-                           "left_running": sum(len(lease["keys"]) for lease in list(self.leases.values()))},
+                           "left_running": sum(len(lease["keys"]) for lease in list(self.leases.values())),
+                           "sign_ins": len(self.jobs)},
                 "recordings": len(self.recordings), "coord_guard": "on" if self.coord_on else "off",
                 "socket": None if self.local else self.paths["sock"], "lessons": lessons_status(self.env)}
 
     def shutdown(self):
-        """End the core: close the driver connection (the VM's driver runtime ends with it)."""
+        """End the core: close the driver connection (the VM's driver runtime ends with it). Sign-ins and session loads
+        still running (site_login.py) are stopped first: each vault call is withdrawn and waited for until the vault
+        confirms it stopped (or `settle` says so), and their driver calls end with the connection. The hub's lease
+        claim goes only once they all have; if one hasn't within JOB_STOP_S, it stays until this process ends."""
+        with self.lease_lock:
+            jobs = list(self.jobs.values())
+        for j in jobs:
+            if not j.get("stopping"):
+                j["stopping"] = True
+                try:
+                    j["stop"]()
+                except Exception:
+                    pass
         proc, self.up, self.ready = self.up, None, False
         if proc:
             try:
@@ -2301,11 +2541,18 @@ class Hub:
         for old in list(self.gen_procs.values()):    # earlier connections still finishing (a bounded session's end)
             if old is not proc:
                 self._end_transport(old, True)
+        end = time.monotonic() + JOB_STOP_S
+        while jobs and self.jobs and time.monotonic() < end:
+            time.sleep(0.1)
         self.flush_notes()
         with self.lease_lock:
             had_lease, self.leases = bool(self.leases), {}
-        if had_lease and not self.local:
-            owners.drop_claim(self.pid)          # the driver connection is closed: nothing it held is running
+            jobs_left = len(self.jobs)
+        if jobs_left:
+            self.note(f"{jobs_left} sign-in(s) or session load(s) didn't confirm that they stopped within "
+                      f"{int(JOB_STOP_S)} s; the hub's hold on the computer isn't let go (it ends with this process)")
+        elif had_lease and not self.local:
+            owners.drop_claim(self.pid)          # the driver connection is closed, its jobs confirmed stopped
         if self.local:
             try:
                 os.remove(os.path.join(run_dir(self.env), f"mcp-local-{self.pid}.stderr"))
@@ -2922,8 +3169,9 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     raise HubError(f"the metacomputer hub didn't open its socket within {timeout:.0f} s (log: {p['log']})")
 
 
-def stop_hub(env=None, wait=8.0):
-    """Stop this VM's hub, if one runs. True when one was stopped."""
+def stop_hub(env=None, wait=JOB_STOP_S + 15):
+    """Stop this VM's hub, if one runs. True when one was stopped. The wait covers its sign-ins and session loads
+    stopping (JOB_STOP_S); a hub with none ends within seconds."""
     pid = hub_pid(env)
     if not pid:
         return False
@@ -2935,9 +3183,19 @@ def stop_hub(env=None, wait=8.0):
     except OSError:
         return False
     end = time.monotonic() + wait
-    while time.monotonic() < end and owners.alive(pid):
+    reaped = []
+
+    def running():
+        try:                                     # a hub this process started (tests, connect_or_start): reap it,
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:      # or it lingers as a zombie that kill(pid, 0) still finds
+                reaped.append(pid)
+                return False
+        except (ChildProcessError, OSError):
+            pass
+        return owners.alive(pid)
+    while time.monotonic() < end and running():
         time.sleep(0.1)
-    if owners.alive(pid):
+    if not reaped and owners.alive(pid):
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:

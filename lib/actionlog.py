@@ -24,6 +24,10 @@ result summary and timing, and the calls the hub refused.
   a file without a final checkpoint ended abnormally or was cut short.
 - Typed text, values and scripts are replaced by their length unless
   ACTION_LOG_TEXT=keep. Results are kept only as a hash and sizes.
+- Once the VM may hold a value from the vault (lib/vmtaint.py), records are
+  secret-adjacent whatever ACTION_LOG_TEXT says: argument names and a size
+  class, whether an answer failed, an image count and a text size class, a
+  refusal's code; no text, error message or hash (ADJACENT below).
 
 What it proves: that a file matches what the holder of the signing key
 signed. It can't stop someone who has that key (anyone with your login on this
@@ -39,11 +43,15 @@ ssh-agent backed by hardware (ACTION_LOG_KEY=path/to/key.pub) to prevent that.
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vmtaint  # noqa: E402
 
 NAMESPACE = "metacomputer-action-log"
 SIGNER = "metacomputer"
@@ -120,6 +128,35 @@ def summarize_result(res, keep_text):
     if keep_text and texts:
         out["text"] = "\n".join(texts)[:400]
     return out
+
+
+# A record on a connection to a VM that may hold a value (lib/vmtaint.py): the VM could spell that value in anything
+# it sends, so nothing it chose is kept, whatever ACTION_LOG_TEXT says. No text, no error message, no hash of either
+# (a hash can be ground to carry a few bits), sizes and counts only as classes. The arguments are kept as their names
+# and size class: they're the client's, but they carry what the VM showed it (element refs, window ids, page text).
+ADJACENT = "secret-adjacent"
+RPC_ERROR_ADJACENT = "error (its message isn't recorded: the VM may hold a value)"
+REFUSED_ADJACENT = "refused by the hub (its words aren't recorded: the VM may hold a value)"
+CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
+
+
+def adjacent_args(args):
+    keys = sorted(re.sub(r"[^A-Za-z0-9_.-]", "", str(k))[:40] for k in args)[:20] if isinstance(args, dict) else []
+    try:
+        size = vmtaint.size_class(len(canonical(args)))
+    except (TypeError, ValueError):
+        size = None
+    return {"redacted": ADJACENT, "keys": keys, "size": size}
+
+
+def adjacent_result(res):
+    if not isinstance(res, dict):
+        return {"kind": "other"}
+    content = res.get("content") if isinstance(res.get("content"), list) else []
+    images = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "image")
+    chars = sum(len(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text"
+                and isinstance(c.get("text"), str))
+    return {"error": bool(res.get("isError")), "images": vmtaint.count_class(images), "text_size": vmtaint.size_class(chars)}
 
 
 class ActionLog:
@@ -200,26 +237,43 @@ class ActionLog:
                 if not self.closed and self.unsigned and time.time() - self.last_sign >= EVERY_S:
                     self._sign()
 
-    def call(self, call_id, tool, args, client=None):
-        """client: the hub's note on whose call it is (kind, pid, Claude Code pid, project, driver session)."""
+    def call(self, call_id, tool, args, client=None, secret=False):
+        """client: the hub's note on whose call it is (kind, pid, Claude Code pid, project, driver session).
+        secret: on a connection to a VM that may hold a value (ADJACENT above)."""
         self.started[call_id] = time.time()
-        rec = {"type": "call", "id": call_id, "tool": tool, "args": args if self.keep_text else redact(args)}
+        if secret:
+            rec = {"type": "call", "id": call_id, "tool": tool, "secret_adjacent": True, "args": adjacent_args(args)}
+        else:
+            rec = {"type": "call", "id": call_id, "tool": tool, "args": args if self.keep_text else redact(args)}
         if client:
             rec["client"] = client
         self._add(rec)
 
-    def result(self, call_id, tool, msg):
+    def result(self, call_id, tool, msg, secret=False):
         t0 = self.started.pop(call_id, None)
         rec = {"type": "result", "id": call_id, "tool": tool,
                "ms": int((time.time() - t0) * 1000) if t0 else None}
-        if "error" in msg:
+        if secret:
+            rec["secret_adjacent"] = True
+            if "error" in msg:
+                rec["rpc_error"] = RPC_ERROR_ADJACENT
+            else:
+                rec["result"] = adjacent_result(msg.get("result"))
+        elif "error" in msg:
             rec["rpc_error"] = str((msg.get("error") or {}).get("message", ""))[:300]
         else:
             rec["result"] = summarize_result(msg.get("result"), self.keep_text)
         self._add(rec)
 
-    def refused(self, tool, args, reason, client=None):
-        rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
+    def refused(self, tool, args, reason, client=None, secret=False, code=None):
+        """secret: the hub's words can quote the VM (a window's title), so only its refusal's code is kept."""
+        if secret:
+            rec = {"type": "refused", "tool": tool, "secret_adjacent": True, "args": adjacent_args(args),
+                   "reason": REFUSED_ADJACENT}
+            if isinstance(code, str) and CODE_RE.fullmatch(code):
+                rec["code"] = code
+        else:
+            rec = {"type": "refused", "tool": tool, "args": args if self.keep_text else redact(args), "reason": reason[:300]}
         if client:
             rec["client"] = client
         self._add(rec)
@@ -402,7 +456,9 @@ def main(argv):
             elif t == "result" and r.get("tool") == "vm_shell":   # metacomputer sh (lib/vm_shell.py)
                 res = r.get("result") or {}
                 state = f"exit {res.get('exit_code')}" if res.get("status") == "exited" else str(res.get("status"))
-                sizes = ", ".join(f"{k} {(res.get(k) or {}).get('bytes', 0)} B" for k in ("stdout", "stderr") if k in res)
+                sizes = ", ".join(f"{k} {(res.get(k) or {}).get('bytes', 0)} B" if "bytes" in (res.get(k) or {})
+                                  else f"{k} at most {(res.get(k) or {}).get('size', 0)} B"
+                                  for k in ("stdout", "stderr") if k in res)
                 print(f"{r['seq']:5} {ts} <- vm_shell {state} ({r.get('ms')} ms" + (f"; {sizes})" if sizes else ")"))
             elif t == "result":
                 res = r.get("result") or {}
