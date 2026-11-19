@@ -336,6 +336,20 @@ the hidden-text marks under `metacomputer_hidden_text`. Those names are the hub'
 the VM's answers can't use them ([Hidden page text](#hidden-page-text), "The hub's names
 are its own").
 
+**The call as the driver reads it.** Cua Driver accepts more than its schemas show: a `run_steps` step may be
+`{tool, args}`, flat fields beside `tool`, or the shorthand `{<tool>: args}`; step tool names have aliases (`type`,
+`set`, `press`, `key`, `hover`, …); a key name can be the tool (`{"tool": "down"}`); `triple_click` is a click with
+count 3; a one-key hotkey is a press_key and a press_key of a printable symbol types it; `type_text_chars` and
+`run_actions` are old names of type_text and run_steps; and a string where the schema wants a number or a boolean
+(`"pid": "77"`, `"delay_ms": "200"`) is turned into one. Guards that tested only the canonical forms could be walked
+past with the others (a `{"type": …}` step aimed at Chrome went out as background input, and pixels sent as strings
+skipped the coordinate guard). So the hub normalises each call once, as it arrives, with a copy of the driver's own
+rules for the pinned version (`lib/batch_steps.py`), before any guard; every guard and human pacing read that
+normalised call, and it's what the hub sends the driver. The canonical forms are a fixed point of the driver's own
+normalisation, so what the guards checked is what runs. A step the driver would refuse is left as it came (the driver
+then refuses the whole batch before running any of it), and argument spellings no guard reads (key names, scroll
+deltas) are left to the driver. A call the hub can't normalise isn't passed on.
+
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
 the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
 `metacomputer call` skipped all of them: a session's logs showed it doing a whole

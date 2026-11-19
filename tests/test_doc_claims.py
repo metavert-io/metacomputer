@@ -598,6 +598,19 @@ def caller_pause_counted():
     return none is None and json.dumps(b) == keep and bool(plain and plain["moves"])
 
 
+def normalised_first():
+    """The hub normalises a call (lib/batch_steps.py, for the pinned driver) before every guard and sends that call;
+    one it can't normalise isn't passed on."""
+    import batch_steps
+    c = raw("lib/mcp_hub.py")
+    body = c[c.index("    def on_tools_call("):c.index("    def session_for(")]
+    order = [body.find(x) for x in ("batch_steps.normalize_call(", "self.check_and_claim(", "self.coord_guard(",
+                                    "self.chrome_guard(", "self.pace(name, args, sess)", "self.forward(client, msg")]
+    return (batch_steps.DRIVER_VERSION == D["CUA_DRIVER_VERSION"] and all(i > 0 for i in order)
+            and order == sorted(order) and "couldn't read this call's arguments the way the driver" in body
+            and 'name = params["name"] = batch_steps.tool_name(name)' in body)
+
+
 def own_typing_counted():
     """The typing pauses a batch's own steps set count against the driver's limit: 250 characters at 200 ms, then
     250 more to pace, leave no room, so the batch goes as it came."""
@@ -624,6 +637,10 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
+    ("SECURITY.md", r"So the hub normalises each call once, as it arrives, with a copy of the driver's own rules for the "
+                    r"pinned version \(`lib/batch_steps\.py`\), before any guard",
+     lambda m: normalised_first()),
+    ("SECURITY.md", r"A call the hub can't normalise isn't passed on", lambda m: normalised_first()),
     # Human mode and human pacing (lib/pacing.py, the hub's BROWSER_PACING)
     ("SECURITY.md", r"\*\*Human pacing \(`BROWSER_PACING=human`, the default\)\.\*\*",
      lambda m: D["BROWSER_PACING"] == "human" and mcp_hub.settings_of({})["browser_pacing"] == "human"

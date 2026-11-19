@@ -1004,7 +1004,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (241 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (256 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1082,6 +1082,13 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   200 ms leave no room); a field named by `label` is typed in one run. The Chrome guard reads nested window
   targets: direct `type_text` and `click` and a batch with no default window go in the foreground with the input
   reset; a nested target on another app is left alone.
+- the driver's own call forms (`lib/batch_steps.py`): its lists (batchable tools, tool aliases, key names as tools,
+  symbol names, shifted symbols, renamed tools) are pinned against copies of driver 0.53.0's, each one and every step
+  form becomes the canonical step, which is a fixed point; through the hub, each shorthand form and alias aimed at
+  Chrome by a nested target goes in the foreground with the input reset, `set` to Chrome is refused, the old names
+  `type_text_chars` and `run_actions` are guarded as type_text and run_steps, typing pauses written as `{type: ...}`
+  or a string count in pacing's budget, a mixed batch of shorthand forms is paced and guarded step by step, and
+  `triple_click` and pixels sent as strings reach the coordinate guard. (Against the hub of dba0af9 these fail.)
   (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;

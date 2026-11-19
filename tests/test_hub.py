@@ -1204,6 +1204,14 @@ def chrome_checks():
 FIREFOX = 41    # a Firefox window (pid 88), only in pacing_checks' world
 
 
+def as_driver_reads(run_steps_args):
+    """A run_steps call's arguments in the driver's normal form, as the hub sends them (lib/batch_steps.py)."""
+    import batch_steps
+    seed = json.load(open(os.path.join(LAB, "config", "driver-mcp-cache.json")))
+    return batch_steps.normalize_batch(json.loads(json.dumps(run_steps_args)),
+                                       batch_steps.schemas_of(seed["tools"]["tools"]))
+
+
 def sent_args(name, since):
     return [c["msg"]["params"]["arguments"] for c in tool_calls(name, since)]
 
@@ -1278,9 +1286,10 @@ def pacing_checks():
           2 <= len(moves) <= 4 and moves == list(range(len(steps) - 1 - len(moves), len(steps) - 1))
           and all(steps[i]["args"]["scope"] == "desktop" and 600 <= steps[i]["args"]["x"] <= 1700
                   and 450 <= steps[i]["args"]["y"] <= 950 for i in moves)
-          and last == {"click": {"x": 400, "y": 300}}, steps)
+          and last == {"tool": "click", "args": {"x": 400, "y": 300}}, steps)
     check("…the expect check stays on the last run; the result says steps were added (and why the numbers shift)",
-          any(st.get("expect") == [{"text": "Email"}] for st in steps) and steps[0] == batch["steps"][0]
+          any(st.get("expect") == [{"text": "Email"}] for st in steps)
+          and steps[0] == {"tool": "click", "args": {"role": "entry", "name": "Email"}}
           and pacing.NOTE_PREFIX in res.text, res.text[:300])
     n0 = len(calls())
     h.call("run_steps", {"pid": 50, "window_id": W, "steps": batch["steps"][1:3]})
@@ -1303,7 +1312,8 @@ def pacing_checks():
     h.call("run_steps", json.loads(json.dumps(clicks)))
     fwd = (sent_args("run_steps", n0) or [{}])[-1]
     check("a caller's delay_ms counts against the caps: 10 clicks 2 s apart go as they came (no steps added)",
-          {k: v for k, v in fwd.items() if k != "session"} == clicks, (len(fwd.get("steps") or []), fwd.get("delay_ms")))
+          {k: v for k, v in fwd.items() if k != "session"} == as_driver_reads(clicks),
+          (len(fwd.get("steps") or []), fwd.get("delay_ms")))
     worst = 0.0
     for seed in range(100):
         own = 50 * (seed % 30)
@@ -1324,7 +1334,7 @@ def pacing_checks():
     h.call("run_steps", json.loads(json.dumps(slow)))
     fwd = (sent_args("run_steps", n0) or [{}])[-1]
     check("the typing pauses a batch's steps set themselves count too: 250 characters at 200 ms leave no room, so "
-          "the batch goes as it came", {k: v for k, v in fwd.items() if k != "session"} == slow,
+          "the batch goes as it came", {k: v for k, v in fwd.items() if k != "session"} == as_driver_reads(slow),
           [(len(t), d) for t, d in typed_steps(fwd.get("steps") or [])])
     n0 = len(calls())
     h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
@@ -1398,9 +1408,11 @@ def pacing_checks():
     res = h.call("run_steps", json.loads(json.dumps(batch)))
     fwd_t = [{k: v for k, v in a.items() if k != "session"} for a in sent_args("type_text", n0)]
     fwd = (sent_args("run_steps", n0) or [{}])[-1]
-    check("BROWSER_PACING=fast: typing and batches go to the driver exactly as sent (today's behaviour)",
+    check("BROWSER_PACING=fast: typing and batches go to the driver unpaced (today's behaviour; only in the "
+          "driver's own normal form, lib/batch_steps.py)",
           fwd_t == [{"pid": 88, "window_id": FIREFOX, "text": "abc"}]
-          and {k: v for k, v in fwd.items() if k != "session"} == batch and pacing.NOTE_PREFIX not in res.text,
+          and {k: v for k, v in fwd.items() if k != "session"} == as_driver_reads(batch)
+          and pacing.NOTE_PREFIX not in res.text,
           (fwd_t, fwd))
     h.close()
     clear_claims()
@@ -1454,6 +1466,166 @@ def chrome_nested_checks():
     h.close()
     clear_claims()
     r.stop()
+
+
+# Cua Driver 0.53.0's own lists (cua-driver-core batch_tools.rs and tool.rs), copied by hand: lib/batch_steps.py must
+# cover each one. A driver update means reading the new source and updating both.
+DRIVER_BATCHABLE = ["click", "double_click", "right_click", "set_value", "type_text", "press_key", "hotkey", "scroll",
+                    "drag", "move_cursor"]
+DRIVER_TOOL_ALIASES = [("press", "press_key"), ("key", "press_key"), ("keypress", "press_key"), ("type", "type_text"),
+                       ("set", "set_value"), ("hover", "move_cursor"), ("mouse_move", "move_cursor")]
+DRIVER_KEY_TOOL_NAMES = ["return", "enter", "tab", "escape", "esc", "space", "backspace", "up", "down", "left", "right",
+                         "home", "end", "pageup", "pagedown"]
+DRIVER_SYMBOL_KEY_NAMES = [("asterisk", "*"), ("star", "*"), ("plus", "+"), ("at", "@"), ("hash", "#"),
+                           ("numbersign", "#"), ("pound", "#"), ("dollar", "$"), ("percent", "%"), ("caret", "^"),
+                           ("ampersand", "&"), ("exclamation", "!"), ("exclam", "!"), ("question", "?"),
+                           ("questionmark", "?"), ("underscore", "_"), ("tilde", "~"), ("colon", ":"), ("pipe", "|"),
+                           ("bar", "|"), ("less", "<"), ("lessthan", "<"), ("greater", ">"), ("greaterthan", ">"),
+                           ("parenleft", "("), ("leftparen", "("), ("parenright", ")"), ("rightparen", ")"),
+                           ("braceleft", "{"), ("braceright", "}"), ("quotedbl", '"'), ("doublequote", '"')]
+DRIVER_SHIFTED_SYMBOLS = '*+@#$%^&!?_~:|<>(){}"'
+DRIVER_RENAMED = [("type_text_chars", "type_text"), ("run_actions", "run_steps")]
+
+
+def normalize_checks():
+    """lib/batch_steps.py against the driver's own lists, then through the hub: every shorthand form and alias the
+    driver runs gets the Chrome guard, the coordinate guard and pacing's budget the canonical form gets."""
+    import batch_steps
+    import pacing
+    print("the driver's step forms and aliases (lib/batch_steps.py), through every guard")
+    D = {}
+    for line in open(os.path.join(LAB, "config", "defaults.env")):
+        if line.startswith("CUA_DRIVER_VERSION="):
+            D["v"] = line.split("=", 1)[1].split()[0]
+    check("the normaliser mirrors the pinned driver (re-read its batch_tools.rs and tool.rs before a driver update)",
+          batch_steps.DRIVER_VERSION == D.get("v") == "0.53.0", (batch_steps.DRIVER_VERSION, D))
+    check("its lists are the driver's: batchable tools, tool aliases, key names as tools, symbol names, shifted "
+          "symbols, renamed tools",
+          list(batch_steps.BATCHABLE_TOOLS) == DRIVER_BATCHABLE
+          and sorted(batch_steps.TOOL_ALIASES.items()) == sorted(DRIVER_TOOL_ALIASES)
+          and list(batch_steps.KEY_TOOL_NAMES) == DRIVER_KEY_TOOL_NAMES
+          and sorted(batch_steps.SYMBOL_KEY_NAMES.items()) == sorted(DRIVER_SYMBOL_KEY_NAMES)
+          and batch_steps.SHIFTED_SYMBOLS == DRIVER_SHIFTED_SYMBOLS
+          and sorted(batch_steps.TOOL_RENAMES.items()) == sorted(DRIVER_RENAMED))
+    seed = json.load(open(os.path.join(LAB, "config", "driver-mcp-cache.json")))
+    sch = batch_steps.schemas_of(seed["tools"]["tools"])
+    N = batch_steps.normalize_step
+    cases = []                                   # (step, the canonical step it must become)
+    for alias, tool in DRIVER_TOOL_ALIASES:
+        a = {"key": "Tab"} if tool == "press_key" else {"text": "x"} if tool == "type_text" else \
+            {"value": "v"} if tool == "set_value" else {"x": 5, "y": 5}
+        cases.append(({alias: dict(a)}, {"tool": tool, "args": dict(a)}))
+    cases.append(({"press": {"role": "button", "name": "Go"}}, {"tool": "click", "args": {"role": "button", "name": "Go"}}))
+    cases.append(({"triple_click": {"x": 5, "y": 5}}, {"tool": "click", "args": {"x": 5, "y": 5, "count": 3}}))
+    for k in DRIVER_KEY_TOOL_NAMES:
+        cases.append(({"tool": k.upper() if k == "tab" else k}, {"tool": "press_key", "args": {"key": k}}))
+    for name, text in DRIVER_SYMBOL_KEY_NAMES:
+        cases.append(({"press_key": {"key": name}}, {"tool": "type_text", "args": {"text": text}}))
+    for ch in DRIVER_SHIFTED_SYMBOLS:
+        cases.append(({"tool": "press_key", "key": ch}, {"tool": "type_text", "args": {"text": ch}}))
+    cases += [({"hotkey": {"keys": ["Return"]}}, {"tool": "press_key", "args": {"key": "Return"}}),
+              ({"hotkey": {"keys": "a"}}, {"tool": "press_key", "args": {"key": "a"}}),
+              ({"hotkey": {"keys": ["ctrl", "s"]}}, {"tool": "hotkey", "args": {"keys": ["ctrl", "s"]}}),
+              ({"tool": "type_text", "text": "flat", "pid": "88"}, {"tool": "type_text", "args": {"text": "flat", "pid": 88}}),
+              ({"tool": "click", "args": None, "x": "400", "y": "300"}, {"tool": "click", "args": {"x": 400.0, "y": 300.0}}),
+              ({"type": {"text": "123", "delay_ms": "200"}, "expect": [{"text": "x"}]},
+               {"tool": "type_text", "args": {"text": "123", "delay_ms": 200}, "expect": [{"text": "x"}]})]
+    bad = [(st, N(st, sch), want) for st, want in cases if N(st, sch) != want]
+    check(f"every alias, key name, symbol name and step form becomes the driver's canonical step ({len(cases)} cases)",
+          not bad, bad[:3])
+    fixed = [st for st, _ in cases if N(N(st, sch), sch) != N(st, sch)]
+    check("…and the canonical form is a fixed point (the driver's own pass changes nothing more)", not fixed, fixed[:3])
+    left = [{"tool": "nope", "args": {}}, {"click": {}, "type": {"text": "x"}}, {"tool": "click", "args": {}, "x": 1},
+            {"wait_for": {"text": "x"}}, {"get_window_state": {"pid": 1}}]
+    check("steps the driver refuses, checks and reads come back as they were",
+          all(N(st, sch) == st for st in left), [N(st, sch) for st in left])
+    b = batch_steps.normalize_batch({"pid": "88", "delay_ms": "150", "observe": {"query": "q"}, "steps": [
+        {"type": {"text": "x"}}, {"tool": "screenshot"}, {"get_window_state": {"query": "old"}}, {"zoom": {"x1": 0}}]},
+        sch)
+    check("a batch: its own scalars coerced, the latest trailing read folded into observe (explicit fields win), a "
+          "trailing zoom kept last", b["pid"] == 88 and b["delay_ms"] == 150 and b["observe"] == {"query": "q"}
+          and b["steps"] == [{"tool": "type_text", "args": {"text": "x"}}, {"zoom": {"x1": 0}}], b)
+
+    clear_claims()
+    set_windows(BASE_WINDOWS + [win(FIREFOX, 88, "firefox", 200, 150, 1280, 900, "Sign in - Mozilla Firefox")])
+    r = Running()
+    resets = []
+    r.hub.input_reset = lambda: resets.append(1)
+    h = client(r, "call", session="norm")
+    tg = {"kind": "window", "pid": 77, "window_id": CHROME}
+    forms = [{"type": {"target": dict(tg), "text": "abc"}}, {"press": {"target": dict(tg), "key": "Tab"}},
+             {"key": {"target": dict(tg), "key": "Tab"}}, {"keypress": {"target": dict(tg), "key": "Tab"}},
+             {"tool": "tab", "args": {"target": dict(tg)}}, {"tool": "type_text", "target": dict(tg), "text": "flat"},
+             {"triple_click": {"target": dict(tg), "x": 5, "y": 5}}, {"press_key": {"target": dict(tg), "key": "at"}},
+             {"hotkey": {"target": dict(tg), "keys": ["Return"]}}]
+    missed = []
+    for f in forms:
+        n0, r0 = len(calls()), len(resets)
+        res = h.call("run_steps", {"steps": [json.loads(json.dumps(f))]})
+        fwd = (sent_args("run_steps", n0) or [{}])[-1]
+        st = (fwd.get("steps") or [{}])[0]
+        keys = st.get("tool") in ("type_text", "press_key", "hotkey")
+        if res.is_error or (st.get("args") or {}).get("delivery_mode") != "foreground" or (keys and len(resets) == r0):
+            missed.append((f, st, len(resets) - r0))
+    check("each shorthand form and alias aimed at Chrome (nested target, no default window) goes in the foreground, "
+          "with the input reset before keys", not missed, missed[:3])
+    n0 = len(calls())
+    res = h.call("run_steps", {"steps": [{"set": {"target": dict(tg), "value": "x"}}]})
+    check("…and `set` (set_value) aimed at Chrome is refused before the driver", res.is_error and "set_value" in res.text
+          and not sent_args("run_steps", n0), res.text[:120])
+    n0 = len(calls())
+    h.call("type_text_chars", {"pid": "77", "window_id": str(CHROME), "text": "abc"})
+    s1 = [c["msg"]["params"] for c in tool_calls(None, n0)]
+    check("a direct call by the old name type_text_chars, with pid and window_id as strings, is type_text in the "
+          "foreground", s1 and s1[-1]["name"] == "type_text" and s1[-1]["arguments"].get("delivery_mode") == "foreground"
+          and s1[-1]["arguments"]["pid"] == 77, s1)
+    n0 = len(calls())
+    h.call("run_actions", {"steps": [{"type": {"pid": 77, "window_id": CHROME, "text": "abc"}}]})
+    s2 = [c["msg"]["params"] for c in tool_calls(None, n0)]
+    check("…and run_actions is run_steps, its steps guarded the same way",
+          s2 and s2[-1]["name"] == "run_steps" and s2[-1]["arguments"]["steps"][0]["args"].get("delivery_mode")
+          == "foreground", s2)
+    for label, first in (("{type: ...}", {"type": {"text": "a" * 250, "delay_ms": 200}}),
+                         ("a string delay_ms", {"type_text": {"text": "a" * 250, "delay_ms": "200"}})):
+        n0 = len(calls())
+        h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [first, {"type": {"text": "b" * 250}}]})
+        fwd = (sent_args("run_steps", n0) or [{}])[-1]
+        typed = typed_steps(fwd.get("steps") or [])
+        check(f"the budget counts typing pauses set as {label}: no room, so nothing is paced",
+              typed == [("a" * 250, 200), ("b" * 250, None)] and "delay_ms" not in fwd, typed[:2])
+    h.call("get_window_state", {"pid": 88, "window_id": FIREFOX})
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"type": {"text": "typed into the focus, long enough to split"}},
+        {"key": {"key": "Tab"}},
+        {"triple_click": {"target": dict(tg), "x": 5, "y": 5}},
+        {"set": {"pid": 50, "window_id": W, "role": "text", "name": "body", "value": "v"}},
+        {"type": {"text": "after Mousepad: long text, not to be paced"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    st = fwd.get("steps") or []
+    typed = typed_steps(st)
+    chrome = [x for x in st if (x.get("args") or {}).get("target") == tg]
+    check("a mixed batch of shorthand forms: Firefox typing paced and split, the Chrome step in the foreground, and "
+          "nothing paced after the step aimed at Mousepad",
+          len(typed) >= 3 and all(d for _, d in typed[:-1]) and typed[-1] == ("after Mousepad: long text, not to be paced",
+                                                                             None)
+          and chrome and chrome[0]["args"].get("delivery_mode") == "foreground", st)
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    res = h.call("run_steps", {"pid": 50, "window_id": W, "steps": [{"triple_click": {"x": 10, "y": 10}},
+                                                                      {"click": {"x": "400", "y": "300"}}]})
+    check("the coordinate guard sees triple_click as a click that can change windows, and pixels sent as strings",
+          res.is_error and res.structured.get("code") == "pixels_after_window_change", res.text[:200])
+    h.call("get_window_state", {"pid": 50, "window_id": W})
+    ws = json.loads(json.dumps(BASE_WINDOWS + [win(FIREFOX, 88, "firefox", 200, 150, 1280, 900, "Sign in")]))
+    ws[1]["bounds"].update(width=500, height=400)
+    set_windows(ws)
+    res = h.call("click", {"pid": "50", "window_id": str(W), "x": "400", "y": "300"})
+    check("…and a direct pixel click whose numbers are strings is checked like any other (refused after a resize)",
+          res.is_error and res.structured.get("code") == "windows_changed_since_screenshot", res.text[:200])
+    h.close()
+    clear_claims()
+    r.stop()
+    set_windows(BASE_WINDOWS)
 
 
 def bounded_checks():
@@ -2691,7 +2863,7 @@ def chrome_batch_checks():
     sent = tool_calls("run_steps", n0)
     steps = sent[-1]["msg"]["params"]["arguments"]["steps"] if sent else []
     check("…and typing in that inherited Chrome window goes in the foreground",
-          not res.is_error and steps and steps[1]["type_text"].get("delivery_mode") == "foreground", steps)
+          not res.is_error and steps and steps[1]["args"].get("delivery_mode") == "foreground", steps)
     snap = h.call("get_window_state", {"pid": 50, "window_id": W}).structured.get("snapshot_id")
     n1 = len(calls())
     a = h.call("click", {"element_token": f"{snap}:2", "pid": 10, "window_id": W})
@@ -2968,6 +3140,7 @@ def main():
         chrome_checks()
         pacing_checks()
         chrome_nested_checks()
+        normalize_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()

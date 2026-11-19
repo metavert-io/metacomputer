@@ -61,6 +61,7 @@ import time
 
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
+import batch_steps  # noqa: E402
 import driver_profiles  # noqa: E402
 import hidden_text  # noqa: E402
 import hub_notes  # noqa: E402
@@ -837,6 +838,14 @@ class Hub:
                               origin="bridge")
         except Exception as e:
             self.note(f"event failed: {e!r}")
+
+    def tool_schemas(self):
+        """{tool: input schema} from the driver's tool list (live, else the cached handshake), for lib/batch_steps.py."""
+        tools = self.live_tools if self.live_tools is not None else (self.cache.get("tools") or {}).get("tools") or []
+        cached = getattr(self, "_schemas", None)
+        if cached is None or cached[0] is not tools:
+            cached = self._schemas = (tools, batch_steps.schemas_of(tools))
+        return cached[1]
 
     def _session_tools(self):
         tools = (self.live_tools or (self.cache.get("tools") or {}).get("tools") or [])
@@ -1874,6 +1883,18 @@ class Hub:
         if not isinstance(params.get("arguments"), dict):
             params["arguments"] = {}
         args = params["arguments"]
+        # The call as the driver will run it (lib/batch_steps.py): old tool names, scalars sent as strings, and for
+        # run_steps every step's shorthand and aliases, in canonical form. Every guard and pacing read this, and it's
+        # what goes to the driver, so what they checked is what runs.
+        if batch_steps.tool_name(name) != name:
+            name = params["name"] = batch_steps.tool_name(name)
+        try:
+            batch_steps.normalize_call(name, args, self.tool_schemas())
+        except Exception as e:                   # fail closed: a call the guards can't read isn't passed on
+            self.note(f"normalising a {clean(name, 40)} call failed: {type(e).__name__}", kind="normalise failed")
+            self.tool_error(client, msg, "The metacomputer hub couldn't read this call's arguments the way the driver "
+                                         "would, so it didn't pass the call on. Check its shape and call again.")
+            return
         client.calls += 1
         client.last_tool, client.last_call = str(name)[:40], time.time()
         self.last_activity = time.time()

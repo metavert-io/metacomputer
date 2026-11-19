@@ -68,7 +68,9 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   user's control: report it, never route around it (`call`, a script,
   `MCOMP_DIRECT_BRIDGE=1`, the shell). The raw driver connection is for the hub
   and transport tests only (`MCPClient(transport_test=True)`). New guards go in
-  the hub, never in one client. The VM is untrusted: keep the hub's frame limits,
+  the hub, never in one client, and read the call `lib/batch_steps.py` normalised at the hub's entry (the driver's
+  own step shorthand, aliases and string scalars, mirrored for the pinned driver: re-check it on a driver update).
+  The VM is untrusted: keep the hub's frame limits,
   per-client backlogs and caps on what the driver can make it keep, parse wire
   JSON and drain stderr with `lib/wirelimits.py`, and escape the VM's text on a
   terminal (`lib/termsafe.py`).
