@@ -24,13 +24,13 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s. `start` takes the VM's lock, so it never runs during a build, reset, restore or `vm delete` of it |
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
 | `who` / `release` | Who is using the VM; hand it over (one controller at a time) |
-| `reset [--yes] [--discard-unsynced]` | Restore the clean baseline (asks first; evidence on the Mac is kept). It copies the VM's recordings first and stops, deleting nothing, if that copy isn't whole; `--discard-unsynced` goes on without what wasn't copied (`--yes` doesn't) |
+| `reset [--yes] [--discard-unsynced]` | Restore the clean baseline (asks first; evidence on the Mac is kept). It copies the VM's recordings first and stops, deleting nothing, if that copy isn't whole; `--discard-unsynced` goes on without what wasn't copied (`--yes` doesn't). Like `restore`, `checkpoint` and `baseline`, it checks the identity rule (below) after taking the VM's lock and refuses before anything is replaced |
 | `checkpoint NAME [--replace] [--with-volumes]` / `checkpoint --delete NAME [--yes]` / `checkpoints` / `restore NAME [--yes] [--discard-unsynced]` | Saved states of the stopped VM, with its disk volumes if you ask (deleting and restoring ask first; `restore` copies the recordings first, as `reset` does) |
 | `volume create NAME --size 20G [--dir PATH]` / `volume create NAME --folder PATH` / `volume list [--json]` / `volume resize NAME --size 40G` / `volume delete NAME [--yes]` | Disk volumes (kept outside the VM, read-write to one VM) and folder volumes (a Mac folder, read-only unless `:rw`), attached with `VOLUMES` |
 | `volume create NAME --s3 --bucket B --endpoint URL [--region R] [--prefix P]` / `volume keys NAME` / `volume test NAME` / `volume sync NAME [--force] [--resync]` | S3 volumes: a folder kept in step with a bucket; the keys (your own terminal, into the Keychain); a connection check; a sync now |
 | `refdisk create NAME --from FOLDER [--dir PATH]` / `refdisk list [--json]` / `refdisk delete NAME [--yes]` | Read-only reference disks packed from a Mac folder, attached with `REFDISKS` |
 | `baseline [--yes] [--discard-unsynced]` | Make the current VM the new baseline (the old one is kept as `-prev`). The VM's recordings are copied to the Mac and then removed from it, only once the copy is whole, as for `reset` |
-| `build [--replace]` | Build the VM and its baseline from scratch. Refuses, before anything is deleted, unless every other settings file reads cleanly and the identity rule holds for this VM (below); checked again once the downloads are done |
+| `build [--replace]` | Build the VM and its baseline from scratch. Refuses, before anything is deleted, unless every other settings file reads cleanly and the identity rule holds for this VM (below); checked again before and after the downloads |
 | `sh -c CMD \| --file SCRIPT \| - [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]` | Run bash in the VM as the desktop user, with the desktop's environment |
 | `claude [start] [--token NAME] [--ttl 1h] [--model M] [--skip-permissions] [--session NAME] [--cwd DIR] [--show] [--no-install] [-- CLAUDE_ARGS]` | Claude Code inside the VM, in tmux: installed if missing, signed in through the vault's proxy with a short-lived token for an api secret (`Authorization: Bearer` → `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key` → `ANTHROPIC_API_KEY`), first-run choices set ([guide](guide.md#claude-inside-the-metacomputer)) |
 | `claude send TEXT\|--file F\|- [--no-enter] [--wait] [--quiet S] [--timeout S]` / `claude read [--lines N\|--all]` / `claude wait` / `claude keys KEY...` / `claude show [--again]` / `claude status` / `claude renew [--ttl D]` / `claude stop [--revoke]` | Talk to it through tmux (a bracketed paste, then Enter), read its screen (escaped), wait for it to settle, answer its questions, put it on the VM's desktop, check it and its token, keep its token going (`secrets token renew`, asked like a new token), end it (and its token). Each takes `--session NAME`, `--json`, `--override` |
@@ -108,13 +108,14 @@ layered:
 
 A file in `config/vms/` is one VM's own (`vm create` writes it; `config/vms/` is
 never committed). Its `VM_NAME` is its file name, and it must set its own
-`SSH_PORT` and `VNC_PORT`. Its baseline is always `NAME-baseline`. What it doesn't set comes from
-its name, never from the main VM: `SSH_DIR` `~/.ssh/metacomputer-NAME`,
-`RUN_DIR` and `LOG_DIR` `.run-vms/NAME` and `logs-vms/NAME`, and the vault folder
-and spool below. `config/local.env` isn't read for it (`vm create` copies this
-Mac's choices into the file once). None of these is inside a folder of the main
-VM's (`.run`, `logs`, the account's vault folder) or of another VM's, so no VM's
-folder can be in another's (below).
+`SSH_PORT` and `VNC_PORT`. Its baseline is always `NAME-baseline`. Its folders are
+fixed by its name and can't be set in the file (one that sets `SSH_DIR`, `RUN_DIR`,
+`LOG_DIR`, `VAULT_DIR` or `EVENTS_SPOOL` is refused, saying why): `SSH_DIR`
+`~/.ssh/metacomputer-NAME`, `RUN_DIR` and `LOG_DIR` `.run-vms/NAME` and
+`logs-vms/NAME`, and the vault folder and spool below. `config/local.env` isn't read
+for it (`vm create` copies this Mac's choices into the file once). None of these is
+inside a folder of the main VM's (`.run`, `logs`, the account's vault folder) or of
+another VM's (below).
 
 | Key | Default | |
 | --- | --- | --- |
@@ -122,10 +123,10 @@ folder can be in another's (below).
 | `EVENTS_SPOOL` | the event stream's own spool, `~/Library/Application Support/metacomputer/events/spool`; for a `config/vms/` VM, `.../metacomputer-vms/NAME/events/spool` | Where this VM's vault drops events, and where its event watcher takes them from |
 
 `MCOMP_VAULT_DIR` and `MCOMP_EVENTS_SPOOL` in the environment still override these
-for every VM (they must be absolute); one that isn't the same folder as a file's own
-`VAULT_DIR` or `EVENTS_SPOOL` is refused. Both reach the vault as the folders they
-are, with links resolved. For a `config/vms/` VM they're checked like its own folders:
-never another VM's vault or spool.
+for the main VM and `MCOMP_CONFIG` VMs (they must be absolute); one that isn't the same
+folder as a file's own `VAULT_DIR` or `EVENTS_SPOOL` is refused. For a `config/vms/` VM
+they may only name its own folders. Both reach the vault as the folders they are, with
+links resolved.
 
 Refused rather than guessed (nothing runs):
 - `--vm NAME` with no settings for `NAME`, or with two (`config/local.env` and
@@ -134,15 +135,24 @@ Refused rather than guessed (nothing runs):
   VM's copy (`-baseline`, `-baseline-prev`, `-ckpt-`), sets another `BASELINE_NAME`, or
   shares a name, a port or a folder with the main VM or any other `config/vms/` VM;
 - the identity rule: no VM's folder (`SSH_DIR`, `RUN_DIR`, `LOG_DIR`, `VAULT_DIR`,
-  `EVENTS_SPOOL`) may be another VM's, be inside one or hold one, and none may be in
-  the runner's VM storage (`~/.lume`, and every storage location the runner or Lume's
-  settings list) or hold it. A `config/vms/` file that breaks it is refused when it's
-  read; `vm delete` and `build` check it for whichever VM they change, the main VM
-  included, before they delete anything. Folders are compared as the folders they are
-  (device and inode; links, `.` and `//` resolved; names that don't exist yet without
-  case), so another spelling of the main VM's keys or runtime folder is refused too.
-  The main VM and `MCOMP_CONFIG` VMs may still share the account's own vault folder
-  and spool, as before;
+  `EVENTS_SPOOL`) may be another VM's, be inside one or hold one, and none may be in,
+  or hold, a place where something deletes on its own: the runner's VM storage
+  (`~/.lume`, and every storage location the runner or Lume's settings list), the
+  checkout's `.cache` and `.claude/skills`, the storage state folder
+  (`~/.local/share/metacomputer/storage`) and the runner's install folder
+  (`~/.local/share/lume`). A `config/vms/` VM is refused when it's read if the rule
+  fails. `build`, `vm delete`, `reset`, `restore`, `checkpoint` (deleting or replacing
+  one) and `baseline` check it after taking the VM's lock, for whichever VM they change
+  (the main VM and `MCOMP_CONFIG` VMs included), before anything is deleted, replaced or
+  rotated, and name the file and folder at fault. Folders are compared as the folders
+  they physically are (every link at every level followed; device and inode; names that
+  don't exist yet without case), so a link anywhere, or another spelling, can't put one
+  inside another. When the runner's storage can't be known (no runner, `config get`
+  failing or listing none, a settings file of Lume's or a location that can't be read),
+  all of these refuse; the main VM's `start`, `stop` and `status` don't depend on it.
+  The main VM and `MCOMP_CONFIG` VMs may still share the account's own vault folder and
+  spool, as before. Folders you set in `config/local.env` or an `MCOMP_CONFIG` file are
+  trusted where nothing is deleted (SECURITY.md, "More than one VM");
 - in a checkout with no `config/local.env` and no `--vm`: any command that acts on a
   VM while `config/vms/` has files, or the runner has a VM besides the default one,
   or its list can't be read; and an `MCOMP_CONFIG` file that doesn't exist. `help`,

@@ -680,6 +680,8 @@ if a[:1] == ["ls"]:
     print(json.dumps([{{"name": v}} for v in shown])); sys.exit(0)
 if a[:1] == ["delete"]:
     sys.exit(0)
+if a[:2] == ["config", "get"]:                     # where it keeps VMs (build-vm.sh's identity check needs it)
+    print("Configured VM storage locations:\\n  - home: " + os.path.dirname(st) + "/vms (default)"); sys.exit(0)
 if a[:1] == ["create"]:
     sys.exit(1)                                     # the test stops each build here
 if a[:1] in (["stop"], ["get"]):

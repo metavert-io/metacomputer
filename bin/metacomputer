@@ -771,7 +771,7 @@ expect_guard() {
 
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
   local src="$1" label="$2" evtype="${3:-restored}"
-  vm_lock_or_die "restoring $VM_NAME"   # held already by its callers; never a delete without it
+  vm_lock_or_die "restoring $VM_NAME"   # held already by its callers (vm_change_lock: the identity rule checked)
   expect_guard
   if [ -s "$RUN_DIR/manual-recording" ]; then
     # A reset often follows a run that went wrong; the recording of it is saved before the VM goes, whether or
@@ -801,7 +801,7 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
 
 do_reset() {
   parse_flags "$@"
-  vm_lock_or_die "metacomputer reset"
+  vm_change_lock "metacomputer reset"
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
   owners_check
@@ -816,7 +816,7 @@ ckpt_name() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "checkpoint nam
 do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   parse_flags "$@"
   set -- ${REST[@]+"${REST[@]}"}
-  vm_lock_or_die "metacomputer checkpoint"
+  vm_change_lock "metacomputer checkpoint"
   if [ "${1:-}" = "--delete" ]; then
     ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     local vols; vols="$(storage_py checkpoint list "$2" 2>/dev/null)"
@@ -861,7 +861,7 @@ pre = sys.argv[1]; print("\n".join(sorted(v["name"][len(pre):] for v in json.loa
 do_restore() { # NAME [--yes] [--override]
   parse_flags "$@"
   local name="${REST[0]:-}"; ckpt_name "$name"
-  vm_lock_or_die "metacomputer restore $name"
+  vm_change_lock "metacomputer restore $name"
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
@@ -872,7 +872,7 @@ do_restore() { # NAME [--yes] [--override]
 
 do_baseline() {
   parse_flags "$@"
-  vm_lock_or_die "metacomputer baseline"
+  vm_change_lock "metacomputer baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   handoff_hold_unless_override

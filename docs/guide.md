@@ -921,11 +921,11 @@ metacomputer: VM staging (config/vms/staging.env), vault ~/Library/Application S
 ```
 
 Edit `config/vms/staging.env` like `config/local.env` (it's read on its own, after
-the defaults; `config/local.env` isn't read for it). Its folders are its own, beside
-the main VM's (`.run-vms/staging`, `logs-vms/staging`, `~/.ssh/metacomputer-staging`,
-`.../metacomputer-vms/staging`); a folder you set there may not be another VM's, be
-inside one or hold one, or be in the runner's VM storage (`~/.lume`), or the file is
-refused. `metacomputer vm list` shows
+the defaults; `config/local.env` isn't read for it). Its folders are fixed by its
+name, beside the main VM's (`.run-vms/staging`, `logs-vms/staging`,
+`~/.ssh/metacomputer-staging`, `.../metacomputer-vms/staging`), and can't be set in the
+file; if one of them is a link into another VM's folder or into the runner's VM storage
+(`~/.lume`), the file is refused. `metacomputer vm list` shows
 every VM with its state, disk use, ports and baseline, and the runner's other VMs.
 [commands.md](commands.md#more-than-one-vm) has the whole scheme.
 
@@ -953,7 +953,8 @@ Claude passes `--confirm` only for a VM you named for deletion. It never deletes
 another VM's VM, baseline or copies, or a folder that is or holds another VM's; it
 refuses while any other settings file can't be read cleanly or any VM's folder is in
 the runner's VM storage (whichever VM is deleted, with or without flags), and it
-checks everything again after you confirm ([SECURITY.md](../SECURITY.md#more-than-one-vm---vm-name-metacomputer-vm)).
+checks everything again after you confirm. `reset`, `restore`, `checkpoint` and
+`baseline` check the same before they delete or replace anything ([SECURITY.md](../SECURITY.md#more-than-one-vm---vm-name-metacomputer-vm)).
 
 The `metacomputer` MCP server drives the VM a bare `metacomputer` means. To give a
 Claude Code session the second VM instead, start it with `MCOMP_VM` set (for the

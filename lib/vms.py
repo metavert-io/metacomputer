@@ -32,7 +32,14 @@ PATH_KEYS = ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL")
 # give them their own (as before there was more than one VM): each such VM's folder, but not one they keep apart.
 SHARED_KEYS = ("SHARED_VAULT_DIR", "SHARED_EVENTS_SPOOL")
 FOLDER_KEYS = PATH_KEYS + SHARED_KEYS
-RUNNER = "@runner"           # the owner of the STORAGE records: where the runner keeps VMs (scripts/lib.sh)
+# Places no VM's folder may be in or hold, because something deletes inside them on its own (scripts/lib.sh
+# mc_identity_input sends them as "@NAME PATH value" records; "@runner ERROR reason" when its storage can't be read).
+# The inventory of every recursive delete, and which of these roots or which VM folder each one is in, is pinned by
+# tests/test_multi_vm.py (delete_inventory).
+PLACES = {"@runner": "the runner's VM storage", "@cache": "this checkout's .cache",
+          "@storage": "the storage state folder", "@skills": "this checkout's .claude/skills",
+          "@lume-app": "the runner's install folder"}
+RUNNER = "@runner"
 
 
 class Refused(Exception):
@@ -56,30 +63,54 @@ def absolute(path, home, what="a folder"):
     return "/" + "/".join(parts)
 
 
-def identity(path, home, what="a folder"):
-    """What the folder at path is, whatever spells it: (device, inode) of the path when it exists (links followed),
-    else of its nearest existing ancestor plus the rest of the path (compared without case, as macOS's volumes
-    compare names). Two spellings of one folder (a link, a firmlink, `x/.`, `x//y`) get the same identity."""
-    p = absolute(path, home, what)
-    parts = [c for c in p.split("/") if c]
-    rest = []
+def physical(path, home, what="a folder"):
+    """(identity, chain) of the folder path physically is. The part that exists is resolved with every link at every
+    level followed (realpath), then the part that doesn't exist yet is added. A folder's identity is (device, inode)
+    of its nearest existing folder plus the rest of the path (without case, as macOS's volumes compare names); its
+    chain holds the identities of it and of every folder physically above it, so B's identity is in A's chain exactly
+    when A is B or is inside it, however either is spelled (a link anywhere above, a firmlink, `x/.`, `..`, `//`).
+    Anything that can't be read (a folder it may not search, a loop of links) refuses: it isn't known."""
+    if not isinstance(path, str) or not path:
+        raise Refused(f"{what} is empty")
+    if path == "~" or path.startswith("~/"):
+        path = home + path[1:]
+    if not path.startswith("/"):
+        raise Refused(f"{what} must be an absolute folder, not {path!r}")
+    try:
+        parts = [c for c in os.path.realpath(path).split("/") if c]
+    except (OSError, ValueError) as e:
+        raise Refused(f"can't read {what} ({path}): {e}")
+    k = len(parts)
     while True:
         try:
-            st = os.stat("/" + "/".join(parts))
-            return (st.st_dev, st.st_ino, tuple(c.casefold() for c in rest))
+            st = os.stat("/" + "/".join(parts[:k]))
+            break
         except (FileNotFoundError, NotADirectoryError):
-            if not parts:
+            if k == 0:
                 raise Refused(f"can't read {what} ({path})")
-            rest.insert(0, parts.pop())
+            k -= 1
         except OSError as e:
             raise Refused(f"can't read {what} ({path}): {e.strerror}")
+    ids = []
+    for j in range(k + 1):
+        try:
+            sj = os.stat("/" + "/".join(parts[:j]))
+        except OSError as e:
+            raise Refused(f"can't read {what} ({path}): {e.strerror}")
+        ids.append((sj.st_dev, sj.st_ino, ()))
+    for j in range(k + 1, len(parts) + 1):
+        ids.append((st.st_dev, st.st_ino, tuple(c.casefold() for c in parts[k:j])))
+    return ids[-1], set(ids)
+
+
+def identity(path, home, what="a folder"):
+    """The folder's identity (physical): two spellings of one folder get the same one."""
+    return physical(path, home, what)[0]
 
 
 def chain(path, home, what="a folder"):
-    """The identities of path and of every folder above it: B's identity is in A's chain when A is B or is inside
-    it, however either is spelled (links and firmlinks in the part that exists, and in the part that doesn't yet)."""
-    parts = [c for c in absolute(path, home, what).split("/") if c]
-    return {identity("/" + "/".join(parts[:i]), home, what) for i in range(len(parts), -1, -1)}
+    """The identities of the folder and of every folder physically above it (physical)."""
+    return physical(path, home, what)[1]
 
 
 def canonical(path, home, what="a folder"):
@@ -128,8 +159,26 @@ def folders_of(ids, home, who):
     out = []
     for k in FOLDER_KEYS:
         for v in ids.get(k, []):
-            what = f"{who} {shown(k)}"
-            out.append((k, v, identity(v, home, what), chain(v, home, what)))
+            out.append((k, v, *physical(v, home, f"{who} {shown(k)}")))
+    return out
+
+
+def places_of(owners, home):
+    """The places no VM's folder may be in or hold ("@NAME PATH value" records), as (label, value, identity, chain).
+    Fails closed: the runner's storage must be listed, and every place must resolve."""
+    out = []
+    for owner, label in PLACES.items():
+        recs = owners.pop(owner, {})
+        for reason in recs.get("ERROR", []):
+            raise Refused(f"{label} can't be known ({reason}), so no VM's folder can be checked against it")
+        paths = [v for v in recs.get("PATH", [])]
+        if owner == RUNNER and not paths:
+            raise Refused(f"{label} isn't known (the runner listed no storage location), so no VM's folder can be "
+                          "checked against it")
+        for v in paths:
+            out.append((label, v, *physical(v, home, label)))
+    for owner in [o for o in owners if o.startswith("@")]:
+        raise Refused(f"unknown place {owner}")
     return out
 
 
@@ -148,31 +197,25 @@ def relation(a, b):
 def check_identity(owners, home, ports=True):
     """The identity rule, for one VM ("self") against every other: no name of one is a name or checkpoint of another,
     no port is shared (unless ports=False: deleting a VM ends a clash), no folder of its (SSH_DIR, RUN_DIR, LOG_DIR,
-    VAULT_DIR, EVENTS_SPOOL) is, is inside or holds another's, whatever spells them, and no VM's folder (its own or
-    another's) is in the runner's VM storage or holds it (the "@runner" STORAGE records). The account's shared vault
+    VAULT_DIR, EVENTS_SPOOL) is, is inside or holds another's, compared physically, and no VM's folder (its own or
+    another's) is in or holds a place in PLACES (the runner's VM storage and the other roots something deletes in on
+    its own); a place that can't be known refuses. The account's shared vault
     and spool (SHARED_*) may be shared by the VMs that use them, and nothing else. Another VM whose settings can't be
     read refuses: its folders aren't known. Returns self's vault folder and spool as their canonical paths."""
-    storage = [v for v in owners.pop(RUNNER, {}).get("STORAGE", []) if v]
+    places = places_of(owners, home)
     me = owners.pop("self", None)
     if not me:
         raise Refused("nothing to check")
     my_names, my_ckpt = names_of(me)
     my_ports = {p for k in ("SSH_PORT", "VNC_PORT") for p in me.get(k, []) if p} if ports else set()
     mine = folders_of(me, home, "its")
-    places = []
-    for v in storage:
-        try:
-            places.append(("STORAGE", v, identity(v, home, "the runner's VM storage"),
-                           chain(v, home, "the runner's VM storage")))
-        except Refused:
-            continue                          # not a place that could hold anything (lib.sh lists every candidate)
 
     def in_storage(f, who):
         for p in places:
             rel = relation(f, p)
             if rel:
-                raise Refused(f"{who} {shown(f[0])} ({f[1]}) {rel} the runner's VM storage ({p[1]}); no VM's folder "
-                              "may be in it or hold it (deleting a VM there deletes what's in its folder)")
+                raise Refused(f"{who} {shown(f[0])} ({f[1]}) {rel} {p[0]} ({p[1]}); no VM's folder may be in it or "
+                              "hold it (what's in it gets deleted on its own)")
     for f in mine:
         in_storage(f, "its")
     for owner, ids in owners.items():
@@ -528,7 +571,7 @@ def main(argv=None):
     if a.cmd == "all-known":
         # Every other settings file must read cleanly (mc_identity_records): one that can't is unknown, and nothing
         # that might be one of its folders may be deleted.
-        bad = [o for o, ids in read_records(sys.stdin).items() if ids.get("UNREADABLE")]
+        bad = [o for o, ids in read_records(sys.stdin).items() if ids.get("UNREADABLE") and not o.startswith("@")]
         if bad:
             print(", ".join(bad))
             return 1

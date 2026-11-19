@@ -10,6 +10,7 @@ settings or keys is read or touched.
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import subprocess
@@ -44,7 +45,10 @@ elif a[:1] == ["delete"]:
     save([v for v in load() if v["name"] != a[1]])
     shutil.rmtree(os.path.join(storage, a[1]), ignore_errors=True)    # as the runner does: the VM's whole folder
 elif a[:2] == ["config", "get"]:
-    print(f"Default VM storage: home ({storage})\n\nConfigured VM storage locations:\n  - home: {storage} (default)\n")
+    if os.environ.get("FAKE_CONFIG_FAIL"):
+        sys.exit(1)
+    shown = os.environ.get("FAKE_STORAGE_SPELLING") or storage      # the same place spelled another way (tests)
+    print(f"Default VM storage: home ({shown})\n\nConfigured VM storage locations:\n  - home: {shown} (default)\n")
 elif a[:1] == ["create"]:
     d = os.path.join(storage, a[1])
     os.makedirs(d)
@@ -213,7 +217,11 @@ def resolution(td):
         rc, s, err = b.resolve(MCOMP_CONFIG=legacy, MCOMP_VAULT_DIR="/tmp/mc-elsewhere")
         check("MCOMP_VAULT_DIR still overrides it (as the folder it is)", rc == 0 and s.get("VAULT") == os.path.realpath("/tmp") + "/mc-elsewhere", s)
         rc, s, err = b.resolve("demo", MCOMP_EVENTS_SPOOL="/tmp/mc-spool-x")
-        check("MCOMP_EVENTS_SPOOL overrides a per-VM spool the file doesn't set", rc == 0 and s.get("EVENTS_SPOOL") == os.path.realpath("/tmp") + "/mc-spool-x", s)
+        check("MCOMP_EVENTS_SPOOL naming another spool for a config/vms/ VM: refused (its folders are fixed by its name)",
+              rc == 1 and "isn't the spool of config/vms/demo.env" in err, err)
+        rc, s, err = b.resolve("demo", MCOMP_EVENTS_SPOOL=f"{app}/demo/events/spool", MCOMP_VAULT_DIR=f"{app}/demo")
+        check("...naming its own (as what it starts passes on): fine", rc == 0 and s.get("EVENTS_SPOOL") == f"{app}/demo/events/spool"
+              and s.get("VAULT") == f"{app}/demo", (err, s))
 
         # Refusals: never a guess.
         rc, s, err = b.resolve("nosuch")
@@ -241,18 +249,15 @@ def resolution(td):
         rc, s, err = b.resolve("mainvm")
         check("config/local.env and config/vms/ both for one VM: refused", rc == 1 and "both settings for the VM mainvm" in err, err)
         os.remove(os.path.join(co, "config/vms/mainvm.env"))
-        b.settings("config/vms/vaulted.env", "SSH_PORT=2406\nVNC_PORT=6106\nVAULT_DIR=/tmp/mc-own-vault\n")
-        rc, s, err = b.resolve("vaulted", MCOMP_VAULT_DIR="/tmp/mc-other-vault")
-        check("a file's own VAULT_DIR and a different MCOMP_VAULT_DIR: refused", rc == 1 and "name different vault folders" in err, err)
-        rc, s, err = b.resolve("vaulted")
-        check("...and the file's own VAULT_DIR without it: used", rc == 0 and s.get("VAULT") == os.path.realpath("/tmp") + "/mc-own-vault", s)
-        b.settings("config/vms/relvault.env", "SSH_PORT=2407\nVNC_PORT=6107\nVAULT_DIR=vault-here\n")
-        rc, s, err = b.resolve("relvault")
-        check("a VAULT_DIR that isn't absolute: refused", rc == 1 and "absolute folder" in err, err)
-        rc, s, err = b.resolve("demo")
-        check("...and while it's there, the VMs beside it too (its folder can't be checked against theirs)",
-              rc == 1 and "config/vms/relvault.env's folders aren't known" in err, err)
-        os.remove(os.path.join(co, "config/vms/relvault.env"))
+        for k in ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL"):
+            b.settings("config/vms/setsdir.env", f'SSH_PORT=2406\nVNC_PORT=6106\n{k}="/tmp/mc-own-{k.lower()}"\n')
+            rc, s, err = b.resolve("setsdir")
+            check(f"a config/vms/ file that sets {k}: refused, saying its folders are fixed by its name",
+                  rc == 1 and f"config/vms/setsdir.env sets {k}" in err and "fixed by its name" in err, err)
+        os.remove(os.path.join(co, "config/vms/setsdir.env"))
+        rc, s, err = b.resolve("demo", MCOMP_VAULT_DIR="/tmp/mc-other-vault")
+        check("MCOMP_VAULT_DIR naming another folder for a config/vms/ VM: refused", rc == 1
+              and "isn't the vault folder of config/vms/demo.env" in err, err)
 
         # The Python side reads the same file.
         sys.path.insert(0, os.path.join(co, "lib"))
@@ -421,10 +426,11 @@ def creating(td):
         text = open(f).read() if os.path.exists(f) else ""
         check("vm create --no-build: writes config/vms/side.env", r.returncode == 0 and text, r.stderr)
         check("...private (0600)", os.path.exists(f) and os.stat(f).st_mode & 0o777 == 0o600)
-        check("...with its own name, baseline, ports, keys, vault and spool",
+        check("...with its own name, baseline and ports, and no folder settings (fixed by its name, named in a comment)",
               all(x in text for x in ("VM_NAME=side", "BASELINE_NAME=side-baseline", "SSH_PORT=2433", "VNC_PORT=6133",
-                                      f"SSH_DIR='{b.home}/.ssh/metacomputer-side'", f"VAULT_DIR='{b.app}/side'",
-                                      f"EVENTS_SPOOL='{b.app}/side/events/spool'")), text)
+                                      "can't be set here", f"vault {b.app}/side"))
+              and not any(ln.startswith(k + "=") for ln in text.splitlines()
+                          for k in ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL")), text)
         check("...the Mac's choices copied (browsers, memory, hardening, runner)",
               "BROWSERS='firefox'" in text and "VM_MEMORY='4GB'" in text and "ACTION_LOG='on'" in text
               and 'LUME="$HOME/.local/bin/lume"' in text, text)
@@ -532,7 +538,7 @@ def deleting(td):
         b.settings("config/vms/demo.env", 'SSH_PORT=2401\nVNC_PORT=6101\nVOLUMES="work,cache:/mnt/c"\n')
         b.settings("config/vms/runs.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
         b.settings("config/vms/ckpt.env", "SSH_PORT=2403\nVNC_PORT=6103\n")
-        b.settings("config/vms/shared.env", 'SSH_PORT=2404\nVNC_PORT=6104\nVAULT_DIR="/tmp/mc-shared-vault-test"\nVOLUMES="work"\n')
+        b.settings("config/vms/shared.env", 'SSH_PORT=2404\nVNC_PORT=6104\nVOLUMES="work"\n')
         others = [vm("metacomputer"), vm("metacomputer-baseline"), vm("showcase", "running"), vm("showcase-baseline")]
         b.set_vms(others + [vm("demo"), vm("demo-baseline"), vm("demo-baseline-prev"), vm("runs", "running"), vm("runs-baseline"),
                             vm("ckpt"), vm("ckpt-ckpt-a"), vm("shared")])
@@ -560,9 +566,13 @@ def deleting(td):
         r = b.run("vm", "delete", "showcase", "--confirm", "showcase")
         check("a VM this checkout has no settings for: refused (it doesn't know its baseline)", r.returncode == 1
               and "no settings for a VM named showcase" in r.stderr and gone() == [], r.stderr)
-        r = b.run("vm", "delete", "shared", "--confirm", "shared", "--delete-vault")
-        check("--delete-vault for a vault that isn't the VM's own folder: refused before anything", r.returncode == 1
-              and "only a VM's own vault folder" in r.stderr and gone() == [], r.stderr)
+        legacy = os.path.join(b.root, "legacy-del.env")
+        write(legacy, f'VM_NAME=legacy\nBASELINE_NAME=legacy-baseline\nSSH_PORT=2391\nVNC_PORT=6091\nSSH_DIR="{b.root}/lg-ssh"\n'
+                      f'RUN_DIR="{b.root}/lg-run"\nLOG_DIR="{b.root}/lg-logs"\nVAULT_DIR="/tmp/mc-shared-vault-test"\n')
+        b.set_vms(json.load(open(b.state)) + [vm("legacy")])
+        r = b.run("vm", "delete", "legacy", "--confirm", "legacy", "--delete-vault", env=b.env(MCOMP_CONFIG=legacy))
+        check("--delete-vault for a vault that isn't the VM's own folder (an MCOMP_CONFIG VM's): refused before anything",
+              r.returncode == 1 and "only a VM's own vault folder" in r.stderr and gone() == [], r.stderr)
         r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-volumes")
         check("--delete-volumes when another VM attaches the same volume: refused before anything", r.returncode == 1
               and "shared: work" in r.stderr and gone() == [], r.stderr)
@@ -636,6 +646,16 @@ def release(p):
     p.wait()
 
 
+def link(path, target):
+    """path as a symbolic link to target (its folder made; whatever was at path removed)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.islink(path) or os.path.isfile(path):
+        os.remove(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+    os.symlink(target, path)
+
+
 def drop(path):
     """Remove a file the test made, if it's still there (the code before a fix may have deleted it already)."""
     try:
@@ -684,27 +704,34 @@ def audit_fixes(td):
         for f in ("demo", "metacomputer-baseline"):
             drop(os.path.join(co, f"config/vms/{f}.env"))
 
-        # 2. A per-VM file can't reach the main VM's folders (or another's) by another spelling of the same path.
+        # 2. A per-VM VM's folders are fixed by its name, and compared as the folders they physically are: one that
+        # is a link to the main VM's folder (or another VM's), however spelled, is refused.
         os.makedirs(os.path.join(home, ".ssh", "metacomputer"), exist_ok=True)
         os.makedirs(os.path.join(co, ".run"), exist_ok=True)
         os.symlink(os.path.join(co, ".run"), os.path.join(root, "runlink"))
-        for n, line, why in (("al1", 'SSH_DIR="$HOME/.ssh/metacomputer/."', "SSH_DIR with /. at the end"),
-                             ("al2", 'SSH_DIR="$HOME/.ssh//metacomputer"', "SSH_DIR with //"),
-                             ("al3", f'RUN_DIR="{root}/runlink"', "RUN_DIR through a link"),
-                             ("al4", f'LOG_DIR="{co}/.run"', "LOG_DIR that is the main RUN_DIR")):
-            b.settings(f"config/vms/{n}.env", f"SSH_PORT=24{n[-1]}0\nVNC_PORT=61{n[-1]}0\n{line}\n")
+        for n, path, target, why in (
+                ("al1", os.path.join(home, ".ssh", "metacomputer-al1"), os.path.join(home, ".ssh", "metacomputer") + "/.",
+                 "SSH_DIR, a link to the main SSH_DIR spelled with /."),
+                ("al2", os.path.join(home, ".ssh", "metacomputer-al2"), os.path.join(home, ".ssh") + "//metacomputer",
+                 "SSH_DIR, a link spelled with //"),
+                ("al3", os.path.join(co, ".run-vms", "al3"), os.path.join(root, "runlink"), "RUN_DIR, a link to a link"),
+                ("al4", os.path.join(co, "logs-vms", "al4"), os.path.join(co, ".run"), "LOG_DIR, a link to the main RUN_DIR")):
+            b.settings(f"config/vms/{n}.env", f"SSH_PORT=24{n[-1]}0\nVNC_PORT=61{n[-1]}0\n")
+            link(path, target)
             rc, s, err = b.resolve(n)
             check(f"a per-VM {why} (the main VM's folder): refused", rc == 1 and "is the same folder as the main VM" in err, err)
             drop(os.path.join(co, f"config/vms/{n}.env"))
-        os.makedirs(os.path.join(root, "shared-logs"))
-        os.symlink(os.path.join(root, "shared-logs"), os.path.join(root, "logs-alias"))
-        b.settings("config/vms/pa.env", f'SSH_PORT=2451\nVNC_PORT=6151\nLOG_DIR="{root}/shared-logs"\n')
-        b.settings("config/vms/pb.env", f'SSH_PORT=2452\nVNC_PORT=6152\nLOG_DIR="{root}/logs-alias"\n')
+            os.remove(path)
+        os.makedirs(os.path.join(co, "logs-vms", "pa"))
+        b.settings("config/vms/pa.env", 'SSH_PORT=2451\nVNC_PORT=6151\n')
+        b.settings("config/vms/pb.env", 'SSH_PORT=2452\nVNC_PORT=6152\n')
+        link(os.path.join(co, "logs-vms", "pb"), os.path.join(co, "logs-vms", "pa"))
         rc, s, err = b.resolve("pb")
         check("two per-VM files whose folders are one through a link: refused", rc == 1
               and "is the same folder as config/vms/pa.env's LOG_DIR" in err, err)
         for n in ("pa", "pb"):
             drop(os.path.join(co, f"config/vms/{n}.env"))
+        os.remove(os.path.join(co, "logs-vms", "pb"))
 
         # 3. Recursive deletion goes through no link and never takes another VM's folder.
         b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
@@ -730,26 +757,30 @@ def audit_fixes(td):
               and b.deletes() == [] and os.path.exists(os.path.join(root, "elsewhere2", "demo", "vault.json")), (r.stderr[-300:], b.deletes()))
         os.remove(os.path.join(appvms, "demo"))
         os.makedirs(os.path.join(appvms, "demo", "inner"))
-        b.settings("config/vms/nested.env", f'SSH_PORT=2461\nVNC_PORT=6161\nVAULT_DIR="{appvms}/demo/inner"\n')
+        b.settings("config/vms/nested.env", 'SSH_PORT=2461\nVNC_PORT=6161\n')
+        link(os.path.join(appvms, "nested"), os.path.join(appvms, "demo", "inner"))     # its vault, physically in demo's
         r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-vault")
         check("--delete-vault when another VM's vault is inside demo's: refused, both kept", r.returncode == 1
               and "holds config/vms/nested.env's VAULT_DIR" in r.stderr and b.deletes() == []
               and os.path.isdir(os.path.join(appvms, "demo", "inner")), (r.stderr[-300:], b.deletes()))
-        b.settings("config/vms/nested.env", f'SSH_PORT=2461\nVNC_PORT=6161\nVAULT_DIR="{appvms}/demo"\n')
+        link(os.path.join(appvms, "nested"), os.path.join(appvms, "demo"))
         rc, s, err = b.resolve("demo")
-        check("another VM whose VAULT_DIR is demo's own folder: demo refused (and so its delete)", rc == 1
+        check("another VM whose vault is (a link to) demo's own folder: demo refused (and so its delete)", rc == 1
               and "is the same folder as config/vms/nested.env's VAULT_DIR" in err, err)
         drop(os.path.join(co, "config/vms/nested.env"))
+        os.remove(os.path.join(appvms, "nested"))
 
         # P2: vault folders as the folders they are; the environment's absolute too.
         os.makedirs(os.path.join(root, "mainvault"))
         b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{root}/mainvault"\n')
         os.symlink(os.path.join(root, "mainvault"), os.path.join(root, "vaultlink"))
-        b.settings("config/vms/sym.env", f'SSH_PORT=2471\nVNC_PORT=6171\nVAULT_DIR="{root}/vaultlink"\n')
+        b.settings("config/vms/sym.env", 'SSH_PORT=2471\nVNC_PORT=6171\n')
+        link(os.path.join(b.app, "sym"), os.path.join(root, "vaultlink"))
         r = b.run("--vm", "sym", "secrets", "lock")
         check("a per-VM vault that is a link to the main VM's: refused (no client reaches the main vault)", r.returncode == 1
               and "VAULT_DIR" in r.stderr and "VAULT " not in r.stdout, (r.stdout, r.stderr[-300:]))
         drop(os.path.join(co, "config/vms/sym.env"))
+        os.remove(os.path.join(b.app, "sym"))
         b.settings("config/local.env", "VM_NAME=metacomputer\n")
         r = b.run("--vm", "demo", "secrets", "status", env=b.env(MCOMP_VAULT_DIR="relative/vault"))
         check("MCOMP_VAULT_DIR that isn't absolute: refused", r.returncode == 1 and "must be an absolute folder" in r.stderr
@@ -818,7 +849,8 @@ def recheck_fixes(td):
         os.makedirs(inner)
         write(os.path.join(inner, "vault.json"), "{}")
         # P1: a settings file refused for an unrelated reason still protects its folders (and names) from deletion.
-        b.settings("config/vms/other.env", f'SSH_PORT=2402\nVNC_PORT=not-a-port\nVAULT_DIR="{inner}"\n')
+        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=not-a-port\n')
+        link(os.path.join(b.app, "other"), inner)          # its (fixed) vault folder, physically inside demo's
         rc, s, err = b.resolve("other")
         check("(setup) the other VM's settings are refused, for its port", rc == 1 and "VNC_PORT" in err, err)
         b.set_vms(main + [vm("demo"), vm("demo-baseline")])
@@ -830,12 +862,13 @@ def recheck_fixes(td):
         os.makedirs(inner, exist_ok=True)
         write(os.path.join(inner, "vault.json"), "{}")
         b.set_vms(main + [vm("demo"), vm("demo-baseline")])
-        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=not-a-port\nVAULT_DIR="relative/vault"\n')
+        link(os.path.join(b.app, "other"), os.path.join(b.app, "other"))      # a loop: where it is can't be known
         r = b.run("vm", "delete", "demo", "--confirm", "demo", "--delete-vault")
-        check("...and when a refused file's folder can't be placed (not absolute): refused, nothing deleted", r.returncode == 1
-              and "must be an absolute folder" in r.stderr and os.path.exists(os.path.join(inner, "vault.json")) and b.deletes() == [],
+        check("...and when a refused file's folder can't be placed (a loop of links): refused, nothing deleted", r.returncode == 1
+              and "aren't known" in r.stderr and os.path.exists(os.path.join(inner, "vault.json")) and b.deletes() == [],
               (r.stderr[-300:], b.deletes()))
         drop(os.path.join(co, "config/vms/other.env"))
+        os.remove(os.path.join(b.app, "other"))
         b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
         b.set_vms(main + [vm("demo"), vm("demo-baseline")])
         b.settings("config/vms/zz.env", "VM_NAME=zz\nBASELINE_NAME=demo-baseline\nSSH_PORT=2403\nVNC_PORT=6103\n")
@@ -851,7 +884,7 @@ def recheck_fixes(td):
         b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{root}/mainvault"\n')
         r = b.run("--vm", "demo", "secrets", "lock", env=b.env(MCOMP_VAULT_DIR=os.path.join(root, "mainvault")))
         check("MCOMP_VAULT_DIR naming the main VM's vault for --vm demo: refused (no client reaches it)", r.returncode == 1
-              and "is the same folder as the main VM" in r.stderr and "VAULT " not in r.stdout, (r.stdout, r.stderr[-300:]))
+              and "isn't the vault folder of config/vms/demo.env" in r.stderr and "VAULT " not in r.stdout, (r.stdout, r.stderr[-300:]))
         b.settings("config/local.env", "VM_NAME=metacomputer\n")
 
         # P2: a delete refused after the prompt leaves what runs for the VM running.
@@ -969,7 +1002,9 @@ def recheck3_fixes(td):
                   and b.deletes() == [], (r.stderr[-300:], b.deletes()))
         finally:
             os.chmod(helper, 0o600)
-        r = b.run("vm", "delete", "metacomputer", "--confirm", "metacomputer", "--force", "--delete-vault")
+        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=6102\n')
+        link(os.path.join(b.app, "other"), inner)          # its vault, physically inside the main one
+        r = b.run("vm", "delete", "metacomputer", "--confirm", "metacomputer", "--force")
         check("...once that file reads cleanly (its vault is inside the main one): refused as holding another VM's folder",
               r.returncode == 1 and "holds config/vms/other.env's VAULT_DIR" in r.stderr and os.path.exists(os.path.join(inner, "vault.json")) and b.deletes() == [],
               (r.stderr[-300:], b.deletes()))
@@ -1019,9 +1054,11 @@ def final2_fixes(td):
         check("vms.py delete-check: a settings row whose names can't be read refuses (never its file name alone)",
               r.returncode == 1 and "can't be read" in r.stdout, (r.returncode, r.stdout))
 
-        # 2. The same file, readable: a vault in the runner's VM storage is refused when the file is loaded, and so is
-        # deleting the VM whose folder holds it.
+        # 2. The same VM, readable: a vault in the runner's VM storage (a link there) is refused when the file is loaded,
+        # and so is deleting the VM whose folder holds it.
         fresh()
+        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=6102\n')
+        link(os.path.join(b.app, "other"), caught)
         rc, s, err = b.resolve("other")
         check("a VAULT_DIR in the runner's VM storage: refused when loaded", rc == 1
               and "is inside the runner's VM storage" in err, err[-300:])
@@ -1030,31 +1067,40 @@ def final2_fixes(td):
               r.returncode == 1 and "config/vms/other.env's VAULT_DIR" in r.stderr and "runner's VM storage" in r.stderr
               and b.deletes() == [] and os.path.exists(os.path.join(caught, "vault.json")), (r.stderr[-300:], b.deletes()))
         drop(other)
+        os.remove(os.path.join(b.app, "other"))
 
-        # 3. No VM's folder is inside another's, or holds one, whatever spells it.
-        for n, line, want in (
-                ("in1", f'RUN_DIR="{co}/.run/inside"', "is inside the main VM (config/local.env)'s RUN_DIR"),
-                ("in2", f'LOG_DIR="{co}/logs/x"', "is inside the main VM (config/local.env)'s LOG_DIR"),
-                ("in3", f'RUN_DIR="{co}"', "holds the main VM (config/local.env)'s RUN_DIR"),
-                ("in4", 'SSH_DIR="$HOME/.ssh/metacomputer/inner"', "is inside the main VM (config/local.env)'s SSH_DIR")):
-            b.settings(f"config/vms/{n}.env", f"SSH_PORT=24{n[-1]}5\nVNC_PORT=61{n[-1]}5\n{line}\n")
+        # 3. No VM's folder is inside another's, or holds one, whatever spells it (links to anywhere in them).
+        hs = os.path.join(b.home, ".ssh")
+        for n, path, target, want in (
+                ("in1", os.path.join(co, ".run-vms", "in1"), os.path.join(co, ".run", "inside"),
+                 "is inside the main VM (config/local.env)'s RUN_DIR"),
+                ("in2", os.path.join(co, "logs-vms", "in2"), os.path.join(co, "logs", "x"),
+                 "is inside the main VM (config/local.env)'s LOG_DIR"),
+                ("in3", os.path.join(hs, "metacomputer-in3"), hs, "holds the main VM (config/local.env)'s SSH_DIR"),
+                ("in4", os.path.join(hs, "metacomputer-in4"), os.path.join(hs, "metacomputer", "inner"),
+                 "is inside the main VM (config/local.env)'s SSH_DIR")):
+            b.settings(f"config/vms/{n}.env", f"SSH_PORT=24{n[-1]}5\nVNC_PORT=61{n[-1]}5\n")
+            link(path, target)
             rc, s, err = b.resolve(n)
             check(f"a per-VM folder in or around the main VM's ({n}): refused", rc == 1 and want in err, err[-300:])
             drop(os.path.join(co, f"config/vms/{n}.env"))
-        os.makedirs(os.path.join(root, "pv"))
-        os.symlink(os.path.join(root, "pv"), os.path.join(root, "pvlink"))
-        b.settings("config/vms/pa.env", f'SSH_PORT=2451\nVNC_PORT=6151\nVAULT_DIR="{root}/pv"\n')
-        b.settings("config/vms/pb.env", f'SSH_PORT=2452\nVNC_PORT=6152\nVAULT_DIR="{root}/pvlink/inner"\n')
+            os.remove(path)
+        os.makedirs(os.path.join(b.app, "pa"), exist_ok=True)
+        b.settings("config/vms/pa.env", 'SSH_PORT=2451\nVNC_PORT=6151\n')
+        b.settings("config/vms/pb.env", 'SSH_PORT=2452\nVNC_PORT=6152\n')
+        link(os.path.join(b.app, "pb"), os.path.join(b.app, "pa", "inner"))
         rc, s, err = b.resolve("pb")
         check("a vault inside another VM's vault, through a link: refused", rc == 1
               and "is inside config/vms/pa.env's VAULT_DIR" in err, err[-300:])
         rc, s, err = b.resolve("pa")
         check("...and the VM whose vault holds it, too", rc == 1 and "holds config/vms/pb.env's VAULT_DIR" in err, err[-300:])
-        b.settings("config/vms/pa.env", f'SSH_PORT=2451\nVNC_PORT=6151\nLOG_DIR="{root}/new/a"\n')
-        b.settings("config/vms/pb.env", f'SSH_PORT=2452\nVNC_PORT=6152\nLOG_DIR="{root}/NEW/A/b"\n')
+        os.remove(os.path.join(b.app, "pb"))
+        os.makedirs(os.path.join(co, "logs-vms"), exist_ok=True)
+        link(os.path.join(co, "logs-vms", "pb"), os.path.join(co, "logs-vms", "PA", "b"))   # neither made yet
         rc, s, err = b.resolve("pb")
         check("...and folders not made yet, spelled in another case: refused", rc == 1
               and "is inside config/vms/pa.env's LOG_DIR" in err, err[-300:])
+        os.remove(os.path.join(co, "logs-vms", "pb"))
         for n in ("pa", "pb"):
             drop(os.path.join(co, f"config/vms/{n}.env"))
         b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
@@ -1082,7 +1128,8 @@ def final2_fixes(td):
             return subprocess.run(["/bin/bash", os.path.join(co, "scripts", "build-vm.sh")], env=b.env(**env),
                                   capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
 
-        b.settings("config/vms/other.env", f'SSH_PORT=2402\nVNC_PORT=6102\nVAULT_DIR="{seedvault}"\n')
+        link(os.path.join(b.app, "other"), seedvault)      # the other VM's (fixed) vault folder, physically in the seed
+        b.settings("config/vms/other.env", 'SSH_PORT=2402\nVNC_PORT=6102\n')
         r = build()
         out = r.stdout + r.stderr
         check("building the main VM when another VM's vault is in its RUN_DIR's seed folder: refused, the vault kept",
@@ -1099,15 +1146,309 @@ def final2_fixes(td):
             os.chmod(other, 0o600)
         drop(other)
         later = os.path.join(root, "later.env")
-        write(later, f'SSH_PORT=2402\nVNC_PORT=6102\nVAULT_DIR="{seedvault}"\n')
+        write(later, 'SSH_PORT=2402\nVNC_PORT=6102\n')
         r = build(STUB_TOOLS_COPY=f"{later}:{other}")
         out = r.stdout + r.stderr
         check("...or when that file appears while the tools are built: refused by the second check, before the seed",
               r.returncode != 0 and "holds config/vms/other.env's VAULT_DIR" in out and os.path.exists(os.path.join(seedvault, "vault.json"))
               and "create " not in open(b.log).read() and not os.path.exists(marker), out[-400:])
         drop(other)
+        os.remove(os.path.join(b.app, "other"))
     finally:
         b.close()
+
+
+def final3_fixes(td):
+    """The third final check's findings (on 695cfdd), each failing before its fix: a folder whose parent is a link
+    escaped the comparison (the alias probe); reset, restore, checkpoint and baseline deleted through the runner with no
+    check; the runner's storage was skipped when it couldn't be read or was spelled with ..; and .cache, where the
+    downloads clean up, was outside the rule."""
+    b = Box(td, "final3")
+    try:
+        co, root, store, hs = b.co, b.root, b.storage, os.path.join(b.home, ".ssh")
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        main = [vm("metacomputer"), vm("metacomputer-baseline"), vm("metacomputer-baseline-prev"),
+                vm("metacomputer-ckpt-one")]
+        other = b.settings("config/vms/other.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
+
+        # 1. The alias probe: another VM's SSH_DIR is a link to a folder in the main VM's RUN_DIR/seed. Compared as the
+        # folder it physically is, it's inside the main RUN_DIR: refused when loaded, and building the main VM (whose
+        # rm -rf of the seed would take those keys) is refused before anything is deleted.
+        write(os.path.join(co, "scripts", "build-tools.sh"), "#!/bin/bash\nexit 0\n", 0o755)
+        write(os.path.join(co, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)
+        write(os.path.join(co, "vendor", "bin", "qcow2raw"), '#!/bin/sh\n: > "$2"\n', 0o755)
+        keys = os.path.join(co, ".run", "seed", "keys")
+        os.makedirs(keys)
+        write(os.path.join(keys, "admin"), "not the seed's")
+        link(os.path.join(hs, "metacomputer-other"), keys)
+        rc, s, err = b.resolve("other")
+        check("the alias probe: a per-VM SSH_DIR that is a link into the main RUN_DIR's seed: refused when loaded",
+              rc == 1 and "is inside the main VM (config/local.env)'s RUN_DIR" in err, err[-300:])
+        b.set_vms([])
+        r = subprocess.run(["/bin/bash", os.path.join(co, "scripts", "build-vm.sh")], env=b.env(), capture_output=True,
+                           text=True, timeout=300, stdin=subprocess.DEVNULL)
+        out = r.stdout + r.stderr
+        check("...and building the main VM is refused before its seed is deleted (those keys kept)", r.returncode != 0
+              and "holds config/vms/other.env's SSH_DIR" in out and os.path.exists(os.path.join(keys, "admin"))
+              and "create " not in open(b.log).read(), out[-400:])
+        os.remove(os.path.join(hs, "metacomputer-other"))
+        shutil.rmtree(os.path.join(co, ".run", "seed"), ignore_errors=True)
+
+        # 2. Every command that deletes, replaces or rotates through the runner checks the rule after taking the VM's
+        # lock, the main VM and an MCOMP_CONFIG one too: another VM's vault (a link) in the runner's folder of the VM
+        # refuses reset, restore, checkpoint --delete, checkpoint --replace and baseline, deleting nothing.
+        caught = os.path.join(store, "metacomputer", "other-vault")
+        os.makedirs(caught, exist_ok=True)
+        write(os.path.join(caught, "vault.json"), "{}")
+        link(os.path.join(b.app, "other"), caught)
+        for args, what in ((["reset", "--yes"], "reset"), (["restore", "one", "--yes"], "restore"),
+                           (["checkpoint", "--delete", "one", "--yes"], "checkpoint --delete"),
+                           (["checkpoint", "one", "--replace"], "checkpoint --replace"), (["baseline", "--yes"], "baseline")):
+            b.set_vms(main)
+            r = b.run(*args)
+            check(f"the main VM's {what} with another VM's vault in the runner's storage: refused, naming it, nothing deleted",
+                  r.returncode != 0 and "config/vms/other.env's VAULT_DIR" in r.stderr and "the runner's VM storage" in r.stderr
+                  and b.deletes() == [] and os.path.exists(os.path.join(caught, "vault.json")), (r.stderr[-300:], b.deletes()))
+        legacy = os.path.join(root, "legacy.env")
+        write(legacy, f'VM_NAME=legacy\nBASELINE_NAME=legacy-baseline\nSSH_PORT=2391\nVNC_PORT=6091\nSSH_DIR="{root}/lg-ssh"\n'
+                      f'RUN_DIR="{root}/lg-run"\nLOG_DIR="{root}/lg-logs"\n')
+        b.set_vms([vm("legacy"), vm("legacy-baseline")])
+        r = b.run("reset", "--yes", env=b.env(MCOMP_CONFIG=legacy))
+        check("...and an MCOMP_CONFIG VM's reset: refused too, nothing deleted", r.returncode != 0
+              and "config/vms/other.env's VAULT_DIR" in r.stderr and b.deletes() == [], (r.stderr[-300:], b.deletes()))
+        os.remove(os.path.join(b.app, "other"))
+        b.set_vms(main)
+        r = b.run("checkpoint", "--delete", "one", "--yes")
+        check("(with nothing wrong, checkpoint --delete goes ahead)", r.returncode == 0 and b.deletes() == ["metacomputer-ckpt-one"],
+              (r.stderr[-300:], b.deletes()))
+
+        # 3. Fail closed: when the runner's storage can't be known, a per-VM VM, vm create, vm delete, build and the
+        # commands above refuse; the main VM's start, stop and status don't depend on it.
+        b.set_vms(main)
+        r = b.run("--vm", "other", "where", env=b.env(FAKE_CONFIG_FAIL="1"))
+        check("the runner's config get failing: a per-VM VM is refused (its storage isn't known)", r.returncode == 1
+              and "the runner's VM storage can't be known" in r.stderr, r.stderr[-300:])
+        r = b.run("vm", "create", "newone", "--no-build", env=b.env(FAKE_CONFIG_FAIL="1"))
+        check("...vm create too (and its file removed)", r.returncode == 1 and "can't be known" in r.stderr
+              and not os.path.exists(os.path.join(co, "config/vms/newone.env")), r.stderr[-300:])
+        b.set_vms(main[:2])                                # no checkpoint (that refuses first)
+        r = b.run("vm", "delete", "metacomputer", "--confirm", "metacomputer", "--force", env=b.env(FAKE_CONFIG_FAIL="1"))
+        check("...vm delete of the main VM too, nothing deleted", r.returncode == 1 and "can't be known" in r.stderr
+              and b.deletes() == [], (r.stderr[-300:], b.deletes()))
+        b.set_vms(main)
+        r = b.run("reset", "--yes", env=b.env(FAKE_CONFIG_FAIL="1"))
+        check("...and the main VM's reset", r.returncode != 0 and "can't be known" in r.stderr and b.deletes() == [], r.stderr[-300:])
+        b.set_vms(main)
+        r = b.run("stop", env=b.env(FAKE_CONFIG_FAIL="1"))
+        check("...but not the main VM's stop", r.returncode == 0 and "can't be known" not in r.stderr, r.stderr[-300:])
+        r = b.run("status", env=b.env(FAKE_CONFIG_FAIL="1"))
+        check("...or its status", "can't be known" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-300:])
+        os.makedirs(os.path.join(root, "sub"))
+        link(os.path.join(b.app, "other"), os.path.join(store, "x"))
+        r = b.run("--vm", "other", "where", env=b.env(FAKE_STORAGE_SPELLING=os.path.join(root, "sub", "..", "lume-vms")))
+        check("storage the runner spells with ..: resolved, not skipped (a vault in it refused)", r.returncode == 1
+              and "is inside the runner's VM storage" in r.stderr, r.stderr[-300:])
+        os.remove(os.path.join(b.app, "other"))
+        locked = os.path.join(root, "locked")
+        os.makedirs(os.path.join(locked, "vms"))
+        os.chmod(locked, 0)
+        try:
+            r = b.run("--vm", "other", "where", env=b.env(FAKE_STORAGE_SPELLING=os.path.join(locked, "vms")))
+            check("storage that can't be read (a folder it may not search): refused, not skipped", r.returncode == 1
+                  and "can't read the runner's VM storage" in r.stderr, r.stderr[-300:])
+        finally:
+            os.chmod(locked, 0o700)
+        cfg = os.path.join(b.home, ".config", "lume", "config.yaml")
+        write(cfg, 'vmLocations:\n  - name: "home"\n    path: "~/.lume"\n')
+        os.chmod(cfg, 0)
+        try:
+            r = b.run("--vm", "other", "where")
+            check("Lume's settings file there but unreadable: refused, not skipped", r.returncode == 1
+                  and "can't read" in r.stderr and "config.yaml" in r.stderr, r.stderr[-300:])
+        finally:
+            os.chmod(cfg, 0o600)
+            os.remove(cfg)
+
+        # 4. .cache (the downloads clean up there) is a place no VM's folder may be: a per-VM vault linked into it is
+        # refused when loaded, and building the main VM beside it is refused before the downloads run.
+        cachevault = os.path.join(co, ".cache", "rclone-v1", "x", "vault")
+        os.makedirs(cachevault)
+        link(os.path.join(b.app, "other"), cachevault)
+        rc, s, err = b.resolve("other")
+        check("a per-VM vault in .cache: refused when loaded", rc == 1 and "is inside this checkout's .cache" in err, err[-300:])
+        b.set_vms([])
+        r = subprocess.run(["/bin/bash", os.path.join(co, "scripts", "build-vm.sh")], env=b.env(), capture_output=True,
+                           text=True, timeout=300, stdin=subprocess.DEVNULL)
+        out = r.stdout + r.stderr
+        check("...and the main VM's build beside it, before the downloads", r.returncode != 0
+              and "config/vms/other.env's VAULT_DIR" in out and "this checkout's .cache" in out
+              and "create " not in open(b.log).read(), out[-400:])
+        os.remove(os.path.join(b.app, "other"))
+        b.settings("config/local.env", f'VM_NAME=metacomputer\nRUN_DIR="{co}/.cache/run"\n')
+        r = subprocess.run(["/bin/bash", os.path.join(co, "scripts", "build-vm.sh")], env=b.env(), capture_output=True,
+                           text=True, timeout=300, stdin=subprocess.DEVNULL)
+        out = r.stdout + r.stderr
+        check("...as is a main VM whose own RUN_DIR is in .cache (build refused, naming it)", r.returncode != 0
+              and "its RUN_DIR" in out and "this checkout's .cache" in out and "create " not in open(b.log).read(), out[-400:])
+    finally:
+        b.close()
+
+
+# Every recursive delete in bin/, scripts/, lib/ and install.sh (rm -r, rmtree, the runner's delete), with its root:
+#   runner        the runner's delete of a VM, baseline or checkpoint (its storage is a place; the command checks the rule)
+#   vm            one VM's own folder (RUN_DIR's seed, its runtime folder, its vault), covered by the rule
+#   @cache @storage @skills @lume-app   inside a place no VM's folder may be in or hold (lib/vms.py PLACES)
+#   fresh         a folder made new for this run (mktemp -d, mkdtemp, a random staging name), so nothing else is in it
+#   guest         runs inside the VM, not on the Mac
+#   text          not a delete: a hint printed for the user
+DELETE_INVENTORY = [
+    ("bin/metacomputer", 'if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force', "runner"),
+    ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$2" --force', "runner"),
+    ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die', "runner"),
+    ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null 2>&1', "runner"),
+    ("bin/metacomputer", 'vm_exists "$keep" && "$LUME" delete "$keep" --force', "runner"),
+    ("bin/metacomputer", '"$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null && "$LUME" delete "$BASELINE_NAME" --force', "runner"),
+    ("bin/metacomputer", "gssh ops 'rm -rf ~/metacomputer-runs/*'", "guest"),
+    ("bin/metacomputer", 'gssh ops "rm -rf -- \'$dir\'"', "guest"),
+    ("scripts/build-tools.sh", "trap 'rm -rf \"$tmp_src\"' EXIT", "fresh"),
+    ("scripts/build-vault.sh", "trap 'rm -rf \"$tmp\"' EXIT", "fresh"),
+    ("scripts/build-vm.sh", '"$LUME" delete "$vm" --force', "runner"),
+    ("scripts/build-vm.sh", 'SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"', "vm"),
+    ("scripts/build-vm.sh", 'rm -rf "$SEED/payload"', "vm"),
+    ("scripts/build-vm.sh", 'rm -rf "$SEED"', "vm"),
+    ("scripts/build-vm.sh", "gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'", "guest"),
+    ("scripts/fetch-artifacts.sh", "trap 'rm -rf \"$GNUPGHOME\"' EXIT", "fresh"),
+    ("scripts/fetch-artifacts.sh", 'rm -rf "$R/x"', "@cache"),
+    ("scripts/pin-gpg-key.sh", 'rm -rf "$home"', "fresh"),
+    ("scripts/release.sh", "trap 'rm -rf \"$TMP\"' EXIT", "fresh"),
+    ("scripts/vendor-driver-skill.py", "shutil.rmtree(stage, ignore_errors=True)", "@skills"),
+    ("scripts/vendor-driver-skill.py", "shutil.rmtree(DEST, ignore_errors=True)", "@skills"),
+    ("scripts/vendor-driver-skill.py", "shutil.rmtree(work, ignore_errors=True)", "fresh"),
+    ("scripts/vm-commands.sh", 'rm -rf "$tmp"', "fresh"),
+    ("scripts/vm-commands.sh", '"$LUME" delete "$v" --force', "runner"),
+    ("scripts/vm-commands.sh", 'storage_py volume delete "$v"', "@storage"),
+    ("scripts/vm-commands.sh", "vm_rmtree() {", "vm"),
+    ("scripts/vm-commands.sh", "delete those yourself with metacomputer volume delete NAME", "text"),
+    ("lib/guest_import.py", "shutil.rmtree(stage, ignore_errors=True)", "fresh"),
+    ("lib/guest_put.py", "shutil.rmtree(target)", "guest"),
+    ("lib/guest_put.py", "shutil.rmtree(tmp, ignore_errors=True)", "guest"),
+    ("lib/guest_put.py", 'remote(ssh, f"rm -rf -- {shlex.quote(tmp)}"', "guest"),
+    ("lib/harness.py", 'guest(f"rm -rf {self.guest_dir}', "guest"),
+    ("lib/learn.py", "shutil.rmtree(work, ignore_errors=True)", "fresh"),
+    ("lib/storage.py", "`metacomputer volume delete {name}` removes its keys", "text"),
+    ("lib/storage.py", "`metacomputer volume delete {name}` deletes the image", "text"),
+    ("lib/storage.py", "again after `volume delete {name}`", "text"),
+    ("lib/storage.py", "shutil.rmtree(d, ignore_errors=True)", "@storage"),
+    ("lib/storage.py", "shutil.rmtree(stage, ignore_errors=True)", "fresh"),
+    ("lib/storage.py", "and volume deletes that edit it, take turns", "text"),
+    ("lib/storage.py", "At volume delete: the staging folder", "text"),
+    ("lib/vm_claude_guest.sh", 'rm -rf "$work"', "guest"),
+    ("lib/vm_claude_guest.sh", 'rm -rf "$STATE"', "guest"),
+    ("lib/vm_shell_guest.py", "shutil.rmtree(p, ignore_errors=True)", "guest"),
+    ("lib/vm_shell_guest.py", "shutil.rmtree(d, ignore_errors=True)", "guest"),
+    ("lib/vms.py", "shutil.rmtree(leaf, dir_fd=fd)", "vm"),
+    ("install.sh", "rm -r $SSH_DIR; and last", "text"),
+    ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
+    ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),
+    ("install.sh", 'src="$ROOT/.cache/mcomp-vm"; rm -rf "$src"', "@cache"),
+    ("install.sh", "tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT", "fresh"),
+    ("install.sh", 'rm -rf "$HOME/.local/share/lume/lume.app"', "@lume-app"),
+]
+# What each root stands on, checked in the code: a place's root is listed, a fresh folder is made new, and so on.
+DELETE_ANCHORS = {
+    ("scripts/fetch-artifacts.sh", "@cache"): 'local R="$CACHE_DIR/rclone-v$RCLONE_VERSION"',
+    ("install.sh", "@cache"): 'src="$ROOT/.cache/mcomp-vm"',
+    ("lib/storage.py", "@storage"): 'return os.path.join(state_home(), "s3", name)',
+    ("scripts/vm-commands.sh", "@storage"): 'storage_py volume delete "$v"',
+    ("scripts/vendor-driver-skill.py", "@skills"): 'DEST = os.path.join(LAB, ".claude", "skills", "cua-driver")',
+    ("install.sh", "@lume-app"): '"$HOME/.local/share/lume/lume.app"',
+    ("scripts/build-tools.sh", "fresh"): 'tmp_src="$(mktemp -d',
+    ("scripts/build-vault.sh", "fresh"): 'tmp="$(mktemp -d)"',
+    ("scripts/fetch-artifacts.sh", "fresh"): 'GNUPGHOME="$(mktemp -d',
+    ("scripts/pin-gpg-key.sh", "fresh"): 'home="$(mktemp -d',
+    ("scripts/release.sh", "fresh"): 'TMP="$(mktemp -d',
+    ("scripts/vendor-driver-skill.py", "fresh"): "work = tempfile.mkdtemp(",
+    ("scripts/vm-commands.sh", "fresh"): 'tmp="$(mktemp -d',
+    ("lib/guest_import.py", "fresh"): "stage = tempfile.mkdtemp(",
+    ("lib/learn.py", "fresh"): "work = tempfile.mkdtemp(",
+    ("lib/storage.py", "fresh"): 'stage_name = f".{a.name}.staging-{uuid.uuid4().hex[:8]}"',
+    ("install.sh", "fresh"): 'tmp="$(mktemp -d)"',
+}
+DELETE_PAT = r'rm +-[a-zA-Z]*r[a-zA-Z]*\b|rmtree\(|removedirs\(|"\$LUME" delete|\$LUME delete|lume delete|volume delete'
+
+
+def shell_function(text, line_no):
+    """The name of the shell function a line (1-based) is in: the last NAME() { above it at the start of a line."""
+    name = None
+    for i, ln in enumerate(text.splitlines()[:line_no], 1):
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", ln)
+        if m:
+            name = m.group(1)
+    return name
+
+
+def delete_inventory(td):
+    """No recursive delete without a known root: every rm -r, rmtree, removedirs and runner delete in bin/, scripts/,
+    lib/ and install.sh is in DELETE_INVENTORY with its root, every entry is still there, every place is one the rule
+    checks (lib/vms.py PLACES, sent by scripts/lib.sh), and every runner delete runs after the identity rule."""
+    import re as _re
+    pat = _re.compile(DELETE_PAT)
+    files = ["install.sh"] + sorted(os.path.relpath(os.path.join(d, f), LAB) for top in ("bin", "scripts", "lib")
+                                    for d, _, fs in os.walk(os.path.join(LAB, top)) if "__pycache__" not in d for f in fs)
+    unknown, used, runner_lines = [], set(), []
+    for rel in files:
+        try:
+            text = open(os.path.join(LAB, rel)).read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for i, ln in enumerate(text.splitlines(), 1):
+            if not pat.search(ln):
+                continue
+            hits = [e for e in DELETE_INVENTORY if e[0] == rel and e[1] in ln]
+            if not hits:
+                unknown.append(f"{rel}:{i}: {ln.strip()[:120]}")
+            for e in hits:
+                used.add(e)
+                if e[2] == "runner":
+                    runner_lines.append((rel, i, text))
+    check("every recursive delete (rm -r, rmtree, the runner's delete) is in the inventory with its root", not unknown,
+          "\n".join(unknown))
+    stale = [e for e in DELETE_INVENTORY if e not in used]
+    check("...and every inventory entry is still in the code", not stale, stale)
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    try:
+        import vms
+    finally:
+        sys.path.pop(0)
+    lib = open(os.path.join(LAB, "scripts", "lib.sh")).read()
+    places = {e[2] for e in DELETE_INVENTORY if e[2].startswith("@")}
+    check("every place an inventory root is in is one the rule checks (lib/vms.py PLACES) and scripts/lib.sh sends",
+          all(pl in getattr(vms, "PLACES", {}) and f"{pl} PATH" in lib for pl in places),
+          (places, sorted(getattr(vms, "PLACES", {}))))
+    bad = [k for k, a in DELETE_ANCHORS.items() if a not in open(os.path.join(LAB, k[0])).read()]
+    check("...and each root stands where the inventory says (a place's folder, a folder made new)", not bad, bad)
+    checked = []
+    for rel, i, text in runner_lines:
+        fn = shell_function(text, i) if rel != "scripts/build-vm.sh" else None
+        if rel == "bin/metacomputer":
+            ok = fn in ("do_checkpoint", "do_baseline", "restore_from")
+            if fn == "restore_from":
+                callers = [shell_function(text, j) for j, ln in enumerate(text.splitlines(), 1)
+                           if _re.search(r"\brestore_from \"", ln)]
+                bodies = [_re.search(r"^%s\(\) \{.*?^\}$" % c, text, _re.S | _re.M).group(0) for c in callers]
+                ok = ok and set(callers) <= {"do_reset", "do_restore"} and all("vm_change_lock" in body for body in bodies)
+            elif ok:
+                ok = "vm_change_lock" in _re.search(r"^%s\(\) \{.*?^\}$" % fn, text, _re.S | _re.M).group(0)
+        elif rel == "scripts/vm-commands.sh":
+            plan = _re.search(r"^vm_delete_plan\(\) \{.*?^\}$", text, _re.S | _re.M).group(0)
+            ok = fn == "vm_delete" and "mc_identity_check --no-ports" in plan and "vm_other_identities" in plan
+        else:
+            lines = text.splitlines()
+            last_check = max(j for j, ln in enumerate(lines, 1) if ln.startswith("build_identity_check"))
+            ok = last_check < i
+        checked.append((rel, i, fn, ok))
+    check("every runner delete runs after the identity rule (vm_change_lock, vm delete's plan, build-vm.sh's check)",
+          checked and all(c[3] for c in checked), [c for c in checked if not c[3]])
 
 
 CLAUDE_STAND_IN = r'''import json, os, subprocess, sys
@@ -1231,6 +1572,8 @@ def main():
         recheck2_fixes(td)
         recheck3_fixes(td)
         final2_fixes(td)
+        final3_fixes(td)
+        delete_inventory(td)
         claude_flow(td)
         hub_pin(td)
     finally:

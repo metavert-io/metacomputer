@@ -168,10 +168,14 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
   whose names, ports or folders are another VM's; a settings-less checkout with other VMs in
-  the runner: `vm_target_check`). The identity rule (`mc_identity_check` -> `lib/vms.py identity`,
-  folders by device and inode): no VM's folder is another's, inside one or holding one, or in
-  the runner's VM storage; per-VM loads, every `vm delete` and `build-vm.sh` (before anything
-  is deleted) run it. Per-VM defaults (`mc_vm_default`) sit beside the main VM's folders;
+  the runner: `vm_target_check`). A per-VM file can't set its folders: they're fixed by its name
+  (`mc_vm_default`), beside the main VM's. The identity rule (`mc_identity_check` -> `lib/vms.py
+  identity`, folders compared physically: every link followed, then device and inode): no VM's
+  folder is another's, inside one or holding one, or in a place in `lib/vms.py PLACES` (the
+  runner's storage, `.cache`, ...); it fails closed when the runner's storage can't be read. Per-VM
+  loads, `vm delete`, `build-vm.sh` and every command that takes `vm_change_lock` (reset, restore,
+  checkpoint, baseline) run it before deleting anything. A new recursive delete (rm -r, rmtree,
+  the runner's delete) goes in `tests/test_multi_vm.py`'s DELETE_INVENTORY with its root;
   `lib/labconfig.py` must pick the same file. A hub pins the VM it started with
   (`pin_identity`: name, SSH port, host key) and refuses a reconnect to anything else.
   `vm delete` deletes folders only through `lib/vms.py rmtree` (no-link walk, never another

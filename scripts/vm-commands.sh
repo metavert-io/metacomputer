@@ -72,7 +72,7 @@ vm_list() { # [--json]
 vm_port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes]
-  local name="" ssh="" vnc="" build=1 a used p f vault spool rows k v def tmp rc
+  local name="" ssh="" vnc="" build=1 a used p f vault rows k v def tmp rc
   while [ $# -gt 0 ]; do
     case "$1" in
       --ssh-port) [ $# -ge 2 ] || die "--ssh-port needs a port"; ssh="$2"; shift ;;
@@ -146,7 +146,7 @@ print(" ".join(out))') "
     ssh="$p"; vnc="$((p + 3700))"
   fi
   [ "$ssh" != "$vnc" ] || die "--ssh-port and --vnc-port must differ"
-  vault="$(mc_vm_default VAULT_DIR "$name")"; spool="$(mc_vm_default EVENTS_SPOOL "$name")"
+  vault="$(mc_vm_default VAULT_DIR "$name")"
   [ $(( ${#vault} + 11 )) -le 103 ] || die "the vault's socket path would be too long for macOS ($vault/vault.sock); choose a shorter name"
   if [ "$build" = 1 ] && [ "${ASSUME_YES:-0}" != 1 ] && [ ! -t 0 ]; then
     die "building the VM needs your OK, and there's no terminal to ask on: add --yes (or --no-build to write only its settings)"
@@ -157,12 +157,11 @@ print(" ".join(out))') "
   {
     printf '%s\n' "# metacomputer settings for the VM $name, made by \`metacomputer vm create\` on $(date '+%Y-%m-%d')." \
       "# Used by: metacomputer --vm $name COMMAND (or MCOMP_VM=$name). Read after config/defaults.env, on its own:" \
-      "# config/local.env isn't read for this VM. Bash syntax. Its own names, ports, keys, folders and vault:" \
-      "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc"
-    vm_q SSH_DIR "$(mc_vm_default SSH_DIR "$name")"
-    vm_q VAULT_DIR "$vault"
-    vm_q EVENTS_SPOOL "$spool"
-    printf '%s\n' "# RUN_DIR and LOG_DIR: empty = .run-vms/$name and logs-vms/$name in this checkout."
+      "# config/local.env isn't read for this VM. Bash syntax. Its own names and ports:" \
+      "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc" \
+      "# Its folders are fixed by its name and can't be set here (SSH_DIR, RUN_DIR, LOG_DIR, VAULT_DIR, EVENTS_SPOOL):" \
+      "#   keys $(mc_tilde "$(mc_vm_default SSH_DIR "$name")"), runtime .run-vms/$name and logs logs-vms/$name in this checkout," \
+      "#   vault $(mc_tilde "$vault") (its event spool in it)."
     def="$( . "$LAB_ROOT/config/defaults.env"; for k in $VM_COPY_KEYS; do eval "printf '%s=%s\n' \"\$k\" \"\${$k:-}\""; done )"
     a=0
     for k in $VM_COPY_KEYS; do

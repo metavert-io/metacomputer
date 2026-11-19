@@ -58,6 +58,8 @@ def run(td):
                 "case \"$1\" in\n"
                 "  ls) echo '[{\"name\": \"fake-build-vm\"}, {\"name\": \"fake-build-vm-baseline\"}]' ;;\n"
                 "  get) echo '{\"status\": \"stopped\"}' ;;\n"
+                # Where it keeps VMs: build-vm.sh's identity check fails closed without it.
+                f"  config) printf 'Configured VM storage locations:\\n  - home: {td}/vms (default)\\n' ;;\n"
                 "  *) exit 0 ;;\n"
                 "esac\n")
     os.chmod(os.path.join(bindir, "lume"), 0o755)

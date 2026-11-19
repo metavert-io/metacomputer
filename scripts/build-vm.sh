@@ -44,7 +44,8 @@ esac
 # The identity rule, whichever VM this is (the main one too), before anything is deleted (the runner's VMs on
 # --replace, the seed under RUN_DIR): every other settings file of this checkout reads cleanly, no name or folder of
 # this VM's is another's, no folder of its is in another's or holds one, and no VM's folder is in the runner's VM
-# storage (scripts/lib.sh mc_identity_check). Checked here and again once the downloads are done.
+# storage or another place that gets deleted on its own (scripts/lib.sh mc_identity_check; it fails closed when the
+# runner's storage can't be known). Checked here, again before the downloads, and again before the first deletion.
 build_identity_check() { mc_identity_check --no-ports || die "not building $VM_NAME: $MC_REFUSAL. Nothing was deleted"; }
 build_identity_check
 # A listing that fails is never "absent": nothing is created or deleted on a guess.
@@ -56,8 +57,9 @@ for vm in "$VM_NAME" "$BASELINE_NAME"; do
 done
 command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
 "$(dirname "$0")/build-tools.sh"
+build_identity_check   # again before the downloads (fetch-artifacts.sh cleans up in .cache, a place no VM's folder is)
 "$(dirname "$0")/fetch-artifacts.sh"
-build_identity_check   # again: the settings files may have changed while the tools were built
+build_identity_check   # and before anything of the VM's is deleted: the settings may have changed meanwhile
 
 # The build goes ahead. Until it finishes, this marker says that $VM_NAME is a build in progress (install.sh
 # reads it: only then is a VM without its baseline an interrupted build, and even then it's replaced only on

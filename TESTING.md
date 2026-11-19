@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (176 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (205 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
@@ -156,6 +156,23 @@ runner's does.
   VM while another VM's vault is in its `RUN_DIR`'s seed folder, beside a file that can't be read,
   or when that file appears while the tools are built (each refused before anything is created or
   deleted, the vault kept; before, the seed folder went with it).
+- The third final check's findings (failing on 695cfdd): the alias probe (another VM's `SSH_DIR` a link
+  into the main `RUN_DIR`'s seed: refused when loaded, and the main VM's build refused before its seed is
+  deleted, the keys kept); the main VM's `reset`, `restore`, `checkpoint --delete`, `checkpoint --replace`
+  and `baseline`, and an `MCOMP_CONFIG` VM's `reset`, with another VM's vault in the runner's storage
+  (each refused, naming the file and folder, nothing deleted); the runner's `config get` failing (a per-VM
+  VM, `vm create`, `vm delete` and `reset` refused; the main VM's `stop` and `status` still work);
+  storage spelled with `..`, under a folder that can't be searched, and Lume's settings file unreadable
+  (refused, not skipped); a per-VM vault linked into `.cache`, and a main `RUN_DIR` in `.cache` (refused,
+  the build before its downloads); a `config/vms/` file setting any of its five folders, and
+  `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` naming another folder for one (refused). The older scenarios
+  that set a per-VM folder now make it a link instead (the folders are fixed), and are compared as the
+  folders they physically are.
+- The delete inventory: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
+  `lib/` and `install.sh` is in `DELETE_INVENTORY` with its root (the runner's storage, one VM's own
+  folder, a place in `lib/vms.py PLACES`, a folder made new for the run, the VM, or a printed hint); a new
+  one, or an entry no longer in the code, fails the test, every place is one the rule checks, and every
+  runner delete runs after the identity rule.
 - `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).

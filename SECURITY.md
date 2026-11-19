@@ -1247,34 +1247,49 @@ another VM:
   main VM's and every other `config/vms/` file's. Its name, baseline (always
   `NAME-baseline`), previous baseline and checkpoint names may not be another VM's. Its
   ports may not be another VM's.
-- **The identity rule: no VM's folder is in another's.** A VM's SSH keys, runtime, logs,
-  vault and spool folders may not be another VM's folder, be inside one, or hold one, and
-  no VM's folder may be in the runner's VM storage (`~/.lume` and every storage location
-  the runner or Lume's settings list) or hold it, since deleting a VM there deletes its
-  whole folder. Folders are compared as the folders they are (device and inode, with
-  links, `.` and `//` resolved; the part that doesn't exist yet without case), so a link
-  or another spelling can't reach the main VM's keys, gateway or vault. A `config/vms/`
-  VM's own folders (its defaults: `.run-vms/NAME`, `logs-vms/NAME`,
-  `~/.ssh/metacomputer-NAME`, `.../metacomputer-vms/NAME`) sit beside the main VM's,
-  never in them. A `config/vms/` file that breaks the rule is refused when it's read, and
-  every `config/vms/` VM is refused while the main VM's settings break it, so no VM can run
-  with a vault nested in another VM's folder. The main VM's own commands read only its own
-  file (as before there was more than one VM), so `vm delete` and `build`, the commands
-  that delete folders or VMs, check the rule again for whichever VM they change (the main
-  one too) before they delete anything, against every settings file as it reads then. The
-  one sharing allowed is the old one: the main
-  VM and `MCOMP_CONFIG` VMs may share the account's own vault folder and spool. Anything
-  that clashes is refused, and nothing runs.
+- **A `config/vms/` VM's folders are fixed by its name.** Its SSH keys
+  (`~/.ssh/metacomputer-NAME`), runtime and logs (`.run-vms/NAME`, `logs-vms/NAME` in the
+  checkout), vault and spool (`.../metacomputer-vms/NAME`) sit beside the main VM's, never in
+  them. Its file may not set `SSH_DIR`, `RUN_DIR`, `LOG_DIR`, `VAULT_DIR` or `EVENTS_SPOOL`
+  (one that does is refused, saying why), and `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` may
+  only name its own folders. Fewer settings: none can put one VM's folder in another's.
+- **The identity rule: no VM's folder is in another's, or where things get deleted.** A
+  VM's SSH keys, runtime, logs, vault and spool folders may not be another VM's folder, be
+  inside one, or hold one, and no VM's folder may be in, or hold, a place where something
+  deletes on its own: the runner's VM storage (`~/.lume` and every storage location the
+  runner or Lume's settings list; deleting a VM there deletes its whole folder), the
+  checkout's `.cache` and `.claude/skills`, the storage state folder and the runner's
+  install folder. Every recursive delete in the code is inventoried with its root (one VM's
+  own folder, one of those places, a folder made new for the run, or the VM's own disk), and
+  a test fails when a new one appears. Folders are compared as the folders they physically
+  are: every link at every level is followed (so a folder whose parent is a link counts as
+  where it really is), then device and inode, with the part that doesn't exist yet compared
+  without case. When the runner's storage can't be known (no runner, `config get` failing or
+  listing none, a settings file of Lume's that can't be read, a location that can't be
+  read), the check refuses rather than skip it.
+- **Where the rule is checked.** A `config/vms/` VM's settings are refused when they're read
+  if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it.
+  Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks
+  it after taking the VM's lock and before anything is deleted, for whichever VM it is,
+  the main one and an `MCOMP_CONFIG` one included: `build`, `vm delete`, `reset`, `restore`,
+  `checkpoint` (deleting or replacing one) and `baseline`. A refusal names the settings file
+  and the folder at fault. The one sharing allowed is the old one: the main VM and
+  `MCOMP_CONFIG` VMs may share the account's own vault folder and spool.
+- **The documented limit: your own settings are trusted where nothing is deleted.** Folders
+  you set yourself in `config/local.env` or an `MCOMP_CONFIG` file are used as they are by
+  `start`, `stop`, `status` and the other commands that delete nothing, as before there was
+  more than one VM; they aren't checked against the rule there, and a runner that can't be
+  read doesn't stop them. Every command above that deletes something checks them first.
 - **Every settings file is read one strict way:** it must be readable, parse, and
   say nothing on stderr while it's read (a file it sources but can't read counts). One that
   isn't is never taken for the defaults: the command refuses, and so does a per-VM command,
-  a `vm delete` or a `build` while another VM's file can't be read (it can't be checked
-  against a guess).
+  and every command that deletes, replaces or rotates a VM (above), while another VM's file
+  can't be read (it can't be checked against a guess).
 - **A command only goes ahead when it's clear which VM is meant.** A checkout with no
   `config/local.env` and no `--vm` refuses to act on a VM while the runner has others, and
   so does an `MCOMP_CONFIG` file that's gone. Vault folders reach the vault as the folders
-  they are, and `MCOMP_VAULT_DIR` must be absolute; for a `config/vms/` VM it's checked
-  like the file's own folder, so it can't be another VM's vault either.
+  they are, and `MCOMP_VAULT_DIR` must be absolute; for a `config/vms/` VM it must be that
+  VM's own vault folder, so it can't be another VM's vault either.
 - **A hub serves the VM it started with, and only it.** It pins that VM's name, SSH port and
   host key, and every command it runs (its connection to the driver, `input-reset`) carries
   them. If its settings file goes away, or comes to name another VM, port or host key,
@@ -1286,7 +1301,7 @@ another VM:
   - Every delete, with or without flags and whichever VM it is (the main one and an
     `MCOMP_CONFIG` one included), first requires every other settings file to read cleanly
     and the identity rule to hold, before anything is stopped or deleted (the runner's
-    delete of the VM's folder included).
+    delete of the VM's folder included), and again after you confirm.
   - It refuses a set of names that touches any other VM's VM, baseline, previous baseline
     or checkpoints, and a baseline not named `NAME-baseline`. A settings file that's refused
     for any reason still counts, by the names, folders and volumes it says; one whose names
@@ -1295,8 +1310,9 @@ another VM:
     folder of this account's that neither is nor holds another VM's folder, your home or
     the checkout. `--delete-vault` deletes only the VM's own folder under
     `.../metacomputer-vms/`. When another settings file's folders can't be known (one it
-    can't read, one that reads a file it can't, or one that isn't an absolute path), nothing
-    is deleted, and `--delete-volumes` refuses while any file's volumes are unknown.
+    can't read, one that reads a file it can't, one that isn't an absolute path or can't be
+    resolved), nothing is deleted, and `--delete-volumes` refuses while any file's volumes are
+    unknown.
   - After you confirm, it holds the VM's owners lock (so no session can claim it), checks
     everything again, and refuses if anything changed. Only then does it stop what runs for
     the VM (its event watcher, its hub), so a refusal leaves a session that started meanwhile
