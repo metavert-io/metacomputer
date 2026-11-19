@@ -743,6 +743,20 @@ def fill_checks():
                        text=True, timeout=60)
     check("...while an approval the list shows as another kind (answering a fill on its way) goes straight to the vault",
           any(y.startswith("start approve --json 5e6f7a8b") for y in lines()), (x.returncode, x.stderr[-200:], lines()))
+    # The commands that act on a one-time code request name this VM (whose handoff they checked) to the vault, which
+    # refuses another VM's request; an approve naming another VM is refused here.
+    clear()
+    got = {}
+    for args, stdin in ((["give", "1a2b3c4d"], "123456\n"), (["fill", "--request", "1a2b3c4d"], ""), (["approve", "1a2b3c4d"], "")):
+        open(log, "w").close()
+        subprocess.run([mc, "secrets"] + args, env=dict(e, STUB_REQUESTS=code_req), input=stdin, capture_output=True, text=True, timeout=60)
+        got[args[0]] = [y for y in lines() if y.startswith("start " + args[0])]
+    open(log, "w").close()
+    x = subprocess.run([mc, "secrets", "approve", "1a2b3c4d", "--vm", "othervm"], env=dict(e, STUB_REQUESTS=code_req), capture_output=True,
+                       text=True, timeout=60)
+    check("give, fill --request and approve of a code request pass this VM (--vm fltest) to the vault; approve naming another "
+          "VM is refused before the vault", all(v and v[-1].endswith("--vm fltest") for v in got.values())
+          and x.returncode != 0 and "acts on this VM (fltest)" in x.stderr and not lines(), (got, x.returncode, x.stderr[-200:], lines()))
     clear()
 
     # The vault withdrew the request but its unlock process didn't confirm it stopped (exit 5): the wrapper keeps the

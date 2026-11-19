@@ -246,6 +246,16 @@ class FakeChrome:
         fid_of = {v: k for k, v in ctx_of.items()}
         if method in ("Fetch.enable", "Fetch.disable"):
             page["fetch"] = method == "Fetch.enable"
+            if method == "Fetch.disable" and page.get("nav"):
+                # As Chromium's interceptor does when it's torn down: what's still paused goes on.
+                nav, page["nav"] = page["nav"], None
+                page.setdefault("visited", []).append(nav["hops"][nav["i"]])
+                self.commit(page, nav["hops"][nav["i"]])
+            return {}
+        if method == "Page.stopLoading":
+            page["stopped_loading"] = True
+            if page.get("nav"):
+                page["nav"] = None           # the paused navigation is cancelled
             return {}
         if method == "Page.navigate":
             # An opened link (secret-fill's open mode). The hops: the link's site, then each server redirect (hops=[...],
@@ -288,6 +298,12 @@ class FakeChrome:
             return {}
         if method == "Page.getFrameTree":
             page["tree_calls"] = page.get("tree_calls", 0) + 1
+            if "after_nav" in page and page.get("tree_error_at") and page["after_nav"] + 1 == page["tree_error_at"] and page.get("fetch"):
+                # A protocol error while it watches, with a move to another site paused right behind the error's answer.
+                page["after_nav"] += 1
+                page["nav"] = {"id": None, "hops": [page["tree_error_to"]], "i": 0}
+                self.pause(page)
+                raise LookupError("Internal error while reading the frame tree")
             if "after_nav" in page:
                 page["after_nav"] += 1
                 # The page's own script moves it on, a few tree reads (a quarter second each) after it loaded.
@@ -509,6 +525,12 @@ def fake_suite(td):
     scenario("open: a page that moves two seconds after it loads (long after it looked settled) is stopped too",
              [page(redirect_later=EVIL, later_at=9)], opn,
              lambda r, c: r.get("ok") is False and "stopped" in r.get("reason", "") and "evil" not in json.dumps(r), extra=lw)
+    scenario("open: an error while it watches, with a move to another site paused behind it: the paused request is "
+             "refused and loading stopped before the interception ends (the tab never visits it), and it's a failure",
+             [page(tree_error_at=2, tree_error_to=EVIL)], opn,
+             lambda r, c: r.get("ok") is False and "couldn't be watched to the end" in r.get("reason", "")
+             and EVIL not in c.pages[0].get("visited", []) and c.pages[0].get("stopped_loading") is True and "evil" not in json.dumps(r),
+             extra=lw)
     scenario("open: a navigation that never commits isn't reported as opened", [page(no_commit=True)], opn,
              lambda r, c: r.get("ok") is False and "didn't settle" in r.get("reason", ""), extra=lw)
     scenario("open: a link whose own site isn't the one the vault named is refused before anything is opened", [page()],

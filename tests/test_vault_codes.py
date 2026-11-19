@@ -26,6 +26,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 
@@ -400,12 +401,15 @@ def offline_checks(td):
     w = open(os.path.join(LAB, "bin", "metacomputer")).read()
     check("bin/metacomputer passes INTERACTIVE_PROMPTS to the vault (read at unlock), off when unset",
           'export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"' in w)
+    check("bin/metacomputer: give and fill --request name this VM to the vault (the VM whose handoff they checked)",
+          '[ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"' in w and '[ "$sub" = give ] || set --' not in w)
     check("bin/metacomputer: code, relay and give wait for an open handoff like fills (handoff_hold)",
           re.search(r'\[ "\$sub" = code \] \|\| \[ "\$sub" = relay \] \|\| \[ "\$sub" = give \]', w) is not None
           and "fill|login|session|token|code|relay|give)" in w)
-    check("bin/metacomputer: approving a waiting code request (which then fills) waits for an open handoff, and runs like a "
-          "fill: an in-flight marker, and `settle` when it ends unconfirmed",
-          re.search(r'approve\)\n.*?handoff_hold\n\s+secrets_run_acting secrets_approve_code "\$RUN_DIR/owners/vault-inflight\.\$\$" approve "\$@"', w, re.S)
+    check("bin/metacomputer: approving a waiting code request (which then fills) waits for this VM's open handoff, names this "
+          "VM to the vault, and runs like a fill: an in-flight marker, and `settle` when it ends unconfirmed",
+          re.search(r'approve\)\n.*?secrets_vm_is_this "\$@" \|\| die [^\n]*\n\s+handoff_hold\n\s+\[ "\$has_vm" = 1 \] \|\| set -- "\$@" --vm "\$VM_NAME"\n'
+                    r'\s+secrets_run_acting secrets_approve_code "\$RUN_DIR/owners/vault-inflight\.\$\$" approve "\$@"', w, re.S)
           is not None and re.search(r'secrets_run_acting\(\) \{.*?0\|1\|2\|3\|4\|6\|7\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle', w, re.S)
           is not None)
     d = open(os.path.join(LAB, "config", "defaults.env")).read()
@@ -565,6 +569,10 @@ def run(td, procs):
                    "--fill-user", "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua", "--gateway", my_exe],
                   [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
     check("bind the stand-in VM", rc == 0, out)
+    rc, out = tty([BIN, "bind", "cvm2", "--port", str(port), "--host-key-line", hostkey, "--fill-key", sshdir + "/fill",
+                   "--fill-user", "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua", "--gateway", my_exe],
+                  [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    check("bind a second VM to the same vault (as MCOMP_CONFIG VMs may share one)", rc == 0, out)
 
     # --- 1. stdin only, never argv or the environment ----------------------------------------------------------
     r = client("give", "0badc0de", CODE)
@@ -598,7 +606,7 @@ def run(td, procs):
           len(ev) == 1 and ev[0].get("family") == "needs_you" and ev[0]["data"].get("request_id") == rid and ev[0]["data"].get("site") == SITE
           and ev[0]["data"].get("kind") == "code" and "X sign-in" in ev[0]["data"].get("why", ""), ev)
     check("without INTERACTIVE_PROMPTS=on no dialog is shown (the osascript stand-in wasn't run)", not os.path.exists(os.path.join(osadir, "calls.jsonl")))
-    r = client("give", rid, "--json", stdin="482 913\n")
+    r = client("give", rid, "--vm", "cvm", "--json", stdin="482 913\n")
     g = js(r.stdout)
     check("give from a pipe (no terminal) with no rule: exit 7 (needs approval) at once, naming the one command",
           r.returncode == 7 and g.get("status") == "needs_approval" and g.get("approve") == f"metacomputer secrets approve {rid}"
@@ -606,7 +614,7 @@ def run(td, procs):
     check("...nothing was filled yet", not [c for c in calls()[n0:] if c.get("mode") == "fill"])
     q = state(rid) or {}
     check("...requests shows it waiting for approval", q.get("needs_approval") is True and q.get("state") == "given", q)
-    r = client("approve", rid, extra={})
+    r = client("approve", rid, "--vm", "cvm", extra={})
     check("approve ID with no Touch ID stand-in in the unlock: not approved (a test build never shows the dialog)", r.returncode != 0, r.stdout[-200:] + r.stderr[-200:])
     lock(u)
 
@@ -615,9 +623,9 @@ def run(td, procs):
     n1 = len(calls())
     r = client("ask", "--vm", "cvm", "--site", SITE, "--kind", "code", "--why", "X code", "--into", SITE + "/#otp", "--json")
     rid = js(r.stdout).get("request_id")
-    r = client("give", rid, "--json", stdin=CODE + "\n")
+    r = client("give", rid, "--vm", "cvm", "--json", stdin=CODE + "\n")
     check("give from a pipe again: needs approval", r.returncode == 7, r.stdout[-200:])
-    r = client("approve", rid, "--json")
+    r = client("approve", rid, "--vm", "cvm", "--json")
     ap = js(r.stdout)
     fills = [c for c in calls()[n1:] if c.get("mode") == "fill"]
     check("approve ID (Touch ID stand-in) fills it: the fill account got exactly the request's site and field, the value only on stdin",
@@ -626,7 +634,7 @@ def run(td, procs):
           and not any(CODE in x for x in fills[0]["argv"]) and CODE not in r.stdout + r.stderr,
           (r.stdout[-300:], [(json.loads(f["stdin"]).get("origins"), json.loads(f["stdin"]).get("selector"), json.loads(f["stdin"]).get("value") == CODE,
                               [x for x in f["argv"] if CODE in x]) for f in fills]))
-    r = client("give", rid, "--json", stdin=CODE2 + "\n")
+    r = client("give", rid, "--vm", "cvm", "--json", stdin=CODE2 + "\n")
     check("single use: a second give for a filled request is refused", r.returncode in (2, 6) and len([c for c in calls()[n1:] if c.get("mode") == "fill"]) == 1, r.stdout[-200:])
     recs = audit_recs()
     ops = [x.get("op") for x in recs if x.get("request_id") == rid]
@@ -637,7 +645,7 @@ def run(td, procs):
     r = client("ask", "--vm", "cvm", "--site", SITE, "--kind", "code", "--why", "short", "--ttl", "2s", "--json")
     rid2 = js(r.stdout).get("request_id")
     time.sleep(3.2)
-    r = client("give", rid2, "--json", stdin=CODE + "\n")
+    r = client("give", rid2, "--vm", "cvm", "--json", stdin=CODE + "\n")
     check("a request expires on its own: give after its time gives exit 6 (expired)", r.returncode == 6, (r.returncode, r.stdout[-200:]))
     check("...recorded as code_expire", any(x.get("op") == "code_expire" and x.get("request_id") == rid2 for x in audit_recs()))
     r = client("ask", "--vm", "cvm", "--site", SITE, "--kind", "code", "--why", "wait", "--ttl", "2s", "--wait", "10s", "--json")
@@ -897,6 +905,68 @@ def run(td, procs):
     slow.communicate(timeout=60)
     check("a waiting request expires (its value wiped) on time while an unrelated step in the VM runs, not when it ends",
           r.returncode == 7 and during and expired_during, (r.returncode, during, expired_during))
+    # A command run for one VM (whose handoff its wrapper checked) can't act on another VM's request.
+    clear_flags()
+    sflag("deny-check-next")
+    r = client("code", "--vm", "cvm2", "--site", SITE, "--into", SITE + "/#otp", "--json", stdin=CODE + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    n8 = len(calls())
+    r1 = client("fill", "--request", rid, "--vm", "cvm")
+    r1b = client("fill", "--request", rid)
+    check("fill --request for another VM's request is refused (it names that VM), and with no VM named too; nothing is sent",
+          js(r.stdout).get("state") == "given" and r1.returncode == 2 and "is for VM cvm2, not cvm" in r1.stdout
+          and r1b.returncode == 2 and "named no VM" in r1b.stdout and not value_calls(n8, CODE), (r.stdout[-200:], r1.stdout[-300:], r1b.stdout[-200:]))
+    r2 = client("fill", "--request", rid, "--vm", "cvm2")
+    check("...run for the request's own VM, it fills", r2.returncode == 0 and len(value_calls(n8, CODE)) == 1, r2.stdout[-300:])
+    r = client("ask", "--vm", "cvm2", "--site", SITE2, "--kind", "code", "--why", "the other VM", "--json")
+    rid = js(r.stdout).get("request_id", "00000000")
+    r1 = client("give", rid, "--vm", "cvm", stdin=CODE2 + "\n")
+    check("give for another VM's request is refused, and the request still waits for its value",
+          r1.returncode == 2 and "is for VM cvm2, not cvm" in r1.stdout + r1.stderr and (state(rid) or {}).get("state") == "pending",
+          (r1.returncode, r1.stdout[-200:], r1.stderr[-200:]))
+    client("deny", rid)
+    r = client("code", "--vm", "cvm2", "--site", SITE2, "--into", SITE2 + "/#otp", "--json", stdin=CODE2 + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    n8 = len(calls())
+    r1 = client("approve", rid, "--vm", "cvm")
+    check("approve of another VM's waiting code request is refused before any dialog, and it still waits; nothing is sent",
+          r.returncode == 7 and r1.returncode == 2 and "is for VM cvm2" in r1.stdout + r1.stderr and not value_calls(n8, CODE2)
+          and (state(rid) or {}).get("needs_approval") is True, (r1.returncode, r1.stdout[-200:], r1.stderr[-200:]))
+    r2 = client("approve", rid, "--vm", "cvm2")
+    check("...approved for its own VM, it fills", r2.returncode == 0 and len(value_calls(n8, CODE2)) == 1, (r2.stdout[-200:], r2.stderr[-200:]))
+    # A client that sends half a request and stalls (or trickles it) holds the unlock process at most 10 s, and requests
+    # expire on time meanwhile.
+    r = client("code", "--vm", "cvm", "--site", SITE2, "--into", SITE2 + "/#otp", "--ttl", "2s", "--json", stdin=CODE3 + "\n")
+    rid = js(r.stdout).get("request_id", "00000000")
+    trick = socket.socket(socket.AF_UNIX)
+    trick.connect(os.path.join(vdir, "vault.sock"))
+    trick.sendall(b'{"op": "sta')
+    stop = [False]
+
+    def trickle():
+        for _ in range(15):
+            time.sleep(1.5)
+            if stop[0]:
+                return
+            try:
+                trick.sendall(b" ")
+            except OSError:
+                return
+    th = threading.Thread(target=trickle, daemon=True)
+    th.start()
+    t0 = time.time()
+    st_ = subprocess.Popen([BIN, "status", "--json"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                           stdin=subprocess.DEVNULL)
+    time.sleep(4.0)
+    expired_while_stalled = any(x.get("op") == "code_expire" and x.get("request_id") == rid for x in audit_recs())
+    o, e = st_.communicate(timeout=60)
+    answered_after = time.time() - t0
+    stop[0] = True
+    trick.close()
+    check("a client trickling half a request holds the unlock process at most about 10 s (another client is answered then), "
+          "and a request expires on time meanwhile", r.returncode == 7 and expired_while_stalled and answered_after < 13
+          and '"unlocked":true' in o, (r.returncode, expired_while_stalled, round(answered_after, 1), o[-150:]))
+
     # Approving a waiting request fills it, and is withdrawn like a fill: stopping `approve` stops the fill.
     clear_flags()
     r = client("code", "--vm", "cvm", "--site", SITE2, "--into", SITE2 + "/#otp", "--json", stdin=CODE2 + "\n")
@@ -904,7 +974,7 @@ def run(td, procs):
     sunflag("slow-started")
     sunflag("slow-done")
     sflag("slow-fill-next")
-    ap_ = subprocess.Popen([BIN, "approve", rid], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ap_ = subprocess.Popen([BIN, "approve", rid, "--vm", "cvm"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                            stdin=subprocess.DEVNULL)
     started = wait_for(lambda: os.path.exists(os.path.join(stubdir, "slow-started")), 20)
     ap_.send_signal(signal.SIGTERM)
@@ -923,7 +993,7 @@ def run(td, procs):
     u = start_unlock()
     r = client("ask", "--vm", "cvm", "--site", SITE2, "--kind", "code", "--why", "terminal give", "--into", SITE2 + "/#otp", "--json")
     rid = js(r.stdout).get("request_id")
-    g = ts.Pty([BIN, "give", rid], env)
+    g = ts.Pty([BIN, "give", rid, "--vm", "cvm"], env)
     procs.append(g)
     g.expect("One-time code (hidden): ")
     g.send(CODE + "\n")
@@ -940,7 +1010,7 @@ def run(td, procs):
     r = client("ask", "--vm", "cvm", "--site", SITE2, "--kind", "code", "--why", "deny", "--json")
     rid = js(r.stdout).get("request_id")
     r = client("deny", rid)
-    r2 = client("give", rid, stdin=CODE + "\n")
+    r2 = client("give", rid, "--vm", "cvm", stdin=CODE + "\n")
     check("deny ID refuses a waiting request; a give afterwards is refused", r.returncode == 0 and r2.returncode == 2, (r.stdout, r2.stdout[-200:]))
     lock(u)
 

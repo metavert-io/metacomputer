@@ -501,6 +501,16 @@ extension UnlockServer {
         return out
     }
 
+    /// A command that acts on a request (give, fill --request, approve) names the VM it was run for, which is the VM
+    /// bin/metacomputer checked for an open handoff and holds the dispatch lock of: it must be the request's own VM.
+    /// Otherwise one VM's protection would cover a fill into another (vaults can be shared between VMs). nil: it is.
+    func vmMismatch(_ cr: CodeRequest, _ req: [String: Any]) -> [String: Any]? {
+        let named = req["vm"] as? String
+        if named == cr.vm { return nil }
+        let why = named.map { "request \(cr.id) is for VM \(cr.vm), not \($0)" } ?? "request \(cr.id) is for VM \(cr.vm), and the command named no VM"
+        return denied(why + ": run it with that VM's settings (metacomputer --vm \(cr.vm) secrets ..., or MCOMP_CONFIG=its settings file), whose handoff it then checks")
+    }
+
     /// The fields a code request's client sent, checked: (shape, target, why) or a refusal.
     func codeCommon(_ req: [String: Any]) -> (CodeShape?, CodeTarget?, String?) {
         guard let shape = CodeShape.parse(pattern: req["pattern"] as? String, length: req["length"] as? String) else {
@@ -583,6 +593,7 @@ extension UnlockServer {
         guard let id = req["id"] as? String, validRequestID(id), let cr = codeRequests[id] else {
             return failed("no code request \(clean(req["id"] as? String ?? "", max: 12)) waits (metacomputer secrets requests)")
         }
+        if let no = vmMismatch(cr, req) { return no }
         var v = Array((req["value"] as? String ?? "").utf8)
         defer { wipe(&v) }
         let interactive = req["interactive"] as? Bool == true
@@ -965,6 +976,7 @@ extension UnlockServer {
         }
         if Date() >= cr.expires && !cr.final { codeFinish(cr, state: "expired", reason: "it expired before it was filled") }
         if cr.final { return codeResult(cr) }
+        if let no = vmMismatch(cr, req) { return no }
         guard cr.state == "given" else {
             var out = codeResult(cr)
             out["ok"] = false
@@ -995,6 +1007,8 @@ extension UnlockServer {
         guard parseScope(req["scope"] as? String ?? "use") == .use else {
             return denied("a one-time code is approved for this one use only (no --scope)")
         }
+        // Approving it fills it: only for the VM whose handoff the wrapper checked (asked before any dialog shows).
+        if let no = vmMismatch(cr, req) { return no }
         switch req["method"] as? String ?? "local-auth" {
         case "passphrase":
             var k = approvalProofKey(key)
@@ -1213,9 +1227,9 @@ func cmdAsk(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdGive(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
-    guard a.positional.count == 1, validRequestID(a.positional[0]) else {
-        throw usageError("usage: give ID [--json]  (the value comes from stdin only: typed hidden at a terminal, or one line from a pipe; never on the command line)")
+    let a = try parseArgs(argv, values: ["vm"], flags: ["json"])
+    guard a.positional.count == 1, validRequestID(a.positional[0]), a.last("vm").map(validName) ?? true else {
+        throw usageError("usage: give ID --vm VM [--json]  (the value comes from stdin only: typed hidden at a terminal, or one line from a pipe; never on the command line)")
     }
     let id = a.positional[0]
     // Make sure there's something to give to before asking for the value.
@@ -1236,8 +1250,10 @@ func cmdGive(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     defer { wipe(&value) }
     var res: [String: Any]
     do {
-        res = try request(paths, ["op": "code_give", "id": id, "value": String(decoding: value, as: UTF8.self), "interactive": interactive],
-                          timeout: 300, cancellable: true)
+        var req: [String: Any] = ["op": "code_give", "id": id, "value": String(decoding: value, as: UTF8.self), "interactive": interactive]
+        if let vm = a.last("vm") { req["vm"] = vm }
+        res = try request(paths, req, timeout: 300, cancellable: true)
+        req["value"] = nil
     } catch ClientError.locked {
         eprint("mcomp-vault: \(lockedHint(paths))")
         return Exit.locked
@@ -1329,6 +1345,10 @@ func cmdFillRequest(_ paths: Paths, _ a: Args) throws -> Int32 {
         throw usageError("usage: fill --request ID [--selector CSS] [--profile P] [--browser-pid PID] | fill --request ID --human [--window-id N]")
     }
     var req: [String: Any] = ["op": "code_fill", "id": id]
+    if let vm = a.last("vm") {
+        guard validName(vm) else { throw usageError("--vm: a VM name") }
+        req["vm"] = vm
+    }
     if a.has("human") {
         var t: [String: Any] = ["mode": "human"]
         if let w = a.last("window-id") { guard let n = Int(w), n > 0 else { throw usageError("--window-id: a window id") }; t["window_id"] = n }

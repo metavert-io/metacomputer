@@ -746,7 +746,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (101 checks, about a minute): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (102 checks, about a minute): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -759,7 +759,8 @@ Each of these needs no VM and takes seconds.
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
   stopped (exit 4) with the vault never asked, `secrets approve` of a waiting one-time code request stopped too
   (`--json` before or after the id, `--scope`, a list that can't be read, an id it doesn't show) while an approval
-  the list shows as another kind goes on, a fill naming another VM refused, a handoff that can't open
+  the list shows as another kind goes on, `give`, `fill --request` and a code `approve` passing this VM to the vault
+  (and `approve` naming another VM refused), a fill naming another VM refused, a handoff that can't open
   while a fill is still on its way (a stand-in vault that waits) or while one that ended unconfirmed (exit 5) is
   settling, and the marker that makes the next handoff settle first when that didn't confirm, kept for any exit
   that isn't an answer from the unlock process (a crash too); `sh` holding the
@@ -1679,7 +1680,7 @@ fixture pages and a cookie-echo page in the VM, then:
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 
-`python3 tests/test_vault_codes.py` (124 checks, about 3 minutes; no VM) covers one-time codes and sign-in
+`python3 tests/test_vault_codes.py` (132 checks, about 3 minutes; no VM) covers one-time codes and sign-in
 links and human-mode fills, with its own ssh stub (the fill account's check, fill, read and open, and the
 desktop account's human-mode script) and a stand-in for osascript (`MCOMP_VAULT_TEST_OSASCRIPT`, test builds
 only), so no dialog is ever shown:
@@ -1714,7 +1715,9 @@ only), so no dialog is ever shown:
   expired while a request waited doesn't cover its retry; a slow step is cut at the request's expiry; a request
   expires while a question waits at the unlock terminal, and while an unrelated step in the VM runs; stopping `approve`
   while it fills ends the step in the VM; an answer in the dialog gives and approves but fills nothing until
-  `fill --request`;
+  `fill --request`; `fill --request`, `give` and `approve` run for one VM are refused for another VM's request (two
+  VMs bound to one vault), and with no VM named; a client trickling half a request holds the unlock process at most
+  about 10 s while requests expire on time;
 - no value in any output, the audit log or the events, and none of the test switches in a release build.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_vault_codes_vm.py` (a test VM, 26 checks) serves a "mail" page
@@ -1726,7 +1729,7 @@ refused on a text field and filled on the password field; a page whose title nam
 it). A VM built before the relay's read and the link's open has an older secret-fill: for those two modes
 only, the test's ssh stand-in runs this repository's secret-fill as the desktop user over the real ssh.
 
-`python3 tests/test_secret_fill.py` (183 checks) covers the VM side,
+`python3 tests/test_secret_fill.py` (185 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -1752,7 +1755,9 @@ only, the test's ssh stand-in runs this repository's secret-fill as the desktop 
   - no known desktop user (nothing filled), and a hung browser (the deadline);
   - open mode (a one-time sign-in link), with the fake's `Fetch` interception: a link that lands on the site; a server
     redirect to another site, a hop through another site and back, and the page's own move soon after it loads and two
-    seconds later, each stopped before the tab visits it (unnamed); a navigation that never commits; and a link to
+    seconds later, each stopped before the tab visits it (unnamed); a protocol error while it watches with a move to
+    another site paused behind it (refused and loading stopped before the interception ends, as Chromium continues
+    what's paused when it's turned off); a navigation that never commits; and a link to
     another origin than the vault named (refused before anything is opened).
 - **The whole program against a real headless Chromium**, when one is found
   (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:

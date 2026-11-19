@@ -572,14 +572,15 @@ func cmdRequests(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["scope"], flags: ["passphrase", "json"])
-    guard a.positional.count == 1, validRequestID(a.positional[0]) else {
-        throw usageError("usage: approve ID [--passphrase] [--scope use|session|unlock]  (ID: 8 hex digits, from `requests`)")
+    let a = try parseArgs(argv, values: ["scope", "vm"], flags: ["passphrase", "json"])
+    guard a.positional.count == 1, validRequestID(a.positional[0]), a.last("vm").map(validName) ?? true else {
+        throw usageError("usage: approve ID [--passphrase] [--scope use|session|unlock] [--vm VM]  (ID: 8 hex digits, from `requests`; --vm: the VM a one-time code request is for)")
     }
     // How far it reaches is part of what's confirmed: the dialog's text and the passphrase proof both name it.
     guard let scope = parseScope(a.last("scope") ?? "use") else { throw usageError("--scope use, session or unlock (default: use, this one use)") }
     let id = a.positional[0]
     var req: [String: Any] = ["op": "approve", "id": id, "method": "local-auth", "scope": scopeName(scope)]
+    if let vm = a.last("vm") { req["vm"] = vm }
     // Approving a waiting one-time code request fills it once allowed: like a fill, this client then withdraws it on a
     // signal (or when its wrapper is killed) and waits for the unlock process to confirm that it stopped. Only an
     // approval the list shows as another kind is sent as before; a list that can't be read counts as "may fill".

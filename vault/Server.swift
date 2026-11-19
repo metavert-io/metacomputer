@@ -37,11 +37,33 @@ func setTimeouts(_ fd: Int32, seconds: Int) {
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
 }
 
-/// One newline-terminated message (at most max bytes).
-func readMessage(_ fd: Int32, max: Int = 1 << 20) -> [UInt8]? {
+/// How long the unlock process waits for a client to send its whole request, from when it accepted the connection,
+/// however slowly the bytes come.
+let clientMessageSeconds: TimeInterval = 10
+
+/// One newline-terminated message (at most max bytes). With `within`, an absolute deadline for the whole message (a
+/// client that sends part of one and stalls, or trickles it, gets nil at that time), and waitHook runs while it waits
+/// (one-time code requests expire on time meanwhile): the unlock process's reads of its clients use it.
+func readMessage(_ fd: Int32, max: Int = 1 << 20, within: TimeInterval? = nil) -> [UInt8]? {
     var out = [UInt8]()
     var buf = [UInt8](repeating: 0, count: 4096)
+    let deadline = within.map { Date().addingTimeInterval($0) }
     while true {
+        if let d = deadline {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let left = d.timeIntervalSinceNow
+            if left <= 0 { return nil }
+            let r = poll(&pfd, 1, Int32(Swift.min(250, Swift.max(1, left * 1000))))
+            if r < 0 && errno == EINTR { continue }
+            if r == 0 {
+                if Thread.isMainThread, let hook = waitHook {
+                    waitHook = nil
+                    hook()
+                    waitHook = hook
+                }
+                continue
+            }
+        }
         let n = read(fd, &buf, buf.count)
         if n < 0 && errno == EINTR { continue }
         if n <= 0 { return out.isEmpty ? nil : out }
@@ -563,7 +585,7 @@ final class UnlockServer {
             return
         }
         let pid = peerPID(c)
-        guard let msg = readMessage(c), let req = parseJSONObject(msg), let op = req["op"] as? String else {
+        guard let msg = readMessage(c, within: clientMessageSeconds), let req = parseJSONObject(msg), let op = req["op"] as? String else {
             reply(c, ["ok": false, "status": "error", "reason": "bad request"])
             close(c)
             return
@@ -1066,7 +1088,7 @@ final class UnlockServer {
             return
         }
         let pid = peerPID(c)
-        guard let msg = readMessage(c), let req = parseJSONObject(msg), let op = req["op"] as? String else {
+        guard let msg = readMessage(c, within: clientMessageSeconds), let req = parseJSONObject(msg), let op = req["op"] as? String else {
             reply(c, ["ok": false, "status": "error", "reason": "bad request"])
             return
         }

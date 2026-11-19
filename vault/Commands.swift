@@ -54,7 +54,7 @@ You, from any terminal (they need Touch ID / your login password, or the passphr
   rule add relay --from-host H --to https://site [--link-host H ...] [--project DIR] [--expires 7d] [--passphrase]
                                          one-time codes piped in with no terminal, or relayed from pages on H, go
                                          into that site without asking (at most 30d); never an identity provider
-  give ID                                the value for a waiting one-time code request, from stdin only (typed
+  give ID --vm VM                        the value for a waiting one-time code request (of that VM), from stdin only (typed
                                          hidden at a terminal, or one line from a pipe); a terminal follows the
                                          usual approval, a pipe needs a `rule add code`
 
@@ -71,7 +71,7 @@ From anywhere (Claude uses these; they work only while the vault is unlocked):
                                          ask, give (from stdin) and fill in one step; never prints the value
   relay --vm VM --from TAB/ELEMENT --to TAB/FIELD --site https://site [--kind code|link] [--json]
                                          read a code (or link) from a page element in the VM and fill (open) it
-  fill --request ID [--selector CSS | --human]   a given, approved request into the tab on its site
+  fill --request ID --vm VM [--selector CSS | --human]   a given, approved request (of that VM) into the tab on its site
   login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--origin URL] [--request-id ID]
                                          sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)

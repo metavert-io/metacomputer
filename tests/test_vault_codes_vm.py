@@ -294,11 +294,25 @@ def run(td, procs):
     h.call("end_session", {"session": "vmcodes-m"})
 
     # --- 3. human mode in Firefox ----------------------------------------------------------------------------------
-    la = call("launch_app", {"launch_path": "/usr/bin/firefox", "additional_arguments": ["--new-window", SITE + "/site.html"]})
-    fpid = la.structured.get("pid")
-    time.sleep(6)
-    wins = [w for w in (call("list_windows", {"pid": fpid}).structured.get("windows") or []) if "Example" in str(w.get("title"))]
+    def firefox_windows():
+        return [w for w in (call("list_windows", {}).structured.get("windows") or []) if w.get("app_name") == "firefox"]
+
+    la, wins = None, []
+    for _ in range(2):
+        la = call("launch_app", {"launch_path": "/usr/bin/firefox", "additional_arguments": ["--new-window", SITE + "/site.html"]})
+        time.sleep(6)
+        # A test VM's Firefox that was stopped abruptly before may first ask about Troubleshoot Mode: dismissed, then
+        # launched again (it then starts normally).
+        prompt = [w for w in firefox_windows() if "Troubleshoot Mode" in str(w.get("title"))]
+        if prompt:
+            call("press_key", {"pid": prompt[0]["pid"], "window_id": prompt[0]["window_id"], "key": "Escape", "delivery_mode": "foreground"})
+            time.sleep(3)
+            continue
+        # The launcher may hand the window to another process (a wrapper): take the window's own pid, not the launcher's.
+        wins = [w for w in firefox_windows() if "Example" in str(w.get("title"))]
+        break
     fwin = wins[0]["window_id"] if wins else None
+    fpid = wins[0]["pid"] if wins else (la.structured.get("pid") if la else None)
     check("Firefox (human mode) on the site page", bool(fpid) and fwin, (la.text[-200:], wins))
 
     def focus(label, role="entry"):

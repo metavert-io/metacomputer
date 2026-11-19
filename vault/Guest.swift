@@ -348,6 +348,7 @@ struct GuestRead {
 /// never copied, since the VM has every value it was ever given and could put one in any form into its answer.
 func fillReason(_ guest: String) -> String {
     let known: [(String, String)] = [
+        ("couldn't be watched to the end", "the link's page couldn't be watched to the end; its loading was stopped and anything paused was refused, and nothing more was done (check the page)"),
         ("the link tried to take the tab to another site", "the link tried to take the tab to another site (not shown); that was stopped before it was visited, and nothing more was done (check the page)"),
         ("the link led to another site", "the link led to another site (not shown); nothing more was done (check the page)"),
         ("the tab didn't settle on the link's page", "the tab didn't settle on the link's page in time; check the page"),

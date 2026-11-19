@@ -1919,7 +1919,10 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # Only an approval the vault's own list shows as another kind (one that answers a fill already holding this)
       # goes straight on; anything unclear (an id not listed, a list that can't be read) counts as one that may fill.
       if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then
+        # The VM whose handoff this checks goes with it: the vault refuses to fill another VM's request.
+        secrets_vm_is_this "$@" || die "secrets approve acts on this VM ($VM_NAME), whose handoff it checks; for another VM's request, use that VM's settings (metacomputer --vm NAME, or MCOMP_CONFIG)"
         handoff_hold
+        [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
         secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"
         return $?
       fi
@@ -1944,8 +1947,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         # certificates refuses: say so before anyone is asked to approve.
         [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
-      # give names a request (bound to its VM when it was made), so it takes no --vm.
-      [ "$has_vm" = 1 ] || [ "$sub" = give ] || set -- "$@" --vm "$VM_NAME"
+      # The VM whose handoff this checked: the vault refuses a request (give, fill --request) that's another VM's.
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
       secrets_run_acting "$kind" "$inflight" "$sub" "$@"
       return $? ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
@@ -1956,7 +1959,7 @@ secrets_approve_id() { # APPROVE_ARGS...: the request id, read as the vault read
   local a id="" n=0 skip=0
   for a in "$@"; do
     if [ "$skip" = 1 ]; then skip=0; continue; fi
-    case "$a" in --scope) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac
+    case "$a" in --scope|--vm) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac
   done
   [ "$n" = 1 ] && printf '%s' "$id"
 }

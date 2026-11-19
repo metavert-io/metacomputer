@@ -1850,8 +1850,10 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   or the link's own origin (an identity provider's included) is failed there: the tab never visits it, a hop through
   another site and back is stopped at that hop, and the outcome is a failure that doesn't name the site. The frame
   tree is read throughout too: a site outside the list that shows there anyway (a navigation the interception didn't
-  see) refuses afterwards. The request is used either way. After the 8 seconds nothing is watched. Human-mode
-  browsers take codes only, for now.
+  see) refuses afterwards. If watching breaks (a protocol error, the frame tree unreadable), every paused request is
+  refused and loading is stopped (`Page.stopLoading`) before the interception is turned off, since the browser lets
+  whatever is still paused go on when it ends, and the outcome is a failure. The request is used either way. After
+  the 8 seconds nothing is watched. Human-mode browsers take codes only, for now.
 - **A code is checked first, without the value**: the tab on the site and the field, as a fill's check. A refusal
   there (no tab on the site yet, no field focused) leaves the request `given`, since nothing reached the VM:
   `metacomputer secrets fill --request ID [--selector CSS | --human]` tries again until it expires. **Once the value
@@ -1863,8 +1865,10 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   that expired or was removed while the request waited sends it back to waiting for `approve ID`. No step in the VM
   may take longer than the request has left (its ssh is ended then, and the request expires), and requests expire on
   time even while the unlock process waits on a question or a dialog, or on a step in the VM for another request
-  (checked several times a second): an expired request's value is wiped within about a second. Only a delivery to a
-  slow audit sink, at most 20 seconds a round, can hold it longer.
+  (checked several times a second), or on a client's request arriving: each request must arrive whole within 10
+  seconds of its connection, however slowly the bytes come, and expiries are serviced while it's read. An expired
+  request's value is wiped within about a second. Only a delivery to a slow audit sink, at most 20 seconds a round,
+  can hold it longer.
 
 **Approvals.** Nothing a program does approves, here as anywhere in the vault.
 - A value given at a terminal (`give`, `code` typed at a prompt) or in the dialog follows the vault's approval path,
@@ -1891,7 +1895,12 @@ none after a new unlock). A page in the VM can't make one: requests come only th
   `settle` when it ends unconfirmed), and stopping it (Ctrl-C, a signal, its wrapper killed) withdraws it: the unlock
   process cancels the dialog, or ends the step in the VM, and confirms. bin/metacomputer reads `approve`'s id as the
   vault does (`--json` and `--scope` anywhere), and only an approval the vault's own list shows as another kind goes
-  straight on: an id the list doesn't show, or a list it can't read, counts as one that may fill. The question and the dialog name the site, the kind, a
+  straight on: an id the list doesn't show, or a list it can't read, counts as one that may fill.
+- **The VM a command protects is the request's VM.** VMs can share a vault (the main VM and `MCOMP_CONFIG` VMs do by
+  default), so a request is bound to the VM it was made for, and every command that acts on one (`give`, `fill
+  --request`, a code request's `approve`) names the VM whose handoff its wrapper checked and whose dispatch lock it
+  holds (bin/metacomputer adds `--vm`). The vault refuses a request that's another VM's, or a command that names none:
+  run it with that VM's settings (`metacomputer --vm NAME secrets ...`). The question and the dialog name the site, the kind, a
   link's real host and where it was read from. `secrets requests` lists what waits, and the
   `needs_you.approval_waiting` event says so.
 - **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its
@@ -2797,7 +2806,9 @@ something waits for you:
   can read the mail itself, and ask for codes). Use a dedicated automation mailbox that only receives sign-in mail.
   The vault binds where a relayed code goes, not where it came from: a code rule or relay rule is a standing approval
   for whatever can pose as the requester it names (any program, without `--project`), for that site, until it expires.
-  Where an opened link lands is watched for 8 seconds only: a page that moves on later, or after a click, isn't.
+  Where an opened link lands is watched for 8 seconds only: a page that moves on later, or after a click, isn't. If
+  the DevTools connection itself is lost while it watches, Chrome ends the interception on its own, and what was
+  paused then goes on: nothing can refuse it without that connection (the outcome is still a failure).
   A hostile VM still chooses which of a few fixed outcomes a relay reports, and when.
 - **The code dialog isn't an approval.** It's `osascript`'s dialog, which an app with Accessibility access could type
   into; that's why a value given there still needs Touch ID, your login password or a typed line at the unlock terminal.

@@ -1274,7 +1274,7 @@ CLAIMS = [
     ("SECURITY.md", r"from a pipe, one line of at most (\d+) bytes \(a longer one is\s+refused, not cut\)",
      lambda m: f"if line.count > {m[1]} {{ wipe(&line); throw VaultError(" in raw(CODES)),
     ("SECURITY.md", r"Never from the command line or the environment: a value on the command line is a usage\s+error",
-     lambda m: "guard a.positional.count == 1, validRequestID(a.positional[0]) else {" in raw(CODES)
+     lambda m: "guard a.positional.count == 1, validRequestID(a.positional[0]), a.last(\"vm\").map(validName) ?? true else {" in raw(CODES)
      and "`code` takes the value from stdin only, never from the command line" in raw(CODES)
      and "let n = read(0, &c, 1)" in raw(CODES)),
     ("SECURITY.md", r"With `INTERACTIVE_PROMPTS=on` \(off by default; it's read when you unlock\)",
@@ -1344,8 +1344,8 @@ CLAIMS = [
     ("SECURITY.md", r"bin/metacomputer reads `approve`'s id as the\s+vault does .{0,120}?an id the list doesn't show, or a list it can't read, counts as one that may fill",
      lambda m: 'if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then' in raw("bin/metacomputer")
      and 'listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1' in raw("bin/metacomputer")
-     and 'case "$a" in --scope) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac' in raw("bin/metacomputer")),
-    ("SECURITY.md", r"or on a step in the VM for another request\s+\(checked several times a second\): an expired request's value is wiped within about a second",
+     and 'case "$a" in --scope|--vm) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"or on a step in the VM for another request\s+\(checked several times a second\), or on a client's request arriving: .{0,200}?An expired\s+request's value is wiped within about a second",
      lambda m: "if Thread.isMainThread, let hook = waitHook {" in raw("vault/Guest.swift")
      and "waitHook = { [unowned self] in self.codeExpirySweep(duringStep: true) }" in raw(SERVER)
      and "poll(&fds, nfds_t(fds.count), 250)" in raw("vault/Guest.swift")),
@@ -1361,6 +1361,18 @@ CLAIMS = [
      lambda m: '|| (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }' in raw(SERVER)
      and 'secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"' in raw("bin/metacomputer")
      and "request(paths, req, timeout: 200, cancellable: fills)" in raw(APPROVALS)),
+    ("SECURITY.md", r"The vault refuses a request that's another VM's, or a command that names none",
+     lambda m: all(raw(CODES).count(x) == 1 for x in ("        if let no = vmMismatch(cr, req) { return no }\n        var v = Array(",
+                                                      "        if cr.final { return codeResult(cr) }\n        if let no = vmMismatch(cr, req) { return no }",
+                                                      "        // Approving it fills it: only for the VM whose handoff the wrapper checked (asked before any dialog shows).\n        if let no = vmMismatch(cr, req) { return no }"))
+     and 'let named = req["vm"] as? String\n        if named == cr.vm { return nil }' in raw(CODES)
+     and '      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"\n      secrets_run_acting "$kind" "$inflight" "$sub" "$@"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"every paused request is\s+refused and loading is stopped \(`Page.stopLoading`\) before the interception is turned off",
+     lambda m: 0 < raw(FILL).find('dt.on_event = fail_all') < raw(FILL).find('dt.send("Page.stopLoading")')
+     < raw(FILL).find("dt.wait_events(0.5)") < raw(FILL).rfind('dt.call("Fetch.disable")')),
+    ("SECURITY.md", r"each request must arrive whole within (\d+)\s+seconds of its connection, however slowly the bytes come",
+     lambda m: int(m[1]) == int(swift_num(SERVER, r"let clientMessageSeconds: TimeInterval = (\d+)"))
+     and raw(SERVER).count("readMessage(c, within: clientMessageSeconds)") == 2 and "let deadline = within.map { Date().addingTimeInterval($0) }" in raw(SERVER)),
     ("docs/events.md", r"\| `needs_you` \| `code_requested` \| warn \|",
      lambda m: 'dropEvent(type: "code_requested", severity: "warn"' in raw(CODES)),
     ("docs/guide.md", r"With `INTERACTIVE_PROMPTS=on` in `config/local.env` \(off by default\)", lambda m: D["INTERACTIVE_PROMPTS"] == "off"),
