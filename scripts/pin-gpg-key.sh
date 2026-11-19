@@ -17,7 +17,7 @@ src="$1" fpr="$(printf '%s' "$2" | tr 'a-f' 'A-F')" out="$3"
 [[ "$fpr" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-gpg-key: $2 isn't a full 40-digit fingerprint" >&2; exit 2; }
 # A short private home (GnuPG's sockets fail on paths over ~104 characters).
 home="$(mktemp -d /tmp/mcomp-pin.XXXXXX)"
-cleanup() { gpgconf --homedir "$home" --kill all >/dev/null 2>&1 || true; rm -rf "$home"; }
+cleanup() { gpgconf --homedir "$home" --kill all >/dev/null 2>&1 || true; "$(dirname "$0")/safe-rmtree.sh" --quiet "$home"; }
 trap cleanup EXIT
 gpg --batch --quiet --homedir "$home" --import "$src" >/dev/null 2>&1 \
   || { echo "pin-gpg-key: $src isn't a key file GnuPG can read" >&2; exit 1; }

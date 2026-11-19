@@ -63,7 +63,7 @@ ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)" || die 
 cd "$ROOT" || die "can't enter $ROOT"
 TAG="v$VERSION" BRANCH="release-v$VERSION"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mcomp-release.XXXXXX")" || die "couldn't make a temporary folder"
-trap 'rm -rf "$TMP"' EXIT
+trap '"$ROOT/scripts/safe-rmtree.sh" --quiet "$TMP"' EXIT
 command -v python3 >/dev/null 2>&1 || die "python3 not found"
 
 # --- shared checks ------------------------------------------------------------------------------------------------

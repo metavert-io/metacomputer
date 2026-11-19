@@ -136,12 +136,11 @@ Refused rather than guessed (nothing runs):
   shares a name, a port or a folder with the main VM or any other `config/vms/` VM;
 - the identity rule: no VM's folder (`SSH_DIR`, `RUN_DIR`, `LOG_DIR`, `VAULT_DIR`,
   `EVENTS_SPOOL`) may be another VM's, be inside one or hold one, and none may be in,
-  or hold, a place where something deletes on its own: the runner's VM storage
-  (`~/.lume`, and every storage location the runner or Lume's settings list), the
-  checkout's `.cache` and `.claude/skills`, the storage state folder
-  (`~/.local/share/metacomputer/storage`) and the runner's install folder
-  (`~/.local/share/lume`). A `config/vms/` VM is refused when it's read if the rule
-  fails. `build`, `vm delete`, `reset`, `restore`, `checkpoint` (deleting or replacing
+  or hold, the runner's VM storage (`~/.lume`, and every storage location the runner or
+  Lume's settings list). Every other recursive delete on the Mac goes through
+  `lib/safedelete.py` (`scripts/safe-rmtree.sh`), which refuses a target that, as it
+  physically is, is or holds any VM's folder (or a link on the way to one). A
+  `config/vms/` VM is refused when it's read if the rule fails. `build`, `vm delete`, `reset`, `restore`, `checkpoint` (deleting or replacing
   one) and `baseline` check it after taking the VM's lock, for whichever VM they change
   (the main VM and `MCOMP_CONFIG` VMs included), before anything is deleted, replaced or
   rotated, and name the file and folder at fault. Folders are compared as the folders

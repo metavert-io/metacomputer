@@ -1099,16 +1099,25 @@ CLAIMS = [
                                                         'VAULT_DIR) printf \'%s\' "$MC_VMS_APP_DIR/$2"'))
      and 'MC_VMS_APP_DIR="${MCOMP_VMS_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer-vms}"' in raw("scripts/lib.sh")
      and ".run-vms/" in raw(".gitignore") and "logs-vms/" in raw(".gitignore")),
-    ("SECURITY.md", r"may not be another VM's folder, be inside one, or hold one, and no VM's folder may be in, or hold, a place where something deletes on its own: the runner's VM storage \(`~/\.lume` and every storage location the runner or Lume's settings list; deleting a VM there deletes its whole folder\), the checkout's `\.cache` and `\.claude/skills`, the storage state folder and the runner's install folder",
+    ("SECURITY.md", r"may not be another VM's folder, be inside one, or hold one, and no VM's folder may be in, or hold, the runner's VM storage \(`~/\.lume` and every storage location the runner or Lume's settings list\), since the runner's delete of a VM takes its whole folder there",
      lambda m: "def relation" in raw("lib/vms.py") and 'return "is inside"' in raw("lib/vms.py") and 'return "holds"' in raw("lib/vms.py")
      and 'in_storage(f, "its")' in raw("lib/vms.py") and 'in_storage(t, f"{owner}\'s")' in raw("lib/vms.py")
-     and all(f"{pl} PATH" in raw("scripts/lib.sh") and f'"{pl}":' in raw("lib/vms.py")
-             for pl in ("@runner", "@cache", "@skills", "@storage", "@lume-app"))
+     and 'PLACES = {"@runner": "the runner\'s VM storage"}' in raw("lib/vms.py") and "@runner PATH" in raw("scripts/lib.sh")
      and "printf '%s\\n' \"~/.lume\" \"$out\"" in raw("scripts/lib.sh") and '"$lb" config get' in raw("scripts/lib.sh")
      and ".config/lume/config.yaml" in raw("scripts/lib.sh")),
-    ("SECURITY.md", r"Every recursive delete in the code is inventoried with its root \(one VM's own folder, one of those places, a folder made new for the run, or the VM's own disk\), and a test fails when a new one appears",
-     lambda m: "DELETE_INVENTORY = [" in raw("tests/test_multi_vm.py") and "def delete_inventory(td):" in raw("tests/test_multi_vm.py")
-     and "        delete_inventory(td)\n" in raw("tests/test_multi_vm.py")),
+    ("SECURITY.md", r"It deletes a folder only when that folder, as it physically is, neither is nor holds a folder some VM of this checkout uses \(every VM's keys, runtime, logs, vault and spool, the account's own vault and spools, a vault folder the environment names, the home folder and the checkout\), nor holds a link on the way to one; a link is deleted itself, never what it points to, and not when it's on the way to such a folder\. It fails closed",
+     lambda m: all(x in raw("lib/safedelete.py") for x in (
+         "def check(path, prot", "vms.physical(target", "def links_on_the_way(", "mc_all_identity_records",
+         'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(path)", "shutil.rmtree(os.path.realpath(path))",
+         '("this checkout", lab)', "a link on the way to"))
+     and "mc_all_identity_records() {" in raw("scripts/lib.sh") and '[ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0' in raw("scripts/lib.sh")
+     and 'safedelete.py" rmtree' in raw("scripts/safe-rmtree.sh")),
+    ("SECURITY.md", r"The only recursive deletes not made through it are the runner's own delete of a VM, baseline or checkpoint \(after the rule above\), `vm delete`'s delete of the VM's own folders \(`lib/vms\.py rmtree_own`, which follows no link and has the same guards\), and those inside the VM; a test fails when any other appears",
+     lambda m: "DELETE_EXCEPTIONS = [" in raw("tests/test_multi_vm.py") and "def delete_inventory(td):" in raw("tests/test_multi_vm.py")
+     and "        delete_inventory(td)\n" in raw("tests/test_multi_vm.py")
+     and all(f in raw(p) for p, f in (("scripts/fetch-artifacts.sh", 'safe-rmtree.sh" "$R/x"'),
+                                      ("scripts/build-vm.sh", 'safe-rmtree.sh" "$SEED"'),
+                                      ("lib/storage.py", "safedelete.rmtree(d)"), ("install.sh", "safe-rmtree.sh")))),
     ("SECURITY.md", r"Folders are compared as the folders they physically are: every link at every level is followed \(so a folder whose parent is a link counts as where it really is\), then device and inode, with the part that doesn't exist yet compared without case",
      lambda m: "def physical(path, home" in raw("lib/vms.py") and "os.path.realpath(path)" in raw("lib/vms.py")
      and "tuple(c.casefold() for c in parts[k:j])" in raw("lib/vms.py") and "*physical(v, home" in raw("lib/vms.py")),
@@ -1133,7 +1142,7 @@ CLAIMS = [
      lambda m: 'build_identity_check() { mc_identity_check --no-ports || die "not building' in raw("scripts/build-vm.sh")
      and 0 < raw("scripts/build-vm.sh").find("\nbuild_identity_check\n") < raw("scripts/build-vm.sh").find('st="$(vm_lookup "$vm")"')
      < raw("scripts/build-vm.sh").find('/build-tools.sh"\nbuild_identity_check') < raw("scripts/build-vm.sh").find('/fetch-artifacts.sh"\nbuild_identity_check')
-     < raw("scripts/build-vm.sh").find("BUILD_MARKER=") < raw("scripts/build-vm.sh").find('"$LUME" delete') < raw("scripts/build-vm.sh").find('rm -rf "$SEED"')),
+     < raw("scripts/build-vm.sh").find("BUILD_MARKER=") < raw("scripts/build-vm.sh").find('"$LUME" delete') < raw("scripts/build-vm.sh").find('safe-rmtree.sh" "$SEED"')),
     ("docs/commands.md", r"once you type its name \(no terminal: `--confirm NAME`; `--yes` never counts\)",
      lambda m: "ASSUME_YES" not in vm_delete_src() and "confirm \"" not in vm_delete_src()
      and '[ "$v" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),

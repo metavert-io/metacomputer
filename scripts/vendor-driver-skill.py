@@ -32,6 +32,8 @@ import tempfile
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEST = os.path.join(LAB, ".claude", "skills", "cua-driver")
+sys.path.insert(0, os.path.join(LAB, "lib"))
+import safedelete  # noqa: E402  (every recursive delete: never a folder a VM uses)
 DROP = {"MACOS.md", "WINDOWS.md", "EMBEDDING.md"}
 NOTES = "../../../skills/metacomputer/DESKTOP.md"   # relative to DEST
 
@@ -221,7 +223,7 @@ def main(tarball):
         edited[f] = edit_file(f, open(os.path.join(src, f)).read(), ver)
     edited["LICENSE"] = cua_license(tarball, ver, sums)
     stage = DEST + ".new"
-    shutil.rmtree(stage, ignore_errors=True)
+    safedelete.rmtree(stage, quiet=True)
     os.makedirs(stage)
     for f in sorted(os.listdir(src)):
         if f in DROP or f in edited:
@@ -232,11 +234,14 @@ def main(tarball):
     named = [f"{f}: {d}" for f in sorted(os.listdir(stage)) for d in sorted(DROP)
              if d in open(os.path.join(stage, f)).read()]
     if named:
-        shutil.rmtree(stage, ignore_errors=True)
+        safedelete.rmtree(stage, quiet=True)
         sys.exit("the pack still names a removed guide (" + "; ".join(named) + "); update scripts/vendor-driver-skill.py")
-    shutil.rmtree(DEST, ignore_errors=True)
+    try:
+        safedelete.rmtree(DEST)
+    except safedelete.Refused as e:
+        sys.exit(f"not replacing the skill pack: {e}")
     os.replace(stage, DEST)
-    shutil.rmtree(work, ignore_errors=True)
+    safedelete.rmtree(work, quiet=True)
     print(f"installed Cua Driver {ver} skill pack -> {os.path.relpath(DEST, LAB)} ({', '.join(sorted(os.listdir(DEST)))})")
 
 

@@ -65,7 +65,7 @@ vm_list() { # [--json]
     if [ -n "$(mc_vm_files)" ] || [ "${runner[0]}" = --runner-failed ] || [ -n "$(vm_working_names "$VM_NAME" 2>/dev/null)" ]; then sel=""; fi
   fi
   "$PY" "$LAB_ROOT/lib/vms.py" list --settings "$tmp/settings.jsonl" "${runner[@]}" --selected "$sel" ${json[@]+"${json[@]}"} || rc=$?
-  rm -rf "$tmp"
+  "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$tmp"
   return $rc
 }
 

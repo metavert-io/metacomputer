@@ -58,6 +58,7 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import labconfig  # noqa: E402
+import safedelete  # noqa: E402  (every recursive delete: never a folder a VM uses)
 from termsafe import escape_for_terminal as esc  # noqa: E402
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1883,6 +1884,13 @@ def cmd_volume_delete(a):
             if h:
                 raise StorageError(f"volume '{a.name}' is kept in sync by {describe_holder(h)}; stop that VM first")
             d = s3_dir(a.name)
+            # Its state folder goes through lib/safedelete.py: never one that is, or holds, a folder a VM uses (a VM's
+            # vault reached through a link into it, say). Checked before anything else is changed, and as it's deleted.
+            if os.path.lexists(d):
+                try:
+                    safedelete.check(d, safedelete.protected())
+                except safedelete.Refused as e:
+                    raise StorageError(f"not deleting volume '{a.name}': {e}")
             lockf = None
             if os.path.isdir(d):
                 lockf = os.open(os.path.join(d, "sync.lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1897,7 +1905,12 @@ def cmd_volume_delete(a):
                 for what in ("access_key_id", "secret_access_key"):
                     subprocess.run([SECURITY, "delete-generic-password", "-s", keychain_service(a.name), "-a", what],
                                    capture_output=True)
-                shutil.rmtree(d, ignore_errors=True)
+                try:
+                    safedelete.rmtree(d)
+                except safedelete.Refused as e:
+                    raise StorageError(f"volume '{a.name}': its state folder was kept: {e}")
+                except OSError:
+                    pass
             finally:
                 if lockf is not None:
                     os.close(lockf)
@@ -2253,7 +2266,7 @@ def cmd_refdisk_create(a):
             reg_save("refdisk", rec)
     finally:
         if made:
-            shutil.rmtree(stage, ignore_errors=True)
+            safedelete.rmtree(stage, quiet=True)
         if dfd is not None:
             try:
                 os.unlink(tmp_name, dir_fd=dfd)

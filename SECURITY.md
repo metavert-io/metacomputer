@@ -1253,20 +1253,29 @@ another VM:
   them. Its file may not set `SSH_DIR`, `RUN_DIR`, `LOG_DIR`, `VAULT_DIR` or `EVENTS_SPOOL`
   (one that does is refused, saying why), and `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` may
   only name its own folders. Fewer settings: none can put one VM's folder in another's.
-- **The identity rule: no VM's folder is in another's, or where things get deleted.** A
+- **The identity rule: no VM's folder is in another's, or in the runner's storage.** A
   VM's SSH keys, runtime, logs, vault and spool folders may not be another VM's folder, be
-  inside one, or hold one, and no VM's folder may be in, or hold, a place where something
-  deletes on its own: the runner's VM storage (`~/.lume` and every storage location the
-  runner or Lume's settings list; deleting a VM there deletes its whole folder), the
-  checkout's `.cache` and `.claude/skills`, the storage state folder and the runner's
-  install folder. Every recursive delete in the code is inventoried with its root (one VM's
-  own folder, one of those places, a folder made new for the run, or the VM's own disk), and
-  a test fails when a new one appears. Folders are compared as the folders they physically
-  are: every link at every level is followed (so a folder whose parent is a link counts as
-  where it really is), then device and inode, with the part that doesn't exist yet compared
-  without case. When the runner's storage can't be known (no runner, `config get` failing or
-  listing none, a settings file of Lume's that can't be read, a location that can't be
-  read), the check refuses rather than skip it.
+  inside one, or hold one, and no VM's folder may be in, or hold, the runner's VM storage
+  (`~/.lume` and every storage location the runner or Lume's settings list), since the
+  runner's delete of a VM takes its whole folder there. Folders are compared as the folders
+  they physically are: every link at every level is followed (so a folder whose parent is a
+  link counts as where it really is), then device and inode, with the part that doesn't exist
+  yet compared without case. When the runner's storage can't be known (no runner, `config
+  get` failing or listing none, a settings file of Lume's that can't be read, a location that
+  can't be read), the check refuses rather than skip it.
+- **Every other recursive delete checks its own target.** Each one on the Mac (a build's
+  seed folder, the downloads' cleanup, a volume's S3 state folder, temporary folders, the
+  installer's) goes through one helper, `lib/safedelete.py` (`scripts/safe-rmtree.sh` for
+  scripts). It deletes a folder only when that folder, as it physically is, neither is nor
+  holds a folder some VM of this checkout uses (every VM's keys, runtime, logs, vault and
+  spool, the account's own vault and spools, a vault folder the environment names, the
+  home folder and the checkout), nor holds a link on the way to one; a link is deleted
+  itself, never what it points to, and not when it's on the way to such a folder. It fails
+  closed: when a settings file can't be read, or a VM's folder can't be resolved, nothing is
+  deleted. The only recursive deletes not made through it are the runner's own delete of a
+  VM, baseline or checkpoint (after the rule above), `vm delete`'s delete of the VM's own
+  folders (`lib/vms.py rmtree_own`, which follows no link and has the same guards), and
+  those inside the VM; a test fails when any other appears.
 - **Where the rule is checked.** A `config/vms/` VM's settings are refused when they're read
   if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it.
   Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks

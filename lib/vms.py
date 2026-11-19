@@ -32,13 +32,11 @@ PATH_KEYS = ("SSH_DIR", "RUN_DIR", "LOG_DIR", "VAULT_DIR", "EVENTS_SPOOL")
 # give them their own (as before there was more than one VM): each such VM's folder, but not one they keep apart.
 SHARED_KEYS = ("SHARED_VAULT_DIR", "SHARED_EVENTS_SPOOL")
 FOLDER_KEYS = PATH_KEYS + SHARED_KEYS
-# Places no VM's folder may be in or hold, because something deletes inside them on its own (scripts/lib.sh
-# mc_identity_input sends them as "@NAME PATH value" records; "@runner ERROR reason" when its storage can't be read).
-# The inventory of every recursive delete, and which of these roots or which VM folder each one is in, is pinned by
-# tests/test_multi_vm.py (delete_inventory).
-PLACES = {"@runner": "the runner's VM storage", "@cache": "this checkout's .cache",
-          "@storage": "the storage state folder", "@skills": "this checkout's .claude/skills",
-          "@lume-app": "the runner's install folder"}
+# Places no VM's folder may be in or hold (scripts/lib.sh mc_identity_input sends them as "@NAME PATH value" records;
+# "@runner ERROR reason" when its storage can't be read): only the runner's VM storage, where the runner's own delete
+# of a VM takes its whole folder. Every other recursive delete checks its own target (lib/safedelete.py), and
+# tests/test_multi_vm.py (delete_inventory) fails on one that doesn't.
+PLACES = {"@runner": "the runner's VM storage"}
 RUNNER = "@runner"
 
 

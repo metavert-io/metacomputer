@@ -1269,39 +1269,148 @@ def final3_fixes(td):
             os.chmod(cfg, 0o600)
             os.remove(cfg)
 
-        # 4. .cache (the downloads clean up there) is a place no VM's folder may be: a per-VM vault linked into it is
-        # refused when loaded, and building the main VM beside it is refused before the downloads run.
-        cachevault = os.path.join(co, ".cache", "rclone-v1", "x", "vault")
-        os.makedirs(cachevault)
-        link(os.path.join(b.app, "other"), cachevault)
-        rc, s, err = b.resolve("other")
-        check("a per-VM vault in .cache: refused when loaded", rc == 1 and "is inside this checkout's .cache" in err, err[-300:])
-        b.set_vms([])
-        r = subprocess.run(["/bin/bash", os.path.join(co, "scripts", "build-vm.sh")], env=b.env(), capture_output=True,
-                           text=True, timeout=300, stdin=subprocess.DEVNULL)
-        out = r.stdout + r.stderr
-        check("...and the main VM's build beside it, before the downloads", r.returncode != 0
-              and "config/vms/other.env's VAULT_DIR" in out and "this checkout's .cache" in out
-              and "create " not in open(b.log).read(), out[-400:])
-        os.remove(os.path.join(b.app, "other"))
-        b.settings("config/local.env", f'VM_NAME=metacomputer\nRUN_DIR="{co}/.cache/run"\n')
-        r = subprocess.run(["/bin/bash", os.path.join(co, "scripts", "build-vm.sh")], env=b.env(), capture_output=True,
-                           text=True, timeout=300, stdin=subprocess.DEVNULL)
-        out = r.stdout + r.stderr
-        check("...as is a main VM whose own RUN_DIR is in .cache (build refused, naming it)", r.returncode != 0
-              and "its RUN_DIR" in out and "this checkout's .cache" in out and "create " not in open(b.log).read(), out[-400:])
+        # (.cache was a place here; the deletes in it now check their own targets: final4_fixes.)
     finally:
         b.close()
 
 
-# Every recursive delete in bin/, scripts/, lib/ and install.sh (rm -r, rmtree, the runner's delete), with its root:
-#   runner        the runner's delete of a VM, baseline or checkpoint (its storage is a place; the command checks the rule)
-#   vm            one VM's own folder (RUN_DIR's seed, its runtime folder, its vault), covered by the rule
-#   @cache @storage @skills @lume-app   inside a place no VM's folder may be in or hold (lib/vms.py PLACES)
-#   fresh         a folder made new for this run (mktemp -d, mkdtemp, a random staging name), so nothing else is in it
-#   guest         runs inside the VM, not on the Mac
-#   text          not a delete: a hint printed for the user
-DELETE_INVENTORY = [
+def final4_fixes(td):
+    """The fourth final check's findings (on cf6ad10), each failing before its fix: the main VM's storage commands
+    deleted the S3 state folder of a volume, and fetching rclone deleted .cache/rclone-vVERSION/x, with no look at
+    whether that folder, as it physically is, was another VM's (a link beneath the checked root). Every recursive
+    delete now goes through lib/safedelete.py, which checks its own target."""
+    b = Box(td, "final4")
+    try:
+        co, root, app = b.co, b.root, b.app
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        b.settings("config/vms/x.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
+        vault = os.path.join(app, "x")                      # VM x's own (fixed) vault folder
+        os.makedirs(vault)
+        write(os.path.join(vault, "vault.json"), "{}")
+        rm = os.path.join(co, "scripts", "safe-rmtree.sh")
+
+        def rmrun(path):
+            if not os.path.exists(rm):              # (the code before this round has no helper)
+                return subprocess.CompletedProcess([rm], 127, "", "no scripts/safe-rmtree.sh")
+            return subprocess.run([rm, path], env=b.env(), capture_output=True, text=True, timeout=120)
+
+        # The helper itself.
+        plain = os.path.join(root, "plain", "a")
+        os.makedirs(plain)
+        write(os.path.join(plain, "f"), "x")
+        r = rmrun(os.path.join(root, "plain"))
+        check("safe-rmtree.sh: a folder no VM uses is deleted", r.returncode == 0
+              and not os.path.exists(os.path.join(root, "plain")), r.stderr[-300:])
+        holder = os.path.join(root, "holder")
+        os.makedirs(holder)
+        os.symlink(vault, os.path.join(holder, "to-vault"))
+        r = rmrun(holder)
+        check("...a folder holding a link to a VM's vault is deleted, and the link with it, never what it points to",
+              r.returncode == 0 and not os.path.lexists(holder) and os.path.exists(os.path.join(vault, "vault.json")),
+              r.stderr[-300:])
+        os.makedirs(os.path.join(co, ".run"), exist_ok=True)
+        r = rmrun(os.path.join(co, ".run"))
+        check("...the main VM's RUN_DIR: refused, naming it", r.returncode == 1
+              and "is the main VM (config/local.env)'s RUN_DIR" in r.stderr, r.stderr[-300:])
+        os.symlink(app, os.path.join(root, "app-alias"))
+        r = rmrun(os.path.join(root, "app-alias", "x"))
+        check("...a path whose parent is a link, to VM x's vault: refused, the vault kept", r.returncode == 1
+              and "is config/vms/x.env's VAULT_DIR" in r.stderr and os.path.exists(os.path.join(vault, "vault.json")),
+              r.stderr[-300:])
+        r = rmrun(os.path.join(root, "app-alias"))
+        check("...a link itself: only the link goes", r.returncode == 0 and not os.path.lexists(os.path.join(root, "app-alias"))
+              and os.path.exists(os.path.join(vault, "vault.json")), r.stderr[-300:])
+        os.makedirs(os.path.join(root, "elsewhere"))
+        os.rename(vault, os.path.join(root, "elsewhere", "x"))
+        os.symlink(os.path.join(root, "elsewhere", "x"), vault)          # x's vault path is now a link to it
+        r = rmrun(vault)
+        check("...a link on the way to a VM's folder (x's vault path is a link): refused", r.returncode == 1
+              and "a link on the way to config/vms/x.env's VAULT_DIR" in r.stderr and os.path.islink(vault), r.stderr[-300:])
+        r = rmrun(app)
+        check("...a folder holding such a link: refused", r.returncode == 1 and "a link on the way to" in r.stderr
+              and os.path.islink(vault), r.stderr[-300:])
+        os.remove(vault)
+        os.rename(os.path.join(root, "elsewhere", "x"), vault)
+        os.makedirs(os.path.join(root, "doomed"))
+        bad = b.settings("config/vms/unread.env", "SSH_PORT=2403\nVNC_PORT=6103\n")
+        os.chmod(bad, 0)
+        try:
+            r = rmrun(os.path.join(root, "doomed"))
+            check("...a settings file that can't be read: nothing is deleted (its folders aren't known)", r.returncode == 1
+                  and "can't be read" in r.stderr and os.path.isdir(os.path.join(root, "doomed")), r.stderr[-300:])
+        finally:
+            os.chmod(bad, 0o600)
+            drop(bad)
+
+        # P1 2: a link beneath a checked root. .cache/rclone-vVERSION is a link to the per-VM vaults' folder, so
+        # fetching rclone's rm -rf "$R/x" would be VM x's vault. Fetched with stand-ins (no network): refused, kept.
+        d = {}
+        for ln in open(os.path.join(co, "config", "defaults.env")):
+            if "=" in ln and not ln.lstrip().startswith("#"):
+                k, v = ln.split("=", 1)
+                d[k.strip()] = v.split("#")[0].strip().strip('"')
+        fake = os.path.join(root, "fakebin")
+        write(os.path.join(fake, "curl"), "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
+              f"case \"$out\" in *SHA256SUMS) printf '%s  %s\\n' '{d['RCLONE_SHA256']}' '{d['RCLONE_ZIP']}' > \"$out\" ;;\n"
+              "  *) printf 'not a zip' > \"$out\" ;; esac\nexit 0\n", 0o755)
+        write(os.path.join(fake, "gpgv"), f"#!/bin/sh\necho '[GNUPG:] VALIDSIG {d['RCLONE_SIGNING_KEY_FPR']}'\nexit 0\n", 0o755)
+        write(os.path.join(fake, "shasum"), "#!/bin/sh\nexit 0\n", 0o755)
+        os.makedirs(os.path.join(co, ".cache"), exist_ok=True)
+        rlink = os.path.join(co, ".cache", f"rclone-v{d['RCLONE_VERSION']}")
+        link(rlink, app)
+        write(os.path.join(app, "signing-key.gpg"), "stand-in")       # the pinned key is there already
+        r = subprocess.run(["/bin/bash", os.path.join(co, "scripts", "fetch-artifacts.sh"), "rclone"],
+                           env=b.env(PATH=f"{fake}:{os.path.dirname(PY)}:/usr/bin:/bin:/usr/sbin:/sbin"),
+                           capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+        check("fetching rclone with .cache/rclone-vVERSION linked to the vaults' folder: VM x's vault isn't deleted "
+              "(refused, naming it)", r.returncode != 0 and "config/vms/x.env's VAULT_DIR" in r.stdout + r.stderr
+              and os.path.exists(os.path.join(vault, "vault.json")), (r.stdout + r.stderr)[-400:])
+        os.remove(rlink)
+
+        # P1 1: the main VM's volume delete of an S3 volume whose state folder holds VM x's vault (its fixed path is a
+        # link into it): refused before anything changes, the vault and the volume's registration kept. (In-process,
+        # with a stand-in for the Keychain tool, so this Mac's Keychain is never touched.)
+        sh = os.path.join(root, "storage-home")
+        state = os.path.join(sh, "s3", "work")
+        os.makedirs(os.path.join(state, "inner"))
+        os.rename(vault, os.path.join(state, "inner", "x"))
+        os.symlink(os.path.join(state, "inner", "x"), vault)
+        reg = os.path.join(sh, "registry", "volumes", "work.json")
+        write(reg, json.dumps({"name": "work", "kind": "s3", "path": os.path.join(root, "work-copy")}))
+        code = ("import json, os, sys; sys.path.insert(0, sys.argv[1]); import storage\n"
+                "storage.SECURITY = '/usr/bin/true'\n"
+                "class A: name = 'work'; yes = True; keep_image = False\n"
+                "try:\n    storage.cmd_volume_delete(A()); print('DELETED')\n"
+                "except storage.StorageError as e:\n    print('REFUSED ' + str(e))\n")
+        r = subprocess.run([PY, "-c", code, os.path.join(co, "lib")], env=b.env(MCOMP_STORAGE_HOME=sh),
+                           capture_output=True, text=True, timeout=120)
+        check("volume delete of an S3 volume whose state folder holds VM x's vault: refused, naming it, the vault kept",
+              "REFUSED" in r.stdout and "config/vms/x.env's VAULT_DIR" in r.stdout
+              and os.path.exists(os.path.join(state, "inner", "x", "vault.json")), (r.stdout + r.stderr)[-400:])
+        check("...and the volume stays registered (nothing was changed first)", os.path.exists(reg))
+        if os.path.lexists(vault):
+            os.remove(vault)
+        if os.path.isdir(os.path.join(state, "inner", "x")):
+            os.rename(os.path.join(state, "inner", "x"), vault)
+        else:                                               # (the code before this round deleted it)
+            os.makedirs(vault)
+            write(reg, json.dumps({"name": "work", "kind": "s3", "path": os.path.join(root, "work-copy")}))
+            os.makedirs(state, exist_ok=True)
+        r = subprocess.run([PY, "-c", code, os.path.join(co, "lib")], env=b.env(MCOMP_STORAGE_HOME=sh),
+                           capture_output=True, text=True, timeout=120)
+        check("(with nothing of a VM's in it, the same volume delete goes ahead)", "DELETED" in r.stdout
+              and not os.path.exists(state) and not os.path.exists(reg), (r.stdout + r.stderr)[-400:])
+    finally:
+        b.close()
+
+
+# The recursive deletes that aren't made through lib/safedelete.py (scripts/safe-rmtree.sh), each with why:
+#   runner   the runner's delete of a VM, baseline or checkpoint, after the identity rule (vm_change_lock, vm delete's
+#            plan, build-vm.sh's check); no VM's folder may be in its storage
+#   own      vm delete's own-folder delete (lib/vms.py rmtree_own: no links followed, the same guards)
+#   guest    runs inside the VM, not on the Mac
+#   text     not a delete: a hint printed for the user
+DELETE_EXCEPTIONS = [
     ("bin/metacomputer", 'if vm_exists "$VM_NAME"; then "$LUME" delete "$VM_NAME" --force', "runner"),
     ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$2" --force', "runner"),
     ("bin/metacomputer", '"$LUME" delete "$CKPT_PREFIX$name" --force >/dev/null || die', "runner"),
@@ -1310,71 +1419,25 @@ DELETE_INVENTORY = [
     ("bin/metacomputer", '"$LUME" clone "$BASELINE_NAME" "$keep" >/dev/null && "$LUME" delete "$BASELINE_NAME" --force', "runner"),
     ("bin/metacomputer", "gssh ops 'rm -rf ~/metacomputer-runs/*'", "guest"),
     ("bin/metacomputer", 'gssh ops "rm -rf -- \'$dir\'"', "guest"),
-    ("scripts/build-tools.sh", "trap 'rm -rf \"$tmp_src\"' EXIT", "fresh"),
-    ("scripts/build-vault.sh", "trap 'rm -rf \"$tmp\"' EXIT", "fresh"),
     ("scripts/build-vm.sh", '"$LUME" delete "$vm" --force', "runner"),
-    ("scripts/build-vm.sh", 'SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"', "vm"),
-    ("scripts/build-vm.sh", 'rm -rf "$SEED/payload"', "vm"),
-    ("scripts/build-vm.sh", 'rm -rf "$SEED"', "vm"),
     ("scripts/build-vm.sh", "gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'", "guest"),
-    ("scripts/fetch-artifacts.sh", "trap 'rm -rf \"$GNUPGHOME\"' EXIT", "fresh"),
-    ("scripts/fetch-artifacts.sh", 'rm -rf "$R/x"', "@cache"),
-    ("scripts/pin-gpg-key.sh", 'rm -rf "$home"', "fresh"),
-    ("scripts/release.sh", "trap 'rm -rf \"$TMP\"' EXIT", "fresh"),
-    ("scripts/vendor-driver-skill.py", "shutil.rmtree(stage, ignore_errors=True)", "@skills"),
-    ("scripts/vendor-driver-skill.py", "shutil.rmtree(DEST, ignore_errors=True)", "@skills"),
-    ("scripts/vendor-driver-skill.py", "shutil.rmtree(work, ignore_errors=True)", "fresh"),
-    ("scripts/vm-commands.sh", 'rm -rf "$tmp"', "fresh"),
     ("scripts/vm-commands.sh", '"$LUME" delete "$v" --force', "runner"),
-    ("scripts/vm-commands.sh", 'storage_py volume delete "$v"', "@storage"),
-    ("scripts/vm-commands.sh", "vm_rmtree() {", "vm"),
-    ("scripts/vm-commands.sh", "delete those yourself with metacomputer volume delete NAME", "text"),
-    ("lib/guest_import.py", "shutil.rmtree(stage, ignore_errors=True)", "fresh"),
+    ("lib/vms.py", "shutil.rmtree(leaf, dir_fd=fd)", "own"),
     ("lib/guest_put.py", "shutil.rmtree(target)", "guest"),
     ("lib/guest_put.py", "shutil.rmtree(tmp, ignore_errors=True)", "guest"),
     ("lib/guest_put.py", 'remote(ssh, f"rm -rf -- {shlex.quote(tmp)}"', "guest"),
     ("lib/harness.py", 'guest(f"rm -rf {self.guest_dir}', "guest"),
-    ("lib/learn.py", "shutil.rmtree(work, ignore_errors=True)", "fresh"),
-    ("lib/storage.py", "`metacomputer volume delete {name}` removes its keys", "text"),
-    ("lib/storage.py", "`metacomputer volume delete {name}` deletes the image", "text"),
-    ("lib/storage.py", "again after `volume delete {name}`", "text"),
-    ("lib/storage.py", "shutil.rmtree(d, ignore_errors=True)", "@storage"),
-    ("lib/storage.py", "shutil.rmtree(stage, ignore_errors=True)", "fresh"),
-    ("lib/storage.py", "and volume deletes that edit it, take turns", "text"),
-    ("lib/storage.py", "At volume delete: the staging folder", "text"),
     ("lib/vm_claude_guest.sh", 'rm -rf "$work"', "guest"),
     ("lib/vm_claude_guest.sh", 'rm -rf "$STATE"', "guest"),
     ("lib/vm_shell_guest.py", "shutil.rmtree(p, ignore_errors=True)", "guest"),
     ("lib/vm_shell_guest.py", "shutil.rmtree(d, ignore_errors=True)", "guest"),
-    ("lib/vms.py", "shutil.rmtree(leaf, dir_fd=fd)", "vm"),
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),
-    ("install.sh", 'src="$ROOT/.cache/mcomp-vm"; rm -rf "$src"', "@cache"),
-    ("install.sh", "tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT", "fresh"),
-    ("install.sh", 'rm -rf "$HOME/.local/share/lume/lume.app"', "@lume-app"),
 ]
-# What each root stands on, checked in the code: a place's root is listed, a fresh folder is made new, and so on.
-DELETE_ANCHORS = {
-    ("scripts/fetch-artifacts.sh", "@cache"): 'local R="$CACHE_DIR/rclone-v$RCLONE_VERSION"',
-    ("install.sh", "@cache"): 'src="$ROOT/.cache/mcomp-vm"',
-    ("lib/storage.py", "@storage"): 'return os.path.join(state_home(), "s3", name)',
-    ("scripts/vm-commands.sh", "@storage"): 'storage_py volume delete "$v"',
-    ("scripts/vendor-driver-skill.py", "@skills"): 'DEST = os.path.join(LAB, ".claude", "skills", "cua-driver")',
-    ("install.sh", "@lume-app"): '"$HOME/.local/share/lume/lume.app"',
-    ("scripts/build-tools.sh", "fresh"): 'tmp_src="$(mktemp -d',
-    ("scripts/build-vault.sh", "fresh"): 'tmp="$(mktemp -d)"',
-    ("scripts/fetch-artifacts.sh", "fresh"): 'GNUPGHOME="$(mktemp -d',
-    ("scripts/pin-gpg-key.sh", "fresh"): 'home="$(mktemp -d',
-    ("scripts/release.sh", "fresh"): 'TMP="$(mktemp -d',
-    ("scripts/vendor-driver-skill.py", "fresh"): "work = tempfile.mkdtemp(",
-    ("scripts/vm-commands.sh", "fresh"): 'tmp="$(mktemp -d',
-    ("lib/guest_import.py", "fresh"): "stage = tempfile.mkdtemp(",
-    ("lib/learn.py", "fresh"): "work = tempfile.mkdtemp(",
-    ("lib/storage.py", "fresh"): 'stage_name = f".{a.name}.staging-{uuid.uuid4().hex[:8]}"',
-    ("install.sh", "fresh"): 'tmp="$(mktemp -d)"',
-}
-DELETE_PAT = r'rm +-[a-zA-Z]*r[a-zA-Z]*\b|rmtree\(|removedirs\(|"\$LUME" delete|\$LUME delete|lume delete|volume delete'
+DELETE_HELPER = ("lib/safedelete.py", "scripts/safe-rmtree.sh")
+DELETE_PAT = (r'\brm +-[a-zA-Z]*r[a-zA-Z]*\b|shutil\.rmtree\(|(?<![\w.])rmtree\(|removedirs\(|'
+              r'"\$LUME" delete|\$LUME delete|\blume delete')
 
 
 def shell_function(text, line_no):
@@ -1388,15 +1451,17 @@ def shell_function(text, line_no):
 
 
 def delete_inventory(td):
-    """No recursive delete without a known root: every rm -r, rmtree, removedirs and runner delete in bin/, scripts/,
-    lib/ and install.sh is in DELETE_INVENTORY with its root, every entry is still there, every place is one the rule
-    checks (lib/vms.py PLACES, sent by scripts/lib.sh), and every runner delete runs after the identity rule."""
-    import re as _re
-    pat = _re.compile(DELETE_PAT)
+    """No bare recursive delete: every rm -r, rmtree and removedirs in bin/, scripts/, lib/ and install.sh goes
+    through lib/safedelete.py (scripts/safe-rmtree.sh), except those in DELETE_EXCEPTIONS (the runner's own deletes,
+    which run after the identity rule; vm delete's own-folder delete; deletes inside the VM; printed hints). A new one,
+    or an exception no longer in the code, fails this test."""
+    pat = re.compile(DELETE_PAT)
     files = ["install.sh"] + sorted(os.path.relpath(os.path.join(d, f), LAB) for top in ("bin", "scripts", "lib")
                                     for d, _, fs in os.walk(os.path.join(LAB, top)) if "__pycache__" not in d for f in fs)
-    unknown, used, runner_lines = [], set(), []
+    bare, used, runner_lines = [], set(), []
     for rel in files:
+        if rel in DELETE_HELPER:
+            continue
         try:
             text = open(os.path.join(LAB, rel)).read()
         except (UnicodeDecodeError, OSError):
@@ -1404,29 +1469,24 @@ def delete_inventory(td):
         for i, ln in enumerate(text.splitlines(), 1):
             if not pat.search(ln):
                 continue
-            hits = [e for e in DELETE_INVENTORY if e[0] == rel and e[1] in ln]
+            hits = [e for e in DELETE_EXCEPTIONS if e[0] == rel and e[1] in ln]
             if not hits:
-                unknown.append(f"{rel}:{i}: {ln.strip()[:120]}")
+                bare.append(f"{rel}:{i}: {ln.strip()[:120]}")
             for e in hits:
                 used.add(e)
                 if e[2] == "runner":
                     runner_lines.append((rel, i, text))
-    check("every recursive delete (rm -r, rmtree, the runner's delete) is in the inventory with its root", not unknown,
-          "\n".join(unknown))
-    stale = [e for e in DELETE_INVENTORY if e not in used]
-    check("...and every inventory entry is still in the code", not stale, stale)
-    sys.path.insert(0, os.path.join(LAB, "lib"))
-    try:
-        import vms
-    finally:
-        sys.path.pop(0)
-    lib = open(os.path.join(LAB, "scripts", "lib.sh")).read()
-    places = {e[2] for e in DELETE_INVENTORY if e[2].startswith("@")}
-    check("every place an inventory root is in is one the rule checks (lib/vms.py PLACES) and scripts/lib.sh sends",
-          all(pl in getattr(vms, "PLACES", {}) and f"{pl} PATH" in lib for pl in places),
-          (places, sorted(getattr(vms, "PLACES", {}))))
-    bad = [k for k, a in DELETE_ANCHORS.items() if a not in open(os.path.join(LAB, k[0])).read()]
-    check("...and each root stands where the inventory says (a place's folder, a folder made new)", not bad, bad)
+    check("no recursive delete (rm -r, rmtree, removedirs) outside lib/safedelete.py, but the listed exceptions", not bare,
+          "\n".join(bare))
+    stale = [e for e in DELETE_EXCEPTIONS if e not in used]
+    check("...and every listed exception is still in the code", not stale, stale)
+    hp = os.path.join(LAB, "lib", "safedelete.py")
+    helper = open(hp).read() if os.path.exists(hp) else ""
+    sr = os.path.join(LAB, "scripts", "safe-rmtree.sh")
+    check("the helper checks each target physically against every VM's folders, failing closed", os.path.exists(sr) and
+          "def check(path, prot" in helper and "vms.physical(target" in helper and "mc_all_identity_records" in helper
+          and 'if ids.get("UNREADABLE"):' in helper and 'MC_LIB_DEFS_ONLY=1' in helper
+          and "safedelete.py\" rmtree" in open(sr).read())
     checked = []
     for rel, i, text in runner_lines:
         fn = shell_function(text, i) if rel != "scripts/build-vm.sh" else None
@@ -1434,13 +1494,13 @@ def delete_inventory(td):
             ok = fn in ("do_checkpoint", "do_baseline", "restore_from")
             if fn == "restore_from":
                 callers = [shell_function(text, j) for j, ln in enumerate(text.splitlines(), 1)
-                           if _re.search(r"\brestore_from \"", ln)]
-                bodies = [_re.search(r"^%s\(\) \{.*?^\}$" % c, text, _re.S | _re.M).group(0) for c in callers]
+                           if re.search(r"\brestore_from \"", ln)]
+                bodies = [re.search(r"^%s\(\) \{.*?^\}$" % c, text, re.S | re.M).group(0) for c in callers]
                 ok = ok and set(callers) <= {"do_reset", "do_restore"} and all("vm_change_lock" in body for body in bodies)
             elif ok:
-                ok = "vm_change_lock" in _re.search(r"^%s\(\) \{.*?^\}$" % fn, text, _re.S | _re.M).group(0)
+                ok = "vm_change_lock" in re.search(r"^%s\(\) \{.*?^\}$" % fn, text, re.S | re.M).group(0)
         elif rel == "scripts/vm-commands.sh":
-            plan = _re.search(r"^vm_delete_plan\(\) \{.*?^\}$", text, _re.S | _re.M).group(0)
+            plan = re.search(r"^vm_delete_plan\(\) \{.*?^\}$", text, re.S | re.M).group(0)
             ok = fn == "vm_delete" and "mc_identity_check --no-ports" in plan and "vm_other_identities" in plan
         else:
             lines = text.splitlines()
@@ -1573,6 +1633,7 @@ def main():
         recheck3_fixes(td)
         final2_fixes(td)
         final3_fixes(td)
+        final4_fixes(td)
         delete_inventory(td)
         claude_flow(td)
         hub_pin(td)

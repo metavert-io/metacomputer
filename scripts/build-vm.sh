@@ -109,7 +109,9 @@ ok "disk: Ubuntu $UBUNTU_RELEASE cloud image, $((size / 1024 / 1024 / 1024)) GiB
 MAC="$(vm_mac "$VM_NAME")"
 
 # --- 2. cloud-init seed (NoCloud, ISO9660 label cidata) ---------------------
-SEED="$RUN_DIR/seed"; rm -rf "$SEED" "$RUN_DIR/seed.iso"; mkdir -p "$SEED/payload"
+# Every recursive delete goes through scripts/safe-rmtree.sh (lib/safedelete.py): never a folder another VM uses.
+SEED="$RUN_DIR/seed"; "$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED" "$RUN_DIR/seed.iso" || die "not deleting the old seed (above)"
+mkdir -p "$SEED/payload"
 cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$SEED/payload/mozilla-repo-signing-key.gpg"   # only the pinned key (fetch-artifacts.sh)
@@ -136,7 +138,7 @@ case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/pinned-key.asc" "$SEED
   echo "SECRETS_PROXY_PORT=${SECRETS_PROXY_PORT:-18765}"
 } > "$SEED/payload/versions.env"
 (cd "$SEED/payload" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 -czf ../payload.tgz .)
-rm -rf "$SEED/payload"
+"$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED/payload" || die "not deleting the seed's payload (above)"
 TZ_NAME="$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
 "$PY" - "$SEED" "$SSH_DIR" "$TS" "$TZ_NAME" "$VM_HOSTNAME" "$GUEST_USER" "$ADMIN_USER" <<'EOF'
 import json, sys, pathlib
@@ -192,7 +194,7 @@ p = pathlib.Path(seed)
 EOF
 chmod 600 "$SEED/user-data"
 hdiutil makehybrid -quiet -o "$RUN_DIR/seed.iso" "$SEED" -iso -joliet -iso-volume-name cidata -joliet-volume-name cidata
-rm -rf "$SEED"
+"$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED" || die "not deleting the seed (above)"
 chmod 600 "$RUN_DIR/seed.iso"
 ok "seed: $(du -h "$RUN_DIR/seed.iso" | cut -f1) (user-data, keys, payload)"
 

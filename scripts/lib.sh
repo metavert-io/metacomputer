@@ -104,13 +104,12 @@ mc_shared_records() { # OWNER VAULT_DIR EVENTS_SPOOL
       "$1" SHARED_EVENTS_SPOOL "$MC_SHARED_VAULT/events/spool"
   else printf '%s\0' "$1" EVENTS_SPOOL "$3"; fi
 }
-# The places no VM's folder may be in or hold, because something deletes inside them on its own (lib/vms.py PLACES;
-# the inventory of every recursive delete is pinned by tests/test_multi_vm.py), as NUL-separated "@NAME PATH value"
-# records: the runner's VM storage (Lume's own default ~/.lume, ~ being the account's home as Lume has it; every
-# storage location the runner reports with `config get`; those in Lume's settings file), this checkout's .cache and
-# .claude/skills, the storage state folder and the runner's install folder. When the runner's storage can't be known
-# (no runner, `config get` failing or listing none, a settings file of Lume's that can't be read), an "@runner ERROR"
-# record instead of a guess: the check fails closed.
+# The runner's VM storage, where no VM's folder may be or be held (the runner's own delete of a VM, baseline or
+# checkpoint takes its whole folder there; every other recursive delete checks its own target: lib/safedelete.py), as
+# NUL-separated "@runner PATH value" records: Lume's own default ~/.lume (~ being the account's home as Lume has it),
+# every storage location the runner reports with `config get`, and those in Lume's settings file. When it can't be
+# known (no runner, `config get` failing or listing none, a settings file of Lume's that can't be read), an
+# "@runner ERROR" record instead of a guess: the check fails closed.
 mc_place_records() {
   local lb out="" h f l err=""
   lb="${LUME:-$HOME/.local/bin/mcomp-vm}"
@@ -142,8 +141,25 @@ mc_place_records() {
       *) printf '%s\0' @runner PATH "$l" ;;     # anything not absolute is refused there, never dropped
     esac
   done
-  printf '%s\0' @cache PATH "$LAB_ROOT/.cache" @skills PATH "$LAB_ROOT/.claude/skills" \
-    @storage PATH "${MCOMP_STORAGE_HOME:-$HOME/.local/share/metacomputer/storage}" @lume-app PATH "$HOME/.local/share/lume"
+}
+# Every VM this checkout knows, as identity records (mc_identity_records), for lib/safedelete.py: what no recursive
+# delete may be or hold. The main VM's (config/local.env or the defaults, with the account's shared vault and spools),
+# every config/vms/ VM's (their fixed folders; an unreadable file is UNREADABLE, and nothing is deleted), the
+# MCOMP_CONFIG file's when it's another one, and the vault folder and spool the environment names.
+mc_all_identity_records() {
+  local n f vms_real
+  mc_identity_records "the main VM ($([ -f "$MC_MAIN_CONFIG" ] && echo config/local.env || echo the defaults))" main
+  for n in $(mc_vm_files); do mc_identity_records "config/vms/$n.env" vm "$n"; done
+  if [ -n "${MCOMP_CONFIG:-}" ] && [ -f "$MCOMP_CONFIG" ]; then
+    f="$(mc_realpath "$MCOMP_CONFIG")"; vms_real="$(cd "$MC_VMS_DIR" 2>/dev/null && pwd -P)"
+    case "$f" in
+      "$(mc_realpath "$MC_MAIN_CONFIG")") ;;
+      "${vms_real:-/nonexistent/none}"/*.env) ;;
+      *) mc_identity_records "$(mc_tilde "$MCOMP_CONFIG")" file "$MCOMP_CONFIG" ;;
+    esac
+  fi
+  [ -z "${MCOMP_VAULT_DIR:-}" ] || printf '%s\0' "the environment (MCOMP_VAULT_DIR)" VAULT_DIR "$MCOMP_VAULT_DIR"
+  [ -z "${MCOMP_EVENTS_SPOOL:-}" ] || printf '%s\0' "the environment (MCOMP_EVENTS_SPOOL)" EVENTS_SPOOL "$MCOMP_EVENTS_SPOOL"
 }
 # OWNER KIND [NAME|FILE]: one VM's identity as its file says it (in a subshell, unchecked), NUL-separated OWNER KEY
 # VALUE records for `lib/vms.py identity` and error rows: names, ports and folders. KIND main: config/local.env (or the
@@ -359,6 +375,10 @@ mc_load_settings() {
 }
 # The vault folder in effect: VAULT_DIR, else the vault's own default (the account's, whatever $HOME says).
 mc_vault_dir() { printf '%s' "${VAULT_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer}"; }
+
+# Sourced only for the functions above (lib/safedelete.py reads every VM's folders this way): stop here, before any
+# settings are loaded or anything is made.
+[ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0
 
 mc_sel_name="${MCOMP_VM_ARG:-${MCOMP_VM:-}}"
 mc_load_settings "$mc_sel_name" "${MCOMP_CONFIG:-}" || { printf '%s\n' "metacomputer: $MC_REFUSAL" >&2; exit 1; }

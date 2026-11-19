@@ -20,7 +20,7 @@ U="$CACHE_DIR/ubuntu-$UBUNTU_RELEASE"; mkdir -p "$U"
 # paths over ~104 characters fail (a checkout in a deep folder would).
 # Signatures are checked with gpgv against a key file, which needs no agent.
 GNUPGHOME="$(mktemp -d /tmp/mcomp-gpg.XXXXXX)"; export GNUPGHOME
-trap 'rm -rf "$GNUPGHOME"' EXIT
+trap '"$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$GNUPGHOME"' EXIT
 
 fetch_rclone() {
   local R="$CACHE_DIR/rclone-v$RCLONE_VERSION" listed got
@@ -46,16 +46,19 @@ fetch_rclone() {
   fi
   echo "$RCLONE_SHA256  $R/$RCLONE_ZIP" | shasum -a 256 -c - >/dev/null || { rm -f "$R/$RCLONE_ZIP"; die "rclone zip digest mismatch"; }
   ok "$RCLONE_ZIP sha256 verified"
-  rm -rf "$R/x"; mkdir -p "$R/x"
+  # Every recursive delete goes through scripts/safe-rmtree.sh: $R/x is never, and never holds, a VM's folder,
+  # whatever links lead there.
+  "$LAB_ROOT/scripts/safe-rmtree.sh" "$R/x" || die "not deleting $R/x (above); nothing was unpacked"
+  mkdir -p "$R/x"
   unzip -q -o "$R/$RCLONE_ZIP" -d "$R/x" || die "could not unpack $RCLONE_ZIP"
   got="$(find "$R/x" -type f -name rclone -perm -u+x | head -1)"
   [ -n "$got" ] || die "$RCLONE_ZIP has no rclone program"
   # The program itself is pinned (RCLONE_BIN_SHA256); storage checks it against that value before every use,
   # so no digest is written beside it (one there would only invite trusting it).
   [ -n "${RCLONE_BIN_SHA256:-}" ] && [ "$(shasum -a 256 "$got" | cut -d' ' -f1)" = "$RCLONE_BIN_SHA256" ] \
-    || { rm -rf "$R/x"; die "the rclone program in $RCLONE_ZIP isn't the pinned one (RCLONE_BIN_SHA256)"; }
+    || { "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$R/x"; die "the rclone program in $RCLONE_ZIP isn't the pinned one (RCLONE_BIN_SHA256)"; }
   install -m 0755 "$got" "$R/rclone.part" && mv "$R/rclone.part" "$R/rclone"
-  rm -rf "$R/x" "$R/rclone.sha256"
+  "$LAB_ROOT/scripts/safe-rmtree.sh" "$R/x" "$R/rclone.sha256" || die "not deleting $R/x (above)"
   "$R/rclone" version 2>/dev/null | head -1 | grep -q "rclone v$RCLONE_VERSION\$" \
     || die "the unpacked rclone doesn't report version $RCLONE_VERSION"
   ok "rclone $RCLONE_VERSION installed at $R/rclone (its sha256 is the pinned RCLONE_BIN_SHA256)"

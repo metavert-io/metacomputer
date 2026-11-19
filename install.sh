@@ -650,7 +650,7 @@ if [ "$LUME_CHOICE" = mcomp-vm ]; then
     if [ "$FRESH_SOURCES" = 1 ]; then   # a new temporary clone; nothing in the checkout is touched
       src="$(mktemp -d "${TMPDIR:-/tmp}/mcomp-vm-src.XXXXXX")/mcomp-vm"
     else
-      src="$ROOT/.cache/mcomp-vm"; rm -rf "$src"; mkdir -p "$ROOT/.cache"
+      src="$ROOT/.cache/mcomp-vm"; "$ROOT/scripts/safe-rmtree.sh" "$src" || die "not deleting $src (above)"; mkdir -p "$ROOT/.cache"
     fi
     git_net clone -q -c advice.detachedHead=false --depth 1 --branch "$MCOMP_VM_TAG" "$MCOMP_VM_REPO" "$src" \
       || die "couldn't download mcomp-vm's source ($MCOMP_VM_REPO, $MCOMP_VM_TAG)" "${FAIL_HINT[@]}"
@@ -673,13 +673,14 @@ else
     ok "already installed: $LUME_BIN"
   else
     FAIL_HINT=("Lume's download from github.com/trycua/cua didn't finish or didn't match its pinned checksum. Run ./install.sh again.")
-    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    tmp="$(mktemp -d)"; trap '"$ROOT/scripts/safe-rmtree.sh" --quiet "$tmp"' EXIT
     tgz="lume-$LUME_VERSION-darwin-arm64.tar.gz"
     curl -fsSL --retry 3 -o "$tmp/$tgz" "https://github.com/trycua/cua/releases/download/lume-v$LUME_VERSION/$tgz"
     echo "$LUME_TARBALL_SHA256  $tmp/$tgz" | shasum -a 256 -c - >/dev/null || die "Lume download failed its checksum"
     tar -xzf "$tmp/$tgz" -C "$tmp"
     mkdir -p "$HOME/.local/share/lume" "$HOME/.local/bin"
-    rm -rf "$HOME/.local/share/lume/lume.app"; mv "$tmp/lume.app" "$HOME/.local/share/lume/"
+    "$ROOT/scripts/safe-rmtree.sh" "$HOME/.local/share/lume/lume.app" || die "not replacing lume.app (above)"
+    mv "$tmp/lume.app" "$HOME/.local/share/lume/"
     printf '#!/bin/sh\nLUME_TELEMETRY_ENABLED=0 exec "$HOME/.local/share/lume/lume.app/Contents/MacOS/lume" "$@"\n' > "$LUME_BIN"
     chmod +x "$LUME_BIN"
     ok "installed $LUME_BIN (checksum verified, telemetry off, no background service)"

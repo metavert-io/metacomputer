@@ -659,8 +659,9 @@ def build_root(t):
     root = os.path.join(t, "lab")
     for d in ("scripts", "config", "lib"):
         os.makedirs(os.path.join(root, d))
-    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "lib/vms.py", "lib/termsafe.py"):
-        shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
+    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "lib/vms.py", "lib/termsafe.py",
+              "lib/safedelete.py", "scripts/safe-rmtree.sh"):
+        shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-tools.sh"), '#!/bin/bash\nsleep "${STUB_TOOLS_SLEEP:-0}"\n', 0o755)
     write(os.path.join(root, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)
     runner = os.path.join(t, "runner")
@@ -837,7 +838,7 @@ def test_build_tools_stamps():
     try:
         root = os.path.join(t, "lab")
         for f in ("scripts/build-tools.sh", "scripts/lib.sh", "config/defaults.env", "tools/qcow2raw/go.mod", "tools/qcow2raw/go.sum",
-                  "tools/qcow2raw/main.go"):
+                  "tools/qcow2raw/main.go", "scripts/safe-rmtree.sh", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):
             os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
             shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
         stubs = os.path.join(t, "stubs")
@@ -1103,6 +1104,9 @@ def install_root(b):
     shutil.copy(INSTALL, root)
     for f in ("defaults.env", "local.env.example"):
         shutil.copy(os.path.join(LAB, "config", f), os.path.join(root, "config"))
+    for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):   # every recursive delete goes through it
+        os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
+        shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
     write(os.path.join(root, "scripts", "build-tools.sh"),
           f'#!/bin/bash\nif [ "$1" = --check ]; then [ -z "${{STUB_TOOLS_STALE:-}}" ]; exit; fi\necho "tools${{*:+ $*}}" >> "{b.t}/tools.log"\n', 0o755)

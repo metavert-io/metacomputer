@@ -47,6 +47,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(LIB)
 sys.path.insert(0, LIB)
 import learn_mine  # noqa: E402
+import safedelete  # noqa: E402  (every recursive delete: never a folder a VM uses)
 import learn_store  # noqa: E402
 import transcripts  # noqa: E402
 import termsafe  # noqa: E402
@@ -907,7 +908,7 @@ def draft_with_claude(rep, covered, model=None, quiet=False, min_count=2):
             say(f"  dropped a draft for {esc(pat)}: {esc(why)}")
         return drafts
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        safedelete.rmtree(work, quiet=True)
 
 
 # --- measuring: the benchmark without and with the lessons ------------------------------------------

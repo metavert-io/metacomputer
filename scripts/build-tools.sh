@@ -54,7 +54,7 @@ G() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
 
 if [ "$REBUILD" = 1 ] || ! stamp_ok cua-netgw "$(netgw_src)"; then
   if [ "$FRESH" = 1 ]; then
-    tmp_src="$(mktemp -d "${TMPDIR:-/tmp}/mcomp-cua-src.XXXXXX")"; trap 'rm -rf "$tmp_src"' EXIT
+    tmp_src="$(mktemp -d "${TMPDIR:-/tmp}/mcomp-cua-src.XXXXXX")"; trap '"$LAB/scripts/safe-rmtree.sh" --quiet "$tmp_src"' EXIT
     SRC="$tmp_src/cua-src"
   else
     SRC="$CACHE_DIR/cua-src"

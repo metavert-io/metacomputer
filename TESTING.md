@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (205 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (213 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
@@ -163,16 +163,23 @@ runner's does.
   (each refused, naming the file and folder, nothing deleted); the runner's `config get` failing (a per-VM
   VM, `vm create`, `vm delete` and `reset` refused; the main VM's `stop` and `status` still work);
   storage spelled with `..`, under a folder that can't be searched, and Lume's settings file unreadable
-  (refused, not skipped); a per-VM vault linked into `.cache`, and a main `RUN_DIR` in `.cache` (refused,
-  the build before its downloads); a `config/vms/` file setting any of its five folders, and
+  (refused, not skipped); a `config/vms/` file setting any of its five folders, and
   `MCOMP_VAULT_DIR` / `MCOMP_EVENTS_SPOOL` naming another folder for one (refused). The older scenarios
   that set a per-VM folder now make it a link instead (the folders are fixed), and are compared as the
   folders they physically are.
-- The delete inventory: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
-  `lib/` and `install.sh` is in `DELETE_INVENTORY` with its root (the runner's storage, one VM's own
-  folder, a place in `lib/vms.py PLACES`, a folder made new for the run, the VM, or a printed hint); a new
-  one, or an entry no longer in the code, fails the test, every place is one the rule checks, and every
-  runner delete runs after the identity rule.
+- The fourth final check's findings (failing on cf6ad10): fetching rclone (scripts/fetch-artifacts.sh, with
+  stand-ins for curl, gpgv and shasum: no network) while `.cache/rclone-vVERSION` is a link to the per-VM
+  vaults' folder (VM x's vault kept, the delete refused, naming it); `volume delete` of an S3 volume whose
+  state folder holds VM x's vault through a link (in-process, with a stand-in for the Keychain tool: refused
+  before anything changes, the vault and the registration kept; with nothing of a VM's in it, deleted). And
+  the helper, `scripts/safe-rmtree.sh`: a plain folder goes; a folder holding a link to a VM's vault goes,
+  the vault stays; the main `RUN_DIR`, a path whose parent is a link to a VM's vault, a link on the way to a
+  VM's folder and a folder holding one are refused; a link itself goes, never what it points to; an
+  unreadable settings file deletes nothing.
+- No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
+  `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS` (the runner's
+  own deletes, each checked to run after the identity rule; `vm delete`'s own-folder delete; deletes
+  inside the VM; printed hints). A new one, or an exception no longer in the code, fails the test.
 - `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).
