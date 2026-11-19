@@ -230,8 +230,9 @@ VM, and checks:
 - the task copier (`TASK_SYNC_INTERVAL`), with a local folder as the VM: finished turns
   arrive while the task runs, the newest and the video don't, each turn is copied
   once (a later change in the VM doesn't reach the Mac), names other than
-  `turn-<digits>` are never used, it ends when `task finish` removes its pid file or
-  after the folder has gone, and `TASK_SYNC_INTERVAL=0` starts none.
+  `turn-<digits>` are never used, it ends when `task finish` removes its pid file,
+  after the folder has gone, or after its idle limit, and `TASK_SYNC_INTERVAL=0`
+  and `task start --no-sync` start none.
 
 `tests/test_guest_import.py` checks `--keep-existing`, which `task finish` uses: a
 turn file already on the Mac is kept, one the VM has changed since is named and
@@ -258,7 +259,7 @@ after the wipe, and `record stop` must say it couldn't reach the VM (the wipe ta
 the desktop account's SSH key). Then a task with a real driver recording
 (`metacomputer call`): finished turns must reach the Mac while it runs, and after
 the same wipe `task finish` must still list them. Last run, on a test VM built from
-this change (2026-11-18): all 80 checks of `--vm --wipe` passed.
+this change (2026-11-18): all 84 checks of `--vm --wipe` passed.
 
 Sync between sound and picture was measured separately, by recording a full-screen
 flash and a beep started on the same frame once a second. The pulse input's

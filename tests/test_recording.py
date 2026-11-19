@@ -435,6 +435,34 @@ guest_import() { MCOMP_IMPORT_MIN_FREE_GB=0 "$PY" "$LAB_ROOT/lib/guest_import.py
                                 f'TASK_SYNC_INTERVAL=0 task_sync_start {name}; ls "$RUN_DIR"; cat "$TD/calls" 2>/dev/null'))
         check("TASK_SYNC_INTERVAL=0 starts no copier", "DAEMONIZE" not in r.stdout and "task-sync" not in r.stdout,
               r.stdout)
+        # A task nobody finishes: an hour (here 3 s) without a new turn ends the copier.
+        os.makedirs(vm)
+        turn(1)
+        body = (stand_in + f'\necho $$ > "{pidf}"\nMCOMP_TASK_SYNC_IDLE=3 TASK_SYNC_INTERVAL=1 do_task_sync {name}\n'
+                f'echo "EXIT $?"; [ -e "{pidf}" ] || echo "PIDFILE GONE"\n')
+        t0 = time.time()
+        r = subprocess.run(["/bin/bash", "-c", cli_script(td, ("task_sync_pidfile", "task_sync_on", "do_task_sync"), body)],
+                           capture_output=True, text=True, timeout=30, env=dict(os.environ, FAKE_DIR=vm),
+                           stdin=subprocess.DEVNULL)
+        check("copier: no new turn for its idle limit ends it, pid file and all", "EXIT 0" in r.stdout
+              and "PIDFILE GONE" in r.stdout and time.time() - t0 < 15, (r.stdout, r.stderr))
+        # task start: a copier per task, none with --no-sync (what web checks without --record pass)
+        funcs = ("task_sync_pidfile", "task_sync_on", "task_sync_start", "do_task")
+        for args, want in (("probe", True), ("probe --no-sync", False), ("--no-sync probe", False)):
+            calls = os.path.join(td, "calls")
+            if os.path.exists(calls):
+                os.remove(calls)
+            r = run_bash(cli_script(td, funcs, f'do_task start {args}; cat "$TD/calls" 2>/dev/null'))
+            started = "DAEMONIZE" in r.stdout and re.search(r"_task-sync mcomp-\d{8}-\d{6}-probe\b", r.stdout)
+            check(f"task start {args}: {'a copier' if want else 'no copier'}", r.returncode == 0
+                  and re.search(r"^NAME=mcomp-\d{8}-\d{6}-probe$", r.stdout, re.M) and bool(started) == want,
+                  (r.stdout, r.stderr))
+        pids = os.path.join(td, "stub-pids")
+        for pid in (open(pids).read().split() if os.path.exists(pids) else []):
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

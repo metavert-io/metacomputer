@@ -763,7 +763,9 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    `guest_import`; names other than `turn-<digits>` are never used. It ends when
    `task finish` removes its pid file (killed with its process group after 30 s),
    after the folder has been missing four times in a row, after eight failed
-   listings, or after a day. `task finish` then copies the folder with
+   listings, after an hour without a new turn, or after a day. `task start
+   --no-sync` starts none (`web` checks without `--record`, which never call
+   `task finish`). `task finish` then copies the folder with
    `guest_import --keep-existing recording/turn-`: a turn file the Mac already has
    stays as it is, and one the VM changed since is named and counted in the
    `task.finished` event. The video is only whole at `stop_recording`, so it

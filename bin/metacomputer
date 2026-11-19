@@ -20,7 +20,7 @@
 #   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
-#   task start SLUG | finish NAME  one folder per task (guest + host), artifacts listed; finished recording
+#   task start SLUG [--no-sync] | finish NAME   one folder per task (guest + host), artifacts listed; finished recording
 #                                  turns copied to the Mac while it's open (TASK_SYNC_INTERVAL)
 #   put HOST_PATH... [--to GUEST_DIR] [--overwrite]
 #                                  copy files into the VM (default ~/Inbox), each checked by SHA-256; a
@@ -1226,12 +1226,13 @@ do_task_sync() { # NAME (internal; task start runs it detached, task finish ends
   local name="${1:-}"
   [[ "$name" =~ ^mcomp-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$ ]] || die "usage: metacomputer _task-sync NAME"
   task_sync_on || return 0
-  local every="${TASK_SYNC_INTERVAL:-15}" pidf guest host deadline list sorted last t n gone=0 down=0
+  local every="${TASK_SYNC_INTERVAL:-15}" pidf guest host deadline list sorted seen="" changed last t n gone=0 down=0
   pidf="$(task_sync_pidfile "$name")"
   guest="$GUEST_RUN_DIR/$name/recording"; host="$LAB_ROOT/results/$name/guest/recording"
-  deadline=$(( $(date +%s) + 86400 ))        # a task left open ends its copier after a day
+  deadline=$(( $(date +%s) + 86400 ))        # a task left open ends its copier after a day...
+  changed=$(date +%s)                         # ...or after an hour without a new turn (a task never finished)
   mkdir -p "$host"
-  while [ "$(date +%s)" -lt "$deadline" ]; do
+  while [ "$(date +%s)" -lt "$deadline" ] && [ $(( $(date +%s) - changed )) -lt "${MCOMP_TASK_SYNC_IDLE:-3600}" ]; do
     n=0; while [ $n -lt "$every" ]; do [ -f "$pidf" ] || return 0; sleep 1; n=$((n + 1)); done
     # What the VM lists is only a list of names: each one is checked here (turn-<digits>) before it's used.
     list="$(gssh ops "test -d '$guest' || { echo GONE; exit 0; }; cd '$guest' && ls -1 && echo END" 2>/dev/null | head -n 100001)"
@@ -1241,6 +1242,7 @@ do_task_sync() { # NAME (internal; task start runs it detached, task finish ends
       *) down=$((down + 1)); [ $down -ge 8 ] && break; continue ;;            # unreachable: stopped, for one
     esac
     sorted="$(printf '%s\n' "$list" | grep -E '^turn-[0-9]{1,9}$' | sort -t- -k2,2n)" || continue
+    [ "$sorted" = "$seen" ] || { seen="$sorted"; changed=$(date +%s); }
     last="$(printf '%s\n' "$sorted" | tail -n 1)"
     local want=()
     while IFS= read -r t; do
@@ -1253,13 +1255,16 @@ do_task_sync() { # NAME (internal; task start runs it detached, task finish ends
   rm -f "$pidf"
 }
 
-do_task() { # start SLUG | finish NAME
+do_task() { # start SLUG [--no-sync] | finish NAME
   local sub="${1:-}"; shift || true
   case "$sub" in
     start)
       need_running
-      local slug name guest host
-      slug="$(printf '%s' "${1:-task}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
+      local slug="" name guest host sync=1 a
+      for a in "$@"; do   # --no-sync: nothing will be recorded (web checks without --record), so no copier
+        case "$a" in --no-sync) sync=0 ;; *) [ -n "$slug" ] || slug="$a" ;; esac
+      done
+      slug="$(printf '%s' "${slug:-task}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
       name="mcomp-$(date +%Y%m%d-%H%M%S)-${slug:-task}"
       guest="$GUEST_RUN_DIR/$name"; host="$LAB_ROOT/results/$name"
       gssh ops "mkdir -p '$guest/recording' '$guest/files'" >/dev/null || die "cannot create $guest in the guest"
@@ -1270,7 +1275,7 @@ p, name, guest, host, cwd = sys.argv[1:]
 json.dump({"name": name, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "requested_from": cwd,
            "guest_dir": guest, "host_dir": host}, open(p, "w"), indent=2)
 EOF
-      task_sync_start "$name"
+      [ $sync = 0 ] || task_sync_start "$name"
       echo "NAME=$name"
       echo "GUEST_DIR=$guest"
       echo "RECORDING_DIR=$guest/recording    # start_recording output_dir"
@@ -1384,7 +1389,7 @@ except Exception:
     pass
 EOF
       ;;
-    *) die "usage: metacomputer task start SLUG | finish NAME" ;;
+    *) die "usage: metacomputer task start SLUG [--no-sync] | finish NAME" ;;
   esac
 }
 
