@@ -203,6 +203,10 @@ with Claude Code's normal tools.
   Chrome, signed-in profiles sealed and restored, or you sign in yourself through
   the live view.
 - **API keys:** short-lived tokens for a proxy on your Mac that adds the real key.
+- **Claude inside the metacomputer:** `metacomputer claude` installs and starts
+  Claude Code in the VM, signed in through that proxy (your subscription token or
+  API key stays on the Mac), and Claude drives it with `send` and `read`; `--show`
+  puts it on the VM's desktop for the live view and recordings.
 - **Storage:** disk volumes, shared Mac folders, S3-backed folders and reference
   disks.
 
@@ -294,6 +298,42 @@ code, then download this month's report."
 The password and code never pass through the chat, the transcript or the logs.
 On the page, the password shows as dots; the username and the code are ordinary
 text, visible in screenshots and recordings.
+
+</details>
+
+<details>
+<summary><b>Claude inside the metacomputer</b></summary>
+
+**Once, in your own terminal:** run `claude setup-token` for a subscription token (or
+use an API key), and store it in the vault for `api.anthropic.com`:
+
+```bash
+metacomputer secrets set claude-sub --kind api --api-host api.anthropic.com   # paste the token
+metacomputer secrets unlock --for 2h
+```
+
+**You ask:** "Give me Claude inside the metacomputer, show it on the desktop, and have
+it write and test a small CSV parser in its own folder."
+
+**Claude:**
+1. Runs `metacomputer claude --token claude-sub --show`. That installs Claude Code in
+   the VM if it's missing, gets a 1-hour token from the vault, sets Claude Code's
+   first-run choices, and starts it in tmux, in a terminal on the VM's desktop. The
+   token goes in `CLAUDE_CODE_OAUTH_TOKEN` (an API key stored with `--header 'x-api-key:
+   {value}'` goes in `ANTHROPIC_API_KEY`), and `ANTHROPIC_BASE_URL` points at the
+   vault's proxy inside the VM.
+2. Sends the task with `metacomputer claude send "..." --wait`, which pastes it whole and
+   returns once the inner Claude's screen holds still. It reads the screen with `claude
+   read` and answers the inner Claude's questions with `claude keys`, within what you
+   asked for.
+3. Treats what the inner Claude says as the VM's text, and checks the result itself: the
+   files through `metacomputer sh`, the tests by running them.
+4. Ends with `metacomputer claude stop --revoke`, which closes the session and its token.
+
+**You get:** the code and the test run, a terminal you could watch in the live view, and
+a line per token in the vault's audit log. Your subscription token never entered the VM:
+the inner Claude had a proxy token that worked only through your Mac, only for
+api.anthropic.com, and only until it was revoked.
 
 </details>
 
@@ -441,6 +481,7 @@ A few more to try:
 
 - "Convert every .docx in this folder to PDF and give me a zip."
 - "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there."
+- "Give me Claude inside the metacomputer, signed in with my subscription, and show it on the desktop."
 - "Build the site, serve it inside the VM, and click through sign-up and checkout in both browsers. Tell me what breaks."
 - "Work through these 20 forms. Ping my phone if you hit a CAPTCHA or a sign-in, and when you're done."
 - "Draw a flat two-colour logo for a coffee shop in Inkscape and give me the SVG and a 512 px PNG." (needs `inkscape`)
@@ -506,7 +547,10 @@ with `set` don't (`--approval session`, the default) unless you give them
 on a Mac with Touch ID, an approval takes Touch ID, your login password or the
 passphrase, so a program can't approve by typing into the unlock terminal; with
 typed approvals, one that can type there could. Passwords show as dots on the
-page, but usernames and one-time codes are visible, in recordings too.
+page, but usernames and one-time codes are visible, in recordings too. Programs in
+the VM that need an API key, Claude Code inside the VM included, get a short-lived
+token for a proxy on your Mac instead; anything in the VM can use that token until
+it ends, never the key.
 
 **Opt-in,** so out of the box metacomputer behaves the way Cua Driver does on its
 own (`metacomputer security` shows what's on):
@@ -555,6 +599,7 @@ they're here for when you want to yourself.
 | `checkpoint NAME`, `restore NAME`, `reset` | Save the stopped VM, go back to a save or to the clean baseline |
 | `volume create\|list`, `refdisk create\|list` | Storage that outlives the VM |
 | `secrets unlock`, `secrets list` | Unlock the vault, in your own terminal; what it holds, never values |
+| `claude --token NAME`, `claude send\|read\|stop` | Claude Code inside the VM, signed in through the vault's proxy |
 | `security`, `actions verify` | The optional hardening; check the signed action log |
 | `events status`, `notify "TEXT"` | The event stream; tell your sinks Claude is blocked |
 | `learn report\|review\|list` | Lessons from your own sessions |

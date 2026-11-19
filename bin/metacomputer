@@ -44,6 +44,11 @@
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
+#   claude [start] [--token NAME] [--ttl 1h] [--model M] [--skip-permissions] [--session NAME] [--show] [-- ARGS]
+#          | send TEXT [--wait] | read [--lines N] | wait | keys KEY... | show | status | renew [--ttl D]
+#          | stop [--revoke]
+#                                  Claude Code inside the VM, in tmux, signed in through the vault's proxy with a
+#                                  short-lived token (the key stays on the Mac); driven with send/read
 #   ssh [ops|admin] [CMD...]       shell into the guest
 #   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
 #                                  tell the user Claude is blocked on them (through the event sinks)
@@ -1044,6 +1049,16 @@ do_sh() { # bash in the VM as the desktop user, over the ops connection (lib/vm_
   MCOMP_VM_STATE="$state" exec "$PY" "$LAB_ROOT/lib/vm_shell.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
 }
 
+# Claude Code inside the VM (lib/vm_claude.py): each step goes through the shell channel's guarded runner;
+# the token comes from `metacomputer secrets token` (this file, run again as MCOMP_SELF) through a pipe.
+do_claude() {
+  export_options
+  local state=off; vm_running "$VM_NAME" && state=running
+  ssh_base ops
+  MCOMP_VM_STATE="$state" MCOMP_SELF="$SELF" exec "$PY" "$LAB_ROOT/lib/vm_claude.py" \
+    --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
+}
+
 do_who() {
   local st; st="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   if [ "${1:-}" = "--json" ]; then exec "$PY" "$LAB_ROOT/lib/owners.py" who --json; fi
@@ -1547,6 +1562,7 @@ case "$cmd" in
   recordings) do_recordings "$@" ;;
   view)       do_view "$@" ;;
   sh)         do_sh "$@" ;;
+  claude)     do_claude "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
               ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
   mcp)        # With the hub on, an MCP client here gets the guarded bridge (through the hub); only the hub itself

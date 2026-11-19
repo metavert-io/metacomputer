@@ -112,6 +112,7 @@ with clean_env():
     import events  # noqa: E402
     import mcp_hub  # noqa: E402
     import owners  # noqa: E402
+    import vm_claude  # noqa: E402
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
 
@@ -135,6 +136,153 @@ def fill_types():
     """Which <input> types each field may be filled into (the VM's secret-fill)."""
     m = re.search(r"FIELD_INPUT_TYPES = (\{.*?\n\})", raw(FILL), re.S)
     return ast.literal_eval(m.group(1))
+
+
+# Claude inside the VM (lib/vm_claude.py, lib/vm_claude_guest.sh)
+VC, VCG = "lib/vm_claude.py", "lib/vm_claude_guest.sh"
+
+
+def vc_fn(name):
+    """One top-level function of lib/vm_claude.py, as written."""
+    c = raw(VC)
+    i = c.index(f"\ndef {name}(")
+    j = c.find("\ndef ", i + 1)
+    return c[i:j if j > 0 else len(c)]
+
+
+def claude_headers():
+    """Bearer -> CLAUDE_CODE_OAUTH_TOKEN, x-api-key -> ANTHROPIC_API_KEY, anything else refused, on both sides; a
+    token with another header is revoked before the refusal."""
+    t = "mct_" + "a" * 32
+    ok = (vm_claude.auth_for_header("Authorization: Bearer " + t, t) == "oauth"
+          and vm_claude.auth_for_header("x-api-key: " + t, t) == "api-key"
+          and all(vm_claude.auth_for_header(h, t) is None for h in ("Authorization: Token " + t, "x-goog-api-key: " + t,
+                                                                    "Authorization: Bearer other"))
+          and vm_claude.env_var_for("oauth") == "CLAUDE_CODE_OAUTH_TOKEN" and vm_claude.env_var_for("api-key") == "ANTHROPIC_API_KEY"
+          and "oauth) VAR=CLAUDE_CODE_OAUTH_TOKEN" in raw(VCG) and "api-key) VAR=ANTHROPIC_API_KEY" in raw(VCG))
+    g = vc_fn("get_token")
+    return ok and g.index("revoke_token(tid)", g.index("if auth is None")) < g.index("raise Failed(EXIT_REFUSED")
+
+
+def claude_ttl(default_h, max_h):
+    return (vm_claude.DEFAULT_TTL == f"{default_h}h" and vm_claude.ttl_seconds(vm_claude.DEFAULT_TTL) == default_h * 3600
+            and vm_claude.MAX_TTL_S == max_h * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
+            and "ttl <= tokenMaxTTL else" in raw(CMDS))
+
+
+def claude_token_path():
+    """The VM's half takes the token out of its environment before anything runs, writes it only with printf under
+    umask 077 into a 0700 folder as a plain (unexported) assignment, uses it nowhere else; the launcher reads the file
+    once into unexported variables, deletes it, and exports the token only on the line before `exec claude`."""
+    g = raw(VCG)
+    launcher = g[g.index('cat > "$STATE/launch.sh"'):g.index("\nLAUNCH\n")]
+    return (g.index("unset MCOMP_CLAUDE_TOKEN MCOMP_CLAUDE_TEXT") < g.index('ACTION="${1:-}"') < g.index("\nfield() {")
+            and re.search(r"\(\s*umask 077\s*\{[^()]*printf '_mc_token=%q\\n' \"\$TOKEN\"[^()]*\} > \"\$STATE/env\"\s*\)", g)
+            is not None and 'chmod 700 "$STATE"' in g and g.count("$TOKEN") == 3
+            and launcher.index("unset _mc_base _mc_var _mc_token") < launcher.index('. "$d/env"\nrm -f "$d/env"')
+            and re.search(r'export "\$_mc_var=\$_mc_token"\nunset _mc_base _mc_var _mc_token\nexec claude "\$@"$', launcher)
+            is not None and len(re.findall(r"(?m)^export ", launcher)) == 2)
+
+
+def claude_keeper():
+    """A keeper holds an owners claim of kind inner for the session that started it, renewed only when the screen
+    changed (the probe's hash), never logged; who/status show it; it ends with stop, the session's end, release."""
+    k, p, s = vc_fn("run_keeper"), vc_fn("probe"), vc_fn("start_keeper")
+    return ('kind="inner"' in s and "owners.claude_of(" in s and "start_new_session=True" in s and "close_fds=True" in s
+            and 'if fields.get("hash") != last:' in k and 'if fields.get("state") != "running":' in k
+            and "if not os.path.exists(owners.claim_path(me)):" in k and "owners.drop_claim(me)" in k
+            and "vm_shell.execute(" in p and "run_guarded" not in p and vm_claude.KEEP_S == 60
+            and 'if o.get("claim") == "inner":' in raw("lib/owners.py") and "stop_keeper(" in vc_fn("do_stop")
+            and "owners.ACTIVE_S" not in k and owners.ACTIVE_S == 600
+            and "probe_fresh(session)" in k and "probe(transport" not in k
+            and '[me, "claude", "_probe", "--session", session]' in vc_fn("probe_fresh")
+            and '"_keeper", "--session", o["session"]]' in s and "--transport" not in s)
+
+
+def claude_release_locked():
+    """`release` drops claims under owners.lock(); the keeper reads its claim and renews it under the same lock, and
+    exits when the claim is gone."""
+    o = raw("lib/owners.py")
+    rel = o[o.index('if cmd == "release":'):]
+    rel = rel[:rel.index("return 0")]
+    k = vc_fn("run_keeper")
+    held = k[k.index("with owners.lock():"):]
+    return ("with lock():" in rel and rel.index("with lock():") < rel.index("drop_claim(")
+            and held.index("json.load(open(owners.claim_path(me)))") < held.index("owners.write_claim(")
+            and "return 0              # released" in held[:held.index("owners.write_claim(")])
+
+
+def answer_cut_at_token_end():
+    """The proxy re-checks a token while an answer streams and cancels the upstream task when it ended."""
+    p = raw(PROXY)
+    if "if !stillLive(token) {" not in p:
+        return False, "the proxy no longer checks the token while an answer streams"
+    loop = p[p.index("if !stillLive(token) {"):]
+    return "invalidateAndCancel()" in loop[:2000], "no cancel after the token check"
+
+
+def claude_env_allowlist():
+    import vm_shell_guest
+    ok = all(vm_shell_guest.env_ok({n: "x"}) for n in ("MCOMP_CLAUDE_TOKEN", "CLAUDE_CODE_X", "ANTHROPIC_BASE_URL"))
+    bad = not any(vm_shell_guest.env_ok({n: "x"}) for n in ("PATH", "BASH_ENV", "LD_PRELOAD", "PYTHONPATH", "HOME",
+                                                            "MCOMP_X", "claude_x", "CLAUDE_"))
+    g = raw("lib/vm_shell_guest.py")
+    return (ok and bad and vm_shell_guest.MAX_HEADER == 1 << 20 and "inp.readline(MAX_HEADER + 1)" in g
+            and g.index("inp.readline(MAX_HEADER + 1)") < g.index("json.loads(line)")
+            and "vm_shell_guest.env_ok(" in raw("lib/vm_shell.py"))
+
+
+def claude_header_unlogged():
+    """The token travels in the request header's env; nothing that writes the action log reads the header."""
+    s = raw("lib/vm_shell.py")
+    logging = s[s.index("def call_args("):s.index("# --- the connection")]
+    la = vc_fn("run_step")
+    la = la[la.index("def log_args(keep):"):la.index('extra = {"env": env}')]
+    return ("header" not in logging and "env" not in la and '"MCOMP_CLAUDE_TOKEN": tok["token"]' in vc_fn("do_start")
+            and "header.update(header_extra or {})" in s)
+
+
+def claude_record_without_token():
+    st = vc_fn("do_start")
+    rec = st[st.index('rec = {"session"'):st.index("save_state(")]
+    keys = set(re.findall(r'"([a-z_]+)":', rec))
+    return ("token_id" in keys and "token" not in keys and vm_claude.state_dir().endswith(os.sep + "claude")
+            and '"workdir": o["cwd"]' in rec and "fields.get(" not in rec and "workdir" not in vm_claude.FIELD_RULES)
+
+
+def claude_acting():
+    acting = all("read_only=False" in vc_fn(f) for f in ("do_start", "do_send", "do_keys", "do_show", "do_stop"))
+    looking = all("read_only=True" in vc_fn(f) and "read_only=False" not in vc_fn(f) for f in ("do_read", "do_wait", "do_status"))
+    rs = vc_fn("run_step")
+    return acting and looking and '"override": o["override"] and not read_only' in rs and "vm_shell.run_guarded(" in rs
+
+
+def claude_refused_first():
+    st, pre = vc_fn("do_start"), vc_fn("precheck")
+    return (st.index("precheck(") < st.index("get_token(") and "vm_shell.shell_allowed(" in pre and "owners.others()" in pre
+            and vm_shell.shell_allowed("off", "standard")[0] is False and vm_shell.shell_allowed("auto", "bounded")[0] is False)
+
+
+def claude_renew():
+    """renew: only for a session the VM says runs (checked before the vault is asked), through the vault's own
+    `secrets token renew` with the session's token id, from the Mac only (nothing in the VM's half renews); a failure
+    is reported with the id, and the record keeps its expiry."""
+    r = vc_fn("do_renew")
+    return (r.index('fields.get("state") != "running"') < r.index('secrets_cmd("token", "renew", tid')
+            and "rc == 64" not in r and "TOKEN_ID_RE.fullmatch" in r and "renew" not in raw(VCG)
+            and 'f.message += (f" (token {tid}' in r and "func cmdTokenRenew(" in raw(CMDS))
+
+
+def claude_installer():
+    g = raw(VCG)
+    return (re.search(r"curl -fsSL --proto '=https' --tlsv1\.2 --max-time \d+ https://claude\.ai/install\.sh -o \"\$work/install\.sh\"",
+                      g) is not None and 'bash "$work/install.sh"' in g)
+
+
+def claude_escaped():
+    c = raw(VC)
+    return ("isatty" not in c and 'clean(out["screen"])' in c and 'clean(f.extra["screen"])' in c
+            and vm_claude.clean("a\x1b]52;c;QQ==\x07‮b") == "a\\x1b]52;c;QQ==\\x07\\u202eb")
 
 
 def mb(n):
@@ -362,6 +510,73 @@ CLAIMS = [
     ("THIRD_PARTY_NOTICES.md", r"trycua/cua release `lume-v([\d.]+)`", lambda m: m[1] == D["LUME_VERSION"]),
     ("THIRD_PARTY_NOTICES.md", r"trycua/cua release `cua-driver-rs-v([\d.]+)`", lambda m: m[1] == D["CUA_DRIVER_VERSION"]),
     ("THIRD_PARTY_NOTICES.md", r"rclone/rclone release `v([\d.]+)`", lambda m: m[1] == D["RCLONE_VERSION"]),
+    # Claude inside the VM (lib/vm_claude.py, lib/vm_claude_guest.sh): the credential, the token's path, the controls
+    ("SECURITY.md", r"`Authorization: Bearer <token>` becomes `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key: <token>` becomes "
+                    r"`ANTHROPIC_API_KEY`\. A token whose header is anything else is revoked at once", lambda m: claude_headers()),
+    ("docs/guide.md", r"With `Authorization: Bearer` \(the default, for a subscription token\) the token goes in "
+                      r"`CLAUDE_CODE_OAUTH_TOKEN`; with `x-api-key` it goes in `ANTHROPIC_API_KEY`", lambda m: claude_headers()),
+    ("docs/commands.md", r"`Authorization: Bearer` → `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key` → `ANTHROPIC_API_KEY`",
+     lambda m: claude_headers()),
+    ("CHANGELOG.md", r"`Authorization: Bearer` becomes `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key` becomes `ANTHROPIC_API_KEY`",
+     lambda m: claude_headers()),
+    ("SECURITY.md", r"`metacomputer secrets token NAME --ttl D` \(default (\d+) hour, at most (\d+) hours, never past the unlock\)",
+     lambda m: claude_ttl(int(m[1]), int(m[2]))),
+    ("docs/guide.md", r"(\d+) hour by default \(`--ttl`, at most (\d+) hours, never past the unlock\)",
+     lambda m: claude_ttl(int(m[1]), int(m[2]))),
+    ("README.md", r"gets a (\d+)-hour token from the vault", lambda m: claude_ttl(int(m[1]), 8)),
+    ("SECURITY.md", r"`ANTHROPIC_BASE_URL` is the proxy inside the VM \(`http://127\.0\.0\.1:(\d+)/NAME`\), and "
+                    r"`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off",
+     lambda m: m[1] == D["SECRETS_PROXY_PORT"]
+     and 'export PATH="$HOME/.local/bin:$PATH" ANTHROPIC_BASE_URL="$_mc_base" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' in raw(VCG)
+     and "printf '_mc_base=%q\\n' \"$BASE_URL\"" in raw(VCG) and 'base.rstrip("/")' in vc_fn("get_token")),
+    ("SECURITY.md", r"The script copies it into an unexported shell variable and takes it out of the environment before "
+                    r"running anything", lambda m: claude_token_path()),
+    ("SECURITY.md", r"The script writes it with `printf` \(a shell builtin\) into a file in a 0700 folder, under umask 077\. "
+                    r"Claude Code's launcher reads that file once into unexported variables and deletes it, then exports "
+                    r"the token only on the line that starts Claude Code \(`exec`\), so no other program the launcher runs "
+                    r"inherits it", lambda m: claude_token_path()),
+    ("SECURITY.md", r"That field takes only `MCOMP_CLAUDE_\*`, `CLAUDE_\*` and `ANTHROPIC_\*` names, never `PATH`, `BASH_ENV`, "
+                    r"`LD_\*` or the like, checked on both sides, and the header is read with a 1 MB cap before it's parsed",
+     lambda m: claude_env_allowlist()),
+    ("docs/shell.md", r"The VM's half reads the header with a 1 MB cap before it parses it", lambda m: claude_env_allowlist()),
+    ("SECURITY.md", r"the request header isn't logged, even with `ACTION_LOG_TEXT=keep`", lambda m: claude_header_unlogged()),
+    ("SECURITY.md", r"never in the session record on the Mac \(`RUN_DIR/claude/NAME\.json`: the id, the secret's name, the "
+                    r"expiry, the folder asked for\)\. What the VM's half reports back is checked field by field against "
+                    r"fixed shapes", lambda m: claude_record_without_token()),
+    ("SECURITY.md", r"The keeper looks once a minute \(read-only, and not in the action log, like `who`\)\. Each look is a "
+                    r"new `metacomputer claude _probe` with SSH credentials made for it \(a fresh certificate under "
+                    r"`SSH_AUTH=cert`\)\. It renews the claim whenever the inner Claude's screen has changed, so other "
+                    r"sessions are refused while the inner Claude works and for (\d+) minutes after",
+     lambda m: int(m[1]) * 60 == owners.ACTIVE_S and claude_keeper()),
+    ("SECURITY.md", r"Both `release` and the keeper's check-and-renew hold the owners lock, so a released claim stays released",
+     lambda m: claude_release_locked()),
+    ("SECURITY.md", r"`stop --revoke` revokes the token from the Mac even when the VM can't be reached or refuses, and keeps "
+                    r"the session's record \(and exits non-zero\) until both are done",
+     lambda m: vc_fn("do_stop").index("revoke_token(tid)") < vc_fn("do_stop").index("if stop_err is not None:")
+     and "if stop_err is None and (not (tid and o[\"revoke\"]) or revoked):" in vc_fn("do_stop")
+     and 'out["exit"] = EXIT_FAILED' in vc_fn("do_stop")),
+    # Expiry cuts an answer in progress: the vault's proxy checks the token while it streams (`if !stillLive(token)` in
+    # its wait loop) and cancels the answer when the token ends.
+    ("SECURITY.md", r"When it ends, new requests are refused, and an answer the proxy is still streaming is cut off",
+     lambda m: answer_cut_at_token_end()),
+    ("docs/guide.md", r"Claude Code can't reach the API, and an answer it's in the middle of stops",
+     lambda m: answer_cut_at_token_end()),
+    ("SECURITY.md", r"`start`, `send`, `keys`, `show` and `stop` act, so the one-controller rule refuses them while another "
+                    r"session uses the computer \(unless you agree to `--override`\)\. `read`, `wait` and `status` only look",
+     lambda m: claude_acting()),
+    ("SECURITY.md", r"it's refused while `VM_SHELL=off`, or under the bounded driver with `VM_SHELL=auto`, before any token is "
+                    r"asked for", lambda m: claude_refused_first()),
+    ("SECURITY.md", r"with `ACTION_LOG=on`, each step is a signed `vm_claude` record\. The prompt text and the screens read "
+                    r"back are kept only with `ACTION_LOG_TEXT=keep`",
+     lambda m: vm_claude.TOOL == "vm_claude" and 'rec[k] = v["text"] if keep else {"redacted": True' in vc_fn("run_step")
+     and re.search(r"if keep_text:\s+out\[k\]\[\"text\"\]", raw("lib/vm_shell.py")) is not None),
+    ("SECURITY.md", r"what comes back from the VM \(its screen, its fields\) is parsed strictly and escaped before it is "
+                    r"printed, on a terminal or not", lambda m: claude_escaped()),
+    ("SECURITY.md", r"It's made only for a session that still runs, and only from the Mac: nothing in the VM can ask for "
+                    r"one\. The vault's limits for renewals apply \(\"API keys\" above\)\. A refused or failed renewal is "
+                    r"reported with the token's id", lambda m: claude_renew()),
+    ("SECURITY.md", r"\*\*Claude Code comes from Anthropic's installer\*\* \(https://claude\.ai/install\.sh, over HTTPS, as the "
+                    r"desktop user, saved whole before it runs\)", lambda m: claude_installer()),
 ]
 
 

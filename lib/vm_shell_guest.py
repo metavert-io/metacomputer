@@ -4,7 +4,11 @@ Runs INSIDE the virtual computer as the desktop user. The Mac sends it over
 the ops SSH connection's stdin, so nothing is quoted on either side:
 
   1. its length and this file (read by the one-line bootstrap in vm_shell.py);
-  2. one JSON line: cwd, timeout, max_output, desktop, args, script_bytes;
+  2. one JSON line (at most MAX_HEADER bytes, checked before it's parsed): cwd,
+     timeout, max_output, desktop, args, script_bytes, and optionally env (up to
+     16 more variables for the script, names from an allowlist: MCOMP_CLAUDE_*,
+     CLAUDE_*, ANTHROPIC_*; how `metacomputer claude` hands over a token without
+     putting it in the script, its arguments or a command line);
   3. the script itself (script_bytes bytes).
 
 The Mac then keeps stdin open until the answer arrives. The script runs with
@@ -36,6 +40,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -51,6 +56,17 @@ CHUNK = 1 << 16
 KILL_AFTER = 3.0   # SIGTERM grace for the script's process group
 KILL_WAIT = 2.0    # after SIGKILL, how long to wait for the group to be gone
 DRAIN_S = 0.5      # output still read after the script's own process ends
+MAX_HEADER = 1 << 20   # the request header's line, read with this cap before it's parsed
+# Header "env": the only names a script may be given that way. An allowlist, so nothing that changes how a program
+# runs (PATH, BASH_ENV, LD_*, PYTHON*, ...) can arrive through it. vm_shell.py checks the same before sending.
+ENV_NAME = re.compile(r"(?:MCOMP_CLAUDE|CLAUDE|ANTHROPIC)_[A-Z0-9_]{1,56}")
+ENV_MAX, ENV_VALUE_MAX = 16, 65536
+
+
+def env_ok(extra):
+    return (isinstance(extra, dict) and len(extra) <= ENV_MAX
+            and all(isinstance(k, str) and ENV_NAME.fullmatch(k) and isinstance(v, str) and len(v) <= ENV_VALUE_MAX
+                    and "\0" not in v for k, v in extra.items()))
 
 
 def build_env(desktop):
@@ -234,13 +250,21 @@ def collect(proc, timeout, cap, cancel):
 def main():
     inp = sys.stdin.buffer
     try:
-        hdr = json.loads(inp.readline())
+        line = inp.readline(MAX_HEADER + 1)          # bounded before anything parses it
+        if len(line) > MAX_HEADER or not line.endswith(b"\n"):
+            raise ValueError(f"the request header is over {MAX_HEADER} bytes or unfinished")
+        hdr = json.loads(line)
+        if not isinstance(hdr, dict):
+            raise ValueError("the request header isn't an object")
         n = int(hdr["script_bytes"])
         script = inp.read(n)
         if len(script) != n:
             raise ValueError(f"expected {n} bytes of script, got {len(script)}")
         cap = int(hdr["max_output"])
         timeout = float(hdr["timeout"])
+        extra = hdr.get("env") or {}
+        if not env_ok(extra):
+            raise ValueError("env: at most 16 MCOMP_CLAUDE_*, CLAUDE_* or ANTHROPIC_* names, text values without NUL")
     except (ValueError, KeyError, TypeError) as e:
         emit({"status": "error", "code": "bad_request", "message": str(e)[:300]})
         return 2
@@ -249,6 +273,7 @@ def main():
         emit({"status": "error", "code": "no_such_folder", "message": cwd[:300]})
         return 2
     env, desktop = build_env(bool(hdr.get("desktop", True)))
+    env.update(extra)
     base = tempfile.gettempdir()
     sweep(base)
     d = tempfile.mkdtemp(prefix="mcsh.", dir=base)

@@ -27,6 +27,8 @@ alias). `metacomputer help` prints a summary.
 | `baseline [--yes]` | Make the current VM the new baseline (the old one is kept as `-prev`) |
 | `build [--replace]` | Build the VM and its baseline from scratch |
 | `sh -c CMD \| --file SCRIPT \| - [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]` | Run bash in the VM as the desktop user, with the desktop's environment |
+| `claude [start] [--token NAME] [--ttl 1h] [--model M] [--skip-permissions] [--session NAME] [--cwd DIR] [--show] [--no-install] [-- CLAUDE_ARGS]` | Claude Code inside the VM, in tmux: installed if missing, signed in through the vault's proxy with a short-lived token for an api secret (`Authorization: Bearer` → `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key` → `ANTHROPIC_API_KEY`), first-run choices set ([guide](guide.md#claude-inside-the-metacomputer)) |
+| `claude send TEXT\|--file F\|- [--no-enter] [--wait] [--quiet S] [--timeout S]` / `claude read [--lines N\|--all]` / `claude wait` / `claude keys KEY...` / `claude show [--again]` / `claude status` / `claude renew [--ttl D]` / `claude stop [--revoke]` | Talk to it through tmux (a bracketed paste, then Enter), read its screen (escaped), wait for it to settle, answer its questions, put it on the VM's desktop, check it and its token, keep its token going (`secrets token renew`, asked like a new token), end it (and its token). Each takes `--session NAME`, `--json`, `--override` |
 | `inspect [SECTION...] [--minutes N] [--top N] [--json]` | Read-only snapshot of the VM: `system`, `windows`, `processes`, `ports`, `files`, `browser` |
 | `task start SLUG` / `task finish NAME` | One folder per task: video, contact sheet, screenshots, files, `artifacts.json` |
 | `put HOST_PATH... [--to GUEST_DIR] [--overwrite]` | Copy files into the VM (default `~/Inbox`), each checked by SHA-256; a taken name lands as `name (1).ext` unless `--overwrite` |
@@ -66,8 +68,9 @@ alias). `metacomputer help` prints a summary.
 | `mcp-lazy` / `mcp` | The MCP bridge Claude Code uses, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise) |
 | `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time |
 
-`stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart` and `sh`
-refuse while another session is using the VM; `--override` proceeds anyway.
+`stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart`, `sh` and
+`claude` (but `claude read`, `wait` and `status`) refuse while another session is
+using the VM; `--override` proceeds anyway.
 
 ## Configuration
 
