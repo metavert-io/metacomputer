@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-19
+
 ### Added
 
 - More than one VM, by name: `metacomputer --vm NAME COMMAND` (or `MCOMP_VM=NAME`) acts on the VM whose settings are `config/vms/NAME.env`, one file per VM, never committed. Everything follows the VM: its baseline, ports, SSH keys, gateway, hub, locks, logs, and now its vault folder (`VAULT_DIR`, handed to the vault as `MCOMP_VAULT_DIR`) and event spool (`EVENTS_SPOOL`), so `metacomputer --vm demo secrets unlock` needs no environment variables. A `config/vms/` VM's folders sit beside the main VM's, never in them: `.run-vms/NAME` and `logs-vms/NAME` in the checkout, `~/.ssh/metacomputer-NAME`, and `~/Library/Application Support/metacomputer-vms/NAME` for its vault and spool.
