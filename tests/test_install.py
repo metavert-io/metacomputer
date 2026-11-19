@@ -1699,6 +1699,19 @@ def test_quiet_builds():
               and re.search(r"✓.*host tools .*build-tools-\d{8}-\d{6}\.log", p.stdout), (tool_logs, p.stdout[-600:]))
     finally:
         b.close()
+    # A logs folder that exists but can't be written: the builds still run, their logs go to temporary files.
+    b, root = runner_box(0)
+    try:
+        ro = os.path.join(root, "logs")
+        os.makedirs(ro, exist_ok=True)
+        os.chmod(ro, 0o500)
+        p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude", "--no-build"])
+        check("an unwritable logs folder: the builds still run and the install goes on, logging to a temporary file",
+              p.returncode == 0 and "==> Done" in p.stdout and "mcomp-build-mcomp-vm." in p.stdout
+              and "warning" not in p.stdout + p.stderr, (p.returncode, (p.stdout + p.stderr)[-500:]))
+        os.chmod(ro, 0o700)
+    finally:
+        b.close()
     b, root = runner_box(3)
     try:
         p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude", "--no-build"])

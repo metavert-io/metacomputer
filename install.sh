@@ -471,6 +471,8 @@ quiet_build() { # NAME WHAT FINISHED COMMAND [ARG...]: the log is build-NAME-TIM
   local name="$1" what="$2" finished="$3" dir="${LOG_DIR:-$ROOT/logs}" log rc=0; shift 3
   mkdir -p "$dir" 2>/dev/null || dir="${TMPDIR:-/tmp}"
   log="$dir/build-$name-$(date +%Y%m%d-%H%M%S).log"
+  # a logs folder that exists but can't be written: the log goes to a temporary file, so the build still runs
+  { : > "$log"; } 2>/dev/null || log="$(mktemp "${TMPDIR:-/tmp}/mcomp-build-$name.XXXXXX")" || log=/dev/null
   printf '%s\n' "  $what..."
   "$@" > "$log" 2>&1 < /dev/null || rc=$?
   if [ "$rc" = 0 ]; then ok "$finished ${d}(log: $(tildify "$log"))${o}"; return 0; fi
