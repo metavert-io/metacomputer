@@ -16,6 +16,8 @@ outlive any one call. Every guard runs here, for every client:
   changed since the screenshot it was aimed from;
 - hidden page text (HIDDEN_TEXT, lib/hidden_text.py): text a person likely can't
   see, or that addresses AI agents, is marked in the results that carry it;
+- human pacing (BROWSER_PACING, lib/pacing.py): typing, steps and pixel clicks
+  aimed at a Firefox or Chrome window go at a person's pace;
 - the signed action log (the relay records which client made each call) and
   the event stream.
 
@@ -64,6 +66,7 @@ import hidden_text  # noqa: E402
 import hub_notes  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
+import pacing  # noqa: E402
 import wirelimits  # noqa: E402
 try:
     import events  # noqa: E402  (the optional event stream, docs/events.md)
@@ -137,6 +140,9 @@ HABITS = (
     "an open dialog, a frozen app), then change mechanism. Never a third identical call.\n"
     "- Pixel input needs a screenshot as that window's last read; any read without one cancels it.\n"
     "- A refusal from the hub is the user's control: follow the route it names, or report it.\n"
+    "- Sign-ins, sign-ups, checkout, account settings and posting: human mode first (Firefox, or Chrome from "
+    "launch_app; real clicks, foreground keys). Sites can flag page-mode Chrome as automated: a sign-in that looks "
+    "degraded there (no code box, an email that never comes) means switch to human mode and retry.\n"
     "- A CAPTCHA or \"verify you are human\" check, or a sign-in or 2FA prompt that's the user's to do: never try to "
     "pass it, switch browsers or retry it. Run `metacomputer handoff --why captcha|login|2fa|other --say \"...\"` "
     "and wait for it to return.\n"
@@ -194,6 +200,7 @@ INPUT_TOOLS = {"click", "double_click", "right_click", "drag", "type_text", "pre
 KEY_TOOLS = {"type_text", "press_key", "hotkey"}
 MPX_RE = re.compile(r"mpx_(?:uinput|pointer)|click_type_mpx|virtual master (?:keyboard|pointer)")
 CHROME_RE = re.compile(r"chrom(e|ium)", re.I)
+BROWSER_RE = re.compile(r"firefox|chrom(e|ium)", re.I)    # human pacing's browsers (lib/pacing.py)
 SET_VALUE_CHROME = (
     "Refused by the metacomputer bridge: set_value on a Chrome page types through the driver's virtual keyboard, "
     "which Chrome ignores and which then blocks Chrome's keyboard. Page-level mode: browser_type with a ref "
@@ -294,6 +301,7 @@ def settings_of(env=None):
     out["run_dir"] = os.path.realpath(run_dir(env))
     out["coord_guard"] = onoff(env.get("MCOMP_COORD_GUARD"), "on")
     out["hidden_text"] = onoff(env.get("MCOMP_HIDDEN_TEXT"), "on")
+    out["browser_pacing"] = pacing.mode(env)
     out["driver_cmd"] = env.get("MCOMP_HUB_DRIVER_CMD", "")
     return out
 
@@ -661,6 +669,8 @@ class Hub:
         self.paths = paths(self.env)
         self.coord_on = self.settings["coord_guard"] == "on"
         self.hidden_on = self.settings["hidden_text"] == "on"
+        self.pacing_on = self.settings["browser_pacing"] == "human"
+        self.pace_rng = pacing.rng()
         self.hidden_events = hidden_text.Limiter()   # security.hidden_text: per host, and in all
         self.action_log = self.env.get("MCOMP_ACTION_LOG") == "on"
         self.bounded_mode = self.env.get("MCOMP_DRIVER_MODE", "standard") == "bounded"
@@ -1939,6 +1949,10 @@ class Hub:
                            f"The bridge refused {tool} aimed at Chrome (background input there would block "
                            "Chrome's keyboard)", data={"tool": tool}, debounce=f"bridge{client.peer_pid}:{tool}")
                 return
+            if self.pacing_on and name in ("type_text", "run_steps"):
+                pace_note = self.pace(name, args, sess)   # after every guard: it changes only delays and adds moves
+                if pace_note:
+                    note = (note + "; " if note else "") + pace_note
             self.act_seq += 1
         pre = None
         if self.coord_on and name == "get_window_state" and args.get("include_screenshot", True) is not False \
@@ -2120,13 +2134,17 @@ class Hub:
         guard refuses: an element token whose read the hub never saw ("token"; the token carries its pid to the
         driver, not to the hub), a window id the driver doesn't list ("window"), or a token whose app disagrees with
         the pid or window the call also names ("conflict"). Naming something else never makes a target safe."""
+        return self.app_verdict(args, outer, CHROME_RE)
+
+    def app_verdict(self, args, outer, rx):
+        """chrome_verdict for the apps whose names match rx (BROWSER_RE: Firefox or Chrome, for pacing)."""
         if not isinstance(args, dict):
             return False, None
         own = names_target(args)
         layer = args if own or not isinstance(outer, dict) else outer
         for k in ("app", "window"):
             v = layer.get(k)
-            if isinstance(v, str) and v and CHROME_RE.search(v):
+            if isinstance(v, str) and v and rx.search(v):
                 return True, None
         hints = set()
         pid = layer.get("pid")
@@ -2138,7 +2156,7 @@ class Hub:
             wpid = self.window_owner(wid)
             if wpid is not None:
                 hints.add(wpid)
-        if any(CHROME_RE.search(self.app_name(p)) for p in hints):
+        if any(rx.search(self.app_name(p)) for p in hints):
             return True, None                    # Chrome by what the call names: the stricter handling applies
         if wid is not None and wpid is None and isinstance(wid, int) and not isinstance(wid, bool):
             return None, "window"
@@ -2152,14 +2170,14 @@ class Hub:
             if snap is None:
                 return None, "token"
             tok_pid, twid, tapp = snap
-            if tapp and CHROME_RE.search(tapp):
+            if tapp and rx.search(tapp):
                 return True, None
             if tok_pid is None and twid is not None:
                 tok_pid = self.window_owner(twid)
             if tok_pid is None:
                 return None, "token"
         pids = hints | ({tok_pid} if tok_pid is not None else set())
-        if any(CHROME_RE.search(self.app_name(p)) for p in pids):
+        if any(rx.search(self.app_name(p)) for p in pids):
             return True, None
         if tok_pid is not None and any(h != tok_pid for h in hints):
             return None, "conflict"              # every hint must agree with the token's app, not just one
@@ -2271,6 +2289,92 @@ class Hub:
                 notes.append(n)
         note = ("metacomputer bridge (Chrome): " + "; ".join(notes)) if notes else None
         return None, note
+
+    # --- human pacing (BROWSER_PACING; lib/pacing.py) ------------------------------------------
+    def pace(self, name, args, sess):
+        """Human pacing for a type_text or run_steps aimed at a Firefox or Chrome window, run after every guard: it
+        changes only the call's delays and adds pointer moves before pixel clicks (lib/pacing.py). It never fails a
+        call: anything unexpected leaves the call as it was. hub.log gets counts, never text. Returns a note for the
+        result when steps were added (their numbers in the driver's report shift), else None."""
+        try:
+            if name == "type_text":
+                plan = pacing.pace_type(args, self.pace_rng) if self.app_verdict(args, None, BROWSER_RE)[0] else None
+            else:
+                browser = self.browser_steps(args)
+                if not browser:
+                    return None
+                moves_on = not self.bounded_mode         # a bounded manifest may not list move_cursor
+                targets = self.pointer_targets(args, browser, sess) if moves_on else {}
+                plan = pacing.pace_batch(args, browser, targets, self.pace_rng, moves_on=moves_on)
+        except Exception as e:                           # never let pacing break a call
+            self.note(f"pacing skipped: {type(e).__name__}", kind="pacing failed")
+            return None
+        if not plan:
+            return None
+        self.note(pacing.describe(plan), kind="pacing")
+        return pacing.note_of(plan)
+
+    def browser_steps(self, args):
+        """Indexes of the run_steps steps aimed at a Firefox or Chrome window, following targets as the driver does:
+        a step that names none runs in the window the last one that did named, or in the batch's default."""
+        inherited = names_target(args) and self.app_verdict(args, None, BROWSER_RE)[0] is True
+        out = set()
+        for i, st in enumerate(args.get("steps") or []):
+            tool, a = pacing.step_parts(st)
+            if tool is None:
+                continue
+            if names_target(a):
+                inherited = self.app_verdict(a, None, BROWSER_RE)[0] is True
+            if inherited:
+                out.add(i)
+        return out
+
+    def pointer_targets(self, args, browser, sess):
+        """For each pixel click among the browser steps: (where the pointer is, the screen point the click lands on).
+        The point comes from the screenshot the click was aimed from (the coordinate guard's layout, so only with
+        COORD_GUARD=on) and the window's live position; a click whose point can't be worked out, or a pointer the
+        driver doesn't report, gets no path."""
+        dwid, clicks = args.get("window_id"), {}
+        for i, st in enumerate(args.get("steps") or []):
+            tool, a = pacing.step_parts(st)
+            if i not in browser or tool not in pacing.CLICK_TOOLS:
+                continue
+            tg = pixel_target(tool, a, dwid, args)
+            pt = self.screen_point(tg, sess) if tg and not tg[3] else None
+            if pt:
+                clicks[i] = pt
+        if not clicks:
+            return {}
+        r = self.ask_up("tools/call", {"name": "get_cursor_position", "arguments": {}}, timeout=5)
+        sc = (((r or {}).get("result") or {}).get("structuredContent") or {})
+        cur = (sc.get("x"), sc.get("y"))
+        if not all(_num(v) and 0 <= v <= 1e5 for v in cur):
+            return {}
+        out = {}
+        for i in sorted(clicks):
+            out[i] = (cur, clicks[i])
+            cur = clicks[i]
+        return out
+
+    def screen_point(self, tg, sess):
+        """The screen point of a pixel target (pixel_target's tuple) from the layout of the screenshot it was aimed
+        from: window pixels scaled to the window and placed at its live position; desktop pixels scaled to the
+        screen. None when there's no such layout."""
+        frame, wid, pts, _ = tg
+        rec = self.layouts.get((sess, "desktop") if frame == "desktop" else (sess, "w", wid))
+        b, shot = (rec or {}).get("bounds"), (rec or {}).get("shot") or (None, None)
+        if not b or not _num(shot[0]) or not _num(shot[1]) or shot[0] <= 0 or shot[1] <= 0:
+            return None
+        x, y = pts[0]
+        sx, sy = b["width"] / shot[0], b["height"] / shot[1]
+        ox, oy = (0.0, 0.0) if frame == "desktop" else (b["x"], b["y"])
+        if frame != "desktop":
+            live = _find(self.live_windows() or [], wid)
+            g = live.get("bounds") if live else None
+            if g:
+                ox, oy = g["x"], g["y"]
+        p = (ox + x * sx, oy + y * sy)
+        return p if all(math.isfinite(v) and 0 <= v <= 1e5 for v in p) else None
 
     # --- coordinate guard --------------------------------------------------------------
     def capture_layout(self, key):
@@ -2553,6 +2657,7 @@ class Hub:
                            "pending": len(self.pending),
                            "left_running": sum(len(lease["keys"]) for lease in list(self.leases.values()))},
                 "recordings": len(self.recordings), "coord_guard": "on" if self.coord_on else "off",
+                "browser_pacing": self.settings["browser_pacing"],
                 "socket": None if self.local else self.paths["sock"], "lessons": lessons_status(self.env)}
 
     def shutdown(self):
@@ -3292,6 +3397,8 @@ def describe_status(st, brief=False):
     if left:
         parts.append(f"{left} call(s) a disconnected client left running (the hub holds the computer for them)")
     parts.append(f"coordinate guard {st.get('coord_guard')}")
+    if st.get("browser_pacing"):
+        parts.append(f"browser pacing {st['browser_pacing']}")
     line = ", ".join(parts)
     if brief:
         return line

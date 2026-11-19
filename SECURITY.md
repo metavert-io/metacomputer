@@ -366,6 +366,7 @@ the hub, and the hub applies, to each one:
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
+- human pacing for browser windows ([below](#human-mode-and-human-pacing-browser_pacing)), after every guard;
 - a handoff ([below](#handing-the-computer-to-you-metacomputer-handoff)): while the user has the
   computer, every acting call waits, from every client, the session that asked included;
 - the action log's notes (which client made each call) and the event stream.
@@ -501,6 +502,34 @@ own checks.
   Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
   kept for the activity window after the last call even when that shell exits,
   and the same controller for later calls from the same terminal session.
+
+## Human mode and human pacing (`BROWSER_PACING`)
+
+Sign-ins, sign-ups, checkout, account settings and posting go through human mode by default: the VM's regular
+Firefox, or Chrome started with `launch_app`, driven with real pointer clicks and foreground keys
+([BROWSER.md](skills/metacomputer/BROWSER.md#account-pages-human-mode-first)). Page-mode Chrome is launched with
+the driver's DevTools route, which sites can detect and treat as automated (one site gave it a degraded sign-in
+that never sent its email). This is about getting the ordinary flow on the user's own accounts and testing a site
+as a person meets it. It isn't a protection, and it isn't a way past bot defences:
+- no fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services;
+- a CAPTCHA or "prove you're human" check still goes to you, through `metacomputer handoff`
+  ([below](#handing-the-computer-to-you-metacomputer-handoff)).
+
+**Human pacing (`BROWSER_PACING=human`, the default).** The hub (`lib/pacing.py`) paces `type_text` and
+`run_steps` calls aimed at a Firefox or Chrome window, for every client, after every guard has passed the call.
+It changes only the call's delays (`delay_ms`: a random 60-140 ms per key, 120-320 ms between batch steps),
+splits a long text in a batch into two or three typing runs, and adds `move_cursor` steps (desktop scope, the real
+pointer) toward a pixel click; nothing else in the call changes, and a `delay_ms` the call sets is kept. At most
+15 s is added per call, and a batch whose own steps leave no room under the driver's 60 s limit isn't paced.
+Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came. What it keeps:
+- **No values in new places.** `hub.log` gets each plan as counts and milliseconds, never text. The action log
+  records the call as sent to the driver: with `ACTION_LOG_TEXT=redact` a text split into runs shows as two or
+  three redacted runs with their lengths (split at random places), instead of one.
+- **The vault isn't paced.** Fills type on the vault's own path (SSH to the VM), never through the hub.
+- **The added moves aren't guarded.** They're the hub's own, aimed between where the pointer is and the point
+  the coordinate guard already checked; they move the pointer and press nothing, but a page can react to the
+  pointer passing over it (a hover menu). Bounded mode gets the delays but no moves (a manifest may not list
+  `move_cursor`).
 
 ## The live view (`metacomputer view`)
 

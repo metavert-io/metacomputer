@@ -997,7 +997,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (213 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (228 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1060,6 +1060,14 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   by then keeps it);
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
+- human pacing (`BROWSER_PACING`, `lib/pacing.py`): `type_text` into Firefox and Chrome gets a pause between
+  characters within 60-140 ms that varies from call to call, Mousepad gets none, a `delay_ms` the caller set
+  (0 too) is kept, and a 1,000-character text adds at most 15 s; a batch into Firefox gets a pause between
+  steps, its text typed in runs (each with its own pause) that put it back together exactly, pointer moves at
+  desktop scope toward a pixel click inside the box from the pointer to the target, the `expect` kept on the last
+  run, and a note saying steps were added; a Mousepad batch goes as sent; a 1,800-character batch stays within the
+  cap; `hub.log` gets counts, never the typed text; `BROWSER_PACING=fast` sends every call as it came; bounded
+  mode gets delays but no moves. (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;
 - the action log through the hub (the real relay in front of the stand-in): one

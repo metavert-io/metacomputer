@@ -1081,6 +1081,37 @@ def polish_checks(shot):
           "nothing to compare" in out.getvalue() and "Without vs with" not in out.getvalue(), out.getvalue()[-300:])
 
 
+def page_signin_checks():
+    """The human-signin lesson: proposed from structure only (page-mode tool names plus the CLI's own `secrets fill`
+    or a sign-in handoff in the same session), never from page text, and its text is the template's."""
+    print("the human-signin lesson: sign-ins through page-mode Chrome")
+    d = os.path.join(TD, "signin")
+    page = [("browser_prepare", {"session": "s", "allow_launch": True, "profile": {"mode": "isolated_new"}},
+             '{"prepared_pid": 5}', False),
+            ("browser_navigate", {"session": "s", "url": "https://example.com/" + INJECT}, "ok " + INJECT, False),
+            (None, "~/.local/bin/metacomputer secrets fill site --field username", '{"ok":true,"chars":9}', False)]
+    human = [("launch_app", {"name": "firefox"}, "Launched firefox " + INJECT, False),
+             (None, "~/.local/bin/metacomputer handoff --why login --say 'Sign in " + INJECT + "'", "done", False)]
+    reading = [("browser_prepare", {"session": "s"}, "ok", False),
+               (None, "~/.local/bin/metacomputer secrets list", "names", False)]
+    mined = []
+    for name, calls_ in (("page", page), ("human", human), ("reading", reading)):
+        path = os.path.join(d, name + ".jsonl")
+        write_jsonl(path, events_for(calls_, P1, time.time() - 600, False, name + "-0000-session", "/work/" + name))
+        mined.append(learn_mine.mine_transcript(transcripts.parse(path, slim=True), "claude-code", name))
+    rep = learn_mine.aggregate(mined, {}, learn_mine.mine_action_logs([], 0), learn_mine.mine_event_logs([], 0),
+                               "7d", time.time() - 7 * 86400, None)
+    check("only the session that signed in through page-mode Chrome counts (human mode and page reading don't)",
+          rep["page_signin"]["sessions"] == 1 and rep["page_signin"]["examples"] == ["page"], rep["page_signin"])
+    props = {p["id"]: p for p in learn.build_proposals(rep, 2)}
+    p = props.get("human-signin")
+    check("…it proposes the built-in human-signin lesson, with the template's own words",
+          p is not None and learn.builtin_text_ok(p) and "human mode" in p["text"] and p["source"] == "built-in", p)
+    blob = json.dumps(rep) + json.dumps(p)
+    check("…and nothing from the transcript or the page reaches the report or the proposal",
+          not any(w in blob.lower() for w in BAD_WORDS) and "example.com" not in blob, blob[:300])
+
+
 def main():
     try:
         shot = build_world()
@@ -1104,6 +1135,7 @@ def main():
         privacy_wording_check()
         final_checks(shot)
         polish_checks(shot)
+        page_signin_checks()
         test_analyzer()
         check("the real lessons store was never touched", os.path.exists(REAL_STORE) == REAL_STORE_EXISTED)
     finally:

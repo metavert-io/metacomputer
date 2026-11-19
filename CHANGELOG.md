@@ -6,6 +6,17 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Human pacing for browser windows, on by default (`BROWSER_PACING=human`; `fast` keeps the earlier behaviour; `metacomputer browser pacing human|fast`). The hub, for every client and after every guard, gives `type_text` and `run_steps` aimed at a Firefox or Chrome window a person's pace with what Cua Driver offers: the driver's pause between characters (a random 60-140 ms per call; a longer text in a batch typed in two or three runs, each with its own pause), a pause between batch steps (120-320 ms), and the real pointer moved toward a pixel click in a few steps first. At most 15 s is added per call; a `delay_ms` the call sets is kept; other apps aren't paced; nothing typed goes to `hub.log` (counts only). A result says when steps were added (`metacomputer hub (human pacing): …`), since the driver's step numbers then shift. Clicks by element token or by role and name get no pointer path: the driver resolves where they land. (`lib/pacing.py`; BROWSER.md "Human pacing"; SECURITY.md "Human mode and human pacing".)
+- Kept Firefox profiles for human mode: `metacomputer browser profiles --new NAME` makes one in the VM and prints the `launch_app` call that opens it (`firefox --profile DIR --no-remote`), so the user signs in once and stays signed in until a VM reset. `browser profiles` lists them with the page-mode Chrome profiles, `--delete NAME --firefox` deletes one, and `inspect browser` shows which profile a running Firefox uses.
+- A built-in lesson, `human-signin` (`metacomputer learn`): proposed when sessions signed in through page-mode Chrome (page tools in a session that also ran `secrets fill|login` or a `handoff --why login|2fa|captcha`), it says to sign in in human mode first and what a degraded sign-in looks like. Detected from tool names and the CLI's own subcommands and `--why` values only.
+- BROWSER.md: a "Test it as a person" checklist (human mode and pacing, real window sizes, a keyboard-only pass, a screenshot per step and a recording, and what a person would notice), the lines kept (no fingerprint spoofing, stealth plugins or CAPTCHA services; human checks go to the user through `handoff`), and notes for rich-text web editors (pasting formatted text through the VM's clipboard, placeholders for media, where the caret is).
+
+### Changed
+
+- Sign-in, sign-up, checkout, account settings and posting go through human mode first: the VM's Firefox, or Chrome from `launch_app`, with real clicks and foreground keys. Page-mode Chrome, driven through the DevTools route that sites can flag as automated, is now the exception (bulk data entry, reading your own sites, steps human mode can't do). A sign-in that looks degraded (no code box, an email that never arrives) means switch to human mode and retry once. The skill, BROWSER.md and the hub's MCP instructions say so.
+
 ## [0.3.1] - 2026-11-19
 
 ### Added

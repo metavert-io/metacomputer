@@ -146,6 +146,8 @@ for line in sys.stdin:
     elif name == "get_desktop_state":
         ok(mid, "desktop", {"windows": ranked(windows()), "screen_width": 1920, "screen_height": 1080,
                             "screenshot_width": 1920, "screenshot_height": 1080}, images=1)
+    elif name == "get_cursor_position":
+        ok(mid, "Cursor at (1700, 950)", {"x": 1700, "y": 950, "source": "x11"})
     elif name in ("click", "double_click", "right_click", "type_text", "press_key", "hotkey", "scroll", "drag",
                   "move_cursor", "set_value", "launch_app", "mouse_button_down"):
         tok = a.get("element_token")
@@ -1197,6 +1199,146 @@ def chrome_checks():
         h.close()
     clear_claims()
     r.stop()
+
+
+FIREFOX = 41    # a Firefox window (pid 88), only in pacing_checks' world
+
+
+def sent_args(name, since):
+    return [c["msg"]["params"]["arguments"] for c in tool_calls(name, since)]
+
+
+def typed_steps(steps):
+    """(text, delay_ms) of each type_text step of a forwarded batch, in order."""
+    out = []
+    for st in steps:
+        tool, a = (st.get("tool"), st.get("args") if isinstance(st.get("args"), dict) else st) if "tool" in st else \
+            next(((k, v) for k, v in st.items() if isinstance(v, dict)), (None, None))
+        if tool == "type_text":
+            out.append((a.get("text"), a.get("delay_ms")))
+    return out
+
+
+def pacing_checks():
+    """Human pacing (BROWSER_PACING, lib/pacing.py): the hub changes only the delays of typing and batches aimed at
+    a browser, and adds pointer moves before pixel clicks there; never for other apps, never with fast, never past
+    its cap, and never with the typed text in hub.log."""
+    import pacing
+    print("human pacing (BROWSER_PACING) for browser windows")
+    clear_claims()
+    set_windows(BASE_WINDOWS + [win(FIREFOX, 88, "firefox", 200, 150, 1280, 900, "Sign in - Mozilla Firefox")])
+    check("BROWSER_PACING defaults to human (unset, unknown); fast only when asked",
+          mcp_hub.settings_of({})["browser_pacing"] == "human" == pacing.mode({"MCOMP_BROWSER_PACING": "slow"})
+          and pacing.mode({"MCOMP_BROWSER_PACING": "fast"}) == "fast")
+    secret = "Pacing-Typed-Value-7Q2"
+    r = Running()
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="pace")
+    n0 = len(calls())
+    delays = []
+    for i in range(30):
+        h.call("type_text", {"pid": 88, "window_id": FIREFOX, "text": f"{secret}-{i}", "delivery_mode": "foreground"})
+    delays = [a.get("delay_ms") for a in sent_args("type_text", n0)]
+    lo, hi = pacing.KEY_MS
+    check(f"type_text into Firefox gets a pause between characters, {lo}-{hi} ms",
+          len(delays) == 30 and all(isinstance(d, int) and lo <= d <= hi for d in delays), delays)
+    check("…and the pause varies from call to call (jitter), the text unchanged",
+          len(set(delays)) >= 5 and [a["text"] for a in sent_args("type_text", n0)] == [f"{secret}-{i}" for i in range(30)],
+          sorted(set(delays)))
+    n0 = len(calls())
+    h.call("type_text", {"pid": 77, "window_id": CHROME, "text": "abc"})
+    h.call("type_text", {"pid": 50, "window_id": W, "text": "abc"})
+    h.call("type_text", {"pid": 88, "window_id": FIREFOX, "text": "abc", "delay_ms": 0})
+    h.call("type_text", {"pid": 88, "window_id": FIREFOX, "text": "x" * 1000})
+    s = sent_args("type_text", n0)
+    check("Chrome counts as a browser; Mousepad isn't paced; a delay_ms the caller set (0) is kept",
+          lo <= (s[0].get("delay_ms") or 0) <= hi and "delay_ms" not in s[1] and s[2]["delay_ms"] == 0, s[:3])
+    check(f"the cap: a 1,000-character text adds at most {pacing.CAP_S:g} s",
+          0 < s[3]["delay_ms"] and 1000 * s[3]["delay_ms"] <= pacing.CAP_S * 1000, s[3].get("delay_ms"))
+    h.call("get_window_state", {"pid": 88, "window_id": FIREFOX})      # the screenshot a pixel click is aimed from
+    text = f"{secret}@example.com and more"
+    batch = {"pid": 88, "window_id": FIREFOX, "delivery_mode": "foreground", "steps": [
+        {"click": {"role": "entry", "name": "Email"}},
+        {"tool": "type_text", "args": {"text": text}, "expect": [{"text": "Email"}]},
+        {"tool": "press_key", "args": {"key": "Tab"}},
+        {"click": {"x": 400, "y": 300}}]}
+    n0 = len(calls())
+    res = h.call("run_steps", json.loads(json.dumps(batch)))
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    steps = fwd.get("steps") or []
+    typed = typed_steps(steps)
+    slo, shi = pacing.STEP_MS
+    check(f"a batch into Firefox gets {slo}-{shi} ms between steps", slo <= (fwd.get("delay_ms") or 0) <= shi, fwd.get("delay_ms"))
+    check("…its text is typed in 2-3 runs, each with its own pause, that put the same text back together",
+          2 <= len(typed) <= 3 and "".join(t for t, _ in typed) == text and all(lo <= d <= hi for _, d in typed), typed)
+    moves = [i for i, st in enumerate(steps) if st.get("tool") == "move_cursor"]
+    last = steps[-1] if steps else {}
+    check("…the pointer moves toward a pixel click first (desktop scope, inside the box from where it is to the "
+          "target), and the click is the caller's own",
+          2 <= len(moves) <= 4 and moves == list(range(len(steps) - 1 - len(moves), len(steps) - 1))
+          and all(steps[i]["args"]["scope"] == "desktop" and 600 <= steps[i]["args"]["x"] <= 1700
+                  and 450 <= steps[i]["args"]["y"] <= 950 for i in moves)
+          and last == {"click": {"x": 400, "y": 300}}, steps)
+    check("…the expect check stays on the last run; the result says steps were added (and why the numbers shift)",
+          any(st.get("expect") == [{"text": "Email"}] for st in steps) and steps[0] == batch["steps"][0]
+          and pacing.NOTE_PREFIX in res.text, res.text[:300])
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 50, "window_id": W, "steps": batch["steps"][1:3]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("a batch into Mousepad goes as it was sent", fwd.get("steps") == batch["steps"][1:3] and "delay_ms" not in fwd, fwd)
+    n0 = len(calls())
+    h.call("run_steps", {"pid": 88, "window_id": FIREFOX, "steps": [
+        {"tool": "type_text", "args": {"text": "to firefox"}},
+        {"tool": "type_text", "args": {"pid": 50, "window_id": W, "text": "to mousepad"}},
+        {"tool": "type_text", "args": {"text": "still mousepad"}}]})
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("in a mixed batch only the steps aimed at Firefox are paced (a step that names no window inherits the "
+          "last one named)", [d is not None for _, d in typed_steps(fwd.get("steps") or [])] == [True, False, False],
+          fwd.get("steps"))
+    long_batch = {"pid": 88, "window_id": FIREFOX, "steps": [{"tool": "type_text", "args": {"text": "y" * 300}}] * 6}
+    n0 = len(calls())
+    h.call("run_steps", long_batch)
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    st = fwd.get("steps") or []
+    added = (sum(len(t) * (d or 0) for t, d in typed_steps(st)) + (len(st) - 1) * (fwd.get("delay_ms") or 0)) / 1000 \
+        + (len(st) - 6) * pacing.RUN_COST_S
+    check(f"the cap holds for a batch too (1,800 characters: at most {pacing.CAP_S:g} s added, the text whole)",
+          added <= pacing.CAP_S + 1e-6 and "".join(t for t, _ in typed_steps(st)) == "y" * 1800, added)
+    h.close()
+    clear_claims()
+    r.stop()
+    log = open(mcp_hub.paths(r.env)["log"]).read()
+    check("hub.log records pacing plans as counts (rate-limited like other notes), never the typed text",
+          "pacing type_text: 24 characters in 1 runs" in log and secret not in log and "yyyyyyyy" not in log,
+          [ln[-160:] for ln in log.splitlines() if "pacing" in ln][:6])
+    r = Running(MCOMP_BROWSER_PACING="fast")
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="fast")
+    n0 = len(calls())
+    h.call("type_text", {"pid": 88, "window_id": FIREFOX, "text": "abc"})
+    res = h.call("run_steps", json.loads(json.dumps(batch)))
+    fwd_t = [{k: v for k, v in a.items() if k != "session"} for a in sent_args("type_text", n0)]
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("BROWSER_PACING=fast: typing and batches go to the driver exactly as sent (today's behaviour)",
+          fwd_t == [{"pid": 88, "window_id": FIREFOX, "text": "abc"}]
+          and {k: v for k, v in fwd.items() if k != "session"} == batch and pacing.NOTE_PREFIX not in res.text,
+          (fwd_t, fwd))
+    h.close()
+    clear_claims()
+    r.stop()
+    r = Running(MCOMP_DRIVER_MODE="bounded")
+    r.hub.input_reset = lambda: None
+    h = client(r, "call", session="bnd")
+    h.call("get_window_state", {"pid": 88, "window_id": FIREFOX})
+    n0 = len(calls())
+    h.call("run_steps", json.loads(json.dumps(batch)))
+    fwd = (sent_args("run_steps", n0) or [{}])[-1]
+    check("bounded mode: delays only, no pointer moves (a manifest may not list move_cursor)",
+          fwd.get("delay_ms") and not any(s.get("tool") == "move_cursor" for s in fwd.get("steps") or []), fwd)
+    h.close()
+    clear_claims()
+    r.stop()
+    set_windows(BASE_WINDOWS)
 
 
 def bounded_checks():
@@ -2709,6 +2851,7 @@ def main():
         handoff_teardown_checks()
         handoff_teardown_race_checks()
         chrome_checks()
+        pacing_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()

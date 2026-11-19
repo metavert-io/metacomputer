@@ -41,7 +41,11 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   focus with a fresh read. Details: `skills/metacomputer/SKILL.md` ("How to
   drive it") and `DESKTOP.md` (with its error table).
 - Browsers: Firefox is the default; Chrome is installed. Modes and steps
-  (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Never
+  (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Sign-in, sign-up, checkout,
+  account settings and posting go through human mode first (sites can flag page-mode Chrome as automated); no
+  fingerprint spoofing, stealth plugins or CAPTCHA services, ever. Human pacing (`BROWSER_PACING=human`,
+  `lib/pacing.py`) runs in the hub after every guard: it may change only delays and add pointer moves, and never
+  puts typed text in a log. Never
   send background input or `set_value` to Chrome (the hub enforces it);
   `metacomputer input-reset` if Chrome ignores typing.
 - Logins, 2FA codes and API keys: never ask for or type passwords, codes, keys or
@@ -60,7 +64,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   all go through it, and it applies every guard to every client: one controller
   (check and claim under `owners.lock()`, a lease for calls a client left
   running), the Chrome guard, bounded mode, the coordinate guard
-  (`COORD_GUARD`), action-log notes, events. A refusal from any of them is the
+  (`COORD_GUARD`), human pacing (`BROWSER_PACING`), action-log notes, events. A refusal from any of them is the
   user's control: report it, never route around it (`call`, a script,
   `MCOMP_DIRECT_BRIDGE=1`, the shell). The raw driver connection is for the hub
   and transport tests only (`MCPClient(transport_test=True)`). New guards go in

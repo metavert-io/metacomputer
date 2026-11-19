@@ -21,7 +21,8 @@
 #   hub [status [--json] | start | stop]   the hub: one connection per VM shared by every client
 #   inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
 #                                  read-only snapshot of the VM (no GUI, changes nothing)
-#   browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
+#   browser [default firefox|chrome | mode human|page|hybrid | pacing human|fast |
+#            profiles [--new NAME | --delete NAME [--firefox]]]
 #   input-reset [--check]          remove the driver's leftover virtual input devices
 #                                  (while one exists, Chrome ignores the keyboard); prints the count
 #   desktop-restart                log the desktop out and in again (closes every app)
@@ -1204,36 +1205,65 @@ browser_set() { # KEY VALUE: written to this machine's config (config/local.env)
     echo "$1=$2"; } > "$tmp"
   mv "$tmp" "$LOCAL_CONFIG"
 }
-do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME [--yes]] | --json]
+do_browser() { # [default firefox|chrome | mode human|page|hybrid | pacing human|fast | profiles [--new NAME | --delete NAME [--firefox] [--yes]] | --json]
+  local kept_root="/home/$GUEST_USER/.local/state/metacomputer/firefox-profiles"   # lib/guest_inspect.py has the same
   case "${1:-}" in
     ""|--json)
-      local b m; b="$(browser_get BROWSER firefox)"; m="$(browser_get MODE human)"
-      if [ "${1:-}" = --json ]; then printf '{"browser":"%s","mode":"%s"}\n' "$b" "$m"
+      local b m p; b="$(browser_get BROWSER firefox)"; m="$(browser_get MODE human)"; p="$(browser_get BROWSER_PACING human)"
+      if [ "${1:-}" = --json ]; then printf '{"browser":"%s","mode":"%s","pacing":"%s"}\n' "$b" "$m" "$p"
       else
         echo "default browser: $b   (firefox | chrome)"
-        echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome)"
-        echo "Words in a request override these. Change with: metacomputer browser default chrome | metacomputer browser mode page"
+        echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome; sign-ins and other account pages: human)"
+        echo "pacing:          $p   (human: typing, steps and pixel clicks in browser windows at a person's pace | fast)"
+        echo "Words in a request override the browser and mode. Change with: metacomputer browser default chrome | mode page | pacing fast"
       fi ;;
     default) case "${2:-}" in firefox|chrome) browser_set BROWSER "$2"; echo "default browser: $2" ;;
                               *) die "usage: metacomputer browser default firefox|chrome" ;; esac ;;
     mode)    case "${2:-}" in human|page|hybrid) browser_set MODE "$2"; echo "default mode: $2" ;;
                               *) die "usage: metacomputer browser mode human|page|hybrid" ;; esac ;;
+    pacing)  case "${2:-}" in human|fast) browser_set BROWSER_PACING "$2"
+                                          echo "pacing: $2 (the hub picks it up when no session is using it; metacomputer hub stop restarts it)" ;;
+                              *) die "usage: metacomputer browser pacing human|fast" ;; esac ;;
     profiles)
       need_running
-      if [ "${2:-}" = --delete ]; then
-        local name="${3:-}"; shift 3 2>/dev/null || true
-        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: metacomputer browser profiles --delete NAME [--yes]"
-        parse_flags "$@"
-        local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
-        gssh ops "test -d '$dir'" >/dev/null || die "no driver profile named $name (metacomputer browser profiles)"
-        # [-] keeps pgrep from matching this very ssh command line
-        gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" >/dev/null && die "profile $name is in use by a running Chrome; close it first"
-        confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
-        gssh ops "rm -rf -- '$dir'" >/dev/null && echo "deleted profile $name"
-      else
-        gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles
-      fi ;;
-    *) die "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
+      local name="${3:-}"
+      case "${2:-}" in
+        --new|--delete)
+          { [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$ ]] && [ "$name" != . ] && [ "$name" != .. ]; } \
+            || die "usage: metacomputer browser profiles --new NAME | --delete NAME [--firefox] [--yes] (NAME: letters, digits, . _ -)" ;;
+      esac
+      case "${2:-}" in
+        --new)
+          # A kept Firefox profile for human mode: sign in once (the user, in a handoff), stay signed in until a reset.
+          gssh ops "umask 077 && mkdir -p -- '$kept_root/$name'" >/dev/null || die "couldn't make the profile folder in the VM"
+          echo "kept Firefox profile $name: $kept_root/$name"
+          echo "open it with launch_app:"
+          printf '  {"name": "firefox", "additional_arguments": ["--profile", "%s", "--no-remote", "URL"]}\n' "$kept_root/$name"
+          echo "(--no-remote lets it run beside another Firefox; its cookies and sign-ins stay until a VM reset)" ;;
+        --delete)
+          shift 3 2>/dev/null || true
+          local firefox=0 rest=()
+          for a in "$@"; do [ "$a" = --firefox ] && firefox=1 || rest+=("$a"); done
+          parse_flags ${rest[@]+"${rest[@]}"}
+          if [ "$firefox" = 1 ]; then
+            local dir="$kept_root/$name"
+            gssh ops "test -d '$dir' && test ! -L '$dir'" >/dev/null || die "no kept Firefox profile named $name (metacomputer browser profiles)"
+            gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-profile $dir( |\$)' >/dev/null" >/dev/null && die "profile $name is in use by a running Firefox; close it first"
+            confirm "Delete the kept Firefox profile '$name' in the VM (its cookies and sign-ins go with it)?"
+            gssh ops "rm -rf -- '$dir'" >/dev/null && echo "deleted Firefox profile $name"
+          else
+            local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
+            gssh ops "test -d '$dir'" >/dev/null || die "no driver profile named $name (metacomputer browser profiles; a kept Firefox profile needs --firefox)"
+            # [-] keeps pgrep from matching this very ssh command line
+            gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" >/dev/null && die "profile $name is in use by a running Chrome; close it first"
+            confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
+            gssh ops "rm -rf -- '$dir'" >/dev/null && echo "deleted profile $name"
+          fi ;;
+        "")
+          gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles ;;
+        *) die "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;;
+      esac ;;
+    *) die "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | pacing human|fast | profiles [--new NAME | --delete NAME [--firefox]]]" ;;
   esac
 }
 

@@ -233,6 +233,9 @@ def files(minutes, limit=40):
 
 PROFILE_ROOT = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local/state"),
                             "cua-driver", "browser-profiles")
+# Kept Firefox profiles for human mode (`metacomputer browser profiles --new NAME`): one folder each, used with
+# `firefox --profile DIR --no-remote`. A fixed path (bin/metacomputer's do_browser has the same one).
+FIREFOX_KEPT_ROOT = os.path.join(HOME, ".local/state/metacomputer/firefox-profiles")
 
 
 def _du(path):
@@ -265,16 +268,24 @@ def browser(env, win):
                             "driver_owned": owned, "page_tools": owned or any(a.startswith("--remote-debugging") for a in args),
                             "windows": titles.get(pid, [])})
         elif exe in ("/usr/lib/firefox/firefox", "/usr/lib/firefox/firefox-bin") and "-contentproc" not in args:
-            running.append({"browser": "firefox", "pid": pid, "profile": "default", "driver_owned": False,
+            pdir = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("--profile", "-profile")), None)
+            kept = bool(pdir and os.path.dirname(pdir.rstrip("/")) == FIREFOX_KEPT_ROOT)
+            running.append({"browser": "firefox", "pid": pid,
+                            "profile": os.path.basename(pdir.rstrip("/")) + " (kept)" if kept else (pdir or "default"),
+                            "kept": os.path.basename(pdir.rstrip("/")) if kept else None, "driver_owned": False,
                             "page_tools": False, "windows": titles.get(pid, [])})
-    profiles = []
-    if os.path.isdir(PROFILE_ROOT):
-        in_use = {b["profile"] for b in running if b["driver_owned"]}
-        for n in sorted(os.listdir(PROFILE_ROOT)):
-            p = os.path.join(PROFILE_ROOT, n)
-            if os.path.isdir(p):
-                profiles.append({"name": n, "bytes": _du(p), "age_s": int(time.time() - os.lstat(p).st_mtime),
-                                 "in_use": n in in_use})
+
+    def listed(root, in_use):
+        out = []
+        if os.path.isdir(root):
+            for n in sorted(os.listdir(root)):
+                p = os.path.join(root, n)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    out.append({"name": n, "bytes": _du(p), "age_s": int(time.time() - os.lstat(p).st_mtime),
+                                "in_use": n in in_use})
+        return out
+    profiles = listed(PROFILE_ROOT, {b["profile"] for b in running if b["driver_owned"]})
+    firefox_kept = listed(FIREFOX_KEPT_ROOT, {b.get("kept") for b in running if b.get("kept")})
     downloading = []
     for d, dirs, names in os.walk(HOME):
         dirs[:] = [x for x in dirs if not x.startswith(".")]
@@ -282,7 +293,7 @@ def browser(env, win):
     installed = [b for b, path in (("firefox", "/usr/bin/firefox"), ("chrome", "/usr/bin/google-chrome-stable"))
                  if os.path.exists(path)]
     return {"installed": installed, "running": running, "named_profiles": profiles,
-            "downloading": downloading[:20]}
+            "firefox_profiles": firefox_kept, "downloading": downloading[:20]}
 
 
 def collect(sections, minutes, top):
@@ -369,6 +380,9 @@ def render(d):
         if b["named_profiles"]:
             L.append("  driver profiles: " + ", ".join(
                 f"{p['name']} ({p['bytes'] // 2**20} MiB{', in use' if p['in_use'] else ''})" for p in b["named_profiles"]))
+        if b.get("firefox_profiles"):
+            L.append("  kept Firefox profiles: " + ", ".join(
+                f"{p['name']} ({p['bytes'] // 2**20} MiB{', in use' if p['in_use'] else ''})" for p in b["firefox_profiles"]))
         if b["downloading"]:
             L += ["  downloading:"] + [f"    {p}" for p in b["downloading"]]
     return "\n".join(L)
@@ -402,9 +416,16 @@ def main(argv):
             if argv[0] == "--render":
                 text = render(d)
             else:
-                ps = d["browser"]["named_profiles"]
-                text = "\n".join([f"{p['name']:<40} {p['bytes'] // 2**20:>6} MiB  {'in use' if p['in_use'] else ''}"
-                                  for p in ps] or ["no driver-owned Chrome profiles in the VM"])
+                def rows(ps):
+                    return [f"  {p['name']:<40} {p['bytes'] // 2**20:>6} MiB  {'in use' if p['in_use'] else ''}" for p in ps]
+                b = d["browser"]
+                text = "\n".join(
+                    ["Chrome, page mode (browser_prepare's isolated_named profiles):"]
+                    + (rows(b["named_profiles"]) or ["  no driver-owned Chrome profiles in the VM"])
+                    + ["Firefox, human mode (kept profiles: firefox --profile DIR --no-remote):"]
+                    + (rows(b.get("firefox_profiles") or []) or ["  no kept Firefox profiles in the VM"])
+                    + ["The VM's default Firefox profile and Chrome's normal profile keep their sign-ins too.",
+                       "A VM reset clears all of them."])
         except (ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError):
             print("metacomputer: the VM's snapshot isn't in the expected shape (metacomputer inspect --json shows it)",
                   file=sys.stderr)

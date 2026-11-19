@@ -44,7 +44,7 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `recordings [--sync] [N]` | List recent recordings; copy the VM's task runs to the Mac |
 | `contact-sheet MP4 [OUT.png]` | 12 frames of a recording in one image |
 | `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model |
-| `browser [default firefox\|chrome] [mode human\|page\|hybrid] [profiles [--delete NAME]]` | The skill's defaults; named Chrome profiles |
+| `browser [default firefox\|chrome] [mode human\|page\|hybrid] [pacing human\|fast] [profiles [--new NAME \| --delete NAME [--firefox]]]` | The skill's defaults and human pacing; kept Firefox profiles (`--new`: made in the VM, with the `launch_app` call that opens one) and named Chrome profiles |
 | `view [--open \| --tailnet]` | Watch or take over the desktop (VNC on loopback). `--open`: Screen Sharing on this Mac, with the live-view password on the clipboard for 45 s (`VIEW_CLIPBOARD_S`); over SSH it says how instead. `--tailnet`: the `tailscale serve` command that would publish it to your tailnet, and its undo (printed, never run) |
 | `input-reset [--check]` | Remove the driver's leftover virtual input devices (when Chrome ignores typing) |
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
@@ -211,6 +211,7 @@ Refused rather than guessed (nothing runs):
 | `MCP_HUB` | `on` | `on`: Claude Code's bridge, `metacomputer call` and scripts share one hub per VM, which applies every guard to each of them; `off`: each connects on its own, with the same guards |
 | `HUB_IDLE` | `10m` | The hub exits after this long with no client and no driver recording |
 | `COORD_GUARD` | `on` | `on`: pixel input is refused when certain window-layout changes happened since the screenshot it was aimed from (a window resized, or covered by a dialog or another app; it compares geometry, not content); `off`: only Cua Driver's own checks |
+| `BROWSER_PACING` | `human` | `human`: typing, batch steps and pixel clicks aimed at a Firefox or Chrome window go at a person's pace (a random 60-140 ms per key, 120-320 ms between steps, the pointer moved toward a pixel click first; at most 15 s added per call; a `delay_ms` the call sets is kept; [BROWSER.md](../skills/metacomputer/BROWSER.md#human-pacing-browser_pacing)); `fast`: as fast as the driver goes. `metacomputer browser pacing` changes it |
 | `HIDDEN_TEXT` | `on` | `on`: page text a person likely can't see (too small, off the page, no size on screen) or that addresses AI agents is marked in the results that carry it, for Claude to tell you about, and reported as `security.hidden_text` ([SECURITY.md](../SECURITY.md#hidden-page-text)); it labels, never removes or blocks; `off`: results as the driver sends them |
 
 **Lessons** (`metacomputer learn`; [docs/learn.md](learn.md)):

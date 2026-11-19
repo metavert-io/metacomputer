@@ -32,7 +32,9 @@ Use the desktop when the outcome lives on a screen: a GUI app or a real browser 
 
 ## Browsers
 
-Firefox is the default; Chrome is installed. Modes: **human** (the tree plus real mouse and keyboard; both browsers; the default), **page** (the page's own elements, in the background; Chrome only), **hybrid** (page reads, real clicks and typing; Chrome only). `metacomputer browser` shows the defaults; the user's words override them ("in Chrome", "drive the page directly", "like a person"). Page or hybrid in Firefox: say the driver can't, offer Chrome. Name the choice in the announcement ("Using the virtual computer: Chrome, page-level, throwaway profile."). Checks that need no model: `metacomputer web compare|responsive|a11y|open-untrusted URL` ([BROWSER.md](BROWSER.md)).
+Firefox is the default; Chrome is installed. Modes: **human** (the tree plus real mouse and keyboard, at a person's pace; both browsers; the default), **page** (the page's own elements, in the background; Chrome only), **hybrid** (page reads, real clicks and typing; Chrome only). `metacomputer browser` shows the defaults; the user's words override them ("in Chrome", "drive the page directly", "like a person"). Page or hybrid in Firefox: say the driver can't, offer Chrome. Name the choice in the announcement ("Using the virtual computer: Firefox, human mode.").
+- **Anything account-facing goes through human mode first:** sign-in, sign-up, checkout, account settings, posting. Sites can flag page-mode Chrome as automated; a sign-in that looks degraded there (no code box, an email that never comes) means switch to human mode and retry. Page mode is for bulk data entry, reading the user's own sites, and steps human mode can't do. Keep sign-ins in a kept profile so they last until a reset ([BROWSER.md](BROWSER.md), "Sign in once, stay signed in").
+- **"Test it as a person":** follow BROWSER.md's checklist (human mode and pacing, real window sizes, a keyboard-only pass, a screenshot per step and a recording, and what a person would notice). Checks that need no model: `metacomputer web compare|responsive|a11y|open-untrusted URL` ([BROWSER.md](BROWSER.md)).
 
 ## Start: one round, then the safety check
 
@@ -41,7 +43,7 @@ Firefox is the default; Chrome is installed. Modes: **human** (the tree plus rea
      - Another session **ACTIVE**: stop and ask the user; take over only with their OK (`metacomputer release`). With no one to ask (a headless run), report it and end. Don't wait in sleep loops.
      - Stopped: `metacomputer start` (about 12 s). Note that you started it.
    - **One ToolSearch** (with your tool list's prefix): `select:mcp__metacomputer__health_report,mcp__metacomputer__list_windows,mcp__metacomputer__launch_app,mcp__metacomputer__get_window_state,mcp__metacomputer__run_steps,mcp__metacomputer__invoke_menu,mcp__metacomputer__zoom`, plus what the task clearly needs: `run_script` (loops), `get_desktop_state` (games, desktop-scope clicks), and for Chrome page mode `browser_prepare`, `get_browser_state`, `browser_navigate`, `browser_click`, `browser_type`, `browser_select`. Clicks, typing and keys run as `run_steps` steps, so they need no tools of their own.
-   - **Read only the notes the task needs:** [DESKTOP.md](DESKTOP.md) for desktop apps and Firefox; [BROWSER.md](BROWSER.md) for Chrome, page or hybrid mode and `metacomputer web`; [EXTRA-APPS.md](EXTRA-APPS.md) for Inkscape, Audacity, Kdenlive, games and other added apps; [SECRETS.md](SECRETS.md) before any sign-in, 2FA code or API key, and before running Claude Code inside the VM; [SHELL.md](SHELL.md) for file work in the VM's shell beyond a check; [STORAGE.md](STORAGE.md) for volumes, reference disks and files that must outlive a reset.
+   - **Read only the notes the task needs:** [DESKTOP.md](DESKTOP.md) for desktop apps and Firefox; [BROWSER.md](BROWSER.md) for sign-ins and other account pages, testing a site as a person, rich-text web editors, Chrome, page or hybrid mode and `metacomputer web`; [EXTRA-APPS.md](EXTRA-APPS.md) for Inkscape, Audacity, Kdenlive, games and other added apps; [SECRETS.md](SECRETS.md) before any sign-in, 2FA code or API key, and before running Claude Code inside the VM; [SHELL.md](SHELL.md) for file work in the VM's shell beyond a check; [STORAGE.md](STORAGE.md) for volumes, reference disks and files that must outlive a reset.
 2. **`health_report` before the first action** (in the same round as `list_windows` is fine). It must report Linux and Ubuntu arm64; if it doesn't, stop.
 3. **No `mcp__metacomputer__*` tools?** Ask the user to reconnect `metacomputer` with `/mcp`, or to restart Claude Code. Meanwhile `metacomputer call --session NAME TOOL 'JSON'` (the same NAME on every call) goes through the same hub and guards and keeps tokens and screenshots between calls; `--json` gives the whole result.
 
@@ -109,7 +111,7 @@ A CAPTCHA, Cloudflare's "Verify you are human" or another bot check; a sign-in t
 3. While it's open, your acting calls are refused ("Paused: the user has the computer"), `metacomputer claude send/keys` included; reads still work. Don't act, and don't reach the desktop another way. An inner Claude (`metacomputer claude`) that's working isn't paused: if it could get in the user's way, `claude stop` it before you hand over.
 4. When it returns: exit 0, the user is done: read the screen again (it changed, and old element tokens are stale) and carry on. 4: cancelled: stop and ask. 124: its time limit passed: ask; don't try the check yourself. 5: your wait was stopped and the handoff is still open: `metacomputer handoff wait`.
 
-Never try to pass a human check yourself, switch browsers, modes or profiles to get around one, retry it in a loop, or run `handoff done` for the user. If a site's check keeps failing even when the user ticks it, the site is refusing the VM's automated browser: say so and ask how to go on ([BROWSER.md](BROWSER.md)).
+Never try to pass a human check yourself, switch browsers, modes or profiles to get around one, retry it in a loop, or run `handoff done` for the user. (Opening an account page in human mode from the start, or once more after a degraded sign-in that showed no check, is the ordinary browser, not a way around one.) If a site's check keeps failing even when the user ticks it, the site is refusing the VM's automated browser: say so and ask how to go on ([BROWSER.md](BROWSER.md)).
 
 ## Also available
 
@@ -124,7 +126,7 @@ Never try to pass a human check yourself, switch browsers, modes or profiles to 
 
 - [DESKTOP.md](DESKTOP.md): reading, acting, pixels, the error table, verifying; Firefox, Writer, Calc, Mousepad, Thunar and file dialogs.
 - [EXTRA-APPS.md](EXTRA-APPS.md): Inkscape, Audacity, Kdenlive, pygame and other apps added with `EXTRA_PACKAGES`.
-- [BROWSER.md](BROWSER.md): Firefox or Chrome; human, page or hybrid mode; profiles; `metacomputer web` checks.
+- [BROWSER.md](BROWSER.md): Firefox or Chrome; human, page or hybrid mode; account pages in human mode; human pacing; kept profiles; testing as a person; rich-text editors; `metacomputer web` checks.
 - [SHELL.md](SHELL.md): `metacomputer sh`, which work goes to the shell and which to the apps, and what the VM has for format-aware work.
 - [STORAGE.md](STORAGE.md): volumes and reference disks (where they're mounted, that `reset` keeps them), `put`'s collision names, checkpoints with volumes.
 - [SECRETS.md](SECRETS.md): signing in, 2FA codes, keeping a login, and API keys from the user's vault (`metacomputer secrets`); Claude Code inside the VM (`metacomputer claude`).
