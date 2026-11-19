@@ -183,6 +183,15 @@ def main():
         boom = [r for r in recs if r["type"] == "result" and r["tool"] == "boom"]
         check("relay records a tool error", boom and boom[0]["result"]["error"] is True)
         check("relay's log verifies", verify(newest, base, key + ".pub")["ok"])
+
+        # Same second, a PID that grew from 4 to 5 digits: the newer file sorts last.
+        order = os.path.join(td, "order", "2026-01-02")
+        os.makedirs(order)
+        for n in ("120000-9994.jsonl", "120000-10003.jsonl", "115959-99999.jsonl", "120001-7.jsonl"):
+            open(os.path.join(order, n), "w").close()
+        got = [os.path.basename(f) for f in actionlog.files(os.path.dirname(order))]
+        check("files sort by time, then PID as a number",
+              got == ["115959-99999.jsonl", "120000-9994.jsonl", "120000-10003.jsonl", "120001-7.jsonl"], str(got))
     finally:
         shutil.rmtree(td, ignore_errors=True)
     print(f"\n{sum(results)}/{len(results)} passed")
