@@ -112,6 +112,7 @@ with clean_env():
     import events  # noqa: E402
     import mcp_hub  # noqa: E402
     import owners  # noqa: E402
+    import site_login  # noqa: E402
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
 
@@ -307,7 +308,100 @@ CLAIMS = [
     ("THIRD_PARTY_NOTICES.md", r"trycua/cua release `lume-v([\d.]+)`", lambda m: m[1] == D["LUME_VERSION"]),
     ("THIRD_PARTY_NOTICES.md", r"trycua/cua release `cua-driver-rs-v([\d.]+)`", lambda m: m[1] == D["CUA_DRIVER_VERSION"]),
     ("THIRD_PARTY_NOTICES.md", r"rclone/rclone release `v([\d.]+)`", lambda m: m[1] == D["RCLONE_VERSION"]),
+    # The hub's sign-in tools (lib/site_login.py) and what's kept once the VM may hold a value (lib/vmtaint.py)
+    ("SECURITY.md", r"every record on its connections is `secret_adjacent`, until the VM is reset",
+     lambda m: adjacent_records()),
+    ("SECURITY.md", r"There's no text, no error message and no hash", lambda m: adjacent_records()),
+    ("SECURITY.md", r"Sizes are one of 0, 1 KiB, 64 KiB, 1 MiB, 16 MiB, 256 MiB, 4 GiB or 1 TiB",
+     lambda m: size_classes_match()),
+    ("SECURITY.md", r"one file per VM, `RUN_DIR/(vm-may-hold-values)`", lambda m: vm_mark_kept(m[1])),
+    ("architecture.md", r"one file, `RUN_DIR/(vm-may-hold-values)` \(`lib/vmtaint\.py`\)", lambda m: vm_mark_kept(m[1])),
+    ("SECURITY.md", r"\*\*The tool list\.\*\* The hub doesn't ask the driver for its tool list or handshake again, "
+                    r"doesn't save one, and doesn't pass `tools/list_changed` on",
+     lambda m: tool_list_frozen()),
+    ("SECURITY.md", r"\*\*The driver connection's stderr\*\* \(`upstream\.stderr`, and what error messages quote\) keeps "
+                    r"nothing more", lambda m: stderr_withheld()),
+    ("SECURITY.md", r"A driver call that doesn't answer in time \((\d+) s; all the steps before the vault call have (\d+) s "
+                    r"together, and those after it (\d+) s\)",
+     lambda m: (int(m[1]), int(m[2]), int(m[3])) == (site_login.CALL_S, site_login.BEFORE_S, site_login.AFTER_S)),
+    ("SECURITY.md", r"Stopped normally, the hub waits up to (\d+) s for each sign-in to confirm it stopped",
+     lambda m: int(m[1]) == mcp_hub.JOB_STOP_S and mcp_hub.stop_hub.__defaults__[1] > mcp_hub.JOB_STOP_S),
+    ("SECURITY.md", r"Outcomes are kept in the hub for (\d+) minutes", lambda m: int(m[1]) * 60 == site_login.JOB_TTL_S),
+    ("SECURITY.md", r"marked unverified: 1 to (\d+) letters, digits, spaces and `\. _ @ : \( \) / \+ -`",
+     lambda m: agent_names_match(int(m[1]))),
+    ("SECURITY.md", r"The vault refuses a request through the hub that names no Chrome",
+     lambda m: 'who.hubPID != nil && profile == nil && req["browser_pid"] == nil' in raw(SERVER)),
+    ("SECURITY.md", r"Nothing of the page's address comes back, not its path or query and not its host",
+     lambda m: "page_url" not in raw("lib/site_login.py") and not any("url" in f for f in site_login_report_fields())),
+    ("SECURITY.md", r"when the process `--while-pid` names ends \(the hub passes its own\)",
+     lambda m: 'whilePID, kill(w, 0) != 0 && errno == ESRCH' in raw(CMDS)
+     and '["--while-pid", str(os.getpid())]' in raw("lib/site_login.py")),
 ]
+
+
+def adjacent_records():
+    """Every record the relay writes passes whether the VM may hold a value, and a secret-adjacent answer keeps no
+    text, message or hash (lib/mcp_relay.py, lib/actionlog.py)."""
+    relay = raw("lib/mcp_relay.py")
+    n_calls = len(re.findall(r"\blog\.(?:result|call|refused)\(", relay))
+    every = n_calls > 0 and n_calls == relay.count("secret=adjacent()")
+    res = actionlog.adjacent_result({"content": [{"type": "text", "text": "x" * 5000}, {"type": "image", "data": "y"}],
+                                     "isError": True})
+    args = actionlog.adjacent_args({"text": "secret words", "ref": "p1:2"})
+    ok = (res == {"error": True, "images": "1-9", "text_size": 65536} and set(args) == {"redacted", "keys", "size"}
+          and "secret words" not in json.dumps(args) and "p1:2" not in json.dumps(args)
+          and actionlog.RPC_ERROR_ADJACENT.startswith("error ("))
+    return every and ok, (n_calls, res, args)
+
+
+def size_classes_match():
+    """lib/vmtaint.py's size classes are the vault's (sizeBound in vault/Util.swift) and the ones SECURITY.md names."""
+    import vmtaint
+    swift_list = [num(x) for x in swift("vault/Util.swift", r"for b in \[([^\]]+)\] where n <= b").split(",")]
+    tail = swift_num("vault/Util.swift", r"return (1 << 40)\n")
+    want = [0, 1 << 10, 1 << 16, 1 << 20, 1 << 24, 1 << 28, 1 << 32]
+    return list(vmtaint.SIZES) == swift_list == want and tail == 1 << 40 and vmtaint.size_class(1 << 33) == 1 << 40
+
+
+def vm_mark_kept(name):
+    """The mark's file name, written by `secrets fill|login|session load|token` before the vault runs, cleared only by
+    reset (restoring the baseline) and a new build."""
+    import vmtaint
+    mc = raw("bin/metacomputer")
+    mark_at = mc.find('lib/vmtaint.py" mark')
+    run_at = mc.find('out="$("$VAULT_BIN" "$sub" "$@")"')
+    clear = re.search(r'if \[ "\$evtype" = reset \]; then "\$PY" "\$LAB_ROOT/lib/vmtaint\.py" clear', mc)
+    return (name == vmtaint.NAME and 0 < mark_at < run_at and clear is not None
+            and f'rm -f "$RUN_DIR/{name}"' in raw("scripts/build-vm.sh")
+            and mc.count('lib/vmtaint.py" clear') == 1), (mark_at, run_at, bool(clear))
+
+
+def tool_list_frozen():
+    """refresh_cache gives up before asking and again before keeping anything; list_changed isn't passed on."""
+    src = raw("lib/mcp_hub.py")
+    body = src[src.index("    def refresh_cache(self, params):"):src.index("    def ask_up(self, method")]
+    first = body.index("if self.tainted():")
+    ask = body.index('self.ask_up("tools/list"')
+    save = body.index("json.dump(cache, f)")
+    return (first < ask and body.count("if self.tainted():") >= 3 and body.rindex("if self.tainted():") < save
+            and 'if not self.tainted() and self.schedule_refresh():' in src)
+
+
+def stderr_withheld():
+    src = raw("lib/mcp_hub.py")
+    return ("withhold_when=lambda: vmtaint.tainted(mark_path=mark)" in src
+            and "withhold_when" in raw("lib/wirelimits.py") and 'return "" if self.withheld is not None' in raw("lib/wirelimits.py"))
+
+
+def agent_names_match(n):
+    """`agent`: site_login.py's pattern and the vault's validAgentName allow the same characters, at most n of them."""
+    return (site_login.AGENT_RE.pattern == r"[A-Za-z0-9 ._@:()/+-]{1,%d}" % n
+            and f"s.count <= {n}" in raw("vault/Util.swift") and '" ._@:()/+-".unicodeScalars' in raw("vault/Util.swift"))
+
+
+def site_login_report_fields():
+    import mcomp_sdk
+    return mcomp_sdk.SiteLoginReport.FIELDS
 
 
 def fpr(full, head, tail):
