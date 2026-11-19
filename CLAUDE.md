@@ -163,12 +163,24 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `claude plugin validate .` and `python3 tests/test_plugin.py` (its only accepted
   warnings: no version, the links in `plugin/skills`).
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
+- Security promises in the docs (SECURITY.md, README, docs/, CHANGELOG) are pinned to the code by
+  `tests/test_doc_claims.py`: a table of (doc, phrase, check against the code or `config/defaults.env`), plus
+  the settings tables, the code's fallbacks for the security settings, the gateway's refusal list, pinned
+  versions and no absolute claims of invulnerability (the patterns are in the test). A change to a promise or to the code
+  behind it updates its row in the same change; a weaker promise is said in the CHANGELOG.
+- Releases: `scripts/release.sh VERSION [--dry-run]` refuses unless it's on an up-to-date, clean main, the
+  CHANGELOG's [Unreleased] has entries, `check-public.sh -a` passes and the no-VM suites pass; then it moves
+  [Unreleased] to [VERSION] - DATE on a branch `release-vVERSION` and opens a PR (never a push to main). After
+  the PR is merged, `scripts/release.sh VERSION --tag [--draft-release]` tags the merge commit (annotated),
+  pushes the tag and checks that get.sh's dry run installs it; `--draft-release` makes a draft GitHub Release only,
+  never a published one (publishing is the owner's call). Each step has `--dry-run`. Tests: `tests/test_release.py`.
 - Tests: `metacomputer test`, `python3 tests/test_chrome_guard.py`,
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
-  `test_bench_workdir`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`, `test_install` (no VM),
+  `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
+  `test_install`, `test_events`, `test_doc_claims`, `test_release` (no VM; `scripts/release.sh` runs exactly these),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
   `tests/test_chrome_guard.py` and `tests/test_vault_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.

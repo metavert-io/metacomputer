@@ -170,6 +170,55 @@ def main():
                                  capture_output=True, text=True).stdout
         check("moments listing", "0:02  launch_app  name=inkscape" in listing and "(refused)" in listing, listing)
 
+        # A call the log records as sent and then ended without running: Cua Driver refusing it in bounded mode
+        # (an error result), a shell run refused after its call was logged (status refused). Its moment says so,
+        # as `actions show` does; a call that worked, or whose result came after the recording, stays plain.
+        actions2 = os.path.join(tmp, "actions2")
+        recs = [{"type": "start", "session": {"vm": "showvm"}},
+                {"type": "call", "id": "c9.12", "tool": "launch_app", "args": {"name": "xfce4-terminal"}, "t": 2},
+                {"type": "result", "id": "c9.12", "tool": "launch_app", "result": {"error": True, "images": 0}, "t": 2},
+                {"type": "call", "id": "c10.13", "tool": "launch_app", "args": {"launch_path": "/usr/bin/mousepad"}, "t": 4},
+                {"type": "result", "id": "c10.13", "tool": "launch_app", "result": {"error": False, "images": 0}, "t": 4},
+                {"type": "call", "id": "c11.14", "tool": "click", "args": {"x": 1, "y": 2}, "t": 6},
+                {"type": "result", "id": "c11.14", "tool": "click", "rpc_error": "the driver went away", "t": 6},
+                {"type": "call", "id": "c12.15", "tool": "list_windows", "args": {}, "t": 8},
+                {"type": "result", "id": "c12.15", "tool": "list_windows", "result": {"error": False}, "t": 30},
+                {"type": "call", "id": "c13.16", "tool": "get_window_state", "args": {}, "t": 9}]   # no result yet
+        write_raw = os.path.join(actions2, day, "100003-4.jsonl")
+        os.makedirs(os.path.dirname(write_raw), exist_ok=True)
+        with open(write_raw, "w") as f:
+            for i, r in enumerate(recs):
+                f.write(json.dumps(dict({k: v for k, v in r.items() if k != "t"}, seq=i,
+                                        ts=ts(started + r.get("t", 0)))) + "\n")
+        shell = os.path.join(actions2, day, "100004-5.jsonl")    # lib/vm_shell.py's records, its id always 1
+        with open(shell, "w") as f:
+            for i, r in enumerate([{"type": "start", "session": {"vm": "showvm"}},
+                                   {"type": "call", "id": 1, "tool": "vm_shell", "args": {"script": {"redacted": True, "chars": 9}}},
+                                   {"type": "result", "id": 1, "tool": "vm_shell",
+                                    "result": {"status": "refused", "kind": "log", "error": True}}]):
+                f.write(json.dumps(dict(r, seq=i, ts=ts(started + 10))) + "\n")
+        out = subprocess.run([sys.executable, REC, "sidecar", mp4, "--name", "clip2", "--started", str(started),
+                              "--ended", str(ended), "--fps", "30", "--quality", "high", "--mode", "host",
+                              "--vm", "showvm", "--actions-dir", actions2], capture_output=True, text=True)
+        side = json.load(open(os.path.join(tmp, "clip.json")))
+        by = {(m["tool"], m["what"]): m for m in side["moments"]}
+        term, mouse = by.get(("launch_app", "name=xfce4-terminal"), {}), by.get(("launch_app", ""), {})
+        check("a call the driver refused (an error result) is marked, not listed as if it ran",
+              out.returncode == 0 and term.get("error") is True and not term.get("refused"), side["moments"])
+        check("…a call whose result is an RPC error too",
+              by.get(("click", "x=1 y=2"), {}).get("error") is True, side["moments"])
+        check("…a shell run refused after its call was logged is marked refused",
+              by.get(("vm_shell", "script=<9 chars>"), {}).get("refused") is True, side["moments"])
+        check("…while calls that worked, or have no result yet, stay plain",
+              not any(m.get("error") or m.get("refused") for m in (mouse, by.get(("list_windows", ""), {}),
+                                                                    by.get(("get_window_state", ""), {})))
+              and len(side["moments"]) == 6, side["moments"])
+        listing = subprocess.run([sys.executable, REC, "moments", os.path.join(tmp, "clip.json")],
+                                 capture_output=True, text=True).stdout
+        check("…and the listing shows each one's outcome",
+              "launch_app (error)  name=xfce4-terminal" in listing and "vm_shell (refused)" in listing
+              and "0:04  launch_app\n" in listing + "\n", listing)
+
         out = subprocess.run([sys.executable, REC, "sidecar", mp4, "--name", "clip", "--started", str(started),
                               "--ended", str(ended), "--fps", "20", "--quality", "standard", "--mode", "guest",
                               "--vm", "showvm"], capture_output=True, text=True)

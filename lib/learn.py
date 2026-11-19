@@ -34,6 +34,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -597,8 +598,11 @@ def cmd_approve(a):
             for x in done:
                 record("approved", x, lessons["lessons"])
     if done:
+        # One summary line, the same as `learn list`'s ("Lessons: 2 active in the MCP instructions, ..."): the
+        # status line already says where they go, so it isn't repeated in front of it.
         s = learn_store.summary()
-        print(f"Active in the MCP instructions of new sessions: {esc(learn_store.status_line(s))}")
+        sent = s.get("delivered") and s.get("setting") != "off" and not s.get("problem")
+        print(f"Lessons: {esc(learn_store.status_line(s))}" + (" (from the next new session)" if sent else ""))
 
 
 def cmd_reject(a):
@@ -948,6 +952,8 @@ def cmd_bench(a):
         die(f"{config} changed while you were asked (it now names VM {config_identity(config)['vm'] or 'unknown'}); "
             "nothing was run")
     env = bench_env(config, ident, main_vm)
+    again = (f"metacomputer learn bench --config {shlex.quote(config)} --run-id {prefix}"
+             + (f" --tasks {shlex.quote(a.tasks)}" if a.tasks else ""))
     runs = {}
     for variant, sw in (("without", "off"), ("with", "on")):
         rid = f"{prefix}-{variant}"
@@ -956,12 +962,35 @@ def cmd_bench(a):
         if a.tasks:
             cmd += ["--tasks", a.tasks]
         print(f"\n== {variant} lessons: bench/bench.py run --lessons {sw} --run-id {esc(rid)}", flush=True)
-        r = subprocess.run(cmd, env=env)
+        r = run_bench(cmd, env)
         if r.returncode != 0:
-            die(f"the {variant}-lessons run stopped (exit {r.returncode}); run the same command again to resume it")
+            die(f"the {variant}-lessons run stopped (exit {r.returncode}); to pick it up where it stopped: {again}")
         runs[variant] = os.path.join(bench_results_dir(), rid)
+        # The benchmark stops early without failing when it's refused (another controller using the VM, the
+        # cap, a usage limit): a comparison then has nothing, or only part of a run, to compare. Say why and stop.
+        why = run_stopped(runs[variant])
+        if why:
+            die(f"the {variant}-lessons run stopped before its last task: {why}. Nothing was compared"
+                + (", and the run with the lessons wasn't started" if variant == "without" else "")
+                + f". Once that's sorted out, this picks it up where it stopped: {again}")
     path = report.write_compare(runs["without"], runs["with"])
     print_bench_comparison(report, runs, path)
+
+
+def run_bench(cmd, env):
+    """One benchmark run (bench/bench.py run ...), its output on this terminal."""
+    return subprocess.run(cmd, env=env)
+
+
+def run_stopped(rdir):
+    """Why a benchmark run stopped before its last task (run.json's `stopped`), or None when it finished."""
+    try:
+        with open(os.path.join(rdir, "run.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return "it left no run.json"
+    why = meta.get("stopped") if isinstance(meta, dict) else "its run.json isn't readable"
+    return str(why)[:300] if why else None
 
 
 def positive_usd(v, flag):
@@ -1016,6 +1045,10 @@ def print_bench_comparison(report, runs, path):
     A = {r["task"]: report.row(r) for r in xa}
     B = {r["task"]: report.row(r) for r in xb}
     common = [k for k in A if k in B]
+    if not common:
+        print("\nNo task finished in both runs, so there is nothing to compare (no table). "
+              f"What each run did: {esc(runs['without'])} and {esc(runs['with'])}")
+        return
     ta, tb = report.totals([A[k] for k in common]), report.totals([B[k] for k in common])
     print(f"\nWithout vs with the approved lessons, over the {len(common)} tasks both runs have:")
     rows = [("passed", f"{ta['passed']}/{ta['n']}", f"{tb['passed']}/{tb['n']}", f"{tb['passed'] - ta['passed']:+d}"),

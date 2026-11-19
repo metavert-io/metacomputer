@@ -1595,6 +1595,43 @@ def test_setup_in_checkout():
         shutil.rmtree(t, ignore_errors=True)
 
 
+def test_build_vault_quiet():
+    """scripts/build-vault.sh leaves out the linker's harmless "search path ... not found" warnings (Swift with
+    only the Command Line Tools) and nothing else; a failed compile still fails the build."""
+    t = tempfile.mkdtemp(prefix="mcomp-vaultbuild-")
+    try:
+        fb = os.path.join(t, "bin")
+        # a stand-in swiftc: the warnings and other output on both streams, then a binary that passes the selftest
+        write(os.path.join(fb, "swiftc"), "#!/bin/bash\n"
+              "out=; while [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
+              "echo \"ld: warning: search path '/Library/Developer/CommandLineTools/Developer/usr/lib' not found\"\n"
+              "echo 'warning: a compiler warning, kept'\n"
+              "echo \"ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' "
+              "not found\" >&2\n"
+              "echo 'ld: warning: another linker warning, kept' >&2\n"
+              "[ -z \"${STUB_SWIFTC_FAIL:-}\" ] || { echo 'error: a compile error, kept' >&2; exit 1; }\n"
+              "printf '#!/bin/sh\\nexit 0\\n' > \"$out\"; chmod +x \"$out\"\n", 0o755)
+        write(os.path.join(fb, "codesign"), "#!/bin/sh\nexit 0\n", 0o755)
+        env = dict(os.environ, PATH=fb + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME=os.path.join(t, "home"))
+        out = os.path.join(t, "out", "mcomp-vault")
+        r = subprocess.run([os.path.join(LAB, "scripts", "build-vault.sh"), "--out", out], env=env,
+                           capture_output=True, text=True, timeout=120)
+        check("build-vault.sh: the linker's 'search path ... not found' warnings aren't shown",
+              r.returncode == 0 and os.path.exists(out) and "search path" not in r.stdout + r.stderr,
+              (r.returncode, r.stdout[-300:], r.stderr[-300:]))
+        check("...every other line is, on its own stream",
+              "a compiler warning, kept" in r.stdout and "another linker warning, kept" in r.stderr
+              and "built " in r.stdout, (r.stdout[-300:], r.stderr[-300:]))
+        os.remove(out)
+        r = subprocess.run([os.path.join(LAB, "scripts", "build-vault.sh"), "--out", out],
+                           env=dict(env, STUB_SWIFTC_FAIL="1"), capture_output=True, text=True, timeout=120)
+        check("...and a compile that fails still fails the build, its error shown",
+              r.returncode != 0 and not os.path.exists(out) and "a compile error, kept" in r.stderr,
+              (r.returncode, r.stderr[-300:]))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def test_no_machine_paths():
     """Nothing in the installers or the defaults names one person's machine or tools."""
     bad = re.compile(r"/Users/[a-z]|secret exec|cua-lab/VNC|taild[0-9a-f]{4}|/Volumes/Elements")
@@ -1631,6 +1668,7 @@ test_vm_dir()
 test_vnc_password()
 test_vnc_real_keychain()
 test_setup_in_checkout()
+test_build_vault_quiet()
 test_no_machine_paths()
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

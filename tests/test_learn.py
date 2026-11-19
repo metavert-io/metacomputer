@@ -941,6 +941,69 @@ def test_analyzer():
           and s.get("cost_usd") == 0.42, (r.stderr[-300:], s.get("mcp_tools")))
 
 
+def polish_checks(shot):
+    print("polish: approve's one summary line; learn bench after a refused run")
+    import contextlib
+    import io
+    import report
+    s3 = os.path.join(TD, "store3")
+    e3 = {"MCOMP_LESSONS_DIR": s3}
+    run(["learn", "report", "--since", "7d", "--transcripts", shot], env=e3)
+    r = run(["learn", "approve", "no-frame"], env=e3)
+    lines = [ln for ln in r.stdout.splitlines() if "MCP instructions" in ln]
+    check("learn approve prints its summary once (not 'active in the MCP instructions' twice)",
+          r.returncode == 0 and len(lines) == 1 and r.stdout.count("active in the MCP instructions") == 1
+          and lines[0].startswith("Lessons: 1 active"), r.stdout[-300:])
+
+    saved_env, saved_run = dict(os.environ), learn.run_bench
+    calls = []
+
+    def stopped_run(cmd, env):          # the benchmark refusing as bench.py does: exit 0, `stopped` in run.json
+        rid = cmd[cmd.index("--run-id") + 1]
+        calls.append(rid)
+        rdir = os.path.join(learn.bench_results_dir(), rid)
+        os.makedirs(rdir, exist_ok=True)
+        with open(os.path.join(rdir, "run.json"), "w") as f:
+            json.dump({"run_id": rid, "tasks": ["a", "b"], "stopped": "VM in use by another controller"}, f)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def bench(argv):
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                learn.main(argv)
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+    try:
+        os.environ.update(e3)
+        learn.run_bench = stopped_run
+        code, out, err = bench(["bench", "--config", CONFIG, "--yes", "--run-id", "polish-stop"])
+        check("learn bench: a run refused by the one-controller rule ends the command with the reason",
+              code == 1 and "VM in use by another controller" in err and "wasn't started" in err, (code, err[-300:]))
+        check("…without the run with the lessons, and with how to pick it up again",
+              calls == ["polish-stop-without"] and "--run-id polish-stop" in err, (calls, err[-300:]))
+        check("…and no comparison table ('0 tasks') is printed or written",
+              "Without vs with" not in out and "over the 0 tasks" not in out
+              and not any(f.startswith("compare") for f in os.listdir(learn.bench_results_dir())), out[-300:])
+    finally:
+        learn.run_bench = saved_run
+        os.environ.clear()
+        os.environ.update(saved_env)
+    runs = {}
+    for v in ("without", "with"):
+        runs[v] = os.path.join(TD, "bench-empty", v)
+        os.makedirs(runs[v], exist_ok=True)
+        with open(os.path.join(runs[v], "run.json"), "w") as f:
+            json.dump({"run_id": v, "tasks": ["a"]}, f)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        learn.print_bench_comparison(report, runs, os.path.join(TD, "bench-empty", "compare.md"))
+    check("a comparison of runs with no task in common says so instead of printing an empty table",
+          "nothing to compare" in out.getvalue() and "Without vs with" not in out.getvalue(), out.getvalue()[-300:])
+
+
 def main():
     try:
         shot = build_world()
@@ -962,6 +1025,7 @@ def main():
         budget_checks()
         privacy_wording_check()
         final_checks(shot)
+        polish_checks(shot)
         test_analyzer()
         check("the real lessons store was never touched", os.path.exists(REAL_STORE) == REAL_STORE_EXISTED)
     finally:

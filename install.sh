@@ -460,6 +460,14 @@ git_net() {
   gh="$(command -v gh)" && "$gh" auth status >/dev/null 2>&1 || return 1
   GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c "credential.helper=!'$gh' auth git-credential" "$@"
 }
+# A Swift build with only Apple's Command Line Tools makes the linker name SDK folders those tools don't
+# have ("ld: warning: search path '/Library/Developer/CommandLineTools/Developer/usr/lib' not found"):
+# harmless, and nothing to act on. Runs COMMAND with exactly those lines left out of its output and its
+# errors (each stays on its own stream, every other line kept as it is) and keeps its exit status.
+without_ld_search_path_warnings() { # COMMAND [ARG...]
+  { "$@" 2>&1 1>&3 3>&- | drop_ld_search_path_warnings >&2 || exit; } 3>&1 | drop_ld_search_path_warnings
+}
+drop_ld_search_path_warnings() { awk "!/ld: warning: search path '[^']*' not found\\r?\$/ { print; fflush() }"; }
 need=(); pkgs=()
 for t in git curl go gpg ffmpeg python3; do tool_ok "$t" || need+=("$t"); done
 for t in ${need[@]+"${need[@]}"}; do case "$t" in gpg) pkgs+=(gnupg) ;; python3) pkgs+=(python) ;; *) pkgs+=("$t") ;; esac; done
@@ -630,7 +638,7 @@ if [ "$LUME_CHOICE" = mcomp-vm ]; then
     git_net clone -q -c advice.detachedHead=false --depth 1 --branch "$MCOMP_VM_TAG" "$MCOMP_VM_REPO" "$src" \
       || die "couldn't download mcomp-vm's source ($MCOMP_VM_REPO, $MCOMP_VM_TAG)" "${FAIL_HINT[@]}"
     [ "$(git -C "$src" rev-parse HEAD)" = "$MCOMP_VM_COMMIT" ] || die "mcomp-vm $MCOMP_VM_TAG isn't the pinned commit $MCOMP_VM_COMMIT"
-    "$src/install.sh"
+    without_ld_search_path_warnings "$src/install.sh"
     # A tag from before the rename (pinned in local.env) installs the runner as lume-secure.
     if [ ! -x "$LUME_BIN" ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
       LUME_BIN="$HOME/.local/bin/lume-secure"
