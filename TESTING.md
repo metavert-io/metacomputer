@@ -1363,7 +1363,7 @@ writes the lists with cloud-init's key options, `provision.sh` installs them roo
 before the config that names them, and `finalize.sh` removes the homes' copies only
 after `sshd -T` shows the lists in use.
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_codes.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -1676,6 +1676,44 @@ fixture pages and a cookie-echo page in the VM, then:
   its value's hash.
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
+
+`python3 tests/test_vault_codes.py` (110 checks, about 2 minutes; no VM) covers one-time codes and sign-in
+links and human-mode fills, with its own ssh stub (the fill account's check, fill, read and open, and the
+desktop account's human-mode script) and a stand-in for osascript (`MCOMP_VAULT_TEST_OSASCRIPT`, test builds
+only), so no dialog is ever shown:
+- **stdin only:** a value on `give`'s or `code`'s command line is a usage error and never echoed; a line over
+  4096 bytes and a value that isn't a code are refused before anything reaches the VM;
+- **by hand:** `ask` returns the id at once, `requests` lists it, `needs_you.code_requested` reaches the spool
+  with the site, kind, id and `why`; `give` from a pipe with no rule exits 7 naming `secrets approve ID`, and
+  `approve ID` (the test build's Touch ID stand-in) fills it, with the value only on the stub's stdin; single
+  use; expiry (exit 6; `MCOMP_VAULT_TEST_CODE_MIN_TTL` lets a test request live 2 s); `ask --wait`;
+- **rules:** `rule add code --from stdin` fills at once and is recorded as `rule:ID`; after it expires the same
+  command needs approval again; `--project` covers only Claude Code sessions there; identity providers can't
+  be a rule's site or link host, and a code for one always needs approval;
+- **binding:** a VM reporting another site keeps nothing as filled; a fill refused before typing stays given
+  for `fill --request`; a VM answer holding the value is withheld; links to the site open, links to another
+  host need the rule's `--link-host`, non-https links are refused;
+- **relay:** needs approval without a rule; under one, Claude sees only `relayed: filled`; two codes, no code,
+  or a source tab on another site are refused; `--kind link` opens the site's link, not another host's;
+- **human mode:** `fill --human` checks then fills through the desktop account's script, an address bar
+  naming another site and a non-password field for `password` are refused; `code --human`; and the script
+  itself against a fake accessibility tree: a page whose title names another site, an address typed but not
+  opened, Firefox's trimmed https bar, a field in a frame, the bar focused, two windows with one title
+  (picked by place and size), the typed value counted, never echoed;
+- **a terminal and the dialog:** `give` at a terminal reads the value hidden and the unlock terminal asks;
+  with `INTERACTIVE_PROMPTS=on` the dialog's script is fixed and `why` (with quotes and an AppleScript
+  injection attempt) arrives as one argument, nothing in it runs, and the dialog's answer is filled after the
+  approval; the AppleScript compiles (`osacompile`, never run);
+- no value in any output, the audit log or the events, and none of the test switches in a release build.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_codes_vm.py` (a test VM, 24 checks) serves a "mail" page
+(a code and links, on `http://localhost:8000`) and a "site" page (a code field that says whether it got the
+right code, on `http://127.0.0.1:8000`) in the VM, then: `code` from a pipe (needs approval, then filled under
+a rule, and the page sees it), `relay` of the code and of the site's sign-in link from the mail page (another
+host's link refused), and human mode in the VM's Firefox (`code --human`; `fill --human --field password`
+refused on a text field and filled on the password field; a page whose title names another site refused for
+it). A VM built before the relay's read and the link's open has an older secret-fill: for those two modes
+only, the test's ssh stand-in runs this repository's secret-fill as the desktop user over the real ssh.
 
 `python3 tests/test_secret_fill.py` (169 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.

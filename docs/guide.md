@@ -342,6 +342,45 @@ Limits to know:
 
 The full model is in [SECURITY.md](../SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
+### One-time codes and sign-in links
+
+- "Sign in to example.com; it emails a code. Ask me for it."
+- "The sign-in code is in the test mailbox in the VM: relay it."
+- "My script fetches the code: pipe it in."
+
+Some sites send a one-time code or a sign-in link by email or text. Claude doesn't type
+those itself: the vault fills them, bound to the site, and Claude learns only the outcome.
+
+```bash
+metacomputer secrets ask --site https://example.com --kind code --why "example.com sign-in" --into example.com/#otp
+metacomputer secrets give 5f2c9a0e          # you, in your own terminal: the code is typed hidden (or piped in)
+fetch-code | metacomputer secrets code --site https://example.com --into example.com/#otp   # a script, one step
+metacomputer secrets relay --from mail.example.net/#code --to example.com/#otp --site https://example.com
+```
+
+- **`ask`** files a request and prints its id at once (`--wait 5m` waits for it). You get a
+  `needs_you.code_requested` notice and run `give ID`; the value comes from stdin only, never the
+  command line. With `INTERACTIVE_PROMPTS=on` in `config/local.env` (off by default), a dialog
+  on the Mac asks for it too, when the vault was unlocked after you set it.
+- **Approvals.** A code you give at a terminal or in the dialog is approved like any use (Touch ID or
+  your login password in presence mode, else the request id typed at the unlock terminal). One piped
+  in with no terminal, and every relay, goes ahead without a question only under a rule you made:
+  `metacomputer secrets rule add code --site https://example.com --from stdin [--expires 30d]`, or
+  `rule add relay --from-host mail.example.net --to https://example.com`. Without one, the command
+  exits 7 at once and names the one command to run, `metacomputer secrets approve ID`. Identity
+  providers always ask.
+- **Site binding.** A code goes only into a tab on the request's site. A link opens only if it's https
+  and goes to the site's own host (a tracking redirect's host only if the rule lists it, `--link-host`).
+- **Human mode.** `--human` (on `ask`, `code`, and `fill NAME --field ... --human` for saved logins)
+  fills the focused field of the VM's regular Firefox instead of page-mode Chrome: its site comes from
+  the address bar, and the value is typed as real keys. Some sites offer a degraded sign-in to a
+  DevTools-driven Chrome and the normal one to Firefox. The binding is weaker than page mode's
+  ([SECURITY.md](../SECURITY.md#human-mode-fills-the-address-bar-instead-of-devtools)).
+- **Relays read a mailbox signed in inside the VM**, which anything running there can read too: give it
+  an automation mailbox that only receives sign-in mail, not your own inbox.
+- `CODES_VIA=claude` is your opt-in to let Claude read and type codes itself instead (the code then
+  lands in the transcript, with no site binding). It's guidance the skill follows, not enforced.
+
 ### Use an API key from the VM without the VM seeing it
 
 - "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there."

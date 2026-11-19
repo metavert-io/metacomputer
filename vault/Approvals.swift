@@ -92,15 +92,19 @@ func maskUsername(_ u: String) -> String {
 /// Touch ID / the login password or the passphrase; never covers an identity provider.
 struct UnattendedRule: Codable {
     var id: String                  // 8 hex digits
-    var use: String                 // fill (fill and sign-in) | token | session_load
+    var use: String                 // fill (fill and sign-in) | token | session_load | code | relay
     var secret: String?             // fill, token: this secret
-    var site: String?               // fill: any secret's fill into this origin
+    var site: String?               // fill: any secret's fill into this origin; code, relay: the site codes go to
     var session: String?            // session_load: this sealed session (into the VM it belongs to)
-    var project: String             // Claude Code sessions working in this folder or below
+    var project: String             // Claude Code sessions working in this folder or below ("" for a code or relay rule
+                                    // made without --project: any requester, a script included)
     var created: String
     var expires: String
     var expires_unix: Double
     var confirmed: String           // local-auth | passphrase
+    var source: String? = nil       // code: where the value comes from ("stdin": a program's input, no terminal)
+    var from_host: String? = nil    // relay: the host of the page the code or link is read from
+    var link_hosts: [String]? = nil // code, relay: other hosts a sign-in link may go to (a tracking redirect), named by you
 
     var live: Bool { Date().timeIntervalSince1970 < expires_unix }
 
@@ -108,6 +112,7 @@ struct UnattendedRule: Codable {
         guard use == u, live, let p = who.project, who.claudePID != nil, insideAny(p, [project]) else { return false }
         switch u {
         case "session_load": return session == name
+        case "code", "relay": return false          // coversCode / coversRelay
         default:
             if let sec = secret { return sec == name }
             if let st = site, let s { return st == s }
@@ -115,19 +120,44 @@ struct UnattendedRule: Codable {
         }
     }
 
+    /// A code or relay rule's requester check: with a project, Claude Code sessions working there (as other rules);
+    /// without one, any requester (a script with no terminal is what a code rule is for).
+    func requesterOK(_ who: Requester) -> Bool {
+        if project.isEmpty { return true }
+        guard let p = who.project, who.claudePID != nil else { return false }
+        return insideAny(p, [project])
+    }
+
+    /// A one-time code from a program's input (no terminal) filled into `site` (never an identity provider: callers check).
+    func coversCode(site s: String, who: Requester) -> Bool {
+        use == "code" && live && site == s && source == "stdin" && requesterOK(who)
+    }
+
+    /// A code or link read from a page on `fromHost` and filled or opened in `site`.
+    func coversRelay(site s: String, fromHost: String, who: Requester) -> Bool {
+        use == "relay" && live && site == s && from_host == fromHost && requesterOK(who)
+    }
+
     var what: String {
         switch use {
         case "session_load": return "load the sealed session \(session ?? "?")"
         case "token": return "API tokens for \(secret ?? "?")"
+        case "code": return "one-time codes from a program's input into \(site ?? "?")" + linkWords
+        case "relay": return "codes and sign-in links relayed from \(from_host ?? "?") into \(site ?? "?")" + linkWords
         default: return secret.map { "fills of \($0)" } ?? "fills into \(site ?? "?")"
         }
     }
+
+    var linkWords: String { (link_hosts ?? []).isEmpty ? "" : " (links may also go to \((link_hosts ?? []).joined(separator: ", ")))" }
 
     var record: [String: Any] {
         var d: [String: Any] = ["rule_id": id, "use": use, "project": project, "expires": expires, "confirmed": confirmed]
         if let s = secret { d["name"] = s }
         if let s = site { d["origin"] = s }
         if let s = session { d["session"] = s }
+        if let s = source { d["source"] = s }
+        if let h = from_host { d["from_host"] = h }
+        if let l = link_hosts, !l.isEmpty { d["link_hosts"] = l }
         return d
     }
 
@@ -154,8 +184,47 @@ func ruleConfirmText(secret: String?, site: String?, session: String?, project: 
     return "make an unattended rule: allow \(what) without asking, for Claude Code sessions in \(tildePath(project)), until \(expires)"
 }
 
+/// What confirming a code or relay rule allows, from exactly its stored fields (as ruleConfirmText).
+func codeRuleConfirmText(use: String, site: String, fromHost: String?, linkHosts: [String], project: String, expires: String) -> String {
+    let what = use == "relay"
+        ? "relaying one-time codes and sign-in links read from pages on \(fromHost ?? "?") into \(site)"
+        : "one-time codes from a program's input (no terminal) to be filled into \(site)"
+    let links = linkHosts.isEmpty ? "" : ", with sign-in links also to \(linkHosts.joined(separator: ", "))"
+    let whom = project.isEmpty ? "for any program that asks" : "for Claude Code sessions in \(tildePath(project))"
+    return "make an unattended rule: allow \(what)\(links) without asking, \(whom), until \(expires)"
+}
+
 extension UnattendedRule {
-    var confirmText: String { ruleConfirmText(secret: secret, site: site, session: session, project: project, expires: expires) }
+    var confirmText: String {
+        if use == "code" || use == "relay" {
+            return codeRuleConfirmText(use: use, site: site ?? "?", fromHost: from_host, linkHosts: link_hosts ?? [], project: project, expires: expires)
+        }
+        return ruleConfirmText(secret: secret, site: site, session: session, project: project, expires: expires)
+    }
+}
+
+/// The longest a code or relay rule lasts (the default when no --expires is given is shorter: defaultCodeRuleSeconds).
+let defaultCodeRuleSeconds = 7 * 86400
+
+/// A code or relay rule, checked: (rule, error). Identity providers always ask, so no rule names one as its site or
+/// as a link's host.
+func buildCodeRule(use: String, site: String, fromHost: String?, linkHosts: [String], project: String, expires exp: Date,
+                   confirmed: String) -> (UnattendedRule?, String?) {
+    guard use == "code" || use == "relay" else { return (nil, "a code rule is `code` or `relay`") }
+    guard canonicalOrigin(site) == site else { return (nil, "the site is https://host[:port], no path") }
+    if isIdentityProviderOrigin(site) { return (nil, "\(site) is an identity provider's sign-in page, which always asks: no rule can cover it") }
+    if use == "relay" {
+        guard let h = fromHost, validSiteHost(h) else { return (nil, "--from-host: the host of the page the code is read from, like mail.example.com") }
+    }
+    for h in linkHosts {
+        guard validSiteHost(h) else { return (nil, "--link-host: a host name like links.example.com") }
+        if isIdentityProviderHost(h) { return (nil, "\(h) is an identity provider's, which always asks: no rule can send links there") }
+    }
+    let now = Date()
+    return (UnattendedRule(id: newRuleID(), use: use, secret: nil, site: site, session: nil, project: project,
+                           created: isoTime(now), expires: isoTime(exp), expires_unix: exp.timeIntervalSince1970, confirmed: confirmed,
+                           source: use == "code" ? "stdin" : nil, from_host: use == "relay" ? fromHost?.lowercased() : nil,
+                           link_hosts: linkHosts.isEmpty ? nil : linkHosts.map { $0.lowercased() }), nil)
 }
 
 func newRuleID() -> String { randomBytes(4).map { String(format: "%02x", $0) }.joined() }
@@ -188,6 +257,8 @@ final class PendingRequest {
     var localAuth: LocalAuthAttempt?    // the dialog in flight, if any: it names one scope, and only grants that one
     var autoLocalAuth = false           // the dialog `unlock --touch-id` showed by itself
     var waiters: [Int32] = []           // `approve ID` clients waiting for the dialog's answer
+    var singleUse = false               // a one-time code or link: only this use, never a grant
+    var forceLocalAuth = false          // the person is at this Mac (the code dialog): macOS's dialog shows at once
 
     init(id: String, use: String, name: String, vm: String, site: String?, usernameHint: String?, who: Requester,
          identityProvider: Bool, summary: String) {
@@ -532,7 +603,16 @@ func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     do { res = try request(paths, req, timeout: 200) } catch ClientError.locked {
         throw VaultError("the vault is locked: nothing waits for approval", code: Exit.locked)
     }
-    if a.has("json") { printResult(res, ["ok", "id", "reason"]); return exitFor(res) }
+    if a.has("json") { printResult(res, ["ok", "id", "status", "state", "site", "kind", "reason"]); return exitFor(res) }
+    if let st = res["state"] as? String {
+        // A one-time code request: approving it acts at once (Codes.swift), and this says how that went.
+        let done = st == "filled" ? ((res["kind"] as? String) == "link" ? "the sign-in link was opened" : "the code was filled")
+            : (st == "given" ? "it waits for `fill --request \(id)`" : "it wasn't filled: \(res["reason"] as? String ?? st)")
+        if res["ok"] as? Bool == true || st == "given" { oprint(clean("Approved request \(id) for this one use: \(done).", max: 400)) } else {
+            eprint(clean("mcomp-vault: request \(id): \(res["reason"] as? String ?? "not approved")", max: 400))
+        }
+        return exitFor(res)
+    }
     if res["ok"] as? Bool == true { oprint("Approved request \(id) " + (res["scope_words"] as? String ?? "for this one use") + ".") } else {
         eprint(clean("mcomp-vault: not approved: \(res["reason"] as? String ?? "no answer")", max: 400))
     }
@@ -588,12 +668,23 @@ func buildRule(_ p: Payload, use: String, secret: String?, site: String?, sessio
 }
 
 func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: rule add (--secret NAME | --site https://site | --session NAME) --project DIR --for 8h [--passphrase] | rule list [--json] | rule remove ID"
+    let usage = "usage: rule add (--secret NAME | --site https://site | --session NAME) --project DIR --for 8h [--passphrase]"
+        + " | rule add code --site https://site --from stdin [--link-host H ...] [--project DIR] [--expires 7d] [--passphrase]"
+        + " | rule add relay --from-host H --to https://site [--link-host H ...] [--project DIR] [--expires 7d] [--passphrase]"
+        + " | rule list [--json] | rule remove ID"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["secret", "site", "session", "project", "for"], flags: ["passphrase", "json"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["secret", "site", "session", "project", "for", "from", "from-host", "to",
+                                                            "link-host", "expires"], flags: ["passphrase", "json"])
     switch sub {
     case "add":
+        if let kind = a.positional.first, kind == "code" || kind == "relay" {
+            guard a.positional.count == 1 else { throw usageError(usage) }
+            return try cmdCodeRuleAdd(paths, kind, a)
+        }
         guard a.positional.isEmpty else { throw usageError(usage) }
+        for k in ["from", "from-host", "to", "link-host", "expires"] where a.last(k) != nil {
+            throw usageError("--\(k) goes with `rule add code` or `rule add relay`")
+        }
         let picked = [a.last("secret"), a.last("site"), a.last("session")].compactMap { $0 }
         guard picked.count == 1 else { throw usageError("rule add: exactly one of --secret NAME, --site https://site or --session NAME") }
         if let s = a.last("secret") ?? a.last("session"), !validName(s) { throw usageError("names: letters, digits, '.', '_' and '-'") }
@@ -657,7 +748,8 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         if a.has("json") { oprint(jsonPretty(["rules": list])); return Exit.ok }
         oprint(list.isEmpty ? "No unattended rules." : "Unattended rules (uses that don't ask):")
         for r in list {
-            oprint(clean("  \(r["id"] ?? "")  \(r["what"] ?? "") for Claude Code sessions in \(tildePath(r["project"] as? String ?? "?")), "
+            let whom = (r["project"] as? String ?? "").isEmpty ? "for any program" : "for Claude Code sessions in \(tildePath(r["project"] as? String ?? "?"))"
+            oprint(clean("  \(r["id"] ?? "")  \(r["what"] ?? "") \(whom), "
                          + "until \(r["expires"] ?? "?") (\((r["expires_in_s"] as? Int ?? 0) / 60) min left), confirmed with \(r["confirmed"] ?? "?")", max: 500))
         }
         return Exit.ok
@@ -684,6 +776,81 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     default:
         throw usageError(usage)
     }
+}
+
+/// `rule add code|relay ...`: a standing approval for one-time codes from a program's input, or for relays, into one
+/// site. Made like every rule: macOS's Touch ID / password dialog (shown by the unlock process) or the passphrase here.
+func cmdCodeRuleAdd(_ paths: Paths, _ kind: String, _ a: Args) throws -> Int32 {
+    for k in ["secret", "session", "for"] where a.last(k) != nil {
+        throw usageError("--\(k) isn't for a \(kind) rule (`rule add \(kind)` takes --expires for how long it lasts)")
+    }
+    let siteFlag = kind == "code" ? "site" : "to"
+    guard let raw = a.last(siteFlag), let site = canonicalOrigin(raw) else {
+        throw usageError("rule add \(kind): --\(siteFlag) https://site (the site the codes go to; https://host[:port], no path)")
+    }
+    if kind == "code" {
+        guard a.last("from") == "stdin" else {
+            throw usageError("rule add code: --from stdin (codes a program pipes in with no terminal; the only source a code rule covers)")
+        }
+        guard a.last("from-host") == nil, a.last("site") != nil, a.last("to") == nil else { throw usageError("rule add code takes --site, not --to or --from-host") }
+    } else {
+        guard a.last("from") == nil, a.last("site") == nil else { throw usageError("rule add relay takes --from-host H --to https://site") }
+        guard let h = a.last("from-host"), validSiteHost(h) else {
+            throw usageError("rule add relay: --from-host H (the host of the page the code is read from, like mail.example.com)")
+        }
+    }
+    let linkHosts = a.all("link-host").map { $0.lowercased() }
+    guard linkHosts.count <= 8, linkHosts.allSatisfy(validSiteHost) else { throw usageError("--link-host: a host name like links.example.com (at most 8)") }
+    var project = ""
+    if let pr = a.last("project") {
+        var isDir: ObjCBool = false
+        project = realPath(absolutePath(pr)) ?? ""
+        guard clean(project, max: 4096) == project, FileManager.default.fileExists(atPath: project, isDirectory: &isDir), isDir.boolValue else {
+            throw usageError("--project \(pr): an existing folder")
+        }
+        guard project != "/" && project != realPath(homeDirectory()) else {
+            throw usageError("--project \(pr): name the project's own folder, not / or your home folder")
+        }
+    }
+    var seconds = defaultCodeRuleSeconds
+    if let e = a.last("expires") {
+        guard let n = parseDuration(e), n <= maxRuleSeconds else { throw usageError("--expires: like 8h, 7d or 30d (at most 30d; 7d when left out)") }
+        seconds = n
+    }
+    let fromHost = a.last("from-host")?.lowercased()
+    let unlocked = (try? request(paths, ["op": "status"], timeout: 10))?["ok"] as? Bool == true
+    if a.has("passphrase") || !unlocked {
+        try requireTTY("rule add")
+        installPromptSignalHandlers()
+        let exp = Date().addingTimeInterval(TimeInterval(seconds))
+        let shown = codeRuleConfirmText(use: kind, site: site, fromHost: fromHost, linkHosts: linkHosts, project: project, expires: isoTime(exp))
+        oprint(clean("Make an unattended rule: " + shown.dropFirst("make an unattended rule: ".count) + ". Your vault passphrase confirms it.", max: 4500))
+        let (key, _) = try unlockKey(paths)
+        defer { key.wipeKey() }
+        let (rule, why) = buildCodeRule(use: kind, site: site, fromHost: fromHost, linkHosts: linkHosts, project: project, expires: exp,
+                                        confirmed: "passphrase")
+        guard let rule else { throw VaultError(why ?? "can't make that rule") }
+        guard rule.confirmText == shown else { throw VaultError("the rule to be stored isn't the one shown; nothing was saved") }
+        try updateVault(paths, key) { p in p.rules = (p.rules ?? []).filter { $0.live } + [rule] }
+        var rec = rule.record
+        rec["op"] = "rule_add"
+        rec["result"] = "ok"
+        audit(paths, rec, macKey: vaultAuditKey(paths, key))
+        oprint(clean("Rule \(rule.id): \(rule.what) without asking, " + (project.isEmpty ? "for any program" : "for Claude Code sessions in \(tildePath(project))")
+                     + ", until \(rule.expires).", max: 500))
+        return Exit.ok
+    }
+    var req: [String: Any] = ["op": "rule_add", "use": kind, "site": site, "for_s": seconds, "project": project]
+    if let h = fromHost { req["from_host"] = h }
+    if !linkHosts.isEmpty { req["link_hosts"] = linkHosts }
+    let res = try request(paths, req, timeout: 200)
+    if res["ok"] as? Bool == true {
+        oprint(clean("Rule \(res["id"] ?? "?"): \(res["what"] ?? "") without asking, " + (project.isEmpty ? "for any program" : "for Claude Code sessions in \(tildePath(project))")
+                     + ", until \(res["expires"] ?? "?").", max: 500))
+        return Exit.ok
+    }
+    eprint(clean("mcomp-vault: no rule made: \(res["reason"] as? String ?? "no answer")", max: 400))
+    return exitFor(res)
 }
 
 // MARK: - command: policy (a secret's approval, without retyping its value)

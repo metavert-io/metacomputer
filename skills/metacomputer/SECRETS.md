@@ -8,8 +8,8 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
   - To bring saved logins in, suggest: `metacomputer secrets import-passwords --browser chrome` (or `--csv FILE` for a Chrome, Passwords app, 1Password or Bitwarden export; `--dry-run` first shows what would come in). To bring a signed-in session for one site from their Chrome: `metacomputer secrets import-session --browser chrome --site SITE --name NAME --to-profile PROFILE` (cookies only; localStorage doesn't come along). Then load it like any sealed session (below).
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
-- **Only the user, from any terminal:** `approve ID`, `rule add` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase): never run them yourself, even though you could make the dialog appear. Tell the user the command.
-- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `token renew`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`. `lock` only if the user asks you to lock the vault. And `metacomputer claude` (below), which asks for its own token.
+- **Only the user, from any terminal:** `approve ID`, `rule add` (including `rule add code|relay`), `give ID` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase, or read the code they type): never run them yourself, even though you could make the dialog appear. Tell the user the command.
+- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `token renew`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`, and for one-time codes `ask`, `code` (only with a value a script produces, never one you typed), `relay` and `fill --request`. `lock` only if the user asks you to lock the vault. And `metacomputer claude` (below), which asks for its own token.
 
 ## First: what's stored
 
@@ -24,6 +24,8 @@ The user keeps passwords, one-time-code seeds, saved browser logins and API keys
 | 3 | the vault is locked | ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. No vault yet: they run `metacomputer secrets init` and `set` |
 | 4 | error | VM off, no Chrome, no tab on that site. "Rebuild the VM": the VM predates the fill or proxy account; tell the user. "Bind again": the user runs `metacomputer secrets bind` |
 | 5 | sent, but the vault never answered | it may still be finishing. Run `metacomputer secrets settle` (it returns once the vault is done) before trying again or doing anything else on that page |
+| 6 | (one-time codes) the request expired, or was used already | ask again (`secrets ask`, or rerun `code` / `relay`) |
+| 7 | (one-time codes) it waits for the user's approval | tell the user the exact command it printed, `metacomputer secrets approve ID`, and wait; don't retry in a loop (or suggest `rule add code` / `rule add relay` if they want this unattended) |
 
 A fill or sign-in you interrupt (Ctrl-C, a timeout that kills the command) is withdrawn: the vault stops it before its next step and answers with a "stopped" reason. Don't retry it in a loop.
 
@@ -46,13 +48,24 @@ Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mo
    - Or let the fill focus it: add `--selector '#username'` (an id or name from a `dom_refs_v1` snapshot). It must match exactly one element. A selector searches the page itself, not frames or shadow roots; for a field in a frame, click into it.
 3. `metacomputer secrets fill NAME --field username`.
 4. Focus the password field, then `metacomputer secrets fill NAME --field password`.
-5. For a 2FA code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp` (the vault works out the current code). A 2FA prompt the vault can't fill (an SMS or email code, "approve on your phone") or a CAPTCHA on the way: hand over with `metacomputer handoff --why 2fa|captcha --say "..."` ([SKILL.md](SKILL.md), "When a step is the user's"). While a handoff is open, fills wait like any other action.
+5. For a 2FA code, focus the code field, then `metacomputer secrets fill CODE_NAME --field otp` (the vault works out the current code). An SMS or email code, or a sign-in link: [One-time codes and sign-in links](#one-time-codes-and-sign-in-links) below. A prompt the vault can't fill ("approve on your phone") or a CAPTCHA on the way: hand over with `metacomputer handoff --why 2fa|captcha --say "..."` ([SKILL.md](SKILL.md), "When a step is the user's"). While a handoff is open, fills wait like any other action.
 6. With a named profile, add `--profile P` to each fill.
 7. Submit with a click, then check the signed-in page with a fresh snapshot.
 
 `{"ok":true,...,"chars":N}` means it was typed and checked. That is the verification: don't read the field back.
 
+**In a human-mode browser** (the VM's regular Firefox, or a Chrome started normally, which has no DevTools): click into the field with a foreground click, then add `--human` to the fill: `metacomputer secrets fill NAME --field password --human [--window-id W]`. The vault reads the site from the browser's address bar, checks the focused field is the right kind (a password field for `password`, a text entry for `username` and `otp`), and types the value as real keystrokes. No `--selector`, `--profile` or `--browser-pid` there. A refusal saying the address bar disagrees with the page means something was typed into the bar and not opened: press Escape in the bar, or reload, and try again.
+
 **One approval for username and password:** `metacomputer secrets login NAME --username-selector '#user' --password-selector '#pass' [--profile P]` (selectors from a `dom_refs_v1` snapshot, each matching exactly one field) fills both into the page's fields with one question instead of two. Leave out `--username-selector` on a password-only page. The answer lists `fields`, the `origin` and a masked `username_hint`. Then submit with a click and check the page. `--origin https://site` allows only that one of the login's sites, and `--browser-pid PID` only the Chrome you opened (its `prepared_pid`); either way the fill refuses when two or more tabs there are on the site: close the others.
+
+## One-time codes and sign-in links
+
+A site that emails or texts a code, or sends a sign-in link: the vault fills it, bound to the site, and you learn only the outcome. By default (`CODES_VIA=vault`) never read a code (from a page, a mail, a screenshot) and type it yourself; only when the user set `CODES_VIA=claude` (`metacomputer secrets status` shows it) may you. Pick one of three ways:
+- **The user has the code** (on their phone, in their own mail): `metacomputer secrets ask --site https://x.com --kind code --why "x.com sign-in code" --into x.com/#otp` (or `--human` for the focused field of a human-mode browser; `--into` takes the tab's site and an optional CSS selector, else the focused field). It prints the request id at once; tell the user to run `metacomputer secrets give ID` in their own terminal (it reads the code hidden). Add `--wait 5m` to wait for it. With `INTERACTIVE_PROMPTS=on` a dialog also asks them on the Mac. A sign-in link: `--kind link`, and `--into x.com` names the tab it opens in.
+- **A script of the user's fetches it**: `fetch-code | metacomputer secrets code --site https://x.com --into x.com/#otp --json` gives `{"status":"filled"}` or why not. Never pipe in a value you typed or read yourself.
+- **It's in the VM** (the automation mailbox open in a page-mode Chrome tab): `metacomputer secrets relay --from mail.example.net/#message --to x.com/#otp --site https://x.com` (`--kind link` for the site's sign-in link; `--pattern digits`, `--length 6` when the element holds other numbers). It answers `relayed: filled` or why not. The element must be in the page itself, not in a frame, and hold exactly one code (or one link to the site). Relays into human-mode browsers aren't supported yet: use `ask` or `code --human` there.
+
+Without the user's standing rule (`rule add code ... --from stdin`, `rule add relay ...`), `code` and `relay` exit 7 at once: tell the user the command they printed (`metacomputer secrets approve ID`) and wait. Identity providers always ask. A link to another host than the site's is refused unless the user's rule lists it. If a fill was refused before anything was typed (no field focused yet), the request stays given: `metacomputer secrets fill --request ID` tries again until it expires (10 minutes by default).
 
 ## Keeping the user signed in (sealed sessions)
 
@@ -103,5 +116,5 @@ When the user asks for Claude inside the VM ("Claude inside the metacomputer", "
 ## Never
 
 - Read a secret, or a filled field's value: no snapshot that includes a field's value, no "show password" buttons, no Chrome developer tools (F12, `devtools://`), no `javascript:` addresses, no querying or posing as Chrome's DevTools through `metacomputer sh` or `metacomputer ssh ops`. If a page shows a secret anyway, don't read it out, and tell the user.
-- Type a secret with `type_text`, `browser_type` or a shell command.
+- Type a secret with `type_text`, `browser_type` or a shell command, or a one-time code (unless the user set `CODES_VIA=claude`).
 - Record sign-in steps unless the user wants that: password fields show dots, but usernames and codes are visible on screen.

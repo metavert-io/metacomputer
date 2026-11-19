@@ -90,9 +90,13 @@
 #           | import-passwords --browser chrome|--csv FILE | import-session --browser chrome --site HOST --name N --to-profile P
 #           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
+#           | fill NAME --field password|username|otp --human [--window-id N]   (a human-mode browser: Firefox)
 #           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove | lock
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | token renew ID|--all [--ttl 15m] | tokens | revoke ID|--all
+#           | ask --site S --kind code|link --why TEXT [--into TAB/FIELD | --human] [--wait 5m] | give ID (stdin only)
+#           | code --site S (--into TAB/FIELD | --human) < value | relay --from TAB/ELEMENT --to TAB/FIELD --site S
+#           | fill --request ID | rule add code|relay ...   one-time codes and sign-in links (SECURITY.md)
 #                                  use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
@@ -1870,6 +1874,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
   [ $# -gt 0 ] && shift
   # This VM's vault and spool (scripts/lib.sh): empty for the main VM, which leaves the vault's own defaults.
   [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"
+  # Dialogs that wait for you (`secrets ask`'s): only the unlock reads it, from your own settings, when you unlock.
+  export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
   [ -z "${EVENTS_SPOOL:-}" ] || export MCOMP_EVENTS_SPOOL="$EVENTS_SPOOL"
   # A per-VM vault folder's parent (the vault makes only the last folder, 0700).
   case "${VAULT_DIR:-}" in "$MC_VMS_APP_DIR/"*) ( umask 077; mkdir -p "$MC_VMS_APP_DIR" ) || die "couldn't make $(mc_tilde "$MC_VMS_APP_DIR")" ;; esac
@@ -1897,7 +1903,27 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # The session is for this VM (its approval policy, and where `session load` puts it).
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
       exec "$VAULT_BIN" import-session "$@" ;;
-    fill|login|session|token)
+    ask)
+      # A request for you: nothing acts on the VM until a value comes (give, the dialog), which follows the approvals.
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      exec "$VAULT_BIN" ask "$@" ;;
+    status)
+      "$VAULT_BIN" status "$@"; rc=$?
+      case " $* " in *" --json "*) ;; *)
+        echo "codes:    $([ "${CODES_VIA:-vault}" = claude ] && echo "Claude may read and type one-time codes itself (CODES_VIA=claude; guidance, not enforced)" || echo "through the vault: secrets code, relay or ask (CODES_VIA=vault)"); dialogs: ${INTERACTIVE_PROMPTS:-off} (INTERACTIVE_PROMPTS, read at unlock)" ;;
+      esac
+      return $rc ;;
+    approve)
+      # Approving a waiting one-time code request fills it in the VM once you've allowed it: that waits for an open
+      # handoff like any fill. (Other approvals answer a fill that already holds this, so they go straight on.)
+      local id="${1:-}"
+      if [[ "$id" =~ ^[0-9a-f]{8}$ ]] && "$VAULT_BIN" requests --json 2>/dev/null | "$PY" -c 'import json,sys
+d = json.load(sys.stdin); want = sys.argv[1]
+sys.exit(0 if any(r.get("id") == want and r.get("kind") in ("code", "link") and r.get("needs_approval") for r in d.get("requests") or []) else 1)' "$id" 2>/dev/null; then
+        handoff_hold
+      fi
+      exec "$VAULT_BIN" approve "$@" ;;
+    fill|login|session|token|code|relay|give)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
       # While the user has the computer (metacomputer handoff), a fill, login or session load waits like any acting
@@ -1905,7 +1931,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # can take minutes), so a handoff can't open while it's on its way. That check is this VM's, so --vm must
       # name this VM; another VM is chosen by its own settings (MCOMP_CONFIG).
       local inflight=""
-      if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
+      if [ "$sub" = fill ] || [ "$sub" = login ] || [ "$sub" = code ] || [ "$sub" = relay ] || [ "$sub" = give ] \
+         || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
         secrets_vm_is_this "$@" || die "secrets $sub acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
         handoff_hold
         inflight="$RUN_DIR/owners/vault-inflight.$$"
@@ -1916,7 +1943,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         # certificates refuses: say so before anyone is asked to approve.
         [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
-      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      # give names a request (bound to its VM when it was made), so it takes no --vm.
+      [ "$has_vm" = 1 ] || [ "$sub" = give ] || set -- "$@" --vm "$VM_NAME"
       # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
       # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
       # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
@@ -1933,7 +1961,7 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         # withdrawn without its confirmation; a crash, a signal) may leave it working: keep the dispatch lock while
         # `settle` waits for it, and the marker if even that doesn't confirm.
         case "$rc" in
-          0|1|2|3|4|64) rm -f "$inflight" ;;
+          0|1|2|3|4|6|7|64) rm -f "$inflight" ;;
           *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
         esac
       fi

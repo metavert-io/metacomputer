@@ -57,6 +57,12 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `secrets approve ID [--passphrase] [--scope session\|unlock]`, `secrets rule add ... --for D`, `secrets presence on\|off\|auto` | Approve a waiting use, make an unattended rule, or set presence mode: you, from any terminal, with Touch ID, your login password or the passphrase |
 | `secrets requests`, `secrets deny ID`, `secrets rule list\|remove ID`, `secrets lock`, `secrets settle` | What waits for you; refuse one; the rules; lock now; wait until the vault has finished what it was sent |
 | `secrets list\|fill\|login\|session save\|session load` | What Claude uses while the vault is unlocked (`login NAME --password-selector CSS [--username-selector CSS]` fills both fields under one approval); values never come back |
+| `secrets fill NAME --field password\|username\|otp --human [--window-id N]` | The same into a human-mode browser (the VM's regular Firefox, or a Chrome started normally): its site from the address bar, the focused field checked, typed as real keys through the driver ([SECURITY.md](../SECURITY.md#human-mode-fills-the-address-bar-instead-of-devtools)) |
+| `secrets ask --site S --kind code\|link --why TEXT [--into TAB/FIELD \| --human] [--ttl 10m] [--wait 5m] [--json]` | A one-time code or sign-in link request for you: prints its id at once, sends `needs_you.code_requested`, and with `INTERACTIVE_PROMPTS=on` a dialog asks for it on the Mac. `--wait` blocks until it's filled, refused or expired |
+| `secrets give ID [--json]` | The value for a waiting request, from stdin only (hidden at a terminal, one line from a pipe; never the command line): a terminal follows the usual approval, a pipe needs `rule add code` or exits 7 |
+| `secrets code --site S (--into TAB/FIELD \| --human) [--kind link] [--json] < value` | Ask, give and fill in one step from a script: it gets `{"status":"filled"}` or a refusal, never the value |
+| `secrets relay --from TAB/ELEMENT --to TAB/FIELD --site S [--kind code\|link] [--pattern digits\|alnum] [--length N\|A-B] [--json]` | Read a code (or the site's sign-in link) from a page element in the VM's page-mode Chrome and fill (open) it: `relayed: filled` or why not |
+| `secrets fill --request ID [--selector CSS \| --human]`, `secrets rule add code --site S --from stdin [--link-host H] [--project DIR] [--expires 7d]`, `secrets rule add relay --from-host H --to S [...]` | A given request into the tab on its site; your standing approvals for codes piped in with no terminal, or relayed (never an identity provider). Exit codes for these: 0 filled, 2 refused, 3 locked, 6 expired, 7 needs approval (`secrets approve ID`) |
 | `secrets token NAME [--ttl 15m]`, `secrets token renew ID\|--all [--ttl 15m]`, `secrets tokens`, `secrets revoke ID\|--all` | A short-lived API token and the proxy's URL in the VM; keep live ones going (the same token in the VM); the live tokens; end them |
 | `secrets status\|audit\|selftest`, `secrets audit --verify\|--head`, `secrets audit-sink list\|test NAME` | State, the audit history (no values) and its checks, the vault's self-test; the sinks and their backlog |
 | `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action TEXT]` | Tell your event sinks that Claude is blocked on you |
@@ -219,6 +225,13 @@ Refused rather than guessed (nothing runs):
 | --- | --- | --- |
 | `LESSONS` | `on` | `on`: the lessons you approved go in every new session's MCP instructions, as advice; `off`: kept, not sent |
 | `LESSONS_DIR` | `~/.local/share/metacomputer/lessons` | Their private store (a 0700 folder, 0600 files, read only when private) |
+
+**Dialogs and one-time codes** ([SECURITY.md](../SECURITY.md#one-time-codes-and-sign-in-links-ask-give-code-relay)):
+
+| Key | Default | |
+| --- | --- | --- |
+| `INTERACTIVE_PROMPTS` | `off` | Allow metacomputer to show dialogs on this Mac that wait for you. `on`: `secrets ask` also shows a dialog with a hidden field for the code (read when you unlock). Without a terminal, a command never prompts or opens a dialog itself, whatever this says |
+| `CODES_VIA` | `vault` | `vault`: Claude uses `secrets code`, `relay` or `ask` and never reads or types a one-time code itself. `claude`: your opt-in to let it (the code lands in the transcript, and nothing ties it to the site). Guidance the skill follows, not enforced |
 
 **Shell channel** (`metacomputer sh`; [docs/shell.md](shell.md)):
 

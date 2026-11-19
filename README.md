@@ -205,7 +205,9 @@ with Claude Code's normal tools.
   LibreOffice headless, pdftotext, sqlite3, ImageMagick and ffmpeg; `put` and
   `get` move files.
 - **Sign-ins:** saved passwords and 2FA codes typed by the vault into page-mode
-  Chrome, signed-in profiles sealed and restored, or you sign in yourself through
+  Chrome (or the VM's own Firefox, `--human`), emailed or texted one-time codes and
+  sign-in links filled by the vault too, bound to their site (`secrets ask`, `code`,
+  `relay`), signed-in profiles sealed and restored, or you sign in yourself through
   the live view, in a handoff.
 - **API keys:** short-lived tokens for a proxy on your Mac that adds the real key;
   a long job renews its token (`secrets token renew`) instead of getting a new one.

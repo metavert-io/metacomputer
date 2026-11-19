@@ -566,7 +566,9 @@ notice (`--say` cleaned like every event) and writes a record,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
   nothing, so its claim isn't kept fresh by what changes on its screen meanwhile;
-- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`;
+- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`; so do the one-time code
+  commands that fill (`secrets code`, `relay`, `give`, and `approve` of a waiting code request, which fills once
+  allowed). A fill that your answer in the code dialog completes is your own, and doesn't wait;
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
@@ -1782,6 +1784,148 @@ question allows that one use only. This is a tightening: before, a secret set to
   every whole browser profile saved from the VM, since its contents aren't known.
   Replacing a session keeps that mark.
 
+### One-time codes and sign-in links (`ask`, `give`, `code`, `relay`)
+
+A site that sends a one-time code by email or text, or a sign-in link, needs that value typed into the page. Typed
+by Claude, the code lands in the transcript, and nothing ties it to the site it was meant for. The vault handles
+these as **requests**, and Claude learns only the outcome.
+
+**One request model, three ways in.** A request has an id (8 hex digits), a site (`--site`, as for `--origin`), a
+kind (`code` or `link`), why it's wanted (`--why`, cleaned, at most 200 characters), the requester (as for every
+use: "Who is asking" above), the VM, an optional target (below), when it was made, when it expires (10 minutes by
+default, `--ttl`, at most 15) and a state: `pending` (no value yet), `given` (it holds the value), `filled`,
+`expired` or `refused`. A request is used once. It lives only in the unlock process's memory: the value is held
+there between its give (or the relay's read) and its fill, and wiped then, at expiry and at lock (`requests` lists
+none after a new unlock). A page in the VM can't make one: requests come only through the vault's socket, from the
+`metacomputer secrets` commands.
+1. **By hand.** `metacomputer secrets ask --site S --kind code --why TEXT [--into TAB/FIELD | --human] [--wait 5m]
+   [--json]` prints the request id at once. `--wait` blocks until it's filled, refused or expired.
+   - It sends `needs_you.code_requested` through the event stream (the site, the kind, the request id and the
+     cleaned `why`; never a value), so it can reach your phone or Slack, and `secrets requests` lists it.
+   - You give the value with `metacomputer secrets give ID`, in your own terminal. The value comes from stdin only:
+     on a terminal, a prompt with the echo off; from a pipe, one line of at most 4096 bytes (a longer one is
+     refused, not cut). Never from the command line or the environment: a value on the command line is a usage
+     error, and nothing is sent.
+   - With `INTERACTIVE_PROMPTS=on` (off by default; it's read when you unlock), the unlock process also shows a
+     dialog on this Mac with a hidden field (`osascript`'s `display dialog ... with hidden answer`). The script is
+     fixed; the site's host, `why`, the id and the time left are passed to it as arguments (`on run argv`), so
+     nothing in `why` can become AppleScript. The answer comes back on the dialog's own output, a pipe only the
+     unlock process reads: never stdout, an argument or a log. Cancelling leaves the request pending. A command
+     without a terminal never prompts or opens a dialog itself, whatever the setting.
+2. **From a script.** `fetch-code | metacomputer secrets code --site S --into TAB/FIELD [--kind link] [--json]`
+   asks, gives and fills in one step, the value from stdin. The script gets `{"status": "filled"}` or a refusal and
+   its reason, never the value.
+3. **From inside the session (relay).** `metacomputer secrets relay --from TAB/ELEMENT --to TAB/FIELD --site S
+   [--kind code|link]`. The vault reads one element of a page in the VM's page-mode Chrome (an email open in a
+   webmail tab) through the fill account, in the browser's isolated world, as a fill checks a page: the tab must be
+   on `--from`'s site and the selector must match exactly one element in the page itself (not in a frame). At most
+   8192 characters of its text (or 20 of its links) come back, to the unlock process's memory only, where the vault
+   checks it. A code is the one run of letters and digits that fits the shape (4 to 10 long with at least one digit;
+   `--pattern digits|alnum` and `--length N` or `MIN-MAX`, 4 to 16, narrow it): none, or two or more different
+   ones, refuses, saying so. A link must be https and go to the site (below). Then it's filled into `--to`, or the
+   link opened in the tab on the site. Claude learns only `relayed: filled` or the failure and its reason.
+
+**Where it goes.** `--into TAB/FIELD`: TAB is the site (`https://host[:port]`, a bare host meaning https, or
+`http://localhost:PORT` and `http://127.0.0.1:PORT` for testing), FIELD a CSS selector (empty: the focused field).
+- **A code is filled only into a tab whose origin is the request's site**, through the same path as `fill`, with the
+  same checks: the one tab on that site in the driver's Chrome (`--profile`, `--browser-pid` narrow it), the field's
+  site and kind (a text, phone or number field), the element checked is the one typed into. `--into` naming another
+  site than `--site` is refused before anything is sent. `--human` sends it to a human-mode browser instead (below).
+- **A link is opened only if it's https and its host is the site's** (its origin equal to the site's), in the tab on
+  the site, by navigating that tab (`Page.navigate`); the VM's secret-fill opens nothing but the origin the vault
+  checked. A link to another host, a tracking redirect, isn't opened without you: refused under a rule unless the
+  rule lists that host (`--link-host H`), and shown in the question (`the link goes to H, not S`) when you're asked.
+  Human-mode browsers take codes only, for now.
+- A fill that a check refused before anything was typed (no tab on the site yet, no field focused) leaves the request
+  `given`: `metacomputer secrets fill --request ID [--selector CSS | --human]` tries again until it expires. Without
+  `--into`, a given request waits for that command.
+
+**Approvals.** Nothing a program does approves, here as anywhere in the vault.
+- A value given at a terminal (`give`, `code` typed at a prompt) or in the dialog follows the vault's approval path,
+  as a fill of an `each` secret does: in presence mode Touch ID or your login password in macOS's dialog (or `approve
+  ID --passphrase`), otherwise the request id typed at the unlock terminal. After the dialog, macOS's dialog shows at
+  once, since you're at this Mac. Approvals of codes cover this one use only: `session` and `unlock` don't apply.
+- A value from a pipe or a script with no terminal, and every relay, goes ahead **without a question only under a
+  standing rule** you made, like any rule (Touch ID / your login password, or `--passphrase`; "Unattended rules"):
+
+  ```
+  metacomputer secrets rule add code --site https://x.com --from stdin [--link-host H ...] [--project DIR] [--expires 30d]
+  metacomputer secrets rule add relay --from-host mail.example.com --to https://x.com [--link-host H ...] [--project DIR] [--expires 30d]
+  ```
+
+  A code rule covers codes piped in with no terminal (`--from stdin`, the only source it covers) for that site; a
+  relay rule covers codes and links read from pages on that host and filled into that site. `--expires` is 7 days
+  when left out, at most 30 days. Without `--project` a code or relay rule covers any program that asks, a script
+  included (that's what a code rule is for); with it, only Claude Code sessions working in that folder.
+- **Without a rule, the command exits at once** with exit 7 ("needs approval"). It prints the request id and the one
+  command you run: `metacomputer secrets approve ID` (Touch ID or your login password; `--passphrase` for the vault
+  passphrase). It never waits for you, and the request expires on its own; `deny ID` refuses it. `approve` then
+  fills it (or opens the link) and says how that went. The question and the dialog name the site, the kind, a
+  link's real host and where it was read from. `secrets requests` lists what waits, and the
+  `needs_you.approval_waiting` event says so.
+- **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its
+  site or as a link's host, and a code or link for one from a pipe or a relay always needs `approve ID`.
+
+**Exit codes** (`ask`, `give`, `code`, `relay`, `fill --request`; `--json` on each prints one JSON line with `status`):
+
+| Exit | `status` | Means |
+| --- | --- | --- |
+| 0 | `filled` (`given` without a target, `pending` for `ask`) | done |
+| 2 | `denied` | refused: the reason says why (not a code, wrong site, a link to another host, you refused, a check in the VM) |
+| 3 | `locked` | the vault is locked |
+| 6 | `expired` | the request expired, or was used already |
+| 7 | `needs_approval` | it waits for `metacomputer secrets approve ID`; nothing waits here |
+
+**Audit.** The hash-chained audit log records each step with no value: `code_request` (the site, kind, `why`, target,
+requester), `code_give` (where the value came from: `terminal`, `dialog`, `stdin` or `relay`, and a link's host),
+`request` and `authorize` when you're asked, `code_fill` or `code_relay` (the outcome, the approval, `rule:ID` for a
+rule), `code_refuse` and `code_expire`. Events are cleaned the usual way.
+
+**Who types codes: `CODES_VIA`.** `CODES_VIA=vault` (the default) is guidance for Claude: it uses `secrets code`,
+`relay` or `ask` and never reads or types a one-time code itself. `CODES_VIA=claude` is your opt-in to let Claude read
+a code (from a page, a mail) and type it itself, with the trade-offs: the value lands in the transcript, and nothing
+ties it to the site it's typed into. The hub can't tell a code from other text, so this is guidance the skill follows,
+not something metacomputer enforces.
+
+**Use a dedicated mailbox for relays.** A relay reads from a mailbox signed in inside the VM, and anything signed in
+there is reachable by a misbehaving agent with a shell (below, "What doesn't hold"). Give the VM an automation
+mailbox: an alias or a separate account that only receives sign-in mail, never your main inbox.
+
+### Human-mode fills: the address bar instead of DevTools
+
+`metacomputer secrets fill NAME --field password|username|otp --human [--window-id N]` (and `code --human`, `ask
+--human`, `fill --request ID --human`) fill the focused field of a human-mode browser: the VM's regular Firefox, or a
+Chrome started normally, which have no DevTools port. Some sites treat a DevTools-driven Chrome as automated and offer
+it a degraded sign-in; a regular browser gets the normal one. Page-mode fills stay as they were.
+- **The site comes from the browser's address bar**, read through the accessibility tree (the toolbar's address
+  entry, the browser's own control, never the page's title or text), and it must agree with the address the browser
+  reports for the page's document (AT-SPI's `DocURL`). A bar showing something that isn't the page's address (an
+  address typed but not opened, a search, the bar being edited) is refused. Firefox leaves out `https://` for a secure
+  page; a bar with no scheme counts only when the page's own address is https.
+- **The field is the focused element**, which must be in that page's top document (not in the browser's own controls
+  and not in a frame, whose site the bar doesn't show) and be the expected kind: a password text for `password`, an
+  entry for `username` and `otp` (or a spin button for a numeric code), editable and not read-only.
+- **The value is typed as real foreground keystrokes through Cua Driver** (`type_text`, `delivery_mode:
+  "foreground"`), never handed to Claude; a field that already holds text is selected first, so the value replaces it.
+  Then the same field must still have the focus, on the same site, and hold that many characters (the browser's count,
+  never its text). The answer is held to the form a page-mode fill's is, and nothing the VM says after the value is
+  passed on: the reason is one of the vault's own sentences.
+- It's checked before every use (a human-mode fill always checks first, then asks where the secret or the unlock says
+  to), and the value then goes only to the site that check named.
+
+**How this binding differs from page mode.** A page-mode fill gets each frame's site from Chrome's DevTools
+(`Page.getFrameTree`, confirmed inside an isolated world) and types into the very element it checked, in the same
+document. A human-mode fill gets the site from the address bar and the page's address as the browser reports them to
+the accessibility tree, and types keystrokes into whatever has the focus. So:
+- it runs in the VM as the desktop account (the key sealed sessions use, `SSH_AUTH=key` for now), not the fill
+  account, which can't reach the desktop's accessibility bus or keyboard. Code running as the desktop user (a
+  misbehaving agent with a shell) can see the value on its way there, as it can pose as DevTools for a page-mode fill;
+- keystrokes aren't bound to an element: a page that moves the focus between the check and the typing gets the
+  keys (the vault reads the field again afterwards and reports a change, but can't undo it);
+- a field inside a frame is refused rather than checked;
+- a VM whose driver policy accepts only bounded sessions refuses human-mode fills (they type through the driver in its
+  standard mode).
+
 ### Signing in with one approval (`login`)
 
 `metacomputer secrets login NAME --password-selector CSS [--username-selector CSS]`
@@ -2243,7 +2387,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper`, `code_request`, `code_give`, `code_fill`, `code_relay`, `code_refuse`, `code_expire` |
 | `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
 | `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
@@ -2259,6 +2403,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
+| `kind`, `source`, `link_host`, `from`, `target`, `why` | a one-time code request's kind (`code` or `link`), where its value came from (`terminal`, `dialog`, `stdin`, `relay`), a link's host, the page a relay read from, where it goes (`page` or `human`), and why it was asked for (never the value) |
 | `token_id`, `ttl_s`, `renewer` | a token's id, and on `token` and `renew` the seconds it has to live then (the vault's own numbers); on `renew`, who renewed it: `same` (its own Claude Code session), `terminal` (you at a terminal) or `other` |
 | `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
@@ -2440,6 +2585,10 @@ something waits for you:
   renamed; the event stream takes it from there. Fields: `family`, `type`,
   `severity`, `vm`, `message`, `action`, `project` (the requester's folder), `data`.
   Never a value or a token, and writing it never blocks or fails a request.
+- `needs_you.code_requested` (severity `warn`), when `metacomputer secrets ask` files a one-time code request: the
+  site, the kind (`code` or `link`), the request id and the cleaned `why` in `data`, with the action `metacomputer
+  secrets give ID`. A code or relay request that waits for `approve ID` sends `needs_you.approval_waiting` with
+  `data.op` `code`. Never a value.
 - `needs_you.vault_locked`, when `metacomputer secrets fill`, `session save|load` or
   `token` exits 3 because the vault is locked: the event stream's own exit hook in
   `bin/metacomputer` reports it (once, at most every 5 minutes, and not when you ran
@@ -2612,6 +2761,17 @@ something waits for you:
 
   The terminal requirement keeps values off pipes and command lines. It isn't a
   barrier against your own account, since a program can open a pseudo-terminal.
+- **One-time codes from inside the VM are only as trustworthy as the page they're read from.** A relay reads a
+  mailbox signed in inside the VM, and anything signed in there is reachable by a misbehaving agent with a shell (it
+  can read the mail itself, and ask for codes). Use a dedicated automation mailbox that only receives sign-in mail.
+  The vault binds where a relayed code goes, not where it came from: a code rule or relay rule is a standing approval
+  for whatever can pose as the requester it names (any program, without `--project`), for that site, until it expires.
+- **The code dialog isn't an approval.** It's `osascript`'s dialog, which an app with Accessibility access could type
+  into; that's why a value given there still needs Touch ID, your login password or a typed line at the unlock terminal.
+- **`CODES_VIA` is guidance.** Nothing stops Claude from reading a code shown in the VM (a page, a screenshot) and
+  typing it; `CODES_VIA=vault` tells it not to, and the skill follows that.
+- **Human-mode fills are weaker than page-mode fills** ("Human-mode fills" above): the value goes to the desktop
+  account, where code running as that user can see it, and keystrokes go wherever the focus is when they arrive.
 - **A compromised guest kernel or root** can do anything in the VM, including
   replacing `secret-fill`. Values go only to the VM you bound, but what happens
   inside it is up to the VM.
@@ -2715,6 +2875,10 @@ something waits for you:
 | `settle [--timeout S]` | anywhere | Return once the unlock process has finished every request it got before (or none runs); for a requester that got no confirmation (exit 5) |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
+| `fill NAME --field password\|username\|otp --human [--window-id N]` | anywhere | The same into a human-mode browser's focused field, its site from the address bar ("Human-mode fills") |
+| `ask --site S --kind code\|link --why TEXT [--into TAB/FIELD \| --human] [--wait D]`, `code --site S (--into TAB/FIELD \| --human) < value`, `relay --from TAB/ELEMENT --to TAB/FIELD --site S`, `fill --request ID` | anywhere | One-time codes and sign-in links ("One-time codes and sign-in links"); never print the value |
+| `give ID` | you, any terminal (the value from stdin only) | The value for a waiting request: a terminal follows the usual approval, a pipe needs a `rule add code` |
+| `rule add code --site S --from stdin [--expires D]`, `rule add relay --from-host H --to S [--expires D]` | you, any terminal (Touch ID / login password, or the passphrase) | Standing approvals for codes piped in with no terminal, or relayed; never an identity provider |
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `token renew ID\|--all [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; keep live ones going (the same token, asked like a new one); the live ones; end them |
