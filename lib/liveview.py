@@ -8,25 +8,29 @@
                                         helper empties the clipboard after that many seconds, but only if nothing
                                         was copied since: it keeps the change count the copy's own clearContents
                                         returned (never the password), and compares and empties in one run.
-  liveview.py remember --port PORT [--consent-checked]
-                                        the live-view password, one line on stdin -> the login keychain item that
-                                        Screen Sharing reads for vnc://127.0.0.1:PORT (created, or updated in place;
-                                        then checked by its attributes). Prints "created" or "updated". Refused unless
-                                        stdin is a terminal (a person typing it) or --consent-checked says the caller
-                                        (bin/metacomputer view) already has the user's yes; refused while VIEW_REMEMBER
-                                        is off
+  liveview.py remember --port PORT [--from-view]
+                                        the live-view password, one line on stdin (typed at a terminal: not echoed) ->
+                                        the login keychain item that Screen Sharing reads for vnc://127.0.0.1:PORT
+                                        (created, or updated in place; then checked by its attributes). Prints
+                                        "created" or "updated". Refused unless stdin is a terminal (a person typing
+                                        it) or --from-view; refused while VIEW_REMEMBER is off
   liveview.py refresh --port PORT       the same, but only into metacomputer's item that's already there (never makes
                                         one): view --open's silent update. "updated", or exit 1. Refused while off
   liveview.py remembered --port PORT [--json]   exit 0 when that item is metacomputer's and there, 1 when it isn't,
                                         3 when the keychain couldn't say; --json prints its attributes (never the
                                         password)
-  liveview.py forget --port PORT [--consent-checked]
+  liveview.py forget --port PORT [--from-view]
                                         removes that item (only metacomputer's); prints "removed" or "none". Refused
-                                        unless stdin is a terminal or --consent-checked
+                                        unless stdin is a terminal or --from-view
 
-VIEW_REMEMBER, as these apply it: the settings file's value (lib/labconfig.py: the file bin/metacomputer reads), made
-stricter, never looser, by MCOMP_VIEW_REMEMBER from bin/metacomputer (off > ask > on); a value in the environment that
-isn't one of those counts as off.
+--from-view is internal: bin/metacomputer view passes it after its own checks (a terminal for a first save or a
+removal, VIEW_REMEMBER). It says who's calling; it isn't proof of the user's consent. These checks guard against
+mistakes (a script or an agent running the helper by itself), not against a program running as the user, which could
+pass the flag, or reach the keychain without this helper, as with any keychain item it can reach (SECURITY.md).
+
+VIEW_REMEMBER, as these apply it: the settings file's value (lib/labconfig.py: the file bin/metacomputer reads; empty
+means ask, anything but ask, on or off means off), made stricter, never looser, by MCOMP_VIEW_REMEMBER from
+bin/metacomputer (off > ask > on); a value in the environment that isn't one of those counts as off.
 
 The clipboard is macOS's general pasteboard, through osascript's JavaScript bridge to AppKit (NSPasteboard), so
 the copy and its change count, and later the comparison and the clearing, each happen inside one process. The
@@ -244,9 +248,35 @@ def gui_reason():
     return None
 
 
+def read_hidden():
+    """One line typed at the terminal that is stdin (never /dev/tty), with echo off on it while it's read and a prompt
+    on stderr; echo comes back afterwards, even after Ctrl-C. b"" when echo can't be turned off (nothing is read)."""
+    import termios
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+        quiet = termios.tcgetattr(fd)
+        quiet[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSAFLUSH, quiet)
+    except (termios.error, OSError):
+        return b""
+    try:
+        sys.stderr.write("Live-view password (it isn't shown): ")
+        sys.stderr.flush()
+        return sys.stdin.buffer.readline(MAX_PASSWORD + 2)
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, old)
+        except (termios.error, OSError):
+            pass
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+
 def read_password():
-    """One line from stdin: 1-256 bytes, no control characters (VNC itself uses the first 8)."""
-    data = sys.stdin.buffer.readline(MAX_PASSWORD + 2)
+    """One line from stdin: 1-256 bytes, no control characters (VNC itself uses the first 8). Piped in, as
+    bin/metacomputer does; typed at a terminal, not echoed (read_hidden)."""
+    data = read_hidden() if sys.stdin.isatty() else sys.stdin.buffer.readline(MAX_PASSWORD + 2)
     pw = data.rstrip(b"\r\n")
     if not pw or len(pw) > MAX_PASSWORD or any(c < 32 or c == 127 for c in pw):
         return None
@@ -355,14 +385,16 @@ ORDER = {"on": 0, "ask": 1, "off": 2}
 
 
 def remember_setting(env=None):
-    """VIEW_REMEMBER as the settings file says (unknown there: ask, as bin/metacomputer reads it), made stricter, never
-    looser, by MCOMP_VIEW_REMEMBER; an unknown value in the environment counts as off."""
+    """VIEW_REMEMBER as the settings file says (empty or unset: ask; anything but ask, on or off: off, as
+    bin/metacomputer reads it), made stricter, never looser, by MCOMP_VIEW_REMEMBER; an unknown value in the
+    environment counts as off too."""
     env = os.environ if env is None else env
     try:
         conf = labconfig.load(env).get("VIEW_REMEMBER", "ask")
     except Exception:
         conf = "off"
-    conf = conf if conf in ORDER else "ask"
+    conf = "ask" if conf == "" else conf
+    conf = conf if conf in ORDER else "off"
     if "MCOMP_VIEW_REMEMBER" not in env:
         return conf
     given = env["MCOMP_VIEW_REMEMBER"]
@@ -370,17 +402,18 @@ def remember_setting(env=None):
     return max(conf, given, key=ORDER.get)
 
 
-def consent_refusal(what, checked):
-    """None when a person agreed: stdin is their terminal, or the caller says it checked (--consent-checked)."""
-    if checked or sys.stdin.isatty():
+def consent_refusal(what, from_view):
+    """None when stdin is a terminal (a person typing), or the caller is bin/metacomputer view (--from-view), which
+    checked first. A guard against mistakes, not a barrier (the docstring above)."""
+    if from_view or sys.stdin.isatty():
         return None
     return (f"{what} changes your login keychain, so it needs your yes: run `metacomputer view --remember` (or "
             "--forget) in your own terminal")
 
 
-def remember(port, op="save", checked=False):
+def remember(port, op="save", from_view=False):
     if op == "save":
-        why = consent_refusal("saving the live-view password for Screen Sharing", checked)
+        why = consent_refusal("saving the live-view password for Screen Sharing", from_view)
         if why:
             print(why, file=sys.stderr)
             return 1
@@ -428,8 +461,8 @@ def remembered(port, as_json):
     return 0 if isinstance(attrs, dict) and attrs.get("label") == ss_label(port) else 1
 
 
-def forget(port, checked=False):
-    why = consent_refusal("removing Screen Sharing's saved live-view password", checked)
+def forget(port, from_view=False):
+    why = consent_refusal("removing Screen Sharing's saved live-view password", from_view)
     if why:
         print(why, file=sys.stderr)
         return 1
@@ -452,7 +485,7 @@ def forget(port, checked=False):
 def main(argv):
     if argv[:1] in (["remember"], ["refresh"], ["remembered"], ["forget"]):
         port, rest = port_arg(argv[1:])
-        extra = {"remembered": ["--json"], "remember": ["--consent-checked"], "forget": ["--consent-checked"]}
+        extra = {"remembered": ["--json"], "remember": ["--from-view"], "forget": ["--from-view"]}
         if port is None or rest not in ([], extra.get(argv[0], [])):
             print(f"usage: liveview.py {argv[0]} --port PORT" + "".join(f" [{x}]" for x in extra.get(argv[0], [])),
                   file=sys.stderr)

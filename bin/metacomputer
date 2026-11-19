@@ -1724,13 +1724,14 @@ EOF
 #   - view --open without the flag: the first save only with a yes typed at a terminal here, or VIEW_REMEMBER=on;
 #     an item that's already there is brought up to date in place (a rebuilt VM's new password), unless off.
 # VIEW_REMEMBER=off means no writes at all. Removing it (`view --forget`) is typed at a terminal too. lib/liveview.py
-# applies the same rules itself: `remember` and `forget` only with a terminal on stdin or --consent-checked (passed
-# here, after these checks), `refresh` only into an item that's already there, and never while VIEW_REMEMBER is off
-# (its settings file's value, made stricter by MCOMP_VIEW_REMEMBER, which these calls pass).
-view_remember_setting() { case "${VIEW_REMEMBER:-ask}" in on|off) echo "$VIEW_REMEMBER" ;; *) echo ask ;; esac; }
+# checks the same rules itself, against mistakes rather than as a barrier: `remember` and `forget` only with a terminal
+# on stdin or --from-view (the internal flag passed here, after these checks; not proof of consent), `refresh` only
+# into an item that's already there, and never while VIEW_REMEMBER is off (its settings file's value, made stricter
+# by MCOMP_VIEW_REMEMBER, which these calls pass). A VIEW_REMEMBER that isn't ask, on or off counts as off.
+view_remember_setting() { case "${VIEW_REMEMBER:-ask}" in on|off|ask) echo "${VIEW_REMEMBER:-ask}" ;; *) echo off ;; esac; }
 view_remembered() { "$PY" "$LAB_ROOT/lib/liveview.py" remembered --port "$VNC_PORT" </dev/null >/dev/null 2>&1; }
 view_save() { # create | refresh: 0 = Screen Sharing's item holds the current live-view password; prints what happened
-  local how op=remember extra=--consent-checked
+  local how op=remember extra=--from-view
   [ "$1" = refresh ] && op=refresh extra=""
   how="$(vnc_password_get | MCOMP_VIEW_REMEMBER="$(view_remember_setting)" \
            "$PY" "$LAB_ROOT/lib/liveview.py" "$op" --port "$VNC_PORT" ${extra:+"$extra"})" || return 1
@@ -1749,6 +1750,7 @@ view_remember_decide() {
   local flag="$1" setting a rc=0
   VIEW_SAVE=0 VIEW_HINT=0
   setting="$(view_remember_setting)"
+  case "${VIEW_REMEMBER:-ask}" in on|off|ask) ;; *) warn "VIEW_REMEMBER=${VIEW_REMEMBER} isn't ask, on or off, so it counts as off" ;; esac
   [ "$flag" = no-remember ] && return 0
   if [ "$flag" = remember ]; then
     [ -t 0 ] || die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal"
@@ -1788,7 +1790,7 @@ view_remember_now() { # view --remember: save it now, without opening anything
 view_forget() { # view --forget: remove Screen Sharing's saved live-view password (only the item metacomputer made)
   local how
   [ -t 0 ] || die "view --forget changes your login keychain, so it's yours to run: in your own terminal"
-  how="$("$PY" "$LAB_ROOT/lib/liveview.py" forget --port "$VNC_PORT" --consent-checked </dev/null)" || die "couldn't remove it (above)"
+  how="$("$PY" "$LAB_ROOT/lib/liveview.py" forget --port "$VNC_PORT" --from-view </dev/null)" || die "couldn't remove it (above)"
   case "$how" in
     removed) echo "Removed the live-view password metacomputer saved for Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
              [ "$(view_remember_setting)" = off ] || echo "(view --open asks again next time; VIEW_REMEMBER=off stops that.)" ;;

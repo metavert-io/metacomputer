@@ -23,6 +23,7 @@ import select
 import shutil
 import signal
 import stat
+import termios
 import subprocess
 import sys
 import tempfile
@@ -1176,6 +1177,10 @@ def remember_checks():
     r = view(vd, stub, lume, ssh, "--print")
     check("view --print: how to connect, nothing opened", r.returncode == 0 and "ssh -N -L 59871" in r.stdout
           and not lines("open "), r.stdout)
+    rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", extra_cfg="VIEW_REMEMBER=maybe\n")
+    check("view --open with a VIEW_REMEMBER that isn't ask, on or off: counts as off (says so), no question, no write",
+          rc == 0 and not asked and "counts as off" in out and not any(" save " in x or " refresh " in x
+                                                                        for x in lines("osascript ")), out)
     for bad in (["--open", "--tailnet"], ["--remember", "--no-remember"], ["--tailnet", "--remember"]):
         r = view(vd, stub, lume, ssh, *bad)
         check(f"view {' '.join(bad)}: a usage error", r.returncode != 0 and "usage" in r.stderr, r.stderr)
@@ -1201,37 +1206,73 @@ def remember_helper_checks():
         if not tty:
             return subprocess.run(lv + list(args), input=VNC_PW + "\n", env=e, capture_output=True, text=True,
                                   timeout=60)
+        # At a terminal: wait for the prompt (echo is turned off before it's written), look at the terminal's echo
+        # flag, type the password, then collect what the terminal showed: with echo on, the password would be there.
         m, s = pty.openpty()
-        p = subprocess.Popen(lv + list(args), env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True)
-        os.close(s)
+        p = subprocess.Popen(lv + list(args), env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        err, end = b"", time.time() + 30
+        while time.time() < end and b"isn't shown" not in err:
+            ready, _, _ = select.select([p.stderr], [], [], 0.2)
+            if ready:
+                chunk = os.read(p.stderr.fileno(), 4096)
+                if not chunk:
+                    break
+                err += chunk
+        echo_off = b"isn't shown" in err and not termios.tcgetattr(s)[3] & termios.ECHO
         os.write(m, (VNC_PW + "\n").encode())
-        o, err = p.communicate(timeout=60)
+        o, rest = p.communicate(timeout=60)
+        shown = b""
+        while True:
+            ready, _, _ = select.select([m], [], [], 0.3)
+            if not ready:
+                break
+            try:
+                chunk = os.read(m, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            shown += chunk
+        echo_back = bool(termios.tcgetattr(s)[3] & termios.ECHO)
+        os.close(s)
         os.close(m)
-        return subprocess.CompletedProcess(p.args, p.returncode, o, err)
+        res = subprocess.CompletedProcess(p.args, p.returncode, o.decode(), (err + rest).decode())
+        res.echo_off, res.shown, res.echo_back = echo_off, shown.decode("utf-8", "replace"), echo_back
+        return res
 
     def wrote():
         return any(f" {op} " in x for x in read(os.path.join(stub, "argv.log")).splitlines()
                    for op in ("save", "refresh", "forget"))
 
     r = call("remember", "--port", "59871")
-    check("remember with the password piped in and no --consent-checked: refused, the keychain never reached",
+    check("remember with the password piped in and no --from-view: refused, the keychain never reached",
           r.returncode == 1 and "needs your yes" in r.stderr and not wrote() and not os.path.exists(item), r.stderr)
-    r = call("remember", "--port", "59871", "--consent-checked", setting="off")
-    check("remember --consent-checked with MCOMP_VIEW_REMEMBER=off: refused", r.returncode == 1
+    r = call("remember", "--port", "59871", "--from-view", setting="off")
+    check("remember --from-view with MCOMP_VIEW_REMEMBER=off: refused", r.returncode == 1
           and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
-    r = call("remember", "--port", "59871", "--consent-checked", setting="on", conf="VIEW_REMEMBER=off\n")
+    r = call("remember", "--port", "59871", "--from-view", setting="on", conf="VIEW_REMEMBER=off\n")
     check("…and with the settings file's VIEW_REMEMBER=off, an environment that says on can't loosen it",
           r.returncode == 1 and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
-    r = call("remember", "--port", "59871", "--consent-checked", setting="yes please")
+    r = call("remember", "--port", "59871", "--from-view", setting="yes please")
     check("an unknown MCOMP_VIEW_REMEMBER counts as off (fails closed)", r.returncode == 1
           and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
     r = call("refresh", "--port", "59871", setting="ask")
     check("refresh with nothing saved: makes nothing (exit 1, says so)", r.returncode == 1
           and "no saved live-view password" in r.stderr and not os.path.exists(item), (r.returncode, r.stderr))
+    r = call("refresh", "--port", "59871", conf="VIEW_REMEMBER=maybe\n")
+    r2 = call("remember", "--port", "59871", "--from-view", conf="VIEW_REMEMBER=maybe\n")
+    check("a VIEW_REMEMBER in the settings file that isn't ask, on or off counts as off (fails closed)",
+          r.returncode == 1 and r2.returncode == 1 and "VIEW_REMEMBER is off" in r.stderr + r2.stderr
+          and r.stderr.count("VIEW_REMEMBER is off") == 1 and not wrote(), (r.stderr, r2.stderr))
+    r = call("refresh", "--port", "59871", conf="VIEW_REMEMBER=\n")
+    check("…while an empty one means ask, as unset does", r.returncode == 1 and "VIEW_REMEMBER is off" not in r.stderr
+          and "no saved live-view password" in r.stderr, r.stderr)
     r = call("remember", "--port", "59871", tty=True)
     check("remember with the password typed at a terminal (stdin is one): allowed", r.returncode == 0
           and r.stdout.strip() == "created" and os.path.exists(item), (r.returncode, r.stdout, r.stderr))
+    check("…typed with echo off on that terminal, so the password never shows there, and echo back on afterwards",
+          r.echo_off and VNC_PW not in r.shown and r.echo_back and read(os.path.join(stub, "kc.pw")) == VNC_PW,
+          (r.echo_off, r.shown, r.echo_back, r.stderr))
     tag = read(item).splitlines()[2]
     r = call("refresh", "--port", "59871", setting="ask")
     check("refresh with metacomputer's item there: updated in place, no terminal needed", r.returncode == 0
@@ -1243,13 +1284,13 @@ def remember_helper_checks():
           r.returncode == 1 and r2.returncode == 1 and read(item).splitlines()[2] == tag and not wrote(),
           (r.stderr, r2.stderr))
     r = call("forget", "--port", "59871")
-    check("forget with no terminal and no --consent-checked: refused, the item stays", r.returncode == 1
+    check("forget with no terminal and no --from-view: refused, the item stays", r.returncode == 1
           and "needs your yes" in r.stderr and os.path.exists(item) and not wrote(), r.stderr)
-    r = call("forget", "--port", "59871", "--consent-checked")
-    check("forget --consent-checked (what bin/metacomputer passes after its own check): removed", r.returncode == 0
+    r = call("forget", "--port", "59871", "--from-view")
+    check("forget --from-view (what bin/metacomputer passes after its own check): removed", r.returncode == 0
           and r.stdout.strip() == "removed" and not os.path.exists(item), (r.returncode, r.stderr))
-    for bad in (["remember", "--port", "59871", "--json"], ["refresh", "--port", "59871", "--consent-checked"],
-                ["remembered", "--port", "59871", "--consent-checked"]):
+    for bad in (["remember", "--port", "59871", "--json"], ["refresh", "--port", "59871", "--from-view"],
+                ["remembered", "--port", "59871", "--from-view"]):
         r = call(*bad)
         check(f"liveview.py {' '.join(bad)}: a usage error", r.returncode == 2 and "usage" in r.stderr, r.stderr)
 
@@ -1304,9 +1345,9 @@ def keychain_checks():
         check("refresh with nothing there: makes nothing (exit 1)", r.returncode == 1 and r0.returncode == 1,
               (r.returncode, r.stdout, r.stderr, r0.returncode))
         r = lvrun("remember", "--port", "59871", data=fake + "\n")
-        check("remember without a terminal or --consent-checked: refused, nothing made", r.returncode == 1
+        check("remember without a terminal or --from-view: refused, nothing made", r.returncode == 1
               and "needs your yes" in r.stderr and lvrun("remembered", "--port", "59871").returncode == 1, r.stderr)
-        r = lvrun("remember", "--port", "59871", "--consent-checked", data=fake + "\n")
+        r = lvrun("remember", "--port", "59871", "--from-view", data=fake + "\n")
         check("remember: the item is created in the keychain it was given", r.returncode == 0
               and r.stdout.strip() == "created", (r.returncode, r.stdout, r.stderr))
         r = lvrun("remembered", "--port", "59871", "--json")
@@ -1321,18 +1362,18 @@ def keychain_checks():
         a2 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
         check("refresh: updated in place (the same key, a new tag)", r.returncode == 0
               and r.stdout.strip() == "updated" and a2.get("comment") not in (None, tag1), (r.stdout, r.stderr, a2))
-        r = lvrun("remember", "--port", "59871", "--consent-checked", data="Ot" + secrets.token_hex(3) + "\n")
+        r = lvrun("remember", "--port", "59871", "--from-view", data="Ot" + secrets.token_hex(3) + "\n")
         a3 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
         check("remember again: updated in place too", r.returncode == 0 and r.stdout.strip() == "updated"
               and a3.get("comment") not in (None, tag1, a2.get("comment")), (r.stdout, r.stderr, a3))
         r = lvrun("remembered", "--port", "59872")
         check("another port isn't that item (exit 1)", r.returncode == 1, (r.returncode, r.stderr))
         r = lvrun("forget", "--port", "59871")
-        check("forget without a terminal or --consent-checked: refused, the item stays", r.returncode == 1
+        check("forget without a terminal or --from-view: refused, the item stays", r.returncode == 1
               and lvrun("remembered", "--port", "59871").returncode == 0, r.stderr)
-        r = lvrun("forget", "--port", "59871", "--consent-checked")
+        r = lvrun("forget", "--port", "59871", "--from-view")
         r2 = lvrun("remembered", "--port", "59871")
-        r3 = lvrun("forget", "--port", "59871", "--consent-checked")
+        r3 = lvrun("forget", "--port", "59871", "--from-view")
         check("forget removes it, so there was exactly one; a second forget finds none", r.stdout.strip() == "removed"
               and r2.returncode == 1 and r3.stdout.strip() == "none", (r.stdout, r.stderr, r2.returncode, r3.stdout))
         calls = read(os.path.join(stub, "calls")).split("\n")

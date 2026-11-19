@@ -1022,7 +1022,8 @@ CLAIMS = [
      lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
     # Screen Sharing's remembered password (bin/metacomputer view_remember_*, lib/liveview.py remember)
     ("SECURITY.md", r"\*\*Screen Sharing's remembered password\*\* \(`VIEW_REMEMBER`, `(\w+)` by default\)",
-     lambda m: m[1] == D["VIEW_REMEMBER"] == "ask" and 'case "${VIEW_REMEMBER:-ask}" in on|off)' in raw("bin/metacomputer")),
+     lambda m: m[1] == D["VIEW_REMEMBER"] == "ask"
+     and 'case "${VIEW_REMEMBER:-ask}" in on|off|ask) echo "${VIEW_REMEMBER:-ask}" ;; *) echo off ;; esac' in raw("bin/metacomputer")),
     ("SECURITY.md", r"an internet-password item in your \*\*login keychain\*\*, server `127\.0\.0\.1:PORT`, protocol `vnc `, "
                     r"port 0, type `vncl` \(a VNC password\)", lambda m: remembered_item_shape()),
     ("SECURITY.md", r"a \"no\" writes `VIEW_REMEMBER=off` to your settings so it isn't asked again",
@@ -1044,9 +1045,21 @@ CLAIMS = [
                     r"without a terminal, whether or not an item is there, and an explicit save that fails is an error "
                     r"with its reason", lambda m: remember_flag_gated()),
     ("SECURITY.md", r"`off` means no writes at all: nothing is saved, `view --remember` refuses, and an item saved "
-                    r"earlier is no longer updated", lambda m: remember_needs_a_person()),
-    ("SECURITY.md", r"`lib/liveview.py`, the helper that writes and removes it, applies the same rules when it's run "
-                    r"directly", lambda m: helper_gated()),
+                    r"earlier is no longer updated; a value that isn't `ask`, `on` or `off` counts as `off`",
+     lambda m: unknown_setting_is_off()),
+    ("SECURITY.md", r"\*\*Who can write it\.\*\* The CLI refuses to make or remove the item without a terminal \(unless "
+                    r"you set `VIEW_REMEMBER=on`, which makes it without asking\); without one it only brings an item you "
+                    r"agreed to up to date\. Claude's skill never runs the commands that save or remove it\. A program "
+                    r"running as you could still write the item directly, as with any keychain item it can reach",
+     lambda m: remember_flag_gated() and remember_needs_a_person() and skill_never_saves()),
+    ("SECURITY.md", r"checks the same rules when it's run by itself \(stdin must be a terminal unless its internal "
+                    r"`--from-view` flag says `metacomputer view` is calling; nothing while `VIEW_REMEMBER` is off; the "
+                    r"silent update only changes an item that's already there\), as a guard against mistakes, not a "
+                    r"barrier: the flag says who's calling and proves nothing", lambda m: helper_gated()),
+    ("SECURITY.md", r"A password typed into the helper at a terminal isn't echoed",
+     lambda m: "quiet[3] &= ~termios.ECHO\n        termios.tcsetattr(fd, termios.TCSAFLUSH, quiet)" in raw("lib/liveview.py")
+     and "data = read_hidden() if sys.stdin.isatty() else sys.stdin.buffer.readline(MAX_PASSWORD + 2)"
+     in raw("lib/liveview.py")),
     ("SECURITY.md", r"the helper checks all of that again itself, whoever starts it, from the handoff's own record",
      lambda m: 'if dialog_off_reason(rec.get("interactive") is not False) is not None:\n        return 0'
      in raw("lib/handoff.py") and raw("lib/handoff.py").index("if dialog_off_reason(rec.get(")
@@ -1327,7 +1340,7 @@ def remembered_item_shape():
 def remember_needs_a_person():
     """The item is made only with a person's yes: a terminal for the question and for --remember, or
     VIEW_REMEMBER=on; off never writes; the silent update goes through the helper's refresh, which never makes one.
-    The helper applies the same rules when it's run directly (helper_gated)."""
+    The helper checks the same rules when run by itself, as a guard against mistakes (helper_gated)."""
     b = raw("bin/metacomputer")
     return ('if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi' in b
             and '[ "$setting" = on ] && { VIEW_SAVE=create; return 0; }' in b and remember_flag_gated()
@@ -1350,16 +1363,30 @@ def remember_flag_gated():
 
 
 def helper_gated():
-    """lib/liveview.py itself: remember and forget only with a terminal on stdin or --consent-checked; remember and
+    """lib/liveview.py itself: remember and forget only with a terminal on stdin or --from-view; remember and
     refresh never while VIEW_REMEMBER is off (the settings file's value, made stricter, never looser, by the
     environment; an unknown value there is off); refresh never makes an item."""
     lv = raw("lib/liveview.py")
-    return ('if checked or sys.stdin.isatty():\n        return None' in lv
+    return ('if from_view or sys.stdin.isatty():\n        return None' in lv
             and 'if op == "save":\n        why = consent_refusal(' in lv
-            and 'why = consent_refusal("removing Screen Sharing\'s saved live-view password", checked)' in lv
+            and 'why = consent_refusal("removing Screen Sharing\'s saved live-view password", from_view)' in lv
             and 'if remember_setting() == "off":' in lv
             and 'given = given if given in ORDER else "off"\n    return max(conf, given, key=ORDER.get)' in lv
             and "if (op === 'refresh' && item === null) { return 'none'; }" in lv)
+
+
+def unknown_setting_is_off():
+    """VIEW_REMEMBER that isn't ask, on or off counts as off, in bin/metacomputer and in lib/liveview.py (the file's
+    value and the environment's); off writes nothing."""
+    lv = raw("lib/liveview.py")
+    return ('*) echo off ;; esac' in raw("bin/metacomputer") and 'conf = conf if conf in ORDER else "off"' in lv
+            and 'given = given if given in ORDER else "off"' in lv and remember_needs_a_person())
+
+
+def skill_never_saves():
+    """The skill tells Claude never to run the saving or removing commands."""
+    return re.search(r"Saving or removing the password for Screen Sharing \(`view --remember`, `view --forget`\) is "
+                     r"theirs too: never run them", re.sub(r"\s+", " ", raw("skills/metacomputer/SKILL.md"))) is not None
 
 
 def remember_pipes_password():
