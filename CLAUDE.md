@@ -103,7 +103,10 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   user does or a 2FA prompt the vault can't fill, run `metacomputer handoff --why …
   --say "…"` and wait (lib/handoff.py; the record is owners.py's, written under the
   owners lock). While it's open every acting call waits, in the hub for every client
-  and in `sh`, fills and the lifecycle checks; never try to pass a check, switch
+  and in `sh`, fills and the lifecycle checks. Anything new that acts on the VM (a hub
+  cleanup, a raw SSH mutation, a CLI command) looks again right before it leaves the Mac
+  under `owners.acting()` (bash: `handoff_hold`), the dispatch lock that opening a handoff
+  takes exclusively; never act between a check and a dispatch. Never try to pass a check, switch
   browsers or profiles to get around one, or run `handoff done` for the user. Live
   view for the user: `metacomputer view --open` (the password goes on the clipboard,
   never into argv, output, logs or events); `view --tailnet` only prints the command.

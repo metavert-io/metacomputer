@@ -5,8 +5,9 @@
 
 Claude's side opens a handoff (no terminal, as an agent's shell runs it) and waits. While it's open, an acting
 call through the hub (`metacomputer call`) is refused with "Paused: the user has the computer" and reaches nothing,
-reads still work, `metacomputer sh` is refused (with or without --override; --read-only runs), `secrets fill`
-and `stop` are refused, `release` leaves it, and the session that asked can't say "done" for the user. Then the
+reads still work, `metacomputer sh` is refused (with or without --override; --read-only runs), `secrets fill`,
+a fill naming another VM, `input-reset` (but `--check`) and `stop` are refused, `release` leaves it, and the
+session that asked can't say "done" for the user. Then the
 user's "done" (scripted at a pseudo-terminal, standing in for the user's own terminal) ends it: the waiting
 command returns 0 with the user's note, and the same acting call goes through.
 
@@ -93,6 +94,14 @@ def main():
         r = mc(env, "secrets", "fill", "nothing-here", "--field", "password")
         check("secrets fill is refused before the vault is asked (exit 4)", r.returncode == 4
               and "the user has the computer" in r.stderr, (r.returncode, r.stderr[-300:]))
+        r = mc(env, "secrets", "fill", "nothing-here", "--vm", vm + "-other", "--field", "password")
+        check("a fill naming another VM is refused (its handoff isn't this one's)", r.returncode != 0
+              and "acts on this VM" in r.stderr, (r.returncode, r.stderr[-300:]))
+        r = mc(env, "input-reset")
+        r2 = mc(env, "input-reset", "--check")
+        check("input-reset is refused (exit 4); input-reset --check only reads and runs",
+              r.returncode == 4 and "the user has the computer" in r.stderr and r2.returncode == 0,
+              (r.returncode, r.stderr[-200:], r2.returncode, r2.stderr[-200:]))
         r = mc(env, "stop")
         check("stop is refused while the user has the computer", r.returncode != 0
               and "the user has the computer" in r.stderr, (r.returncode, r.stderr[-300:]))

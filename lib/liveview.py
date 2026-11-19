@@ -4,17 +4,19 @@
   liveview.py gui                       exit 0 when this command can use the Mac's own screen: it didn't come in
                                         over SSH, and the console is this user's screen session; else exit 1 and
                                         say why on stdout
-  liveview.py clip [--clear-after 45]   the live-view password, one line on stdin -> the clipboard (pbcopy's
-                                        stdin). A detached helper clears the clipboard after that many seconds,
-                                        but only while it still holds that password: it keeps a SHA-256 of it,
-                                        never the password, and compares the clipboard's text with it.
+  liveview.py clip [--clear-after 45]   the live-view password, one line on stdin -> the clipboard. A detached
+                                        helper empties the clipboard after that many seconds, but only if nothing
+                                        was copied since: it keeps the pasteboard's change count from right after
+                                        the copy (never the password), and compares and empties in one step.
 
-The password comes in on stdin and leaves on pbcopy's stdin: never in an argument, the environment, a file, a
-log or an event, and nothing here prints it. Stdlib only.
+The clipboard is macOS's general pasteboard, through osascript's JavaScript bridge to AppKit (NSPasteboard), so
+the copy and its change count, and later the comparison and the clearing, each happen inside one process. The
+password is marked concealed and transient (nspasteboard.org's markers), which clipboard managers that follow
+them don't keep. It comes in on stdin and leaves on osascript's stdin: never in an argument, the environment,
+a file, a log or an event, and nothing here prints it. Stdlib only.
 """
-import hashlib
-import hmac
 import os
+import re
 import resource
 import subprocess
 import sys
@@ -22,6 +24,41 @@ import time
 
 MAX_PASSWORD = 256
 CLEAR_DEFAULT_S = 45
+# run(argv): "copy" (the text on stdin -> the pasteboard; prints the change count after it) or "clear N" (empties
+# the pasteboard only if its change count is still N; prints "cleared" or "kept").
+PASTEBOARD_JS = r"""
+ObjC.import('AppKit');
+function run(argv) {
+  var pb = $.NSPasteboard.generalPasteboard;
+  if (argv[0] === 'copy') {
+    var data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+    var s = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+    if (s.isNil() || !ObjC.unwrap(s)) { return 'error'; }
+    pb.clearContents;
+    var ok = pb.setStringForType(s, 'public.utf8-plain-text');
+    pb.setStringForType($(''), 'org.nspasteboard.ConcealedType');
+    pb.setStringForType($(''), 'org.nspasteboard.TransientType');
+    return ok ? String(pb.changeCount) : 'error';
+  }
+  if (argv[0] === 'clear' && argv.length === 2) {
+    if (String(pb.changeCount) !== argv[1]) { return 'kept'; }
+    pb.clearContents;
+    return 'cleared';
+  }
+  return 'error';
+}
+"""
+COUNT_RE = re.compile(r"-?\d{1,20}")
+
+
+def pasteboard(args, data=None):
+    """osascript with PASTEBOARD_JS: its one line of output, or None."""
+    try:
+        r = subprocess.run(["osascript", "-l", "JavaScript", "-e", PASTEBOARD_JS] + args, input=data,
+                           capture_output=True, timeout=15, stdin=None if data is not None else subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else None
 
 
 def gui_reason():
@@ -62,9 +99,9 @@ def _max_fd():
     return min(soft if soft > 0 else 1024, 65536)
 
 
-def clear_later(digest, after):
+def clear_later(count, after):
     """A detached helper (its own session, no inherited descriptors: not the caller's output pipe, nor the VM
-    locks on 7 and 8) that empties the clipboard after `after` seconds if it still holds the password."""
+    locks on 7 and 8) that empties the clipboard after `after` seconds if its change count is still `count`."""
     pid = os.fork()
     if pid:
         os.waitpid(pid, 0)
@@ -78,9 +115,7 @@ def clear_later(digest, after):
             os.dup2(null, fd)
         os.closerange(3, _max_fd())
         time.sleep(after)
-        cur = subprocess.run(["pbpaste"], capture_output=True, timeout=10, stdin=subprocess.DEVNULL).stdout
-        if hmac.compare_digest(hashlib.sha256(cur).digest(), digest):
-            subprocess.run(["pbcopy"], input=b"", timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pasteboard(["clear", count])
     except BaseException:
         pass
     finally:
@@ -92,18 +127,13 @@ def clip(clear_after):
     if pw is None:
         print("couldn't read the live-view password from its store", file=sys.stderr)
         return 1
-    try:
-        r = subprocess.run(["pbcopy"], input=pw, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-        ok = r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        ok = False
-    digest = hashlib.sha256(pw).digest()
+    count = pasteboard(["copy"], pw)
     del pw
-    if not ok:
-        print("couldn't put the live-view password on the clipboard (pbcopy failed)", file=sys.stderr)
+    if count is None or not COUNT_RE.fullmatch(count):
+        print("couldn't put the live-view password on the clipboard (osascript failed)", file=sys.stderr)
         return 1
     if clear_after > 0:
-        clear_later(digest, clear_after)
+        clear_later(count, clear_after)
     return 0
 
 

@@ -14,7 +14,9 @@ and waits:
   handoff.py cancel [--note TEXT]   the user, or the session that asked: called off; Claude stops and asks
   handoff.py wait [--json]          wait again for the open handoff, or report how the last one ended
   handoff.py status [--json]        the open handoff, if any
-  handoff.py guard                  exit 4 (and say why) while a handoff is open (bin/metacomputer's fills)
+  handoff.py guard [--hold-fd N]    exit 4 (and say why) while a handoff is open; with --hold-fd, the dispatch
+                                    lock is taken shared on the caller's descriptor N and kept for the caller
+                                    (bin/metacomputer's fills, session loads and input-reset)
 
 At a terminal, Enter where `handoff` waits is "done", and c then Enter (or Ctrl-C) is "cancel".
 
@@ -31,16 +33,19 @@ import re
 import secrets
 import select
 import signal
+import stat
 import sys
 import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import flockwait  # noqa: E402
 import owners  # noqa: E402
 import termsafe  # noqa: E402
 
 DEFAULT_TIMEOUT_S = 900
 MIN_TIMEOUT_S = 30
+OPEN_WAIT_S = 40          # opening waits this long for actions on their way (the hub's input reset takes up to 30 s)
 POLL_S = 0.25
 TEXT_MAX = 500
 EXIT_DONE, EXIT_ERROR, EXIT_USAGE, EXIT_REFUSED, EXIT_CANCELLED, EXIT_STOPPED, EXIT_TIME_LIMIT = 0, 1, 2, 3, 4, 5, 124
@@ -364,6 +369,19 @@ def open_and_wait(a, say, timeout, interactive, opened):
     table = owners.ps_table()
     claude = owners.claude_of(os.getpid(), table)
     try:
+        # Exclusive: every action still on its way to the VM (a call being sent, a shell run starting, a vault fill
+        # or session load until it ends) gets there first, and each one after this looks and finds the record.
+        held = owners.dispatch(shared=False, timeout=OPEN_WAIT_S)
+        held.__enter__()
+    except TimeoutError:
+        err("an action is still on its way to the virtual computer (a call being sent, a shell run starting, or a "
+            "vault fill or session load, which holds it until it ends); nothing was handed over. Wait for it to "
+            "end, then run the handoff again.")
+        return EXIT_REFUSED
+    except OSError as e:
+        err(f"couldn't record the handoff ({e}); nothing was handed over")
+        return EXIT_ERROR
+    try:
         with owners.lock():
             cur = owners.open_handoff()
             if cur:
@@ -390,6 +408,8 @@ def open_and_wait(a, say, timeout, interactive, opened):
     except (OSError, TimeoutError) as e:
         err(f"couldn't record the handoff ({e}); nothing was handed over")
         return EXIT_ERROR
+    finally:
+        held.__exit__(None, None, None)
     told = announce(rec, interactive)
     instructions(rec, interactive)
     if told:
@@ -486,7 +506,29 @@ def cmd_status(a):
     return 0
 
 
-def cmd_guard():
+def cmd_guard(argv):
+    """guard [--hold-fd N]: exit 4, and say why, while a handoff is open. With --hold-fd, N is a descriptor the
+    caller (bin/metacomputer) opened on this VM's dispatch lock file: the lock is taken shared on it first, and
+    stays with the caller's descriptor after this exits (a flock belongs to the open file, which the caller
+    shares), so no handoff opens until the caller and what it runs are done."""
+    if argv:
+        if len(argv) != 2 or argv[0] != "--hold-fd" or not argv[1].isdigit() or not 3 <= int(argv[1]) <= 255:
+            err("usage: guard [--hold-fd N]")
+            return EXIT_USAGE
+        fd = int(argv[1])
+        try:
+            st, want = os.fstat(fd), os.lstat(owners.dispatch_path())
+        except OSError as e:
+            err(f"couldn't check this VM's dispatch lock ({e}); not going ahead")
+            return EXIT_CANCELLED
+        if not stat.S_ISREG(want.st_mode) or (st.st_dev, st.st_ino) != (want.st_dev, want.st_ino):
+            err(f"descriptor {fd} isn't this VM's dispatch lock ({owners.dispatch_path()}); not going ahead")
+            return EXIT_CANCELLED
+        try:
+            flockwait.take(fd, owners.DISPATCH_WAIT_S, 0.02, shared=True)
+        except BlockingIOError:
+            err("a handoff is being opened; not going ahead (`metacomputer handoff status`)")
+            return EXIT_CANCELLED
     h = owners.open_handoff()
     if h:
         print("metacomputer: " + owners.handoff_refusal(h), file=sys.stderr, flush=True)
@@ -498,7 +540,7 @@ def main(argv):
     if argv and argv[0] in SUBCOMMANDS:
         sub, rest = argv[0], argv[1:]
         if sub == "guard":
-            return cmd_guard()
+            return cmd_guard(rest)
         ap = argparse.ArgumentParser(prog=f"metacomputer handoff {sub}")
         if sub in ("done", "cancel"):
             ap.add_argument("--note", help="what Claude should know (at most 500 characters)")

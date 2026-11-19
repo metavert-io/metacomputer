@@ -526,27 +526,34 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (79 checks, about 30 s): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (91 checks, about 40 s): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
   `c` and Ctrl-C at a terminal, the asking session refused "done" without a terminal,
   one at a time, refused while another session acts (unless `--override` or a person at
   a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and records
-  with a field of the wrong type failing closed for at most 2 hours, `sh` refused with or without
-  `--override`; its events (the `needs_you` notice cleaned of escapes, URL queries and
+  with a field of the wrong type failing closed for at most 2 hours (from the kernel's change time, so a
+  future modification time doesn't stretch it, or from the first failure when nothing about the file can be
+  read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
+  (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
+  stopped (exit 4) with the vault never asked, a fill naming another VM refused, and a handoff that can't open
+  while a fill is still on its way (a stand-in vault that waits); its events (the `needs_you` notice cleaned of escapes, URL queries and
   the live-view password; the note never in an event; the `handoff_*` types reserved;
   the 5-minute repeat rule). The live view, with stand-ins for pbcopy, pbpaste, open,
   launchctl, security, tailscale and the VM runner: the password from the file,
   Keychain and command stores reaches the clipboard and no argument, output, log or
   `vnc://` link; the clipboard is cleared after the delay only while it still holds the
-  password; over SSH or outside the screen session it prints instructions and touches
+  password (a stand-in for osascript keeps the pasteboard's change count: the clear compares
+  and empties in one step, never pbpaste, and leaves the clipboard alone after any copy, even
+  of the same text); over SSH or outside the screen session it prints instructions and touches
   nothing; with the VM off it opens nothing; `--tailnet` prints the commands and runs
   only `tailscale status`.
-- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (16 checks, a test VM only; it starts the VM if
+- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (18 checks, a test VM only; it starts the VM if
   it's off and stops it again): Claude's handoff opens without a terminal and waits; meanwhile an acting call
   through the hub is refused ("Paused: the user has the computer"), reads work, `sh` is refused with or
-  without `--override` (`--read-only` runs), `secrets fill` and `stop` are refused, `release` leaves it and
+  without `--override` (`--read-only` runs), `secrets fill`, a fill naming another VM, `input-reset` (not
+  `--check`) and `stop` are refused, `release` leaves it and
   the asking session can't say done; then the user's done at a pseudo-terminal ends it, the waiting command
   returns 0 with the note, the same acting call goes through, and the events are there without the note.
   Events go to a temporary folder, never your sinks.
@@ -815,7 +822,10 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   `call`'s and a script's acting calls are refused (`user_has_computer`, nothing reaches
   the driver, no `needs_you.in_use`), the session that asked included, and so is a
   `web` claim; reads still work; a record that can't be read refuses too; once it's
-  done, or past its time limit, the same call acts;
+  done, or past its time limit, the same call acts; a handoff that opens after a call
+  was admitted, while its guards run, still stops it at dispatch, and the call is sent
+  holding the dispatch lock; a disconnected session's `end_session` and the Chrome
+  guard's input reset wait until the handoff ends;
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
 - bounded mode: `launch_app` by path; when the session ends its clients stay
@@ -967,12 +977,15 @@ update the row with the doc's new wording. What it pins:
   2 s, follow-ups once a minute up to once an hour); the shell's timeout
   and output limits;
 - the live view: forwarded to 127.0.0.1 only; `view --open` pipes the password from its
-  store to `pbcopy`'s stdin and opens a `vnc://` link with only the port; the clipboard is
-  cleared after `VIEW_CLIPBOARD_S` only while it still holds the password; `view --tailnet`
-  runs nothing through Tailscale but `status --json`;
+  store to osascript's stdin and opens a `vnc://` link with only the port; the clipboard is
+  cleared after `VIEW_CLIPBOARD_S` only if its change count hasn't moved, and the password
+  is marked concealed and transient; `view --tailnet` runs nothing through Tailscale but
+  `status --json`;
 - handoffs: the hub's refusal and its code (`user_has_computer`), `sh` refusing before
-  `--override` is looked at, the fills guarded before they reach the vault, the 15-minute
-  default and 2-hour longest time limit, and the 2 hours an unreadable record counts;
+  `--override` is looked at, the fills and `input-reset` holding the dispatch lock with the
+  guard (and `--vm` checked), the places that look again under `owners.acting()`, opening's
+  exclusive lock and its 40 s wait, the 15-minute default and 2-hour longest time limit,
+  and the 2 hours an unreadable record counts, from its change time;
 - the gateway: each refusal docs/guide.md, architecture.md and the README name is a
   refusing rule in config/netgw-rules.json and every refusing rule is named, nothing of
   the Mac is reachable, and `scripts/lib.sh` starts the gateway with that file;

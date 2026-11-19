@@ -164,8 +164,19 @@ class Driver:
         """Close the windows this run opened, as the window manager's close button does
         (WM_DELETE_WINDOW via wmctrl), then confirm they're gone. Other Firefox windows stay."""
         ids = w.get("opened") or [w["window_id"]]
-        for wid in ids:
-            guest(f"/opt/metacomputer/bin/session-run wmctrl -ic {hex(wid)}")
+        # Closing goes to the VM over SSH, not through the hub, so it looks for a handoff itself (under the dispatch
+        # lock, held while it closes them): while the user has the computer the windows stay open.
+        try:
+            with owners.acting():
+                for wid in ids:
+                    guest(f"/opt/metacomputer/bin/session-run wmctrl -ic {hex(wid)}")
+        except owners.HandoffOpen:
+            say(f"left this run's Firefox window(s) {[hex(x) for x in ids]} open: the user has the computer "
+                "(metacomputer handoff)")
+            return False
+        except (OSError, TimeoutError) as e:
+            say(f"left this run's Firefox window(s) {[hex(x) for x in ids]} open: couldn't check for a handoff ({e})")
+            return False
         end = time.time() + 10
         while time.time() < end:
             left = [x for x in self.windows(app="firefox") if x["window_id"] in ids]

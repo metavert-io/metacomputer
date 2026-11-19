@@ -266,8 +266,13 @@ against 20.2 turns, no refusals; per-task records in
   lock, and while it's open `owners.others()` lists it for every caller, so the
   hub refuses every client's acting calls (`user_has_computer`), the session that
   asked included, and `metacomputer sh`, the vault's fills and the lifecycle
-  commands refuse too. It ends with `handoff done`, `handoff cancel` or its time
-  limit; a record that can't be read counts as open, for at most 2 hours.
+  commands refuse too. Because a call's guards can wait on the VM after it was
+  admitted, every action looks once more right before it leaves the Mac, under a
+  per-VM dispatch lock (`.run/owners/.dispatch`, `owners.acting()`): held shared
+  by the hub while it sends a call (and by its cleanup and input reset), by `sh`
+  while it starts a run, and by the fills for their whole command; opening a
+  handoff takes it exclusively. It ends with `handoff done`, `handoff cancel` or
+  its time limit; a record that can't be read counts as open, for at most 2 hours.
 - **Chrome** (docs/chrome-investigation.md). When the driver delivers
   background input through its own X input devices (a "CUA v1..." master
   pointer/keyboard pair, created by XInput2 multi-pointer), Chrome ignores that

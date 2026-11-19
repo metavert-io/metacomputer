@@ -173,6 +173,35 @@ def lock(timeout=10.0):
         os.close(fd)   # releases the lock
 
 
+DISPATCH_FILE = ".dispatch"
+DISPATCH_WAIT_S = 10.0     # an acting step waits this long for a handoff that is being opened
+
+
+def dispatch_path():
+    return os.path.join(OWNERS_DIR, DISPATCH_FILE)
+
+
+@contextlib.contextmanager
+def dispatch(shared=True, timeout=DISPATCH_WAIT_S):
+    """This VM's dispatch lock, which makes "is a handoff open?" and the action it lets through one step.
+    Whatever acts holds it shared from its last look for a handoff until the action has left the Mac (the hub
+    across sending a call, `metacomputer sh` across starting its run, a vault fill or session load for the
+    whole command, the hub's own cleanup), and opening a handoff holds it exclusively while it writes the
+    record. So an action is either on its way before the handoff opens, or sees it. Never take it while holding
+    lock(): the order is dispatch, then the owners lock. TimeoutError when it can't be had within timeout."""
+    os.makedirs(OWNERS_DIR, exist_ok=True)
+    fd = os.open(dispatch_path(), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            flockwait.take(fd, timeout, 0.02, shared=shared)
+        except BlockingIOError:
+            raise TimeoutError("a handoff is being opened" if shared else
+                               "an action is still on its way to the virtual computer")
+        yield
+    finally:
+        os.close(fd)   # releases the lock
+
+
 def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None, extra=None):
     os.makedirs(OWNERS_DIR, exist_ok=True)
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
@@ -285,9 +314,10 @@ def claims():
 
 # --- the user has the computer: a handoff (lib/handoff.py) ---------------------------------------
 # Its record sits beside the claims under a name claims() never reads (not *.json), and only lib/handoff.py
-# writes it, under the owners lock. While it's open (status "open", before its deadline), others() lists it
-# for every caller, so every acting call waits: the hub's clients, `metacomputer sh`, the vault's fills and
-# the lifecycle commands that check for other controllers.
+# writes it, under the owners lock (and, to open one, the dispatch lock held exclusively). While it's open
+# (status "open", before its deadline), others() lists it for every caller, and every acting step looks again
+# under dispatch() right before it leaves the Mac, so every acting call waits: the hub's clients and its own
+# cleanup, `metacomputer sh`, the vault's fills and the lifecycle commands that check for other controllers.
 HANDOFF_FILE = "handoff.state"
 HANDOFF_MAX_S = 7200          # the longest time limit; a record that can't be read counts as open this long
 HANDOFF_WHY = ("captcha", "login", "2fa", "other")
@@ -315,21 +345,66 @@ def handoff_valid(rec):
             and opt("claude_pid", int) and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
+UNREADABLE_FILE = "handoff-unreadable"     # in RUN_DIR: when the record was first found impossible to look at
+_first_failure_memo = []
+
+
+def _unreadable_path():
+    return os.path.join(os.path.dirname(OWNERS_DIR), UNREADABLE_FILE)
+
+
+def _first_failure(now):
+    """When the record was first found impossible even to look at (no metadata), kept in RUN_DIR so the 2 hours
+    count from then for every process that looks; a time there that's missing, not a number or later than now
+    starts over from now. If it can't be kept on disk, this process remembers it."""
+    p = _unreadable_path()
+    try:
+        with open(p) as f:
+            t = float(f.read(64).strip())
+        if _finite(t) and t <= now:
+            return t
+    except (OSError, ValueError):
+        pass
+    try:
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            f.write(repr(now))
+        os.replace(tmp, p)
+        return now
+    except OSError:
+        if not _first_failure_memo:
+            _first_failure_memo.append(now)
+        return min(_first_failure_memo[0], now)
+
+
+def _forget_failure():
+    _first_failure_memo.clear()
+    try:
+        os.remove(_unreadable_path())
+    except OSError:
+        pass
+
+
 def handoff_record():
     """The handoff record as lib/handoff.py wrote it, whatever its status; None when there is none. A file
     that isn't a valid record fails closed, for a bounded time: it reads as an open handoff ("unreadable")
-    until HANDOFF_MAX_S after it was last written (`metacomputer handoff cancel` removes it)."""
+    for HANDOFF_MAX_S from when it last changed (its ctime, which the kernel sets: unlike its modification time,
+    a program can't move it into the future), or, when even that can't be had, from when that was first
+    noticed (`metacomputer handoff cancel` removes it)."""
     p = handoff_path()
+    now = time.time()
     try:
         fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
+        if os.path.lexists(_unreadable_path()):
+            _forget_failure()
         return None
     except OSError:
         fd = None                                    # a link, or not ours to read: unreadable
     data, t = b"", None
     try:
         st = os.fstat(fd) if fd is not None else os.lstat(p)
-        t = st.st_mtime
+        t = st.st_ctime
         if fd is not None and stat.S_ISREG(st.st_mode) and st.st_size <= 65536:
             data = os.read(fd, 65537)
     except FileNotFoundError:
@@ -339,13 +414,15 @@ def handoff_record():
     finally:
         if fd is not None:
             os.close(fd)
+    if t is not None and os.path.lexists(_unreadable_path()):
+        _forget_failure()
     try:
         rec = json.loads(data.decode("utf-8")) if data else None
     except (UnicodeDecodeError, ValueError):
         rec = None
     if handoff_valid(rec):
         return rec
-    t = t if _finite(t) else time.time()
+    t = min(t, now) if _finite(t) else _first_failure(now)
     return {"v": 1, "id": None, "status": "open", "unreadable": True, "why": "other", "opened": t,
             "deadline": t + HANDOFF_MAX_S, "cwd": None, "claude_pid": None}
 
@@ -373,6 +450,25 @@ def handoff_describe(h, now=None):
     where = f" from {short(h['cwd'])}" if h.get("cwd") else ""
     return (f"the user has the computer: a handoff ({h['why']}) opened {fmt_s(now - h['opened'])} ago{where}, until "
             f"they run `metacomputer handoff done` (or `cancel`), {left} at most [ACTIVE]")
+
+
+class HandoffOpen(Exception):
+    """An acting step found the user holding the computer (rec: the open handoff)."""
+
+    def __init__(self, rec):
+        super().__init__("the user has the computer (metacomputer handoff)")
+        self.rec = rec
+
+
+@contextlib.contextmanager
+def acting(timeout=DISPATCH_WAIT_S):
+    """Wrap the step that sends an action to the VM: the dispatch lock held shared, and HandoffOpen raised
+    instead when a handoff is open. TimeoutError (or OSError) when the lock can't be had: don't act then."""
+    with dispatch(shared=True, timeout=timeout):
+        h = open_handoff()
+        if h:
+            raise HandoffOpen(h)
+        yield
 
 
 def handoff_refusal(h):

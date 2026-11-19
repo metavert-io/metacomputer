@@ -478,16 +478,20 @@ Keychain (item `metacomputer-vnc`, account the VM's name), a 0600 file in
 `SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin.
 
 **`metacomputer view --open`**, on the Mac's own screen, reads the password from
-that store into a pipe, puts it on the clipboard (`pbcopy`'s input) and opens
-Screen Sharing at `vnc://127.0.0.1:PORT`. It's never in the link, an argument,
-the environment, a log, an event or the command's output. A detached helper
-that keeps only its SHA-256 empties the clipboard after `VIEW_CLIPBOARD_S`
-seconds (45), if the clipboard still holds the password then; whatever you
-copied meanwhile is left alone. Where it ends: while it's on the clipboard, any
-app you run can read it; a clipboard manager that keeps a history may keep a
-copy; Universal Clipboard can pass it to your other Apple devices nearby. Run
-from an SSH session, `view --open` touches nothing and says how to connect
-instead.
+that store into a pipe, puts it on the clipboard and opens Screen Sharing at
+`vnc://127.0.0.1:PORT`. It's never in the link, an argument, the environment, a
+log, an event or the command's output. The clipboard is macOS's pasteboard,
+written through osascript's bridge to AppKit with the password on its stdin, and
+marked concealed and transient (nspasteboard.org's markers), which clipboard
+managers that follow them don't keep. A detached helper that keeps only the
+pasteboard's change count from right after the copy (not the password) empties
+the clipboard after `VIEW_CLIPBOARD_S` seconds (45) if nothing was copied since,
+comparing and emptying in one step of one process. Where it ends: something you
+copy in the instant between that comparison and the clearing can still be
+cleared; while the password is on the clipboard, any app you run can read it; a
+clipboard manager that ignores the markers may keep a copy; Universal Clipboard
+can pass it to your other Apple devices nearby. Run from an SSH session,
+`view --open` touches nothing and says how to connect instead.
 
 **From another device.** The port stays on 127.0.0.1. `metacomputer view`
 prints an SSH tunnel. `view --tailnet` prints the `tailscale serve` command that
@@ -509,17 +513,36 @@ notice (`--say` cleaned like every event) and writes a record,
 - the hub refuses every client's acting calls, the session that asked included,
   with "Paused: the user has the computer" (code `user_has_computer`), and refuses
   claims from `web` and the GUI tests; reads still work;
+- the hub's own cleanup waits too: the driver session of a Claude Code session
+  that disconnected is ended only when the handoff ends (ending it could close
+  the browser you're in), and the Chrome guard's input reset doesn't run;
 - `metacomputer sh` refuses every run that isn't `--read-only`, with or without
   `--override`;
-- `secrets fill`, `login` and `session load` refuse;
+- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`;
+  `metacomputer web` leaves the Firefox windows it opened instead of closing them;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
   unless you add `--override`; `release` doesn't end it.
+
+**No action slips in while it opens.** A call is checked when the hub takes it,
+but its guards can then wait on the VM (a window list, an input reset). So every
+action looks once more right before it leaves the Mac, under a per-VM dispatch
+lock (`RUN_DIR/owners/.dispatch`): held shared by the hub while it sends a call,
+by `sh` while it starts a run, by the hub's cleanup and input reset while they
+run, and by `secrets fill`, `login`, `session load` and `input-reset` for the
+whole command, including a wait for your approval. Opening a handoff holds it
+exclusively, so it waits for those to finish (up to 40 s, then it refuses and
+says why). An action is therefore either on its way before the handoff opens or
+sees it. The fills check this VM's handoff, so their `--vm` must name this VM;
+another VM is chosen by its own settings.
 
 It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
 most 2 hours), and each ending is an event. A record that can't be read (not
 valid, or a link in its place, which is never followed) counts as open for up to
 2 hours after it was written, so it fails closed; `handoff cancel` removes it.
+The 2 hours run from the file's change time, which the kernel sets (a modification
+time moved into the future doesn't stretch them), or, when not even that can be
+read, from when that was first noticed (kept in `RUN_DIR/handoff-unreadable`).
 
 **What it is and isn't.** It's a pause, so Claude doesn't fight you for the
 mouse, and an honest handoff: metacomputer doesn't disguise its browser or try
@@ -528,9 +551,9 @@ mode or profile, no retrying in a loop). It isn't a barrier against a program
 running as you, which can run `handoff done`, remove the record, or use the raw
 driver connection. The Claude Code session that asked can't say "done" for you
 from its shell without a terminal (it can cancel its own request); another
-process running as you can. A call already running in the driver when the
-handoff opens finishes. Your `handoff done --note` reaches only Claude's output,
-never an event.
+process running as you can. A call already sent to the driver, or a shell run
+already started, when the handoff opens finishes. Your `handoff done --note`
+reaches only Claude's output, never an event.
 
 ## The shell channel (`metacomputer sh`)
 

@@ -583,14 +583,17 @@ CLAIMS = [
      lambda m: '"host": "127.0.0.1:$VNC_PORT"' in raw("scripts/lib.sh")),
     ("SECURITY.md", r"It's never in the link, an argument, the environment, a log, an event or the command's output",
      lambda m: view_open_pipes_password()),
-    ("SECURITY.md", r"empties the clipboard after `VIEW_CLIPBOARD_S` seconds \((\d+)\), if the clipboard still holds the "
-                    r"password then",
-     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and "hmac.compare_digest(hashlib.sha256(cur).digest(), digest)"
-     in raw("lib/liveview.py")),
+    ("SECURITY.md", r"the pasteboard's change count from right after the copy \(not the password\) empties the "
+                    r"clipboard after `VIEW_CLIPBOARD_S` seconds \((\d+)\) if nothing was copied since, comparing and "
+                    r"emptying in one step of one process",
+     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
+    ("SECURITY.md", r"marked concealed and transient \(nspasteboard\.org's markers\)",
+     lambda m: all(t in raw("lib/liveview.py") for t in ("org.nspasteboard.ConcealedType",
+                                                          "org.nspasteboard.TransientType"))),
     ("SECURITY.md", r"`view --tailnet` prints the `tailscale serve` command that would publish the port to your own "
                     r"tailnet, and its undo; metacomputer never runs it", lambda m: tailnet_runs_only_status()),
-    ("docs/guide.md", r"cleared from the clipboard after (\d+) seconds, if it's still there then",
-     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"])),
+    ("docs/guide.md", r"cleared from the clipboard after (\d+) seconds, if nothing else was copied since",
+     lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
     # Handoffs (lib/handoff.py, owners.py): what an open one pauses, and its limits
     ("SECURITY.md", r'with "Paused: the user has the computer" \(code `(user_has_computer)`\)',
      lambda m: f'"code": "{m[1]}"' in raw("lib/mcp_hub.py")
@@ -598,7 +601,19 @@ CLAIMS = [
          "Paused: the user has the computer")),
     ("SECURITY.md", r"`metacomputer sh` refuses every run that isn't `--read-only`, with or without `--override`",
      lambda m: handoff_before_override()),
-    ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse", lambda m: fills_guarded()),
+    ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse, and so does `input-reset`",
+     lambda m: fills_guarded() and input_reset_guarded()),
+    ("SECURITY.md", r"The fills check this VM's handoff, so their `--vm` must name this VM",
+     lambda m: 'secrets_vm_is_this "$@" || die' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"Opening a handoff holds it exclusively, so it waits for those to finish \(up to (\d+) s, then it "
+                    r"refuses and says why\)",
+     lambda m: int(m[1]) == handoff.OPEN_WAIT_S and "owners.dispatch(shared=False, timeout=OPEN_WAIT_S)"
+     in raw("lib/handoff.py")),
+    ("SECURITY.md", r"held shared by the hub while it sends a call, by `sh` while it starts a run, by the hub's cleanup "
+                    r"and input reset while they run",
+     lambda m: dispatch_gates()),
+    ("SECURITY.md", r"The 2 hours run from the file's change time, which the kernel sets",
+     lambda m: "t = st.st_ctime" in raw("lib/owners.py") and "_first_failure(now)" in raw("lib/owners.py")),
     ("SECURITY.md", r"its time limit \((\d+) minutes by default, at most (\d+) hours\)",
      lambda m: (int(m[1]) * 60, int(m[2]) * 3600) == (handoff.DEFAULT_TIMEOUT_S, owners.HANDOFF_MAX_S)),
     ("SECURITY.md", r"counts as open for up to (\d+) hours after it was written, so it fails closed",
@@ -620,11 +635,31 @@ def health_categories_only():
 
 
 def view_open_pipes_password():
-    """view --open: the password goes from its store through a pipe to liveview.py, then pbcopy's stdin; the
-    vnc:// link has only the port."""
+    """view --open: the password goes from its store through a pipe to liveview.py, then osascript's stdin (its
+    arguments are the script and "copy"); the vnc:// link has only the port."""
     b, lv = raw("bin/metacomputer"), raw("lib/liveview.py")
     return ('vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip' in b and 'open "vnc://127.0.0.1:$VNC_PORT"' in b
-            and 'subprocess.run(["pbcopy"], input=pw' in lv and "print(pw" not in lv)
+            and 'count = pasteboard(["copy"], pw)' in lv and '"-e", PASTEBOARD_JS] + args, input=data' in lv
+            and "print(pw" not in lv)
+
+
+def clear_compares_change_count():
+    """The clearing compares the pasteboard's change count and empties it in the same osascript run."""
+    js = raw("lib/liveview.py")
+    return ("if (String(pb.changeCount) !== argv[1]) { return 'kept'; }\n    pb.clearContents;" in js
+            and 'pasteboard(["clear", count])' in js and "pbpaste" not in js)
+
+
+def input_reset_guarded():
+    """bin/metacomputer's input-reset (but --check) holds the dispatch lock and looks for a handoff first."""
+    return '[ "${1:-}" = --check ] || handoff_hold' in raw("bin/metacomputer")
+
+
+def dispatch_gates():
+    """Each of the places the doc names wraps its step in owners.acting(), the dispatch lock held shared."""
+    hub, sh, bt = raw("lib/mcp_hub.py"), raw("lib/vm_shell.py"), raw("lib/browser_tools.py")
+    return (hub.count("with owners.acting():") >= 3 and "with owners.acting():\n                self.forward(" in hub
+            and "with owners.acting():\n                yield" in sh and "with owners.acting():" in bt)
 
 
 def tailnet_runs_only_status():
@@ -644,10 +679,15 @@ def handoff_before_override():
 
 
 def fills_guarded():
-    """bin/metacomputer runs the handoff guard before secrets fill, login and session load reach the vault."""
-    return re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \{ \[ "\$sub" = session \] && '
-                     r'\[ "\$\{1:-\}" = load \]; \}; then\s+"\$PY" "\$LAB_ROOT/lib/handoff\.py" guard \|\| exit 4',
-                     raw("bin/metacomputer")) is not None
+    """bin/metacomputer checks --vm and takes the dispatch lock with the handoff guard (handoff_hold) before secrets
+    fill, login and session load reach the vault."""
+    b = raw("bin/metacomputer")
+    hold = re.search(r"^handoff_hold\(\) \{\n(.*?)^\}", b, re.S | re.M)
+    return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \{ \[ "\$sub" = session \] && '
+                      r'\[ "\$\{1:-\}" = load \]; \}; then\n\s+secrets_vm_is_this "\$@" \|\| die [^\n]*\n\s+handoff_hold\n',
+                      b) is not None and hold is not None
+            and 'exec 6>>"$f"' in hold.group(1)
+            and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4' in hold.group(1))
 
 
 def fpr(full, head, tail):

@@ -521,17 +521,19 @@ def deferred_signals():
             signal.signal(sig, handler)
 
 
-def run_remote(transport, payload, deadline, limits, on_tick=None):
+def run_remote(transport, payload, deadline, limits, on_tick=None, gate=None):
     """Send the payload and read the answer, never past the deadline or a stream's limit.
     The transport's stdin stays open until the end: the VM's half stops the script if it
     closes first. Returns (stdout, stderr, problem), problem being None, "timeout",
-    "overflow:stdout", "overflow:stderr" or "spawn"."""
+    "overflow:stdout", "overflow:stderr" or "spawn". gate: a context manager the start of the
+    transport runs in (the last look for a handoff, main()); what it raises goes to the caller."""
     out = {"stdout": bytearray(), "stderr": bytearray()}
-    try:
-        p = subprocess.Popen(transport + [BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
-    except OSError as e:
-        return b"", str(e).encode(), "spawn"
+    with (gate() if gate else contextlib.nullcontext()):
+        try:
+            p = subprocess.Popen(transport + [BOOTSTRAP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
+        except OSError as e:
+            return b"", str(e).encode(), "spawn"
     problem = None
     sel = selectors.DefaultSelector()
     try:
@@ -617,13 +619,13 @@ def run_remote(transport, payload, deadline, limits, on_tick=None):
     return bytes(out["stdout"]), bytes(out["stderr"]), problem
 
 
-def execute(o, transport, header, script, deadline, base, on_tick):
+def execute(o, transport, header, script, deadline, base, on_tick, gate=None):
     """Run it and turn whatever came back into (result, exit code)."""
     guest = open(GUEST_PART, "rb").read()
     payload = str(len(guest)).encode() + b"\n" + guest + json.dumps(header).encode() + b"\n" + script
     cap = o["max_output"]
     limits = {"stdout": wire_limit(cap), "stderr": STDERR_WIRE}
-    raw, remote, problem = run_remote(transport, payload, deadline, limits, on_tick)
+    raw, remote, problem = run_remote(transport, payload, deadline, limits, on_tick, gate)
     err = {**base, "status": "error", "exit_code": None, "_remote": remote}
     if problem == "timeout":
         return {**err, "status": "timeout", "kind": "timeout", "message":
@@ -852,15 +854,29 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
         if not sig_state["defer"]:
             raise KeyboardInterrupt
 
+    @contextlib.contextmanager
+    def gate():
+        """The admission check above was a while ago (the log, its signer): a handoff may have opened since. One
+        last look under the dispatch lock, held while the run starts, so it starts before a handoff opens or not
+        at all."""
+        try:
+            with owners.acting():
+                yield
+        except (OSError, TimeoutError) as e:
+            raise owners.HandoffOpen(None) from e
+
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
     res, code = None, EXIT_FAILED
     try:
         try:
             res, code = execute(o, transport, header, script, deadline, base,
-                                None if o["read_only"] else refresh)
+                                None if o["read_only"] else refresh, None if o["read_only"] else gate)
         finally:
             sig_state["defer"] = True
+    except owners.HandoffOpen as e:
+        res, code = {**base, "status": "refused", "message": owners.handoff_refusal(e.rec) if e.rec else (
+            "couldn't check whether the user has the computer (a handoff being opened?); not running")}, EXIT_REFUSED
     except KeyboardInterrupt:
         sig_state["defer"] = True
         res, code = {**base, "status": "cancelled", "kind": "interrupted", "exit_code": None,

@@ -9,6 +9,7 @@ also shows that lessons can't switch a guard.
 
     python3 tests/test_hub.py
 """
+import fcntl
 import json
 import os
 import shutil
@@ -739,6 +740,91 @@ def handoff_checks():
         res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
         h.close()
         check("an open record past its time limit doesn't pause anything", not res.is_error, res.text[:200])
+        clear_claims()
+
+        # A handoff that opens after the call was admitted, while its guards wait on the VM (the coordinate
+        # guard's window list here), is still seen: the last look is at dispatch, under the dispatch lock.
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+        late = {**rec, "id": "h-eeeeeeeeeeee", "opened": time.time(), "deadline": time.time() + 120}
+        guard = r.hub.coord_guard
+
+        def opening_meanwhile(*a, **kw):
+            handoff.write_record(late)
+            return guard(*a, **kw)
+        r.hub.coord_guard = opening_meanwhile
+        h = client(r, "sdk")
+        n0 = len(tool_calls("press_key"))
+        res = h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        r.hub.coord_guard = guard
+        check("a handoff that opens after admission, while the guards run, still stops the call at dispatch",
+              res.is_error and (res.structured or {}).get("code") == "user_has_computer"
+              and len(tool_calls("press_key")) == n0, (res.text[:200], res.structured))
+        dispatch_held = []
+
+        def sending(*a, **kw):              # what the dispatch lock looks like to a handoff opening during the send
+            fd = os.open(owners.dispatch_path(), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                dispatch_held.append(False)
+            except BlockingIOError:
+                dispatch_held.append(True)
+            finally:
+                os.close(fd)
+            return forward(*a, **kw)
+        handoff.end(late["id"], "done", "process")
+        forward = r.hub.forward
+        r.hub.forward = sending
+        h = client(r, "sdk")
+        h.call("press_key", {"pid": 50, "window_id": W, "key": "a"})
+        h.close()
+        r.hub.forward = forward
+        check("the acting call is sent while it holds the dispatch lock (a handoff can't open in between)",
+              dispatch_held == [True], dispatch_held)
+        clear_claims()
+
+        # The hub's own cleanup of a disconnected Claude Code session (end_session) waits for the handoff to end.
+        cc = mcomp_sdk.open_connection(r.env, kind="claude-code")
+        replies = []
+        cc.on_message = replies.append
+        cc.start()
+        cc.send({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}})
+        end = time.time() + 5
+        while not replies and time.time() < end:
+            time.sleep(0.05)
+        label = json.loads(replies[0]["result"]["content"][0]["text"])["session"] if replies else ""
+        later = {**rec, "id": "h-ffffffffffff", "opened": time.time(), "deadline": time.time() + 120}
+        handoff.write_record(later)
+        n0 = len(calls())
+        cc.close()
+        time.sleep(1.5)
+        early = [c for c in tool_calls("end_session", n0) if c["msg"]["params"]["arguments"].get("session") == label]
+        handoff.end(later["id"], "done", "process")
+        end = time.time() + 5
+        ended = []
+        while not ended and time.time() < end:
+            ended = [c for c in tool_calls("end_session", n0) if c["msg"]["params"]["arguments"].get("session") == label]
+            time.sleep(0.1)
+        check("a disconnected session's driver session isn't ended while the user has the computer, and is after",
+              label.startswith("mcp-") and not early and len(ended) == 1, (label, len(early), len(ended)))
+
+        # The Chrome guard's input reset acts on the desktop: not while the user has the computer.
+        ran = []
+        real_run = mcp_hub.subprocess.run
+        mcp_hub.subprocess.run = lambda *a, **kw: ran.append(a) or subprocess.CompletedProcess(a, 0, "0\n", "")
+        try:
+            handoff.write_record({**later, "id": "h-111111111111", "status": "open", "ended": None})
+            note = r.hub.input_reset()
+            during = list(ran)
+            handoff.end("h-111111111111", "done", "process")
+            r.hub.input_reset()
+        finally:
+            mcp_hub.subprocess.run = real_run
+        check("the hub's input reset doesn't run while the user has the computer, and does after",
+              note is None and not during and len(ran) == 1, (note, during, ran))
     finally:
         try:
             os.remove(owners.handoff_path())

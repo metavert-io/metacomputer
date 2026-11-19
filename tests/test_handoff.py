@@ -51,7 +51,9 @@ os.chmod(os.path.join(ENV["MCOMP_SSH_DIR"], "vnc-pass"), 0o600)
 # whatever runs this test), with a 1-second minimum time limit so the limit can be tested quickly.
 PRELUDE = ("import os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import owners; "
            "_c = os.environ.get('FAKE_CLAUDE'); owners.claude_of = (lambda *a: int(_c)) if _c else (lambda *a: None); "
-           "import handoff; handoff.MIN_TIMEOUT_S = 1; sys.exit(handoff.main(sys.argv[1:]))") % LAB
+           "import handoff; handoff.MIN_TIMEOUT_S = 1; "
+           "handoff.OPEN_WAIT_S = float(os.environ.get('TEST_OPEN_WAIT', '40')); "
+           "sys.exit(handoff.main(sys.argv[1:]))") % LAB
 SESSION_A = 424242
 SAY = "Tick the 'Verify you are human' box on example.com"
 
@@ -357,12 +359,46 @@ def unreadable_checks():
     check("done can't hand back what can't be read", r.returncode == 1, r.stderr)
     r = run("cancel", claude=None)
     check("cancel removes it", r.returncode == 0 and not os.path.lexists(owners.handoff_path()), r.stderr)
-    # an old garbage file: counts only for HANDOFF_MAX_S after it was written
+    # garbage counts for HANDOFF_MAX_S from when it last changed, and no longer
     open(owners.handoff_path(), "w").write("x")
-    old = time.time() - owners.HANDOFF_MAX_S - 5
-    os.utime(owners.handoff_path(), (old, old))
-    check("garbage older than the longest time limit doesn't count", owners.open_handoff() is None)
+    check("garbage counts for at most 2 h from when it last changed", owners.open_handoff()
+          and owners.open_handoff(now=time.time() + owners.HANDOFF_MAX_S + 5) is None)
+    future = time.time() + 10 * 365 * 86400
+    os.utime(owners.handoff_path(), (future, future))
+    check("a modification time in the future doesn't stretch it (the kernel's change time counts)",
+          owners.open_handoff(now=time.time() + owners.HANDOFF_MAX_S + 5) is None,
+          owners.handoff_record())
+    # nothing about the file can be had (not even its metadata): 2 h from the first time that was noticed,
+    # whoever looks and however often
+    real_open, real_lstat, real_time = os.open, os.lstat, time.time
+    clock = [real_time()]
+
+    def deny(path, *a, **kw):
+        if path == owners.handoff_path():
+            raise PermissionError(13, "Permission denied", path)
+        return (real_open if deny.which == "open" else real_lstat)(path, *a, **kw)
+
+    def deny_open(path, *a, **kw):
+        deny.which = "open"
+        return deny(path, *a, **kw)
+
+    def deny_lstat(path, *a, **kw):
+        deny.which = "lstat"
+        return deny(path, *a, **kw)
+    try:
+        os.open, os.lstat, time.time = deny_open, deny_lstat, (lambda: clock[0])
+        first = owners.open_handoff()
+        clock[0] += 3600
+        still = owners.open_handoff()
+        clock[0] += owners.HANDOFF_MAX_S
+        later = owners.open_handoff()
+    finally:
+        os.open, os.lstat, time.time = real_open, real_lstat, real_time
+    check("no metadata at all: open from the first time that was noticed, for at most 2 h, not from each look",
+          first and first.get("unreadable") and still and later is None, (first, still, later))
     clear()
+    check("once the record is gone, that first failure is forgotten", owners.handoff_record() is None
+          and not os.path.lexists(os.path.join(os.path.dirname(owners.OWNERS_DIR), "handoff-unreadable")))
     target = os.path.join(TD, "elsewhere.json")
     now = time.time()
     json.dump({"v": 1, "id": "h-aaaaaaaaaaaa", "status": "done", "why": "other", "opened": now, "deadline": now + 60},
@@ -441,9 +477,136 @@ def shell_checks():
               r.returncode == 125 and "the user has the computer" in res.get("message", ""), (r.returncode, r.stdout,
                                                                                                r.stderr))
     clear()
+    # Admitted with no handoff open; one opens right after (here: as the claim is written), before the run starts.
+    mark = os.path.join(TD, "sh-ran")
+    rec = {"v": 1, "id": "h-cccccccccccc", "status": "open", "why": "captcha", "say": "x", "opened": now,
+           "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None}
+    code = ("import json, os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import owners, handoff, vm_shell\n"
+            "claim = owners.claim_for_shell\n"
+            "def opening(*a, **kw):\n"
+            "    r = claim(*a, **kw); handoff.write_record(json.loads(os.environ['REC'])); return r\n"
+            "owners.claim_for_shell = opening\n"
+            "sys.exit(vm_shell.main(sys.argv[1:]))\n") % LAB
+    r = subprocess.run([sys.executable, "-c", code, "--transport", "4", "/bin/sh", "-c", f"touch {mark}; cat >/dev/null",
+                        "x", "-c", "true", "--timeout", "5", "--json"], env=dict(e, REC=json.dumps(rec)), capture_output=True, text=True,
+                       timeout=60)
+    res = json.loads(r.stdout or "{}")
+    check("sh: a handoff that opens after the admission check, before the run starts, still stops it (nothing ran)",
+          r.returncode == 125 and "the user has the computer" in res.get("message", "") and not os.path.exists(mark),
+          (r.returncode, r.stdout[-300:], r.stderr[-300:], os.path.exists(mark)))
+    clear()
+
+
+def web_cleanup_checks():
+    print("metacomputer web's cleanup while the user has the computer")
+    clear()
+    import browser_tools
+    sent = []
+    real_guest = browser_tools.guest
+    browser_tools.guest = lambda cmd: sent.append(cmd) or ""
+    d = object.__new__(browser_tools.Driver)
+    d.windows = lambda **kw: []
+    now = time.time()
+    try:
+        handoff.write_record({"v": 1, "id": "h-dddddddddddd", "status": "open", "why": "login", "say": "x",
+                              "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
+        kept = d.close_firefox({"window_id": 0x1a00003, "opened": [0x1a00003]})
+        during = list(sent)
+        handoff.end("h-dddddddddddd", "done", "process")
+        closed = d.close_firefox({"window_id": 0x1a00003, "opened": [0x1a00003]})
+    finally:
+        browser_tools.guest = real_guest
+    check("a web run's Firefox windows aren't closed over SSH while the user has the computer, and are after",
+          kept is False and not during and closed is True and len(sent) == 1 and "wmctrl -ic" in sent[0],
+          (kept, during, closed, sent))
+    clear()
+
+
+VAULT_STUB = """#!/bin/sh
+case "$1" in version) echo '{"build":"test"}'; exit 0 ;; esac
+echo "start $*" >> "$VAULT_LOG"
+sleep "${STUB_FILL_S:-0}"
+echo "sent $*" >> "$VAULT_LOG"
+echo '{"ok":true,"chars":8}'
+"""
+
+
+def fill_checks():
+    print("secrets fill, login and session load; input-reset")
+    clear()
+    fd = os.path.join(TD, "fill")
+    os.makedirs(fd)
+    vault, log = os.path.join(fd, "vault"), os.path.join(fd, "vault.log")
+    open(vault, "w").write(VAULT_STUB)
+    os.chmod(vault, 0o755)
+    lume = os.path.join(fd, "lume")
+    open(lume, "w").write('#!/bin/sh\ncase "$1" in get) echo \'{"name": "fltest", "status": "running"}\' ;; esac\n')
+    os.chmod(lume, 0o755)
+    cfg = os.path.join(fd, "test.env")
+    open(cfg, "w").write(f'VM_NAME=fltest\nBASELINE_NAME=fltest-baseline\nSSH_DIR="{fd}/ssh"\nSSH_PORT=59873\n'
+                         f'VNC_PORT=59874\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{fd}/logs"\nLUME="{lume}"\n')
+    e = env(MCOMP_CONFIG=cfg, MCOMP_VAULT_BIN=vault, MCOMP_VAULT_ALLOW_TEST_BUILD="1", VAULT_LOG=log)
+    for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
+        e.pop(k, None)
+    mc = os.path.join(LAB, "bin", "metacomputer")
+
+    def lines():
+        return read(log).splitlines()
+    r = subprocess.run([mc, "secrets", "fill", "site", "--vm", "othervm", "--field", "password"], env=e,
+                       capture_output=True, text=True, timeout=60)
+    check("a fill naming another VM (--vm) is refused before the vault: its handoff isn't this one's",
+          r.returncode != 0 and "acts on this VM (fltest)" in r.stderr and not lines(), (r.returncode, r.stderr, lines()))
+    r = subprocess.run([mc, "secrets", "fill", "site", "--vm=fltest", "--field", "password"], env=e,
+                       capture_output=True, text=True, timeout=60)
+    check("--vm naming this VM goes ahead", r.returncode == 0 and any("--vm=fltest" in x for x in lines()),
+          (r.returncode, r.stderr, lines()))
+    # A fill that waits (for an approval, say) keeps the computer: a handoff can't open until it's done.
+    open(log, "w").close()
+    p = subprocess.Popen([mc, "secrets", "fill", "site", "--field", "password"], env=dict(e, STUB_FILL_S="3"),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    end = time.time() + 15
+    while not any(x.startswith("start") for x in lines()) and time.time() < end:
+        time.sleep(0.05)
+    h = start("--why", "captcha", "--say", SAY, TEST_OPEN_WAIT="1")
+    time.sleep(1.8)
+    opened_during = owners.open_handoff() is not None and not any(x.startswith("sent") for x in lines())
+    rc_h, o_h, e_h = finish(h, 5) if h.poll() is not None else (None, "", "")
+    p.wait(30)
+    if h.poll() is None:
+        run("cancel", claude=None)
+        finish(h)
+    check("a handoff can't open while a fill is on its way (it waits for the dispatch lock, then refuses)",
+          not opened_during and rc_h == 3 and "still on its way" in e_h and p.returncode == 0,
+          (opened_during, rc_h, e_h[-300:], p.returncode))
+    clear()
+    now = time.time()
+    handoff.write_record({"v": 1, "id": "h-eeeeeeeeeeee", "status": "open", "why": "login", "say": "x",
+                          "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
+    open(log, "w").close()
+    rs = [subprocess.run([mc, "secrets"] + a, env=e, capture_output=True, text=True, timeout=60)
+          for a in (["fill", "site", "--field", "password"], ["login", "site", "--password-selector", "#p"],
+                    ["session", "load", "s"])]
+    check("fill, login and session load stop (exit 4) while the user has the computer; the vault isn't asked",
+          all(x.returncode == 4 and "the user has the computer" in x.stderr for x in rs) and not lines(),
+          ([x.returncode for x in rs], rs[0].stderr[-200:], lines()))
+    r = subprocess.run([mc, "input-reset"], env=e, capture_output=True, text=True, timeout=60)
+    check("input-reset (it acts on the desktop) stops too", r.returncode == 4 and "the user has the computer" in r.stderr,
+          (r.returncode, r.stderr[-300:]))
+    clear()
 
 
 # --- the live view ----------------------------------------------------------------------------------
+# osascript stands in for the pasteboard (lib/liveview.py's PASTEBOARD_JS): "copy" puts stdin on it and prints the
+# new change count; "clear N" empties it only if the count is still N. Every argument is logged (on one line).
+OSASCRIPT = r"""#!/bin/sh
+printf 'osascript %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$STUB/argv.log"
+n=$(cat "$STUB/count" 2>/dev/null || echo 7)
+case "$5" in
+  copy) cat > "$STUB/clip"; n=$((n + 1)); echo "$n" > "$STUB/count"; echo "$n" ;;
+  clear) echo "clear $6 at $n" >> "$STUB/clears.log"
+         if [ "$6" = "$n" ]; then : > "$STUB/clip"; echo $((n + 1)) > "$STUB/count"; echo cleared; else echo kept; fi ;;
+esac
+"""
 STUBS = {
     "pbcopy": 'echo "pbcopy $*" >> "$STUB/argv.log"; cat > "$STUB/clip"',
     "pbpaste": 'echo "pbpaste $*" >> "$STUB/argv.log"; cat "$STUB/clip" 2>/dev/null',
@@ -463,6 +626,8 @@ def view_setup():
         p = os.path.join(stub, name)
         open(p, "w").write("#!/bin/sh\n" + body + "\n")
         os.chmod(p, 0o755)
+    open(os.path.join(stub, "osascript"), "w").write(OSASCRIPT)
+    os.chmod(os.path.join(stub, "osascript"), 0o755)
     lume = os.path.join(stub, "lume")
     open(lume, "w").write('#!/bin/sh\ncase "$1" in get) echo \'{"name": "hvtest", "status": "running"}\' ;;\n'
                           'ls) echo \'[{"name": "hvtest", "status": "running"}]\' ;; esac\n')
@@ -496,7 +661,7 @@ def everything_but_clip(vd):
     out = []
     for root, _, files in os.walk(vd):
         for f in files:
-            if f not in ("clip", "keychain", "vnc-pass", "secret.txt"):
+            if f not in ("clip", "keychain", "vnc-pass", "secret.txt", "count"):
                 out.append(read(os.path.join(root, f)))
     return "\n".join(out)
 
@@ -530,12 +695,27 @@ def view_checks():
     check("the password is in no argument, no output and no log", VNC_PW not in read(argv)
           and VNC_PW not in r.stdout + r.stderr and VNC_PW not in everything_but_clip(vd), read(argv))
     check("after the delay the clipboard is cleared (it still held the password)", wait_file(clip, ""), read(clip))
+    check("the clipboard is set and cleared through the pasteboard's change count (one step each), never "
+          "pbcopy or pbpaste", not any(l.split()[0] in ("pbcopy", "pbpaste") for l in read(argv).splitlines())
+          and "clear 8 at 8" in read(os.path.join(stub, "clears.log")), (read(argv)[-300:],
+                                                                         read(os.path.join(stub, "clears.log"))))
+
+    def user_copies(text):                   # what another app's copy does to the pasteboard
+        n = int(read(os.path.join(stub, "count")) or 7)
+        open(clip, "w").write(text)
+        open(os.path.join(stub, "count"), "w").write(str(n + 1))
     r = view(vd, stub, lume, ssh, "--open", clear=3)
     time.sleep(0.5)
-    open(clip, "w").write("something the user copied")
+    user_copies("something the user copied")
     time.sleep(4)
     check("a clipboard the user changed meanwhile is left alone", r.returncode == 0
           and read(clip) == "something the user copied", read(clip))
+    r = view(vd, stub, lume, ssh, "--open", clear=3)
+    time.sleep(0.5)
+    user_copies(VNC_PW)
+    time.sleep(4)
+    check("the same text copied again by the user is left alone too (the change count decides, not the text)",
+          r.returncode == 0 and read(clip) == VNC_PW, read(clip))
     # The Keychain store: `security ... -w` prints it into the pipe; its arguments name the item, never the password.
     os.remove(os.path.join(ssh, "vnc-pass"))
     open(os.path.join(stub, "keychain"), "w").write("Kc9Pw4Lm\n")
@@ -561,7 +741,8 @@ def view_checks():
           and "came in over SSH" in r.stdout and "ssh -N -L 59871:127.0.0.1:59871" in r.stdout
           and "view --tailnet" in r.stdout and "metacomputer view --open" in r.stdout, (r.stdout, r.stderr))
     check("over SSH: no clipboard, no Screen Sharing, no password read", read(clip) == "untouched"
-          and not any(l.split()[0] in ("pbcopy", "open", "security") for l in read(argv).splitlines()), read(argv))
+          and not any(l.split()[0] in ("pbcopy", "open", "security", "osascript") for l in read(argv).splitlines()),
+          read(argv))
     open(os.path.join(stub, "manager"), "w").write("Background\n")
     r = view(vd, stub, lume, ssh, "--open", store="keychain")
     os.remove(os.path.join(stub, "manager"))
@@ -609,6 +790,8 @@ def main():
         unreadable_checks()
         event_checks()
         shell_checks()
+        web_cleanup_checks()
+        fill_checks()
         view_checks()
     finally:
         clear()

@@ -176,6 +176,18 @@ owners_check() {
   [ $rc = 0 ] || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
 }
 
+# For a command that acts on the desktop from here (not through the hub): this VM's dispatch lock (lib/owners.py,
+# dispatch()) taken shared on descriptor 6, then one last look for a handoff. While the user has the computer
+# (metacomputer handoff) it stops with exit 4; otherwise the lock stays held until this command and what it runs
+# end (they inherit descriptor 6), so no handoff opens meanwhile: opening one takes the lock exclusively.
+handoff_hold() {
+  local f="$RUN_DIR/owners/.dispatch"
+  { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
+    || die "couldn't open this VM's dispatch lock ($f)"
+  exec 6>>"$f" || die "couldn't open this VM's dispatch lock ($f)"
+  "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4
+}
+
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
   local p="$1"
   case "$p" in "~") p="/home/$GUEST_USER" ;; "~/"*) p="/home/$GUEST_USER/${p#\~/}" ;; /*) ;; *) p="/home/$GUEST_USER/$p" ;; esac
@@ -1035,6 +1047,7 @@ do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download sa
 
 do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (Chrome's keyboard)
   need_running
+  [ "${1:-}" = --check ] || handoff_hold   # removing them acts on the desktop: not while the user has it
   local n; n="$(gssh ops "/opt/metacomputer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
   printf '%s\n' "$n" | term_safe
 }
@@ -1572,9 +1585,13 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
     fill|login|session|token)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
-      # While the user has the computer (metacomputer handoff), a fill or a session load waits like any acting call.
+      # While the user has the computer (metacomputer handoff), a fill, login or session load waits like any acting
+      # call: checked under the dispatch lock, which stays held until the vault is done with the request (an approval
+      # can take minutes), so a handoff can't open while it's on its way. That check is this VM's, so --vm must
+      # name this VM; another VM is chosen by its own settings (MCOMP_CONFIG).
       if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
-        "$PY" "$LAB_ROOT/lib/handoff.py" guard || exit 4
+        secrets_vm_is_this "$@" || die "secrets $sub acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
+        handoff_hold
       fi
       if [ "$sub" = session ]; then
         case "${1:-}" in save|load) kind="secrets_session_$1" ;; *) exec "$VAULT_BIN" session "$@" ;; esac
@@ -1596,6 +1613,14 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       return $rc ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_vm_is_this() { # ARGS...: 0 when every --vm among them names this VM (the vault takes the last one)
+  local a want=0
+  for a in "$@"; do
+    if [ "$want" = 1 ]; then [ "$a" = "$VM_NAME" ] || return 1; want=0; continue; fi
+    case "$a" in --vm) want=1 ;; --vm=*) [ "${a#--vm=}" = "$VM_NAME" ] || return 1 ;; esac
+  done
+  [ "$want" = 0 ]
 }
 secrets_metadata() { # the vault's result JSON (stdin) without the token value
   "$PY" -c 'import json,sys

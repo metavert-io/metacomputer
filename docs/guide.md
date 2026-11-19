@@ -697,7 +697,7 @@ running. Command lines are masked.
 - **On the Mac:** `metacomputer view --open`. Screen Sharing opens the live
   view, and the live-view password is on your clipboard: paste it with Cmd+V
   when Screen Sharing asks for a password (it isn't your Mac's password). It's
-  cleared from the clipboard after 45 seconds, if it's still there then
+  cleared from the clipboard after 45 seconds, if nothing else was copied since
   (`VIEW_CLIPBOARD_S` changes that). It's never put in the `vnc://` link,
   on a command line, in a log or in an event.
 - **From another device:** `metacomputer view` prints the SSH tunnel
@@ -714,8 +714,10 @@ The password comes from where your setup keeps it: the login Keychain (item
 `~/.ssh/metacomputer/vnc-pass` on an older one, or your own secret store (see
 `VNC_PASSWORD_STORE` under [Configuration](commands.md#configuration)).
 `metacomputer view` prints the command that reads it, for your own terminal.
-Clipboard managers that keep a history may keep a copy, and with Universal
-Clipboard your other Apple devices nearby can paste it too.
+On the clipboard it's marked concealed and transient, which clipboard managers
+that follow those markers don't keep in their history (one that ignores them
+may), and with Universal Clipboard your other Apple devices nearby can paste it
+too.
 
 ### When Claude needs you: handoffs and the live view
 
@@ -739,11 +741,17 @@ past them. It hands the computer to you and waits:
 
 While a handoff is open, Claude's actions on the desktop wait: the hub refuses
 every acting call, from every session and script, with "Paused: the user has
-the computer", and so do `metacomputer sh` (but `--read-only`), fills from the
-vault, and `stop`, `reset` and the other commands that check for other
-controllers (`--override` still goes ahead on those, as it does for another
-session). Claude can still read the screen. `metacomputer who` and
-`metacomputer handoff status` show it.
+the computer", and so do `metacomputer sh` (but `--read-only`), fills and
+session loads from the vault, `input-reset`, and `stop`, `reset` and the other
+commands that check for other controllers (`--override` still goes ahead on
+those, as it does for another session). The hub's own cleanup waits too, and
+`metacomputer web` leaves its Firefox windows open. Claude can still read the
+screen. `metacomputer who` and `metacomputer handoff status` show it.
+
+Opening a handoff waits for anything already on its way to the VM: a call being
+sent, a shell run starting, or a fill from the vault, which counts from its start
+until it ends, approval included. After 40 seconds it gives up and says why;
+Claude then waits for that to finish and hands over again.
 
 It ends when you run `handoff done` or `handoff cancel`, or at its time limit
 (15 minutes unless Claude chose another, at most 2 hours); then the computer is
