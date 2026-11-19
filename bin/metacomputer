@@ -1623,11 +1623,14 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       fi
       out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
       if [ -n "$inflight" ]; then
-        # Exit 5: the request was withdrawn but the unlock process didn't confirm that it stopped. Keep the dispatch
-        # lock until it has finished what it was doing (settle), so no handoff opens while it could still type.
-        if [ "$rc" != 5 ] || "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1; then
-          rm -f "$inflight"
-        fi
+        # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
+        # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error) or 64 (usage). Anything else (5:
+        # withdrawn without its confirmation; a crash, a signal) may leave it working: keep the dispatch lock while
+        # `settle` waits for it, and the marker if even that doesn't confirm.
+        case "$rc" in
+          0|1|2|3|4|64) rm -f "$inflight" ;;
+          *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
+        esac
       fi
       trap - INT TERM HUP
       printf '%s\n' "$out"

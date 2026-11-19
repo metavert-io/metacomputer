@@ -763,6 +763,19 @@ def fill_checks():
           "it can, then opens", r.returncode == 5 and left and refused and opened and not marks(),
           (r.returncode, left, rc_h, e_h[-200:], opened, marks()))
     clear()
+    # A vault client that dies after sending (a crash, a signal: here exit 139) is no answer either: settle, then
+    # the marker goes; a clean refusal (exit 2, denied) needs none.
+    open(log, "w").close()
+    r = subprocess.run([mc, "secrets", "fill", "site", "--field", "password"], env=dict(e, STUB_FILL_RC="139"),
+                       capture_output=True, text=True, timeout=60)
+    crashed = (r.returncode, "settled" in lines(), marks())
+    open(log, "w").close()
+    r2 = subprocess.run([mc, "secrets", "fill", "site", "--field", "password"], env=dict(e, STUB_FILL_RC="2"),
+                        capture_output=True, text=True, timeout=60)
+    check("a vault client that died (exit 139) is settled before the lock goes; a clean refusal (exit 2) isn't",
+          crashed == (139, True, []) and r2.returncode == 2 and not any(x.startswith("settle") for x in lines())
+          and not marks(), (crashed, r2.returncode, lines(), marks()))
+    clear()
 
 
 # --- the live view ----------------------------------------------------------------------------------

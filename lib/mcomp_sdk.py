@@ -150,12 +150,18 @@ class Connection:
         except OSError:
             pass
         if self.core is not None:
-            end = time.monotonic() + 2
-            while self.core.active_clients() and time.monotonic() < end:
-                time.sleep(0.02)                 # the core lets go of this client (its claim, its event) first
-            waiting = self.core.local_end
-            if keep_for_handoff and waiting is not None:
-                waiting.join(mcp_hub.owners.HANDOFF_MAX_S + 120)
+            # The core lets go of this client (its claim, its event) and ends its own connection under the dispatch
+            # lock once no handoff is open (Hub._end_local_when_free, started by its detach whichever way it goes).
+            done = self.core.local_done
+            if keep_for_handoff:
+                end = time.monotonic() + mcp_hub.owners.HANDOFF_MAX_S + 120
+                settled = time.monotonic() + 5
+                while not done.wait(0.5):
+                    now = time.monotonic()
+                    if now >= end or (now >= settled and not self.core.held_for_handoff()):
+                        break
+            else:
+                done.wait(2)
             self.core.shutdown()
 
 

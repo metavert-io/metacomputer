@@ -953,6 +953,138 @@ def handoff_teardown_checks():
     clear_claims()
 
 
+def handoff_teardown_race_checks():
+    """Teardown decided before a handoff opened is made only under the dispatch lock, so it sees one that opened
+    meanwhile; and the action-log relay can't hold that lock on a VM that stopped reading."""
+    print("a handoff: teardown decided just before it opened, and a VM that stops reading")
+    import handoff
+    clear_claims()
+    now = time.time()
+    rec = {"v": 1, "id": "h-555555555555", "status": "open", "why": "captcha", "say": "x", "opened": now,
+           "deadline": now + 300, "timeout_s": 300, "cwd": "/handoff/project", "claude_pid": None}
+
+    def clear_handoff():
+        try:
+            os.remove(owners.handoff_path())
+        except FileNotFoundError:
+            pass
+
+    # A restart for other settings, decided as no handoff was open (the check said so), with one opening right after.
+    r = Running()
+    handoff.write_record(rec)
+    r.hub.held_for_handoff = lambda: False       # the decision's own look came just before it opened
+    try:
+        other = mcomp_sdk.Hub(env=dict(r.env, MCOMP_COORD_GUARD="off"), timeout=5).connect()
+        other.close()
+    except mcp_hub.HubError:
+        pass
+    time.sleep(2.0)
+    alive = r.t.is_alive()
+    del r.hub.held_for_handoff
+    clear_handoff()
+    check("a restart for other settings that a handoff overtook isn't made (the dispatch lock says it's open)",
+          alive, alive)
+    r.stop()
+    mcp_hub.stop_hub(r.env)
+
+    # Idle exit decided just before a handoff opened.
+    r = Running(idle_s=1)
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    r.hub.idle_for = lambda: 9999.0
+    time.sleep(2.5)
+    kept = r.t.is_alive()
+    del r.hub.idle_for
+    clear_handoff()
+    r.hub.last_activity = time.time() - 100
+    exited = wait_until(lambda: not r.t.is_alive(), 10)
+    check("idle exit decided just before a handoff opened isn't made; it is once the handoff is gone",
+          kept and exited, (kept, exited))
+
+    # A lease's teardown looks under the dispatch lock itself, and is tried again later.
+    r = Running()
+    h = client(r, "sdk")
+    driver = h.call("whoami", {}).structured["driver_pid"]
+    gen, proc = r.hub.up_gen, r.hub.gen_procs.get(r.hub.up_gen)
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    try:
+        r.hub._end_leased_transport(proc, gen, False)
+        deferred = owners.alive(driver) and gen in r.hub._lease_retry
+    except Exception as e:
+        deferred = repr(e)
+    clear_handoff()
+    h.close()
+    r.stop()
+    check("a lease's teardown checks for a handoff under the dispatch lock and is put off (tried again later)",
+          deferred is True, deferred)
+    clear_claims()
+
+    # MCP_HUB=off: the close waits for the core's own teardown, even when its client went inactive before detach ran.
+    off = dict(env(), MCOMP_MCP_HUB="off")
+    conn = mcomp_sdk.open_connection(off, kind="claude-code")
+    replies = []
+    conn.on_message = replies.append
+    conn.start()
+    conn.send({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}})
+    end = time.time() + 10
+    while not replies and time.time() < end:
+        time.sleep(0.05)
+    driver = json.loads(replies[0]["result"]["content"][0]["text"]).get("driver_pid") if replies else None
+    core, real = conn.core, conn.core.detach
+    core.detach = lambda c: (time.sleep(1.0), real(c))[1]          # detach still running after the client is gone
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    t = threading.Thread(target=conn.close, kwargs={"keep_for_handoff": True}, daemon=True)
+    t.start()
+    time.sleep(3.0)
+    waiting = t.is_alive() and driver and owners.alive(driver)
+    clear_handoff()
+    t.join(20)
+    gone = wait_until(lambda: not owners.alive(driver), 10)
+    check("MCP_HUB=off: a graceful close keeps the connection while the user has the computer, even when detach is "
+          "late", waiting and not t.is_alive() and gone, (waiting, t.is_alive(), gone))
+    clear_claims()
+
+    # The relay's write to the VM is bounded: a VM that stops reading can't keep the dispatch lock (or the call).
+    adir = os.path.join(TD, "actions-stall")
+    key = os.path.join(TD, "keys", "alog")
+    renv = dict(env(), MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=adir, MCOMP_ACTION_LOG_KEY=key,
+                MCOMP_RELAY_WRITE_TIMEOUT_S="2")
+    relay = subprocess.Popen([PY, os.path.join(LAB, "lib", "mcp_relay.py"), "/bin/sh", "-c", "sleep 600"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=renv)
+    big = {"jsonrpc": "2.0", "id": "c1.1", "method": "tools/call",
+           "params": {"name": "type_text", "arguments": {"pid": 50, "text": "x" * 400000}}}
+    threading.Thread(target=lambda: (relay.stdin.write((json.dumps(big) + "\n").encode()), relay.stdin.flush()),
+                     daemon=True).start()
+    out = []
+    threading.Thread(target=lambda: out.append(relay.stdout.readline()), daemon=True).start()
+    free = False
+    end = time.time() + 8
+    while time.time() < end and not free:
+        time.sleep(0.2)
+        try:
+            fd = os.open(owners.dispatch_path(), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = time.time() > end - 8 + 1.0           # free after it started writing (not before)
+            except BlockingIOError:
+                pass
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+    time.sleep(1.0)
+    answered = out and b'"isError": true' in out[0] and b"didn't take this call" in out[0]
+    try:
+        relay.wait(5)
+        ended = True
+    except subprocess.TimeoutExpired:
+        relay.kill()
+        relay.wait()
+        ended = False
+    check("the relay lets go of the dispatch lock and fails the call when the VM stops reading (bounded write)",
+          free and answered and ended, (free, out[:1], ended))
+    clear_claims()
+
+
 def lessons_checks():
     print("approved lessons: in the instructions after the habits, never read by a guard")
     r = Running()
@@ -2549,6 +2681,7 @@ def main():
         owner_checks()
         handoff_checks()
         handoff_teardown_checks()
+        handoff_teardown_race_checks()
         chrome_checks()
         bounded_checks()
         actionlog_checks()

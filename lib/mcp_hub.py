@@ -36,6 +36,7 @@ With MCP_HUB=off the same core runs inside each client process instead
   mcp_hub.py refresh-cache [--seed]   connect once and save the driver's handshake
 """
 import collections
+import contextlib
 import ctypes
 import fcntl
 import hashlib
@@ -672,7 +673,8 @@ class Hub:
         self.owner_lock = threading.Lock()
         self.chrome_lock = threading.Lock()
         self.deferred, self.deferred_lock, self.deferred_thread = [], threading.Lock(), None   # end_session later
-        self.local_end = None       # MCP_HUB=off: the connection's end, waiting for a handoff to end
+        self.local_done = threading.Event()   # MCP_HUB=off: set once the core's own teardown has run
+        self._lease_retry = set()   # lease teardowns put off by a handoff: the keeper tries them again
         self.leases = {}            # client id -> its acting calls still running after it disconnected (detach)
         self.lease_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
@@ -835,7 +837,7 @@ class Hub:
                         "code": -32001, "message": "the hub is restarting with this client's settings",
                         "data": {"code": "hub_restarting", "differs": differs}}})
                     self.note(f"settings changed ({', '.join(differs)}); restarting for client pid {client.peer_pid}")
-                    threading.Timer(0.3, self.server.stop, args=("settings changed",)).start()
+                    self.server.stop("settings changed", gated=True)   # under the dispatch lock, if no handoff opened
                 else:
                     client.send({"jsonrpc": "2.0", "id": mid, "error": {
                         "code": -32002, "data": {"code": "hub_settings_differ", "differs": differs},
@@ -886,6 +888,14 @@ class Hub:
         with self.clock:
             if self.clients.pop(client.cid, None) is None:
                 return
+            last_local = self.local and not self.clients
+        try:
+            self._detach(client)
+        finally:
+            if last_local:                  # MCP_HUB=off: this core's connection ends with its one client
+                threading.Thread(target=self._end_local_when_free, daemon=True, name="hub-local-end").start()
+
+    def _detach(self, client):
         if not client.hello or (client.kind == "status" and not client.has_claim):
             return
         self.last_activity = time.time()
@@ -910,13 +920,6 @@ class Hub:
                        f"The Claude Code session in {owners.short(client.cwd)} let go of the virtual computer",
                        data={"bridge_pid": client.peer_pid, "claude_pid": client.claude})
         self.note(f"client {client.cid} detached ({client.close_reason or 'closed'})")
-        if self.local and not self.active_clients():
-            if self.held_for_handoff():
-                self.local_end = threading.Thread(target=self._shutdown_after_handoff, daemon=True,
-                                                  name="hub-local-end")
-                self.local_end.start()
-            else:
-                self.shutdown()
 
     def end_session_later(self, session):
         """End a driver session the hub started for a client that's gone: now, or, while a handoff is open, when it
@@ -955,16 +958,26 @@ class Hub:
                 del self.deferred[:-DEFERRED_MAX]
                 return not self.deferred
 
-    def _shutdown_after_handoff(self):
-        """MCP_HUB=off: the last client left while the user has the computer. End the connection once the handoff has
-        ended and its cleanup is sent (at most the handoff's longest time limit), unless a client came back. A process
-        that exits meanwhile takes its connection with it (documented)."""
-        end = time.monotonic() + owners.HANDOFF_MAX_S + 60
-        while time.monotonic() < end and self.held_for_handoff():
-            time.sleep(1.0)
-            self.flush_deferred()
-        if not self.active_clients():
-            self.shutdown()
+    def _end_local_when_free(self):
+        """MCP_HUB=off: the core's one client has gone. End its driver connection under the dispatch lock (no handoff
+        can open while it ends), once no handoff is open: at most the longest handoff later, then regardless. A process
+        that exits meanwhile takes its connection with it (documented). local_done is set when it has run."""
+        try:
+            end = time.monotonic() + owners.HANDOFF_MAX_S + 60
+            while True:
+                try:
+                    with owners.acting():
+                        self.shutdown()
+                    return
+                except (owners.HandoffOpen, OSError, TimeoutError):
+                    pass
+                if time.monotonic() >= end:
+                    self.shutdown()
+                    return
+                self.flush_deferred()
+                time.sleep(1.0)
+        finally:
+            self.local_done.set()
 
     def _deferred_run(self):
         try:
@@ -1091,9 +1104,28 @@ class Hub:
                     ending.add(gen)
                     self.note(f"calls a disconnected client left running are past {int(LEASE_MAX_S)} s; ending driver "
                               f"connection {gen} (its whole process tree) before letting the computer go")
-                    threading.Thread(target=self._end_transport, args=(proc, True), daemon=True,
+                    hard = age > LEASE_MAX_S + owners.HANDOFF_MAX_S
+                    threading.Thread(target=self._end_leased_transport, args=(proc, gen, hard), daemon=True,
                                      name=f"hub-end-{gen}").start()
+            with self.lease_lock:
+                retry, self._lease_retry = self._lease_retry, set()
+            ending -= retry                          # put off by a handoff: looked at again on the next tick
             ending &= set(self.gen_procs)
+
+    def _end_leased_transport(self, proc, gen, hard):
+        """A lease past its life ends its connection under the dispatch lock, so a handoff can't open while it ends,
+        and not while one is open (the keeper tries again); past the hard bound (the longest handoff on top of the
+        lease's life) it ends regardless."""
+        if not hard:
+            try:
+                with owners.acting():
+                    self._end_transport(proc, True)
+                return
+            except (owners.HandoffOpen, OSError, TimeoutError):
+                with self.lease_lock:
+                    self._lease_retry.add(gen)
+                return
+        self._end_transport(proc, True)
 
     def _end_transport(self, proc, term):
         """End a driver connection's process tree, bounded, once: with term, SIGTERM to its process group first (the
@@ -2844,11 +2876,40 @@ class Server:
         self.why = None
         self.lsock = None
         self.lock_fd = None
+        self.gated_why = None       # a stop the hub decided on itself (a restart for other settings), not yet made
+        self.teardown_hold = None   # the dispatch lock, held from that decision through close()
 
-    def stop(self, why="stopped"):
+    def stop(self, why="stopped", gated=False):
+        """Stop serving. gated: the hub's own decision (a restart for other settings; idle exit goes the same way): the
+        run loop makes it only under the dispatch lock with no handoff open, and keeps the lock through the
+        connection's end; with a handoff open, the restart is dropped and idle exit waits. An explicit stop (a
+        signal: `metacomputer hub stop`, `metacomputer stop`, which look for a handoff themselves) isn't gated."""
+        if gated:
+            self.gated_why = why
+            return
         if not self.stopping:
             self.why = why
             self.stopping = True
+
+    def _gated_stop(self, why):
+        """True once the stop is made: the dispatch lock held (until close()) and no handoff open."""
+        hold = contextlib.ExitStack()
+        try:
+            hold.enter_context(owners.acting())
+        except owners.HandoffOpen:
+            hold.close()
+            if self.gated_why:
+                self.hub.note(f"not stopping ({self.gated_why}): the user has the computer (a handoff)")
+                self.gated_why = None
+            return False
+        except (OSError, TimeoutError):
+            hold.close()
+            return False
+        if self.hub.pending or self.hub.recordings or (why.startswith("idle") and self.hub.idle_for() < self.idle_s):
+            hold.close()                         # it's no longer idle, or a call started meanwhile
+            return False
+        self.teardown_hold, self.why, self.stopping = hold, why, True
+        return True
 
     def run(self):
         private_dir(self.paths["dir"])
@@ -2893,11 +2954,14 @@ class Server:
                       f"{'on' if self.hub.coord_on else 'off'})")
         try:
             while not self.stopping:
+                why = self.gated_why
+                if why and self._gated_stop(why):
+                    break
                 try:
                     conn, _ = s.accept()
                 except socket.timeout:
                     if self.hub.idle_for() >= self.idle_s:
-                        self.stop(f"idle for {int(self.idle_s)} s")
+                        self._gated_stop(f"idle for {int(self.idle_s)} s")
                     continue
                 except OSError:
                     if self.stopping:
@@ -2926,7 +2990,11 @@ class Server:
             pass
         for c in list(self.hub.clients.values()):
             c.close("the hub stopped")
-        self.hub.shutdown()
+        try:
+            self.hub.shutdown()
+        finally:
+            if self.teardown_hold is not None:
+                self.teardown_hold.close()   # the connection has ended: a handoff may open now
         if self.lock_fd is not None:
             try:
                 os.ftruncate(self.lock_fd, 0)

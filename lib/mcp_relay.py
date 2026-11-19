@@ -20,10 +20,12 @@ user has the computer (`metacomputer handoff`) it answers the call with the hub'
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import actionlog  # noqa: E402
@@ -45,6 +47,12 @@ TOO_COMPLEX = "the VM's answer was over the hub's value or depth limit; the hub 
 # The ids the hub gives its requests (mcp_hub.HUB_ID_RE): an answer too complex to parse is recorded for the request
 # its top-level "id" names (wirelimits.top_level_id), the one the hub answers; nested ids never count.
 HUB_ID_RE = re.compile(r"c\d{1,9}\.\d{1,12}|mcomp-hub-\d{1,12}")
+# A message to the VM must be taken within this long (the hub's own WRITE_TIMEOUT_S); one that isn't ends the
+# connection: a VM that stops reading can't hold the relay, nor the dispatch lock an acting call is sent under.
+WRITE_TIMEOUT_S = float(os.environ.get("MCOMP_RELAY_WRITE_TIMEOUT_S") or 30)
+STALLED = ("The virtual computer didn't take this call within {} s, so the action-log relay closed its connection "
+           "(the call wasn't sent whole). Check `metacomputer status`; after a reconnect, element tokens from earlier "
+           "reads are stale.")
 
 
 def session_info():
@@ -82,6 +90,31 @@ def actions_listener():
 def main(cmd):
     log = actionlog.ActionLog(session_info(), listener=actions_listener())
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    up = proc.stdin.fileno()
+    os.set_blocking(up, False)          # writes go through to_vm(), with a deadline
+
+    def to_vm(data):
+        """data to the VM within WRITE_TIMEOUT_S: True, or False when it isn't taken (the connection is then ended)."""
+        view, end = memoryview(data), time.monotonic() + WRITE_TIMEOUT_S
+        while view:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                if not select.select([], [up], [], left)[1]:
+                    continue
+                view = view[os.write(up, view):]
+            except BlockingIOError:
+                continue
+            except (OSError, ValueError):
+                break
+        if not view:
+            return True
+        try:
+            proc.kill()                 # a partial message can't be taken back: this connection is over
+        except OSError:
+            pass
+        return False
     pending = {}            # json(id) -> tool
     clients = {}            # json(id) -> the hub's note on whose call it is
     plock = threading.Lock()
@@ -228,17 +261,13 @@ def main(cmd):
                 if acting:
                     # Signing the record can take a while: look again right before it goes, holding the dispatch
                     # lock across the write, so a handoff that opened meanwhile stops it here.
-                    broken = False
+                    sent = None
                     try:
                         with owners.acting():
-                            try:
-                                proc.stdin.write(line)
-                                proc.stdin.flush()
-                            except (OSError, ValueError):
-                                broken = True
-                        if broken:
-                            break
-                        continue
+                            sent = to_vm(line)   # bounded: the lock is let go of within WRITE_TIMEOUT_S
+                        if sent:
+                            continue
+                        text = STALLED.format(int(WRITE_TIMEOUT_S))
                     except owners.HandoffOpen as e:
                         text = owners.handoff_refusal(e.rec)
                     except (OSError, TimeoutError):
@@ -247,17 +276,18 @@ def main(cmd):
                     with plock:
                         pending.pop(json.dumps(msg["id"]), None)
                     log.result(msg["id"], name, {"error": {"message": text}})
+                    if sent is False:       # the VM stopped taking messages: fail the call, end the connection
+                        to_client((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                            "content": [{"type": "text", "text": text}], "isError": True}}) + "\n").encode())
+                        break
                     refuse(msg["id"], text)
                     continue
-        try:
-            proc.stdin.write(line)
-            proc.stdin.flush()
-        except (BrokenPipeError, OSError):
+        if not to_vm(line):
             break
     client_done.set()
     try:
-        proc.stdin.close()
-    except OSError:
+        proc.stdin.close()          # nothing was ever buffered in it: every write went through to_vm()
+    except (OSError, ValueError):
         pass
     rc = proc.wait()
     t.join(timeout=5)
