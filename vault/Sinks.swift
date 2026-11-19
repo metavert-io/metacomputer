@@ -393,7 +393,7 @@ struct OutEvent {
 
 /// Uses a locked client may record without the vault key (it has none): refusals while locked.
 func clientMayWrite(_ e: [String: Any]) -> Bool {
-    (e["result"] as? String) == "locked" && ["fill", "login", "session_save", "session_load", "token"].contains(e["op"] as? String ?? "")
+    (e["result"] as? String) == "locked" && ["fill", "login", "session_save", "session_load", "token", "renew"].contains(e["op"] as? String ?? "")
 }
 
 /// A notice that stands in for a record that failed its checks. Its id is fixed by the seq and

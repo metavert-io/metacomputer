@@ -615,6 +615,47 @@ def main():
             except subprocess.TimeoutExpired:
                 wp.kill()
             wlog.close()
+
+        # Q5: ...also while the watcher's own cycle is busy: here a health probe that takes 20 s (a stand-in for the real
+        # one, which may take minutes) holds the cycle, and the gateway's log is still watched on its own thread.
+        refill()
+        if os.path.exists(wst):
+            os.remove(wst)
+        slow = os.path.join(TD, "q5-slow-watcher.py")
+        with open(slow, "w") as fh:
+            fh.write("import sys, time\n"
+                     f"sys.path.insert(0, {os.path.join(LAB, 'lib')!r})\n"
+                     "import events\n"
+                     "def probe():\n"
+                     "    time.sleep(20)\n"
+                     "    return {'vm': 'running', 'gateway': True, 'ssh': True, 'recording': {'expected': False},\n"
+                     "            'guest': {'ready': True, 'driver_doctor_rc': 0, 'disk_free_gb': 20}}\n"
+                     "events.probe_health = probe\n"
+                     "sys.exit(events.watch(health=True))\n")
+        wlog = open(os.path.join(TD, "q5-watcher.log"), "w")
+        wp = subprocess.Popen([PY, slow], stdout=wlog, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        try:
+            time.sleep(3)                        # the first cycle is in its 20 s probe now
+            base = len(web.reqs)
+            t_block = time.time()
+            with open(ng, "a") as fh:
+                fh.write(json.dumps({"t": "2026-11-17T10:06:00Z", "event": "blocked", "reason": "lab:private-lan",
+                                     "proto": "tcp", "dst": "10.8.8.8:22"}) + "\n")
+
+            def blocked_got5():
+                return [b["data"] for b in web.bodies()[base:] if b["data"]["type"] == "blocked_connections"]
+            got5 = wait_for(blocked_got5, 15)
+            took = time.time() - t_block
+            check("Q5 while the watcher's cycle is busy (a 20 s health probe), the first blocked connection still reaches "
+                  "the sinks within seconds", got5 and took < 8 and got5[0]["data"].get("first") is True
+                  and wp.poll() is None, (round(took, 1), got5, wp.poll()))
+        finally:
+            wp.terminate()
+            try:
+                wp.wait(30)
+            except subprocess.TimeoutExpired:
+                wp.kill()
+            wlog.close()
         hst = {}
         good = {"vm": "running", "gateway": True, "ssh": True, "guest": {"ready": True, "driver_doctor_rc": 0, "disk_free_gb": 20},
                 "recording": {"expected": False}}

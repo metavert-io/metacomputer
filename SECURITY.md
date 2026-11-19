@@ -827,7 +827,8 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
 - An API secret names its host (`--api-host`), the header it goes in (`--header
   'x-api-key: {value}'`; the default is `Authorization: Bearer {value}`), optionally
   a path prefix (`--api-path-prefix /v1/`) and how long one answer may take
-  (`--answer-timeout 30m`; 10 minutes by default, at most an hour). See "API keys" below.
+  (`--answer-timeout 30m`; 10 minutes by default, at most an hour; the API must still send its first byte, and each
+  next one, within 120 seconds, whatever the limit). See "API keys" below.
 - `--project DIR` (repeatable) limits a secret to Claude Code sessions working in that
   folder or below it ("Who is asking" below).
 - Each secret names the exact sites it may go to (`--origin`, repeatable): scheme,
@@ -1368,10 +1369,13 @@ it expires.
    - gives the whole answer at most 600 seconds from the moment it sends the request (or the
      secret's own `--answer-timeout`, 10 seconds to 3600): a slower one is cancelled and the
      connection to the VM closed (with a 504 that says why if nothing of the answer was sent
-     yet), with nothing more written to it;
-   - ends the answer sooner when its token ends (revoked, expired without a renewal, the
-     vault locking: checked four times a second), or after 120 seconds without a byte from
-     the API;
+     yet), with nothing more written to it. The API must send its first byte, and each next
+     one, within 120 seconds, whatever the limit (`--answer-timeout` doesn't change that);
+   - ends the answer sooner when its token ends: revoked, expired without a renewal, its
+     secret replaced or deleted (the vault file is checked for changes four times a second
+     while an answer streams), or the vault locking. The connection is then shut at once,
+     so a VM that stops reading can't keep a write, and the answer, going: every write to it
+     also gives up at the answer's deadline;
    - with a required audit sink, first records the request (`begin`, use `api`) and
      waits for every required sink to acknowledge that record; otherwise 503;
    - checks again, just before forwarding, that the token is still live (not revoked,
@@ -1392,7 +1396,9 @@ it expires.
    when the vault locks: the proxy and its SSH forwards stop. `tokens` lists the live
    ones (id, secret, VM, time left, requests in words, renewals, the latest it may live
    until, requester). A revoke is answered at once, even while a question waits in the
-   unlock terminal, and an answer the token is still streaming ends with it.
+   unlock terminal, and an answer the token is still streaming ends with it. So is `lock`:
+   every token ends when it's accepted, before the unlock process has stopped the proxy, and
+   nothing is renewed or handed out after it.
 6. **Renewing.** `metacomputer secrets token renew ID [--ttl 15m]` (or `--all` for every
    live token on the VM) moves a live token's expiry later. The token in the VM stays the
    same, so a program running there on it (Claude Code inside the VM, a long job) goes on
@@ -1404,9 +1410,21 @@ it expires.
    - the pinned VM and gateway;
    - the approval: an `each` secret, an unlock with `--confirm each` or an identity
      provider's host asks again (`Keep token 5f2c9a0e for openai (api.openai.com) on VM
-     metacomputer working for 15 more minutes?`). A `NAME session` or `NAME unlock` answer,
-     or an unattended rule for that secret's tokens, covers renewals as it covers new
-     tokens. A `session` secret doesn't ask.
+     metacomputer working for 15 more minutes?`). A `session` secret doesn't ask, when the
+     renewal comes from the token's own requester or from you;
+   - who renews: renewing a token made for another requester asks at the unlock terminal,
+     like an `each` secret, even for a `session` secret. The question says whose token it
+     is. The token's own requester is the Claude Code session it was made for (the same
+     pid and start time, "Who is asking" below). You are a `token renew` run at a terminal:
+     no Claude Code process among its parents, its input and error output a terminal, and
+     the kernel putting it in that terminal's foreground. Anyone else (another Claude Code
+     session, a script, a program in the background) is another requester, and so is
+     everyone for a token that wasn't made for a Claude Code session, except you at your
+     terminal. A `NAME session` or `NAME unlock` answer, or an unattended rule for that
+     secret's tokens, covers a renewal as it covers a new token. Each renewal records who
+     renewed it (`renewer`: `same`, `terminal` or `other`). Like every requester check, this
+     is attribution, not isolation: a program of yours can run in a pseudo-terminal of its
+     own, or pose as a session.
 
    The new expiry is `--ttl` from now (by default, the lifetime the token was made with,
    at most 8 hours), and never:
@@ -1416,8 +1434,10 @@ it expires.
    - earlier than it was: asking for less changes nothing and asks nothing.
 
    What happens while a renewal waits wins: a token revoked, expired or ended by a
-   changed secret meanwhile isn't renewed, and the vault locking ends it like every other.
-   An ended token can't be renewed. Each renewal is recorded (`op` `renew`: the token's
+   changed secret meanwhile isn't renewed, and a lock stops it, and the rest of a
+   `--all` batch, like every other. A renewal that was asked about gets the expiry its
+   question named, never a later one, however long the answer took. An ended token can't
+   be renewed. Each renewal is recorded (`op` `renew`: the token's
    id, its new lifetime in the vault's own seconds, the approval, the requester).
 
 **The proxy account**, like the fill account, is always present on VMs built with this
@@ -1513,7 +1533,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
-| `token_id`, `ttl_s` | a token's id, and on `token` and `renew` the seconds it has to live then (the vault's own numbers) |
+| `token_id`, `ttl_s`, `renewer` | a token's id, and on `token` and `renew` the seconds it has to live then (the vault's own numbers); on `renew`, who renewed it: `same` (its own Claude Code session), `terminal` (you at a terminal) or `other` |
 | `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
 **What each check proves.** Claude Code runs as you, so it can edit any file of yours,
@@ -1932,7 +1952,8 @@ something waits for you:
   which a program running as you controls ("Who is asking"). A client's
   `--on-behalf-pid` claim is shown as unverified and never counts for any of them.
   A rule is a standing approval for whatever can pose as a session in its folder: keep
-  its folder narrow and its time short.
+  its folder narrow and its time short. The same goes for telling a token's own session, or you at a terminal, from
+  another requester when it's renewed: a program of yours can pose as either.
 - **A token is a bearer credential.** Anything that holds it, in the VM or on the Mac
   (the proxy's Mac end is on 127.0.0.1), can call that API as you until it ends, renewals
   included (at most 12 hours from when it was made, never past the unlock). The

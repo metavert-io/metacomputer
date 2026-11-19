@@ -796,8 +796,8 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl (checked every 2 s),
   neither holds), pid in `$RUN_DIR/events-watcher.pid`. Every 30 s: the
   configuration check, the spool, pending announcements, due
   backlogs, held-back summaries, and new lines of `$LOG_DIR/netgw-blocked.jsonl`
-  (destination, port, protocol, reason). Between cycles it stats that log every
-  2 s: the first blocked connection after 5 quiet minutes is sent at once (at
+  (destination, port, protocol, reason). A thread of its own stats that log every
+  2 s, whatever the cycle is doing: the first blocked connection after 5 quiet minutes is sent at once (at
   most 6 an hour); the follow-ups are batched to one event a minute, slowing
   to once an hour for the same destinations. Every 5 min: `metacomputer
   _health` (Lume state, gateway, SSH, `guest-status`, the desktop recording),

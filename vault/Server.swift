@@ -244,6 +244,9 @@ final class UnlockServer {
 
     func remaining() -> Int { max(0, Int(expires.timeIntervalSinceNow)) }
 
+    /// The vault is on its way to locking: `lock`, a signal, or its time is up. Nothing more is handed out or renewed.
+    var stopping: Bool { stopReason != nil || receivedSignal != 0 || Date() >= expires }
+
     // MARK: approvals
 
     func granted(_ kind: String, _ name: String, _ who: Requester) -> String? {
@@ -549,6 +552,7 @@ final class UnlockServer {
         case "revoke": res = opRevoke(req, who, flush: false)
         case "lock":
             stopReason = "locked with `lock` (from \(who.describe))"
+            hub.lockdown()          // every token ends now, before the answer: nothing is renewed or served after it
             say("\(clockTime())  `lock` from \(who.describe)")
             res = ["ok": true, "status": "ok"]
         case "approve":
@@ -973,6 +977,7 @@ final class UnlockServer {
                 }
             }
             sinkTick()
+            hub.refreshIfVaultChanged()     // a secret replaced or deleted meanwhile ends its tokens (and their answers)
         }
         for d in deferred {
             reply(d.fd, ["ok": false, "status": "locked", "reason": "the vault is locked"])
@@ -1071,6 +1076,7 @@ final class UnlockServer {
         case "lock":
             // It only restricts: anyone may. The loop ends after this reply.
             stopReason = "locked with `lock` (from \(who.describe))"
+            hub.lockdown()          // every token ends now, before the answer: nothing is renewed or served after it
             say("\(clockTime())  `lock` from \(who.describe)")
             res = ["ok": true, "status": "ok"]
         default: res = ["ok": false, "status": "error", "reason": "unknown request \(clean(op, max: 40))"]
@@ -1544,12 +1550,16 @@ final class UnlockServer {
             if !o.yes { return finish("token", fields, denied(o.why), who, approval: approval, requestID: o.requestID) }
         }
         if requesterGone() { return finish("token", fields, failed(requesterLeftReason), who, approval: approval) }
+        if stopping {
+            hub.lockdown()
+            return finish("token", fields, lockedResult("the vault is locking"), who, approval: approval)
+        }
         let listener: ProxyListener
         do { listener = try hub.ensure(t) } catch let e as VaultError { return finish("token", fields, failed(e.message), who, approval: approval) } catch {
             return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
         }
         let ttl = max(1, min(ttlAsked, tokenMaxTTL, remaining()))
-        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who.record, secret: s)
+        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who, secret: s)
         let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
         var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
         res = finish("token", fields, res, who, approval: approval)
@@ -1602,9 +1612,10 @@ final class UnlockServer {
 
     /// `token renew ID|--all`: a live token lives longer and the token in the VM stays the same, so a program there
     /// doesn't restart. The same rules as a new token, checked again for each: the secret's --project limit, a required
-    /// audit sink's record first, the pinned gateway, and the approval: an `each` secret, an unlock with --confirm each
-    /// or an identity provider's host asks again (a `NAME session` / `NAME unlock` answer or an unattended rule for its
-    /// tokens covers it, as it covers a new token); a `session` secret doesn't. Never past the unlock, never past
+    /// audit sink's record first, the pinned gateway, and the approval: an `each` secret, an unlock with --confirm each,
+    /// an identity provider's host, or a renewer other than the token's own session or you at a terminal (renewer())
+    /// asks (a `NAME session` / `NAME unlock` answer or an unattended rule for its tokens covers it, as it covers a new
+    /// token); otherwise a `session` secret doesn't. Never past the unlock, never past
     /// tokenMaxLifetime after the token was issued, never shorter than it was. Whatever happened while it waited wins: a
     /// revoke, an expiry, a changed secret or the vault locking, and it isn't renewed. Only the Mac side can renew: the
     /// proxy in the VM has no way to ask.
@@ -1622,6 +1633,8 @@ final class UnlockServer {
             guard let v = (n as? NSNumber)?.intValue, v > 0, v <= tokenMaxTTL else { return finish("renew", fields, failed("bad request"), who, approval: "-") }
             step = v
         }
+        // The client says whether it runs at a terminal (its stdin and stderr); renewOne also asks the kernel.
+        let interactive = req["interactive"] as? Bool == true
         if let p = try? load() { hub.prune(p) }   // a secret replaced or deleted has ended its tokens
         let mine = hub.live().filter { $0.vm == vm && (all || $0.id == id) }
         if !all {
@@ -1630,18 +1643,26 @@ final class UnlockServer {
                 return finish("renew", fields, denied("no live token \(id ?? "") on VM \(vm) (metacomputer secrets tokens): an ended token can't be renewed; get a new one"),
                               who, approval: "-")
             }
-            return renewOne(t, step: step, proposedID: req["request_id"] as? String, who)
+            return renewOne(t, step: step, proposedID: req["request_id"] as? String, interactive: interactive, who)
         }
         say("\(clockTime())  renew every live token on VM \(vm) (\(mine.count)), asked by \(who.describe)")
         var renewed: [[String: Any]] = [], notRenewed: [[String: Any]] = []
         var worst = "ok"
+        var lockedDuring = false
         for t in mine {
             if requesterGone() {
                 notRenewed.append(["token_id": t.id, "name": t.name, "reason": requesterLeftReason])
                 worst = "cancelled"
                 continue
             }
-            let r = renewOne(t, step: step, proposedID: nil, who)
+            // A lock (or the time running out) while an earlier token's question waited stops the whole batch.
+            if stopping {
+                hub.lockdown()
+                notRenewed.append(["token_id": t.id, "name": t.name, "reason": "the vault is locking: not renewed"])
+                lockedDuring = true
+                continue
+            }
+            let r = renewOne(t, step: step, proposedID: nil, interactive: interactive, who)
             if r["status"] as? String == "ok" {
                 var d: [String: Any] = ["token_id": t.id, "name": t.name]
                 for k in ["expires", "expires_in_s", "extended", "renewals", "longest_until"] { if let v = r[k] { d[k] = v } }
@@ -1649,18 +1670,38 @@ final class UnlockServer {
             } else {
                 notRenewed.append(["token_id": t.id, "name": t.name, "reason": r["reason"] as? String ?? "not renewed"])
                 let st = r["status"] as? String ?? "error"
+                if st == "locked" { lockedDuring = true; continue }
                 if worst == "ok" || (worst == "denied" && st != "denied") { worst = st }
             }
         }
         var out: [String: Any] = ["ok": worst == "ok", "status": worst, "vm": vm, "renewed": renewed, "not_renewed": notRenewed]
         if mine.isEmpty { out["reason"] = "no live tokens on VM \(vm)" }
+        // Stopped by a lock: said as a refusal (exit 2) so the lists still reach the requester; every token has ended.
+        if lockedDuring {
+            out["ok"] = false
+            out["status"] = "denied"
+            out["reason"] = "the vault locked during the batch: the rest weren't renewed, and every token has ended"
+        }
         return out
     }
 
+    /// Who renews a token, in the vault's own words: `same`, the Claude Code session it was made for (same pid and start
+    /// time); `terminal`, you at a terminal (no Claude Code process among the client's parents, the client says its stdin
+    /// and stderr are a terminal, and the kernel puts it in a terminal's foreground); `other`, anyone else. The client's
+    /// --on-behalf-pid claim never counts. Attribution, not isolation: a program of yours can pose as either.
+    func renewer(_ t: APIToken, _ who: Requester, interactive: Bool) -> String {
+        if let mine = t.ownerClaudePID, let ms = t.ownerClaudeStart, who.claudePID == mine,
+           let s = who.claudeStart, abs(s - ms) < 0.001 { return "same" }
+        if who.claudePID == nil && interactive && inTerminalForeground(who.clientPID) { return "terminal" }
+        return "other"
+    }
+
     /// One token's renewal (opRenew).
-    func renewOne(_ t: APIToken, step asked: Int?, proposedID: String?, _ who: Requester) -> [String: Any] {
-        let fields: [String: Any] = ["name": t.name, "vm": t.vm, "token_id": t.id]
-        say("\(clockTime())  renew token \(t.id) for \(t.name) on VM \(t.vm), asked by \(who.describe)")
+    func renewOne(_ t: APIToken, step asked: Int?, proposedID: String?, interactive: Bool, _ who: Requester) -> [String: Any] {
+        let by = renewer(t, who, interactive: interactive)
+        let fields: [String: Any] = ["name": t.name, "vm": t.vm, "token_id": t.id, "renewer": by]
+        say("\(clockTime())  renew token \(t.id) for \(t.name) on VM \(t.vm), asked by \(who.describe)"
+            + (by == "other" ? " (made for \(t.ownerDescribe))" : ""))
         let p: Payload
         do { p = try load() } catch let e as VaultError { return finish("renew", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
             return finish("renew", fields, failed("cannot read the vault"), who, approval: "-")
@@ -1703,11 +1744,16 @@ final class UnlockServer {
         var approval = "session"
         var requestID: String? = nil
         let idp = isIdentityProviderHost(originHost(host))
-        if confirmEach || s.approval == "each" || idp {
+        // A token made for another requester asks, like an `each` secret, whatever the secret's policy: a session can't
+        // keep alive a token it wasn't given without you saying so.
+        let otherRequester = by == "other"
+        if confirmEach || s.approval == "each" || idp || otherRequester {
             let minutes = max(1, Int(first.timeIntervalSinceNow) / 60)
-            let o = approve("token", t.name, "  Keep token \(t.id) for \(t.name) (\(host)) on VM \(t.vm) working for \(minutes) more minutes (until \(clockTime(first)))?\n  Asked by \(who.describe).",
+            let whose = otherRequester ? "\n  It was made for \(t.ownerDescribe), not for whoever asks now." : ""
+            let o = approve("token", t.name, "  Keep token \(t.id) for \(t.name) (\(host)) on VM \(t.vm) working for \(minutes) more minutes (until \(clockTime(first)))?\n  Asked by \(who.describe).\(whose)",
                             who, vm: t.vm, site: "https://\(host)", use: "renew",
-                            summary: "renew API token \(t.id) for \(t.name) (\(host)) for \(minutes) more minutes",
+                            summary: "renew API token \(t.id) for \(t.name) (\(host)) for \(minutes) more minutes"
+                                + (otherRequester ? ", made for another requester" : ""),
                             identityProvider: idp, proposedID: proposedID, ruleUse: "token")
             approval = o.how
             requestID = o.requestID
@@ -1719,9 +1765,15 @@ final class UnlockServer {
             _ = hub.revoke(t.id)
             return finish("renew", fields, denied("\(t.name) changed while the renewal waited; get a new token"), who, approval: approval, requestID: requestID)
         }
-        // ...and the token still there, unexpired, at the moment it moves (a revoke or a lock that came first wins).
-        let (until, _) = reach()
-        let (nt, moved, why) = hub.renew(id: t.id, vm: t.vm, until: until)
+        // ...the vault not locking...
+        if stopping {
+            hub.lockdown()
+            return finish("renew", fields, lockedResult("the vault is locking: token \(t.id) isn't renewed"), who, approval: approval,
+                          requestID: requestID)
+        }
+        // ...and the token still there, unexpired, at the moment it moves (a revoke or a lock that came first wins). It moves
+        // to the expiry shown when it was asked for (`first`), never later, however long the answer took.
+        let (nt, moved, why) = hub.renew(id: t.id, vm: t.vm, until: first)
         guard let nt else {
             return finish("renew", fields, denied("token \(t.id) \(why); it isn't renewed. Get a new one if it's still needed (`metacomputer secrets token \(t.name)`)"),
                           who, approval: approval, requestID: requestID)

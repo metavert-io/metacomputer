@@ -199,6 +199,24 @@ CLAIMS = [
     ("SECURITY.md", r"The new expiry is `--ttl` from now \(by default, the lifetime the token was made with, at most (\d+) hours\)",
      lambda m: int(m[1]) * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
      and "let step = min(asked ?? t.ttl, tokenMaxTTL)" in raw(SERVER)),
+    # Who renews: another requester asks, even for a `session` secret; the token's own session and you at a terminal don't
+    ("SECURITY.md", r"renewing a token made for another requester asks at the unlock terminal, like an `each` secret, even for a "
+                    r"`session` secret",
+     lambda m: 'let otherRequester = by == "other"' in raw(SERVER)
+     and "if confirmEach || s.approval == \"each\" || idp || otherRequester {" in raw(SERVER)
+     and 'return "same"' in raw(SERVER) and 'who.claudePID == nil && interactive && inTerminalForeground(who.clientPID)' in raw(SERVER)
+     and "func inTerminalForeground" in raw("vault/Util.swift")),
+    ("SECURITY.md", r"A renewal that was asked about gets the expiry its question named, never a later one",
+     lambda m: "hub.renew(id: t.id, vm: t.vm, until: first)" in raw(SERVER)),
+    ("SECURITY.md", r"So is `lock`: every token ends when it's accepted, before the unlock process has stopped the proxy",
+     lambda m: raw(SERVER).count("hub.lockdown()          // every token ends now") == 2),
+    # The answer: 120 s without a byte, whatever --answer-timeout says; the vault file checked while it streams
+    ("SECURITY.md", r"The API must send its first byte, and each next one, within (\d+) seconds, whatever the limit",
+     lambda m: f"plainSessionConfig(timeout: {m[1]})" in raw(PROXY) and "cfg.timeoutIntervalForResource = limit + 30" in raw(PROXY)),
+    ("SECURITY.md", r"the API must still send its first byte, and each next one, within (\d+) seconds, whatever the limit",
+     lambda m: f"plainSessionConfig(timeout: {m[1]})" in raw(PROXY)),
+    ("SECURITY.md", r"the vault file is checked for changes four times a second while an answer streams",
+     lambda m: "while stream.done.wait(timeout: .now() + 0.25) == .timedOut {\n            refreshIfVaultChanged()" in raw(PROXY)),
     ("SECURITY.md", r"the token \(`mct_` and (\d+) random bits\)",
      lambda m: int(m[1]) == 8 * swift_num(PROXY, r'"mct_" \+ base64url\(randomBytes\((\d+)\)\)')),
     ("SECURITY.md", r"\*\*127\.0\.0\.1:(\d+) inside the VM\*\* \(`SECRETS_PROXY_PORT`\)",

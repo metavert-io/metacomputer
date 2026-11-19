@@ -365,8 +365,8 @@ only, over HTTPS. It never follows a redirect. If an answer contains the key, ev
 compressed, the proxy replaces it with `[key withheld by metacomputer secrets]`.
 
 - A token lasts 15 minutes by default and at most 8 hours, and every token ends when the vault locks. Changing or deleting the secret ends its tokens too, so a token never picks up a new value or a wider scope.
-- `token renew` moves a live token's expiry later under the same rules as a new token (an `each` secret asks you again), never past the unlock and never more than 12 hours after the token was made. A long job in the VM, Claude Code included, keeps working on the same token.
-- One answer may take 10 minutes; `--answer-timeout 30m` on `set` (or `policy NAME --answer-timeout 30m` later) allows longer, up to an hour. An answer still streaming when its token ends is cut off.
+- `token renew` moves a live token's expiry later under the same rules as a new token (an `each` secret asks you again), never past the unlock and never more than 12 hours after the token was made. A long job in the VM, Claude Code included, keeps working on the same token. The Claude Code session a token was made for, and you at your terminal, renew it under the secret's own policy; anyone else (another session, a script) is asked about at your unlock terminal, even for a `session` secret.
+- One answer may take 10 minutes; `--answer-timeout 30m` on `set` (or `policy NAME --answer-timeout 30m` later) allows longer, up to an hour. Whatever the limit, the API must send its first byte, and each next one, within 120 seconds. An answer still streaming when its token ends (revoked, expired, its secret replaced or deleted, the vault locking) is cut off.
 - A token is a bearer credential: whatever holds it can call that API as you until it ends. It can't get the key or reach another host.
 - The key is withheld only as an exact copy; an API that sent it back transformed (in base64, say) would hand it over.
 - The VM needs the proxy account, which VMs built before API tokens don't have. `token` says so; rebuild the VM.

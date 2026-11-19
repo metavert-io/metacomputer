@@ -478,8 +478,8 @@ runs starts it too. Every 30 seconds it:
 - retries backlogs whose backoff has passed;
 - reads new lines of `$LOG_DIR/netgw-blocked.jsonl` (where it got to is kept in its state, so nothing is reported twice, and the log's earlier history is never reported) and sends what's due of the `blocked_connections` events.
 
-Between those cycles it also looks at the gateway's log every 2 seconds (one `stat`; the file is read
-only when it grew). The first blocked connection after 5 minutes with none is sent from there at once,
+On a thread of its own, whatever its cycle is doing (a health probe or a slow sink can take minutes),
+it also looks at the gateway's log every 2 seconds (one `stat`; the file is read only when it grew). The first blocked connection after 5 minutes with none is sent from there at once,
 so it reaches the sinks within a few seconds of the gateway refusing it. Only that first one: the
 follow-ups wait for their batch (at most one event a minute, slowing down for the same destinations),
 the 5 quiet minutes are measured on this Mac's clock from when the watcher last saw a blocked

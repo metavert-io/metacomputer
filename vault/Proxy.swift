@@ -39,6 +39,11 @@ struct APIToken {
     let limit: Date             // issued + the longest lifetime: the latest it may ever expire
     var renewals: Int
     let requester: [String: Any]
+    // Who it was made for, to tell its own Claude Code session (same pid and start time) from another requester when
+    // it's renewed. nil: it wasn't made for a Claude Code session.
+    let ownerClaudePID: pid_t?
+    let ownerClaudeStart: Double?
+    let ownerDescribe: String
     var requests: Int
     // What was approved: the secret's generation and its scope then. A token works only while
     // the secret is still that one (no set --replace or delete since) with that host, header
@@ -165,13 +170,14 @@ final class ProxyHub: @unchecked Sendable {
 
     // MARK: tokens
 
-    func issue(name: String, vm: String, ttl: Int, requester: [String: Any], secret s: Secret) -> (APIToken, String) {
+    func issue(name: String, vm: String, ttl: Int, requester who: Requester, secret s: Secret) -> (APIToken, String) {
         let raw = "mct_" + base64url(randomBytes(24))
         let now = Date()
         let limit = now.addingTimeInterval(maxLifetime)
         let t = APIToken(id: randomBytes(4).map { String(format: "%02x", $0) }.joined(), hash: sha256Hex(Array(raw.utf8)), name: name, vm: vm,
                          issued: now, expires: min(now.addingTimeInterval(TimeInterval(ttl)), limit), ttl: ttl, limit: limit, renewals: 0,
-                         requester: requester, requests: 0,
+                         requester: who.record, ownerClaudePID: who.claudePID, ownerClaudeStart: who.claudeStart,
+                         ownerDescribe: who.describe, requests: 0,
                          gen: secretGen(s), host: s.api_host ?? "", header: s.api_header ?? "", prefix: s.api_path_prefix)
         withLock { tokens[t.hash] = t }
         return (t, raw)
@@ -204,6 +210,34 @@ final class ProxyHub: @unchecked Sendable {
         withLock { !closed && tokens[t.hash].map { $0.expires > Date() } == true }
     }
 
+    /// The vault is locking (`lock` accepted, its time up, a signal): every token ends now, before the unlock process
+    /// gets round to stopping the listeners and tunnels. Answers in flight see it within a quarter of a second.
+    func lockdown() {
+        withLock {
+            closed = true
+            tokens = [:]
+        }
+    }
+
+    // The vault file as last read for pruning: its inode, size and modification time.
+    var vaultStamp: [Int] = []
+    let refreshLock = NSLock()
+
+    /// When the vault file changed (a `set --replace`, a `delete`, any write), read it again and end the tokens whose
+    /// secret is gone or changed, so an answer streaming on one ends too. A stat each time; a read only on a change.
+    func refreshIfVaultChanged() {
+        var st = stat()
+        guard stat(paths.vault, &st) == 0 else { return }
+        let stamp = [Int(st.st_ino), Int(st.st_size), Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec)]
+        guard refreshLock.try() else { return }       // another thread is checking right now
+        defer { refreshLock.unlock() }
+        guard stamp != vaultStamp else { return }
+        vaultStamp = stamp
+        // One that can't be read with this key (a rekey) is the unlock process's to notice: it locks, which ends them all.
+        guard let p = try? loadPayload(paths, key) else { return }
+        prune(p)
+    }
+
     /// Drop tokens whose secret is gone or changed (set --replace, delete); returns them.
     @discardableResult
     func prune(_ p: Payload) -> [APIToken] {
@@ -233,7 +267,7 @@ final class ProxyHub: @unchecked Sendable {
     /// The live token this request presents for NAME on this VM, or nil.
     func check(_ raw: String, name: String, vm: String) -> APIToken? {
         withLock {
-            guard var t = tokens[sha256Hex(Array(raw.utf8))], t.name == name, t.vm == vm, t.expires > Date() else { return nil }
+            guard !closed, var t = tokens[sha256Hex(Array(raw.utf8))], t.name == name, t.vm == vm, t.expires > Date() else { return nil }
             t.requests += 1
             tokens[t.hash] = t
             return t
@@ -545,15 +579,18 @@ final class ProxyHub: @unchecked Sendable {
         let cfg = plainSessionConfig(timeout: 120)
         cfg.timeoutIntervalForResource = limit + 30
         let session = URLSession(configuration: cfg, delegate: stream, delegateQueue: nil)
-        session.dataTask(with: u).resume()
-        // Wait for the answer in short steps: it ends with its token (revoked, expired without a renewal, the vault
-        // locking) or at its time limit, whichever comes first.
+        // Writes to the VM's connection give up at the answer's deadline too: a VM that reads slowly can't stretch it.
         let deadline = Date().addingTimeInterval(limit)
+        stream.writeDeadline = deadline
+        session.dataTask(with: u).resume()
+        // Wait for the answer in short steps: it ends with its token (revoked, expired without a renewal, its secret
+        // replaced or deleted, the vault locking) or at its time limit, whichever comes first.
         var cut: (code: Int, why: String)? = nil
         while stream.done.wait(timeout: .now() + 0.25) == .timedOut {
+            refreshIfVaultChanged()
             if !stillLive(token) {
                 cut = withLock({ closed }) ? (503, "the vault locked during the answer; cancelled")
-                    : (401, "the token ended during the answer (revoked, or expired without a renewal); cancelled")
+                    : (401, "the token ended during the answer (revoked, expired without a renewal, or its secret changed); cancelled")
                 break
             }
             if Date() >= deadline {
@@ -561,13 +598,16 @@ final class ProxyHub: @unchecked Sendable {
                 break
             }
         }
-        session.invalidateAndCancel()
         if let c = cut {
             if stream.failure == nil { stream.failure = c.why }
-            // Give the cancelled task a moment to report its end (didCompleteWithError)...
+            // Say why if nothing of the answer went back yet, then shut the connection: that also ends at once a write
+            // the VM holds up by not reading.
+            stream.cutOff(c.code, c.why)
+            session.invalidateAndCancel()
+            // Give the cancelled task a moment to report its end (didCompleteWithError).
             _ = stream.done.wait(timeout: .now() + 5)
-            // ...and if nothing of the answer went back yet, say why (the cancelled task writes nothing more).
-            if !stream.headSent { stream.writeError(c.code, c.why) }
+        } else {
+            session.invalidateAndCancel()
         }
         // Whatever it does, no callback writes to this connection from here on: the caller
         // closes the descriptor next, and its number could soon belong to another connection.
@@ -800,6 +840,8 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     /// runs late (after a timeout and cancel) can never write to a reused descriptor number.
     let writeLock = NSLock()
     var outputClosed = false
+    /// Writes give up here (the answer's deadline), however slowly the VM reads.
+    var writeDeadline = Date.distantFuture
 
     init(fd: Int32, upstreamHost: String, scheme: String, proxyBase: String, secret: [UInt8]) {
         self.fd = fd
@@ -817,7 +859,25 @@ final class StreamBack: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         writeLock.lock()
         defer { writeLock.unlock() }
         guard !outputClosed else { return false }
-        return writeAll(fd, bytes)
+        return writeAllBefore(fd, bytes, writeDeadline)
+    }
+
+    /// The answer is cut: if nothing of it went back yet and no write is under way, the reason goes back (within a
+    /// second); then the connection is shut both ways, which ends at once a write in progress that the VM holds up by
+    /// not reading, and no write reaches it afterwards.
+    func cutOff(_ code: Int, _ message: String) {
+        if writeLock.try() {
+            if !outputClosed && !headSent {
+                status = code
+                headSent = true
+                let body = Array((jsonLine(["error": message]) + "\n").utf8)
+                _ = writeAllBefore(fd, Array("HTTP/1.1 \(code) \(reason(code))\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body,
+                                   Date().addingTimeInterval(1))
+            }
+            outputClosed = true
+            writeLock.unlock()
+        }
+        Darwin.shutdown(fd, SHUT_RDWR)
     }
 
     /// No write reaches the connection after this returns (one in progress finishes first).

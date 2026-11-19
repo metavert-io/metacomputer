@@ -237,7 +237,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (185 checks, about a minute and a half). It keeps
+`python3 tests/test_events.py` needs no VM (186 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -248,7 +248,7 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the spool, including invalid and oversized files;
 - a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
 - eight processes emitting at once; debounce; `notify`;
-- the watcher's pieces (the first blocked connection after a quiet spell sent at once, also by a running watcher within seconds, the follow-ups batched a minute at a time, floods and repeated quiet-spell reports still limited; health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
+- the watcher's pieces (the first blocked connection after a quiet spell sent at once, also by a running watcher within seconds, even while its cycle is busy with a 20 s health probe, the follow-ups batched a minute at a time, floods and repeated quiet-spell reports still limited; health changes), `events watcher start|stop`, and the bridge's hooks, now in the hub (VM in use, the Chrome guard, repeated bounded-mode refusals, controllers);
 - the relay's `actions` events without arguments or typed text, a failed `actions verify`, and `web open-untrusted` findings by origin only;
 - the bash helper, including a broken config that must not fail the command, and the exit hooks for `metacomputer secrets` ("vault locked") and builds;
 - the review's fixes, one or more checks each:
@@ -826,7 +826,10 @@ update the row with the doc's new wording. What it pins:
   a 32 MB body within 300 s, 600 s for the whole answer by default and a secret's own
   `--answer-timeout` from 10 s to an hour, tokens of at most 8 hours (both where they're asked
   for and where they're made), renewals at most 12 hours after issue (the longest unlock) and
-  stepping by at most 8 hours, 192 random bits, port 18765 in the defaults and the VM's sshd;
+  stepping by at most 8 hours, another requester's renewal asking even for a `session` secret,
+  the expiry a renewal's question named, `lock` ending every token when it's accepted, 120 s
+  without a byte from the API whatever `--answer-timeout` says, the vault checked for changes
+  while an answer streams, 192 random bits, port 18765 in the defaults and the VM's sshd;
 - what recordings show of a filled login: the VM's fill puts a password only into a
   password field and never a username or code into one (secret-fill), and every doc that
   says passwords show as dots says usernames are visible;
@@ -1045,25 +1048,36 @@ pseudo-terminal for the rest of the vault:
   event from the event stream's hook (in a test events folder) and no spool file of
   the wrapper's own.
 
-`python3 tests/test_vault_tokens.py` (49 checks, about a minute and a half) reuses that stub, the
+`python3 tests/test_vault_tokens.py` (59 checks, about two minutes) reuses that stub, the
 stand-in Claude Code and a local plain-HTTP API for renewable tokens and the answer time
-limit, in a throwaway vault:
+limit, in a throwaway vault. "You at a terminal" is the client in a pseudo-terminal of its
+own, started by an orphaned helper so no Claude Code process is among its parents, whoever
+runs the test:
 - **renewing:** `token renew ID` keeps the same token working past its first expiry and
   counts it in `tokens`; an unknown, expired or revoked token isn't renewed; a shorter
   `--ttl` never shortens one; `renew --all`; through `bin/metacomputer`, with
   `secrets_token_renew` in the signed action log;
+- **who renews:** the token's own Claude Code session and you at a terminal renew a
+  `session` secret's token without a question; another session, or a program that isn't
+  Claude Code and isn't at a terminal, is asked about (told whose token it is), refused with
+  no and renewed with yes; the record's `renewer` says which;
 - **approval:** an `each` secret's renewal asks again (no leaves the expiry as it was, yes
   renews it, each step in the audit log), `NAME session` covers the next renewal from that
-  session; `unlock --confirm each` makes a `session` secret's renewal ask; `--project`
+  session; a renewal answered 4 s late gets the expiry its question named; `unlock --confirm each` makes a `session` secret's renewal ask; `--project`
   applies to whoever renews; a required audit sink that's down refuses a renewal, and
   once it's back the renewal's own `begin` record reaches it first;
-- **revocation wins:** `revoke` is answered at once while a question waits (a new token's
-  or a renewal's), and the renewal allowed afterwards is refused;
+- **revocation and lock win:** `revoke` is answered at once while a question waits (a new
+  token's or a renewal's), and the renewal allowed afterwards is refused; `lock` while
+  `renew --all` waits on a question stops the batch (the token after it isn't renewed) and
+  ends every token as soon as it's answered; a renewal's refusal written while locked
+  isn't taken for a forgery (`audit --verify`);
 - **limits:** the longest life after issue (8 s in this test build,
   `MCOMP_VAULT_TEST_TOKEN_MAX_LIFETIME`; 12 hours otherwise) and the unlock's end are
   never passed, and a renewal with nothing left to give says which;
 - **answers in flight:** a revoke cuts a streaming answer at once, a token that expires
-  without a renewal cuts it there, and one renewed in time streams on to the end;
+  without a renewal cuts it there, and one renewed in time streams on to the end; an answer
+  the VM stops reading ends within seconds of a revoke; `set --replace` cuts an answer
+  streaming on one of its tokens with no other request;
   `set --answer-timeout` (its range, api secrets only, `list`, `policy NAME
   --answer-timeout D|default`) and the proxy honouring it per secret;
 - renewal records hold only the vault's own fields; no key, passphrase or token in any
