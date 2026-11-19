@@ -286,8 +286,15 @@ def install_cases(td):
                                    build_version="0.7.2-mcomp.1")
     check("...and so is a build of an earlier release", r.returncode == 0 and NEW_TAG in clone, (clone, (r.stdout + r.stderr)[-300:]))
 
-    # The build's harmless linker warnings ("search path ... not found", from Swift with only the Command Line
-    # Tools) are left out of what install.sh shows; everything else the build prints stays, on its own stream.
+    # What the build prints (the harmless linker warnings "search path ... not found", from Swift with only the
+    # Command Line Tools, among the rest) goes to its log, not the terminal; a build that fails shows the log's end.
+    def build_logs():
+        d = os.path.join(root, "logs")
+        return [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.startswith("build-mcomp-vm-")] if os.path.isdir(d) else []
+
+    def clear_build_logs():
+        for f in build_logs():
+            os.remove(f)
     noise = os.path.join(td, "build-output.sh")
     write(noise, "echo 'Building for production...'\n"
                  "echo \"/tmp/x/Package.swift: lume-product: ld: warning: search path "
@@ -297,19 +304,28 @@ def install_cases(td):
                  "not found\" >&2\n"
                  "echo 'error: something the build says on stderr, kept' >&2\n"
                  "exit \"${FAKE_BUILD_EXIT:-0}\"\n")
+    clear_build_logs()
     home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n",
                                    extra_env={"FAKE_BUILD_OUTPUT": noise})
-    check("mcomp-vm's build: the linker's 'search path ... not found' warnings aren't shown",
-          r.returncode == 0 and "search path" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-500:])
-    check("...every other line is, on its own stream",
-          "Building for production" in r.stdout and "another linker warning, kept" in r.stdout
-          and "something the build says on stderr, kept" in r.stderr, (r.stdout[-300:], r.stderr[-300:]))
+    out = r.stdout + r.stderr
+    logs = build_logs()
+    text = open(logs[0]).read() if len(logs) == 1 else ""
+    check("mcomp-vm's build: nothing it prints is shown, the linker's 'search path ... not found' warnings included",
+          r.returncode == 0 and "search path" not in out and "Building for production" not in out
+          and "another linker warning" not in out and "says on stderr" not in out, out[-500:])
+    check("...every line of it, from both streams, is in its log, which the ✓ line names",
+          "search path" in text and "Building for production" in text and "another linker warning, kept" in text
+          and "something the build says on stderr, kept" in text and "mcomp-vm built" in r.stdout
+          and os.path.basename(logs[0]) in r.stdout, (logs, text[-300:], r.stdout[-300:]))
+    clear_build_logs()
     home, r, clone, lume = install(["--lume=mcomp-vm"] + flags, "BROWSERS=firefox\n",
                                    extra_env={"FAKE_BUILD_OUTPUT": noise, "FAKE_BUILD_EXIT": "3"})
     out = r.stdout + r.stderr
-    check("...and a build that fails still stops the install, once, with its advice",
-          r.returncode != 0 and out.count("install: stopped") == 1 and "mcomp-vm didn't build" in out
-          and "something the build says on stderr, kept" in r.stderr, out[-500:])
+    logs = build_logs()
+    check("...and a build that fails still stops the install (its exit status), once, with its advice, the end of its log and its path",
+          r.returncode == 3 and out.count("install: stopped") == 1 and "mcomp-vm didn't build" in out
+          and "something the build says on stderr, kept" in r.stderr and len(logs) == 1
+          and os.path.basename(logs[0]) in r.stderr, (r.returncode, out[-500:]))
 
     # --uninstall names the runner in use.
     def uninstall(local_env, have):

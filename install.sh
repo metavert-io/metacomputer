@@ -462,22 +462,35 @@ git_net() {
   gh="$(command -v gh)" && "$gh" auth status >/dev/null 2>&1 || return 1
   GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c "credential.helper=!'$gh' auth git-credential" "$@"
 }
-# A Swift build with only Apple's Command Line Tools makes the linker name SDK folders those tools don't
-# have ("ld: warning: search path '/Library/Developer/CommandLineTools/Developer/usr/lib' not found"):
-# harmless, and nothing to act on. Runs COMMAND with exactly those lines left out of its output and its
-# errors (each stays on its own stream, every other line kept as it is) and keeps its exit status.
-without_ld_search_path_warnings() { # COMMAND [ARG...]
-  { "$@" 2>&1 1>&3 3>&- | drop_ld_search_path_warnings >&2 || exit; } 3>&1 | drop_ld_search_path_warnings
+# The builds of mcomp-vm, the host tools and the vault print hundreds of lines (Swift's compiler warnings, Go's
+# downloads) that are harmless and nothing to act on. quiet_build sends all of it, both streams, to a log in this
+# install's logs folder (LOG_DIR, else logs/ in the checkout, where the VM build's logs go) and shows one line for it:
+# then a ✓ naming the log, or, when the build fails, the log's last lines (escaped: lib/termsafe.py) and its path.
+# It returns the command's exit status, so the caller's die or warn is what it was.
+quiet_build() { # NAME WHAT FINISHED COMMAND [ARG...]: the log is build-NAME-TIME.log
+  local name="$1" what="$2" finished="$3" dir="${LOG_DIR:-$ROOT/logs}" log rc=0; shift 3
+  mkdir -p "$dir" 2>/dev/null || dir="${TMPDIR:-/tmp}"
+  log="$dir/build-$name-$(date +%Y%m%d-%H%M%S).log"
+  printf '%s\n' "  $what..."
+  "$@" > "$log" 2>&1 < /dev/null || rc=$?
+  if [ "$rc" = 0 ]; then ok "$finished ${d}(log: $(tildify "$log"))${o}"; return 0; fi
+  { printf '%s\n' "  ${r}the build failed (exit $rc); the end of its log:${o}"
+    tail -n 40 "$log" 2>/dev/null | term_escape | sed 's/^/    /'
+    printf '%s\n' "  the whole log: $(tildify "$log")"; } >&2 || true
+  return "$rc"
 }
-drop_ld_search_path_warnings() { awk "!/ld: warning: search path '[^']*' not found\\r?\$/ { print; fflush() }"; }
+term_escape() { # stdin to stdout, every control character shown as an escape (lib/termsafe.py); without Python, dropped
+  if [ -n "$PY311" ]; then "$PY311" "$ROOT/lib/termsafe.py"; else LC_ALL=C tr -d '\000-\010\013-\037\177'; fi
+}
 # Python 3.11 or later: Homebrew's, or python3 on PATH (Apple's /usr/bin/python3, 3.9, isn't enough; the
-# same order scripts/lib.sh uses). An older one counts as missing, so Homebrew adds python.
+# same order scripts/lib.sh uses). An older one counts as missing, so Homebrew adds python. PY311: the one found.
+PY311=""
 py311_ok() {
   local p
   for p in "${MCOMP_BREW_PYTHON:-/opt/homebrew/bin/python3}" "$(command -v python3 2>/dev/null)"; do
     [ -n "$p" ] && [ -x "$p" ] || continue
     case "$p" in /usr/bin/python3) clt_ok || continue ;; esac
-    "$p" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null && return 0
+    "$p" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null && { PY311="$p"; return 0; }
   done
   return 1
 }
@@ -634,8 +647,9 @@ if [ "$tools_ok" = 1 ]; then
   ok "host tools (cua-netgw, qcow2raw): up to date"
 else
   FAIL_HINT=("The host tools didn't build (scripts/build-tools.sh). They need Go and github.com; run ./install.sh again.")
-  if [ "$FRESH_SOURCES" = 1 ]; then "$ROOT/scripts/build-tools.sh" --rebuild --fresh-source | sed 's/^/  /'
-  else "$ROOT/scripts/build-tools.sh" | sed 's/^/  /'; fi
+  what="building the host tools (cua-netgw, qcow2raw) with Go"; finished="host tools (cua-netgw, qcow2raw): built"
+  if [ "$FRESH_SOURCES" = 1 ]; then quiet_build tools "$what" "$finished" "$ROOT/scripts/build-tools.sh" --rebuild --fresh-source
+  else quiet_build tools "$what" "$finished" "$ROOT/scripts/build-tools.sh"; fi
 fi
 
 # --- 3. Lume ------------------------------------------------------------------------
@@ -655,7 +669,7 @@ if [ "$LUME_CHOICE" = mcomp-vm ]; then
     git_net clone -q -c advice.detachedHead=false --depth 1 --branch "$MCOMP_VM_TAG" "$MCOMP_VM_REPO" "$src" \
       || die "couldn't download mcomp-vm's source ($MCOMP_VM_REPO, $MCOMP_VM_TAG)" "${FAIL_HINT[@]}"
     [ "$(git -C "$src" rev-parse HEAD)" = "$MCOMP_VM_COMMIT" ] || die "mcomp-vm $MCOMP_VM_TAG isn't the pinned commit $MCOMP_VM_COMMIT"
-    without_ld_search_path_warnings "$src/install.sh"
+    quiet_build mcomp-vm "building mcomp-vm $MCOMP_VM_TAG with Swift" "mcomp-vm built" "$src/install.sh"
     # A tag from before the rename (pinned in local.env) installs the runner as lume-secure.
     if [ ! -x "$LUME_BIN" ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
       LUME_BIN="$HOME/.local/bin/lume-secure"
@@ -719,7 +733,8 @@ fi
 # --- 6. the secrets vault -------------------------------------------------------------
 step "Secrets vault (metacomputer secrets)" "$([ "$vault_ok" = 1 ] && echo "about 1 minute, unless it's up to date" || echo "skipped")"
 if [ "$vault_ok" = 1 ]; then
-  "$ROOT/scripts/build-vault.sh" | sed 's/^/  /' \
+  quiet_build vault "building the secrets vault (mcomp-vault) with Swift, unless it's up to date" \
+    "secrets vault: $(tildify "$HOME/.local/share/metacomputer/bin/mcomp-vault") is up to date" "$ROOT/scripts/build-vault.sh" \
     || warn "the vault didn't build; metacomputer secrets won't work until scripts/build-vault.sh succeeds"
 else
   warn "skipped: the vault needs macOS 15 and swiftc (xcode-select --install); then run scripts/build-vault.sh. Everything else works without it"
@@ -730,6 +745,17 @@ step "The virtual computer ($VM_NAME)" "$([ "$build_vm" = 1 ] && echo "about 3 m
 FAIL_HINT=("The VM build stopped; its log is the newest build-*.log in ${LOG_DIR:-$ROOT/logs}."
            "Finished downloads are kept. To delete the unfinished VM and build it again: ./install.sh --replace-vm"
            "If provisioning failed inside the VM, the VM is left running so you can look: metacomputer ssh admin")
+# metacomputer build [--replace]. A build that stops before it begins (no build marker: a refusal, such as settings whose
+# folders are another VM's, or a failed download) makes and deletes no VM, so --replace-vm and the VM to look at aren't
+# offered; its own message says why it stopped.
+vm_build() {
+  local rc=0
+  "$ROOT/bin/metacomputer" build "$@" || rc=$?
+  [ "$rc" != 0 ] || return 0
+  [ -e "${RUN_DIR:-$ROOT/.run}/build-unfinished-$VM_NAME" ] \
+    || FAIL_HINT=("The VM build stopped before it began, so no VM was made or deleted; the reason is above (and in the newest build-*.log in ${LOG_DIR:-$ROOT/logs}).")
+  return "$rc"
+}
 if [ "$BUILD" = no ]; then
   # --no-build: whatever the VM's state, it's left as it is and this run succeeds; say what's there.
   case "$vm_state" in
@@ -749,9 +775,9 @@ else
     built:0:*) ok "already built (and its clean snapshot $BASELINE_NAME)" ;;
     *:1:1)
       warn "--replace-vm: deleting $VM_NAME and $BASELINE_NAME, then building them again"
-      "$ROOT/bin/metacomputer" build --replace
+      vm_build --replace
       report_vm_built ;;
-    none:1:0) "$ROOT/bin/metacomputer" build; report_vm_built ;;
+    none:1:0) vm_build; report_vm_built ;;
     interrupted:*)
       die "an earlier build of $VM_NAME didn't finish ($(sed -n 's/^started=/started /p' "$VM_MARKER" 2>/dev/null | head -1)), so it was left as it is." \
           "To delete it and build it again: ./install.sh --replace-vm (or metacomputer build --replace)." \

@@ -23,7 +23,9 @@ exists only inside a temporary HOME.
 - install.sh: refusals before changing anything (no Homebrew, no Command Line Tools, too little disk where the
   VM or the checkout goes, no network, a VM listing that fails); a stage that fails partway gives its advice;
   the VM: built is left alone, missing is built, and a VM without its clean snapshot (interrupted build or
-  not) or a snapshot without its VM is never replaced without --replace-vm, which --yes doesn't imply.
+  not) or a snapshot without its VM is never replaced without --replace-vm, which --yes doesn't imply; the builds
+  of mcomp-vm, the host tools and the vault keep their output in a log and show its end only when they fail; a VM
+  build that stopped before it began isn't followed by --replace-vm advice.
 - scripts/lib.sh vm_dir / vm_dir_is: the VM's folder comes only from Lume's settings, matched literally and
   exactly once, absolute and existing, and belongs to the VM (its MAC address) before anything is replaced.
 - The live-view password: through stdin only (never a command line or an environment, including ssh's and
@@ -1647,6 +1649,122 @@ def test_build_vault_quiet():
         shutil.rmtree(t, ignore_errors=True)
 
 
+def test_quiet_builds():
+    """The builds of mcomp-vm, the host tools and the vault print hundreds of harmless lines (Swift's warnings, Go's
+    downloads): install.sh sends all of it, both streams, to a log in its logs folder and shows one line, then a ✓
+    naming the log; a build that fails shows the log's last lines (escaped) and its path, and ends as before (mcomp-vm
+    and the tools stop the install with their advice and exit status, the vault only warns)."""
+    noise = ('for i in $(seq 1 80); do echo "/src/Sources/File$i.swift:$i:5: warning: harmless thing $i"; '
+             'echo "warning: on stderr $i" >&2; done\necho "go: downloading example.com/mod v1.0.$RANDOM" >&2\n')
+
+    def logs(root, name):
+        d = os.path.join(root, "logs")
+        return [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.startswith(f"build-{name}-")] if os.path.isdir(d) else []
+
+    def runner_box(exit_code):
+        """install.sh that builds mcomp-vm (the stand-in source's install.sh prints NOISE, then exits EXIT_CODE) and
+        whose host tools are out of date (the stand-in build prints Go's downloads)."""
+        b = Box()
+        root = install_root(b)
+        commit = re.search(r"^MCOMP_VM_COMMIT=(\w+)", open(os.path.join(LAB, "config", "defaults.env")).read(), re.M).group(1)
+        build = ('#!/bin/bash\n' + noise + ('echo "error: the last thing it said, \033]52;c;Zm9v\007 with an escape" >&2\n'
+                                            f'exit {exit_code}\n' if exit_code else
+                                            'mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\\n" > "$HOME/.local/bin/mcomp-vm"\n'
+                                            'chmod +x "$HOME/.local/bin/mcomp-vm"\n'))
+        write(os.path.join(b.t, "mcomp-vm-install.sh"), build, 0o755)
+        write(os.path.join(b.stubs, "git"), STUB_HEAD +
+              f'case "$*" in *clone*) for a; do d="$a"; done; mkdir -p "$d"; cp "{b.t}/mcomp-vm-install.sh" "$d/install.sh" ;;\n'
+              f'  *rev-parse*) echo {commit} ;;\nesac\n', 0o755)
+        write(os.path.join(root, "scripts", "build-tools.sh"),
+              '#!/bin/bash\nif [ "$1" = --check ]; then exit 1; fi\n'
+              'for i in $(seq 1 30); do echo "go: downloading example.com/dep$i v0.$i.0" >&2; done\necho "built the tools"\n', 0o755)
+        return b, root
+
+    b, root = runner_box(0)
+    try:
+        p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude", "--no-build"])
+        term = p.stdout + p.stderr
+        vm_logs, tool_logs = logs(root, "mcomp-vm"), logs(root, "tools")
+        vm_text = open(vm_logs[0]).read() if len(vm_logs) == 1 else ""
+        check("mcomp-vm's build prints 160 warning lines and succeeds: none of them on the terminal, the install goes on",
+              p.returncode == 0 and "warning" not in term and "harmless thing" not in term and "==> Done" in p.stdout, term[-600:])
+        check("...its log in the install's logs folder has every line, from both streams",
+              all(f"warning: harmless thing {i}\n" in vm_text and f"warning: on stderr {i}\n" in vm_text for i in range(1, 81)),
+              (vm_logs, vm_text[:200]))
+        check("...one progress line, then a ✓ line naming the log",
+              "building mcomp-vm" in p.stdout and re.search(r"✓.* mcomp-vm built .*build-mcomp-vm-\d{8}-\d{6}\.log", p.stdout),
+              p.stdout[-800:])
+        check("the host tools' build: Go's 'go: downloading' lines only in its log, and a ✓ line naming it",
+              "go: downloading" not in term and len(tool_logs) == 1 and open(tool_logs[0]).read().count("go: downloading") == 30
+              and re.search(r"✓.*host tools .*build-tools-\d{8}-\d{6}\.log", p.stdout), (tool_logs, p.stdout[-600:]))
+    finally:
+        b.close()
+    b, root = runner_box(3)
+    try:
+        p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude", "--no-build"])
+        err = p.stderr
+        vm_logs = logs(root, "mcomp-vm")
+        check("mcomp-vm's build fails: install stops with the build's exit status (3), naming the stage and its advice",
+              p.returncode == 3 and 'stopped in "Lume, the VM runner' in err and "mcomp-vm didn't build" in err
+              and "--lume=standard" in err, (p.returncode, err[-600:]))
+        check("...after the end of the build's log (its last lines, not the first) and the log's path",
+              "error: the last thing it said" in err and "warning: on stderr 80" in err and "harmless thing 1\n" not in err
+              and len(vm_logs) == 1 and os.path.basename(vm_logs[0]) in err,
+              (vm_logs, err[-900:]))
+        check("...the log's lines escaped on the terminal (no raw escape sequence), the log itself exact",
+              "\033]52" not in p.stdout + err and "\\x1b]52" in err and "\033]52" in open(vm_logs[0]).read(), err[-400:])
+        check("...in that order: the log's end, its path, then the install's own advice",
+              err.find("the last thing it said") < err.find("the whole log:") < err.find("install: stopped"), err[-600:])
+    finally:
+        b.close()
+    # The vault: a build that warns a lot and succeeds, then one that fails (the install only warns and goes on).
+    for fails in (False, True):
+        b, root = vm_box("mctest,mctest-baseline")
+        try:
+            write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/bash\n" + noise
+                  + ("echo 'error: the vault compile failed' >&2\nexit 1\n" if fails else "echo 'installed the vault'\n"), 0o755)
+            p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude"])
+            term = p.stdout + p.stderr
+            v = logs(root, "vault")
+            text = open(v[0]).read() if len(v) == 1 else ""
+            if not fails:
+                check("the vault's build prints 160 warning lines and succeeds: none on the terminal, all in its log, ✓ naming it",
+                      p.returncode == 0 and "warning" not in term and text.count("warning:") == 160 and "installed the vault" in text
+                      and re.search(r"✓.*secrets vault.*build-vault-\d{8}-\d{6}\.log", p.stdout), (term[-600:], v))
+            else:
+                check("the vault's build fails: only a warning (exit 0, the install goes on to the VM and Done), "
+                      "after the end of its log and its path",
+                      p.returncode == 0 and "the vault didn't build" in p.stdout and "error: the vault compile failed" in p.stderr
+                      and len(v) == 1 and os.path.basename(v[0]) in p.stderr and "harmless thing 1\n" not in term
+                      and "already built" in p.stdout and "==> Done" in p.stdout, (p.returncode, term[-700:]))
+        finally:
+            b.close()
+
+
+def test_vm_build_footer():
+    """The VM build's advice: --replace-vm and the VM left to look at only when the build began (its marker is there);
+    a build that stopped before it began (a refusal, such as settings whose folders are another VM's) made and deleted
+    no VM, so its advice says that instead."""
+    for began in (False, True):
+        b, root = vm_box("")
+        try:
+            marker = os.path.join(root, ".run", "build-unfinished-mctest")
+            write(os.path.join(root, "bin", "metacomputer"),
+                  '#!/bin/bash\necho "not building mctest: refused by the test" >&2\n'
+                  + (f'mkdir -p "{os.path.dirname(marker)}"; echo started=1 > "{marker}"\n' if began else "") + "exit 1\n", 0o755)
+            p, _ = b.run([os.path.join(root, "install.sh"), "--yes", "--no-claude"])
+            err = p.stderr
+            if began:
+                check("a VM build that began and failed: the advice names --replace-vm and the VM left running to look at",
+                      p.returncode == 1 and "--replace-vm" in err and "metacomputer ssh admin" in err, err[-500:])
+            else:
+                check("a VM build that stopped before it began: exit 1 as before, no --replace-vm or VM to look at, says no VM was made",
+                      p.returncode == 1 and "--replace-vm" not in err and "provisioning" not in err
+                      and "no VM was made or deleted" in err and "run ./install.sh again" in err, err[-500:])
+        finally:
+            b.close()
+
+
 def test_no_machine_paths():
     """Nothing in the installers or the defaults names one person's machine or tools."""
     bad = re.compile(r"/Users/[a-z]|secret exec|cua-lab/VNC|taild[0-9a-f]{4}|/Volumes/Elements")
@@ -1684,6 +1802,8 @@ test_vnc_password()
 test_vnc_real_keychain()
 test_setup_in_checkout()
 test_build_vault_quiet()
+test_quiet_builds()
+test_vm_build_footer()
 test_no_machine_paths()
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)
