@@ -34,7 +34,9 @@ folders under DEST. The VM is untrusted, so:
 - the copy stops, keeping the files that arrived whole, when the files pass
   MCOMP_IMPORT_MAX_BYTES (bin/metacomputer passes VM_DISK_BYTES: a VM can't hold
   more real files than its disk), when the Mac's free space at DEST would fall
-  below MCOMP_IMPORT_MIN_FREE_GB (IMPORT_MIN_FREE_GB, default 10), after
+  below MCOMP_IMPORT_MIN_FREE_GB (IMPORT_MIN_FREE_GB, default 10) plus the
+  space other operations have claimed (lib/storage.py's claims: a recording
+  being converted to MP4, an S3 sync), after
   MAX_MEMBERS entries, or after MAX_OBJECTS files and folders made (folders a
   path implies count too), so a VM can't fill the Mac's disk or memory;
 - the stream is read as plain tar only (the VM's `tar -cf -`; nothing is
@@ -231,10 +233,22 @@ def free_bytes(fd):
     return st.f_bavail * st.f_frsize
 
 
-def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None):
+def claimed_space(path):
+    """Bytes other live operations hold on the disk holding path (lib/storage.py's free-space claims: a recording
+    being converted to MP4, an S3 sync), which every copy from the VM counts against the reserve too. 0 when the
+    claims can't be read (the reserve itself still holds)."""
+    try:
+        import storage
+        return storage.claims_on(storage.space_pool(path))
+    except Exception:  # noqa: BLE001 - the reserve itself still holds
+        return 0
+
+
+def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None, claimed=lambda: 0):
     """Unpack the tar stream into the staging folder: regular files and folders only, and with only (a set of
     names) only entries under those top-level names. Raises ImportLimit when the stream passes max_bytes,
-    MAX_MEMBERS or MAX_OBJECTS, or when the free space would fall below min_free."""
+    MAX_MEMBERS or MAX_OBJECTS, or when the free space would fall below min_free plus what claimed() says other
+    operations hold."""
     members = 0
     budget = {"since_check": FREE_CHECK_EVERY}       # check before the first byte or folder
 
@@ -243,8 +257,10 @@ def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None):
         budget["since_check"] += n
         if budget["since_check"] >= FREE_CHECK_EVERY:
             budget["since_check"] = 0
-            if free_bytes(stage_fd) - FREE_CHECK_EVERY < min_free:
-                raise ImportLimit(f"the Mac would have less than {min_free / GIB:.0f} GiB free (IMPORT_MIN_FREE_GB)")
+            held = claimed()
+            if free_bytes(stage_fd) - FREE_CHECK_EVERY < min_free + held:
+                raise ImportLimit(f"the Mac would have less than {min_free / GIB:.0f} GiB free (IMPORT_MIN_FREE_GB)"
+                                  + (" beside the space other operations have claimed" if held else ""))
 
     def made():
         report.objects += 1
@@ -445,7 +461,7 @@ def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None, only=None):
         try:
             failure = None
             try:
-                unpack(capped, stage_fd, report, max_bytes, min_free, only)
+                unpack(capped, stage_fd, report, max_bytes, min_free, only, claimed=lambda: claimed_space(dest))
             except (tarfile.TarError, OSError, EOFError, ImportLimit, ValueError, RecursionError) as e:
                 failure = e         # what arrived whole before the stream broke is still kept
             sweep(stage_fd, "", report)

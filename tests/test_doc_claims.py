@@ -310,6 +310,34 @@ def stream_keeps_reserve():
             and "IMPORT_MIN_FREE_GB" in raw("lib/recording.py") and callable(recording.cmd_save))
 
 
+def finalize_keeps_reserve():
+    """recording.py finalize claims its space (lib/storage.py's claims) before ffmpeg starts and watches the free space
+    and the MP4's size while it runs; every copy from the VM and the stream count claims against the reserve."""
+    import recording
+    import inspect
+    fin, save = inspect.getsource(recording.cmd_finalize), inspect.getsource(recording.cmd_save)
+    gi = raw("lib/guest_import.py")
+    return (recording.FINALIZE_GUARD == 512 << 20 and recording.FINALIZE_POLL == 0.2
+            and "space_claim(folder, limit + 2 * FINALIZE_GUARD, min_free" in fin
+            and "free_bytes(folder) < min_free + FINALIZE_GUARD" in fin and "os.killpg(proc.pid, signal.SIGKILL)" in fin
+            and "os.unlink(a.mp4)" in fin and "min_free + claims_by_others(a.out)" in save
+            and "claimed=lambda: claimed_space(dest)" in gi and "min_free + held" in gi
+            and "storage.claims_on(storage.space_pool(path))" in gi)
+
+
+def recording_deadlines():
+    """The deadlines SECURITY.md lists for what a recording asks of the VM, and the stream without one."""
+    rec, sync = function_text("do_record"), function_text("do_task_sync")
+    return ('local wait_s="${MCOMP_RECORD_WAIT:-60}"' in rec
+            and 'run_until $((SECONDS + wait_s)) gssh ops "/opt/metacomputer/bin/desktop-record start' in rec
+            and "run_until $((SECONDS + ${MCOMP_RECORD_WAIT:-60})) gssh ops /opt/metacomputer/bin/desktop-record status" in rec
+            and '--idle-timeout "${MCOMP_RECORD_WAIT:-60}" --timeout 3600' in function_text("vm_copy_video")
+            and "--only-top \"$wantf\" --timeout 300" in sync
+            and 'run_until $((SECONDS + 3600)) gssh ops "test -d' in function_text("do_task")
+            and "run_until $((SECONDS + 3600)) gssh ops 'if cd ~/metacomputer-runs" in function_text("do_recordings")
+            and "--timeout" not in function_text("do_record_pipe"))
+
+
 def task_finish_keeps_turns():
     """task start starts the copier; it copies every turn but the newest, once; task finish keeps those copies."""
     sync = function_text("do_task_sync")
@@ -582,6 +610,22 @@ CLAIMS = [
     ("SECURITY.md", r"Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold",
      lambda m: '--max-bytes "${VM_DISK_BYTES:-0}"' in function_text("vm_copy_video")
      and '--min-free-gb "${IMPORT_MIN_FREE_GB:-' in function_text("vm_copy_video")),
+    ("SECURITY.md", r"or hold it open: it ends after a minute without a byte, or an hour in all, keeping what arrived",
+     lambda m: recording_deadlines()),
+    ("SECURITY.md", r"and is stopped if the free space nears the reserve while it's made \(either way the `\.mkv` is kept",
+     lambda m: finalize_keeps_reserve()),
+    ("SECURITY.md", r"that space is claimed while ffmpeg writes it: every copy from the VM \(the task copier's included\), "
+                    r"every stream and every S3 sync counts the claim against the reserve",
+     lambda m: finalize_keeps_reserve() and "claims_on(pool)" in raw("lib/storage.py")),
+    ("SECURITY.md", r"ffmpeg is watched as well \(five times a second\): if the free space comes within (\d+) MiB of the "
+                    r"reserve anyway",
+     lambda m: int(m[1]) << 20 == __import__("recording").FINALIZE_GUARD and finalize_keeps_reserve()),
+    ("SECURITY.md", r"Everything else a recording asks of the VM has a deadline too: `record start` and `record status` in "
+                    r"guest mode \(a minute\), the guest-mode copy at `record stop` \(a minute without a byte, or an hour "
+                    r"in all\), the task copier's copies \(5 minutes\), and `task finish` and `recordings --sync` \(an hour "
+                    r"each\)",
+     lambda m: recording_deadlines()),
+    ("SECURITY.md", r"The one exchange without a deadline is the stream itself", lambda m: recording_deadlines()),
     ("SECURITY.md", r"from the VM's answer it takes only those folders \(anything else the VM slips in is left out\) and "
                     r"never replaces a file the Mac already has, with a file or a folder",
      lambda m: task_finish_keeps_turns()[0] and kept_any_spelling()),

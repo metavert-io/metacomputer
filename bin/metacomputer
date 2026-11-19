@@ -204,7 +204,8 @@ guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
 
 abs_host_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$PWD/$1" ;; esac; }
 # A tar stream from the VM on stdin -> plain files and folders under DEST (lib/guest_import.py).
-# Stops past the VM's disk size or when the Mac would have less than IMPORT_MIN_FREE_GB free.
+# Stops past the VM's disk size or when the Mac would have less than IMPORT_MIN_FREE_GB free beside the space
+# other operations have claimed (lib/storage.py's claims: a recording being converted to MP4, an S3 sync).
 guest_import() { # DEST [--quiet]
   MCOMP_IMPORT_MAX_BYTES="${VM_DISK_BYTES:-}" MCOMP_IMPORT_MIN_FREE_GB="${IMPORT_MIN_FREE_GB:-10}" \
     "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"
@@ -399,7 +400,7 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
       # In a subshell: a recording that can't be saved ends with die, which must not end the stop too.
       ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
     fi
-    gssh ops 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
+    vm_answer 64 15 'pgrep -x ffmpeg >/dev/null && echo busy' 2>/dev/null | grep -q busy && warn "a recording was running; stop it first with 'metacomputer record stop' to keep it"
     vm_stop "$VM_NAME" "$force"
     storage_release
     emit_event lifecycle stopped info "The virtual computer $VM_NAME stopped" "" "forced=$([ -n "$force" ] && echo yes || echo no)"
@@ -858,11 +859,14 @@ vm_answer() { # MAX_BYTES TIMEOUT_S REMOTE_COMMAND...
   ssh_base ops
   "$PY" "$LAB_ROOT/lib/recording.py" capture --max-bytes "$max" --timeout "$t" -- ssh -T "${SSH_ARGS[@]}" "$@"
 }
-# A video file in the VM (RECORD_TO=guest) to a new file on the Mac, held to what the VM's disk can hold and to
-# the free-space reserve (lib/recording.py save). Its stderr arrives escaped and capped.
+# A video file in the VM (RECORD_TO=guest) to a new file on the Mac, held to what the VM's disk can hold, to the
+# free-space reserve (beside what other operations have claimed) and to deadlines: the VM going quiet for
+# MCOMP_RECORD_WAIT seconds (60), or an hour in all, ends it (lib/recording.py save). Its stderr arrives escaped
+# and capped.
 vm_copy_video() { # GUEST_PATH OUT
   ssh_base ops
-  "$PY" "$LAB_ROOT/lib/recording.py" save "$2" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" --max-bytes "${VM_DISK_BYTES:-0}" \
+  "$PY" "$LAB_ROOT/lib/recording.py" save "$2" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" \
+    --max-bytes "${VM_DISK_BYTES:-0}" --idle-timeout "${MCOMP_RECORD_WAIT:-60}" --timeout 3600 \
     -- ssh -T "${SSH_ARGS[@]}" "cat '$1'" 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
 }
 
@@ -926,9 +930,13 @@ do_record() {
         # anything running there can delete (a script that wiped ~ mid-recording took one with it).
         warn "RECORD_TO=guest: this video stays in the VM until 'metacomputer record stop' copies it, so anything running there can delete it first (wiping ~ does). For a task you don't trust, use RECORD_TO=host, the default: it streams to this Mac as it records."
         # The recorder's words go out escaped as they come (term_safe caps them on a terminal), never held in a
-        # variable: a recorder that writes without end can't grow this shell. Its own exit status decides.
-        gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio" | term_safe
-        [ "${PIPESTATUS[0]}" = 0 ] || die "could not start recording"
+        # variable: a recorder that writes without end can't grow this shell. Its own exit status decides, within
+        # MCOMP_RECORD_WAIT seconds (60): a VM that never answers is cut off (run_until).
+        local wait_s="${MCOMP_RECORD_WAIT:-60}" src
+        run_until $((SECONDS + wait_s)) gssh ops "/opt/metacomputer/bin/desktop-record start '$name' $fps $quality $audio" | term_safe
+        src="${PIPESTATUS[0]}"
+        [ "$src" != 124 ] || die "could not start recording: the VM's recorder didn't answer within $wait_s s (if it started anyway, metacomputer record stop copies what it made)"
+        [ "$src" = 0 ] || die "could not start recording"
         printf 'name=%s\nmode=guest\ndir=%s\nstarted=%s\nfps=%s\nquality=%s\n' \
           "$name" "$dir" "$started" "$fps" "$quality" > "$state"
         ok "recording the guest desktop as '$name' (${fps} fps, $quality) — run your task, then: metacomputer record stop"
@@ -1000,7 +1008,9 @@ do_record() {
       if [ -s "$state" ]; then
         echo "recording $(sed -n 's/^name=//p' "$state") ($(sed -n 's/^mode=//p' "$state"), to $(sed -n 's/^dir=//p' "$state"))"
       else
-        gssh ops /opt/metacomputer/bin/desktop-record status | term_safe
+        # Streamed escaped as it comes, within MCOMP_RECORD_WAIT seconds (60): a VM that never answers is cut off.
+        run_until $((SECONDS + ${MCOMP_RECORD_WAIT:-60})) gssh ops /opt/metacomputer/bin/desktop-record status | term_safe
+        [ "${PIPESTATUS[0]}" != 124 ] || die "the VM's recorder didn't answer within ${MCOMP_RECORD_WAIT:-60} s"
       fi ;;
     moments)
       local f="${1:-}"; [ -n "$f" ] || die "usage: metacomputer record moments RECORDING.mp4|.json"
@@ -1014,6 +1024,7 @@ do_record_pipe() { # NAME FPS QUALITY OUT.mkv [AUDIO] (internal: the detached ha
   # lib/recording.py save writes the stream to OUT as it arrives (a new file, never through a link) and ends it
   # before this Mac's free space falls below IMPORT_MIN_FREE_GB, since the VM decides how much it sends. It runs
   # ssh itself and ends it when it's stopped. The VM's stderr goes to the stream log escaped and capped (1 MB).
+  # Space other operations have claimed (a recording being converted to MP4, an S3 sync) counts against the reserve.
   exec "$PY" "$LAB_ROOT/lib/recording.py" save "$4" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" -- \
     ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" \
     2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
@@ -1029,7 +1040,8 @@ do_recordings() {
     local dest="$LAB_ROOT/recordings/guest-runs"; mkdir -p "$dest"
     # Plain files and folders only: links and special files from the VM are left out (lib/guest_import.py).
     # No ~/metacomputer-runs (a wiped home) is nothing to copy, not a failure: an empty archive and a note.
-    gssh ops 'if cd ~/metacomputer-runs 2>/dev/null; then tar -cf - . 2>/dev/null; else echo "no ~/metacomputer-runs in the VM: nothing to copy" >&2; tar -cf - -T /dev/null; fi' | guest_import "$dest" \
+    # The copy has a deadline (an hour): a VM that stops sending can't hold up reset, stop or checkpoint.
+    run_until $((SECONDS + 3600)) gssh ops 'if cd ~/metacomputer-runs 2>/dev/null; then tar -cf - . 2>/dev/null; else echo "no ~/metacomputer-runs in the VM: nothing to copy" >&2; tar -cf - -T /dev/null; fi' | guest_import "$dest" \
       || { warn "could not sync ~/metacomputer-runs from the guest"; return 1; }
     ok "guest ~/metacomputer-runs synced to recordings/guest-runs/"
   fi
@@ -1354,8 +1366,9 @@ EOF
         # contact sheets below can't be written through a link it planted (lib/guest_import.py).
         # Recording turns copied while the task ran stay as they were copied: the VM can't swap them now,
         # and any it changed since are named (--keep-existing), and counted for the event below.
+        # The copy has a deadline (an hour): a VM that stops sending can't hold up task finish.
         export MCOMP_IMPORT_KEEP_REPORT="$keeprep"
-        gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." \
+        run_until $((SECONDS + 3600)) gssh ops "test -d '$guest' && tar -C '$guest' -cf - ." \
           | guest_import "$host/guest" --quiet --keep-existing recording/turn- \
           || { warn "nothing (or not everything) could be copied from $guest"; copied=no; }
         unset MCOMP_IMPORT_KEEP_REPORT

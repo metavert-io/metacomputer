@@ -242,7 +242,17 @@ VM, and checks:
   `vm_answer` with a VM that floods keeps nothing; `record start`/`stop` read the
   recorder only through it; `recording.py finalize` converts only when the copy fits
   above the reserve (else the `.mkv` is kept, exit 3) and never over an existing file;
-  `save --max-bytes` stops at its limit;
+  `save --max-bytes` stops at its limit, and `--idle-timeout` and `--timeout` cut off a
+  VM that goes quiet or drips bytes, keeping what arrived; in guest mode, `record
+  start`, `record status` and the copy at `record stop` end at their deadlines with a
+  VM that never answers or goes quiet;
+- finalize under pressure, with a stand-in ffmpeg that ignores `-fs`: free space that
+  falls while it writes (stubbed) stops it before the reserve (exit 3); a TERM stops
+  it; an MP4 past its limit, or one that ends at it, isn't kept; each time the partial
+  MP4 is deleted and the `.mkv` kept, with the reason given. Its space claim exists
+  while ffmpeg runs and is what a copy sees; another operation's live claim leaves the
+  conversion no room (exit 3) and stops a `guest_import` copy and a stream, which go
+  through once it's gone;
 - a recording whose VM went away: `restore_from` and `stop` with the VM already off
   still save what was streamed, and `record start` saves a stale streamed recording
   first instead of refusing.
@@ -1095,6 +1105,9 @@ update the row with the doc's new wording. What it pins:
   within it; guest copies held to the reserve and `VM_DISK_BYTES`; the warning for
   `RECORD_TO=guest`; `record stop` cutting the stream at once when the VM can't be
   reached; the VM's answers read through `vm_answer` (a byte limit and a deadline);
+  finalize's space claim and watchdog (512 MiB, five times a second) and every copy
+  counting claims; the deadlines SECURITY.md lists (guest-mode start, status and copy,
+  the copier, `task finish`, `recordings --sync`) and the stream without one;
   the task copier every `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest,
   once, taking only the folders it asked for and keeping what the Mac has; `task
   finish` keeping those copies under any spelling (`--keep-existing`); `stop`,

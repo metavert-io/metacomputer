@@ -776,7 +776,8 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    listings, after an hour without a new turn, or after a day. `task start
    --no-sync` starts none (`web` checks without `--record`, which never call
    `task finish`). `task finish` then copies the folder with
-   `guest_import --keep-existing recording/turn-`: a turn file the Mac already has
+   `guest_import --keep-existing recording/turn-` (within an hour: `run_until`): a
+   turn file the Mac already has
    stays as it is, and one the VM changed since is named and counted in the
    `task.finished` event. The video is only whole at `stop_recording`, so it
    arrives at `task finish`.
@@ -790,11 +791,18 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    stop` asks the VM's recorder to stop (its answer through `vm_answer`: at most 4 KB
    within 60 s), waits up to 30 s for the stream to end (none if the VM can't be
    reached), then `recording.py finalize` remuxes to MP4 without re-encoding, only if a
-   copy of the `.mkv`'s size fits above the reserve, with ffmpeg held to that size
-   (`-fs`); otherwise the `.mkv` stays. A stream whose Mac side ended before `record
-   stop` is marked `stream_ended_early` in the description file. With
-   `RECORD_TO=guest` the MP4 is written in `~/metacomputer-runs/manual/` and copied at
-   stop (`vm_copy_video`: `recording.py save` with the reserve and `VM_DISK_BYTES`).
+   copy of the `.mkv`'s size (plus two 512 MiB margins) fits above the reserve and what
+   other operations have claimed. It claims that space (`lib/storage.py`'s free-space
+   claims, which S3 syncs use too, and which `guest_import` and `recording.py save`
+   count against the reserve) until ffmpeg ends, and watches ffmpeg every 0.2 s: free
+   space within 512 MiB of the reserve, an MP4 past its limit (`-fs` is only advice),
+   a failure or a signal stops it, deletes the partial MP4 and keeps the `.mkv`. A
+   stream whose Mac side ended before `record stop` is marked `stream_ended_early` in
+   the description file. With `RECORD_TO=guest` the MP4 is written in
+   `~/metacomputer-runs/manual/` and copied at stop (`vm_copy_video`: `recording.py
+   save` with the reserve, `VM_DISK_BYTES` and deadlines: 60 s without a byte, an hour
+   in all); `record start` and `record status` in that mode run under `run_until` (60
+   s, `MCOMP_RECORD_WAIT`).
    `stream`, `stop` and `status` keep their state in `/run/user/UID/metacomputer`,
    not the home folder.
 

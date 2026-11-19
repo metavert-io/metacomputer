@@ -1035,8 +1035,8 @@ there, and a file on your Mac can't be reached from the VM at all.
 
 | Recording | While it records, it is | A VM that turns hostile mid-recording can | It can't |
 | --- | --- | --- | --- |
-| **Desktop, `RECORD_TO=host`** (the default) | On the Mac: the VM encodes its screen and streams it over SSH, and the Mac writes what arrives to a new file | Stop sending (kill the recorder, shut down); from then on, with root, send any picture | Take back or change what already arrived; fill your disk: the stream stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB` (10 GB by default), and the MP4 is made from it only if that copy fits above the reserve too (otherwise the `.mkv` is kept as it is) |
-| **Desktop, `RECORD_TO=guest`** | An MP4 in the VM's `~/metacomputer-runs/manual/`, copied at `record stop` | Delete or change it before then (wiping the home folder does) | Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold |
+| **Desktop, `RECORD_TO=host`** (the default) | On the Mac: the VM encodes its screen and streams it over SSH, and the Mac writes what arrives to a new file | Stop sending (kill the recorder, shut down); from then on, with root, send any picture | Take back or change what already arrived; fill your disk: the stream stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB` (10 GB by default), and the MP4 is made from it only if that copy fits above the reserve too, and is stopped if the free space nears the reserve while it's made (either way the `.mkv` is kept as it is) |
+| **Desktop, `RECORD_TO=guest`** | An MP4 in the VM's `~/metacomputer-runs/manual/`, copied at `record stop` | Delete or change it before then (wiping the home folder does) | Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold; or hold it open: it ends after a minute without a byte, or an hour in all, keeping what arrived |
 | **Per task** (Cua Driver's `start_recording` into a task folder) | Files in the VM's task folder: a folder per action, and the video, which is only whole at `stop_recording` | Delete or change the newest action's folder, the video, and anything not copied yet, before `task finish` | Change an action's folder once the Mac has it: while the task folder is open, the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds (15), once, and `task finish` never replaces it |
 
 Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while
@@ -1075,9 +1075,25 @@ say which mode is.
   which is then a warning. All of it goes through the importer every copy from the
   VM uses (plain files and folders, never written through a link, within the disk
   reserve), and each copy has a deadline.
-- **It bounds what the VM says.** The VM's short answers (the recorder's replies, a
-  task folder's listing) are read with a byte limit and a deadline, so a VM that
-  answers without end, or never, can't grow or stall the command reading them.
+- **It keeps its reserve while it converts.** The MP4 is made only if a copy of the
+  stream fits above `IMPORT_MIN_FREE_GB`, and that space is claimed while ffmpeg
+  writes it: every copy from the VM (the task copier's included), every stream
+  and every S3 sync counts the claim against the reserve (and the conversion
+  counts an S3 sync's claim). ffmpeg is watched as well (five times a second): if
+  the free space comes within 512 MiB of the reserve anyway (a copy that was
+  already writing, another program), or the MP4 grows past its limit, ffmpeg is
+  stopped. Whatever stops it, the partial MP4 is deleted, the `.mkv` is kept, and
+  `record stop` says which happened.
+- **It bounds what the VM says, and how long it waits.** The VM's short answers
+  (the recorder's replies, a task folder's listing) are read with a byte limit and
+  a deadline, so a VM that answers without end, or never, can't grow or stall the
+  command reading them. Everything else a recording asks of the VM has a deadline
+  too: `record start` and `record status` in guest mode (a minute), the guest-mode
+  copy at `record stop` (a minute without a byte, or an hour in all), the task
+  copier's copies (5 minutes), and `task finish` and `recordings --sync` (an hour
+  each). What arrived before a deadline is kept. The one exchange without a
+  deadline is the stream itself, which runs until `record stop` (or until the
+  Mac's free space reaches its reserve).
 - **Its events carry nothing the VM chose.** A VM that holds a value from the vault
   could spell it in a file name, a size, a video's own length or its recorder's
   reply. So `task.recording_failed` gives a fixed reason category, never what the

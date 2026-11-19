@@ -8,7 +8,7 @@ The description file written beside each recording, the Mac's half of a streamed
                        --quality Q --mode guest|host --vm VM [--actions-dir DIR] [--ended-early]
   recording.py moments MP4.json          print a recording's key moments
   recording.py probe FILE                print its length in seconds (exit 1 if unreadable)
-  recording.py save OUT [--min-free-gb G] [--max-bytes N] -- CMD...
+  recording.py save OUT [--min-free-gb G] [--max-bytes N] [--idle-timeout S] [--timeout S] -- CMD...
                                          run CMD (the SSH command that streams from the VM,
                                          RECORD_TO=host, or copies its video, RECORD_TO=guest) and
                                          save its output to OUT as it arrives
@@ -32,10 +32,13 @@ which includes Cua Driver's own refusals in bounded mode).
 `save` is the Mac's half of a streamed recording (RECORD_TO=host, the default). What
 arrives is on the Mac at once, out of reach of anything in the VM; the VM decides
 how much it sends, so the copy stops, keeping what arrived, before the Mac's free
-space falls below --min-free-gb (IMPORT_MIN_FREE_GB, as for every copy from the VM)
-or past --max-bytes. `finalize` turns the stream into an MP4 only when the copy fits
-above that reserve too (the VM chose the stream's size), with a hard size limit on
-ffmpeg's output; otherwise the .mkv is kept as it is. `capture` reads the VM's short
+space falls below --min-free-gb (IMPORT_MIN_FREE_GB, as for every copy from the VM,
+beside the space other operations have claimed) or past --max-bytes, or, with
+--idle-timeout and --timeout (a guest-mode copy), when the VM goes quiet or takes too
+long. `finalize` turns the stream into an MP4 only when the copy fits above that
+reserve too (the VM chose the stream's size), claims that space while ffmpeg writes,
+and stops ffmpeg if the free space nears the reserve anyway or its output passes its
+limit; whatever stops it, the .mkv is kept as it is. `capture` reads the VM's short
 answers (a listing, the recorder's reply) with a byte limit and a deadline, so a VM
 that sends without end, or never answers, can't grow or stall the command.
 """
@@ -276,6 +279,41 @@ def free_bytes(path_or_fd):
     return st.f_bavail * st.f_frsize
 
 
+FINALIZE_GUARD = 512 << 20        # finalize stops ffmpeg this far above the reserve (what it can write between looks)
+FINALIZE_POLL = 0.2               # seconds between finalize's looks at the free space and the MP4's size
+STOP_GRACE = 10                   # seconds save waits for a stopped stream's last bytes
+
+
+def claims_by_others(path):
+    """Bytes other live operations have claimed on the disk holding path (guest_import.claimed_space)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import guest_import
+    return guest_import.claimed_space(path)
+
+
+@contextlib.contextmanager
+def space_claim(path, nbytes, reserve, what):
+    """Claim nbytes of free space on the disk holding path (lib/storage.py's claims, which S3 syncs and every copy
+    from the VM count against the reserve), if that much is free above the reserve and what others hold. Yields
+    True when claimed, False when there isn't room; the claim goes when the block ends."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import storage
+    import uuid
+    pool = storage.space_pool(path)
+    f = None
+    try:
+        with storage.GlobalLock():
+            if free_bytes(path) - reserve - storage.claims_on(pool) >= nbytes:
+                f = os.path.join(storage.space_dir(), f"{what}-{os.getpid()}-{uuid.uuid4().hex[:8]}.json")
+                storage.atomic_json(f, {"pool": pool, "bytes": int(nbytes), "pid": os.getpid(),
+                                        "pstart": storage.proc_start(os.getpid()), "what": what, "since": storage.now()})
+        yield f is not None
+    finally:
+        if f:
+            with contextlib.suppress(OSError):
+                os.unlink(f)
+
+
 def cmd_save(a):
     cmd = a.command
     if not cmd:
@@ -283,6 +321,8 @@ def cmd_save(a):
         return 2
     min_free = int(max(0.0, a.min_free_gb) * GIB)
     max_bytes = a.max_bytes if a.max_bytes and a.max_bytes > 0 else None
+    idle = a.idle_timeout if a.idle_timeout and a.idle_timeout > 0 else None
+    deadline = time.monotonic() + a.timeout if a.timeout and a.timeout > 0 else None
     try:
         # A new file only: never an existing one, never through a link.
         fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o644)
@@ -299,7 +339,7 @@ def cmd_save(a):
     stopped = []
 
     def stop(why):
-        stopped.append(why)
+        stopped.append(time.monotonic())
         try:
             proc.terminate()      # the stream ends; what arrived stays
         except OSError:
@@ -308,21 +348,40 @@ def cmd_save(a):
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda *_: stop("signal"))
     rc, since, total = 0, SAVE_CHECK_EVERY, 0
+    import selectors
+    sel = selectors.DefaultSelector()
     try:
         src = proc.stdout.fileno()
+        sel.register(src, selectors.EVENT_READ)
+        last = time.monotonic()
         while True:
             if since >= SAVE_CHECK_EVERY:
                 since = 0
-                if free_bytes(fd) - SAVE_CHECK_EVERY < min_free:
+                if free_bytes(fd) - SAVE_CHECK_EVERY < min_free + claims_by_others(a.out):
                     print(f"metacomputer: the recording stopped saving here: the Mac would have less than "
-                          f"{min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB); what arrived before is kept",
-                          file=sys.stderr, flush=True)
+                          f"{min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB, with what other copies have claimed); "
+                          "what arrived before is kept", file=sys.stderr, flush=True)
                     stop("space")
                     rc = 3
                     break
+            now_ = time.monotonic()
+            if deadline is not None and now_ >= deadline or idle is not None and now_ - last >= idle:
+                print("metacomputer: stopped saving: the VM " + ("took too long" if deadline is not None
+                      and now_ >= deadline else f"sent nothing for {idle:g} s") + "; what arrived before is kept",
+                      file=sys.stderr, flush=True)
+                stop("time")
+                rc = 5
+                break
+            if stopped and now_ - stopped[0] > STOP_GRACE:
+                break           # stopped (a signal) and the stream still hasn't ended: what arrived is kept
+            waits = [w for w in (deadline - now_ if deadline is not None else None,
+                                 idle - (now_ - last) if idle is not None else None) if w is not None]
+            if not sel.select(timeout=max(0.0, min(waits + [1.0]))):
+                continue
             b = os.read(src, min(1 << 20, SAVE_CHECK_EVERY - since))
             if not b:
                 break
+            last = time.monotonic()
             if max_bytes is not None and total + len(b) > max_bytes:
                 b = b[:max_bytes - total]
                 stop("size")
@@ -337,6 +396,7 @@ def cmd_save(a):
                       "what arrived before is kept", file=sys.stderr, flush=True)
                 break
     finally:
+        sel.close()
         os.close(fd)
         try:
             proc.wait(timeout=10)
@@ -348,9 +408,15 @@ def cmd_save(a):
 
 def cmd_finalize(a):
     """The streamed .mkv as an MP4, the same video in a container players and editors open at once (no
-    re-encoding). The MP4 is about the MKV's size: it's made only if that leaves the Mac its reserve, and ffmpeg
-    is held to a hard size limit whatever the stream claims. 0: made (the caller removes the MKV); 3: not enough
-    room (nothing written, the MKV kept); 1: ffmpeg failed or ran into its limit (nothing kept, the MKV kept)."""
+    re-encoding). The MP4 is about the MKV's size plus a little; the stream's size is the VM's choice, so:
+    - the space is claimed first (lib/storage.py's claims), so every copy from the VM, the task copier's included,
+      and every S3 sync counts it against the reserve while ffmpeg writes;
+    - while ffmpeg runs, the free space and the MP4's size are watched every FINALIZE_POLL seconds: ffmpeg is
+      stopped when the free space comes within FINALIZE_GUARD of the reserve (writes nobody claimed: another
+      program, a copy started before) or the MP4 passes its limit (ffmpeg's own -fs is only advice);
+    - whatever stops ffmpeg (that, a failure, a signal), the partial MP4 is deleted and the MKV kept.
+    0: made (the caller removes the MKV); 3: no room, before or during (the MKV kept); 1: ffmpeg failed, ran past its
+    limit or was stopped (the MKV kept)."""
     min_free = int(max(0.0, a.min_free_gb) * GIB)
     try:
         st = os.stat(a.mkv, follow_symlinks=False)
@@ -358,22 +424,84 @@ def cmd_finalize(a):
         print(f"metacomputer: no stream to convert ({e.strerror})", file=sys.stderr)
         return 1
     limit = st.st_size + max(16 << 20, st.st_size // 50)        # container overhead, generously
-    if free_bytes(os.path.dirname(os.path.abspath(a.mp4))) - limit < min_free:
-        print(f"metacomputer: not converting to MP4: a copy of {st.st_size / GIB:.1f} GiB would leave this Mac less "
-              f"than {min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB); the .mkv is kept and plays as it is",
-              file=sys.stderr)
-        return 3
+    folder = os.path.dirname(os.path.abspath(a.mp4))
     if os.path.lexists(a.mp4):
         print(f"metacomputer: {a.mp4} exists; not writing over it", file=sys.stderr)
         return 1
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-i", a.mkv, "-c", "copy",
-                        "-movflags", "+faststart", "-fs", str(limit), a.mp4], stdin=subprocess.DEVNULL)
-    size = os.path.getsize(a.mp4) if os.path.isfile(a.mp4) and not os.path.islink(a.mp4) else -1
-    if r.returncode != 0 or size <= 0 or size >= limit - (1 << 20) or probe_duration(a.mp4) is None:
-        with contextlib.suppress(OSError):
-            os.unlink(a.mp4)
+    no_room = (f"metacomputer: not converting to MP4: a copy of {st.st_size / GIB:.1f} GiB would leave this Mac "
+               f"less than {min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB, with what other copies have claimed); "
+               "the .mkv is kept and plays as it is")
+    try:
+        claim = space_claim(folder, limit + 2 * FINALIZE_GUARD, min_free, "recording-finalize")
+        got = claim.__enter__()
+    except Exception as e:      # the claims can't be read or written: don't convert, keep the MKV
+        print(f"metacomputer: not converting to MP4 (free-space claims unavailable: {type(e).__name__}); "
+              "the .mkv is kept and plays as it is", file=sys.stderr)
         return 1
-    return 0
+    why = None
+    proc = None
+    stop = []
+    old = {}
+    try:
+        if not got:
+            print(no_room, file=sys.stderr)
+            return 3
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            old[sig] = signal.signal(sig, lambda *_: stop.append("signal"))
+        proc = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-i", a.mkv,
+                                 "-c", "copy", "-movflags", "+faststart", "-fs", str(limit), a.mp4],
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        while proc.poll() is None:
+            try:
+                low = free_bytes(folder) < min_free + FINALIZE_GUARD
+            except OSError:
+                low = None          # the folder can't be checked (a drive gone): stop rather than write blind
+            if stop:
+                why = "it was interrupted"
+            elif low is None:
+                why = "its folder's free space couldn't be checked"
+            elif low:
+                why = "space"
+            else:
+                try:
+                    if os.lstat(a.mp4).st_size > limit:
+                        why = "it grew past its size limit"
+                except OSError:
+                    pass
+            if why:
+                with contextlib.suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                break
+            time.sleep(FINALIZE_POLL)
+        rc = proc.returncode
+        size = os.path.getsize(a.mp4) if os.path.isfile(a.mp4) and not os.path.islink(a.mp4) else -1
+        if why is None and size >= limit - (1 << 20):
+            why = "it reached its size limit"     # -fs ended it early: not the whole video
+        if why is None and (rc != 0 or size <= 0 or probe_duration(a.mp4) is None):
+            why = "ffmpeg failed"
+        if why is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(a.mp4)
+            if why == "space":
+                print("metacomputer: stopped converting to MP4: this Mac's free space came within "
+                      f"{FINALIZE_GUARD >> 20} MiB of the reserve (IMPORT_MIN_FREE_GB) while it ran; the partial MP4 is "
+                      "deleted and the .mkv is kept and plays as it is", file=sys.stderr)
+                return 3
+            print(f"metacomputer: not converted to MP4 ({why}); the partial MP4 is deleted and the .mkv is kept and "
+                  "plays as it is", file=sys.stderr)
+            return 1
+        return 0
+    finally:
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            with contextlib.suppress(OSError):
+                os.unlink(a.mp4)
+        for sig, h in old.items():
+            signal.signal(sig, h)
+        claim.__exit__(None, None, None)
 
 
 def cmd_capture(a):
@@ -459,6 +587,8 @@ def main():
     sv.add_argument("out")
     sv.add_argument("--min-free-gb", type=float, default=10.0)
     sv.add_argument("--max-bytes", type=int, default=0)
+    sv.add_argument("--idle-timeout", type=float, default=0)
+    sv.add_argument("--timeout", type=float, default=0)
     fz = sub.add_parser("finalize")
     fz.add_argument("mkv")
     fz.add_argument("mp4")

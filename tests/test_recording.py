@@ -3,9 +3,12 @@
 
     python3 tests/test_recording.py         no VM: the description file (lib/recording.py); where
                                             recordings go by default (RECORD_TO=host) and the warning
-                                            for RECORD_TO=guest; the stream writer's limits; record stop
-                                            when the stream ended early or the VM can't be reached; the
-                                            task copier (TASK_SYNC_INTERVAL) against a stand-in VM
+                                            for RECORD_TO=guest; the stream writer's limits and deadlines;
+                                            the MP4 conversion under disk pressure (a stand-in ffmpeg) and
+                                            the free-space claims it shares with every copy; guest-mode
+                                            deadlines; record stop when the stream ended early or the VM
+                                            can't be reached; the task copier (TASK_SYNC_INTERVAL) against
+                                            a stand-in VM
     MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm
                                             also `metacomputer record` in both RECORD_TO modes and
                                             both qualities on a running test VM (about a minute)
@@ -160,6 +163,7 @@ esc_text() { printf '%s' "$1"; }
 gssh() { # what the stand-in VM answers; FAKE_VM=down: it can't be reached
   echo "GSSH $*" >> "$TD/calls"
   [ "${FAKE_VM:-up}" = down ] && return 255
+  [ "${FAKE_VM:-up}" = hang ] && { sleep 30; return 0; }
   case "$*" in
     *"desktop-record status"*) echo "recording stream:${REC_NAME:-x}" ;;
     *"desktop-record start"*) echo "recording /home/u/metacomputer-runs/manual/${REC_NAME:-x}.mp4 (1920x1080 @ 20 fps)" ;;
@@ -295,6 +299,20 @@ def save_checks():
                             "100000", "--", "yes"], capture_output=True, text=True, timeout=30)
         check("save --max-bytes (a guest-mode copy: no more than the VM's disk holds): stops there, keeps what arrived",
               r.returncode == 4 and os.path.getsize(os.path.join(td, "d.mp4")) == 100000, (r.returncode, r.stderr))
+        # Deadlines (a guest-mode copy): a VM that goes quiet, or drips bytes, can't hold the copy open.
+        t0 = time.time()
+        r = subprocess.run([sys.executable, REC, "save", os.path.join(td, "q.mp4"), "--min-free-gb", "0", "--idle-timeout",
+                            "1", "--", "sh", "-c", "printf abc; exec sleep 30"], capture_output=True, text=True, timeout=60)
+        check("save --idle-timeout: a VM that sends nothing more is cut off, keeping what arrived (exit 5)",
+              r.returncode == 5 and time.time() - t0 < 8 and open(os.path.join(td, "q.mp4"), "rb").read() == b"abc"
+              and "sent nothing for 1 s" in r.stderr, (r.returncode, round(time.time() - t0, 1), r.stderr))
+        t0 = time.time()
+        r = subprocess.run([sys.executable, REC, "save", os.path.join(td, "r.mp4"), "--min-free-gb", "0", "--idle-timeout",
+                            "5", "--timeout", "1.5", "--", "sh", "-c", "while :; do printf x; sleep 0.2; done"],
+                           capture_output=True, text=True, timeout=60)
+        check("save --timeout: a VM that drips bytes is cut off at the deadline, keeping what arrived (exit 5)",
+              r.returncode == 5 and time.time() - t0 < 8 and os.path.getsize(os.path.join(td, "r.mp4")) > 0
+              and "took too long" in r.stderr, (r.returncode, round(time.time() - t0, 1), r.stderr))
 
         # finalize: the MP4 only when the copy leaves the reserve; otherwise the MKV stays and nothing is written.
         mkv = os.path.join(td, "s.mkv")
@@ -331,9 +349,196 @@ def save_checks():
         shutil.rmtree(td, ignore_errors=True)
 
 
+FAKE_FFMPEG = r"""#!/usr/bin/env python3
+# A stand-in ffmpeg for finalize: ignores -fs, writes FAKE_FF_MIB MiB to its output a MiB every FAKE_FF_DELAY s,
+# notes its pid, whether finalize's space claim was there while it ran, and whether it got to the end.
+import glob, os, sys, time
+d, out = os.environ["FAKE_FF_DIR"], sys.argv[-1]
+open(os.path.join(d, "pid"), "w").write(str(os.getpid()))
+if glob.glob(os.path.join(os.environ.get("MCOMP_STORAGE_HOME", "/nonexistent"), "space", "recording-finalize-*.json")):
+    open(os.path.join(d, "claimed"), "w").close()
+with open(out, "xb") as f:
+    for _ in range(int(os.environ.get("FAKE_FF_MIB", "50"))):
+        f.write(b"\0" * (1 << 20))
+        f.flush()
+        time.sleep(float(os.environ.get("FAKE_FF_DELAY", "0.05")))
+open(os.path.join(d, "done"), "w").close()
+"""
+
+
+def finalize_guard_checks():
+    """finalize keeps the reserve while ffmpeg writes (a watchdog), shares one reservation with every copy from the
+    VM (lib/storage.py's claims), and keeps the MKV whenever ffmpeg doesn't finish."""
+    import argparse
+    import contextlib
+    import io
+    import recording
+    import storage
+    td = tempfile.mkdtemp(prefix="mcomp-rec-fin-")
+    old_env = {k: os.environ.get(k) for k in ("PATH", "MCOMP_STORAGE_HOME", "FAKE_FF_DIR", "FAKE_FF_MIB", "FAKE_FF_DELAY")}
+    saved = (recording.free_bytes, getattr(recording, "FINALIZE_GUARD", None), getattr(recording, "FINALIZE_POLL", None))
+    try:
+        bindir, ffdir, state = (os.path.join(td, n) for n in ("bin", "ff", "state"))
+        for d in (bindir, ffdir, state):
+            os.makedirs(d)
+        with open(os.path.join(bindir, "ffmpeg"), "w") as f:
+            f.write(FAKE_FFMPEG)
+        os.chmod(os.path.join(bindir, "ffmpeg"), 0o755)
+        os.environ.update(PATH=bindir + os.pathsep + old_env["PATH"], MCOMP_STORAGE_HOME=state, FAKE_FF_DIR=ffdir)
+        MIB = 1 << 20
+
+        def reset_ff():
+            for n in os.listdir(ffdir):
+                os.remove(os.path.join(ffdir, n))
+
+        def claims_left():
+            d = os.path.join(state, "space")
+            return os.listdir(d) if os.path.isdir(d) else []
+
+        def sparse_mkv(name, size):
+            p = os.path.join(td, name)
+            with open(p, "wb") as f:
+                f.truncate(size)
+            return p
+
+        # The free space falls while ffmpeg writes (another program, a copy): ffmpeg is stopped before the reserve,
+        # not left to run to the end. Reserve 64 MiB, a 40 MiB stream (limit 56 MiB); the stand-in writes 50 MiB
+        # in 2.5 s while something else takes 60 MiB/s.
+        mkv, mp4 = sparse_mkv("w.mkv", 40 * MIB), os.path.join(td, "w.mp4")
+        recording.FINALIZE_GUARD, recording.FINALIZE_POLL = 2 * MIB, 0.02
+        t0, seen = [], []
+
+        def falling(_path):
+            if not t0:
+                t0.append(time.monotonic())
+            used = os.path.getsize(mp4) if os.path.exists(mp4) else 0
+            free = 132 * MIB - used - int((time.monotonic() - t0[0]) * 60 * MIB)
+            seen.append(free)
+            return free
+
+        recording.free_bytes = falling
+        os.environ.update(FAKE_FF_MIB="50", FAKE_FF_DELAY="0.05")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = recording.cmd_finalize(argparse.Namespace(mkv=mkv, mp4=mp4, min_free_gb=64 / 1024))
+        recording.free_bytes = saved[0]
+        pid = int(open(os.path.join(ffdir, "pid")).read()) if os.path.exists(os.path.join(ffdir, "pid")) else 0
+        check("finalize: free space falling during the conversion stops ffmpeg before the reserve (exit 3)",
+              rc == 3 and not os.path.exists(os.path.join(ffdir, "done")) and pid, (rc, err.getvalue()[-300:]))
+        check("...the partial MP4 is deleted and the .mkv kept, and it says so and why",
+              not os.path.exists(mp4) and os.path.exists(mkv) and ".mkv is kept" in err.getvalue()
+              and "reserve" in err.getvalue() and "partial MP4 is deleted" in err.getvalue(), err.getvalue()[-300:])
+        check("...ffmpeg itself is gone", pid and not _alive(pid), pid)
+        check("...and its space claim is gone", claims_left() == [],
+              claims_left())
+
+        # Interrupted (TERM, Ctrl-C): ffmpeg stopped, the partial MP4 deleted, the .mkv kept.
+        reset_ff()
+        mkv, mp4 = sparse_mkv("i.mkv", 40 * MIB), os.path.join(td, "i.mp4")
+        p = subprocess.Popen([sys.executable, REC, "finalize", mkv, mp4, "--min-free-gb", "0"], stderr=subprocess.PIPE,
+                             text=True, env=dict(os.environ, FAKE_FF_MIB="200", FAKE_FF_DELAY="0.05"))
+        for _ in range(100):
+            if os.path.exists(mp4) and os.path.exists(os.path.join(ffdir, "pid")):
+                break
+            time.sleep(0.05)
+        claimed = os.path.exists(os.path.join(ffdir, "claimed"))
+        p.send_signal(signal.SIGTERM)
+        _, perr = p.communicate(timeout=30)
+        pid = int(open(os.path.join(ffdir, "pid")).read())
+        check("finalize: while ffmpeg runs, its space is claimed where every copy from the VM and S3 syncs count it",
+              claimed, os.listdir(ffdir))
+        check("finalize interrupted: ffmpeg stopped, the partial MP4 deleted, the .mkv kept, and it says so",
+              p.returncode == 1 and not _alive(pid) and not os.path.exists(mp4) and os.path.exists(mkv)
+              and "interrupted" in perr and ".mkv is kept" in perr and claims_left() == [],
+              (p.returncode, perr[-300:]))
+
+        # ffmpeg's -fs is only advice: an MP4 past its limit is stopped and deleted; one that ends at it (cut short
+        # by -fs) isn't the whole video either. The .mkv stays both times.
+        reset_ff()
+        mkv, mp4 = sparse_mkv("g.mkv", 40 * MIB), os.path.join(td, "g.mp4")
+        r = subprocess.run([sys.executable, REC, "finalize", mkv, mp4, "--min-free-gb", "0"], capture_output=True,
+                           text=True, timeout=60, env=dict(os.environ, FAKE_FF_MIB="120", FAKE_FF_DELAY="0.01"))
+        check("finalize: an MP4 growing past its size limit is stopped and deleted, the .mkv kept",
+              r.returncode == 1 and not os.path.exists(mp4) and os.path.exists(mkv)
+              and not os.path.exists(os.path.join(ffdir, "done")) and "size limit" in r.stderr, (r.returncode, r.stderr))
+        reset_ff()
+        r = subprocess.run([sys.executable, REC, "finalize", mkv, mp4, "--min-free-gb", "0"], capture_output=True,
+                           text=True, timeout=60, env=dict(os.environ, FAKE_FF_MIB="56", FAKE_FF_DELAY="0"))
+        check("finalize: an MP4 that ends at its limit (cut short) isn't taken for the video; the .mkv kept",
+              r.returncode == 1 and not os.path.exists(mp4) and os.path.exists(mkv), (r.returncode, r.stderr))
+
+        # One reservation: another operation's live claim counts against the reserve for the conversion, the task
+        # copier (every copy through lib/guest_import.py) and the stream alike.
+        reset_ff()
+        claim = os.path.join(storage.space_dir(), "test-claim.json")
+        storage.atomic_json(claim, {"pool": storage.space_pool(td), "bytes": 1 << 60, "pid": os.getpid(),
+                                    "pstart": storage.proc_start(os.getpid()), "what": "test", "since": storage.now()})
+        r = subprocess.run([sys.executable, REC, "finalize", mkv, mp4, "--min-free-gb", "0"], capture_output=True,
+                           text=True, timeout=60)
+        check("finalize: space another operation claimed counts: no room, nothing converted, the .mkv kept (exit 3)",
+              r.returncode == 3 and not os.path.exists(os.path.join(ffdir, "pid")) and os.path.exists(mkv)
+              and ".mkv is kept" in r.stderr, (r.returncode, r.stderr))
+        src = os.path.join(td, "vmfiles")
+        os.makedirs(os.path.join(src, "turn-00001"))
+        with open(os.path.join(src, "turn-00001", "action.json"), "w") as f:
+            f.write("{}")
+        dest = os.path.join(td, "copied")
+        tar = subprocess.run(["tar", "-C", src, "-cf", "-", "."], capture_output=True, check=True,
+                             env=dict(os.environ, COPYFILE_DISABLE="1")).stdout
+        r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "guest_import.py"), dest], input=tar,
+                           capture_output=True, timeout=60, env=dict(os.environ, MCOMP_IMPORT_MIN_FREE_GB="0"))
+        check("the task copier (guest_import) counts it too: the copy stops before the claimed space",
+              r.returncode == 1 and not os.path.exists(os.path.join(dest, "turn-00001", "action.json"))
+              and b"claimed" in r.stderr, (r.returncode, r.stderr[-300:]))
+        r = subprocess.run([sys.executable, REC, "save", os.path.join(td, "claimed.mkv"), "--min-free-gb", "0", "--",
+                            "printf", "frames"], capture_output=True, text=True, timeout=60)
+        check("...and so does a stream", r.returncode == 3 and "claimed" in r.stderr, (r.returncode, r.stderr))
+        os.remove(claim)
+        r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "guest_import.py"), dest], input=tar,
+                           capture_output=True, timeout=60, env=dict(os.environ, MCOMP_IMPORT_MIN_FREE_GB="0"))
+        check("...once the claim is gone, the copy goes through", r.returncode == 0
+              and os.path.exists(os.path.join(dest, "turn-00001", "action.json")), (r.returncode, r.stderr[-300:]))
+        # Finalize's own claim reaches the copier: while a conversion runs, a copy sees the space it holds.
+        reset_ff()
+        mkv, mp4 = sparse_mkv("c.mkv", 40 * MIB), os.path.join(td, "c.mp4")
+        p = subprocess.Popen([sys.executable, REC, "finalize", mkv, mp4, "--min-free-gb", "0"], stderr=subprocess.PIPE,
+                             text=True, env=dict(os.environ, FAKE_FF_MIB="40", FAKE_FF_DELAY="0.05"))
+        for _ in range(100):
+            if os.path.exists(os.path.join(ffdir, "pid")):
+                break
+            time.sleep(0.05)
+        import guest_import
+        held = getattr(guest_import, "claimed_space", lambda _p: 0)(td)
+        p.communicate(timeout=60)
+        check("...and a conversion's own claim is what a copy sees while it runs (the MP4's limit and a margin)",
+              held > 0 and held >= (56 << 20) + 2 * (saved[1] or 0), held)
+    finally:
+        recording.free_bytes = saved[0]
+        if saved[1] is not None:
+            recording.FINALIZE_GUARD, recording.FINALIZE_POLL = saved[1], saved[2]
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie (finished, not yet reaped by a parent that's gone) isn't running.
+    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return bool(r.stdout.strip()) and not r.stdout.strip().startswith("Z")
+
+
 def record_cli_checks():
     """record start / stop from bin/metacomputer, with a stand-in VM."""
-    funcs = ("record_dir", "record_sidecar", "do_record")
+    funcs = ("record_dir", "record_sidecar", "proc_tree", "run_until", "do_record")
     td = tempfile.mkdtemp(prefix="mcomp-rec-cli-")
     env = {"MCOMP_EVENTS_DIR": os.path.join(td, "events"), "REC_NAME": "t1"}
     calls = os.path.join(td, "calls")
@@ -360,6 +565,29 @@ def record_cli_checks():
         check("...and warns that anything in the VM can delete it, pointing at RECORD_TO=host",
               "WARN RECORD_TO=guest" in r.stderr and "can delete it" in r.stderr and "RECORD_TO=host" in r.stderr,
               r.stderr)
+        # Guest mode: a VM that never answers record start or record status is cut off at the deadline.
+        for args, what in (("start t1", "record start"), ("status", "record status")):
+            for f in (calls, state):
+                if os.path.exists(f):
+                    os.remove(f)
+            t0 = time.time()
+            r = run_bash(cli_script(td, funcs, f"do_record {args}", cfg="RECORD_TO=guest"),
+                         dict(env, FAKE_VM="hang", MCOMP_RECORD_WAIT="2"))
+            check(f"RECORD_TO=guest {what}: a VM that never answers is cut off at the deadline, and it says so",
+                  r.returncode != 0 and time.time() - t0 < 10 and "didn't answer within 2 s" in r.stderr
+                  and not os.path.exists(state), (r.returncode, round(time.time() - t0, 1), r.stderr[-300:]))
+        bindir = os.path.join(td, "quietbin")
+        os.makedirs(bindir, exist_ok=True)
+        with open(os.path.join(bindir, "ssh"), "w") as f:
+            f.write("#!/bin/sh\nprintf 'video-start'\nexec sleep 30\n")
+        os.chmod(os.path.join(bindir, "ssh"), 0o755)
+        t0 = time.time()
+        r = run_bash(cli_script(td, ("vm_copy_video",), 'ssh_base() { SSH_ARGS=(x); }\n'
+                                f'vm_copy_video /home/u/metacomputer-runs/manual/q.mp4 "{td}/quiet.mp4"; echo "RC=$?"'),
+                     dict(env, PATH=bindir + os.pathsep + os.environ["PATH"], MCOMP_RECORD_WAIT="1"))
+        check("RECORD_TO=guest record stop: a VM that goes quiet mid-copy is cut off, keeping what arrived",
+              "RC=5" in r.stdout and time.time() - t0 < 10 and open(os.path.join(td, "quiet.mp4"), "rb").read()
+              == b"video-start", (r.stdout, round(time.time() - t0, 1), r.stderr[-300:]))
         r, log, st = start(cfg='RECORD_TO="cloud"')
         check("any other RECORD_TO is refused before anything starts", r.returncode != 0
               and "RECORD_TO must be host or guest" in r.stderr and "GSSH" not in log and not st, (r.stderr, log))
@@ -417,6 +645,11 @@ def record_cli_checks():
               and 'gssh ops "cat' not in rec_src
               and rec_src.count("vm_answer 4096") >= 4 and rec_src.count("vm_copy_video") == 2,
               rec_src.count("vm_answer 4096"))
+        check("stop asks the VM about a running recorder through vm_answer (bounded), not a raw ssh",
+              "vm_answer 64 15 'pgrep -x ffmpeg" in function(src, "do_stop") and "gssh ops 'pgrep" not in function(src, "do_stop"))
+        check("task finish and recordings --sync copy from the VM with a deadline (run_until)",
+              'run_until $((SECONDS + 3600)) gssh ops "test -d' in function(src, "do_task")
+              and "run_until $((SECONDS + 3600)) gssh ops 'if cd ~/metacomputer-runs" in function(src, "do_recordings"))
         bindir = os.path.join(td, "floodbin")
         os.makedirs(bindir, exist_ok=True)
         with open(os.path.join(bindir, "ssh"), "w") as f:
@@ -891,10 +1124,22 @@ def main():
                                                    capture_output=True).returncode == 1)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    where_checks()
-    save_checks()
-    record_cli_checks()
-    task_sync_checks()
+    # The no-VM checks' free-space claims (finalize) go to a folder of their own, not this Mac's.
+    claims = tempfile.mkdtemp(prefix="mcomp-rec-claims-")
+    before = os.environ.get("MCOMP_STORAGE_HOME")
+    os.environ["MCOMP_STORAGE_HOME"] = claims
+    try:
+        where_checks()
+        save_checks()
+        finalize_guard_checks()
+        record_cli_checks()
+        task_sync_checks()
+    finally:
+        if before is None:
+            os.environ.pop("MCOMP_STORAGE_HOME", None)
+        else:
+            os.environ["MCOMP_STORAGE_HOME"] = before
+        shutil.rmtree(claims, ignore_errors=True)
     if "--vm" in sys.argv:
         vm_tests()
         if "--wipe" in sys.argv:
