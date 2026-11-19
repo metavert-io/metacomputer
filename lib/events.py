@@ -2350,12 +2350,14 @@ def recording_event(mp4):
     side = read_json(mp4[:-4] + ".json" if mp4.endswith(".mp4") else mp4 + ".json", {})
     dur = side.get("duration_s")
     name = side.get("name") or os.path.basename(mp4)[:-4]
-    return {"family": "task", "type": "recording_stopped", "severity": "info",
-            "message": f"Recording '{name}' saved" + (f" ({dur:.0f} s)" if isinstance(dur, (int, float)) else ""),
+    early = bool(side.get("stream_ended_early"))    # the VM stopped sending before record stop
+    return {"family": "task", "type": "recording_stopped", "severity": "warn" if early else "info",
+            "message": f"Recording '{name}' saved" + (f" ({dur:.0f} s)" if isinstance(dur, (int, float)) else "")
+            + ("; the VM stopped sending before record stop" if early else ""),
             "data": {"name": name, "duration_s": dur, "path": mp4,
                      "description_file": (mp4[:-4] + ".json") if side else None,
                      "key_moments": len(side.get("moments") or []), "audio": bool(side.get("audio")),
-                     "mode": side.get("mode"), "bytes": side.get("bytes")}}
+                     "mode": side.get("mode"), "bytes": side.get("bytes"), "ended_early": early}}
 
 
 # --- CLI ---------------------------------------------------------------------------------------

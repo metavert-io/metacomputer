@@ -23,7 +23,8 @@ guard) to every way in, through a socket only you can use, and marks page text a
 person likely can't see ([Hidden page text](#hidden-page-text)); the live view and
 handoffs, where Claude gives the computer to you and waits; and the lessons
 channel (`metacomputer learn`), which can't carry text from the VM into future
-sessions.
+sessions; and [recordings](#recordings): which of them a VM that turns hostile
+mid-run can erase.
 
 | Setting | What it adds | Costs |
 | --- | --- | --- |
@@ -1000,6 +1001,65 @@ persistence that you can audit, not an approval you can prove.
 - A misclassified error only moves a count: the classes come from fixed
   patterns over the driver's and the hub's messages, and a page can contain
   those words.
+
+## Recordings
+
+A recording is the evidence of what ran in the VM, and that includes a run that
+turns hostile, such as a script from a stranger's repository that wipes the home
+folder. What decides whether it survives is where the recording is while it's
+being made: a file inside the VM can be deleted or changed by anything running
+there, and a file on your Mac can't be reached from the VM at all.
+
+| Recording | While it records, it is | A VM that turns hostile mid-recording can | It can't |
+| --- | --- | --- | --- |
+| **Desktop, `RECORD_TO=host`** (the default) | On the Mac: the VM encodes its screen and streams it over SSH, and the Mac writes what arrives to a new file | Stop sending (kill the recorder, shut down); from then on, with root, send any picture | Take back or change what already arrived; fill your disk (the copy stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB`, 10 GB by default) |
+| **Desktop, `RECORD_TO=guest`** | An MP4 in the VM's `~/metacomputer-runs/manual/`, copied at `record stop` | Delete or change it before then (wiping the home folder does) | Nothing here stops it |
+| **Per task** (Cua Driver's `start_recording` into a task folder) | Files in the VM's task folder: a folder per action, and the video, which is only whole at `stop_recording` | Delete or change the newest action's folder, the video, and anything not copied yet, before `task finish` | Change an action's folder once the Mac has it: while the task folder is open, the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds (15), once, and `task finish` never replaces it |
+
+Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while `RECORD_TO=guest` is in force, and `metacomputer status` and
+`metacomputer security` say which mode is.
+
+**What the Mac does:**
+- **It notices a stream that ends early.** If the stream ends before you run
+  `record stop` (the VM stopped sending or went away, or your disk reached its
+  reserve), `record stop` saves what arrived and says so, the description file
+  records `stream_ended_early`, and the `task.recording_stopped` event is a
+  warning. With an event sink, the health watcher also reports a recording that
+  stopped on its own (`recording_failed`) within 5 minutes.
+- **It saves a stream from a VM it can't reach.** Wiping the home folder also
+  deletes the desktop account's SSH key (`~/.ssh/authorized_keys`), so afterwards
+  nothing can run as that account: `metacomputer sh`, `task finish` and
+  `recordings --sync` fail until `metacomputer reset`. `record stop` still saves a
+  streamed recording: it cuts the stream on the Mac at once and says why. (Checked
+  on a test VM: a recording with `rm -rf ~` in the middle came back whole,
+  including what happened on screen after the wipe.) With
+  [`SSH_AUTH=cert`](#ssh-certificates-ssh_authcert) the account is reached through
+  certificates that a root-owned file trusts, not `~/.ssh`, so it stays reachable
+  after such a wipe and `record stop` ends the recording the usual way (also
+  checked on a test VM).
+- **Copies made during a task stay as they were copied.** The copier uses only
+  names of the form `turn-<digits>` from the VM's listing, and the same importer as
+  every copy from the VM (plain files and folders, never written through a link,
+  within the disk reserve). `task finish` keeps every turn file the Mac already
+  has; one the VM has changed since is named on the terminal and counted in the
+  `task.finished` event (`recording_changed_in_vm`), which is then a warning.
+- **It describes what it saved.** The description file beside a desktop recording
+  is written by the Mac, with the MP4's length and SHA-256.
+
+**Where it ends:**
+- A streamed recording is the VM's own picture of its screen. A VM with root could
+  send a doctored picture from some point on; what arrived before that point is as
+  it was sent. The driver's recording is made inside the VM too.
+- A per-task recording's video, its newest action, and whatever the driver wrote
+  since the last copy are only in the VM until `task finish`. So are recordings made
+  outside a task folder (an `output_dir` of your own, `web --record`), which only
+  `recordings --sync`, `task finish` or `reset` copy. For a run you don't trust,
+  record the whole desktop as well.
+- `recordings --sync` replaces what it copied before with what the VM has now; only
+  `task finish` keeps earlier copies.
+- On your Mac, recordings are your own files: anything running as you can change
+  them. The SHA-256 in the description file lets you check a copy you keep
+  elsewhere; it isn't signed.
 
 ## Storage
 

@@ -213,7 +213,29 @@ didn't run is marked the way the action log records it: refused by a guard (a
 `refused` record) or a shell run refused after its call was logged, `refused`; a
 call that came back as an error (Cua Driver refusing it in bounded mode, or an RPC
 error), `error`; calls that worked, or whose result came after the recording, stay
-plain, and `record moments` shows each outcome.
+plain, and `record moments` shows each outcome. It also runs
+the real `record` and `task` functions from `bin/metacomputer` against a stand-in
+VM, and checks:
+- where recordings go: the shipped default is `RECORD_TO=host` (and so is an unset
+  one); `record start` with `RECORD_TO=guest` still records in the VM and warns that
+  anything running there can delete it; any other value is refused before anything
+  starts; what `status` and `security` say in each case (`lib/recording.py`);
+- the Mac's half of a stream (`recording.py save`): it writes exactly what arrives,
+  never over an existing file or through a link, stops itself and the stream before
+  the free space falls below the reserve, and on TERM ends the command it runs and
+  keeps what arrived;
+- `record stop` after a stream that had ended on its own (saved, said, recorded in
+  the description file and as a warning event), and with a VM it can't reach (the
+  stream cut on the Mac within seconds, saved, and why);
+- the task copier (`TASK_SYNC_INTERVAL`), with a local folder as the VM: finished turns
+  arrive while the task runs, the newest and the video don't, each turn is copied
+  once (a later change in the VM doesn't reach the Mac), names other than
+  `turn-<digits>` are never used, it ends when `task finish` removes its pid file or
+  after the folder has gone, and `TASK_SYNC_INTERVAL=0` starts none.
+
+`tests/test_guest_import.py` checks `--keep-existing`, which `task finish` uses: a
+turn file already on the Mac is kept, one the VM has changed since is named and
+counted, and a link in its place is still replaced, not followed.
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm` also records six
 seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality,
@@ -227,6 +249,16 @@ connected) is refused rather than created, and that a `RECORD_AUDIO` other than
 when it does; on such a VM it also checks that `RECORD_AUDIO=off` leaves it out.
 Without a VM, it checks that the description file describes a clip's sound track
 and reports none for a silent one.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm --wipe` then plays a
+VM that turns hostile, and resets the test VM twice (test VMs only). A recording
+with the defaults; `rm -rf ~` in the VM through `metacomputer sh` in the middle of
+it; `record stop`: the MP4 must be on the Mac, decode whole and cover the time
+after the wipe, and `record stop` must say it couldn't reach the VM (the wipe takes
+the desktop account's SSH key). Then a task with a real driver recording
+(`metacomputer call`): finished turns must reach the Mac while it runs, and after
+the same wipe `task finish` must still list them. Last run, on a test VM built from
+this change (2026-11-18): all 80 checks of `--vm --wipe` passed.
 
 Sync between sound and picture was measured separately, by recording a full-screen
 flash and a beep started on the same frame once a second. The pulse input's

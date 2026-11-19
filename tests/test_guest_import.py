@@ -17,7 +17,9 @@ It checks that:
 - `contact-sheet` refuses an output that's a link and writes through a temporary
   file it then renames;
 - `recordings --sync` goes through the same importer, and the listing escapes what
-  it prints.
+  it prints;
+- `--keep-existing PREFIX` (task finish) keeps files the Mac already has under PREFIX,
+  names and counts the ones the VM has changed since, and still replaces a link.
 """
 import io
 import json
@@ -320,6 +322,7 @@ def run(td):
     check("the Mac file is still untouched at the end", open(victim, "rb").read() == before)
     hostile_metadata_checks(td)
     command_checks(td)
+    keep_checks(td)
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0
@@ -579,6 +582,60 @@ def command_checks(td):
           and os.listdir(os.path.join(td, "col2")) == ["a.bin"], (probs, os.listdir(os.path.join(td, "col2"))))
     ok, probs = harness.collect_guest([sys.executable, prod, "quiet"], os.path.join(td, "col3"), lim)
     check("collection: a whole copy is complete, with nothing to report", ok and probs == [], probs)
+
+
+def keep_checks(td):
+    # 11. --keep-existing (task finish): recording turns copied while the task ran can't be swapped by the VM later
+    dest = os.path.join(td, "keep")
+    for rel, data in (("recording/turn-00001/a.json", b"as copied\n"), ("recording/turn-00001/b.png", b"same\n"),
+                      ("files/out.txt", b"old output\n")):
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        with open(os.path.join(dest, rel), "wb") as f:
+            f.write(data)
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        add_file(tf, "./recording/turn-00001/a.json", b"doctored by the VM\n")
+        add_file(tf, "./recording/turn-00001/b.png", b"same\n")
+        add_file(tf, "./recording/turn-00002/c.json", b"new turn\n")
+        add_file(tf, "./recording/recording.mp4", b"video\n")
+        add_file(tf, "./files/out.txt", b"new output\n")
+    report = os.path.join(td, "keep-report.json")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet", "--keep-existing", "recording/turn-"],
+                       input=b.getvalue(), capture_output=True, env=dict(os.environ, MCOMP_IMPORT_KEEP_REPORT=report))
+    err = r.stderr.decode()
+    rd = lambda rel: open(os.path.join(dest, rel), "rb").read()  # noqa: E731
+    check("--keep-existing: a turn file the Mac already had keeps the Mac's copy", r.returncode == 0
+          and rd("recording/turn-00001/a.json") == b"as copied\n", (r.returncode, err))
+    check("...new turn files and anything outside the prefix arrive as usual",
+          rd("recording/turn-00002/c.json") == b"new turn\n" and rd("recording/recording.mp4") == b"video\n"
+          and rd("files/out.txt") == b"new output\n")
+    check("...a kept file the VM has changed since is named on stderr (escaped), an identical one isn't",
+          "1 of them differ in the VM now" in err and "recording/turn-00001/a.json" in err and "b.png" not in err, err)
+    rep = json.load(open(report)) if os.path.exists(report) else {}
+    check("...and counted for the caller's event, with folder names only", rep == {"kept": 2, "changed": 1,
+                                                                                  "changed_in": ["turn-00001"]}, rep)
+    # Without the option the importer replaces, as before (recordings --sync, get).
+    with tarfile.open(fileobj=(b2 := io.BytesIO()), mode="w") as tf:
+        add_file(tf, "recording/turn-00001/a.json", b"replaced\n")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet"], input=b2.getvalue(), capture_output=True)
+    check("without --keep-existing a file is replaced as before", r.returncode == 0
+          and rd("recording/turn-00001/a.json") == b"replaced\n")
+    # A kept name on the Mac that's a link isn't kept: it's replaced, never followed (the usual rule).
+    target = os.path.join(td, "keep-target.txt")
+    with open(target, "w") as f:
+        f.write("the Mac's\n")
+    os.remove(os.path.join(dest, "recording/turn-00001/a.json"))
+    os.symlink(target, os.path.join(dest, "recording/turn-00001/a.json"))
+    with tarfile.open(fileobj=(b3 := io.BytesIO()), mode="w") as tf:
+        add_file(tf, "recording/turn-00001/a.json", b"from the VM\n")
+    r = subprocess.run([sys.executable, IMPORT, dest, "--quiet", "--keep-existing", "recording/turn-"],
+                       input=b3.getvalue(), capture_output=True)
+    p = os.path.join(dest, "recording/turn-00001/a.json")
+    check("...a link where a kept file would be is replaced, its target untouched", not os.path.islink(p)
+          and open(p, "rb").read() == b"from the VM\n" and open(target).read() == "the Mac's\n")
+    for bad in ("/abs", "../up", ""):
+        r = subprocess.run([sys.executable, IMPORT, dest, "--keep-existing", bad], input=b"", capture_output=True)
+        check(f"--keep-existing {bad!r} is refused", r.returncode == 2, r.stderr)
 
 
 if __name__ == "__main__":

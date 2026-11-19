@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-"""Desktop recordings. Needs ffmpeg/ffprobe on the Mac.
+"""Desktop recordings and per-task recordings. Needs ffmpeg/ffprobe on the Mac.
 
-    python3 tests/test_recording.py         the description file (lib/recording.py); no VM
+    python3 tests/test_recording.py         no VM: the description file (lib/recording.py); where
+                                            recordings go by default (RECORD_TO=host) and the warning
+                                            for RECORD_TO=guest; the stream writer's limits; record stop
+                                            when the stream ended early or the VM can't be reached; the
+                                            task copier (TASK_SYNC_INTERVAL) against a stand-in VM
     MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm
                                             also `metacomputer record` in both RECORD_TO modes and
                                             both qualities on a running test VM (about a minute)
+    MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm --wipe
+                                            also wipes the test VM's home folder in the middle of a
+                                            default recording and of a task's driver recording, checks
+                                            what the Mac kept, then resets the test VM (about 2 minutes)
 """
 import json
 import os
+import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -16,7 +26,9 @@ import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REC = os.path.join(LAB, "lib", "recording.py")
+CLI = os.path.join(LAB, "bin", "metacomputer")
 FAILS = []
+sys.path.insert(0, os.path.join(LAB, "lib"))
 
 
 def check(name, cond, detail=""):
@@ -121,6 +133,376 @@ def vm_tests():
         check("a RECORD_DIR on a missing drive is refused, not created", r.returncode != 0
               and not os.path.exists(os.path.dirname(missing)), r.stderr.strip())
     finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def function(src, name):
+    """One shell function, as written in bin/metacomputer."""
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), src, re.S | re.M)
+    assert m, name
+    return m.group(0)
+
+
+# Stand-ins for the VM and the CLI's helpers; the real functions under test come from bin/metacomputer.
+STUBS = r'''
+set -uo pipefail
+warn() { echo "WARN $*" >&2; }
+ok() { echo "OK $*"; }
+say() { echo "SAY $*"; }
+die() { echo "DIE $*" >&2; exit 9; }
+need_running() { :; }
+export_options() { :; }
+emit_event() { echo "EVENT $*" >> "$TD/calls"; }
+term_safe() { cat; }
+esc_text() { printf '%s' "$1"; }
+gssh() { # what the stand-in VM answers; FAKE_VM=down: it can't be reached
+  echo "GSSH $*" >> "$TD/calls"
+  [ "${FAKE_VM:-up}" = down ] && return 255
+  case "$*" in
+    *"desktop-record status"*) echo "recording stream:${REC_NAME:-x}" ;;
+    *"desktop-record start"*) echo "recording /home/u/metacomputer-runs/manual/${REC_NAME:-x}.mp4 (1920x1080 @ 20 fps)" ;;
+    *"desktop-record stop"*) echo "stream:${REC_NAME:-x}" ;;
+    *) return 0 ;;
+  esac
+}
+daemonize() { echo "DAEMONIZE $*" >> "$TD/calls"; sleep 20 & echo $! >> "$TD/stub-pids"; }
+'''
+
+
+def cli_script(td, funcs, body, defaults=True, cfg=""):
+    """A bash script: the shipped defaults (or none), a config, stand-ins, the real functions, then body."""
+    src = open(CLI).read()
+    lab = os.path.join(td, "lab")
+    os.makedirs(os.path.join(lab, "recordings"), exist_ok=True)
+    if not os.path.exists(os.path.join(lab, "lib")):
+        os.symlink(os.path.join(LAB, "lib"), os.path.join(lab, "lib"))
+    return "\n".join([
+        f'TD="{td}"',
+        f'. "{LAB}/config/defaults.env"' if defaults else "unset RECORD_TO",
+        cfg,
+        f'LAB_ROOT="{lab}"; RUN_DIR="{td}/run"; LOG_DIR="{td}/logs"; VM_NAME=t; PY="{sys.executable}"; SELF=/bin/true',
+        'GUEST_RUN_DIR=/home/u/metacomputer-runs; mkdir -p "$RUN_DIR" "$LOG_DIR"',
+        STUBS, *(function(src, f) for f in funcs), body])
+
+
+def run_bash(script, env=None, timeout=60):
+    return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL, env=dict(os.environ, **(env or {})))
+
+
+def where_checks():
+    """What status and security say about recordings (lib/recording.py), and the shipped default."""
+    import recording
+    defaults = open(os.path.join(LAB, "config", "defaults.env")).read()
+    check("the shipped default streams desktop recordings to the Mac (RECORD_TO=host)",
+          re.search(r"^RECORD_TO=host\b", defaults, re.M) is not None)
+    check("...and the task copier is on (TASK_SYNC_INTERVAL=15)", re.search(r"^TASK_SYNC_INTERVAL=15\b", defaults, re.M)
+          is not None)
+    d = recording.settings_summary({})
+    check("with nothing set: host, copier every 15 s", d == {"desktop_to": "host", "desktop_recording": None,
+                                                            "task_sync_interval_s": 15}, d)
+    g = recording.settings_summary({"MCOMP_RECORD_TO": "guest", "MCOMP_TASK_SYNC_INTERVAL": "0",
+                                    "MCOMP_RECORDING_NOW": "demo-1"})
+    check("guest mode, copier off, a recording running", g == {"desktop_to": "guest", "desktop_recording": "demo-1",
+                                                               "task_sync_interval_s": 0}, g)
+    bad = recording.settings_summary({"MCOMP_RECORD_TO": "cloud", "MCOMP_TASK_SYNC_INTERVAL": "soon",
+                                      "MCOMP_RECORDING_NOW": "x\x1b[2J"})
+    check("anything else is reported as invalid, never echoed", bad == {"desktop_to": "invalid", "desktop_recording": None,
+                                                                         "task_sync_interval_s": None}, bad)
+    check("status: host mode in plain words", "stream to this Mac as they record (RECORD_TO=host)"
+          in recording.status_line(d))
+    line = recording.status_line(g)
+    check("status: guest mode warns that the VM can delete it, and names the running recording",
+          "RECORD_TO=guest" in line and "can delete" in line and "recording now: demo-1" in line, line)
+    sec = "\n".join(recording.security_lines(g))
+    check("security: guest mode and a copier that's off are both flagged", "RECORD_TO=guest" in sec
+          and "delete it first" in sec and "TASK_SYNC_INTERVAL=0" in sec, sec)
+    sec = "\n".join(recording.security_lines(d))
+    check("security: the defaults explained", "RECORD_TO=host" in sec and "every 15 s" in sec, sec)
+    import events
+    td = tempfile.mkdtemp(prefix="mcomp-rec-ev-")
+    try:
+        mp4 = os.path.join(td, "cut.mp4")
+        open(mp4, "wb").close()
+        json.dump({"name": "cut", "mode": "host", "duration_s": 12.0, "stream_ended_early": "..."},
+                  open(os.path.join(td, "cut.json"), "w"))
+        ev = events.recording_event(mp4)
+        check("a recording whose stream ended early is a warning event", ev["severity"] == "warn"
+              and ev["data"]["ended_early"] is True and "stopped sending" in ev["message"], ev)
+        json.dump({"name": "cut", "mode": "host", "duration_s": 12.0}, open(os.path.join(td, "cut.json"), "w"))
+        ev = events.recording_event(mp4)
+        check("...a whole one stays info", ev["severity"] == "info" and ev["data"]["ended_early"] is False, ev)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def save_checks():
+    """The Mac's half of a streamed recording (recording.py save): limits the VM can't move."""
+    td = tempfile.mkdtemp(prefix="mcomp-rec-save-")
+    try:
+        out = os.path.join(td, "a.mkv")
+        r = subprocess.run([sys.executable, REC, "save", out, "--min-free-gb", "0", "--", "sh", "-c",
+                            "printf 'frames'; printf 'stderr' >&2"], capture_output=True, text=True, timeout=30)
+        check("save: what the command writes is saved as it is", r.returncode == 0 and open(out, "rb").read() == b"frames"
+              and "stderr" in r.stderr, (r.returncode, r.stderr))
+        r = subprocess.run([sys.executable, REC, "save", out, "--", "true"], capture_output=True, text=True, timeout=30)
+        check("save: never over an existing file", r.returncode != 0 and open(out, "rb").read() == b"frames", r.stderr)
+        link = os.path.join(td, "link.mkv")
+        os.symlink(os.path.join(td, "target"), link)
+        r = subprocess.run([sys.executable, REC, "save", link, "--", "true"], capture_output=True, text=True, timeout=30)
+        check("save: never through a link", r.returncode != 0 and not os.path.exists(os.path.join(td, "target")), r.stderr)
+        t0 = time.time()
+        r = subprocess.run([sys.executable, REC, "save", os.path.join(td, "b.mkv"), "--min-free-gb", "1e9", "--", "yes"],
+                           capture_output=True, text=True, timeout=30)
+        check("save: stops (and stops the VM's stream) before the Mac's free space falls below the reserve",
+              r.returncode == 3 and "IMPORT_MIN_FREE_GB" in r.stderr and time.time() - t0 < 10
+              and os.path.getsize(os.path.join(td, "b.mkv")) == 0, (r.returncode, r.stderr))
+        # Stopped (record stop's fallback, a reset): the stream's command ends too, and what arrived stays.
+        marker = os.path.join(td, "child-alive")
+        p = subprocess.Popen([sys.executable, REC, "save", os.path.join(td, "c.mkv"), "--min-free-gb", "0", "--", "sh",
+                              "-c", f"trap 'exit 0' TERM; while :; do printf x; touch {marker}; sleep 0.1; done"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)
+        p.send_signal(signal.SIGTERM)
+        rc = p.wait(timeout=15)
+        size = os.path.getsize(os.path.join(td, "c.mkv"))
+        os.remove(marker)
+        time.sleep(0.5)
+        check("save: a TERM ends it and the command it runs, keeping what arrived", rc == 0 and size > 0
+              and not os.path.exists(marker), (rc, size))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def record_cli_checks():
+    """record start / stop from bin/metacomputer, with a stand-in VM."""
+    funcs = ("record_dir", "record_sidecar", "do_record")
+    td = tempfile.mkdtemp(prefix="mcomp-rec-cli-")
+    env = {"MCOMP_EVENTS_DIR": os.path.join(td, "events"), "REC_NAME": "t1"}
+    calls = os.path.join(td, "calls")
+    state = os.path.join(td, "run", "manual-recording")
+    try:
+        def start(defaults=True, cfg=""):
+            for f in (calls, state):
+                if os.path.exists(f):
+                    os.remove(f)
+            r = run_bash(cli_script(td, funcs, 'do_record start t1', defaults, cfg), env)
+            log = open(calls).read() if os.path.exists(calls) else ""
+            st = open(state).read() if os.path.exists(state) else ""
+            return r, log, st
+
+        r, log, st = start()
+        check("record start with the shipped defaults streams to the Mac (host mode)", r.returncode == 0
+              and "DAEMONIZE" in log and "_record-pipe t1" in log and "mode=host" in st, (r.stderr, log, st))
+        check("...and gives no warning", "WARN" not in r.stderr, r.stderr)
+        r, log, st = start(defaults=False)
+        check("with RECORD_TO unset altogether, host too", r.returncode == 0 and "mode=host" in st, (r.stderr, st))
+        r, log, st = start(cfg="RECORD_TO=guest")
+        check("RECORD_TO=guest still records in the VM", r.returncode == 0 and "desktop-record start" in log
+              and "DAEMONIZE" not in log and "mode=guest" in st, (r.stderr, log, st))
+        check("...and warns that anything in the VM can delete it, pointing at RECORD_TO=host",
+              "WARN RECORD_TO=guest" in r.stderr and "can delete it" in r.stderr and "RECORD_TO=host" in r.stderr,
+              r.stderr)
+        r, log, st = start(cfg='RECORD_TO="cloud"')
+        check("any other RECORD_TO is refused before anything starts", r.returncode != 0
+              and "RECORD_TO must be host or guest" in r.stderr and "GSSH" not in log and not st, (r.stderr, log))
+
+        # stop, host mode: a stream whose Mac side had already ended (the VM stopped sending)
+        rec = os.path.join(td, "rec")
+        os.makedirs(rec, exist_ok=True)
+
+        def mkv(name):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=10", "-t", "2",
+                            "-pix_fmt", "yuv420p", "-f", "matroska", os.path.join(rec, name + ".mkv")], check=True,
+                           stdin=subprocess.DEVNULL)
+
+        def host_state(name, pid):
+            with open(state, "w") as f:
+                f.write(f"name={name}\nmode=host\ndir={rec}\npid={pid}\nstarted={time.time() - 5:.2f}\nfps=10\n"
+                        "quality=standard\n")
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        mkv("early")
+        host_state("early", dead.pid)
+        r = run_bash(cli_script(td, funcs, "do_record stop"), dict(env, REC_NAME="early"))
+        side = json.load(open(os.path.join(rec, "early.json"))) if os.path.exists(os.path.join(rec, "early.json")) else {}
+        check("stop: a stream that had already ended is saved all the same", r.returncode == 0
+              and os.path.getsize(os.path.join(rec, "early.mp4")) > 0 and not os.path.exists(os.path.join(rec, "early.mkv")),
+              (r.returncode, r.stderr))
+        check("...says so, and the description file records it", "the stream had ended before this stop" in r.stderr
+              and "stream_ended_early" in side, (r.stderr, side))
+
+        # stop, host mode, the VM can't be reached (a wiped home takes the SSH key): cut on the Mac, at once
+        live = subprocess.Popen(["sleep", "60"])
+        try:
+            mkv("cut")
+            host_state("cut", live.pid)
+            t0 = time.time()
+            r = run_bash(cli_script(td, funcs, "do_record stop"), dict(env, REC_NAME="cut", FAKE_VM="down"))
+            took = time.time() - t0
+            live.wait(timeout=5)
+            check("stop with the VM unreachable: the stream is cut on the Mac within seconds, and saved",
+                  r.returncode == 0 and took < 10 and live.returncode is not None
+                  and os.path.getsize(os.path.join(rec, "cut.mp4")) > 0, (r.returncode, round(took, 1), r.stderr))
+            check("...and it says why", "couldn't be reached to stop its recorder" in r.stderr, r.stderr)
+        finally:
+            if live.poll() is None:
+                live.kill()
+        check("the shared state is gone after each stop", not os.path.exists(state))
+    finally:
+        pids = os.path.join(td, "stub-pids")     # the stand-in daemons this test started, and only those
+        for pid in (open(pids).read().split() if os.path.exists(pids) else []):
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def task_sync_checks():
+    """The task copier (TASK_SYNC_INTERVAL) against a stand-in VM: a local folder plays the task's recording."""
+    td = tempfile.mkdtemp(prefix="mcomp-rec-sync-")
+    name = "mcomp-20261118-120000-sync"
+    vm = os.path.join(td, "vm-recording")
+    host = os.path.join(td, "lab", "results", name, "guest", "recording")
+    pidf = os.path.join(td, "run", f"task-sync.{name}.pid")
+
+    def turn(n, extra=""):
+        d = os.path.join(vm, f"turn-{n:05d}" + extra)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "action.json"), "w") as f:
+            f.write(f'{{"turn": {n}}}\n')
+
+    # The stand-in VM: the copier's two commands (list, tar) run against the local folder.
+    stand_in = r'''
+gssh() {
+  echo "GSSH $*" >> "$TD/calls"
+  case "$*" in
+    *"ls -1"*) [ -d "$FAKE_DIR" ] || { echo GONE; return 0; }; ( cd "$FAKE_DIR" && ls -1 && echo END ) ;;
+    *"tar -cf -"*) ( cd "$FAKE_DIR" && eval "COPYFILE_DISABLE=1 tar -cf - ${*##*tar -cf - }" ) ;;   # no ._ files
+    *) return 0 ;;
+  esac
+}
+guest_import() { MCOMP_IMPORT_MIN_FREE_GB=0 "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"; }
+'''
+    try:
+        for n in (1, 2, 3):
+            turn(n)
+        os.makedirs(os.path.join(vm, "turn-1;touch pwned"))      # a name the copier must never use
+        open(os.path.join(vm, "recording.mp4"), "w").write("partial video")
+        body = (stand_in + f'\necho $$ > "{pidf}"\nTASK_SYNC_INTERVAL=1 do_task_sync {name}\necho "EXIT $?"\n')
+        os.makedirs(os.path.join(td, "run"), exist_ok=True)
+        script = cli_script(td, ("task_sync_pidfile", "task_sync_on", "do_task_sync"), body)
+        p = subprocess.Popen(["/bin/bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env=dict(os.environ, FAKE_DIR=vm), stdin=subprocess.DEVNULL)
+
+        def have():
+            return sorted(os.listdir(host)) if os.path.isdir(host) else []
+
+        def wait_for(cond, s=8):
+            end = time.time() + s
+            while time.time() < end and not cond():
+                time.sleep(0.2)
+            return cond()
+
+        check("copier: finished turns arrive while the task runs, the newest (still being written) doesn't",
+              wait_for(lambda: have() == ["turn-00001", "turn-00002"]), have())
+        check("...nor the video, which is only whole at stop_recording", "recording.mp4" not in have())
+        with open(os.path.join(vm, "turn-00001", "action.json"), "w") as f:
+            f.write('{"doctored": true}\n')
+        turn(4)
+        check("...once a newer turn exists, the one before it follows", wait_for(lambda: "turn-00003" in have()), have())
+        check("...each turn is copied once: a change in the VM afterwards doesn't reach the Mac",
+              open(os.path.join(host, "turn-00001", "action.json")).read() == '{"turn": 1}\n')
+        check("...names other than turn-<digits> are never used", not os.path.exists(os.path.join(td, "pwned"))
+              and not any(";" in n for n in have()), have())
+        os.remove(pidf)       # what task finish does first
+        out, err = p.communicate(timeout=10)
+        check("...and it ends once task finish removes its pid file", "EXIT 0" in out, (out, err))
+
+        # A VM whose task folder is gone (wiped, or reset): the copier gives up on its own.
+        shutil.rmtree(vm)
+        body = (stand_in + f'\necho $$ > "{pidf}"\nTASK_SYNC_INTERVAL=1 do_task_sync {name}\n'
+                f'echo "EXIT $?"; [ -e "{pidf}" ] || echo "PIDFILE GONE"\n')
+        script = cli_script(td, ("task_sync_pidfile", "task_sync_on", "do_task_sync"), body)
+        r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, FAKE_DIR=vm), stdin=subprocess.DEVNULL)
+        check("copier: a task folder that's gone ends it after a few tries, and it cleans up its pid file",
+              "EXIT 0" in r.stdout and "PIDFILE GONE" in r.stdout, (r.stdout, r.stderr))
+        check("...what it copied before stays on the Mac", have() == ["turn-00001", "turn-00002", "turn-00003"], have())
+        r = run_bash(cli_script(td, ("task_sync_pidfile", "task_sync_on", "task_sync_start"),
+                                f'TASK_SYNC_INTERVAL=0 task_sync_start {name}; ls "$RUN_DIR"; cat "$TD/calls" 2>/dev/null'))
+        check("TASK_SYNC_INTERVAL=0 starts no copier", "DAEMONIZE" not in r.stdout and "task-sync" not in r.stdout,
+              r.stdout)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def wipe_tests():
+    """On the test VM: what a VM that wipes its own home folder mid-recording can and can't take back."""
+    env = dict(os.environ)
+    cfg_base = os.environ.get("MCOMP_CONFIG")
+    if not cfg_base:
+        print("SKIP wipe tests: they need a test VM's MCOMP_CONFIG (they reset it)")
+        return
+    out_dir = tempfile.mkdtemp(prefix="mcomp-rec-wipe-")
+    cfg = os.path.join(out_dir, "wipe.env")
+    with open(cfg, "w") as f:   # the default RECORD_TO, whatever the test VM's config says
+        f.write(f'. "{cfg_base}"\nRECORD_TO=host\nRECORD_DIR="{out_dir}"\nTASK_SYNC_INTERVAL=5\n')
+    env["MCOMP_CONFIG"] = cfg
+    sh = lambda c, t=60: subprocess.run([CLI, "sh", "-c", c], env=env, capture_output=True, text=True, timeout=t)  # noqa
+    cli = lambda *a, t=120: subprocess.run([CLI, *a], env=env, capture_output=True, text=True, timeout=t)  # noqa
+    try:
+        # 1. A desktop recording with the defaults; the VM wipes ~ in the middle of it.
+        name = f"t-wipe-{int(time.time())}"
+        r = cli("record", "start", name)
+        check("wipe: record start with the defaults", r.returncode == 0 and "streaming to" in r.stdout, r.stderr)
+        sh("DISPLAY=:0 nohup mousepad >/dev/null 2>&1 & sleep 4")
+        r = sh("rm -rf ~ 2>/dev/null; ls -A ~ | wc -l")
+        check("wipe: the VM's home folder is wiped mid-recording", r.returncode == 0, r.stderr)
+        time.sleep(4)
+        r = cli("record", "stop", t=180)
+        mp4 = os.path.join(out_dir, name + ".mp4")
+        dec = subprocess.run(["ffmpeg", "-v", "error", "-i", mp4, "-f", "null", "-"], capture_output=True, text=True) \
+            if os.path.exists(mp4) else None
+        side = json.load(open(mp4[:-4] + ".json")) if os.path.exists(mp4[:-4] + ".json") else {}
+        check("wipe: the MP4 is on the Mac, decodes whole, and covers the time after the wipe",
+              r.returncode == 0 and dec is not None and dec.returncode == 0 and dec.stderr.strip() == ""
+              and (side.get("duration_s") or 0) >= 8, (r.returncode, r.stderr[-400:], side.get("duration_s")))
+        check("wipe: record stop says the VM couldn't be reached (the SSH key went with ~) and cut the stream",
+              "couldn't be reached" in r.stderr, r.stderr[-400:])
+        cli("reset", "--yes", t=400)
+
+        # 2. A task's driver recording: finished turns copied while it runs survive the same wipe.
+        r = cli("task", "start", "wipe-sync")
+        tname = re.search(r"^NAME=(\S+)", r.stdout, re.M)
+        rdir = re.search(r"^RECORDING_DIR=(\S+)", r.stdout, re.M)
+        check("wipe: task start", r.returncode == 0 and tname and rdir, r.stderr)
+        if tname and rdir:
+            tname, rdir = tname.group(1), rdir.group(1)
+            sess = ["call", "--session", "wipe"]
+            cli(*sess, "start_recording", json.dumps({"output_dir": rdir, "record_video": True}))
+            r = cli(*sess, "launch_app", '{"name": "mousepad"}')
+            pid = re.search(r"pid (\d+)", r.stdout)
+            for txt in ("one", "two", "three"):
+                cli(*sess, "type_text", json.dumps({"pid": int(pid.group(1)) if pid else 0, "text": txt}))
+            sh("sleep 8")
+            host = os.path.join(LAB, "results", tname)
+            copied = sorted(os.listdir(os.path.join(host, "guest", "recording"))) \
+                if os.path.isdir(os.path.join(host, "guest", "recording")) else []
+            check("wipe: finished turns reached the Mac while the task ran", len(copied) >= 2, copied)
+            sh("rm -rf ~ 2>/dev/null; true")
+            r = cli("task", "finish", tname)
+            arts = json.load(open(os.path.join(host, "artifacts.json"))) if os.path.exists(
+                os.path.join(host, "artifacts.json")) else {}
+            check("wipe: after the wipe, task finish still lists the turns copied before it",
+                  arts.get("recording_turns", 0) >= len(copied) >= 2 and "turns" in r.stdout, (r.stdout, r.stderr[-300:]))
+            shutil.rmtree(host, ignore_errors=True)
+        cli("reset", "--yes", t=400)
+    finally:
+        # The calls above started a hub with this temporary config; it mustn't outlive the file.
+        cli("hub", "stop", t=60)
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
@@ -244,8 +626,14 @@ def main():
                                                    capture_output=True).returncode == 1)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    where_checks()
+    save_checks()
+    record_cli_checks()
+    task_sync_checks()
     if "--vm" in sys.argv:
         vm_tests()
+        if "--wipe" in sys.argv:
+            wipe_tests()
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0
 

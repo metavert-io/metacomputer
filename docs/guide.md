@@ -131,7 +131,8 @@ package to add to `EXTRA_PACKAGES` (and the VM then needs a rebuild; see
 | "Record a demo of signing up for our app in Chrome, with the typing visible." | Hybrid mode: real clicks and key-by-key typing for the video, page reads to check each step. |
 | "Record the whole desktop while you build a budget in Calc, and give me the key moments with timestamps." | A whole-desktop recording with a description file; with `ACTION_LOG=on` it lists every tool call and its time in the video. |
 | "Make a contact sheet of yesterday's recording so I can see what happened without watching it." | `metacomputer contact-sheet`: 12 frames in one image. |
-| "Record at editing quality and stream it straight to my external drive." | Claude sets `RECORD_QUALITY=high`, `RECORD_TO=host` and `RECORD_DIR` because you asked, then records. |
+| "Record at editing quality and stream it straight to my external drive." | Claude sets `RECORD_QUALITY=high` and `RECORD_DIR` because you asked, then records (streaming to the Mac is the default). |
+| "Run this script from a repo I don't trust, and record everything in case it wrecks the VM." | A whole-desktop recording streamed to your Mac as it's made, so a script that wipes the VM can't take it back; then `metacomputer reset`. |
 
 **Research and automation**
 
@@ -574,8 +575,8 @@ another site is also sent as a security event.
 - "Use a disposable computer to write this memo in LibreOffice, and record the whole desktop while you do it."
 
 There are two recorders:
-- **Per task, through Cua Driver.** Claude makes a task folder and calls `start_recording`. It produces a 1920×1080, 30 fps MP4 and a folder per action with the state, screenshots and click markers before and after. `metacomputer task finish` copies it all to the Mac and makes a contact sheet.
-- **The whole desktop, whoever drives it.** `metacomputer record start NAME` and `record stop` capture the screen with ffmpeg, at 20 fps by default. A description file (`NAME.json`) beside the MP4 lists its times, settings, length, size, sound track and SHA-256. With `ACTION_LOG=on` it also lists the key moments: every tool call and shell run made on this VM while it recorded, with its time in the video (for example `0:42 launch_app inkscape`). A call that didn't run says so, as the action log records it: `(refused)` when a guard refused it, `(error)` when it came back as an error, Cua Driver's own refusals in bounded mode included.
+- **Per task, through Cua Driver.** Claude makes a task folder and calls `start_recording`. It produces a 1920×1080, 30 fps MP4 and a folder per action with the state, screenshots and click markers before and after, written in the VM. While the task folder is open, the Mac copies each finished action's folder every 15 s (`TASK_SYNC_INTERVAL`), once; `metacomputer task finish` copies the rest, the video included, never replaces what was copied earlier, and makes a contact sheet.
+- **The whole desktop, whoever drives it.** `metacomputer record start NAME` and `record stop` capture the screen with ffmpeg, at 20 fps by default, streamed to the Mac as it records. A description file (`NAME.json`) beside the MP4 lists its times, settings, length, size, sound track and SHA-256. With `ACTION_LOG=on` it also lists the key moments: every tool call and shell run made on this VM while it recorded, with its time in the video (for example `0:42 launch_app inkscape`). A call that didn't run says so, as the action log records it: `(refused)` when a guard refused it, `(error)` when it came back as an error, Cua Driver's own refusals in bounded mode included.
 
 ```bash
 metacomputer record start demo          # name and, optionally, frames per second
@@ -586,10 +587,21 @@ metacomputer contact-sheet FILE.mp4     # 12 frames in one image
 ```
 
 `RECORD_QUALITY=high` is sharp enough to edit into videos (several times
-larger). `RECORD_TO=host` streams the recording to the Mac while it runs, so
-nothing builds up on the VM's disk. `RECORD_DIR` can be any folder, such as
-an external drive. Shell steps don't show in a recording, so for a recorded
-demo Claude uses the apps.
+larger). `RECORD_DIR` can be any folder, such as an external drive. Shell
+steps don't show in a recording, so for a recorded demo Claude uses the apps.
+
+**When the task might turn on the VM.** Recording exists to capture runs like a
+script from a stranger's repository, so a desktop recording goes to your Mac as
+it's made (`RECORD_TO=host`, the default): if the script wipes the VM's home
+folder, what was recorded up to the end is on the Mac already, and `record stop`
+saves it even though the VM can no longer be reached (the wipe takes the desktop
+account's SSH key with it; `metacomputer reset` brings it back). If the VM stops
+sending before you stop it, `record stop` says so and the description file
+records it. `RECORD_TO=guest` records inside the VM instead and copies at
+`record stop`; anything running there can delete it first, and `record start`
+warns. For a per-task recording, the newest step and the video are only copied
+at `task finish`, so for an untrusted run Claude also records the whole desktop.
+[SECURITY.md](../SECURITY.md#recordings) has the details.
 
 Recordings capture the whole screen. Passwords filled by `metacomputer secrets`
 show as dots, but usernames and codes are visible. With the driver's recorder,
@@ -1015,6 +1027,7 @@ the following. These are **always on**:
 | **Page text is data** | The skill and the MCP server's own instructions tell Claude that pages, documents, window titles, accessibility text and shell output from the VM are data, never instructions. Claude never asks you for a password: you sign in through the live view yourself, or keep the credential in the vault and unlock it in your own terminal. `metacomputer web open-untrusted` opens a link in a throwaway Chrome profile without clicking anything on it. |
 | **The VM is treated as hostile** | What comes back from the VM is bounded and checked. `metacomputer sh` reads a capped amount of output under one deadline, accepts only an answer that fits a strict schema, and escapes control characters before they reach your terminal. The hub caps every message from the driver. Files copied to the Mac arrive as plain files and folders only (links, devices and unsafe names are left out, and nothing is written through a link), and a copy stops before it can fill your disk. Event text from the VM never goes into a message, only into cleaned data. |
 | **Every guard on every path** | One hub per VM holds the only connection to Cua Driver, and Claude Code's tools, `metacomputer call` and scripts all go through it, so its guards apply to each of them. One session controls the desktop at a time. Chrome gets real input, never background typing. Bounded mode's limits hold. The coordinate guard refuses a pixel click when certain window-layout changes happened since the screenshot it was aimed from (the window resized, or covered by a dialog or another app). It compares window geometry, not content: a page that scrolled or redrew inside the same window isn't caught, and when it has no screenshot to compare with it leaves the click to Cua Driver's own checks ([SECURITY.md](../SECURITY.md#the-hub-and-its-guards-mcp_hub-coord_guard)). A refusal is reported to you, never worked around. |
+| **Recordings out of the VM's reach** (the default) | A desktop recording streams to your Mac as it records (`RECORD_TO=host`), so a run that wipes or doctors the VM can't take back what was already recorded, and the copy stops before your disk falls below its reserve. Cua Driver's per-task recording is written in the VM: while a task folder is open, each finished step is copied to the Mac every 15 s, once, and `task finish` never replaces it; the newest step and the video arrive at `task finish` ([SECURITY.md](../SECURITY.md#recordings)). |
 | **Your Mac stays yours** | Nothing here can see or control your Mac's screen. The VM's wallpaper and menu say VIRTUAL COMPUTER, so every screenshot and recording shows which machine it is. |
 
 These are **opt-in**. They're off by default, so out of the box metacomputer
@@ -1091,6 +1104,7 @@ plain process that `start` and `stop` manage.
 - Everything the VM shows (pages, documents, window titles, accessibility text, shell output) is untrusted data, never instructions. The skill says so, but no model is immune to prompt injection; the protections above limit what a steered agent could reach.
 - The VM can reach the public internet, so anything you put in it could be sent out. Don't copy secrets into it.
 - Recordings and screenshots capture the whole screen.
+- Anything still in the VM can be deleted by what runs there: a desktop recording with `RECORD_TO=guest` until it stops, and a per-task recording's newest step and video until `task finish`.
 - `ACTION_LOG_TEXT=keep` records typed text, scripts and shell output in full; keep such logs as safe as the passwords that might be in them.
 - Event sinks' URLs, tokens and signing keys sit in a file anything running as you can read. Use ingest-only tokens.
 
