@@ -31,7 +31,11 @@ SIZES = (0, 1 << 10, 1 << 16, 1 << 20, 1 << 24, 1 << 28, 1 << 32)
 
 
 def path(env=None):
+    """The mark's file: MCOMP_VM_MARK when set (the hub gives its driver connection the very path it marks, so the
+    action log's relay reads the same file whatever its own config says), else RUN_DIR/vm-may-hold-values."""
     env = os.environ if env is None else env
+    if env.get("MCOMP_VM_MARK"):
+        return env["MCOMP_VM_MARK"]
     rd = env.get("MCOMP_RUN_DIR") or os.path.join(LAB, ".run")
     return os.path.join(rd, NAME)
 

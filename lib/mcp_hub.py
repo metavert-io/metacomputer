@@ -1219,7 +1219,8 @@ class Hub:
 
     def _spawn_bridge(self):
         os.makedirs(self.paths["dir"], exist_ok=True)
-        env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid))
+        # MCOMP_VM_MARK: the action log's relay looks at the very mark the hub writes and reads (lib/vmtaint.py).
+        env = dict(self.env, MCOMP_DIRECT_BRIDGE="1", MCOMP_HUB_PID=str(self.pid), MCOMP_VM_MARK=vmtaint.path(self.env))
         # MCOMP_HUB_DRIVER_CMD (a JSON list) replaces the driver connection, for tests with a stand-in driver.
         cmd = json.loads(self.env["MCOMP_HUB_DRIVER_CMD"]) if self.env.get("MCOMP_HUB_DRIVER_CMD") else [MCOMP_CLI, "mcp"]
         # A process group of its own (the relay, SSH under it): ending the connection ends all of it (_end_transport).
@@ -1765,7 +1766,8 @@ class Hub:
             cached = self.cache.get(key) if method != "resources/templates/list" else None
             empty = {"resources": []} if method == "resources/list" else (
                 {"resourceTemplates": []} if method == "resources/templates/list" else {"prompts": []})
-            if self.connected():
+            # Once the VM may hold a value, its listings (the VM's to write, like the tool list) aren't asked for again.
+            if self.connected() and not self.tainted():
                 self.forward(client, msg)
             else:
                 self.reply(client, msg, cached or empty)

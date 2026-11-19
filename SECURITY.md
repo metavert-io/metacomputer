@@ -1941,10 +1941,12 @@ something waits for you:
   (`--while-pid`) and withdraw, and the unlock process ends the step in progress; a step
   the VM already started may finish. Stopped normally, the hub waits up to 60 s for each
   sign-in to confirm it stopped, and keeps its hold until then.
-- **A VM that was given values before this mark existed.** A VM that got a fill, a
-  session or a token from an earlier version has no mark, so its records aren't
-  secret-adjacent yet. The first value sent through this version marks it; `metacomputer
-  reset` starts it clean.
+- **A VM that was given values without the mark.** A VM that got a fill, a session or a
+  token from an earlier version has no mark, so its records aren't secret-adjacent yet.
+  The first value sent through this version marks it; `metacomputer reset` starts it
+  clean. The same goes for a program that runs `mcomp-vault` itself instead of
+  `metacomputer secrets`: the vault program doesn't
+  know which VM folder to mark.
 - **A deliberately hostile agent with a shell in the VM** (the default: `metacomputer
   sh`, `metacomputer ssh ops`, `metacomputer put`, the VM's terminal app). Chrome runs as the desktop
   user, and so does code started that way. Such code can:
