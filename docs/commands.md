@@ -138,8 +138,11 @@ Refused rather than guessed (nothing runs):
   `EVENTS_SPOOL`) may be another VM's, be inside one or hold one, and none may be in,
   or hold, the runner's VM storage (`~/.lume`, and every storage location the runner or
   Lume's settings list). Every other recursive delete on the Mac goes through
-  `lib/safedelete.py` (`scripts/safe-rmtree.sh`), which refuses a target that, as it
-  physically is, is or holds any VM's folder (or a link on the way to one). A
+  `lib/safedelete.py` (`scripts/safe-rmtree.sh`), which resolves a target once, refuses
+  one that, as it physically is, is or holds any VM's folder (or a link on the way to
+  one), the account's own vault and spools included, and deletes exactly what it checked
+  (a path ending in `/`, `/.` or `/..` is refused); a cleanup that walks a folder (S3
+  backups, old SSH certificates) checks that folder first and follows no link. A
   `config/vms/` VM is refused when it's read if the rule fails. `build`, `vm delete`, `reset`, `restore`, `checkpoint` (deleting or replacing
   one) and `baseline` check it after taking the VM's lock, for whichever VM they change
   (the main VM and `MCOMP_CONFIG` VMs included), before anything is deleted, replaced or

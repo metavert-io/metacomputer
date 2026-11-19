@@ -174,9 +174,12 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   folder is another's, inside one or holding one, or in the runner's storage; it fails closed when
   that storage can't be read. Per-VM loads, `vm delete`, `build-vm.sh` and every command that takes
   `vm_change_lock` (reset, restore, checkpoint, baseline) run it before the runner deletes anything.
-  Never `rm -rf` or `shutil.rmtree` on the Mac: every recursive delete goes through
-  `lib/safedelete.py` (`scripts/safe-rmtree.sh` in scripts), which refuses a target that physically
-  is or holds any VM's folder; `tests/test_multi_vm.py` (DELETE_EXCEPTIONS) fails on a bare one;
+  Never `rm -rf`, `shutil.rmtree`, `find -delete` or a loop that deletes what it walks on the Mac:
+  every recursive delete goes through `lib/safedelete.py` (`scripts/safe-rmtree.sh` in scripts;
+  `prune_files` / `prune` for a cleanup that walks a folder), which resolves the target once, refuses
+  one that physically is or holds any VM's folder (the account's own vault and spools always) and
+  deletes exactly what it checked, by descriptor; `tests/test_multi_vm.py` (DELETE_EXCEPTIONS,
+  DELETE_WALK_EXCEPTIONS) fails on a bare one;
   `lib/labconfig.py` must pick the same file. A hub pins the VM it started with
   (`pin_identity`: name, SSH port, host key) and refuses a reconnect to anything else.
   `vm delete` deletes folders only through `lib/vms.py rmtree` (no-link walk, never another

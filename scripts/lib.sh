@@ -841,7 +841,9 @@ cert_for() { # ROLE -> sets CERT_KEY (KEY-cert.pub beside it); reused for half i
   if [ -n "$cached" ] && [ -f "$cached-cert.pub" ] && [ $(( now - at )) -lt $(( $(cert_ttl_s) / 2 )) ]; then CERT_KEY="$cached"; return 0; fi
   ensure_ca
   dir="$SOCK_DIR/certs"; ( umask 077; mkdir -p "$dir" )
-  find "$dir" -type f -mmin +60 -delete 2>/dev/null
+  # Certificates over an hour old go, through lib/safedelete.py: a delete that walks a folder, so never one that is,
+  # holds or has a link on the way to a folder a VM uses, and never through a link. Best effort.
+  "$PY" -B "$LAB_ROOT/lib/safedelete.py" prune --older-than 3600 -- "$dir" >/dev/null 2>&1 || :
   key="$(mktemp "$dir/$role.XXXXXX")" && rm -f "$key"
   ssh-keygen -q -t ed25519 -N '' -C "mcomp-$role" -f "$key" || return 1
   # The key ID appears in the VM's auth log: who asked, from which project, which process.

@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (213 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (231 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
@@ -176,10 +176,23 @@ runner's does.
   the vault stays; the main `RUN_DIR`, a path whose parent is a link to a VM's vault, a link on the way to a
   VM's folder and a folder holding one are refused; a link itself goes, never what it points to; an
   unreadable settings file deletes nothing.
+- The fifth final check's findings (failing on 3cf8be0): `scripts/safe-rmtree.sh` given a link to VM x's
+  vault spelled `alias/`, `alias/.`, `alias/..` and `alias/../x` (refused, the vault kept; the link itself
+  still goes), and links to the home folder and to the checkout (the box's own copies) spelled with `/`
+  and `/.` (refused, both kept); pruning S3 backups (`storage.prune_backups`, with nothing to keep) while
+  VM x's vault is a link into the backup folder (refused, nothing pruned, `vault.json` kept; with nothing
+  of a VM's there, the backups go and a linked folder in it is left alone); the SSH certificates' cleanup
+  (`cert_for`, with a stand-in CA) while VM x's vault is a link into `$SOCK_DIR/certs` with files over an
+  hour old (kept); and, with `config/local.env` naming its own vault and spool, the folder holding the
+  account's own vault (refused by `safedelete.py check`: only checked, nothing deleted).
 - No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
   `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS` (the runner's
   own deletes, each checked to run after the identity rule; `vm delete`'s own-folder delete; deletes
-  inside the VM; printed hints). A new one, or an exception no longer in the code, fails the test.
+  inside the VM; printed hints). So does every delete that walks a tree: a Python function that walks a
+  folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`) and deletes what it finds
+  itself is in `DELETE_WALK_EXCEPTIONS` with why (one level of its own files, or inside the VM), and no
+  script has `find -delete`, `find -exec rm`, `xargs rm`, `rsync --delete`, `tar --remove-files` or
+  `ditto`. A new one, or an exception no longer in the code, fails the test.
 - `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).

@@ -2739,24 +2739,20 @@ def backup_budget():
 
 
 def prune_backups(folder, budget):
-    """Keep the newest backups that fit in budget bytes (the folder is ours: the VM can't reach it)."""
-    files = []
-    for d, _, fs in os.walk(folder):
-        for f in fs:
-            p = os.path.join(d, f)
-            try:
-                st = os.lstat(p)
-            except OSError:
-                continue
-            files.append((st.st_mtime, st.st_size, p))
-    total = 0
-    for mtime, size, p in sorted(files, reverse=True):
-        total += size
-        if total > budget:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+    """Keep the newest backups that fit in budget bytes (the folder is ours: the VM can't reach it). A delete that
+    walks a tree, so it goes through lib/safedelete.py: the folder is checked first (never one that is, holds or has
+    a link on the way to a folder a VM uses) and walked without following a link."""
+    def choose(files):
+        total, out = 0, []
+        for _mtime, size, rel in sorted(files, reverse=True):
+            total += size
+            if total > budget:
+                out.append(rel)
+        return out
+    try:
+        safedelete.prune_files(folder, choose)
+    except safedelete.Refused as e:
+        print(f"storage: not pruning the backups in {esc(folder)}: {esc(str(e))}", file=sys.stderr)
 
 
 # --- free space: claims ------------------------------------------------------------------------

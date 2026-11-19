@@ -1404,6 +1404,127 @@ def final4_fixes(td):
         b.close()
 
 
+def final5_fixes(td):
+    """The fifth check's findings (on 3cf8be0), each failing before its fix: the helper checked one spelling and
+    deleted another (a trailing / or /. went through a link to what it points to), tree-walking cleanups (S3 backup
+    pruning, old SSH certificates) deleted files without the guard, and the account's own vault and spools weren't
+    protected when config/local.env set its own."""
+    b = Box(td, "final5")
+    try:
+        co, root, app = b.co, b.root, b.app
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        b.settings("config/vms/x.env", "SSH_PORT=2402\nVNC_PORT=6102\n")
+        vault = os.path.join(app, "x")
+        os.makedirs(vault)
+        write(os.path.join(vault, "vault.json"), "{}")
+        rm = os.path.join(co, "scripts", "safe-rmtree.sh")
+
+        def rmrun(path):
+            return subprocess.run([rm, path], env=b.env(), capture_output=True, text=True, timeout=120)
+
+        # P1 1: one path checked, another deleted. A link to VM x's vault, spelled alias/, alias/. and alias/..
+        alias = os.path.join(root, "alias")
+        os.symlink(vault, alias)
+        for spelled in (alias + "/", alias + "/.", alias + "/..", alias + "/../x"):   # the last: x's vault, physically
+            r = rmrun(spelled)
+            check(f"safe-rmtree.sh alias{spelled[len(alias):]} (a link to VM x's vault): refused, the vault and what "
+                  "holds it kept", r.returncode == 1 and os.path.exists(os.path.join(vault, "vault.json")),
+                  (r.returncode, r.stderr[-300:]))
+        r = rmrun(alias)
+        check("...the link itself (alias): only the link goes", r.returncode == 0 and not os.path.lexists(alias)
+              and os.path.exists(os.path.join(vault, "vault.json")), r.stderr[-300:])
+
+        # P1 2a: S3 backup pruning walks a tree. VM x's vault path is a link into .../s3/work/backup/x.
+        os.makedirs(vault, exist_ok=True)              # (the code before this round deleted it above)
+        write(os.path.join(vault, "vault.json"), "{}")
+        sh = os.path.join(root, "storage-home")
+        backup = os.path.join(sh, "s3", "work", "backup")
+        os.makedirs(os.path.join(backup, "x"))
+        os.rename(vault, os.path.join(backup, "x", "vault"))
+        os.symlink(os.path.join(backup, "x", "vault"), vault)
+        write(os.path.join(backup, "old-1.bak"), "x" * 100)
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import storage\n"
+                "storage.prune_backups(sys.argv[2], 0)\n")
+        r = subprocess.run([PY, "-c", code, os.path.join(co, "lib"), backup], env=b.env(MCOMP_STORAGE_HOME=sh),
+                           capture_output=True, text=True, timeout=120)
+        check("pruning S3 backups when a VM's vault is in the backup folder: refused, nothing pruned, vault.json kept",
+              os.path.exists(os.path.join(backup, "x", "vault", "vault.json")) and os.path.exists(os.path.join(backup, "old-1.bak"))
+              and "config/vms/x.env's VAULT_DIR" in r.stderr, (r.stdout + r.stderr)[-300:])
+        os.remove(vault)
+        os.rename(os.path.join(backup, "x", "vault"), vault)
+        elsewhere = os.path.join(root, "elsewhere")
+        os.makedirs(elsewhere)
+        write(os.path.join(elsewhere, "keep.bak"), "x" * 100)
+        os.symlink(elsewhere, os.path.join(backup, "linked"))
+        r = subprocess.run([PY, "-c", code, os.path.join(co, "lib"), backup], env=b.env(MCOMP_STORAGE_HOME=sh),
+                           capture_output=True, text=True, timeout=120)
+        check("(with nothing of a VM's there, pruning to 0 bytes deletes the backups, through no link)",
+              not os.path.exists(os.path.join(backup, "old-1.bak")) and os.path.exists(os.path.join(vault, "vault.json"))
+              and os.path.exists(os.path.join(elsewhere, "keep.bak")), (r.stdout + r.stderr)[-300:])
+
+        # P1 2b: the SSH certificates' cleanup walks $SOCK_DIR/certs. VM x's vault path is a link into certs/x, whose
+        # files are over an hour old: cert_for's cleanup leaves them.
+        script = ('. "$1/scripts/lib.sh"; ensure_ca() { :; }; CA_KEY=/nonexistent; printf "%s\\n" "$SOCK_DIR"; '
+                  'cert_for ops >/dev/null 2>&1; :')
+        r = subprocess.run(["/bin/bash", "-c", script, "_", co], env=b.env(), capture_output=True, text=True, timeout=120)
+        sock = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
+        certs = os.path.join(sock, "certs")
+        ok_setup = bool(sock) and os.path.isdir(certs)
+        if ok_setup:
+            os.makedirs(os.path.join(certs, "x"), exist_ok=True)
+            os.makedirs(vault, exist_ok=True)          # (the code before this round pruned vault.json above)
+            write(os.path.join(vault, "vault.json"), "{}")
+            os.rename(vault, os.path.join(certs, "x", "vault"))
+            os.symlink(os.path.join(certs, "x", "vault"), vault)
+            old = time.time() - 7200
+            os.utime(os.path.join(certs, "x", "vault", "vault.json"), (old, old))
+            subprocess.run(["/bin/bash", "-c", script, "_", co], env=b.env(), capture_output=True, text=True, timeout=120)
+        check("the old SSH certificates' cleanup when a VM's vault is in the certificates' folder: vault.json kept",
+              ok_setup and os.path.exists(os.path.join(certs, "x", "vault", "vault.json")), (sock, r.stderr[-300:]))
+        if ok_setup:
+            os.remove(vault)
+            os.rename(os.path.join(certs, "x", "vault"), vault)
+        if sock.startswith("/tmp/mcomp-"):
+            shutil.rmtree(sock, ignore_errors=True)    # this box's own socket folder (named for its checkout)
+
+        # P1 3: config/local.env names its own vault and spool; the account's own are protected all the same.
+        b.settings("config/local.env", f'VM_NAME=metacomputer\nVAULT_DIR="{root}/main-vault"\nEVENTS_SPOOL="{root}/main-spool"\n')
+        real_home = os.path.expanduser("~" + __import__("pwd").getpwuid(os.getuid()).pw_name)
+        r = subprocess.run([PY, os.path.join(co, "lib", "safedelete.py"), "check", "--",
+                            os.path.join(real_home, "Library", "Application Support")], env=b.env(),
+                           capture_output=True, text=True, timeout=120)
+        check("with config/local.env's own vault and spool, a folder holding the account's vault is still refused "
+              "(only checked: nothing deleted)", r.returncode == 1 and "the account's vault folder" in r.stderr, r.stderr[-300:])
+    finally:
+        b.close()
+
+    # Links to the home folder and to the checkout (this box's own copies: the code before this round deleted them).
+    b = Box(td, "final5-links")
+    try:
+        co, root = b.co, b.root
+        b.settings("config/local.env", "VM_NAME=metacomputer\n")
+        rm = os.path.join(co, "scripts", "safe-rmtree.sh")
+
+        def rmrun(path):
+            if not os.path.exists(rm):              # (the code before this round deleted the checkout, helper and all)
+                return subprocess.CompletedProcess([rm], 127, "", "no scripts/safe-rmtree.sh")
+            return subprocess.run([rm, path], env=b.env(), capture_output=True, text=True, timeout=120)
+
+        for target, what in ((b.home, "the home folder"), (co, "the checkout")):
+            ln = os.path.join(root, "to-" + os.path.basename(target))
+            os.symlink(target, ln)
+            r = rmrun(ln + "/")
+            check(f"a link to {what}, spelled with a trailing /: refused, {what} kept", r.returncode == 1
+                  and os.path.isdir(target) and os.path.exists(os.path.join(co, "bin", "metacomputer")), r.stderr[-300:])
+            r = rmrun(ln + "/.")
+            check(f"...and {what} spelled with /.: refused", r.returncode == 1 and os.path.isdir(target), r.stderr[-300:])
+            r = rmrun(ln)
+            check(f"...the link itself: only the link goes, {what} kept", r.returncode == 0 and not os.path.lexists(ln)
+                  and os.path.isdir(target), r.stderr[-300:])
+    finally:
+        b.close()
+
+
 # The recursive deletes that aren't made through lib/safedelete.py (scripts/safe-rmtree.sh), each with why:
 #   runner   the runner's delete of a VM, baseline or checkpoint, after the identity rule (vm_change_lock, vm delete's
 #            plan, build-vm.sh's check); no VM's folder may be in its storage
@@ -1436,6 +1557,27 @@ DELETE_EXCEPTIONS = [
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),
 ]
 DELETE_HELPER = ("lib/safedelete.py", "scripts/safe-rmtree.sh")
+# Python functions that walk a folder (os.walk, fwalk, listdir, scandir, glob, rglob, iterdir) and delete what they
+# find (os.remove, unlink, rmdir, removedirs) themselves, not through lib/safedelete.py: each with why it isn't a
+# recursive delete into another VM's folder.
+DELETE_WALK_EXCEPTIONS = {
+    ("lib/vm_shell_guest.py", "sweep"): "runs inside the VM, not on the Mac",
+    ("lib/guest_import.py", "sweep"): "the staging folder this import made (mkdtemp), by descriptor, following no link",
+    ("lib/guest_import.py", "merge"): "replaces one entry at a time in the destination (a file or link where the VM "
+                                      "sent a folder), by descriptor; never a folder's contents",
+    ("lib/owners.py", "claims"): "one level: dead claim files in the VM's own RUN_DIR/owners",
+    ("lib/events.py", "quarantine"): "one level: the spool's own .quarantine, by descriptor",
+    ("lib/events.py", "_admin_records"): "one level: the events admin folder's own records",
+    ("lib/storage.py", "clear_state"): "named state files and one level of storage's own run folder",
+    ("lib/storage.py", "claims_on"): "one level: stale space claims in storage's own space folder",
+    ("lib/storage.py", "clean_stage"): "one level, by descriptor, in a staging folder this program made (its identity "
+                                       "checked); only empty folders removed",
+}
+WALK_CALLS = {"walk", "fwalk", "listdir", "scandir", "glob", "rglob", "iterdir"}
+DELETE_CALLS = {"remove", "unlink", "rmdir", "removedirs", "rmtree"}
+# Shell forms that delete a tree: find -delete / -exec rm, xargs rm, rsync --delete, tar --remove-files, ditto.
+TREE_SHELL_PAT = (r'\bfind\b.*(-delete\b|-exec\s+rm\b)|\bxargs\b.*\brm\b|\brsync\b.*--delete|--remove-files|'
+                  r'^\s*[^#]*\bditto\b')
 DELETE_PAT = (r'\brm +-[a-zA-Z]*r[a-zA-Z]*\b|shutil\.rmtree\(|(?<![\w.])rmtree\(|removedirs\(|'
               r'"\$LUME" delete|\$LUME delete|\blume delete')
 
@@ -1480,11 +1622,64 @@ def delete_inventory(td):
           "\n".join(bare))
     stale = [e for e in DELETE_EXCEPTIONS if e not in used]
     check("...and every listed exception is still in the code", not stale, stale)
+    # Deletes that walk a tree: Python functions with a walk and a delete of their own, and shell tree-delete forms.
+    import ast
+    walkers, seen, shell = [], set(), []
+    tpat = re.compile(TREE_SHELL_PAT)
+    for rel in files:
+        if rel in DELETE_HELPER:
+            continue
+        try:
+            text = open(os.path.join(LAB, rel)).read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if rel.endswith(".py") or text.startswith("#!/usr/bin/env python"):
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                tree = None
+            for node in ast.walk(tree) if tree else ():
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                names = set()
+                for c in ast.walk(node):
+                    if isinstance(c, ast.Call):
+                        f = c.func
+                        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "safedelete":
+                            continue                  # through the helper
+                        names.add(f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""))
+                if names & WALK_CALLS and names & DELETE_CALLS:
+                    if (rel, node.name) in DELETE_WALK_EXCEPTIONS:
+                        seen.add((rel, node.name))
+                    else:
+                        walkers.append(f"{rel}:{node.lineno} {node.name}()")
+            # Code outside any function, too (a script's top level).
+            top = set()
+            for st in (tree.body if tree else ()):
+                if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                for c in ast.walk(st):
+                    if isinstance(c, ast.Call) and not (isinstance(c.func, ast.Attribute) and isinstance(c.func.value, ast.Name)
+                                                        and c.func.value.id == "safedelete"):
+                        top.add(c.func.attr if isinstance(c.func, ast.Attribute) else getattr(c.func, "id", ""))
+            if top & WALK_CALLS and top & DELETE_CALLS:
+                walkers.append(f"{rel}: its top level")
+        else:
+            for i, ln in enumerate(text.splitlines(), 1):
+                if tpat.search(ln) and not ln.lstrip().startswith("#"):
+                    shell.append(f"{rel}:{i}: {ln.strip()[:120]}")
+    check("no Python function walks a folder and deletes what it finds outside lib/safedelete.py, but the listed ones",
+          not walkers, "\n".join(walkers))
+    check("...and every listed one is still in the code", seen == set(DELETE_WALK_EXCEPTIONS),
+          sorted(set(DELETE_WALK_EXCEPTIONS) - seen))
+    check("no shell tree delete (find -delete, -exec rm, xargs rm, rsync --delete, tar --remove-files, ditto)",
+          not shell, "\n".join(shell))
     hp = os.path.join(LAB, "lib", "safedelete.py")
     helper = open(hp).read() if os.path.exists(hp) else ""
     sr = os.path.join(LAB, "scripts", "safe-rmtree.sh")
     check("the helper checks each target physically against every VM's folders, failing closed", os.path.exists(sr) and
-          "def check(path, prot" in helper and "vms.physical(target" in helper and "mc_all_identity_records" in helper
+          "def check(path, prot" in helper and "vms.physical(t.path" in helper
+          and "shutil.rmtree(t.name, dir_fd=fd)" in helper and "avoids_symlink_attacks" in helper and "mc_all_identity_records" in helper
           and 'if ids.get("UNREADABLE"):' in helper and 'MC_LIB_DEFS_ONLY=1' in helper
           and "safedelete.py\" rmtree" in open(sr).read())
     checked = []
@@ -1634,6 +1829,7 @@ def main():
         final2_fixes(td)
         final3_fixes(td)
         final4_fixes(td)
+        final5_fixes(td)
         delete_inventory(td)
         claude_flow(td)
         hub_pin(td)

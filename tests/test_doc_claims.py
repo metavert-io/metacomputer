@@ -1105,15 +1105,29 @@ CLAIMS = [
      and 'PLACES = {"@runner": "the runner\'s VM storage"}' in raw("lib/vms.py") and "@runner PATH" in raw("scripts/lib.sh")
      and "printf '%s\\n' \"~/.lume\" \"$out\"" in raw("scripts/lib.sh") and '"$lb" config get' in raw("scripts/lib.sh")
      and ".config/lume/config.yaml" in raw("scripts/lib.sh")),
-    ("SECURITY.md", r"It deletes a folder only when that folder, as it physically is, neither is nor holds a folder some VM of this checkout uses \(every VM's keys, runtime, logs, vault and spool, the account's own vault and spools, a vault folder the environment names, the home folder and the checkout\), nor holds a link on the way to one; a link is deleted itself, never what it points to, and not when it's on the way to such a folder\. It fails closed",
+    ("SECURITY.md", r"It deletes a folder only when that folder, as it physically is, neither is nor holds a folder some VM of this checkout uses \(every VM's keys, runtime, logs, vault and spool, the account's own vault and spools whatever the settings say, a vault folder the environment names, the home folder and the checkout\), nor holds a link on the way to one; a link is deleted itself, never what it points to, and not when it's on the way to such a folder\.",
      lambda m: all(x in raw("lib/safedelete.py") for x in (
-         "def check(path, prot", "vms.physical(target", "def links_on_the_way(", "mc_all_identity_records",
-         'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(path)", "shutil.rmtree(os.path.realpath(path))",
-         '("this checkout", lab)', "a link on the way to"))
+         "def check(path, prot", "vms.physical(t.path", "def links_on_the_way(", "mc_all_identity_records",
+         'if ids.get("UNREADABLE"):', "MC_LIB_DEFS_ONLY=1", "os.unlink(t.name, dir_fd=fd)", "shutil.rmtree(t.name, dir_fd=fd)",
+         '("this checkout", lab)', "a link on the way to", '("the account\'s vault folder", os.path.join(home, ACCOUNT_VAULT))',
+         '("the account\'s event spool", os.path.join(home, ACCOUNT_VAULT, "events", "spool"))'))
      and "mc_all_identity_records() {" in raw("scripts/lib.sh") and '[ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0' in raw("scripts/lib.sh")
      and 'safedelete.py" rmtree' in raw("scripts/safe-rmtree.sh")),
-    ("SECURITY.md", r"The only recursive deletes not made through it are the runner's own delete of a VM, baseline or checkpoint \(after the rule above\), `vm delete`'s delete of the VM's own folders \(`lib/vms\.py rmtree_own`, which follows no link and has the same guards\), and those inside the VM; a test fails when any other appears",
+    ("SECURITY.md", r"It resolves a path once \(its folder physically, its last part as it is; a path ending in `/`, `/\.` or `/\.\.` is refused\) and deletes exactly that entry, through a descriptor of its folder, following no link inside",
+     lambda m: all(x in raw("lib/safedelete.py") for x in (
+         "class Target:", 'if path.endswith("/"):', 'if parts[-1] in (".", ".."):', "self.parent = os.path.realpath(",
+         "def _open_parent(t):", "shutil.rmtree(t.name, dir_fd=fd)", "if not shutil.rmtree.avoids_symlink_attacks:",
+         "changed while it was being checked"))),
+    ("SECURITY.md", r"A cleanup that walks a folder checks that folder the same way first, then follows no link while it walks\. It fails closed",
+     lambda m: all(x in raw("lib/safedelete.py") for x in (
+         "def prune_files(root, choose", "check_target(t, protected(home, lab), home)", "follow_symlinks=False",
+         "os.O_NOFOLLOW", "isn't a folder (a link isn't followed)"))
+     and "safedelete.prune_files(folder, choose)" in raw("lib/storage.py")
+     and 'safedelete.py" prune --older-than 3600 -- "$dir"' in raw("scripts/lib.sh")
+     and "-mmin +60 -delete" not in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"The only recursive deletes not made through it are the runner's own delete of a VM, baseline or checkpoint \(after the rule above\), `vm delete`'s delete of the VM's own folders \(`lib/vms\.py rmtree_own`, which follows no link and has the same guards\), and those inside the VM; a test fails when any other appears, a loop that deletes what it walks and `find -delete`, `xargs rm` or `rsync --delete` included",
      lambda m: "DELETE_EXCEPTIONS = [" in raw("tests/test_multi_vm.py") and "def delete_inventory(td):" in raw("tests/test_multi_vm.py")
+     and "DELETE_WALK_EXCEPTIONS = {" in raw("tests/test_multi_vm.py") and "TREE_SHELL_PAT = (" in raw("tests/test_multi_vm.py")
      and "        delete_inventory(td)\n" in raw("tests/test_multi_vm.py")
      and all(f in raw(p) for p, f in (("scripts/fetch-artifacts.sh", 'safe-rmtree.sh" "$R/x"'),
                                       ("scripts/build-vm.sh", 'safe-rmtree.sh" "$SEED"'),

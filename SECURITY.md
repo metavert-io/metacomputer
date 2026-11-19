@@ -1265,17 +1265,24 @@ another VM:
   can't be read), the check refuses rather than skip it.
 - **Every other recursive delete checks its own target.** Each one on the Mac (a build's
   seed folder, the downloads' cleanup, a volume's S3 state folder, temporary folders, the
-  installer's) goes through one helper, `lib/safedelete.py` (`scripts/safe-rmtree.sh` for
-  scripts). It deletes a folder only when that folder, as it physically is, neither is nor
-  holds a folder some VM of this checkout uses (every VM's keys, runtime, logs, vault and
-  spool, the account's own vault and spools, a vault folder the environment names, the
-  home folder and the checkout), nor holds a link on the way to one; a link is deleted
-  itself, never what it points to, and not when it's on the way to such a folder. It fails
+  installer's, and the cleanups that walk a folder: pruning S3 backups, old SSH
+  certificates) goes through one helper, `lib/safedelete.py` (`scripts/safe-rmtree.sh` for
+  scripts). It resolves a path once (its folder physically, its last part as it is; a path
+  ending in `/`, `/.` or `/..` is refused) and deletes exactly that entry, through a
+  descriptor of its folder, following no link inside. It deletes a folder only when that
+  folder, as it physically is, neither is nor holds a folder some VM of this checkout uses
+  (every VM's keys, runtime, logs, vault and spool, the account's own vault and spools
+  whatever the settings say, a vault folder the environment names, the home folder and the
+  checkout), nor holds a link on the way to one; a link is deleted itself, never what it
+  points to, and not when it's on the way to such a folder. A cleanup that walks a folder
+  checks that folder the same way first, then follows no link while it walks. It fails
   closed: when a settings file can't be read, or a VM's folder can't be resolved, nothing is
   deleted. The only recursive deletes not made through it are the runner's own delete of a
   VM, baseline or checkpoint (after the rule above), `vm delete`'s delete of the VM's own
   folders (`lib/vms.py rmtree_own`, which follows no link and has the same guards), and
-  those inside the VM; a test fails when any other appears.
+  those inside the VM; a test fails when any other appears, a loop that deletes what it
+  walks and `find -delete`, `xargs rm` or `rsync --delete` included (a program's deletes of
+  its own files one level deep are listed in the test, each with why).
 - **Where the rule is checked.** A `config/vms/` VM's settings are refused when they're read
   if the rule fails, and so is every `config/vms/` VM while the main VM's settings break it.
   Every command that deletes, replaces or rotates a VM, its baseline or a checkpoint checks
