@@ -1,6 +1,7 @@
 """Copy files from the VM to the Mac without trusting what the VM sends.
 
-    ... | python3 lib/guest_import.py DEST [--quiet] [--keep-existing PREFIX]
+    ... | python3 lib/guest_import.py DEST [--quiet] [--keep-existing PREFIX] [--only-top FILE]
+    python3 lib/guest_import.py DEST [options] [--timeout S] -- CMD...   (CMD writes the stream)
 
 reads a tar stream (made in the VM: `metacomputer get`, `task finish`,
 `recordings --sync`, the test harness) on stdin and puts its plain files and
@@ -18,10 +19,18 @@ folders under DEST. The VM is untrusted, so:
 - what was left out is reported on stderr (escaped), so later writers (the
   contact sheet, a re-sync) never meet a link the VM made;
 - with `--keep-existing PREFIX`, a file under PREFIX (a path relative to DEST)
-  that the Mac already has as a regular file is kept, not replaced: evidence
-  copied earlier (`task finish` keeps the recording turns copied while the task
-  ran) can't be swapped by the VM later, and copies that now differ in the VM
-  are counted and named;
+  that the Mac already has as a regular file is kept, not replaced, and not by a
+  folder of the same name either: evidence copied earlier (`task finish` and the
+  task copier keep the recording turns copied while the task ran) can't be swapped
+  by the VM later, and copies that now differ in the VM are counted and named.
+  Paths are compared without regard to case or Unicode normalization, as macOS's
+  default filesystem resolves them, so `Recording/...` can't stand in for
+  `recording/...`;
+- with `--only-top FILE`, only entries under the top-level names listed in FILE
+  (one per line) are taken: the VM can't slip anything else into a copy it was
+  asked for (the task copier asks for a few turn folders at a time);
+- with `-- CMD`, CMD's output is the stream, and CMD is stopped after `--timeout`
+  seconds (default 600) or at any limit;
 - the copy stops, keeping the files that arrived whole, when the files pass
   MCOMP_IMPORT_MAX_BYTES (bin/metacomputer passes VM_DISK_BYTES: a VM can't hold
   more real files than its disk), when the Mac's free space at DEST would fall
@@ -39,6 +48,7 @@ be read (no stream, not a tar stream) or the copy failed.
 """
 import json
 import os
+import unicodedata
 import shutil
 import stat
 import subprocess
@@ -221,10 +231,10 @@ def free_bytes(fd):
     return st.f_bavail * st.f_frsize
 
 
-def unpack(stream, stage_fd, report, max_bytes=None, min_free=0):
-    """Unpack the tar stream into the staging folder: regular files and folders only.
-    Raises ImportLimit when the stream passes max_bytes, MAX_MEMBERS or MAX_OBJECTS, or
-    when the free space would fall below min_free."""
+def unpack(stream, stage_fd, report, max_bytes=None, min_free=0, only=None):
+    """Unpack the tar stream into the staging folder: regular files and folders only, and with only (a set of
+    names) only entries under those top-level names. Raises ImportLimit when the stream passes max_bytes,
+    MAX_MEMBERS or MAX_OBJECTS, or when the free space would fall below min_free."""
     members = 0
     budget = {"since_check": FREE_CHECK_EVERY}       # check before the first byte or folder
 
@@ -253,6 +263,9 @@ def unpack(stream, stage_fd, report, max_bytes=None, min_free=0):
                 report.drop(m.name, "a name that isn't a plain relative path")
                 continue
             if not parts:            # "." itself
+                continue
+            if only is not None and parts[0] not in only:
+                report.drop(m.name, "not one of the folders asked for")
                 continue
             if m.isdir():
                 try:
@@ -349,11 +362,35 @@ def same_content(src_fd, dst_fd, name):
         os.close(b)
 
 
+def fold(path):
+    """A path as macOS's default filesystem compares it: case- and normalization-insensitive."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
+
+
+def protected(rel_path, keep):
+    return bool(keep) and fold(rel_path).startswith(fold(keep))
+
+
+def keep_existing(src_fd, dst_fd, name, rel_path, report):
+    """The Mac keeps its file at rel_path; count it, and name it if the VM's copy differs (or isn't a file)."""
+    report.kept += 1
+    try:
+        same = stat.S_ISREG(os.stat(name, dir_fd=src_fd, follow_symlinks=False).st_mode) \
+            and same_content(src_fd, dst_fd, name)
+    except OSError:
+        same = False
+    if not same:
+        report.kept_changed_count += 1
+        if len(report.kept_changed) < MAX_DROPPED_KEPT:
+            report.kept_changed.append(rel_path)
+
+
 def merge(src_fd, dst_fd, rel, report, skip=None, keep=None):
     """Move everything under src_fd into dst_fd with rename(2): a link or a file in the way
     is replaced, never followed or written through; a folder is entered only if it's a
-    real folder; a folder on the Mac isn't replaced by a file. A file whose path starts
-    with keep (relative to DEST) that the Mac already has as a regular file stays as it is."""
+    real folder; a folder on the Mac isn't replaced by a file. A regular file on the Mac whose
+    path starts with keep (relative to DEST, compared as the filesystem does) stays as it is,
+    whatever the VM sends in its place: a file or a folder."""
     for name in sorted(os.listdir(src_fd)):
         if name == skip:
             continue
@@ -374,6 +411,9 @@ def merge(src_fd, dst_fd, rel, report, skip=None, keep=None):
                 finally:
                     os.close(s2)
                 continue
+            if dt is not None and stat.S_ISREG(dt.st_mode) and protected(rel + name, keep):
+                keep_existing(src_fd, dst_fd, name, rel + name, report)     # a folder doesn't replace a kept file
+                continue
             if dt is not None:
                 os.unlink(name, dir_fd=dst_fd)     # a file or link where the VM has a folder: the entry goes, never its target
             os.rename(name, name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
@@ -381,21 +421,18 @@ def merge(src_fd, dst_fd, rel, report, skip=None, keep=None):
             if dt is not None and stat.S_ISDIR(dt.st_mode):
                 report.drop(rel + name, "a folder of that name is already on the Mac")
                 continue
-            if keep and dt is not None and stat.S_ISREG(dt.st_mode) and (rel + name).startswith(keep):
-                report.kept += 1
-                if not same_content(src_fd, dst_fd, name):
-                    report.kept_changed_count += 1
-                    if len(report.kept_changed) < MAX_DROPPED_KEPT:
-                        report.kept_changed.append(rel + name)
+            if dt is not None and stat.S_ISREG(dt.st_mode) and protected(rel + name, keep):
+                keep_existing(src_fd, dst_fd, name, rel + name, report)
                 continue                 # the staged copy goes with the staging folder
             os.rename(name, name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
 
 
-def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None):
+def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None, only=None):
     """Unpack a tar stream from the VM into dest (made if missing). Returns a Report;
     raises tarfile.TarError or OSError when the stream can't be read or written.
     A limit (ImportLimit) ends the copy like a broken stream: report.failure.
-    keep: a path prefix (relative to dest) whose files already on the Mac are kept (merge)."""
+    keep: a path prefix (relative to dest) whose files already on the Mac are kept (merge).
+    only: the top-level names the stream may hold (unpack); None takes any."""
     os.makedirs(dest, exist_ok=True)
     report = Report()
     dest_fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
@@ -408,7 +445,7 @@ def import_tar(stream, dest, max_bytes=None, min_free=0, keep=None):
         try:
             failure = None
             try:
-                unpack(capped, stage_fd, report, max_bytes, min_free)
+                unpack(capped, stage_fd, report, max_bytes, min_free, only)
             except (tarfile.TarError, OSError, EOFError, ImportLimit, ValueError, RecursionError) as e:
                 failure = e         # what arrived whole before the stream broke is still kept
             sweep(stage_fd, "", report)
@@ -434,7 +471,7 @@ def limits_from_config(config=None):
     return limits_from_env(env)
 
 
-def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=None):
+def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=None, keep=None, only=None):
     """Run cmd (an SSH command that writes a tar stream from the VM) and unpack its output into dest as it
     arrives, never holding the stream in memory. Its stderr is kept to a short tail (wirelimits.StderrTail).
     The command is stopped and reaped when a limit is reached, the stream ends or breaks, or after timeout
@@ -447,7 +484,7 @@ def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=
     timer.start()
     report = None
     try:
-        report = import_tar(proc.stdout, dest, max_bytes, min_free)
+        report = import_tar(proc.stdout, dest, max_bytes, min_free, keep, only)
     finally:
         timer.cancel()
         whole = report is not None and report.failure is None
@@ -464,8 +501,40 @@ def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=
 
 
 def main(argv):
+    cmd = None
+    if "--" in argv:
+        i = argv.index("--")
+        argv, cmd = argv[:i], argv[i + 1:]
+        if not cmd:
+            print("guest_import.py: no command after --", file=sys.stderr)
+            return 2
     quiet = "--quiet" in argv
     args = [a for a in argv if a != "--quiet"]
+    timeout = 600.0
+    if "--timeout" in args:
+        i = args.index("--timeout")
+        try:
+            timeout = float(args[i + 1])
+        except (IndexError, ValueError):
+            timeout = -1
+        del args[i:i + 2]
+        if not 0 < timeout <= 86400:
+            print("guest_import.py: --timeout takes seconds", file=sys.stderr)
+            return 2
+    only = None
+    if "--only-top" in args:
+        i = args.index("--only-top")
+        path = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+        try:
+            with open(path, encoding="utf-8") as f:
+                names = [n for n in f.read(1 << 22).splitlines() if n]
+        except (OSError, UnicodeDecodeError):
+            names = None
+        if not names or any(parts_of(n) is None or len(parts_of(n)) != 1 for n in names):
+            print("guest_import.py: --only-top takes a file of plain top-level names", file=sys.stderr)
+            return 2
+        only = set(names)
     keep = None
     if "--keep-existing" in args:
         i = args.index("--keep-existing")
@@ -475,15 +544,20 @@ def main(argv):
             print("guest_import.py: --keep-existing takes a relative path prefix", file=sys.stderr)
             return 2
     if len(args) != 1:
-        print("usage: ... | guest_import.py DEST [--quiet] [--keep-existing PREFIX]", file=sys.stderr)
+        print("usage: ... | guest_import.py DEST [--quiet] [--keep-existing PREFIX] [--only-top FILE] "
+              "[--timeout S -- CMD...]", file=sys.stderr)
         return 2
     max_bytes, min_free = limits_from_env()
+    cmd_rc = 0
     try:
-        report = import_tar(sys.stdin.buffer, args[0], max_bytes, min_free, keep)
+        if cmd is None:
+            report = import_tar(sys.stdin.buffer, args[0], max_bytes, min_free, keep, only)
+        else:
+            report, cmd_rc, _ = import_from_command(cmd, args[0], max_bytes, min_free, timeout, keep=keep, only=only)
     except OSError as e:
         print(f"metacomputer: copying from the VM failed: {escape_for_terminal(str(e))}", file=sys.stderr)
         return 1
-    rc = 0
+    rc = 1 if cmd_rc else 0          # a command that failed, or was stopped at its deadline, isn't a whole copy
     if report.failure is not None:
         rc = 1
         if isinstance(report.failure, ImportLimit):
@@ -514,8 +588,15 @@ def main(argv):
     out = os.environ.get("MCOMP_IMPORT_KEEP_REPORT")
     if keep is not None and out:
         # For the caller's event (task finish): counts, and only folder names of a fixed shape, never the VM's text.
-        folders = sorted({n[len(keep):].split("/")[0] for n in report.kept_changed if n.startswith(keep)})
-        folders = [keep.rsplit("/", 1)[-1] + f for f in folders if f.isdigit()][:20]
+        depth, stem = keep.count("/"), keep.rsplit("/", 1)[-1]
+        folders = set()
+        for n in report.kept_changed:     # the folder under the prefix, by position (the VM may spell it in any case)
+            comps = n.split("/")
+            if len(comps) > depth and fold(comps[depth]).startswith(fold(stem)):
+                digits = comps[depth][len(stem):]
+                if digits.isascii() and digits.isdigit():
+                    folders.add(stem + digits)
+        folders = sorted(folders)[:20]
         try:
             with open(out, "w") as f:
                 json.dump({"kept": report.kept, "changed": report.kept_changed_count, "changed_in": folders}, f)

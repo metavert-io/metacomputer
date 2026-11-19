@@ -230,8 +230,10 @@ before this reads `~/.ssh/authorized_keys` until it's rebuilt. With
 maintenance account keeps its list.
 
 **Where it ends:** root in the VM can change any of this, as it can everything
-else in the VM. Your Mac's side still checks the VM's pinned host key on every
-connection.
+else in the VM. What `metacomputer status` shows (from the VM's `guest-status`) is
+the VM's own report of its configuration and file owners: an indicator for a VM
+that behaves, not proof about one that doesn't. Your Mac's side still checks the
+VM's pinned host key on every connection.
 
 ## SSH certificates (`SSH_AUTH=cert`)
 
@@ -1033,12 +1035,13 @@ there, and a file on your Mac can't be reached from the VM at all.
 
 | Recording | While it records, it is | A VM that turns hostile mid-recording can | It can't |
 | --- | --- | --- | --- |
-| **Desktop, `RECORD_TO=host`** (the default) | On the Mac: the VM encodes its screen and streams it over SSH, and the Mac writes what arrives to a new file | Stop sending (kill the recorder, shut down); from then on, with root, send any picture | Take back or change what already arrived; fill your disk (the copy stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB`, 10 GB by default) |
-| **Desktop, `RECORD_TO=guest`** | An MP4 in the VM's `~/metacomputer-runs/manual/`, copied at `record stop` | Delete or change it before then (wiping the home folder does) | Nothing here stops it |
+| **Desktop, `RECORD_TO=host`** (the default) | On the Mac: the VM encodes its screen and streams it over SSH, and the Mac writes what arrives to a new file | Stop sending (kill the recorder, shut down); from then on, with root, send any picture | Take back or change what already arrived; fill your disk: the stream stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB` (10 GB by default), and the MP4 is made from it only if that copy fits above the reserve too (otherwise the `.mkv` is kept as it is) |
+| **Desktop, `RECORD_TO=guest`** | An MP4 in the VM's `~/metacomputer-runs/manual/`, copied at `record stop` | Delete or change it before then (wiping the home folder does) | Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold |
 | **Per task** (Cua Driver's `start_recording` into a task folder) | Files in the VM's task folder: a folder per action, and the video, which is only whole at `stop_recording` | Delete or change the newest action's folder, the video, and anything not copied yet, before `task finish` | Change an action's folder once the Mac has it: while the task folder is open, the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds (15), once, and `task finish` never replaces it |
 
-Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while `RECORD_TO=guest` is in force, and `metacomputer status` and
-`metacomputer security` say which mode is.
+Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while
+`RECORD_TO=guest` is in force, and `metacomputer status` and `metacomputer security`
+say which mode is.
 
 **What the Mac does:**
 - **It notices a stream that ends early.** If the stream ends before you run
@@ -1046,7 +1049,10 @@ Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while `RECOR
   reserve), `record stop` saves what arrived and says so, the description file
   records `stream_ended_early`, and the `task.recording_stopped` event is a
   warning. With an event sink, the health watcher also reports a recording that
-  stopped on its own (`recording_failed`) within 5 minutes.
+  stopped on its own (`recording_failed`) within 5 minutes. A VM that's gone (it
+  crashed, or was stopped without `record stop`) doesn't strand a recording:
+  `metacomputer stop`, `reset` and `restore` save what was streamed whether or not
+  the VM is still running, and the next `record start` does it too.
 - **It still reaches a VM whose home folder was wiped.** The VM reads its SSH
   keys from root-owned files, not `~/.ssh` ([keys outside the home](#ssh-keys-outside-the-home)),
   so a wipe doesn't cut the Mac off: `record stop` ends the recording the usual
@@ -1057,11 +1063,21 @@ Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while `RECOR
   out until `metacomputer reset`; `record stop` then cuts the stream on the Mac at
   once, saves what arrived and says why. `SSH_AUTH=cert` never used `~/.ssh`.
 - **Copies made during a task stay as they were copied.** The copier uses only
-  names of the form `turn-<digits>` from the VM's listing, and the same importer as
-  every copy from the VM (plain files and folders, never written through a link,
-  within the disk reserve). `task finish` keeps every turn file the Mac already
-  has; one the VM has changed since is named on the terminal and counted in the
-  `task.finished` event (`recording_changed_in_vm`), which is then a warning.
+  names of the form `turn-<digits>` from the VM's listing and asks for a few of them
+  at a time; from the VM's answer it takes only those folders (anything else the VM
+  slips in is left out) and never replaces a file the Mac already has, with a file
+  or a folder. A turn counts as copied only once a copy of it came through whole,
+  so one cut short is asked for again. `task finish` copies the rest the same way:
+  every turn file the Mac already has is kept, whatever the VM sends in its place,
+  under any spelling of its path (case and Unicode normalization don't matter, as
+  on macOS's default filesystem). A file the VM has changed since is named on the
+  terminal and counted in the `task.finished` event (`recording_changed_in_vm`),
+  which is then a warning. All of it goes through the importer every copy from the
+  VM uses (plain files and folders, never written through a link, within the disk
+  reserve), and each copy has a deadline.
+- **It bounds what the VM says.** The VM's short answers (the recorder's replies, a
+  task folder's listing) are read with a byte limit and a deadline, so a VM that
+  answers without end, or never, can't grow or stall the command reading them.
 - **It describes what it saved.** The description file beside a desktop recording
   is written by the Mac, with the MP4's length and SHA-256.
 
@@ -1075,7 +1091,10 @@ Up to 0.2.0 the default was `RECORD_TO=guest`. `record start` warns while `RECOR
   `recordings --sync`, `task finish` or `reset` copy. For a run you don't trust,
   record the whole desktop as well.
 - `recordings --sync` replaces what it copied before with what the VM has now; only
-  `task finish` keeps earlier copies.
+  the task copier and `task finish` keep earlier copies.
+- Before the copier's first pass, and for the newest turn throughout, a turn exists
+  only in the VM; the VM can also simply never list a turn, or send nothing. What it
+  can't do is change a turn file the Mac already has.
 - On your Mac, recordings are your own files: anything running as you can change
   them. The SHA-256 in the description file lets you check a copy you keep
   elsewhere; it isn't signed.

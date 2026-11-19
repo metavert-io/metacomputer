@@ -168,6 +168,8 @@ gssh() { # what the stand-in VM answers; FAKE_VM=down: it can't be reached
   esac
 }
 daemonize() { echo "DAEMONIZE $*" >> "$TD/calls"; sleep 20 & echo $! >> "$TD/stub-pids"; }
+vm_answer() { shift 2; gssh ops "$@"; }   # the real one (bounded) is checked on its own below
+vm_copy_video() { echo "COPY $*" >> "$TD/calls"; [ "${FAKE_VM:-up}" = down ] && return 255; printf 'video' > "$2"; }
 '''
 
 
@@ -272,6 +274,42 @@ def save_checks():
         time.sleep(0.5)
         check("save: a TERM ends it and the command it runs, keeping what arrived", rc == 0 and size > 0
               and not os.path.exists(marker), (rc, size))
+        r = subprocess.run([sys.executable, REC, "save", os.path.join(td, "d.mp4"), "--min-free-gb", "0", "--max-bytes",
+                            "100000", "--", "yes"], capture_output=True, text=True, timeout=30)
+        check("save --max-bytes (a guest-mode copy: no more than the VM's disk holds): stops there, keeps what arrived",
+              r.returncode == 4 and os.path.getsize(os.path.join(td, "d.mp4")) == 100000, (r.returncode, r.stderr))
+
+        # finalize: the MP4 only when the copy leaves the reserve; otherwise the MKV stays and nothing is written.
+        mkv = os.path.join(td, "s.mkv")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=10", "-t", "2",
+                        "-pix_fmt", "yuv420p", "-f", "matroska", mkv], check=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run([sys.executable, REC, "finalize", mkv, os.path.join(td, "s.mp4"), "--min-free-gb", "1e9"],
+                           capture_output=True, text=True, timeout=60)
+        check("finalize: no room above the reserve: nothing converted, the .mkv kept, and it says so (exit 3)",
+              r.returncode == 3 and os.path.exists(mkv) and not os.path.exists(os.path.join(td, "s.mp4"))
+              and "IMPORT_MIN_FREE_GB" in r.stderr, (r.returncode, r.stderr))
+        r = subprocess.run([sys.executable, REC, "finalize", mkv, os.path.join(td, "s.mp4"), "--min-free-gb", "0"],
+                           capture_output=True, text=True, timeout=60)
+        check("finalize: with room, the MP4 is made and plays", r.returncode == 0
+              and subprocess.run([sys.executable, REC, "probe", os.path.join(td, "s.mp4")]).returncode == 0, r.stderr)
+        r = subprocess.run([sys.executable, REC, "finalize", mkv, os.path.join(td, "s.mp4"), "--min-free-gb", "0"],
+                           capture_output=True, text=True, timeout=60)
+        check("finalize: never over an existing file", r.returncode == 1, r.stderr)
+
+        # capture: the VM's short answers, with a byte limit and a deadline.
+        r = subprocess.run([sys.executable, REC, "capture", "--max-bytes", "64", "--timeout", "10", "--", "printf", "hello"],
+                           capture_output=True, timeout=30)
+        check("capture: an answer within its limits is passed on", r.returncode == 0 and r.stdout == b"hello", r)
+        t0 = time.time()
+        r = subprocess.run([sys.executable, REC, "capture", "--max-bytes", "4096", "--timeout", "10", "--", "sh", "-c",
+                            "yes | tr -d '\\n'"], capture_output=True, timeout=30)
+        check("capture: endless bytes without a newline: stopped at the limit, nothing passed on (exit 2)",
+              r.returncode == 2 and r.stdout == b"" and time.time() - t0 < 8, (r.returncode, len(r.stdout)))
+        t0 = time.time()
+        r = subprocess.run([sys.executable, REC, "capture", "--max-bytes", "4096", "--timeout", "1", "--", "sleep", "30"],
+                           capture_output=True, timeout=30)
+        check("capture: no answer by the deadline: stopped (exit 124)", r.returncode == 124 and time.time() - t0 < 5,
+              (r.returncode, round(time.time() - t0, 1)))
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -353,6 +391,50 @@ def record_cli_checks():
             if live.poll() is None:
                 live.kill()
         check("the shared state is gone after each stop", not os.path.exists(state))
+
+        # The VM's answers to record start/stop/status go through vm_answer: a byte limit and a deadline.
+        src = open(CLI).read()
+        rec_src = function(src, "do_record")
+        check("record start/stop read the recorder's answers through vm_answer (bounded), not a raw ssh capture",
+              '$(gssh' not in rec_src and "gssh ops /opt/metacomputer/bin/desktop-record status 2>/dev/null |" not in rec_src
+              and 'gssh ops "cat' not in rec_src
+              and rec_src.count("vm_answer 4096") >= 4 and rec_src.count("vm_copy_video") == 2,
+              rec_src.count("vm_answer 4096"))
+        bindir = os.path.join(td, "floodbin")
+        os.makedirs(bindir, exist_ok=True)
+        with open(os.path.join(bindir, "ssh"), "w") as f:
+            f.write("#!/bin/sh\nyes | tr -d '\\n'\n")
+        os.chmod(os.path.join(bindir, "ssh"), 0o755)
+        t0 = time.time()
+        r = run_bash(cli_script(td, ("vm_answer",), 'ssh_base() { SSH_ARGS=(x); }\n'
+                                'out="$(vm_answer 4096 20 /opt/metacomputer/bin/desktop-record stop)"; echo "RC=$? LEN=${#out}"'),
+                     dict(env, PATH=bindir + os.pathsep + os.environ["PATH"]))
+        check("vm_answer: a VM that answers with endless bytes and no newline: nothing kept, a failure, at once",
+              "LEN=0" in r.stdout and "RC=0" not in r.stdout and time.time() - t0 < 10, (r.stdout, r.stderr[-200:]))
+
+        # A recording whose VM went away (crashed, stopped) is saved by reset/restore and stop, VM or no VM.
+        stubs = ('vm_lock_or_die() { :; }\nexpect_guard() { :; }\nvm_exists() { return 0; }\nvm_running() { return 1; }\n'
+                 'events_watcher_stop() { :; }\nstorage_py() { :; }\nstorage_release() { :; }\nnetgw_stop() { :; }\n'
+                 'hub_stop() { :; }\nvm_stop() { :; }\ndo_recordings() { :; }\ndo_start() { echo STARTED; }\n'
+                 'parse_flags() { REST=("$@"); }\nowners_check() { :; }\nLUME=/usr/bin/true\n')
+        for caller, body in (("restore_from", "restore_from base baseline reset"), ("do_stop", "do_stop")):
+            dead = subprocess.Popen(["true"])
+            dead.wait()
+            mkv(f"gone-{caller}")
+            host_state(f"gone-{caller}", dead.pid)
+            r = run_bash(cli_script(td, funcs + (caller,), stubs + body), dict(env, REC_NAME=f"gone-{caller}", FAKE_VM="down"))
+            check(f"{caller} with the VM already down still saves the recording it was streaming",
+                  os.path.isfile(os.path.join(rec, f"gone-{caller}.mp4")) and not os.path.exists(state),
+                  (r.returncode, r.stderr[-400:]))
+        # record start with a stale streamed recording (its Mac side ended): saved first, then the new one starts.
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        mkv("stale")
+        host_state("stale", dead.pid)
+        r = run_bash(cli_script(td, funcs, "do_record start fresh"), dict(env, REC_NAME="fresh"))
+        st = open(state).read() if os.path.exists(state) else ""
+        check("record start: a stale streamed recording is saved first instead of blocking the new one",
+              os.path.isfile(os.path.join(rec, "stale.mp4")) and "name=fresh" in st, (r.stderr[-400:], st))
     finally:
         pids = os.path.join(td, "stub-pids")     # the stand-in daemons this test started, and only those
         for pid in (open(pids).read().split() if os.path.exists(pids) else []):
@@ -363,13 +445,58 @@ def record_cli_checks():
         shutil.rmtree(td, ignore_errors=True)
 
 
+FAKE_SSH = r"""#!/usr/bin/env python3
+# A stand-in VM for the copier: `ssh ARGS... REMOTE_COMMAND` runs the command locally, with the task's guest path
+# mapped to a local folder. FAKE_MODE plays a hostile or broken VM.
+import io, os, subprocess, sys, tarfile
+cmd = sys.argv[-1].replace(os.environ["FAKE_FROM"], os.environ["FAKE_TO"])
+mode, marker = os.environ.get("FAKE_MODE", ""), os.environ.get("FAKE_MARKER", "")
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(cmd + "\n")
+if "ls -1" in cmd and mode == "flood":
+    out = sys.stdout.buffer
+    for _ in range(64):
+        out.write(b"x" * (1 << 20))        # 64 MB and no newline: more than any listing may be
+    sys.exit(0)
+if "tar -cf -" in cmd and mode in ("extra", "cutonce"):
+    names = cmd.split("tar -cf - ", 1)[1].split()
+    folder = os.environ["FAKE_TO"]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for n in names:
+            tf.add(os.path.join(folder, n), arcname=n)
+        if mode == "extra":                # what wasn't asked for: a doctored copy of a turn the Mac already has
+            data = b'{"doctored": true}\n'
+            ti = tarfile.TarInfo("turn-00001/action.json"); ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+            ti = tarfile.TarInfo("turn-00002/action.json"); ti.type = tarfile.DIRTYPE
+            tf.addfile(ti)
+    data = buf.getvalue()
+    if mode == "cutonce" and not os.path.exists(marker):
+        open(marker, "w").close()
+        sys.stdout.buffer.write(data[:700])   # the first header and part of a file, then the stream breaks
+        sys.exit(1)
+    sys.stdout.buffer.write(data)
+    sys.exit(0)
+os.execvpe("bash", ["bash", "-c", cmd], dict(os.environ, COPYFILE_DISABLE="1"))
+"""
+
+
 def task_sync_checks():
-    """The task copier (TASK_SYNC_INTERVAL) against a stand-in VM: a local folder plays the task's recording."""
+    """The task copier (TASK_SYNC_INTERVAL) against a stand-in VM: a local folder plays the task's recording, and a
+    stand-in `ssh` runs the copier's real commands (vm_answer, guest_import -- ssh) against it."""
     td = tempfile.mkdtemp(prefix="mcomp-rec-sync-")
     name = "mcomp-20261118-120000-sync"
     vm = os.path.join(td, "vm-recording")
     host = os.path.join(td, "lab", "results", name, "guest", "recording")
     pidf = os.path.join(td, "run", f"task-sync.{name}.pid")
+    bindir = os.path.join(td, "bin")
+    os.makedirs(bindir)
+    with open(os.path.join(bindir, "ssh"), "w") as f:
+        f.write(FAKE_SSH.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1))
+    os.chmod(os.path.join(bindir, "ssh"), 0o755)
+    funcs = ("task_sync_pidfile", "task_sync_on", "do_task_sync", "vm_answer", "guest_import")
+    stand_in = 'ssh_base() { SSH_ARGS=(stand-in-vm); }\nIMPORT_MIN_FREE_GB=0\n'
 
     def turn(n, extra=""):
         d = os.path.join(vm, f"turn-{n:05d}" + extra)
@@ -377,38 +504,49 @@ def task_sync_checks():
         with open(os.path.join(d, "action.json"), "w") as f:
             f.write(f'{{"turn": {n}}}\n')
 
-    # The stand-in VM: the copier's two commands (list, tar) run against the local folder.
-    stand_in = r'''
-gssh() {
-  echo "GSSH $*" >> "$TD/calls"
-  case "$*" in
-    *"ls -1"*) [ -d "$FAKE_DIR" ] || { echo GONE; return 0; }; ( cd "$FAKE_DIR" && ls -1 && echo END ) ;;
-    *"tar -cf -"*) ( cd "$FAKE_DIR" && eval "COPYFILE_DISABLE=1 tar -cf - ${*##*tar -cf - }" ) ;;   # no ._ files
-    *) return 0 ;;
-  esac
-}
-guest_import() { MCOMP_IMPORT_MIN_FREE_GB=0 "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"; }
-'''
+    def env(mode=""):
+        return dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"], FAKE_TO=vm, FAKE_MODE=mode,
+                    FAKE_FROM=f"/home/u/metacomputer-runs/{name}/recording", FAKE_LOG=os.path.join(td, "ssh.log"),
+                    FAKE_MARKER=os.path.join(td, "cut-done"))
+
+    def copier(mode="", extra="", wait=False, timeout=30):
+        body = stand_in + f'echo $$ > "{pidf}"\n{extra}TASK_SYNC_INTERVAL=1 do_task_sync {name}\necho "EXIT $?"\n' \
+            f'[ -e "{pidf}" ] || echo "PIDFILE GONE"\n'
+        script = cli_script(td, funcs, body)
+        if wait:
+            return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=timeout,
+                                  env=env(mode), stdin=subprocess.DEVNULL)
+        return subprocess.Popen(["/bin/bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=env(mode), stdin=subprocess.DEVNULL)
+
+    def have():
+        return sorted(n for n in os.listdir(host) if not n.startswith(".")) if os.path.isdir(host) else []
+
+    def wait_for(cond, s=10):
+        end = time.time() + s
+        while time.time() < end and not cond():
+            time.sleep(0.2)
+        return cond()
+
+    def reset_host():
+        shutil.rmtree(os.path.join(td, "lab", "results"), ignore_errors=True)
+        for f in (f"task-sync.{name}.done", f"task-sync.{name}.want"):
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(os.path.join(td, "run", f))
+
+    def stop(p):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(pidf)              # what task finish does first
+        return p.communicate(timeout=15)
+
+    import contextlib
     try:
+        os.makedirs(os.path.join(td, "run"), exist_ok=True)
         for n in (1, 2, 3):
             turn(n)
         os.makedirs(os.path.join(vm, "turn-1;touch pwned"))      # a name the copier must never use
         open(os.path.join(vm, "recording.mp4"), "w").write("partial video")
-        body = (stand_in + f'\necho $$ > "{pidf}"\nTASK_SYNC_INTERVAL=1 do_task_sync {name}\necho "EXIT $?"\n')
-        os.makedirs(os.path.join(td, "run"), exist_ok=True)
-        script = cli_script(td, ("task_sync_pidfile", "task_sync_on", "do_task_sync"), body)
-        p = subprocess.Popen(["/bin/bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             env=dict(os.environ, FAKE_DIR=vm), stdin=subprocess.DEVNULL)
-
-        def have():
-            return sorted(os.listdir(host)) if os.path.isdir(host) else []
-
-        def wait_for(cond, s=8):
-            end = time.time() + s
-            while time.time() < end and not cond():
-                time.sleep(0.2)
-            return cond()
-
+        p = copier()
         check("copier: finished turns arrive while the task runs, the newest (still being written) doesn't",
               wait_for(lambda: have() == ["turn-00001", "turn-00002"]), have())
         check("...nor the video, which is only whole at stop_recording", "recording.mp4" not in have())
@@ -420,53 +558,84 @@ guest_import() { MCOMP_IMPORT_MIN_FREE_GB=0 "$PY" "$LAB_ROOT/lib/guest_import.py
               open(os.path.join(host, "turn-00001", "action.json")).read() == '{"turn": 1}\n')
         check("...names other than turn-<digits> are never used", not os.path.exists(os.path.join(td, "pwned"))
               and not any(";" in n for n in have()), have())
-        os.remove(pidf)       # what task finish does first
-        out, err = p.communicate(timeout=10)
+        out, err = stop(p)
         check("...and it ends once task finish removes its pid file", "EXIT 0" in out, (out, err))
 
-        # A VM whose task folder is gone (wiped, or reset): the copier gives up on its own.
+        # A hostile answer: asked for turn-00003, the VM also sends a doctored turn-00001 and a folder where
+        # turn-00002's file is. Neither reaches what the Mac saved.
+        reset_host()
         shutil.rmtree(vm)
-        body = (stand_in + f'\necho $$ > "{pidf}"\nTASK_SYNC_INTERVAL=1 do_task_sync {name}\n'
-                f'echo "EXIT $?"; [ -e "{pidf}" ] || echo "PIDFILE GONE"\n')
-        script = cli_script(td, ("task_sync_pidfile", "task_sync_on", "do_task_sync"), body)
-        r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30,
-                           env=dict(os.environ, FAKE_DIR=vm), stdin=subprocess.DEVNULL)
+        for n in (1, 2, 3):
+            turn(n)
+        p = copier()
+        wait_for(lambda: have() == ["turn-00001", "turn-00002"])
+        stop(p)
+        turn(4)
+        p = copier("extra")
+        check("copier, hostile answer: the turn asked for still arrives", wait_for(lambda: "turn-00003" in have()), have())
+        out, err = stop(p)
+        check("...a turn the Mac already saved isn't replaced by what the VM slipped into the answer",
+              open(os.path.join(host, "turn-00001", "action.json")).read() == '{"turn": 1}\n'
+              and os.path.isfile(os.path.join(host, "turn-00002", "action.json")),
+              open(os.path.join(host, "turn-00001", "action.json")).read())
+
+        # A copy cut short is asked for again on the next pass (a folder that exists isn't "done").
+        reset_host()
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(td, "cut-done"))
+        p = copier("cutonce")
+        check("copier, a copy cut short: retried on the next pass until the turns arrive whole",
+              wait_for(lambda: all(os.path.isfile(os.path.join(host, t, "action.json"))
+                                   for t in ("turn-00001", "turn-00002", "turn-00003")))
+              and os.path.exists(os.path.join(td, "cut-done")), have())
+        stop(p)
+
+        # A VM that answers the listing with endless bytes (no newline): bounded, counted as no answer, ignored.
+        reset_host()
+        t0 = time.time()
+        r = copier("flood", wait=True, timeout=60)
+        check("copier, a listing past its byte limit: dropped, and after 8 such passes the copier ends; nothing copied",
+              "EXIT 0" in r.stdout and "PIDFILE GONE" in r.stdout and have() == [] and time.time() - t0 < 45,
+              (r.stdout[-200:], r.stderr[-300:], round(time.time() - t0, 1)))
+
+        # A VM whose task folder is gone (wiped, or reset): the copier gives up on its own.
+        reset_host()
+        p = copier()
+        wait_for(lambda: have() == ["turn-00001", "turn-00002", "turn-00003"])
+        shutil.rmtree(vm)
+        out, err = p.communicate(timeout=30)
         check("copier: a task folder that's gone ends it after a few tries, and it cleans up its pid file",
-              "EXIT 0" in r.stdout and "PIDFILE GONE" in r.stdout, (r.stdout, r.stderr))
+              "EXIT 0" in out and "PIDFILE GONE" in out, (out, err))
         check("...what it copied before stays on the Mac", have() == ["turn-00001", "turn-00002", "turn-00003"], have())
         r = run_bash(cli_script(td, ("task_sync_pidfile", "task_sync_on", "task_sync_start"),
                                 f'TASK_SYNC_INTERVAL=0 task_sync_start {name}; ls "$RUN_DIR"; cat "$TD/calls" 2>/dev/null'))
-        check("TASK_SYNC_INTERVAL=0 starts no copier", "DAEMONIZE" not in r.stdout and "task-sync" not in r.stdout,
+        check("TASK_SYNC_INTERVAL=0 starts no copier", "DAEMONIZE" not in r.stdout and "task-sync.mcomp" not in r.stdout,
               r.stdout)
         # A task nobody finishes: an hour (here 3 s) without a new turn ends the copier.
         os.makedirs(vm)
         turn(1)
-        body = (stand_in + f'\necho $$ > "{pidf}"\nMCOMP_TASK_SYNC_IDLE=3 TASK_SYNC_INTERVAL=1 do_task_sync {name}\n'
-                f'echo "EXIT $?"; [ -e "{pidf}" ] || echo "PIDFILE GONE"\n')
         t0 = time.time()
-        r = subprocess.run(["/bin/bash", "-c", cli_script(td, ("task_sync_pidfile", "task_sync_on", "do_task_sync"), body)],
-                           capture_output=True, text=True, timeout=30, env=dict(os.environ, FAKE_DIR=vm),
-                           stdin=subprocess.DEVNULL)
+        r = copier(extra="MCOMP_TASK_SYNC_IDLE=3 ", wait=True)
         check("copier: no new turn for its idle limit ends it, pid file and all", "EXIT 0" in r.stdout
               and "PIDFILE GONE" in r.stdout and time.time() - t0 < 15, (r.stdout, r.stderr))
         # task start: a copier per task, none with --no-sync (what web checks without --record pass)
-        funcs = ("task_sync_pidfile", "task_sync_on", "task_sync_start", "do_task")
+        tfuncs = ("task_sync_pidfile", "task_sync_on", "task_sync_start", "do_task")
         for args, want in (("probe", True), ("probe --no-sync", False), ("--no-sync probe", False)):
             calls = os.path.join(td, "calls")
             if os.path.exists(calls):
                 os.remove(calls)
-            r = run_bash(cli_script(td, funcs, f'do_task start {args}; cat "$TD/calls" 2>/dev/null'))
+            r = run_bash(cli_script(td, tfuncs, f'do_task start {args}; cat "$TD/calls" 2>/dev/null'))
             started = "DAEMONIZE" in r.stdout and re.search(r"_task-sync mcomp-\d{8}-\d{6}-probe\b", r.stdout)
             check(f"task start {args}: {'a copier' if want else 'no copier'}", r.returncode == 0
                   and re.search(r"^NAME=mcomp-\d{8}-\d{6}-probe$", r.stdout, re.M) and bool(started) == want,
                   (r.stdout, r.stderr))
+    finally:
         pids = os.path.join(td, "stub-pids")
         for pid in (open(pids).read().split() if os.path.exists(pids) else []):
             try:
                 os.kill(int(pid), signal.SIGTERM)
             except (OSError, ValueError):
                 pass
-    finally:
         shutil.rmtree(td, ignore_errors=True)
 
 

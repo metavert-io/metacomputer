@@ -227,16 +227,33 @@ VM, and checks:
 - `record stop` after a stream that had ended on its own (saved, said, recorded in
   the description file and as a warning event), and with a VM it can't reach (the
   stream cut on the Mac within seconds, saved, and why);
-- the task copier (`TASK_SYNC_INTERVAL`), with a local folder as the VM: finished turns
-  arrive while the task runs, the newest and the video don't, each turn is copied
-  once (a later change in the VM doesn't reach the Mac), names other than
-  `turn-<digits>` are never used, it ends when `task finish` removes its pid file,
-  after the folder has gone, or after its idle limit, and `TASK_SYNC_INTERVAL=0`
-  and `task start --no-sync` start none.
+- the task copier (`TASK_SYNC_INTERVAL`), with a local folder as the VM and a stand-in
+  `ssh` that runs the copier's real commands: finished turns arrive while the task
+  runs, the newest and the video don't, each turn is copied once (a later change in
+  the VM doesn't reach the Mac), names other than `turn-<digits>` are never used; a
+  VM that slips a doctored copy of an earlier turn (and a folder in place of one of
+  its files) into its answer changes nothing the Mac has; a copy cut short is asked
+  for again until it comes through whole; a listing of 64 MB with no newline is
+  dropped at its limit; it ends when `task finish` removes its pid file, after the
+  folder has gone, or after its idle limit, and `TASK_SYNC_INTERVAL=0` and `task
+  start --no-sync` start none;
+- the bounds: `recording.py capture` passes on an answer within its limits, stops an
+  endless one (no newline) at its byte limit and a silent one at its deadline;
+  `vm_answer` with a VM that floods keeps nothing; `record start`/`stop` read the
+  recorder only through it; `recording.py finalize` converts only when the copy fits
+  above the reserve (else the `.mkv` is kept, exit 3) and never over an existing file;
+  `save --max-bytes` stops at its limit;
+- a recording whose VM went away: `restore_from` and `stop` with the VM already off
+  still save what was streamed, and `record start` saves a stale streamed recording
+  first instead of refusing.
 
-`tests/test_guest_import.py` checks `--keep-existing`, which `task finish` uses: a
-turn file already on the Mac is kept, one the VM has changed since is named and
-counted, and a link in its place is still replaced, not followed.
+`tests/test_guest_import.py` checks `--keep-existing`, which `task finish` and the copier
+use: a turn file already on the Mac is kept, one the VM has changed since is named and
+counted, a folder the VM sends in a kept file's place doesn't replace it, another
+spelling of the path (`Recording/TURN-00001/...`, on a case-insensitive filesystem)
+doesn't either, and a link in its place is still replaced, not followed. It checks
+`--only-top` (only the folders asked for arrive) and `-- CMD` with `--timeout` (a
+command that doesn't finish is stopped, and that isn't a whole copy).
 
 `MCOMP_CONFIG=test-vm.env python3 tests/test_recording.py --vm` also records six
 seconds on a running test VM in each mode: `RECORD_TO=guest` at standard quality,
@@ -261,7 +278,7 @@ the MP4 must be on the Mac, decode whole and cover the time after the wipe, and
 and `recordings --sync` must still work. Then a task with a real driver recording
 (`metacomputer call`): finished turns must reach the Mac while it runs, and after
 the same wipe `task finish` must work and still list them, and `sh` too. Last run:
-on a test VM built from this change (2026-11-18), all 94 checks of `--vm --wipe`
+on a test VM built from this change (2026-11-18), all 110 checks of `--vm --wipe`
 passed, and `tests/test_options.py B D` (SSH certificates, the secrets accounts) 33/33.
 
 Sync between sound and picture was measured separately, by recording a full-screen
@@ -1074,11 +1091,15 @@ update the row with the doc's new wording. What it pins:
   says passwords show as dots says usernames are visible;
 - where recordings are while they record: `RECORD_TO=host` in the defaults and as
   `record start`'s fallback, streamed through `recording.py save` with the
-  `IMPORT_MIN_FREE_GB` reserve; the warning for `RECORD_TO=guest`; `record stop` cutting
-  the stream at once when the VM can't be reached; the task copier every
-  `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest, once, and `task finish`
-  keeping those copies (`--keep-existing`); every fallback for `RECORD_TO` and
-  `TASK_SYNC_INTERVAL` in the code is its default;
+  `IMPORT_MIN_FREE_GB` reserve, and converted to MP4 by `recording.py finalize` only
+  within it; guest copies held to the reserve and `VM_DISK_BYTES`; the warning for
+  `RECORD_TO=guest`; `record stop` cutting the stream at once when the VM can't be
+  reached; the VM's answers read through `vm_answer` (a byte limit and a deadline);
+  the task copier every `TASK_SYNC_INTERVAL` (15) seconds, every turn but the newest,
+  once, taking only the folders it asked for and keeping what the Mac has; `task
+  finish` keeping those copies under any spelling (`--keep-existing`); `stop`,
+  `reset` and `restore` saving a streamed recording with the VM down; every fallback
+  for `RECORD_TO` and `TASK_SYNC_INTERVAL` in the code is its default;
 - the VM's key lists: `AuthorizedKeysFile /etc/ssh/metacomputer-keys/%u` before any
   `Match` block, installed root-owned by provision.sh, the homes' copies removed by
   finalize.sh, and no static keys for `cua` with `SSH_AUTH=cert`;

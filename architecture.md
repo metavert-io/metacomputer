@@ -763,8 +763,14 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    in, with the same limits as `metacomputer get` (`guest_import.import_from_command`).
    For a task folder (`metacomputer task start`), a copier on the Mac (`_task-sync`,
    detached; pid file `RUN_DIR/task-sync.NAME.pid`) lists the folder's recording every
-   `TASK_SYNC_INTERVAL` seconds and copies each turn but the newest, once, through
-   `guest_import`; names other than `turn-<digits>` are never used. It ends when
+   `TASK_SYNC_INTERVAL` seconds (`vm_answer`: at most 4 MB within 60 s) and asks for each
+   turn but the newest that hasn't come through whole yet, at most 500 at a time: names
+   other than `turn-<digits>` are never used. The copy runs `guest_import --only-top
+   LIST --keep-existing turn- --timeout 300 -- ssh ...`: only the folders asked for are
+   taken from the VM's answer, no file already on the Mac is replaced (by a file or a
+   folder, under any spelling), and the copy has a deadline. A turn is marked done
+   (`RUN_DIR/task-sync.NAME.done`) only after a whole copy, so one cut short is asked
+   for again. It ends when
    `task finish` removes its pid file (killed with its process group after 30 s),
    after the folder has been missing four times in a row, after eight failed
    listings, after an hour without a new turn, or after a day. `task start
@@ -781,15 +787,21 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    Mac's half (`_record-pipe`, detached) is `lib/recording.py save`: it runs that
    ssh, writes what arrives to a new `.mkv` (exclusive, no-follow), and stops the
    stream before the Mac's free space falls below `IMPORT_MIN_FREE_GB`. `record
-   stop` asks the VM's recorder to stop, waits up to 30 s for the stream to end
-   (none if the VM can't be reached), then remuxes to MP4 without re-encoding. A stream whose
-   Mac side ended before `record stop` is marked `stream_ended_early` in the
-   description file. With `RECORD_TO=guest` the MP4 is written in
-   `~/metacomputer-runs/manual/` and copied at stop. `stream`, `stop` and `status`
-   keep their state in `/run/user/UID/metacomputer`, not the home folder.
+   stop` asks the VM's recorder to stop (its answer through `vm_answer`: at most 4 KB
+   within 60 s), waits up to 30 s for the stream to end (none if the VM can't be
+   reached), then `recording.py finalize` remuxes to MP4 without re-encoding, only if a
+   copy of the `.mkv`'s size fits above the reserve, with ffmpeg held to that size
+   (`-fs`); otherwise the `.mkv` stays. A stream whose Mac side ended before `record
+   stop` is marked `stream_ended_early` in the description file. With
+   `RECORD_TO=guest` the MP4 is written in `~/metacomputer-runs/manual/` and copied at
+   stop (`vm_copy_video`: `recording.py save` with the reserve and `VM_DISK_BYTES`).
+   `stream`, `stop` and `status` keep their state in `/run/user/UID/metacomputer`,
+   not the home folder.
 
-`metacomputer reset` (and `restore`) finishes a running desktop recording, then
-syncs `~/metacomputer-runs` from the guest, before replacing the VM.
+`metacomputer reset` (and `restore`) finishes a desktop recording, whether or not the
+VM is still running, then syncs `~/metacomputer-runs` from the guest, before replacing
+the VM; `stop` does the same with a VM that's already off, and `record start` saves a
+streamed recording whose stream had ended before it starts a new one.
 
 ## Lifecycle
 

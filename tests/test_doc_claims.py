@@ -314,8 +314,20 @@ def task_finish_keeps_turns():
     """task start starts the copier; it copies every turn but the newest, once; task finish keeps those copies."""
     sync = function_text("do_task_sync")
     return ("task_sync_start" in function_text("do_task") and "--keep-existing recording/turn-" in function_text("do_task")
-            and '[ "$t" != "$last" ] && [ ! -e "$host/$t" ]' in sync
+            and '[ "$t" != "$last" ] || continue' in sync
+            and 'guest_import "$host" --quiet --keep-existing turn- --only-top "$wantf" --timeout' in sync
+            and '>> "$donef"' in sync
             and "${TASK_SYNC_INTERVAL:-" + D["TASK_SYNC_INTERVAL"] + "}" in sync), D.get("TASK_SYNC_INTERVAL")
+
+
+def kept_any_spelling():
+    """--keep-existing compares paths folded as macOS's default filesystem does, and a folder never replaces a kept
+    file (lib/guest_import.py)."""
+    import guest_import
+    src = raw("lib/guest_import.py")
+    return (guest_import.fold("Recording/TURN-1") == guest_import.fold("recording/turn-1")
+            and "protected(rel + name, keep)" in src
+            and src.count("keep_existing(src_fd, dst_fd, name, rel + name, report)") == 2)
 
 
 def keys_outside_home(path="/etc/ssh/metacomputer-keys/%u"):
@@ -539,8 +551,23 @@ CLAIMS = [
     # finish; lib/recording.py save). A VM that turns hostile can erase only what's still inside it.
     ("SECURITY.md", r"\| \*\*Desktop, `RECORD_TO=host`\*\* \(the default\) \| On the Mac: the VM encodes its screen and streams it",
      lambda m: record_to_host()),
-    ("SECURITY.md", r"the copy stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB`, (\d+) GB by default",
-     lambda m: m[1] == D["IMPORT_MIN_FREE_GB"] and stream_keeps_reserve()),
+    ("SECURITY.md", r"the stream stops before the Mac's free space falls below `IMPORT_MIN_FREE_GB` \((\d+) GB by "
+                    r"default\), and the MP4 is made from it only if that copy fits above the reserve too",
+     lambda m: m[1] == D["IMPORT_MIN_FREE_GB"] and stream_keeps_reserve()
+     and 'recording.py" finalize "$dir/$name.mkv"' in function_text("do_record")),
+    ("SECURITY.md", r"Fill your disk at `record stop`: the copy is held to the reserve and to what the VM's disk can hold",
+     lambda m: '--max-bytes "${VM_DISK_BYTES:-0}"' in function_text("vm_copy_video")
+     and '--min-free-gb "${IMPORT_MIN_FREE_GB:-' in function_text("vm_copy_video")),
+    ("SECURITY.md", r"from the VM's answer it takes only those folders \(anything else the VM slips in is left out\) and "
+                    r"never replaces a file the Mac already has, with a file or a folder",
+     lambda m: task_finish_keeps_turns()[0] and kept_any_spelling()),
+    ("SECURITY.md", r"under any spelling of its path \(case and Unicode normalization don't matter", lambda m: kept_any_spelling()),
+    ("SECURITY.md", r"are read with a byte limit and a deadline",
+     lambda m: 'recording.py" capture --max-bytes "$max" --timeout "$t"' in function_text("vm_answer")
+     and "vm_answer 4194304 60" in function_text("do_task_sync")),
+    ("SECURITY.md", r"`metacomputer stop`, `reset` and `restore` save what was streamed whether or not the VM is still running",
+     lambda m: function_text("restore_from").index("( do_record stop )") < function_text("restore_from").index("vm_running")
+     and function_text("do_stop").count("( do_record stop )") == 2),
     ("SECURITY.md", r"the Mac copies each finished one every `TASK_SYNC_INTERVAL` seconds \((\d+)\), once, and `task finish` "
                     r"never replaces it",
      lambda m: m[1] == D["TASK_SYNC_INTERVAL"] and task_finish_keeps_turns()),

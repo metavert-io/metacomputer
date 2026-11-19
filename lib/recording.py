@@ -8,9 +8,16 @@ The description file written beside each recording, the Mac's half of a streamed
                        --quality Q --mode guest|host --vm VM [--actions-dir DIR] [--ended-early]
   recording.py moments MP4.json          print a recording's key moments
   recording.py probe FILE                print its length in seconds (exit 1 if unreadable)
-  recording.py save OUT [--min-free-gb G] -- CMD...
+  recording.py save OUT [--min-free-gb G] [--max-bytes N] -- CMD...
                                          run CMD (the SSH command that streams from the VM,
-                                         RECORD_TO=host) and save its output to OUT as it arrives
+                                         RECORD_TO=host, or copies its video, RECORD_TO=guest) and
+                                         save its output to OUT as it arrives
+  recording.py finalize MKV MP4 [--min-free-gb G]
+                                         the streamed .mkv as an MP4 (no re-encoding), only if
+                                         the Mac keeps its reserve; exit 3 (MKV kept) if it can't
+  recording.py capture [--max-bytes N] [--timeout S] -- CMD...
+                                         CMD's output (a VM's answer), at most N bytes within S
+                                         seconds: past either, CMD is stopped and nothing is printed
 
 The sidecar (MP4 with .json in place of .mp4) says what the file is: when it
 started and ended, its settings, size, length, sound track (if any) and SHA-256. When the signed action
@@ -25,9 +32,15 @@ which includes Cua Driver's own refusals in bounded mode).
 `save` is the Mac's half of a streamed recording (RECORD_TO=host, the default). What
 arrives is on the Mac at once, out of reach of anything in the VM; the VM decides
 how much it sends, so the copy stops, keeping what arrived, before the Mac's free
-space falls below --min-free-gb (IMPORT_MIN_FREE_GB, as for every copy from the VM).
+space falls below --min-free-gb (IMPORT_MIN_FREE_GB, as for every copy from the VM)
+or past --max-bytes. `finalize` turns the stream into an MP4 only when the copy fits
+above that reserve too (the VM chose the stream's size), with a hard size limit on
+ffmpeg's output; otherwise the .mkv is kept as it is. `capture` reads the VM's short
+answers (a listing, the recorder's reply) with a byte limit and a deadline, so a VM
+that sends without end, or never answers, can't grow or stall the command.
 """
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -258,12 +271,18 @@ def security_lines(d):
     return lines
 
 
+def free_bytes(path_or_fd):
+    st = os.fstatvfs(path_or_fd) if isinstance(path_or_fd, int) else os.statvfs(path_or_fd)
+    return st.f_bavail * st.f_frsize
+
+
 def cmd_save(a):
     cmd = a.command
     if not cmd:
         print("recording.py save: no command after --", file=sys.stderr)
         return 2
     min_free = int(max(0.0, a.min_free_gb) * GIB)
+    max_bytes = a.max_bytes if a.max_bytes and a.max_bytes > 0 else None
     try:
         # A new file only: never an existing one, never through a link.
         fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o644)
@@ -288,27 +307,35 @@ def cmd_save(a):
 
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda *_: stop("signal"))
-    rc, since = 0, SAVE_CHECK_EVERY
+    rc, since, total = 0, SAVE_CHECK_EVERY, 0
     try:
         src = proc.stdout.fileno()
         while True:
             if since >= SAVE_CHECK_EVERY:
                 since = 0
-                st = os.fstatvfs(fd)
-                if st.f_bavail * st.f_frsize - SAVE_CHECK_EVERY < min_free:
+                if free_bytes(fd) - SAVE_CHECK_EVERY < min_free:
                     print(f"metacomputer: the recording stopped saving here: the Mac would have less than "
                           f"{min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB); what arrived before is kept",
                           file=sys.stderr, flush=True)
                     stop("space")
                     rc = 3
                     break
-            b = os.read(src, 1 << 20)
+            b = os.read(src, min(1 << 20, SAVE_CHECK_EVERY - since))
             if not b:
                 break
+            if max_bytes is not None and total + len(b) > max_bytes:
+                b = b[:max_bytes - total]
+                stop("size")
+                rc = 4
             view = memoryview(b)
             while view:
                 view = view[os.write(fd, view):]
             since += len(b)
+            total += len(b)
+            if rc == 4:
+                print(f"metacomputer: stopped saving at {max_bytes:,} bytes (more than the VM's disk holds); "
+                      "what arrived before is kept", file=sys.stderr, flush=True)
+                break
     finally:
         os.close(fd)
         try:
@@ -317,6 +344,87 @@ def cmd_save(a):
             proc.kill()
             proc.wait()
     return rc or (0 if stopped else (proc.returncode if proc.returncode and proc.returncode > 0 else 0))
+
+
+def cmd_finalize(a):
+    """The streamed .mkv as an MP4, the same video in a container players and editors open at once (no
+    re-encoding). The MP4 is about the MKV's size: it's made only if that leaves the Mac its reserve, and ffmpeg
+    is held to a hard size limit whatever the stream claims. 0: made (the caller removes the MKV); 3: not enough
+    room (nothing written, the MKV kept); 1: ffmpeg failed or ran into its limit (nothing kept, the MKV kept)."""
+    min_free = int(max(0.0, a.min_free_gb) * GIB)
+    try:
+        st = os.stat(a.mkv, follow_symlinks=False)
+    except OSError as e:
+        print(f"metacomputer: no stream to convert ({e.strerror})", file=sys.stderr)
+        return 1
+    limit = st.st_size + max(16 << 20, st.st_size // 50)        # container overhead, generously
+    if free_bytes(os.path.dirname(os.path.abspath(a.mp4))) - limit < min_free:
+        print(f"metacomputer: not converting to MP4: a copy of {st.st_size / GIB:.1f} GiB would leave this Mac less "
+              f"than {min_free / GIB:g} GiB free (IMPORT_MIN_FREE_GB); the .mkv is kept and plays as it is",
+              file=sys.stderr)
+        return 3
+    if os.path.lexists(a.mp4):
+        print(f"metacomputer: {a.mp4} exists; not writing over it", file=sys.stderr)
+        return 1
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-i", a.mkv, "-c", "copy",
+                        "-movflags", "+faststart", "-fs", str(limit), a.mp4], stdin=subprocess.DEVNULL)
+    size = os.path.getsize(a.mp4) if os.path.isfile(a.mp4) and not os.path.islink(a.mp4) else -1
+    if r.returncode != 0 or size <= 0 or size >= limit - (1 << 20) or probe_duration(a.mp4) is None:
+        with contextlib.suppress(OSError):
+            os.unlink(a.mp4)
+        return 1
+    return 0
+
+
+def cmd_capture(a):
+    """CMD's stdout, at most --max-bytes within --timeout seconds, printed only when it fits both. Past either,
+    CMD and anything it started are stopped and the exit status says which (2 too much, 124 too slow); otherwise
+    it's CMD's own. Its stderr is dropped."""
+    cmd = a.command
+    if not cmd:
+        print("recording.py capture: no command after --", file=sys.stderr)
+        return 2
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError:
+        return 1
+    deadline = time.monotonic() + max(0.1, a.timeout)
+    got, why = bytearray(), None
+    fd = proc.stdout.fileno()
+    import selectors
+    sel = selectors.DefaultSelector()
+    sel.register(fd, selectors.EVENT_READ)
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            why = 124
+            break
+        if not sel.select(timeout=min(left, 1.0)):
+            continue
+        b = os.read(fd, 65536)
+        if not b:
+            break
+        got += b
+        if len(got) > a.max_bytes:
+            why = 2
+            break
+    sel.close()
+    if why is not None:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return why
+    try:
+        rc = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return 124
+    sys.stdout.buffer.write(bytes(got))
+    sys.stdout.flush()
+    return rc if rc >= 0 else 1
 
 
 def cmd_moments(a):
@@ -350,17 +458,26 @@ def main():
     sv = sub.add_parser("save")
     sv.add_argument("out")
     sv.add_argument("--min-free-gb", type=float, default=10.0)
+    sv.add_argument("--max-bytes", type=int, default=0)
+    fz = sub.add_parser("finalize")
+    fz.add_argument("mkv")
+    fz.add_argument("mp4")
+    fz.add_argument("--min-free-gb", type=float, default=10.0)
+    cp = sub.add_parser("capture")
+    cp.add_argument("--max-bytes", type=int, default=1 << 20)
+    cp.add_argument("--timeout", type=float, default=30.0)
     m = sub.add_parser("moments")
     m.add_argument("json")
     pr = sub.add_parser("probe")
     pr.add_argument("file")
     argv, command = sys.argv[1:], []
-    if argv[:1] == ["save"] and "--" in argv:     # save's command: everything after the first --, untouched
+    if argv[:1] in (["save"], ["capture"]) and "--" in argv:   # their command: everything after the first --
         i = argv.index("--")
         argv, command = argv[:i], argv[i + 1:]
     a = p.parse_args(argv)
     a.command = command
-    return {"sidecar": cmd_sidecar, "moments": cmd_moments, "probe": cmd_probe, "save": cmd_save}[a.cmd](a)
+    return {"sidecar": cmd_sidecar, "moments": cmd_moments, "probe": cmd_probe, "save": cmd_save,
+            "finalize": cmd_finalize, "capture": cmd_capture}[a.cmd](a)
 
 
 if __name__ == "__main__":
