@@ -79,7 +79,7 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (104 checks) needs no VM: a copy of the checkout
+`python3 tests/test_multi_vm.py` (107 checks) needs no VM: a copy of the checkout
 in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
@@ -94,7 +94,8 @@ private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
   `MCOMP_VAULT_DIR`, a relative `VAULT_DIR`; in a checkout without
   `config/local.env`: other VMs in the runner, `config/vms/` files, a runner list that
   fails, a missing `MCOMP_CONFIG` file (`help`, `where` and `vm list` still work), and
-  `scripts/build-vm.sh` run directly. Only the default VM and its copies, or no runner
+  `scripts/build-vm.sh` run directly; `setup` for a VM chosen by name, and `install.sh` with
+  `MCOMP_VM` set. Only the default VM and its copies, or no runner
   yet: it goes ahead.
 - `secrets` reaches the vault with the VM's own folder and spool and says which VM and
   vault in one line; the main VM's leaves the vault's defaults; the hub's environment and

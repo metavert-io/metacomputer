@@ -2015,6 +2015,7 @@ case "$cmd" in
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
+              [ "$MC_SETTINGS_KIND" != vm ] || die "setup sets up this checkout's main VM (config/local.env); for $VM_NAME: metacomputer --vm $VM_NAME build"
               case " $* " in *" --yes "*|*" -y "*) ;; *)
                 [ -t 0 ] || { printf '%s\n' "metacomputer setup runs $LAB_ROOT/install.sh, which asks before it changes anything." \
                   "There's no terminal here to ask on: to go ahead, run: metacomputer setup --yes" >&2; exit 3; } ;; esac

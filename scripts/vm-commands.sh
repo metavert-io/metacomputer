@@ -84,6 +84,13 @@ vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes]
   [ -n "$name" ] || die "usage: metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]"
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,23}$ ]] && [[ ! "$name" =~ (-baseline|-baseline-prev|-prev|-)$|-ckpt- ]] \
     || die "a new VM's name: up to 24 lowercase letters, digits and dashes, starting with a letter or digit, not ending in -baseline, -prev or a dash, and without -ckpt-"
+  # The new VM's lock, from the first look until the build ends (the build inherits it): one change per VM at a time.
+  rc=0; lock_hold "$(vm_lock_name "$name")" "${MCOMP_LOCK_WAIT:-10}" "metacomputer vm create $name" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "another build or change of the VM $name is running ($LOCK_OWNER); nothing was done" ;;
+    *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder)" ;;
+  esac
   f="$MC_VMS_DIR/$name.env"
   [ ! -e "$f" ] || die "config/vms/$name.env exists already: that VM's settings (metacomputer --vm $name ..., or vm delete $name)"
   rows="$(vm_all_settings)"
@@ -151,6 +158,9 @@ print(" ".join(out))') "
       [ "$k=$v" != "$(printf '%s\n' "$def" | grep -m1 "^$k=" || true)" ] || continue
       case "$k" in ACTION_LOG_KEY|SSH_CA_KEY|DRIVER_MANIFEST|STORAGE_DIR) [ -n "$v" ] || continue ;; esac
       [ "$a" = 1 ] || { printf '%s\n' "# Copied from $MC_SETTINGS_LABEL when this file was made (they differ from the defaults):"; a=1; }
+      # A runner in your home is written as install.sh writes it ("$HOME/..."), a plain value get.sh accepts.
+      case "$k=$v" in LUME="$HOME"/.local/bin/*)
+        case "${v#"$HOME"/}" in *[!A-Za-z0-9._/-]*) ;; *) printf 'LUME="$HOME/%s"\n' "${v#"$HOME"/}"; continue ;; esac ;; esac
       vm_q "$k" "$v"
     done
     # A live-view password in the Keychain is per VM (its account is the VM's name); a password command isn't.
@@ -175,7 +185,7 @@ print(" ".join(out))') "
     say "the VM $name is built. Next:"
     printf '%s\n' "  metacomputer --vm $name start" \
       "  metacomputer --vm $name secrets init        (its own vault, in your own terminal; then secrets bind)" \
-      "  MCOMP_VM=$name claude                      (a Claude Code session that uses it)"
+      "  a Claude Code session on it: docs/guide.md, \"Run a second VM side by side\""
   else
     warn "the build of $name failed (above). Its settings stay in config/vms/$name.env: metacomputer --vm $name build --replace tries again; metacomputer vm delete $name removes it all"
   fi

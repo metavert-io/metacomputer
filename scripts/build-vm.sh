@@ -22,7 +22,7 @@ REPLACE=0; [ "${1:-}" = "--replace" ] && REPLACE=1
 TS="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="$LOG_DIR/build-$TS.log"
 exec > >(tee -a "$BUILD_LOG") 2>&1
-say "build $TS (log: logs/build-$TS.log)"
+say "build $TS (log: ${BUILD_LOG#"$LAB_ROOT"/})"
 
 # --- 0. prerequisites -------------------------------------------------------
 # Every check that can refuse the build comes first: until the build is certain to go
@@ -45,7 +45,7 @@ esac
 for vm in "$VM_NAME" "$BASELINE_NAME"; do
   st="$(vm_lookup "$vm")" || die "couldn't list the VMs with $LUME, so it can't tell whether $vm exists; nothing was changed"
   if [ "$st" = present ] && [ $REPLACE -ne 1 ]; then
-    BUILD_QUIET_EXIT=1; die "$vm already exists; use 'metacomputer reset' to restore it, or build --replace to rebuild"
+    BUILD_QUIET_EXIT=1; die "$vm already exists; use '$(mc_cmd) reset' to restore it, or build --replace to rebuild"
   fi
 done
 command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
@@ -251,4 +251,4 @@ rm -f "$SSH_DIR/hostkey"
 # storage=1: storage-helper and `metacomputer-admin storage` (volumes, Mac folders, reference disks).
 printf 'storage=1\nbuild=%s\n' "$TS" > "$SSH_DIR/guest-features"
 ok "removed the VM's private host key from $SSH_DIR (the VM keeps it; a rebuild makes a new one)"
-say "build complete. Start it with: metacomputer start"
+say "build complete. Start it with: $(mc_cmd) start"

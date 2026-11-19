@@ -945,10 +945,10 @@ checkpoints, and refuses the VM this checkout uses without `--vm`, a running VM 
 one a session holds unless you add `--force`. `--yes` never confirms it; without a
 terminal, `--confirm staging` does.
 
-The `metacomputer` MCP server drives the VM a bare `metacomputer` means. Claude Code
-passes its environment to the plugin's MCP server and the commands it runs, so a
-session started with `MCOMP_VM=staging claude` uses the second VM throughout. For a
-separate MCP configuration (the benchmark runs its sessions this way):
+The `metacomputer` MCP server drives the VM a bare `metacomputer` means. To give a
+Claude Code session the second VM instead, start it with `MCOMP_VM` set (for the
+commands it runs) and an MCP configuration whose `metacomputer` server passes the
+same variable (the benchmark runs its sessions this way):
 
 ```json
 {"mcpServers": {"metacomputer": {"type": "stdio",

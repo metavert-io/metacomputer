@@ -140,9 +140,16 @@ def render(listing):
     if listing["other"]:
         lines.append("")
         lines.append("Other VMs in the runner (no settings for them in this checkout):")
+        orows = []
         for o in listing["other"]:
-            extra = "".join(f", {esc(c['name'])} {human(c['disk_bytes'])}" for c in o["copies"])
-            lines.append(f"  {esc(o['name'])}  {esc(o['state'])}  {human(o['disk_bytes'])}{extra}")
+            base = next((c for c in o["copies"] if c["name"] == o["name"] + "-baseline"), None)
+            more = len(o["copies"]) - (1 if base else 0)
+            orows.append(("", esc(o["name"]), esc(o["state"]), human(o["disk_bytes"]),
+                          (human(base["disk_bytes"]) if base else "none") + (f" +{more} more" if more else "")))
+        ohead = ("", "VM", "STATE", "DISK", "BASELINE")
+        ow = [max(len(r[i]) for r in [ohead, *orows]) for i in range(len(ohead))]
+        for r in [ohead, *orows]:
+            lines.append("  ".join(c.ljust(ow[i]) for i, c in enumerate(r)).rstrip())
     for p in listing["problems"]:
         lines.append(f"! {esc(p)}")
     return "\n".join(lines)

@@ -352,8 +352,8 @@ origin_is_project() {
 # that holds nothing else that could run code or that the installer would replace: git settings beyond a
 # plain clone's (read from the file, so reading them runs nothing), git hooks, files git doesn't know, build
 # outputs (vendor/, .cache/cua-src, .cache/mcomp-vm, __pycache__), anything else in .cache but the verified
-# downloads, a Lume storage location inside the checkout, or a config/local.env with settings that choose a
-# command, a source or a pin. Nothing is ever deleted: such a checkout is refused, and its owner runs its
+# downloads, a Lume storage location inside the checkout, or a config/local.env (or a VM's config/vms/NAME.env)
+# with settings that choose a command, a source or a pin. Nothing is ever deleted: such a checkout is refused, and its owner runs its
 # ./install.sh or picks a fresh --dir. Prints the problems found, nothing if there are none.
 env_is_data() { # FILE: blank lines, comments and NAME=value lines that only set values (see confirm_problems)
   awk '
@@ -368,7 +368,7 @@ env_is_data() { # FILE: blank lines, comments and NAME=value lines that only set
       # PY), a source or a pin (*_REPO, *_TAG, *_COMMIT, *_URL, *_SHA256, *_FPR, *_VERSION, ...), keys,
       # manifests, guest accounts and the network.
       # Storage (docs/storage.md): where images go, what to attach, sync timing. The rclone pins (RCLONE_*) are refused.
-      if (k ~ /^(VM_NAME|BASELINE_NAME|VM_HOSTNAME|VM_CPU|VM_MEMORY|VM_DISK_BYTES|VM_DISPLAY|IMPORT_MIN_FREE_GB|BROWSERS|EXTRA_PACKAGES|VIRTUAL_AUDIO|SHARE_CLIPBOARD|SHARE_AUDIO|SHARE_ROSETTA|SSH_DIR|SSH_PORT|VNC_PORT|SECRETS_PROXY_PORT|RUN_DIR|LOG_DIR|RECORD_FPS|RECORD_QUALITY|RECORD_TO|RECORD_DIR|RECORD_AUDIO|TASK_SYNC_INTERVAL|BROWSER|MODE|VM_SHELL|SHELL_LOG|MCP_HUB|HUB_IDLE|COORD_GUARD|ACTION_LOG|ACTION_LOG_TEXT|SSH_AUTH|SSH_CERT_TTL|DRIVER_MODE|DRIVER_PROFILE|DRIVER_ORIGINS|DRIVER_EXPIRES|DRIVER_IDLE|STORAGE_DIR|VOLUMES|REFDISKS|S3_SYNC_INTERVAL|S3_BACKUP_MAX_GB|VIEW_CLIPBOARD_S)$/) next
+      if (k ~ /^(VM_NAME|BASELINE_NAME|VM_HOSTNAME|VM_CPU|VM_MEMORY|VM_DISK_BYTES|VM_DISPLAY|IMPORT_MIN_FREE_GB|BROWSERS|EXTRA_PACKAGES|VIRTUAL_AUDIO|SHARE_CLIPBOARD|SHARE_AUDIO|SHARE_ROSETTA|SSH_DIR|SSH_PORT|VNC_PORT|SECRETS_PROXY_PORT|RUN_DIR|LOG_DIR|RECORD_FPS|RECORD_QUALITY|RECORD_TO|RECORD_DIR|RECORD_AUDIO|TASK_SYNC_INTERVAL|BROWSER|MODE|VM_SHELL|SHELL_LOG|MCP_HUB|HUB_IDLE|COORD_GUARD|ACTION_LOG|ACTION_LOG_TEXT|SSH_AUTH|SSH_CERT_TTL|DRIVER_MODE|DRIVER_PROFILE|DRIVER_ORIGINS|DRIVER_EXPIRES|DRIVER_IDLE|STORAGE_DIR|VOLUMES|REFDISKS|S3_SYNC_INTERVAL|S3_BACKUP_MAX_GB|VIEW_CLIPBOARD_S|VAULT_DIR|EVENTS_SPOOL)$/) next
       gsub(/"/, "", v)
       if (k == "LUME" && (v == "$HOME/.local/bin/mcomp-vm" || v == "$HOME/.local/bin/lume" || v == "$HOME/.local/bin/lume-secure")) next
       if (k == "VNC_PASSWORD_STORE" && (v == "file" || v == "keychain")) next
@@ -431,7 +431,7 @@ confirm_problems() {
       .cache/ubuntu-*/*|.cache/cua-driver-*/*|.cache/mozilla/*|.cache/google/*) ;;
       .cache/rclone-v*/*) rclone_download "${e#.cache/rclone-v*/}" || bad="$bad$e"$'\n' ;;
       .DS_Store|*/.DS_Store|*.pem|*vnc-pass*|CLAUDE.local.md) ;;
-      config/local.env|config/*.local.env) env_is_data "$d/$e" || p="${p:+$p; }$e has settings that choose a command, a source or a pin" ;;
+      config/local.env|config/*.local.env|config/vms/*.env) env_is_data "$d/$e" || p="${p:+$p; }$e has settings that choose a command, a source or a pin" ;;
       *) case "$e" in
            .cache/*) e=".cache/$(printf '%s' "${e#.cache/}" | cut -d/ -f1)" ;;
            */__pycache__/*) e="${e%%/__pycache__/*}/__pycache__" ;;

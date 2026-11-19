@@ -87,6 +87,7 @@ class Box:
         for d in ("bin", "scripts", "lib"):
             shutil.copytree(os.path.join(LAB, d), os.path.join(self.co, d),
                             ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy(os.path.join(LAB, "install.sh"), self.co)
         os.makedirs(os.path.join(self.co, "config"))
         for f in os.listdir(os.path.join(LAB, "config")):
             src = os.path.join(LAB, "config", f)
@@ -291,6 +292,12 @@ def resolution(td):
               and f"vault     {app}/vms/demo" in r.stdout and f"spool     {app}/vms/demo/events/spool" in r.stdout, r.stdout)
         r = b.run("--vm", env=b.env())
         check("--vm without a name: refused", r.returncode == 2 and "needs a VM name" in r.stderr, r.stderr)
+        r = b.run("--vm", "demo", "setup", "--yes")
+        check("setup for a VM chosen by name: refused (it sets up config/local.env's VM)", r.returncode == 1
+              and "metacomputer --vm demo build" in r.stderr, r.stderr)
+        r = subprocess.run(["/bin/bash", os.path.join(co, "install.sh")], env=b.env(MCOMP_VM="demo"), capture_output=True,
+                           text=True, timeout=60, stdin=subprocess.DEVNULL)
+        check("install.sh with MCOMP_VM set: refused", r.returncode == 1 and "MCOMP_VM is set" in r.stderr, r.stderr[-300:])
     finally:
         b.close()
 
@@ -399,9 +406,14 @@ def creating(td):
                                       f"EVENTS_SPOOL='{b.app}/vms/side/events/spool'")), text)
         check("...the Mac's choices copied (browsers, memory, hardening, runner)",
               "BROWSERS='firefox'" in text and "VM_MEMORY='4GB'" in text and "ACTION_LOG='on'" in text
-              and f"LUME='{b.home}/.local/bin/lume'" in text, text)
+              and 'LUME="$HOME/.local/bin/lume"' in text, text)
         check("...never the main VM's storage or its password command",
               "VOLUMES" not in text and "VNC_PASSWORD" not in text, text)
+        src = open(os.path.join(LAB, "get.sh")).read()
+        fn = src[src.index("env_is_data() {"):]
+        fn = fn[:fn.index("\n}\n") + 3]
+        r = subprocess.run(["/bin/bash", "-c", fn + '\nenv_is_data "$1"', "_", f], capture_output=True, text=True, timeout=30)
+        check("...and only values, as get.sh --confirm accepts in a checkout", r.returncode == 0, r.stderr)
         check("...and it resolves for --vm side", b.resolve("side")[1].get("VM_NAME") == "side")
         check("...and nothing was built or deleted", b.deletes() == [] and "build" not in open(b.log).read())
         r = b.run("vm", "create", "auto", "--no-build")
@@ -424,11 +436,25 @@ def creating(td):
               os.listdir(os.path.join(b.co, "config", "vms")))
         # The build runs with the new VM's settings: a stand-in build reports what it was given.
         write(os.path.join(b.co, "scripts", "build-vm.sh"),
-              '#!/bin/bash\n. "$(dirname "$0")/lib.sh"\necho "BUILD VM_NAME=$VM_NAME RUN_DIR=$RUN_DIR CONFIG=$LOCAL_CONFIG"\n', 0o755)
+              '#!/bin/bash\n. "$(dirname "$0")/lib.sh"\necho "BUILD VM_NAME=$VM_NAME RUN_DIR=$RUN_DIR CONFIG=$LOCAL_CONFIG"\n'
+              'lock_fd_held 7 "$(mc_lock_dir)/$(vm_lock_name "$VM_NAME").lock" && echo "LOCK=held"\n', 0o755)
         r = b.run("vm", "create", "built", "--ssh-port", "2435", "--vnc-port", "6135", "--yes")
         check("vm create --yes: builds the new VM with its own settings",
               r.returncode == 0 and "BUILD VM_NAME=built" in r.stdout and f"RUN_DIR={os.path.realpath(b.co)}/.run/vms/built" in r.stdout
               and "config/vms/built.env" in r.stdout, r.stdout + r.stderr)
+        check("...holding the new VM's lock from its checks through the build", "LOCK=held" in r.stdout, r.stdout)
+        locks = os.path.join(b.root, "locks")
+        os.makedirs(locks, mode=0o700, exist_ok=True)
+        holder = subprocess.Popen(["/usr/bin/perl", "-e", 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or die; '
+                                   'flock($f, LOCK_EX) or die; print "held\\n"; $| = 1; sleep 30', os.path.join(locks, "vm-busy.lock")],
+                                  stdout=subprocess.PIPE, text=True)
+        holder.stdout.readline()
+        r = b.run("vm", "create", "busy", "--no-build", env=b.env(MCOMP_LOCK_WAIT="1"))
+        holder.kill()
+        holder.wait()
+        check("vm create while that name's lock is held (a build): refused, nothing written", r.returncode == 1
+              and "another build or change of the VM busy" in r.stderr and not os.path.exists(os.path.join(b.co, "config/vms/busy.env")),
+              r.stderr)
     finally:
         b.close()
 

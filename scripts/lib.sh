@@ -258,6 +258,8 @@ vm_target_check() {
   fi
   export MCOMP_VM="$VM_NAME"; MC_IMPLICIT=0
 }
+# The command to type for this VM, in hints: `metacomputer --vm NAME` for a VM in config/vms/.
+mc_cmd() { if [ "${MC_SETTINGS_KIND:-}" = vm ]; then printf 'metacomputer --vm %s' "$VM_NAME"; else printf 'metacomputer'; fi; }
 # One line on stderr, once per command, before a command acts on a VM: which VM and settings; "vault" adds the
 # vault folder. Scripts and commands it starts don't repeat it.
 vm_notice() { # [vault]
