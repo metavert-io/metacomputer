@@ -549,7 +549,8 @@ for your approval. The hub's own teardown is decided under it too, from its last
 look until the connection is closed: the exit when idle, the restart for a client
 with other settings, the end of a connection whose leased calls outlived their
 limit, and, with `MCP_HUB=off`, the end of the bridge's own connection once its
-last client has gone. With `ACTION_LOG=on` the relay that signs each call is the
+last client has gone, whether the core's own teardown or the bridge's close ends
+it (only past the longest handoff does it end regardless). With `ACTION_LOG=on` the relay that signs each call is the
 last hop on the Mac, and signing can take a while, so it looks again too, under
 the same lock, right before it forwards an acting call, and answers with the same
 refusal; its write to SSH has a deadline (`MCOMP_RELAY_WRITE_TIMEOUT_S`, 30 s), so

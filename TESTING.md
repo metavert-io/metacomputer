@@ -782,7 +782,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (212 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (213 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -840,7 +840,9 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   exit, no restart for other settings, no lease kill and (with `MCP_HUB=off`) no end of the
   bridge's own connection while the user has the computer, also when the handoff opens
   after that teardown was decided (it's made under the dispatch lock, and waits), and a
-  graceful close of a client marked inactive before its detach still waits;
+  graceful close of a client marked inactive before its detach still waits, and the
+  close's own fallback ends the connection only under the dispatch lock (a handoff open
+  by then keeps it);
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
 - bounded mode: `launch_app` by path; when the session ends its clients stay

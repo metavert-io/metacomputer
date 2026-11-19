@@ -158,11 +158,15 @@ class Connection:
                 settled = time.monotonic() + 5
                 while not done.wait(0.5):
                     now = time.monotonic()
-                    if now >= end or (now >= settled and not self.core.held_for_handoff()):
+                    if now >= end:
+                        break                    # past the longest handoff: it ends regardless (below)
+                    # The core's own teardown hasn't run yet (a late detach, or between its tries): make it here, the
+                    # same way, deciding and ending under the dispatch lock, so a handoff open by then stops it.
+                    if now >= settled and self.core.end_local_now():
                         break
             else:
                 done.wait(2)
-            self.core.shutdown()
+            self.core.shutdown()             # already ended (it's idempotent), or past the bound, or a one-shot client
 
 
 def open_connection(env=None, kind="sdk", session=None, tools_hash=None, timeout=20.0, spawn=None):

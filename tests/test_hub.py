@@ -1043,6 +1043,32 @@ def handoff_teardown_race_checks():
           "late", waiting and not t.is_alive() and gone, (waiting, t.is_alive(), gone))
     clear_claims()
 
+    # MCP_HUB=off: the close's own fallback, once it has waited a while for the core's teardown, ends the connection
+    # under the dispatch lock too. Here its look said no handoff (as when one opens right after it looked), and the
+    # handoff is open by the time it would end the connection: it waits instead.
+    conn = mcomp_sdk.open_connection(off, kind="claude-code")
+    replies = []
+    conn.on_message = replies.append
+    conn.start()
+    conn.send({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}})
+    end = time.time() + 10
+    while not replies and time.time() < end:
+        time.sleep(0.05)
+    driver = json.loads(replies[0]["result"]["content"][0]["text"]).get("driver_pid") if replies else None
+    conn.core.held_for_handoff = lambda: False     # the look came just before the handoff opened
+    handoff.write_record({**rec, "opened": time.time(), "deadline": time.time() + 300})
+    t = threading.Thread(target=conn.close, kwargs={"keep_for_handoff": True}, daemon=True)
+    t.start()
+    time.sleep(8.0)                                 # past the close's 5 s wait for the core's own teardown
+    waiting = t.is_alive() and bool(driver) and owners.alive(driver)
+    clear_handoff()
+    t.join(20)
+    gone = wait_until(lambda: not owners.alive(driver), 10)
+    check("MCP_HUB=off: the close's fallback ends the connection only under the dispatch lock, so a handoff open by "
+          "then keeps it; it ends once the handoff does", waiting and not t.is_alive() and gone,
+          (waiting, t.is_alive(), gone))
+    clear_claims()
+
     # The relay's write to the VM is bounded: a VM that stops reading can't keep the dispatch lock (or the call).
     adir = os.path.join(TD, "actions-stall")
     key = os.path.join(TD, "keys", "alog")

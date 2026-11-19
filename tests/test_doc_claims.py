@@ -621,7 +621,8 @@ CLAIMS = [
      lambda m: dispatch_gates() and lifecycle_held() and keeper_renewal_gated()),
     ("SECURITY.md", r"The hub's own teardown is decided under it too, from its last look until the connection is closed: "
                     r"the exit when idle, the restart for a client with other settings, the end of a connection whose "
-                    r"leased calls outlived their limit, and, with `MCP_HUB=off`, the end of the bridge's own connection",
+                    r"leased calls outlived their limit, and, with `MCP_HUB=off`, the end of the bridge's own connection "
+                    r"once its last client has gone, whether the core's own teardown or the bridge's close ends it",
      lambda m: teardown_gated()),
     ("SECURITY.md", r"its write to SSH has a deadline \(`MCOMP_RELAY_WRITE_TIMEOUT_S`, (\d+) s\), so a VM that stops "
                     r"reading can't keep the lock: the call fails and the connection ends",
@@ -723,13 +724,25 @@ def claude_start_checks_handoff():
 
 
 def teardown_gated():
-    """The hub's idle exit and restart, a lease's end and MCP_HUB=off's own end each run under owners.acting()."""
+    """The hub's idle exit and restart, a lease's end and MCP_HUB=off's own end (the core's teardown and the bridge's
+    close) each run under owners.acting()."""
     hub = raw("lib/mcp_hub.py")
     fn = lambda name: hub[hub.index(f"    def {name}("):hub.index("\n    def ", hub.index(f"    def {name}(") + 1)]  # noqa: E731
     return ("hold.enter_context(owners.acting())" in fn("_gated_stop") and 'self.server.stop("settings changed", gated=True)'
             in hub and "self._gated_stop(f\"idle for" in hub
             and "with owners.acting():\n                    self._end_transport(proc, True)" in fn("_end_leased_transport")
-            and "with owners.acting():\n                        self.shutdown()" in fn("_end_local_when_free"))
+            and "with owners.acting():\n                self.shutdown()\n            return True" in fn("end_local_now")
+            and "if self.end_local_now():" in fn("_end_local_when_free") and local_close_gated())
+
+
+def local_close_gated():
+    """MCP_HUB=off: the bridge's close ends the core's connection only through end_local_now (under the dispatch
+    lock) until the bound past the longest handoff; it no longer decides on a look of its own."""
+    sdk = raw("lib/mcomp_sdk.py")
+    body = sdk[sdk.index("    def close(self, keep_for_handoff=False):"):sdk.index("\ndef open_connection(")]
+    keep = body[body.index("if keep_for_handoff:"):body.index("else:\n                done.wait(2)")]
+    return ("if now >= settled and self.core.end_local_now():" in keep and "held_for_handoff" not in body
+            and "end = time.monotonic() + mcp_hub.owners.HANDOFF_MAX_S + 120" in keep)
 
 
 def tailnet_runs_only_status():

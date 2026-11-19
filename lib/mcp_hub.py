@@ -958,6 +958,17 @@ class Hub:
                 del self.deferred[:-DEFERRED_MAX]
                 return not self.deferred
 
+    def end_local_now(self):
+        """MCP_HUB=off: one try at ending the core's driver connection, deciding and ending under the dispatch lock (a
+        handoff can't open in between). True once it has ended; False while a handoff is open or the lock can't be
+        had. The only way the core's connection ends while it's held for a handoff is the bound past the longest one."""
+        try:
+            with owners.acting():
+                self.shutdown()
+            return True
+        except (owners.HandoffOpen, OSError, TimeoutError):
+            return False
+
     def _end_local_when_free(self):
         """MCP_HUB=off: the core's one client has gone. End its driver connection under the dispatch lock (no handoff
         can open while it ends), once no handoff is open: at most the longest handoff later, then regardless. A process
@@ -965,12 +976,8 @@ class Hub:
         try:
             end = time.monotonic() + owners.HANDOFF_MAX_S + 60
             while True:
-                try:
-                    with owners.acting():
-                        self.shutdown()
+                if self.end_local_now():
                     return
-                except (owners.HandoffOpen, OSError, TimeoutError):
-                    pass
                 if time.monotonic() >= end:
                     self.shutdown()
                     return
