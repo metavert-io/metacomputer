@@ -846,13 +846,11 @@ def do_renew(transport, o):
         raise Failed(EXIT_ENDED, f"Claude Code isn't running in session {o['session']}, so its token wasn't renewed: "
                      "claude stop, then start it again (-- --continue picks up the conversation)")
     rc, r = secrets_cmd("token", "renew", tid, *(["--ttl", o["ttl"]] if o["ttl"] else []), timeout=330)
-    if rc == 64:
-        # A vault without `token renew` answers this form with a usage error (it never reads it as a new token:
-        # the id is always given).
-        raise Failed(EXIT_FAILED, "this vault can't renew tokens (it needs the version with `metacomputer secrets "
-                     "token renew`); before the token ends, stop the session and start it again with -- --continue")
     if rc != 0 or not r or r.get("ok") is not True:
-        raise vault_failure(rc if rc != 0 else 4, r, "renewal")
+        f = vault_failure(rc if rc != 0 else 4, r, "renewal")
+        f.message += (f" (token {tid}; metacomputer secrets tokens shows whether it still lives. If it can't be "
+                      "renewed, claude stop and start again with -- --continue before it ends)")
+        raise f
     out = {"ok": True, "action": "renew", "session": o["session"], "token_id": tid,
            "expires": str(r.get("expires") or ""), "expires_in_s": r.get("expires_in_s"),
            "extended": r.get("extended") is not False, "renewals": r.get("renewals"),

@@ -410,8 +410,8 @@ with an accessibility tree the driver can read. It changes no VM settings: the
 `python3 tests/test_vm_claude.py` needs no VM (134 checks). `bash -c` stands in
 for SSH, so the shell channel's VM half and `lib/vm_claude_guest.sh` run locally,
 with a temp folder as the VM's home. A fake `metacomputer` answers `secrets
-list|token|token renew|tokens|revoke` with a dummy token (or, as a vault from before
-`token renew`, a usage error), a fake `claude` records its
+list|token|token renew|tokens|revoke` with a dummy token (or a refused
+renewal), a fake `claude` records its
 arguments and environment (hashes) and every prompt it gets, and a fake `curl`
 plays Anthropic's installer. tmux is the real one (Homebrew's) when the Mac has
 it, on a private socket folder; without it the session checks are skipped. It
@@ -432,7 +432,7 @@ checks:
   `--wait`), `keys`, `read`, `wait`, `show`, `status`, `stop` with and without
   `--revoke`, a start while one runs (refused before the vault is asked);
 - `renew`: `secrets token renew ID [--ttl]` for the session's token and its new expiry
-  recorded, a vault without it reported (255), no renewal after `stop` (6), and the
+  recorded, a refused renewal (125, the vault's reason and the token's id, the expiry kept), no renewal after `stop` (6), and the
   warning on `send` and `status` when fewer than 10 minutes are left;
 - the VM's text: field-like lines in a screen stay text, and a VM whose tmux hands
   back OSC 52, a screen clear or a bidi override has them shown escaped, plain and
@@ -459,8 +459,8 @@ checks:
   non-text value and a header over 1 MB are refused by the Mac before sending and,
   in crafted headers, by the VM's half.
 
-`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (33 checks with a vault
-from PR #51, which renews tokens and cuts an answer when its token ends; 31 and a skip without; `MCOMP_VAULT_TEST_BIN` picks the build) runs it
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vm_claude_vm.py` (33 checks; `MCOMP_VAULT_TEST_BIN` picks
+the vault build) runs it
 for real on a test VM, with no real key: a TEST build of the vault in a temp folder,
 bound to the VM, whose proxy goes to a stand-in Anthropic API on the Mac
 (`MCOMP_VAULT_TEST_API_HTTP=1`). It removes Claude Code and its settings from the VM
@@ -468,7 +468,7 @@ first, then checks the native install, no first-run screen, the terminal on the
 desktop, both header kinds reaching the stand-in API with the dummy keys the proxy
 put in (and the oauth beta for Bearer), one-line and three-line prompts arriving
 whole, `--no-enter` + `keys Enter`, `read`, `status`, `renew` (the same token lives
-longer and the same Claude Code keeps answering; or, with an older vault, the refusal), the keeper (`status` and `who` while it runs, gone after `stop`), a token revoked mid-answer cutting a slow streamed answer off (with #51), `--model` and
+longer and the same Claude Code keeps answering), the keeper (`status` and `who` while it runs, gone after `stop`), a token revoked mid-answer cutting a slow streamed answer off, `--model` and
 `--skip-permissions`, that neither dummy key is anywhere in the VM (files, any
 process's environment or command line), that the token is on no command line on the
 Mac or in the VM and in no file written on the Mac during the test (the signed action

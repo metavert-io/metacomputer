@@ -347,25 +347,20 @@ def run(td, procs, port):
           (d.get("keeper") or {}).get("running") is True and (d.get("keeper") or {}).get("active") is True
           and "Claude Code inside the VM (metacomputer claude, session claude)" in w.stdout, (d.get("keeper"), w.stdout[-500:]))
 
-    # --- renewing its token (a vault with `secrets token renew`; one without it is told so) ---
+    # --- renewing its token: the same token lives longer, the same Claude Code keeps going ---
     r = mc("claude", "renew", "--ttl", "20m")
-    renewing = "can't renew tokens" not in r.stderr
-    if not renewing:
-        check("renew with a vault that has no `token renew`: refused with the restart that works instead (255)",
-              r.returncode == 255 and "--continue" in r.stderr, r.stderr)
-    else:
-        st = json.loads(mc("claude", "status", "--json").stdout or "{}").get("token") or {}
-        check("renew: the session's token now lives about 20 minutes from now (it had less), recorded on the Mac",
-              r.returncode == 0 and "now lives until" in r.stdout and st.get("live") is True
-              and 1100 <= int(st.get("seconds_left") or 0) <= 1200 and st.get("expires") and st["expires"] in r.stdout,
-              (r.stdout + r.stderr, st))
-        n5 = len(FakeAPI.got)
-        r = mc("claude", "send", "still there? PING", "--wait", "--quiet", "4", "--timeout", "180")
-        same = ops("p=$(tmux -L metacomputer-claude display -p -t =claude: '#{pane_pid}'); "
-                   "tr '\\0' '\\n' < /proc/$p/environ | sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p'").stdout.strip()
-        check("... and the same Claude Code, with the same token, keeps answering through the proxy",
-              r.returncode == 0 and f"PONG-{NONCE}" in r.stdout and same == tok
-              and any(x["last"] == "still there? PING" and x["auth"] == "bearer-sub" for x in msgs(n5)), r.stdout[-600:])
+    st = json.loads(mc("claude", "status", "--json").stdout or "{}").get("token") or {}
+    check("renew: the session's token now lives about 20 minutes from now (it had less), recorded on the Mac",
+          r.returncode == 0 and "now lives until" in r.stdout and st.get("live") is True
+          and 1100 <= int(st.get("seconds_left") or 0) <= 1200 and st.get("expires") and st["expires"] in r.stdout,
+          (r.stdout + r.stderr, st))
+    n5 = len(FakeAPI.got)
+    r = mc("claude", "send", "still there? PING", "--wait", "--quiet", "4", "--timeout", "180")
+    same = ops("p=$(tmux -L metacomputer-claude display -p -t =claude: '#{pane_pid}'); "
+               "tr '\\0' '\\n' < /proc/$p/environ | sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p'").stdout.strip()
+    check("... and the same Claude Code, with the same token, keeps answering through the proxy",
+          r.returncode == 0 and f"PONG-{NONCE}" in r.stdout and same == tok
+          and any(x["last"] == "still there? PING" and x["auth"] == "bearer-sub" for x in msgs(n5)), r.stdout[-600:])
 
     # --- the keeper outlives its first credentials (run under SSH_AUTH=cert with a short SSH_CERT_TTL) ---
     span = int(os.environ.get("MCOMP_TEST_KEEPER_SPAN_S") or 0)
@@ -434,27 +429,24 @@ def run(td, procs, port):
     check("the token and the dummy keys are in no output of a metacomputer command",
           not any(tok in o or DUMMY_SUB in o or DUMMY_KEY in o for _, o in outputs), [w for w, o in outputs if tok in o])
 
-    # --- a token that ends mid-answer cuts the answer (the vault's in-stream check, PR #51) ---
-    if renewing:
-        tid2 = (json.loads(mc("claude", "status", "--session", "two", "--json").stdout or "{}").get("token") or {}).get("id")
-        n6 = len(FakeAPI.got)
-        mc("claude", "send", "--session", "two", "SLOWSTREAM please")
-        slow = None
-        for _ in range(40):
-            slow = next((g for g in FakeAPI.got[n6:] if "SLOWSTREAM" in g.get("last", "") and "chunks" in g), None)
-            if slow and slow["chunks"] >= 4:
-                break
-            time.sleep(0.5)
-        rv = mc("secrets", "revoke", tid2 or "00000000")
-        for _ in range(30):
-            if slow and slow.get("cut"):
-                break
-            time.sleep(0.5)
-        check("revoking the token mid-answer cuts the answer: the proxy hangs up on the stand-in API within seconds",
-              bool(slow) and rv.returncode == 0 and slow.get("cut") is True and slow.get("chunks", 80) < 40,
-              (slow, rv.stdout[-200:]))
-    else:
-        print("SKIP  a token ending mid-answer cuts it (needs the vault's in-stream check, PR #51)")
+    # --- a token that ends mid-answer cuts the answer (the vault proxy checks the token while it streams) ---
+    tid2 = (json.loads(mc("claude", "status", "--session", "two", "--json").stdout or "{}").get("token") or {}).get("id")
+    n6 = len(FakeAPI.got)
+    mc("claude", "send", "--session", "two", "SLOWSTREAM please")
+    slow = None
+    for _ in range(40):
+        slow = next((g for g in FakeAPI.got[n6:] if "SLOWSTREAM" in g.get("last", "") and "chunks" in g), None)
+        if slow and slow["chunks"] >= 4:
+            break
+        time.sleep(0.5)
+    rv = mc("secrets", "revoke", tid2 or "00000000")
+    for _ in range(30):
+        if slow and slow.get("cut"):
+            break
+        time.sleep(0.5)
+    check("revoking the token mid-answer cuts the answer: the proxy hangs up on the stand-in API within seconds",
+          bool(slow) and rv.returncode == 0 and slow.get("cut") is True and slow.get("chunks", 80) < 40,
+          (slow, rv.stdout[-200:]))
 
     # --- stop, revoke ---
     r = mc("claude", "stop", "--session", "two", "--revoke")

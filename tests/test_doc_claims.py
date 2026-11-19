@@ -166,7 +166,8 @@ def claude_headers():
 
 def claude_ttl(default_h, max_h):
     return (vm_claude.DEFAULT_TTL == f"{default_h}h" and vm_claude.ttl_seconds(vm_claude.DEFAULT_TTL) == default_h * 3600
-            and vm_claude.MAX_TTL_S == max_h * 3600 == swift_num(CMDS, r"ttl <= ([0-9 *]+) else"))
+            and vm_claude.MAX_TTL_S == max_h * 3600 == swift_num(PROXY, r"let tokenMaxTTL = ([^\n]+)")
+            and "ttl <= tokenMaxTTL else" in raw(CMDS))
 
 
 def claude_token_path():
@@ -212,10 +213,10 @@ def claude_release_locked():
 
 
 def answer_cut_at_token_end():
-    """The proxy re-checks a token while an answer streams and cancels the upstream task when it ended (PR #51)."""
+    """The proxy re-checks a token while an answer streams and cancels the upstream task when it ended."""
     p = raw(PROXY)
     if "if !stillLive(token) {" not in p:
-        return False, "the proxy doesn't check the token while an answer streams yet: this waits for PR #51"
+        return False, "the proxy no longer checks the token while an answer streams"
     loop = p[p.index("if !stillLive(token) {"):]
     return "invalidateAndCancel()" in loop[:2000], "no cancel after the token check"
 
@@ -263,11 +264,13 @@ def claude_refused_first():
 
 
 def claude_renew():
-    """renew: only for a session the VM says runs (checked before the vault is asked), the token's own id always given
-    to `secrets token renew` (so a vault without it answers with a usage error, reported), from the Mac only."""
+    """renew: only for a session the VM says runs (checked before the vault is asked), through the vault's own
+    `secrets token renew` with the session's token id, from the Mac only (nothing in the VM's half renews); a failure
+    is reported with the id, and the record keeps its expiry."""
     r = vc_fn("do_renew")
     return (r.index('fields.get("state") != "running"') < r.index('secrets_cmd("token", "renew", tid')
-            and "if rc == 64:" in r and "TOKEN_ID_RE.fullmatch" in r and "renew" not in raw(VCG))
+            and "rc == 64" not in r and "TOKEN_ID_RE.fullmatch" in r and "renew" not in raw(VCG)
+            and 'f.message += (f" (token {tid}' in r and "func cmdTokenRenew(" in raw(CMDS))
 
 
 def claude_installer():
@@ -552,9 +555,8 @@ CLAIMS = [
      lambda m: vc_fn("do_stop").index("revoke_token(tid)") < vc_fn("do_stop").index("if stop_err is not None:")
      and "if stop_err is None and (not (tid and o[\"revoke\"]) or revoked):" in vc_fn("do_stop")
      and 'out["exit"] = EXIT_FAILED' in vc_fn("do_stop")),
-    # Expiry cuts an answer in progress: the vault's proxy (PR #51, which merges before this) checks the token while it
-    # streams (`if !stillLive(token)` in its wait loop) and cancels the answer when the token ends. Until #51 is on
-    # main, these two rows fail on purpose.
+    # Expiry cuts an answer in progress: the vault's proxy checks the token while it streams (`if !stillLive(token)` in
+    # its wait loop) and cancels the answer when the token ends.
     ("SECURITY.md", r"When it ends, new requests are refused, and an answer the proxy is still streaming is cut off",
      lambda m: answer_cut_at_token_end()),
     ("docs/guide.md", r"Claude Code can't reach the API, and an answer it's in the middle of stops",
@@ -571,8 +573,8 @@ CLAIMS = [
     ("SECURITY.md", r"what comes back from the VM \(its screen, its fields\) is parsed strictly and escaped before it is "
                     r"printed, on a terminal or not", lambda m: claude_escaped()),
     ("SECURITY.md", r"It's made only for a session that still runs, and only from the Mac: nothing in the VM can ask for "
-                    r"one\. A vault without `token renew` answers with a usage error, which `claude renew` reports",
-     lambda m: claude_renew()),
+                    r"one\. The vault's limits for renewals apply \(\"API keys\" above\)\. A refused or failed renewal is "
+                    r"reported with the token's id", lambda m: claude_renew()),
     ("SECURITY.md", r"\*\*Claude Code comes from Anthropic's installer\*\* \(https://claude\.ai/install\.sh, over HTTPS, as the "
                     r"desktop user, saved whole before it runs\)", lambda m: claude_installer()),
 ]

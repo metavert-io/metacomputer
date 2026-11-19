@@ -1486,9 +1486,9 @@ lib/vm_claude_guest.sh).
   (`metacomputer secrets token renew ID`), so Claude Code keeps running. A renewal goes
   through the vault like a new token: an `each` secret asks you again. It's made only
   for a session that still runs, and only from the Mac: nothing in the VM can ask for
-  one. A vault without `token renew` answers with a usage error, which `claude renew`
-  reports. It never reads that as a request for a new token, since the token's id is
-  always given.
+  one. The vault's limits for renewals apply ("API keys" above). A refused or failed
+  renewal is reported with the token's id, and the session keeps its token until that
+  token ends.
 - The secret's header decides how Claude Code is given the token, and nothing else is
   accepted: `Authorization: Bearer <token>` becomes `CLAUDE_CODE_OAUTH_TOKEN`, `x-api-key:
   <token>` becomes `ANTHROPIC_API_KEY`. A token whose header is anything else is revoked

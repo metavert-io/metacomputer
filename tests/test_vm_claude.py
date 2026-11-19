@@ -87,9 +87,9 @@ if sub == "list":
 issued_ = open(os.path.join(d, "issued")).read().split() if os.path.exists(os.path.join(d, "issued")) else []
 revoked_ = open(os.path.join(d, "revoked")).read().split() if os.path.exists(os.path.join(d, "revoked")) else []
 if sub == "token" and a[2:3] == ["renew"]:
-    if mode == "norenew":           # a vault from before `token renew`: the id makes it a usage error
-        print("mcomp-vault: usage: token NAME --vm VM [--ttl 15m]", file=sys.stderr)
-        sys.exit(64)
+    if mode == "renewrefused":      # the user said no (an each secret asks again for a renewal)
+        print(json.dumps({"ok": False, "token_id": a[3], "reason": "refused at the Touch ID dialog"}))
+        sys.exit(2)
     tid = a[3]
     if tid not in issued_ or tid in revoked_:
         print(json.dumps({"ok": False, "token_id": tid, "reason": "no live token %s on VM testvm" % tid}))
@@ -661,10 +661,13 @@ def session_checks(td):
     check("renew without --ttl leaves the step to the vault (the token's own lifetime)", r.returncode == 0
           and vault_calls(td)[n:][-1][:3] == ["secrets", "token", "renew"] and "--ttl" not in vault_calls(td)[n:][-1],
           vault_calls(td)[n:])
-    set_mode(td, "norenew")
+    set_mode(td, "renewrefused")
+    exp = json.load(open(os.path.join(td, "run", "claude", "claude.json"))).get("expires")
     r = mc(td, "renew")
-    check("renew with a vault from before `token renew`: says so (255), with the restart that works instead",
-          r.returncode == 255 and "can't renew tokens" in r.stderr and "--continue" in r.stderr, r.stderr)
+    check("a refused renewal: exit 125, the vault's reason and the token's id, the restart that works instead; the "
+          "record keeps its expiry", r.returncode == 125 and "Touch ID" in r.stderr and f"token {tid1}" in r.stderr
+          and "--continue" in r.stderr
+          and json.load(open(os.path.join(td, "run", "claude", "claude.json"))).get("expires") == exp, r.stderr)
     set_mode(td, "soon")
     r = mc(td, "send", "are you there")
     check("send while the token has 2 minutes left: a warning naming `metacomputer claude renew`",

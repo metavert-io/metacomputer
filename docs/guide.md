@@ -433,9 +433,9 @@ metacomputer claude stop --revoke                  # end it and its token
   Claude Code can't reach the API, and an answer it's in the middle of stops.
   `metacomputer claude renew [--ttl 1h]` moves the same token's expiry later without a
   restart. It goes through the vault like a new token, so an `each` secret asks you again.
-  `send`, `wait` and `status` warn when fewer than 10 minutes are left. With a vault that
-  can't renew tokens, `claude stop` and start again with `-- --continue` to pick up the
-  conversation.
+  `send`, `wait` and `status` warn when fewer than 10 minutes are left. If a renewal is
+  refused, or the token has already ended, `claude stop` and start again with
+  `-- --continue` to pick up the conversation.
 - It runs through the shell channel, so `VM_SHELL=off` and bounded mode turn it off, and
   starting it, sending to it and stopping it count as using the computer (one session at a
   time). While the inner Claude works, a keeper on the Mac marks the computer as in use
