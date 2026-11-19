@@ -67,7 +67,7 @@ def main():
 def lib_cases(td):
     n = [0]
 
-    def resolve(have, lume_line="", script='printf "%s" "$LUME"'):
+    def resolve(have, lume_line="", script='printf "%s" "$LUME"', extra_env=None, drop=()):
         """Source lib.sh with a fresh HOME that has the runners in HAVE; returns (LUME, stderr)."""
         n[0] += 1
         home = os.path.join(td, f"home{n[0]}")
@@ -76,8 +76,8 @@ def lib_cases(td):
             fake_runner(home, r)
         cfg = os.path.join(home, "test.env")
         write(cfg, f'VM_NAME=fake-runner-vm\nRUN_DIR="{home}/run"\nLOG_DIR="{home}/logs"\n{lume_line}\n')
-        env = {k: v for k, v in os.environ.items() if k not in ("MCOMP_LUME_NOTICE", "LUME")}
-        env.update(HOME=home, MCOMP_CONFIG=cfg, MCOMP_EVENTS_DIR=os.path.join(home, "events"))
+        env = {k: v for k, v in os.environ.items() if k not in ("MCOMP_LUME_NOTICE", "LUME", *drop)}
+        env.update(HOME=home, MCOMP_CONFIG=cfg, MCOMP_EVENTS_DIR=os.path.join(home, "events"), **(extra_env or {}))
         r = subprocess.run(["bash", "-c", f'. "{LIB}"; {script}'], env=env, capture_output=True, text=True, timeout=30)
         return home, r
 
@@ -122,6 +122,27 @@ def lib_cases(td):
     check("...and build stops with the usual error",
           r.returncode != 0 and f"lume not found ({home}/.local/bin/mcomp-vm)" in r.stdout + r.stderr,
           (r.returncode, (r.stdout + r.stderr)[-300:]))
+
+    # Python: 3.11 or later. Apple's /usr/bin/python3 is 3.9, where parts of metacomputer fail.
+    pyd = os.path.join(td, "pybin")
+    os.makedirs(pyd, exist_ok=True)
+    old_py = os.path.join(pyd, "python3")   # a python3 that says it's 3.9 (fails the version check), else real
+    write(old_py, '#!/bin/sh\nfor a; do case "$a" in *version_info*) exit 1 ;; esac; done\nexec ' + sys.executable + ' "$@"\n', 0o755)
+    gone = os.path.join(td, "no-such-python3")
+    keep = ("PY", "MCOMP_PY_CHECKED")
+    home, r = resolve(["mcomp-vm"], script='printf "%s" "$PY"', drop=keep,
+                      extra_env={"MCOMP_BREW_PYTHON": sys.executable})
+    check("Python: Homebrew's (3.11 or later) is chosen", r.returncode == 0 and r.stdout == sys.executable, (r.stdout, r.stderr))
+    home, r = resolve(["mcomp-vm"], script='printf "%s" "$PY"', drop=keep,
+                      extra_env={"MCOMP_BREW_PYTHON": gone, "PATH": pyd + os.pathsep + "/usr/bin:/bin"})
+    check("Python: only a python3 older than 3.11: stops and says to install it with Homebrew",
+          r.returncode == 1 and "needs Python 3.11 or later" in r.stderr and "brew install python" in r.stderr, (r.returncode, r.stderr))
+    home, r = resolve(["mcomp-vm"], script='printf "%s" "$PY"', drop=keep, extra_env={"PY": old_py})
+    check("Python: PY set to one older than 3.11: stops and says so", r.returncode == 1 and f"PY={old_py} isn't Python 3.11" in r.stderr,
+          (r.returncode, r.stderr))
+    home, r = resolve(["mcomp-vm"], script=f'bash -c \'. "{LIB}"; printf "%s" "$PY"\'', drop=keep,
+                      extra_env={"MCOMP_BREW_PYTHON": sys.executable})
+    check("Python: a script the command runs inherits the choice", r.returncode == 0 and r.stdout == sys.executable, (r.stdout, r.stderr))
 
 
 # --- install.sh -------------------------------------------------------------------

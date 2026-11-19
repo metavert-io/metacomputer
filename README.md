@@ -605,6 +605,8 @@ detail.
 - About 15 GB of free disk. The VM gets 4 vCPUs and 8 GB of memory (4 GB on a Mac
   with less than 16 GB).
 - Homebrew and Apple's Command Line Tools; the install offers both when they're missing.
+- Python 3.11 or later on the Mac. Apple's own `python3` is 3.9, so where that's the only one, the install
+  adds Homebrew's.
 - [Claude Code](https://claude.com/claude-code), for the plugin.
 - Optional: Google Chrome in the VM, which means accepting
   [Google's terms](https://www.google.com/chrome/terms/).

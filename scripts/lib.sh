@@ -34,8 +34,19 @@ if ! command -v "$LUME" >/dev/null 2>&1 && [ -x "$LUME_FORMER" ]; then
   export MCOMP_LUME_NOTICE=1   # scripts this command runs don't repeat it
   LUME="$LUME_FORMER"
 fi
-PY="${PY:-/opt/homebrew/bin/python3}"
-[ -x "$PY" ] || PY=python3
+# Python on the Mac: 3.11 or later (the benchmark reads TOML with tomllib; Apple's /usr/bin/python3 is 3.9,
+# where parts of metacomputer fail). PY if it's set, else Homebrew's (MCOMP_BREW_PYTHON), else python3 on PATH:
+# the first that's new enough. Checked once per command: scripts it runs inherit the answer.
+py_ok() { [ -n "$1" ] && command -v "$1" >/dev/null 2>&1 && "$1" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; }
+if [ -z "${PY:-}" ] || [ "${MCOMP_PY_CHECKED:-}" != "$PY" ]; then
+  if [ -n "${PY:-}" ]; then
+    py_ok "$PY" || { printf '%s\n' "metacomputer: PY=$PY isn't Python 3.11 or later" >&2; exit 1; }
+  else
+    for PY in "${MCOMP_BREW_PYTHON:-/opt/homebrew/bin/python3}" python3 ""; do py_ok "$PY" && break; done
+    [ -n "$PY" ] || { printf '%s\n' "metacomputer: needs Python 3.11 or later on this Mac (python3 here is older, or missing). Install it with Homebrew: brew install python. Then try again." >&2; exit 1; }
+  fi
+  export PY MCOMP_PY_CHECKED="$PY"
+fi
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 export MCOMP_RUN_DIR="$RUN_DIR" MCOMP_LOG_DIR="$LOG_DIR" MCOMP_SSH_PORT="$SSH_PORT"   # for the Python helpers

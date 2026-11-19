@@ -331,7 +331,7 @@ def canon(path, directory=False):
     try:
         st = os.fstat(fd)
         if sys.platform == "darwin":
-            raw = fcntl.fcntl(fd, F_GETPATH, b"\0" * 1025)
+            raw = fcntl.fcntl(fd, F_GETPATH, b"\0" * 1024)   # MAXPATHLEN; Python before 3.10 takes at most 1024 bytes
             spelled = raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
         else:
             spelled = os.path.realpath(path)
@@ -497,7 +497,7 @@ def fd_path(fd):
     """The path the kernel knows an open file by (F_GETPATH)."""
     if sys.platform != "darwin":
         return os.readlink(f"/proc/self/fd/{fd}")
-    raw = fcntl.fcntl(fd, F_GETPATH, b"\0" * 1025)
+    raw = fcntl.fcntl(fd, F_GETPATH, b"\0" * 1024)   # MAXPATHLEN; Python before 3.10 takes at most 1024 bytes
     return raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
 
 

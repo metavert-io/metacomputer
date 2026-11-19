@@ -207,7 +207,7 @@ cd ~/metacomputer
 ```
 
 This is what get.sh does after its prerequisite step. `./install.sh` needs
-Homebrew if any of git, curl, Go, GnuPG, ffmpeg or Python 3 is missing. It
+Homebrew if any of git, curl, Go, GnuPG, ffmpeg or Python 3.11 (or later) is missing; Apple's own `python3` (3.9) doesn't count. It
 needs Apple's Command Line Tools to build mcomp-vm and the vault. It shows what
 it will do and asks once, `Go ahead? [Y/n]` (Enter means yes). `--yes` skips
 the question.

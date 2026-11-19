@@ -468,8 +468,21 @@ without_ld_search_path_warnings() { # COMMAND [ARG...]
   { "$@" 2>&1 1>&3 3>&- | drop_ld_search_path_warnings >&2 || exit; } 3>&1 | drop_ld_search_path_warnings
 }
 drop_ld_search_path_warnings() { awk "!/ld: warning: search path '[^']*' not found\\r?\$/ { print; fflush() }"; }
+# Python 3.11 or later: Homebrew's, or python3 on PATH (Apple's /usr/bin/python3, 3.9, isn't enough; the
+# same order scripts/lib.sh uses). An older one counts as missing, so Homebrew adds python.
+py311_ok() {
+  local p
+  for p in "${MCOMP_BREW_PYTHON:-/opt/homebrew/bin/python3}" "$(command -v python3 2>/dev/null)"; do
+    [ -n "$p" ] && [ -x "$p" ] || continue
+    case "$p" in /usr/bin/python3) clt_ok || continue ;; esac
+    "$p" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null && return 0
+  done
+  return 1
+}
 need=(); pkgs=()
-for t in git curl go gpg ffmpeg python3; do tool_ok "$t" || need+=("$t"); done
+for t in git curl go gpg ffmpeg python3; do
+  if [ "$t" = python3 ]; then py311_ok || need+=("$t"); else tool_ok "$t" || need+=("$t"); fi
+done
 for t in ${need[@]+"${need[@]}"}; do case "$t" in gpg) pkgs+=(gnupg) ;; python3) pkgs+=(python) ;; *) pkgs+=("$t") ;; esac; done
 if [ -z "$LUME_CHOICE" ] && [ -f "$CONF" ] && grep -q '^LUME=' "$CONF"; then
   case "$(grep '^LUME=' "$CONF" | tail -1)" in
@@ -611,6 +624,8 @@ if [ ${#need[@]} -gt 0 ]; then
     "Or install those tools another way (they just need to be on PATH) and run ./install.sh again."
   for t in "${need[@]}"; do tool_ok "$t" || die "$t still isn't on PATH after brew install" \
     "Open a new Terminal (Homebrew's PATH), check 'brew doctor', then run ./install.sh again."; done
+  py311_ok || die "Python 3.11 or later still isn't there after brew install python" \
+    "Check 'brew doctor' and that ${MCOMP_BREW_PYTHON:-/opt/homebrew/bin/python3} exists, then run ./install.sh again."
 fi
 ok "tools: git curl go gpg ffmpeg python3"
 if [ "$tools_ok" = 1 ]; then
