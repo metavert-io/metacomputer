@@ -10,6 +10,8 @@
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
+vm_target_check   # which VM: never the defaults' VM on a guess (scripts/lib.sh)
+vm_notice
 # The optional event stream (docs/events.md): build_done or build_failed, however the build ends.
 # Refusing to overwrite an existing VM sends nothing; an interrupted build (Ctrl-C) is info.
 BUILD_QUIET_EXIT=0

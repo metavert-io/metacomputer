@@ -2606,14 +2606,22 @@ something waits for you:
 | `status`, `audit [--tail N]`, `audit --head`, `audit --verify`, `selftest` | anywhere (`--verify` while unlocked) | State; the audit log; its head as SEQ:HASH; every record's creation MAC and the chain checked by the vault; the program's own checks |
 
 `metacomputer secrets ...` fills in the current VM (`--vm`). `bind` takes its port,
-host key, keys, accounts and gateway from the config (`MCOMP_CONFIG` for another VM),
-and the proxy account too when `$SSH_DIR/proxy` exists.
+host key, keys, accounts and gateway from the config (`metacomputer --vm NAME secrets
+bind`, or `MCOMP_CONFIG`, for another VM), and the proxy account too when
+`$SSH_DIR/proxy` exists. Every `secrets` command first prints which VM and vault it
+uses, on stderr.
 
 - **Vault folder:** `~/Library/Application Support/metacomputer/` (0700), or
   `MCOMP_VAULT_DIR`. It holds `vault.json`, `vault.sock`, `audit.jsonl`,
-  `sessions/*.sealed` and `sinks/` (each sink's delivery state).
+  `sessions/*.sealed` and `sinks/` (each sink's delivery state). A VM made with
+  `metacomputer vm create NAME` has a vault of its own,
+  `.../metacomputer/vms/NAME/` (its `VAULT_DIR`, handed to the vault as
+  `MCOMP_VAULT_DIR`): its secrets, approvals, audit log and unlock are separate from
+  the main VM's. `metacomputer vm delete NAME` keeps it unless `--delete-vault` asks,
+  and that deletes only such a per-VM folder, never a shared one.
 - **Events spool:** `~/Library/Application Support/metacomputer/events/spool/` (made
-  0700 if missing; `MCOMP_EVENTS_SPOOL`), for the event stream to take.
+  0700 if missing; `MCOMP_EVENTS_SPOOL`), for the event stream to take; a per-VM vault
+  uses `.../vms/NAME/events/spool/` (`EVENTS_SPOOL`), which that VM's watcher takes.
 - **Program:** `~/.local/share/metacomputer/bin/mcomp-vault`, or `MCOMP_VAULT_BIN`.
   Rebuild it with `scripts/build-vault.sh`. `scripts/verify-audit.py` checks audit
   logs and sink captures.

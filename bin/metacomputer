@@ -2,8 +2,16 @@
 # metacomputer: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
 # that Claude Code operates through Cua Driver's MCP server.
 #
-# Usage: metacomputer COMMAND [ARGS]     (short alias: mcomp)
+# Usage: metacomputer [--vm NAME] COMMAND [ARGS]     (short alias: mcomp)
 #
+#   --vm NAME                      act on the VM NAME (its settings: config/vms/NAME.env); MCOMP_VM=NAME does the
+#                                  same. Without it: config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
+#   vm list [--json]               this checkout's VMs (settings files and the runner): state, disk, ports, baseline
+#   vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]
+#                                  a VM of its own: writes config/vms/NAME.env (ports, keys, folders, vault) and builds it
+#   vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
+#                                  delete a VM, its baseline and config/vms/NAME.env, after you type its name
+#                                  (--yes doesn't count); volumes and the vault folder stay unless their flag asks
 #   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes] [--discard-unsynced]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
@@ -135,6 +143,16 @@ if mc_in_plugins "$mc_self"; then
 fi
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
+# --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same).
+MCOMP_VM_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --vm) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --vm needs a VM name (metacomputer vm list)" >&2; exit 2; }
+          MCOMP_VM_ARG="$2"; shift 2 ;;
+    --vm=*) MCOMP_VM_ARG="${1#--vm=}"; [ -n "$MCOMP_VM_ARG" ] || { echo "metacomputer: --vm needs a VM name" >&2; exit 2; }; shift ;;
+    *) break ;;
+  esac
+done
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
 # A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM: settings that now name
@@ -145,6 +163,14 @@ if [ -n "${MCOMP_EXPECT_VM:-}" ] && [ "$MCOMP_EXPECT_VM" != "$VM_NAME" ]; then
 fi
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
+# Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
+# for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
+case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions) ;; *) vm_target_check ;; esac
+case "$cmd" in
+  start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
+  security) [ "${1:-}" != apply ] || vm_notice ;;
+  secrets) vm_notice vault ;;
+esac
 
 # --- EVENTS HOOK (secrets) ---------------------------------------------------------
 # `metacomputer secrets` comes from another branch. When it exits 3 ("vault locked"),
@@ -435,6 +461,7 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
   export_options
   local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
   record_env
+  [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"   # this VM's vault (its approvals line below)
   "$PY" - "$json" "$vm_ssh" "$vm_drv" "$req_err" "$(ca_pub)" "$LOG_DIR/actions" "$LAB_ROOT/lib" "$stg" "$VAULT_BIN" <<'EOF'
 import json, os, subprocess, sys
 js, vm_ssh, vm_drv, req_err, ca_pub, logdir, libdir, stg, vault_bin = sys.argv[1:]
@@ -1797,7 +1824,9 @@ do_where() { # paths a person or an agent may need
   echo "skill     $LAB_ROOT/skills/metacomputer"
   echo "docs      $LAB_ROOT/docs"
   echo "results   $LAB_ROOT/results"
-  echo "vm        $VM_NAME (baseline $BASELINE_NAME)"
+  echo "vm        $VM_NAME (baseline $BASELINE_NAME; settings: $MC_SETTINGS_LABEL)$([ "${MC_IMPLICIT:-0}" = 1 ] && echo '; with other VMs in the runner, commands ask you to say which with --vm NAME')"
+  echo "vault     $(mc_vault_dir)"
+  echo "spool     ${EVENTS_SPOOL:-${HOME}/Library/Application Support/metacomputer/events/spool}"
 }
 
 # --- secrets: mcomp-vault (scripts/build-vault.sh) holds them; this only fills in the VM ---
@@ -1818,6 +1847,11 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
   esac
   local sub="${1:-status}" a has_vm=0 out rc
   [ $# -gt 0 ] && shift
+  # This VM's vault and spool (scripts/lib.sh): empty for the main VM, which leaves the vault's own defaults.
+  [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"
+  [ -z "${EVENTS_SPOOL:-}" ] || export MCOMP_EVENTS_SPOOL="$EVENTS_SPOOL"
+  # A per-VM vault folder's parent (the vault makes only the last folder, 0700).
+  case "${VAULT_DIR:-}" in "$MC_APP_DIR/vms/"*) ( umask 077; mkdir -p "$MC_APP_DIR/vms" ) || die "couldn't make $(mc_tilde "$MC_APP_DIR/vms")" ;; esac
   for a in "$@"; do case "$a" in --vm|--vm=*) has_vm=1 ;; esac; done
   case "$sub" in
     bind)
@@ -1950,6 +1984,7 @@ case "$cmd" in
   task)       do_task "$@" ;;
   checkpoint) do_checkpoint "$@" ;;
   checkpoints) do_checkpoints ;;
+  vm)         . "$LAB_ROOT/scripts/vm-commands.sh"; do_vm "$@" ;;
   volume|refdisk) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/storage.py" "$cmd" "$@" ;;
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;

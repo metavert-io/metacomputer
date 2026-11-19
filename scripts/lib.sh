@@ -3,13 +3,176 @@
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../config/defaults.env
-. "$LAB_ROOT/config/defaults.env"
-# This machine's settings (install.sh writes it; never committed). MCOMP_CONFIG
-# points at another file, e.g. for a separate test VM.
-LOCAL_CONFIG="${MCOMP_CONFIG:-$LAB_ROOT/config/local.env}"
-# shellcheck source=/dev/null
-[ -f "$LOCAL_CONFIG" ] && . "$LOCAL_CONFIG"
+
+# --- which VM: its settings (docs/commands.md, "More than one VM") -------------------
+# config/defaults.env, then ONE settings file, never two layered:
+#   --vm NAME (bin/metacomputer) or MCOMP_VM=NAME   config/vms/NAME.env; config/local.env when that names NAME;
+#                                                   the defaults alone for the default name with no local.env
+#   MCOMP_CONFIG=FILE                               that file (as before); with a name too, both must be the same file
+#   neither                                         config/local.env (this checkout's main VM), else the defaults
+# A file in config/vms/ is one VM's own: its VM_NAME is its file name, it sets its own ports, and the rest of its
+# identity (baseline, keys, runtime and log folders, vault folder, event spool) is its own too, never the main VM's.
+# Anything unclear (a name with no settings, two files for one VM, a file that borrows the main VM's ports) is
+# refused, never guessed. Nothing here writes anything.
+MC_VMS_DIR="$LAB_ROOT/config/vms"
+MC_MAIN_CONFIG="$LAB_ROOT/config/local.env"
+# The account's home folder as the system has it (the vault and Lume use it, whatever $HOME says).
+mc_sys_home() {
+  local u h=""; u="$(id -un 2>/dev/null)"
+  case "$u" in ''|*[!A-Za-z0-9._-]*) ;; *) eval "h=~$u" ;; esac
+  case "$h" in /*) printf '%s' "$h" ;; *) printf '%s' "$HOME" ;; esac
+}
+MC_SYS_HOME="$(mc_sys_home)"
+# Where per-VM vault folders and event spools go (vms/NAME); MCOMP_APP_DIR moves it (tests).
+MC_APP_DIR="${MCOMP_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer}"
+mc_valid_vm_name() { case "$1" in ''|[-.]*|*[!A-Za-z0-9._-]*) return 1 ;; esac; [ ${#1} -le 64 ]; }
+mc_realpath() { # PATH -> absolute, with its folder's links resolved (the file itself as named)
+  local d; d="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s' "$d" "$(basename "$1")"
+}
+mc_tilde() { case "$1" in "$MC_SYS_HOME"/*) printf '~/%s' "${1#"$MC_SYS_HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+mc_file_vm_name() { # FILE -> the VM_NAME it ends with, after the defaults (sourced in a subshell)
+  ( . "$LAB_ROOT/config/defaults.env"; . "$1" >/dev/null 2>&1; printf '%s' "$VM_NAME" ) 2>/dev/null
+}
+mc_main_identity() { # the main VM's VM_NAME BASELINE_NAME SSH_DIR SSH_PORT VNC_PORT RUN_DIR LOG_DIR, one per line
+  ( . "$LAB_ROOT/config/defaults.env"; [ ! -f "$MC_MAIN_CONFIG" ] || . "$MC_MAIN_CONFIG" >/dev/null 2>&1
+    printf '%s\n' "$VM_NAME" "$BASELINE_NAME" "$SSH_DIR" "$SSH_PORT" "$VNC_PORT" "${RUN_DIR:-$LAB_ROOT/.run}" "${LOG_DIR:-$LAB_ROOT/logs}" ) 2>/dev/null
+}
+mc_vm_files() { # the VM names config/vms/ has settings for, one per line
+  local f; for f in "$MC_VMS_DIR"/*.env; do [ -f "$f" ] && basename "$f" .env; done; return 0
+}
+mc_abs_dir() { # SETTING VALUE -> MC_ABS: VALUE as an absolute folder (~/ is the account's home); status 1 otherwise
+  case "$2" in "~") MC_ABS="$MC_SYS_HOME" ;; "~/"*) MC_ABS="$MC_SYS_HOME/${2#\~/}" ;; /*) MC_ABS="$2" ;;
+    *) MC_REFUSAL="$1 must be an absolute folder, not '$2'"; return 1 ;; esac
+}
+# NAME CONFIG: load the settings that NAME (--vm / MCOMP_VM) and CONFIG (MCOMP_CONFIG) select. 0 with them loaded
+# (LOCAL_CONFIG, MC_SETTINGS_KIND vm|local|config|defaults, MC_SETTINGS_LABEL, MC_IMPLICIT, VAULT_DIR, EVENTS_SPOOL),
+# or 1 with the reason in MC_REFUSAL.
+mc_load_settings() {
+  local name="$1" cfg="$2" file="" kind="" main_vm="" f_vault f_spool k v i
+  local -a main_ids
+  MC_REFUSAL=""; MC_IMPLICIT=0; MC_MISSING_CONFIG=""
+  # shellcheck source=../config/defaults.env
+  . "$LAB_ROOT/config/defaults.env"
+  MC_DEFAULT_VM="$VM_NAME"
+  if [ -n "$name" ]; then
+    mc_valid_vm_name "$name" || { MC_REFUSAL="'$name' isn't a VM name (letters, digits, '.', '-' and '_')"; return 1; }
+    [ -f "$MC_MAIN_CONFIG" ] && main_vm="$(mc_file_vm_name "$MC_MAIN_CONFIG")"
+    if [ -f "$MC_VMS_DIR/$name.env" ]; then
+      [ "$main_vm" != "$name" ] || { MC_REFUSAL="config/local.env and config/vms/$name.env are both settings for the VM $name; keep one"; return 1; }
+      file="$MC_VMS_DIR/$name.env"
+    elif [ -n "$main_vm" ] && [ "$main_vm" = "$name" ]; then
+      file="$MC_MAIN_CONFIG"
+    elif [ ! -f "$MC_MAIN_CONFIG" ] && [ "$name" = "$MC_DEFAULT_VM" ]; then
+      file=""
+    else
+      MC_REFUSAL="this checkout has no settings for a VM named $name (no config/vms/$name.env). metacomputer vm list shows its VMs; metacomputer vm create $name makes one"
+      return 1
+    fi
+    if [ -n "$cfg" ] && [ "$(mc_realpath "$cfg")" != "$(mc_realpath "${file:-/nonexistent/none}")" ]; then
+      MC_REFUSAL="MCOMP_CONFIG ($cfg) and the VM name $name choose different settings; use one of them"
+      return 1
+    fi
+  elif [ -n "$cfg" ]; then
+    # A file that isn't there means the defaults (as before), but no command acts on a VM with them
+    # (vm_target_check): a mistyped name must not land on the default VM.
+    if [ -f "$cfg" ]; then file="$cfg"; else MC_MISSING_CONFIG="$cfg"; MC_IMPLICIT=1; fi
+  elif [ -f "$MC_MAIN_CONFIG" ]; then
+    file="$MC_MAIN_CONFIG"
+  else
+    MC_IMPLICIT=1    # the defaults, unasked for: vm_target_check decides whether that's clear enough
+  fi
+  # A file in config/vms/ (however it was chosen) is one VM's own settings.
+  kind=defaults; [ -n "$file" ] && kind=config
+  [ "$file" = "$MC_MAIN_CONFIG" ] && kind=local
+  if [ -n "$file" ] && [ -d "$MC_VMS_DIR" ]; then
+    case "$(mc_realpath "$file")" in "$(cd "$MC_VMS_DIR" && pwd -P)"/*.env) kind=vm; name="$(basename "$file" .env)" ;; esac
+  fi
+  if [ "$kind" = vm ]; then
+    mc_valid_vm_name "$name" || { MC_REFUSAL="config/vms/$name.env: '$name' isn't a VM name"; return 1; }
+    # What makes a VM itself starts empty, so nothing of the default VM's is used by accident.
+    VM_NAME=""; BASELINE_NAME=""; SSH_DIR=""; SSH_PORT=""; VNC_PORT=""; RUN_DIR=""; LOG_DIR=""
+    # shellcheck source=/dev/null
+    . "$file"
+    [ -n "$VM_NAME" ] || VM_NAME="$name"
+    [ "$VM_NAME" = "$name" ] || { MC_REFUSAL="config/vms/$name.env names the VM '$VM_NAME'; a file in config/vms/ is for the VM of its own name"; return 1; }
+    [ -n "$BASELINE_NAME" ] || BASELINE_NAME="$VM_NAME-baseline"
+    [ "$BASELINE_NAME" != "$VM_NAME" ] || { MC_REFUSAL="config/vms/$name.env: BASELINE_NAME can't be the VM itself"; return 1; }
+    for k in SSH_PORT VNC_PORT; do
+      eval "v=\$$k"
+      [[ "$v" =~ ^[0-9]{4,5}$ ]] && [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] \
+        || { MC_REFUSAL="config/vms/$name.env must set $k to a port of its own (1024-65535)"; return 1; }
+    done
+    [ "$SSH_PORT" != "$VNC_PORT" ] || { MC_REFUSAL="config/vms/$name.env: SSH_PORT and VNC_PORT are the same"; return 1; }
+    [ -n "$SSH_DIR" ] || SSH_DIR="$HOME/.ssh/metacomputer-$VM_NAME"
+    [ -n "$RUN_DIR" ] || RUN_DIR="$LAB_ROOT/.run/vms/$VM_NAME"
+    [ -n "$LOG_DIR" ] || LOG_DIR="$LAB_ROOT/logs/vms/$VM_NAME"
+    # Nothing that makes a VM may be the main VM's (a copied file, or one that sources config/local.env).
+    i=0; while IFS= read -r v; do main_ids[i]="$v"; i=$((i + 1)); done < <(mc_main_identity)
+    if [ "${main_ids[0]:-}" = "$VM_NAME" ]; then
+      [ ! -f "$MC_MAIN_CONFIG" ] || { MC_REFUSAL="config/local.env and config/vms/$name.env are both settings for the VM $name; keep one"; return 1; }
+    else
+      i=1
+      for k in BASELINE_NAME SSH_DIR SSH_PORT VNC_PORT RUN_DIR LOG_DIR; do
+        eval "v=\$$k"
+        [ "$v" != "${main_ids[i]:-}" ] || { MC_REFUSAL="config/vms/$name.env gives $VM_NAME the main VM's $k ($v); every VM needs its own"; return 1; }
+        i=$((i + 1))
+      done
+    fi
+  elif [ -n "$file" ]; then
+    # shellcheck source=/dev/null
+    . "$file"
+  fi
+  # The vault folder and the event spool (handed to mcomp-vault as MCOMP_VAULT_DIR and MCOMP_EVENTS_SPOOL). Empty
+  # for the main VM and MCOMP_CONFIG files unless set: the vault's and the event stream's own defaults, as before.
+  # A config/vms/ VM gets folders of its own. MCOMP_VAULT_DIR / MCOMP_EVENTS_SPOOL in the environment override
+  # every VM's, as before; one that disagrees with the file's own setting is refused.
+  f_vault="${VAULT_DIR:-}"; f_spool="${EVENTS_SPOOL:-}"
+  if [ -n "$f_vault" ]; then mc_abs_dir VAULT_DIR "$f_vault" || return 1; f_vault="$MC_ABS"; fi
+  if [ -n "$f_spool" ]; then mc_abs_dir EVENTS_SPOOL "$f_spool" || return 1; f_spool="$MC_ABS"; fi
+  VAULT_DIR="$f_vault"; EVENTS_SPOOL="$f_spool"
+  if [ "$kind" = vm ]; then
+    [ -n "$VAULT_DIR" ] || VAULT_DIR="$MC_APP_DIR/vms/$VM_NAME"
+    [ -n "$EVENTS_SPOOL" ] || EVENTS_SPOOL="$MC_APP_DIR/vms/$VM_NAME/events/spool"
+  fi
+  if [ -n "${MCOMP_VAULT_DIR:-}" ]; then
+    [ -z "$f_vault" ] || [ "$f_vault" = "$MCOMP_VAULT_DIR" ] \
+      || { MC_REFUSAL="MCOMP_VAULT_DIR ($MCOMP_VAULT_DIR) and VAULT_DIR in $(mc_tilde "$file") ($f_vault) name different vault folders; unset one"; return 1; }
+    VAULT_DIR="$MCOMP_VAULT_DIR"
+  fi
+  if [ -n "${MCOMP_EVENTS_SPOOL:-}" ]; then
+    [ -z "$f_spool" ] || [ "$f_spool" = "$MCOMP_EVENTS_SPOOL" ] \
+      || { MC_REFUSAL="MCOMP_EVENTS_SPOOL ($MCOMP_EVENTS_SPOOL) and EVENTS_SPOOL in $(mc_tilde "$file") ($f_spool) name different spools; unset one"; return 1; }
+    EVENTS_SPOOL="$MCOMP_EVENTS_SPOOL"
+  fi
+  # This machine's settings file: what `browser default` and the like write to (config/local.env when none exists).
+  LOCAL_CONFIG="${file:-$MC_MAIN_CONFIG}"
+  MC_SETTINGS_KIND="$kind"
+  case "$kind" in
+    vm) MC_SETTINGS_LABEL="config/vms/$VM_NAME.env" ;;
+    local) MC_SETTINGS_LABEL="config/local.env" ;;
+    config) MC_SETTINGS_LABEL="$(mc_tilde "$file")" ;;
+    *) MC_SETTINGS_LABEL="the defaults; no config/local.env" ;;
+  esac
+  if [ -n "$MC_MISSING_CONFIG" ]; then
+    LOCAL_CONFIG="$MC_MISSING_CONFIG"; MC_SETTINGS_LABEL="the defaults; MCOMP_CONFIG's $(mc_tilde "$MC_MISSING_CONFIG") doesn't exist"
+  fi
+}
+# The vault folder in effect: VAULT_DIR, else the vault's own default (the account's, whatever $HOME says).
+mc_vault_dir() { printf '%s' "${VAULT_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer}"; }
+
+mc_sel_name="${MCOMP_VM_ARG:-${MCOMP_VM:-}}"
+mc_load_settings "$mc_sel_name" "${MCOMP_CONFIG:-}" || { printf '%s\n' "metacomputer: $MC_REFUSAL" >&2; exit 1; }
+# Everything this command starts (scripts, the hub, the Python helpers, metacomputer itself) gets the same settings:
+# a VM chosen by name is passed on as its settings file.
+if [ -n "$mc_sel_name" ]; then
+  if [ "$LOCAL_CONFIG" = "$MC_MAIN_CONFIG" ] && [ ! -f "$MC_MAIN_CONFIG" ]; then
+    export MCOMP_VM="$VM_NAME"; unset MCOMP_CONFIG
+  else
+    export MCOMP_CONFIG="$(mc_realpath "$LOCAL_CONFIG")"; unset MCOMP_VM
+  fi
+fi
+unset MCOMP_VM_ARG mc_sel_name
 GUEST_RUN_DIR="/home/$GUEST_USER/metacomputer-runs"
 
 RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"   # RUN_DIR / LOG_DIR: config/defaults.env
@@ -28,6 +191,7 @@ export LUME_TELEMETRY_ENABLED=0
 # same VMs). While LUME's runner isn't installed and that one is, use it and say
 # so once per command. With neither, LUME stays as set and the usual errors apply.
 LUME="${LUME:-$HOME/.local/bin/mcomp-vm}"
+LUME_CONFIGURED="$LUME"   # as set, before the fallback below (`vm create` copies this one)
 LUME_FORMER="$HOME/.local/bin/lume-secure"
 if ! command -v "$LUME" >/dev/null 2>&1 && [ -x "$LUME_FORMER" ]; then
   [ -n "${MCOMP_LUME_NOTICE:-}" ] || printf '%s\n' "metacomputer: $LUME isn't installed, so this uses $LUME_FORMER, mcomp-vm's former name (./install.sh installs mcomp-vm)" >&2
@@ -64,6 +228,47 @@ say()  { printf '%s\n' "${c_bold}metacomputer:${c_off} $*"; }
 ok()   { printf '%s\n' "  ${c_grn}✓${c_off} $*"; }
 warn() { printf '%s\n' "  ${c_yel}!${c_off} $*" >&2; }
 die()  { printf '%s\n' "${c_red}metacomputer: $*${c_off}" >&2; exit 1; }
+
+# --- which VM, before acting on one ---------------------------------------------------
+# The VM names in Lume's list that are VMs of their own (not a baseline, its previous copy or a checkpoint);
+# status 1 when the list can't be had or read. EXCEPT is left out. Space-separated.
+vm_working_names() { # [EXCEPT]
+  local out
+  out="$("$LUME" ls --format json 2>/dev/null)" || return 1
+  printf '%s' "$out" | "$PY" -c 'import json, re, sys
+try:
+    names = [v["name"] for v in json.load(sys.stdin)]
+except Exception:
+    sys.exit(1)
+print(" ".join(sorted(n for n in names if isinstance(n, str) and n != sys.argv[1]
+                      and not re.search(r"(-baseline(-prev)?|-ckpt-.*)$", n))))' "${1:-}"
+}
+# With no settings file and no VM named (the defaults, unasked for), go ahead only when that can't be the wrong
+# VM: no config/vms/ files to choose from, and no VM in the runner but the default one (or no runner yet). Then
+# the choice is pinned (MCOMP_VM) for everything this command starts. Otherwise refuse, saying how to choose.
+vm_target_check() {
+  [ "${MC_IMPLICIT:-0}" = 1 ] || return 0
+  local files names
+  [ -z "${MC_MISSING_CONFIG:-}" ] || die "MCOMP_CONFIG names $MC_MISSING_CONFIG, which doesn't exist; nothing was done"
+  files="$(mc_vm_files | tr '\n' ' ')"
+  [ -z "$files" ] || die "this checkout has no config/local.env, and config/vms/ has settings for: ${files% }. Say which VM: metacomputer --vm NAME ... (or MCOMP_VM=NAME); nothing was done"
+  if command -v "$LUME" >/dev/null 2>&1; then
+    names="$(vm_working_names "$VM_NAME")" || die "couldn't list the VMs with $LUME, so it can't tell which VM a checkout without config/local.env means; nothing was done. Say which: metacomputer --vm NAME ..."
+    [ -z "$names" ] || die "this checkout has no settings of its own (config/local.env) and the runner has VMs besides $VM_NAME ($names), so a bare metacomputer command could act on the wrong one; nothing was done. Say which: metacomputer --vm NAME ... (metacomputer vm list), or write config/local.env"
+  fi
+  export MCOMP_VM="$VM_NAME"; MC_IMPLICIT=0
+}
+# One line on stderr, once per command, before a command acts on a VM: which VM and settings; "vault" adds the
+# vault folder. Scripts and commands it starts don't repeat it.
+vm_notice() { # [vault]
+  [ -z "${MCOMP_VM_NOTICE:-}" ] || return 0
+  export MCOMP_VM_NOTICE=1
+  if [ "${1:-}" = vault ]; then
+    printf '%s\n' "metacomputer: VM $VM_NAME ($MC_SETTINGS_LABEL), vault $(mc_tilde "$(mc_vault_dir)")" >&2
+  else
+    printf '%s\n' "metacomputer: VM $VM_NAME ($MC_SETTINGS_LABEL)" >&2
+  fi
+}
 
 # --- Lume -------------------------------------------------------------------
 lume_json() { "$LUME" get "$1" --format json 2>/dev/null; }
@@ -353,7 +558,8 @@ export_options() {
          MCOMP_DRIVER_MANIFEST="$DRIVER_MANIFEST" MCOMP_DRIVER_ORIGINS="$DRIVER_ORIGINS" MCOMP_DRIVER_EXPIRES="$DRIVER_EXPIRES" \
          MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
-         MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}"
+         MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}" \
+         MCOMP_VM_EVENTS_SPOOL="${EVENTS_SPOOL:-}"   # this VM's spool (empty: lib/events.py's default)
   # The hub (lib/mcp_hub.py), its coordinate guard and its hidden-text marks. MCOMP_MCP_HUB / MCOMP_COORD_GUARD /
   # MCOMP_HIDDEN_TEXT already in the environment win over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \

@@ -24,3 +24,6 @@ config/*.local.env
 __pycache__/
 CLAUDE.local.md
 /local/
+
+# per-VM settings (metacomputer vm create)
+config/vms/

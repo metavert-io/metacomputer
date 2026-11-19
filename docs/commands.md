@@ -11,10 +11,15 @@ short overview, and the [guide](guide.md) shows what each is for, task by task.
 ## Commands
 
 `metacomputer` (installed at `~/.local/bin/metacomputer`; `mcomp` is a short
-alias). `metacomputer help` prints a summary.
+alias). `metacomputer help` prints a summary. `metacomputer --vm NAME COMMAND`
+runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 
 | Command | What it does |
 | --- | --- |
+| `--vm NAME COMMAND` | Any command, on the VM `NAME` (its settings: `config/vms/NAME.env`, or `config/local.env` when that's the VM it names). `MCOMP_VM=NAME` does the same |
+| `vm list [--json]` | This checkout's VMs (from its settings files and the runner): state, disk use, baseline (and checkpoints), ports, settings file; the runner's other VMs; problems such as a port two VMs share. `*` marks the VM these settings act on |
+| `vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]` | A VM of its own: writes `config/vms/NAME.env` (its names, ports, SSH keys, vault folder and spool, plus this Mac's choices such as `LUME`, `BROWSERS` and the hardening settings) and builds it after asking (`--yes` doesn't ask; `--no-build` only writes the file). Without ports, the first free pair from 2300 (live view = SSH + 3700) |
+| `vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]` | Delete the VM, its baseline (and `-prev`) and `config/vms/NAME.env`, after saying what goes and what stays, once you type its name (no terminal: `--confirm NAME`; `--yes` never counts). Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`; refuses while it has checkpoints. Keeps volumes and the vault folder unless `--delete-volumes` (each volume asks again) or `--delete-vault` (only the VM's own folder) |
 | `setup [--no-chrome] [--no-build] [--yes]` | Finish or repair the setup (`./install.sh`; finished steps are skipped). From the Claude Code plugin with no checkout yet, the one-line install shipped in the plugin, which says what it will do and asks first ([install.md](install.md#from-claude-code-first-the-plugin)) |
 | `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s |
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
@@ -75,6 +80,11 @@ alias). `metacomputer help` prints a summary.
 `claude` (but `claude read`, `wait` and `status`) refuse while another session is
 using the VM; `--override` proceeds anyway.
 
+`start`, `stop`, `restart`, `reset`, `restore`, `baseline`, `checkpoint`, `build`,
+`desktop-restart`, `test`, `security apply`, `vm create` and `vm delete` first print
+which VM they act on, and every `secrets` command which VM and vault, in one line
+on stderr: `metacomputer: VM demo (config/vms/demo.env), vault ~/Library/Application Support/metacomputer/vms/demo`.
+
 ## Configuration
 
 `config/defaults.env` holds the pinned versions and defaults. `install.sh`
@@ -82,6 +92,46 @@ writes this Mac's settings to `config/local.env`, which is never committed and
 overrides any default. [config/local.env.example](../config/local.env.example)
 documents the common keys. `MCOMP_CONFIG=/path/to/file` uses another file
 instead.
+
+### More than one VM
+
+Every command reads `config/defaults.env`, then **one** settings file, never two
+layered:
+
+| What picks the VM | Settings file |
+| --- | --- |
+| `--vm NAME` (before the command), or `MCOMP_VM=NAME`; `--vm` wins | `config/vms/NAME.env`; `config/local.env` when that is the VM it names; the defaults alone for `--vm metacomputer` in a checkout with no `config/local.env` |
+| `MCOMP_CONFIG=FILE` | that file, as before (with `--vm` too, both must name the same file) |
+| neither | `config/local.env`, this checkout's main VM |
+
+A file in `config/vms/` is one VM's own (`vm create` writes it; `config/vms/` is
+never committed). Its `VM_NAME` is its file name, and it must set its own
+`SSH_PORT` and `VNC_PORT`. What it doesn't set comes from its name, never from the
+main VM: `BASELINE_NAME` `NAME-baseline`, `SSH_DIR` `~/.ssh/metacomputer-NAME`,
+`RUN_DIR` and `LOG_DIR` `.run/vms/NAME` and `logs/vms/NAME`, and the vault folder
+and spool below. `config/local.env` isn't read for it (`vm create` copies this
+Mac's choices into the file once).
+
+| Key | Default | |
+| --- | --- | --- |
+| `VAULT_DIR` | the vault's own folder, `~/Library/Application Support/metacomputer` (the account's home, whatever `$HOME` says); for a `config/vms/` VM, `.../metacomputer/vms/NAME` | This VM's secrets vault, handed to `mcomp-vault` as `MCOMP_VAULT_DIR` |
+| `EVENTS_SPOOL` | the event stream's own spool, `.../metacomputer/events/spool`; for a `config/vms/` VM, `.../vms/NAME/events/spool` | Where this VM's vault drops events, and where its event watcher takes them from |
+
+`MCOMP_VAULT_DIR` and `MCOMP_EVENTS_SPOOL` in the environment still override these
+for every VM; one that disagrees with a file's own `VAULT_DIR` or `EVENTS_SPOOL` is
+refused.
+
+Refused rather than guessed (nothing runs):
+- `--vm NAME` with no settings for `NAME`, or with two (`config/local.env` and
+  `config/vms/NAME.env`); `--vm` and an `MCOMP_CONFIG` naming different files;
+- a `config/vms/` file that names another VM, has no ports of its own, or shares the
+  main VM's baseline, keys, ports or folders (a copy of `config/local.env`, or one
+  that sources it);
+- in a checkout with no `config/local.env` and no `--vm`: any command that acts on a
+  VM while `config/vms/` has files, or the runner has a VM besides the default one,
+  or its list can't be read; and an `MCOMP_CONFIG` file that doesn't exist. `help`,
+  `where`, `setup`, `vm`, `events`, `notify`, `learn` and `actions` still work there;
+- `install.sh` with `MCOMP_VM` set (it sets up `config/local.env`'s VM).
 
 **The VM** (all but the names take effect on the next build):
 
@@ -107,7 +157,7 @@ instead.
 | --- | --- | --- |
 | `SSH_DIR` | `~/.ssh/metacomputer` | SSH keys, the pinned host key and the live-view password |
 | `SSH_PORT`, `VNC_PORT` | `2277`, `5977` | Loopback ports for the VM's SSH and live view |
-| `RUN_DIR`, `LOG_DIR` | `.run/`, `logs/` in the checkout | Runtime files and logs; a second VM needs its own |
+| `RUN_DIR`, `LOG_DIR` | `.run/`, `logs/` in the checkout (`.run/vms/NAME`, `logs/vms/NAME` for a `config/vms/` VM) | Runtime files and logs; a second VM needs its own |
 | `VNC_PASSWORD_STORE` | `file` (a new install writes `keychain`) | `keychain` (the login Keychain, item `metacomputer-vnc`), `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `VIEW_CLIPBOARD_S` | `45` | How long `view --open` leaves the live-view password on the clipboard; it's cleared then only if the clipboard still holds it (`0`: never) |
 | `IMPORT_MIN_FREE_GB` | `10` | Copies from the VM, and read-write folder and S3 volumes, stop before the Mac's free space falls below this |
@@ -182,7 +232,10 @@ instead.
 in `~/.config/metacomputer/events.json` (changed only with `metacomputer events
 sink`; `MCOMP_EVENTS_DIR` moves the folder, `MCOMP_EVENTS_SPOOL` the drop folder
 for other programs' events), and the vault in
-`~/Library/Application Support/metacomputer/` (`MCOMP_VAULT_DIR`).
+`~/Library/Application Support/metacomputer/` (`MCOMP_VAULT_DIR`). A VM in
+`config/vms/` has a vault folder and spool of its own (`VAULT_DIR`,
+`EVENTS_SPOOL`; [More than one VM](#more-than-one-vm)); the sinks are this Mac's,
+shared by every VM, and each event names its VM.
 
 ## The Claude Code plugin
 

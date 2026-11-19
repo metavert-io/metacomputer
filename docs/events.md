@@ -136,6 +136,7 @@ you about changes:
 | `security` | `untrusted_link` | warn | `web open-untrusted` found a password field, a download, or that the link ended on another site. The message is fixed words; hosts only in data | summary, start and final origin (scheme, host, port only, and only hosts made of letters, digits, dots and dashes, or IP addresses), password fields, the number of downloads, origins passed through |
 | `security` | `hidden_text` | warn when something is instruction-like, else info | The hub marked page text a person likely can't see, or that addresses AI agents, in a result for Claude (`HIDDEN_TEXT=on`; [SECURITY.md](../SECURITY.md#hidden-page-text)); at most once per host per 5 min, and 10 in 10 min from one hub. The message is fixed words and counts | `tool`, `hidden` and `instruction_like` (counts), `signals` (`tiny`, `no_size`, `off_left`, `off_above`, `no_layout`, `off_flow`, with counts), `patterns` (`addresses_ai`, `override`, `secrecy`, `markup`, `exfil`, `spoof`, with counts), `host` (from the driver's address bar or snapshot URL in that same result, letters, digits, dots and dashes only; null when the result doesn't show one, as a query or diff read doesn't), `complete`. Never page text. A scan that was only cut short, with nothing found, sends no event. |
 | `lifecycle` | `started`, `stopped`, `reset`, `restored`, `checkpoint`, `baseline`, `build_done`, `build_failed` | info (build_failed: error) | those commands | checkpoint name, what it was restored from |
+| `lifecycle` | `vm_created`, `vm_deleted` | info | `metacomputer vm create` (the settings are written) and `vm delete` (the VM and its baseline are gone) | `name`; for `vm_deleted`, `baseline` |
 | `security` | `storage_protection_failed` | error | The folder watcher couldn't protect a read-write folder (too many entries or too deep, an attribute that won't stick, the Mac's disk below `IMPORT_MIN_FREE_GB`, an unexpected error) and stopped the VM ([storage.md](storage.md#folder-volumes)) | the reason and the folders |
 | `security` | `symlink_neutralized`, `special_file_removed`, `quarantine_restored` | warn | The folder watcher, while a VM has a Mac folder read-write ([storage.md](storage.md#folder-volumes)): links the VM made that lead out of the folder (replaced by a note), FIFOs, sockets or devices it made (removed), and the quarantine attribute it removed or changed (put back); at most one of each per folder per pass | the volume and folder, and up to 10 paths (with each link's target), cleaned |
 | `task` | `s3_conflict` | warn | An S3 volume's sync found files changed on both sides since the last one ([storage.md](storage.md#s3-volumes)); both copies were kept | the volume and up to 10 file names, cleaned |
@@ -526,7 +527,7 @@ only up to the size limit. The contract is in
 | --- | --- |
 | Sinks (kinds, URLs, headers, filters, signing keys) | `~/.config/metacomputer/events.json` (0600; folder 0700). `MCOMP_EVENTS_DIR` moves the whole folder. |
 | Sequence numbers, each sink's backlog, count and delivery status per generation (`sinks/NAME.GENERATION.*`, a new generation each time a sink is added or replaced) and its lock (`sinks/NAME.lock`), debounce marks, the limits (`ratelimit.json`, `phonelimit.json`), pending sink-change announcements (`admin/`) and their outcomes (`admin.log`), the last configuration `events sink` wrote (`config.sha256`, `config.good.json`), the watcher's place in the gateway log | `~/.config/metacomputer/events-state/` (0700, files 0600). The next number is always one more than the highest anywhere (the counter, the log, the backlogs, what the sinks have), so a lost or restored counter doesn't go back. |
-| The spool | `~/Library/Application Support/metacomputer/events/spool/` (`MCOMP_EVENTS_SPOOL`) |
+| The spool | `~/Library/Application Support/metacomputer/events/spool/` (`MCOMP_EVENTS_SPOOL`); a VM made with `metacomputer vm create NAME` has its own, `.../metacomputer/vms/NAME/events/spool/` (its `EVENTS_SPOOL`), which its vault writes to and its watcher takes |
 | The local log of every event (except `actions`) | `$LOG_DIR/events.jsonl` (0600; `logs/` in the checkout by default); kept to 10 MB plus one older file |
 | The watcher | `$RUN_DIR/events-watcher.pid`, `$LOG_DIR/events-watcher.log` |
 
@@ -586,7 +587,7 @@ io.metavert.metacomputer.security.{blocked_connections,chrome_input_refused,acti
                                    lesson_approved,lesson_edited,lesson_removed,lessons_resealed,hidden_text}
 io.metavert.metacomputer.<family>.suppressed   (the rate limit's summary, in any family)
 io.metavert.metacomputer.lifecycle.{started,stopped,reset,restored,checkpoint,baseline,build_done,build_failed,
-                                    controller_connected,controller_released,health,test,storage_attached,
+                                    vm_created,vm_deleted,controller_connected,controller_released,health,test,storage_attached,
                                     handoff_opened,handoff_done,handoff_cancelled,handoff_timed_out}
 io.metavert.metacomputer.actions.{start,call,result,refused,checkpoint,end,sign_failed}
 ```

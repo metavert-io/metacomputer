@@ -201,7 +201,7 @@ def test_handoff():
         # The checkout itself and the in-place plugin link run as always (here: help).
         for exe in (CLI, os.path.join(LAB, "plugin", "bin", "metacomputer")):
             p = run([exe, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
-            check(f"{os.path.relpath(exe, LAB)} help runs this checkout", p.returncode == 0 and "Usage: metacomputer COMMAND" in p.stdout,
+            check(f"{os.path.relpath(exe, LAB)} help runs this checkout", p.returncode == 0 and "Usage: metacomputer [--vm NAME] COMMAND" in p.stdout,
                   p.stdout[-200:] + p.stderr[-200:])
         p = run([CLI, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
         check("help doesn't show the hand-over block", "mc_" not in p.stdout and "plugin folder" not in p.stdout)

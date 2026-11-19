@@ -77,6 +77,42 @@ a fake `git`.
   that's the one installed, or standard Lume) and how to remove it, and mentions a
   lume-secure left beside mcomp-vm.
 
+## More than one VM: `tests/test_multi_vm.py`
+
+`python3 tests/test_multi_vm.py` (104 checks) needs no VM: a copy of the checkout
+in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
+runner in a temporary HOME that logs every delete, a stand-in for the vault, and
+private folders for locks, events and per-VM vaults (`MCOMP_APP_DIR`).
+- Which settings: `config/local.env` alone (the vault's and the event stream's own
+  defaults, as before); `--vm NAME` and `MCOMP_VM` (`config/vms/NAME.env`, its own
+  baseline, keys, runtime folders, vault and spool, passed on as `MCOMP_CONFIG`);
+  `--vm` beats `MCOMP_VM`; `MCOMP_CONFIG` as before, `MCOMP_VAULT_DIR` and
+  `MCOMP_EVENTS_SPOOL` still override; `lib/labconfig.py` picks the same file.
+- Refused, with nothing run: a name with no settings, two files for one VM, `--vm` and
+  an `MCOMP_CONFIG` that disagree, a per-VM file naming another VM, without ports, or
+  borrowing the main VM's baseline or port, a vault folder that disagrees with
+  `MCOMP_VAULT_DIR`, a relative `VAULT_DIR`; in a checkout without
+  `config/local.env`: other VMs in the runner, `config/vms/` files, a runner list that
+  fails, a missing `MCOMP_CONFIG` file (`help`, `where` and `vm list` still work), and
+  `scripts/build-vm.sh` run directly. Only the default VM and its copies, or no runner
+  yet: it goes ahead.
+- `secrets` reaches the vault with the VM's own folder and spool and says which VM and
+  vault in one line; the main VM's leaves the vault's defaults; the hub's environment and
+  `lib/events.py` use the VM's spool; changing commands name the VM once.
+- `vm list --json` and the table: state, disk, ports, baseline, checkpoints, refused
+  settings, the runner's other VMs, a shared port, and a runner that fails.
+- `vm create`: the file (0600; identity, vault and spool; this Mac's choices copied, never
+  `VOLUMES` or a password command), picked ports, and refusals (existing settings or VM,
+  the main VM's name, bad names, taken or half-given ports, a build with no terminal
+  and no `--yes`); with `--yes` the build runs with the new VM's settings.
+- `vm delete`: refused with only `--yes` or a wrong `--confirm`, for the main VM, a running
+  one, one with checkpoints, one with no settings here, `--delete-vault` for a vault that
+  isn't the VM's own, `--delete-volumes` for a volume another VM attaches, and while the
+  VM's lock is held; at a terminal a mistyped name deletes nothing and the right one
+  deletes the VM, baseline and `-prev`, its settings and runtime folder and keeps its
+  vault; `--delete-vault` removes only the VM's own folder; `--force` stops a running VM
+  first; the main VM keeps `config/local.env`. No other VM is ever deleted.
+
 ## The Claude Code plugin: `tests/test_plugin.py`
 
 `python3 tests/test_plugin.py` (85 checks) needs no VM. `install.sh` runs against a

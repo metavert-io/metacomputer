@@ -169,6 +169,8 @@ on_error() { # LINE COMMAND
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 CONF="${MCOMP_CONFIG:-$ROOT/config/local.env}"   # this Mac's settings (MCOMP_CONFIG: another file, as scripts/lib.sh reads it)
+# install.sh sets up config/local.env's VM; a VM chosen by name in the environment would send its steps elsewhere.
+[ -z "${MCOMP_VM:-}" ] || die "MCOMP_VM is set ($MCOMP_VM): install.sh sets up this Mac's main VM (config/local.env). Unset MCOMP_VM and run it again; a second VM is: metacomputer vm create NAME"
 
 # One install at a time for this user (any checkout, any $HOME): an exclusive flock on a file in a private
 # per-user folder, taken on descriptor 8, which every process this run starts inherits: the lock lasts as long

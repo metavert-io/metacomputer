@@ -143,6 +143,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
 ```bash
 metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--tailnet] | where
 metacomputer handoff --why captcha|login|2fa|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
+metacomputer --vm NAME COMMAND | vm list | vm create NAME | vm delete NAME   # more than one VM (config/vms/NAME.env)
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
 metacomputer notify "TEXT" --why login --action "…" | events status|tail|sink list   # optional event stream
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
@@ -161,7 +162,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
 - Settings: `config/defaults.env` (committed: pins, defaults) + `config/local.env`
   (this machine, never committed; `config/local.env.example` documents it).
   Code must read settings from there, never hard-code a machine's names,
-  paths or hosts. Guest-internal paths (`/opt/metacomputer`, `~/metacomputer-runs`) are
+  paths or hosts. Other VMs: one file each, `config/vms/NAME.env` (never committed),
+  picked with `--vm NAME` / `MCOMP_VM`; `MCOMP_CONFIG=FILE` still names any file.
+  `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults and
+  refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
+  borrowing the main VM's identity, a settings-less checkout with other VMs in the
+  runner: `vm_target_check`); `lib/labconfig.py` must pick the same file. A VM chosen
+  by name is passed on to children as `MCOMP_CONFIG`. Its vault folder and spool
+  (`VAULT_DIR`, `EVENTS_SPOOL`) follow it; the main VM keeps the vault's own defaults.
+  Commands that change a VM, and `secrets`, print which VM (and vault) first (`vm_notice`). Guest-internal paths (`/opt/metacomputer`, `~/metacomputer-runs`) are
   stable names inside the VM; don't rename them (existing VMs depend on them).
   VMs built by earlier versions use `/opt/cua-lab` or `/opt/virtual-computer`;
   `status` says to rebuild them.
@@ -188,7 +197,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   listing, `vm_dir`, release tags, where Lume keeps VMs) stop instead of guessing. One
   install per user and one change per VM run at a time: every command that deletes,
   replaces, restores or snapshots a VM, its baseline or checkpoints calls
-  `vm_lock_or_die` (`scripts/lib.sh`), the lock build-vm.sh holds; install.sh and get.sh
+  `vm_lock_or_die` (`scripts/lib.sh`), the lock build-vm.sh holds (`vm delete` too: it
+  runs with the target's own settings, wants the name typed or `--confirm NAME`, never
+  `--yes`, and needs `--force` for the VM in use); install.sh and get.sh
   take `install_lock`. Locks are flocks on descriptors 7/8 that children inherit (so
   they last as long as the work); `daemonize` closes them, so daemons never keep one.
   `get.sh --confirm` never deletes anything in a checkout: it refuses instead. Anything that names the tools
@@ -215,8 +226,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text` (no VM;
-  `scripts/release.sh` runs exactly these),
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm` (no VM;
+  `scripts/release.sh` runs exactly these; `test_multi_vm` uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
   `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vm_claude_vm.py` and

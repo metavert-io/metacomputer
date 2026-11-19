@@ -241,8 +241,9 @@ with Claude Code's normal tools.
   `/metacomputer:learn` in a chat).
 - **The benchmark:** 20 desktop tasks scored from the VM's real state, to measure
   one change at a time ([bench/README.md](bench/README.md)).
-- **A second computer** beside the first, with its own settings file
-  (`MCOMP_CONFIG`).
+- **More than one computer:** `metacomputer vm create NAME` makes another VM
+  beside the first, with its own settings, keys, ports and vault; `--vm NAME`
+  picks it ([More than one computer](#more-than-one-computer)).
 
 The [guide](docs/guide.md) covers each one with what to ask and the commands
 behind it.
@@ -626,6 +627,7 @@ they're here for when you want to yourself.
 | `web compare\|responsive\|a11y\|open-untrusted URL` | Browser checks that need no model |
 | `record start NAME`, `record stop` | Record the whole desktop |
 | `checkpoint NAME`, `restore NAME`, `reset` | Save the stopped VM, go back to a save or to the clean baseline |
+| `vm list`, `vm create NAME`, `vm delete NAME`, `--vm NAME` | Your VMs; another one beside the first; delete one; act on one |
 | `volume create\|list`, `refdisk create\|list` | Storage that outlives the VM |
 | `secrets unlock`, `secrets list` | Unlock the vault, in your own terminal; what it holds, never values |
 | `claude --token NAME`, `claude send\|read\|stop` | Claude Code inside the VM, signed in through the vault's proxy |
@@ -634,8 +636,8 @@ they're here for when you want to yourself.
 | `learn report\|review\|list` | Lessons from your own sessions |
 | `test`, `help` | Six recorded GUI checks; every command |
 
-`reset`, `restore`, `baseline` and deleting a checkpoint ask first, and Claude
-runs them only with your OK. [docs/commands.md](docs/commands.md) has every
+`reset`, `restore`, `baseline` and deleting a checkpoint ask first, `vm delete`
+wants the VM's name typed, and Claude runs them only with your OK. [docs/commands.md](docs/commands.md) has every
 command and option.
 
 ## Configuration
@@ -652,10 +654,27 @@ The settings people change most:
 | `ACTION_LOG`, `DRIVER_MODE`, `SSH_AUTH` | The optional hardening |
 | `BROWSER`, `MODE` | The browser and mode Claude starts with (`metacomputer browser` sets them) |
 
-`MCOMP_CONFIG=FILE` points every command at another settings file, which is how a
-second VM runs beside the first. Event sinks and the vault keep their own settings
-and change only from your terminal. [docs/commands.md](docs/commands.md#configuration)
-lists every setting.
+Event sinks and the vault keep their own settings and change only from your
+terminal. [docs/commands.md](docs/commands.md#configuration) lists every setting.
+
+### More than one computer
+
+```bash
+metacomputer vm create demo          # config/vms/demo.env, then the build (asks first)
+metacomputer --vm demo start         # or: export MCOMP_VM=demo
+metacomputer --vm demo secrets init  # demo's own vault (in your own terminal)
+metacomputer vm list                 # every VM: state, disk, ports, baseline
+metacomputer vm delete demo          # the VM, its baseline and its settings, after you type its name
+```
+
+Each extra VM has one settings file, `config/vms/NAME.env`, with its own names,
+ports, SSH keys, runtime folders, vault folder and event spool, so `--vm NAME`
+needs nothing else. A bare `metacomputer` still means `config/local.env`'s VM,
+and `MCOMP_CONFIG=FILE` still works. Commands that change a VM say which one first,
+and anything unclear is refused rather than guessed: a checkout with no settings of
+its own, with other VMs in the runner, makes you say which with `--vm`. `vm delete`
+never takes the VM in use without `--force`, and keeps volumes and the vault folder
+unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 
 ## Troubleshooting
 

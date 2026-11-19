@@ -149,7 +149,8 @@ def state_dir():
 
 
 def spool_dir():
-    return os.environ.get("MCOMP_EVENTS_SPOOL") or os.path.expanduser(
+    # MCOMP_EVENTS_SPOOL (yours), else this VM's own (EVENTS_SPOOL, resolved by bin/metacomputer), else the default.
+    return os.environ.get("MCOMP_EVENTS_SPOOL") or os.environ.get("MCOMP_VM_EVENTS_SPOOL") or os.path.expanduser(
         "~/Library/Application Support/metacomputer/events/spool")
 
 
