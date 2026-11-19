@@ -17,6 +17,11 @@ All notable changes to metacomputer are recorded here. The format follows
 
 - `metacomputer browser profiles --delete NAME` (page-mode Chrome profiles) goes through the same `lib/guest_profiles.py` in the VM instead of `rm -rf` on the path: a link on the way to the profiles folder, or a profile that is a link, is now refused rather than followed.
 - Sign-in, sign-up, checkout, account settings and posting go through human mode first: the VM's Firefox, or Chrome from `launch_app`, with real clicks and foreground keys. Page-mode Chrome, driven through the DevTools route that sites can flag as automated, is now the exception (bulk data entry, reading your own sites, steps human mode can't do). A sign-in that looks degraded (no code box, an email that never arrives) means switch to human mode and retry once. The skill, BROWSER.md and the hub's MCP instructions say so.
+
+## [0.3.2] - 2026-11-19
+
+### Changed
+
 - `./install.sh` is quieter: the builds of mcomp-vm, the host tools and the vault, which printed hundreds of harmless lines (Swift's compiler warnings, Go's downloads), each show one line and keep their whole output in a log in the logs folder (`logs/build-mcomp-vm-…`, `build-tools-…` and `build-vault-….log`, or `LOG_DIR`). A build that fails shows the end of its log (escaped) and the log's path, then stops the install or (the vault) warns, as before.
 
 ### Fixed
