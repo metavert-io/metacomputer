@@ -106,7 +106,7 @@ STUBS = {
 class Box:
     """A temporary HOME, a stub folder first on PATH, and a log of every stub call."""
 
-    def __init__(self, without=(), real_git=True):
+    def __init__(self, without=(), real_git=True, old_python=False):
         self.t = tempfile.mkdtemp(prefix="mcomp-install-")
         self.home = os.path.join(self.t, "home")
         self.stubs = os.path.join(self.t, "stubs")
@@ -118,6 +118,9 @@ class Box:
                 write(os.path.join(self.stubs, name), STUB_HEAD + body, 0o755)
         if not real_git:
             write(os.path.join(self.stubs, "git"), STUB_HEAD + "exit 1\n", 0o755)
+        if old_python:   # only a python3 older than 3.11 (Apple's 3.9): it fails the version check, else works
+            write(os.path.join(self.stubs, "python3"), STUB_HEAD + 'for a; do case "$a" in *version_info*) exit 1 ;; esac; done\n'
+                  'exec "$STUB_PY" "$@"\n', 0o755)
         # Apple's Command Line Tools: a folder with usr/bin/swiftc, as xcode-select -p prints it.
         self.clt = os.path.join(self.t, "CommandLineTools")
         write(os.path.join(self.clt, "usr", "bin", "swiftc"), "#!/bin/sh\n", 0o755)
@@ -129,7 +132,8 @@ class Box:
                     "STUB_CLT": self.clt, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                     "GIT_ALLOW_PROTOCOL": "file", "GET_SH_BREW_PATHS": os.path.join(self.t, "no-brew"),
                     "TMPDIR": self.t, "MCOMP_CONFIG": os.path.join(self.t, "local.env"),
-                    "STUB_ACCT_HOME": self.acct, "MCOMP_LOCK_DIR": os.path.join(self.t, "locks"), "MCOMP_LOCK_WAIT": "1"}
+                    "STUB_ACCT_HOME": self.acct, "MCOMP_LOCK_DIR": os.path.join(self.t, "locks"), "MCOMP_LOCK_WAIT": "1",
+                    "MCOMP_BREW_PYTHON": PY if not old_python else os.path.join(self.t, "no-brew-python3")}
         self._repo = None
 
     def repo(self):
@@ -1034,6 +1038,8 @@ def test_install_refusals():
         b.close()
     cases = [
         ("tools missing and no Homebrew", dict(without=("brew", "go", "ffmpeg")), {}, "Homebrew isn't installed"),
+        ("only a python3 older than 3.11 and no Homebrew (it counts as missing)", dict(without=("brew",), old_python=True), {},
+         "missing: python3, and Homebrew isn't installed"),
         ("no Command Line Tools (mcomp-vm needs Swift)", dict(without=("swift",), real_git=False), {"STUB_CLT": ""},
          "Command Line Tools"),
         ("10 GB free on the one disk", dict(real_git=False), {"STUB_FREE_GB": "10"}, "needs 15 GB there"),

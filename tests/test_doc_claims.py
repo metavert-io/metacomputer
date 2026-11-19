@@ -287,6 +287,16 @@ def claude_escaped():
     c = raw(VC)
     return ("isatty" not in c and 'clean(out["screen"])' in c and 'clean(f.extra["screen"])' in c
             and vm_claude.clean("a\x1b]52;c;QQ==\x07‮b") == "a\\x1b]52;c;QQ==\\x07\\u202eb")
+def python_311():
+    """metacomputer needs Python 3.11 or later on the Mac: lib.sh picks one that passes the version check (or stops),
+    and install.sh counts an older python3 as missing, so Homebrew adds python."""
+    lib, inst = raw("scripts/lib.sh"), raw("install.sh")
+    check = "sys.exit(sys.version_info < (3, 11))"
+    return (check in lib and 'py_ok "$PY" ||' in lib and "brew install python" in lib
+            and check in inst and "py311_ok || need+=" in inst and 'python3) pkgs+=(python)' in inst
+            and "py311_ok || die" in inst)
+
+
 def function_text(name, rel="bin/metacomputer"):
     """One shell function's source, as written."""
     m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), raw(rel), re.S | re.M)
@@ -542,6 +552,9 @@ def no_web_apps_match():
 # --- the table -------------------------------------------------------------------------------------------------
 # (document, phrase that must be in it, check(match) -> bool or (bool, detail)). Keep rows short: one promise each.
 CLAIMS = [
+    ("README.md", r"Python 3\.11 or later on the Mac\. Apple's own `python3` is 3\.9, so where that's the only one, the install\s+adds Homebrew's",
+     lambda m: python_311()),
+    ("docs/install.md", r"Python 3\.11 \(or later\) is missing; Apple's own `python3` \(3\.9\) doesn't count", lambda m: python_311()),
     # The vault's approvals (vault/Commands.swift, vault/Import.swift, vault/Approvals.swift, vault/Crypto.swift)
     ("SECURITY.md", r"the default, `--approval session`, doesn't ask once the vault is unlocked",
      lambda m: set_default() == "session"),
