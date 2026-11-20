@@ -241,7 +241,8 @@ def cli_checks():
         check("…and the recorder's own exit status still decides (a failed start says so)",
               rc != 0 and "could not start recording" in out, (rc, out[-200:]))
         # status: a gateway that looks alive, so the guest's own report is read and shown
-        gw = subprocess.Popen(["sleep", "60"])
+        # (its command line names this VM's gw.json, as the real gateway's does: netgw_pid checks that)
+        gw = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-config", f"{td}/run/gw.json"])
         try:
             os.makedirs(os.path.join(td, "run"), exist_ok=True)
             with open(os.path.join(td, "run", "netgw.pid"), "w") as f:

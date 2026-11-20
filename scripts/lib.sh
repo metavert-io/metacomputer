@@ -676,9 +676,11 @@ os.execvp(sys.argv[2], sys.argv[2:])' "$log" "$@" &
 # The gateway's pid, only while that process is this VM's gateway: started with this VM's gw.json (a pid left in the
 # file from an earlier run can belong to another process, even another VM's gateway, by now).
 netgw_pid() {
-  local p; p="$(head -1 "$RUN_DIR/netgw.pid" 2>/dev/null | tr -cd '0-9')"
+  # Safe under set -e / pipefail (build-vm.sh): no pid file, or a process that's gone, prints nothing.
+  local p=""
+  if [ -s "$RUN_DIR/netgw.pid" ]; then p="$(head -1 "$RUN_DIR/netgw.pid" 2>/dev/null | tr -cd '0-9')" || p=""; fi
   [ -n "$p" ] || return 0
-  case "$(ps -o command= -p "$p" 2>/dev/null)" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
+  case "$(ps -o command= -p "$p" 2>/dev/null || true)" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
   return 0
 }
 netgw_alive() { local p; p="$(netgw_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
