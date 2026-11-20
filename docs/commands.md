@@ -45,7 +45,7 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `contact-sheet MP4 [OUT.png]` | 12 frames of a recording in one image |
 | `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model |
 | `net [status [--json]]` | What the VM can reach now: the open internet (with config/netgw-rules.json's refusals) or a network allowlist and when it ends |
-| `net allow NAME... [--for D] [--exact] [--no-check]` | With no list in force: start one (anyone, Claude too; 2 h by default, 1 min to 24 h); the VM then reaches only those names (and their subdomains unless `--exact`), enforced by the gateway on this Mac. With one in force: add names or time, at your own terminal only. After a change to a running VM it checks from inside the VM that a public address not on the list is refused |
+| `net allow NAME... [--for D] [--exact]` | With no list in force: start one (anyone, Claude too; 2 h by default, 1 min to 24 h); the VM then reaches only those names (and their subdomains unless `--exact`), enforced by the gateway on this Mac. With one in force: add names or time, at your own terminal only. With the VM running it says the list is in force only when the gateway reports the rules just written (exit 4 otherwise) |
 | `net remove NAME... [--exact]` | Take names off the list in force (anyone) |
 | `net clear` | Lift the list before it ends (your own terminal only); it also ends by itself when its time is up |
 | `browser [default firefox\|chrome] [mode human\|page\|hybrid] [pacing human\|fast] [profiles [--new NAME \| --delete NAME [--firefox]]]` | The skill's defaults and human pacing; kept Firefox profiles (`--new`: made in the VM, with the `launch_app` call that opens one) and named Chrome profiles |

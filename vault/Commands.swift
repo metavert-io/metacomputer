@@ -465,7 +465,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         proxyUser = pu
         proxyPort = pp
     }
-    guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (cua-netgw)") }
+    guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (mcomp-netgw)") }
     try checkPrintablePath(absolutePath(g), "gateway")
     let gateway = URL(fileURLWithPath: absolutePath(g)).resolvingSymlinksInPath().path
     try checkPrintablePath(gateway, "gateway")

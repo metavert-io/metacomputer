@@ -1141,7 +1141,15 @@ CLAIMS = [
      lambda m: m[1] == D["LUME_VERSION"] and D["LUME_TARBALL_SHA256"].startswith(m[2])),
     ("architecture.md", r"Lume ([\d.]+) \(`lume-v([\d.]+)`, `[0-9a-f]+`\) \+ one patch",
      lambda m: m[1] == m[2] == D["LUME_VERSION"]),
-    ("architecture.md", r"\| cua-netgw \| built from trycua/cua `([0-9a-f]+)`", lambda m: D["CUA_SRC_COMMIT"].startswith(m[1])),
+    ("architecture.md", r"\| mcomp-netgw \| cua-netgw, built from trycua/cua `([0-9a-f]+)`", lambda m: D["CUA_SRC_COMMIT"].startswith(m[1])),
+    ("architecture.md", r"The patch \(`patches/netgw/`, applied by `scripts/build-tools.sh` to a clean export of the pinned\s+source",
+     lambda m: 'G -C "$SRC" archive "$CUA_SRC_COMMIT" libs/cua/netgw | tar -x -C "$tree"' in raw("scripts/build-tools.sh")
+     and 'NETGW_BIN="$LAB_ROOT/vendor/bin/mcomp-netgw"' in raw("scripts/lib.sh")
+     and all(x in raw("patches/netgw/0001-mcomp-allowlist-ptr-recheck-digest.patch") for x in (
+         "+\tif !rules.DNSAllowed(name) {", "StripAnswerFor(", "if !g.decide(policy.TCP, dst, port).Accept {",
+         'return "ok " + g.rules.Digest()'))),
+    ("SECURITY.md", r"named `mcomp-netgw` \(or `cua-netgw`, built by an earlier version\)",
+     lambda m: 'var names = ["mcomp-netgw", "cua-netgw"]' in raw("vault/Guest.swift")),
     ("architecture.md", r"\| rclone \(only for S3 volumes\) \| ([\d.]+) osx-arm64 \(sha256 `([0-9a-f]+)…`; `SHA256SUMS` signed by "
                         r"`([0-9A-F]+)…([0-9A-F]+)`\) \| `\.cache/rclone-v([\d.]+)/rclone`",
      lambda m: m[1] == m[5] == D["RCLONE_VERSION"] and D["RCLONE_SHA256"].startswith(m[2])
@@ -1230,7 +1238,7 @@ CLAIMS = [
     ("SECURITY.md", r"\*\*Claude Code comes from Anthropic's installer\*\* \(https://claude\.ai/install\.sh, over HTTPS, as the "
                     r"desktop user, saved whole before it runs\)", lambda m: claude_installer()),
     # The live view (bin/metacomputer view, lib/liveview.py): loopback only, the password through a pipe
-    ("SECURITY.md", r"cua-netgw forwards it to `127\.0\.0\.1:VNC_PORT` on your Mac only",
+    ("SECURITY.md", r"The gateway forwards it to `127\.0\.0\.1:VNC_PORT` on your Mac only",
      lambda m: '"host": "127.0.0.1:$VNC_PORT"' in raw("scripts/lib.sh")),
     ("SECURITY.md", r"It's never in the link, an argument, the environment, a log, an event or the command's output",
      lambda m: view_open_pipes_password()),
@@ -1653,7 +1661,7 @@ CLAIMS = [
      lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")
      and int(m[2]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
     # Network allowlists (lib/netpolicy.py, `metacomputer net`)
-    ("SECURITY.md", r"The gateway answers DNS only for the names on the\s+list",
+    ("SECURITY.md", r"answers DNS only for the names on the\s+list \(PTR questions included\)",
      lambda m: 'out["default_accept"] = False' in raw("lib/netpolicy.py")
      and 'out["domains"] = {"allow": sorted(set(st["allow"]))}' in raw("lib/netpolicy.py")),
     ("SECURITY.md", r"Adding names or time to a\s+list in force, and `net clear`, run only at a\s+terminal",
@@ -1665,6 +1673,9 @@ CLAIMS = [
      == (60, 86400, 7200)),
     ("SECURITY.md", r"is checked with the gateway's own\s+`-check-rules` before it replaces the one in force",
      lambda m: re.search(r"check_rules\(tmp\)\n\s+os\.replace\(tmp, p\[\"rules\"\]\)", raw("lib/netpolicy.py")) is not None),
+    ("SECURITY.md", r"says the list is in force only when that's the file it just wrote",
+     lambda m: "if have == digest:" in raw("lib/netpolicy.py") and 'c.sendall(b"rules\\n")' in raw("lib/netpolicy.py")
+     and "check_in_vm" not in raw("lib/netpolicy.py")),
     ("SECURITY.md", r"a list file that can't be read\s+stops `metacomputer start` instead of starting with the internet open",
      lambda m: 'net_policy render || die' in raw("scripts/lib.sh") and '"rules": "$RUN_DIR/netgw-rules.json",' in raw("scripts/lib.sh")),
     ("SECURITY.md", r"`net_allowlist_lifted` carry counts and minutes, never the names",

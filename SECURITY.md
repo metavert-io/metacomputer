@@ -322,13 +322,14 @@ How it's enforced:
 ## Network allowlists (`metacomputer net`)
 
 By default the VM reaches the public internet and nothing of yours: the gateway on
-this Mac (cua-netgw) refuses your LAN, your tailnet, this Mac's own addresses, cloud
+this Mac (mcomp-netgw: Cua's cua-netgw with a small patch, below) refuses your LAN, your tailnet, this Mac's own addresses, cloud
 metadata and outbound mail (architecture.md, "Network"). For a task that only needs
 a few sites, `metacomputer net allow example.com stripe.com --for 2h` narrows that to
 those names for that long:
 
-- **Enforced on this Mac, by name.** The gateway answers DNS only for the names on the
-  list (a name also covers its subdomains unless `--exact`; `*.example.com` covers only
+- **Enforced on this Mac, by name.** The gateway (mcomp-netgw: Cua's cua-netgw with a small
+  patch that makes name rules hold; architecture.md, "Network") answers DNS only for the names on the
+  list (PTR questions included) (a name also covers its subdomains unless `--exact`; `*.example.com` covers only
   the subdomains) and lets the guest connect only to the addresses its own resolver
   returned for them, for as long as each answer lives. Every other connection is
   refused and logged like any other blocked connection, and connections open when the
@@ -346,9 +347,13 @@ those names for that long:
 - **It fails closed.** The rules file the gateway reads (`RUN_DIR/netgw-rules.json`:
   config/netgw-rules.json plus the list) is checked with the gateway's own
   `-check-rules` before it replaces the one in force; a list file that can't be read
-  stops `metacomputer start` instead of starting with the internet open. After a change
-  to a running VM, `net` checks from inside the VM that a public address not on the list
-  is refused (`--no-check` skips it). A list goes only on top of the stock kind of
+  stops `metacomputer start` instead of starting with the internet open. Each change saves
+  the list before it writes the rules, under one lock, so an interrupted change never
+  leaves the saved list wider than the gateway's rules. While the VM runs, `net` then asks
+  the gateway, over its control socket on this Mac, for a digest of the rules it has in
+  force, and says the list is in force only when that's the file it just wrote; otherwise
+  it exits 4 with what to do (a gateway that couldn't load the file keeps its earlier
+  rules). The VM's word is never taken for it. A list goes only on top of the stock kind of
   config/netgw-rules.json (refusals, everything else accepted); one that opens address
   ranges or names of its own is refused.
 
@@ -359,7 +364,9 @@ many sites from one address) are reachable by that address while an allowed name
 points there, whatever name a connection then asks for. The SSH and live-view
 forwards and the vault's API proxy don't go out through the gateway, so they keep
 working. A VM whose gateway was started by an earlier version keeps reading the
-checkout's rules: `metacomputer stop` and `start` once.
+checkout's rules: `metacomputer stop` and `start` once (and, if you use the secrets
+vault, `metacomputer secrets bind` again: the vault pins the gateway program, and this
+one is new).
 
 ## The hub and its guards (`MCP_HUB`, `COORD_GUARD`)
 
@@ -626,7 +633,7 @@ from that browser's own working folder) isn't deleted.
 
 ## The live view (`metacomputer view`)
 
-The VM runs a VNC server (x11vnc) for its desktop. cua-netgw forwards it to
+The VM runs a VNC server (x11vnc) for its desktop. The gateway forwards it to
 `127.0.0.1:VNC_PORT` on your Mac only, and the VM's firewall admits it only from
 the gateway. Lume's own VNC server, which listens on every interface, is never
 started.
@@ -1649,7 +1656,7 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    - the field fits its kind: `password` and `username` for a password, `otp` for
      a TOTP seed (it works out the current 6-digit code), `text` for text;
    - the VM is bound;
-   - the program listening on the VM's SSH port is named `cua-netgw`, is the gateway
+   - the program listening on the VM's SSH port is named `mcomp-netgw` (or `cua-netgw`, built by an earlier version), is the gateway
      program pinned at bind (the kernel's path for that process), and that file still
      has the contents pinned at bind.
 4. If the secret or the unlock says `each`, it first asks the VM to check the page
@@ -2981,7 +2988,7 @@ something waits for you:
     can't tell;
   - tamper with the VM, or read it: the VM's disk image (in Lume's VM folder) is
     readable by your account.
-  - **Pose as the VM.** The gateway pin can't tell a copy of the real cua-netgw,
+  - **Pose as the VM.** The gateway pin can't tell a copy of the real gateway,
     started by the agent on the VM's port, from the VM's own. Only the pinned host key
     then stops a fill, and the private half of that key exists only in the VM:
     - builds delete the Mac's copy, `$SSH_DIR/hostkey`;

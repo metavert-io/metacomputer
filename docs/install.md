@@ -127,7 +127,7 @@ folder it uses. Changes to a VM run one at a time too: a build, `reset`,
 same per-VM lock. A second one waits 10 seconds, then stops without changing
 anything and says what's running. A lock lasts as long as the last process
 doing the work, and nothing stale survives once they've all exited. Every
-install also rebuilds the host tools (`cua-netgw`, `qcow2raw`) when they don't
+install also rebuilds the host tools (`mcomp-netgw`, `qcow2raw`) when they don't
 match their pinned sources, whether or not it builds the VM. See
 [Troubleshooting](#troubleshooting).
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# metacomputer host library: configuration, Lume + cua-netgw
+# metacomputer host library: configuration, Lume + mcomp-netgw (cua-netgw)
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -408,7 +408,7 @@ RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"   # RUN_DIR / LOG_DIR: config/defaults.env
 SOCK_DIR="/tmp/mcomp-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
 CACHE_DIR="$LAB_ROOT/.cache"
 LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
-NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
+NETGW_BIN="$LAB_ROOT/vendor/bin/mcomp-netgw"   # cua-netgw with patches/netgw/ (scripts/build-tools.sh)
 QCOW2RAW_BIN="$LAB_ROOT/vendor/bin/qcow2raw"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 export LUME_TELEMETRY_ENABLED=0
@@ -672,7 +672,7 @@ os.closerange(3, 4096)
 os.execvp(sys.argv[2], sys.argv[2:])' "$log" "$@" &
 }
 
-# --- cua-netgw (host-enforced egress policy, loopback-only forwards) -------
+# --- mcomp-netgw: cua-netgw patched (host-enforced egress policy, loopback-only forwards) -------
 netgw_pid() { if [ -s "$RUN_DIR/netgw.pid" ]; then cat "$RUN_DIR/netgw.pid"; fi; return 0; }
 netgw_alive() { local p; p="$(netgw_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 netgw_stop() {
@@ -686,7 +686,8 @@ netgw_stop() {
 }
 net_policy() { # ARGS... -> lib/netpolicy.py for this VM (its RUN_DIR, the gateway binary, whether it runs)
   local alive=0; netgw_alive && alive=1
-  MCOMP_NETGW_BIN="$NETGW_BIN" MCOMP_NETGW_ALIVE="$alive" "$PY" "$LAB_ROOT/lib/netpolicy.py" "$@"
+  MCOMP_NETGW_BIN="$NETGW_BIN" MCOMP_NETGW_ALIVE="$alive" MCOMP_NETGW_CONTROL="$SOCK_DIR/control.sock" \
+    "$PY" "$LAB_ROOT/lib/netpolicy.py" "$@"
 }
 netgw_render() { # MAC -> writes $RUN_DIR/gw.json
   local mac="$1"
@@ -721,7 +722,7 @@ netgw_start() { # MAC
   netgw_render "$1"
   daemonize "$LOG_DIR/netgw.log" "$NETGW_BIN" -config "$RUN_DIR/gw.json"
   local i=0; while [ ! -S "$SOCK_DIR/net.sock" ] && [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done
-  [ -S "$SOCK_DIR/net.sock" ] || { tail -5 "$LOG_DIR/netgw.log" >&2; die "cua-netgw did not start"; }
+  [ -S "$SOCK_DIR/net.sock" ] || { tail -5 "$LOG_DIR/netgw.log" >&2; die "the gateway (mcomp-netgw) did not start"; }
 }
 netgw_control() { # "lease MAC" | "probe IP:PORT"
   "$PY" - "$SOCK_DIR/control.sock" "$1" <<'EOF'

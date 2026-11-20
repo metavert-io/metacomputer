@@ -842,8 +842,10 @@ def test_build_tools_stamps():
     t = tempfile.mkdtemp(prefix="mcomp-install-")
     try:
         root = os.path.join(t, "lab")
+        patches = sorted(f"patches/netgw/{n}" for n in os.listdir(os.path.join(LAB, "patches", "netgw")) if n.endswith(".patch"))
         for f in ("scripts/build-tools.sh", "scripts/lib.sh", "config/defaults.env", "tools/qcow2raw/go.mod", "tools/qcow2raw/go.sum",
-                  "tools/qcow2raw/main.go", "scripts/safe-rmtree.sh", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):
+                  "tools/qcow2raw/main.go", "scripts/safe-rmtree.sh", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py",
+                  *patches):
             os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
             shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
         stubs = os.path.join(t, "stubs")
@@ -851,13 +853,16 @@ def test_build_tools_stamps():
         commit = re.search(r"^CUA_SRC_COMMIT=(\w+)", open(os.path.join(LAB, "config", "defaults.env")).read(), re.M).group(1)
         write(os.path.join(stubs, "go"), '#!/bin/bash\necho "go $*" >> "$STUB_LOG"\nout=""; prev=""; for a; do [ "$prev" = -o ] && out="$a"; prev="$a"; done\n'
                                           'printf "#!/bin/sh\\necho built-%s\\n" "$RANDOM" > "$out"; chmod +x "$out"\n', 0o755)
+        tree = os.path.join(t, "tree")
+        os.makedirs(os.path.join(tree, "libs", "cua", "netgw", "cmd", "cua-netgw"))
         write(os.path.join(stubs, "git"), '#!/bin/bash\necho "git $*" >> "$STUB_LOG"\nfor a; do last="$a"; done\n'
-                                           'case " $* " in *" clone "*) mkdir -p "$last/.git" "$last/libs/cua/netgw" ;; *" rev-parse HEAD"*) echo "${STUB_COMMIT}" ;; esac\nexit 0\n', 0o755)
+                                           'case " $* " in *" clone "*) mkdir -p "$last/.git" "$last/libs/cua/netgw" ;; *" rev-parse HEAD"*) echo "${STUB_COMMIT}" ;;\n'
+                                           '  *" archive "*) tar -cf - -C "$STUB_TREE" libs ;; *" apply "*) [ ! -e "$STUB_TREE/refuse-patch" ] || exit 1 ;; esac\nexit 0\n', 0o755)
         write(os.path.join(stubs, "codesign"), "#!/bin/sh\nexit 0\n", 0o755)
         conf = os.path.join(t, "c.env")
         write(conf, f'RUN_DIR="{t}/run"\nLOG_DIR="{t}/logs"\nLUME="{t}/no-lume"\n')
         env = {"HOME": t, "PATH": f"{stubs}:/usr/bin:/bin", "STUB_LOG": log, "STUB_COMMIT": commit, "MCOMP_CONFIG": conf, "PY": PY,
-               "TMPDIR": t}
+               "TMPDIR": t, "STUB_TREE": tree}
         bt = os.path.join(root, "scripts", "build-tools.sh")
 
         def run(*args, **extra):
@@ -870,20 +875,44 @@ def test_build_tools_stamps():
         p, calls = run()
         gos = [c for c in calls if c.startswith("go build")]
         check("build-tools: builds both tools and stamps them", p.returncode == 0 and len(gos) == 2
-              and os.path.exists(os.path.join(root, "vendor", "bin", ".cua-netgw.built")), (p.stderr[-300:], calls))
+              and os.path.exists(os.path.join(root, "vendor", "bin", ".mcomp-netgw.built")), (p.stderr[-300:], calls))
+        check("build-tools: the gateway is cua-netgw's pinned source exported (never the cache's working tree) with every "
+              "patch in patches/netgw/ applied, built as mcomp-netgw", any(" archive " in f" {c} " and commit in c for c in calls)
+              and len([c for c in calls if " apply " in f" {c} "]) == len(patches) >= 1
+              and any(c.startswith("go build") and "vendor/bin/mcomp-netgw" in c and "+mcomp." in c for c in calls), calls)
         check("build-tools: git runs with hooks and fsmonitor off", all("core.hooksPath=/dev/null" in c for c in calls if c.startswith("git ")), calls)
         p, calls = run("--check")
         check("build-tools --check after a build: up to date (exit 0), nothing run", p.returncode == 0 and not calls, calls)
         p, calls = run()
         check("build-tools again: nothing rebuilt", p.returncode == 0 and not [c for c in calls if c.startswith("go build")], calls)
-        write(os.path.join(root, "vendor", "bin", "cua-netgw"), "#!/bin/sh\necho swapped\n", 0o755)
+        write(os.path.join(root, "vendor", "bin", "mcomp-netgw"), "#!/bin/sh\necho swapped\n", 0o755)
         p, calls = run()
-        check("a cua-netgw that isn't the binary that was built: rebuilt (only it)", p.returncode == 0
-              and len([c for c in calls if c.startswith("go build")]) == 1 and "cua-netgw" in " ".join(calls), calls)
+        check("an mcomp-netgw that isn't the binary that was built: rebuilt (only it)", p.returncode == 0
+              and len([c for c in calls if c.startswith("go build")]) == 1 and "mcomp-netgw" in " ".join(calls), calls)
+        with open(os.path.join(root, patches[0]), "a") as fh:
+            fh.write("\n")
+        p, calls = run()
+        check("a patch that changed: the gateway rebuilt", p.returncode == 0
+              and len([c for c in calls if c.startswith("go build") and "mcomp-netgw" in c]) == 1, calls)
+        write(os.path.join(tree, "refuse-patch"), "x\n")
+        with open(os.path.join(root, patches[0]), "a") as fh:
+            fh.write("\n")
+        p, calls = run()
+        check("a patch that doesn't apply: the build stops, nothing built", p.returncode != 0 and "doesn't apply" in p.stderr
+              and not [c for c in calls if c.startswith("go build") and "mcomp-netgw" in c], (p.stderr[-200:], calls))
+        os.remove(os.path.join(tree, "refuse-patch"))
+        saved = {f: open(os.path.join(root, f)).read() for f in patches}
+        for f in patches:
+            os.remove(os.path.join(root, f))
+        p, calls = run()
+        check("no patches at all: refused (mcomp-netgw is never plain cua-netgw under another name)",
+              p.returncode != 0 and "no patches" in p.stderr, p.stderr[-200:])
+        for f, text in saved.items():
+            write(os.path.join(root, f), text)
         with open(conf, "a") as fh:
             fh.write("CUA_SRC_COMMIT=0123456789abcdef0123456789abcdef01234567\n")
         p, calls = run(STUB_COMMIT="0123456789abcdef0123456789abcdef01234567")
-        check("a new pinned commit: cua-netgw rebuilt from it", p.returncode == 0
+        check("a new pinned commit: the gateway rebuilt from it", p.returncode == 0
               and any("fetch" in c and "0123456789abcdef" in c for c in calls), calls)
         write(os.path.join(root, ".cache", "cua-src", "MINE"), "keep\n")
         p, calls = run("--rebuild", "--fresh-source", STUB_COMMIT="0123456789abcdef0123456789abcdef01234567")

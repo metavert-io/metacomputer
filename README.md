@@ -140,7 +140,7 @@ number of VMs the same read-only files. Nothing is attached until you list it
 which is Anthropic's service, and the install's downloads from GitHub, Ubuntu and
 the projects it builds on, it needs nothing else in the cloud: no account, no
 subscription. It's the self-hosted way to run Cua's open-source stack (Lume, Cua
-Driver, cua-netgw), at pinned versions you can fork. Your keys stay on your Mac,
+Driver, the cua-netgw gateway), at pinned versions you can fork. Your keys stay on your Mac,
 in the vault and your own Keychain; logs and events go only where you send them;
 and moving from Cua Spaces' Keyvault is [documented](docs/moving-from-spaces.md).
 
@@ -529,7 +529,7 @@ Claude Code
  metacomputer sh ───────────────────────────────────── SSH ──▶ bash, as the desktop user
  the secrets vault, unlocked in your terminal ──────── SSH ──▶ locked fill and proxy accounts
  volumes and folders you attach ─────────────────────────────▶ mounted at start
- cua-netgw: the VM's only network, to the public internet
+ mcomp-netgw: the VM's only network, to the public internet
  mcomp-vm: runs the VM on Apple's Virtualization framework
 ```
 
@@ -756,7 +756,7 @@ describes. Bugs in Cua Driver or Lume themselves belong upstream at
 ## Credits
 
 metacomputer is built on [Cua](https://github.com/trycua/cua) by Cua AI, Inc.
-(MIT): Cua Driver runs the desktop, Lume runs the VM, and `cua-netgw`, built from
+(MIT): Cua Driver runs the desktop, Lume runs the VM, and `cua-netgw` (as mcomp-netgw: with a small patch), built from
 Cua's source, is the network gateway (it uses gvisor-tap-vsock, Apache-2.0).
 [mcomp-vm](https://github.com/metavert-io/metacomputer-vm), metacomputer's build
 of Lume, adds the host-sharing flags; like metacomputer, it's made by Metavert,

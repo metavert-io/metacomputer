@@ -2133,7 +2133,7 @@ def safe_word(w):
 
 HEALTH_TEXT = {
     "vm_off": ("error", "The virtual computer is not running (state: {vm}).", "metacomputer start, or metacomputer status"),
-    "gateway": ("error", "The VM's network gateway (cua-netgw) is down.", "metacomputer restart"),
+    "gateway": ("error", "The VM's network gateway (mcomp-netgw) is down.", "metacomputer restart"),
     "ssh": ("error", "The VM is running but doesn't answer SSH.", "metacomputer status; metacomputer restart if it stays down"),
     "not_ready": ("warn", "The VM's desktop session isn't ready (Xorg, XFCE or accessibility).", "metacomputer status"),
     "doctor": ("warn", "Cua Driver's doctor check is failing, or didn't report a result.", "metacomputer status"),

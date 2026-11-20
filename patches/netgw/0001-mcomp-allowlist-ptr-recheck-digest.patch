@@ -1,0 +1,352 @@
+diff --git a/libs/cua/netgw/cmd/cua-netgw/main.go b/libs/cua/netgw/cmd/cua-netgw/main.go
+index 7630adc..d9e4f3b 100644
+--- a/libs/cua/netgw/cmd/cua-netgw/main.go
++++ b/libs/cua/netgw/cmd/cua-netgw/main.go
+@@ -1,4 +1,5 @@
+-// cua-netgw is the Cua network gateway: the user-mode network of one VM
++// mcomp-netgw is metacomputer's build of cua-netgw, the Cua network gateway
++// (Cua's source with metacomputer's patch; MIT): the user-mode network of one VM
+ // (a macOS microVM, a QEMU VM on macOS or Windows, a macOS VM), where every
+ // connection the guest opens is checked against the Space's network rules.
+ //
+@@ -45,7 +46,7 @@ var version = "dev"
+ 
+ func main() {
+ 	if err := run(); err != nil {
+-		fmt.Fprintf(os.Stderr, "cua-netgw: %v\n", err)
++		fmt.Fprintf(os.Stderr, "mcomp-netgw: %v\n", err)
+ 		os.Exit(1)
+ 	}
+ }
+@@ -57,7 +58,7 @@ func run() error {
+ 	showVersion := flag.Bool("version", false, "print the version and exit")
+ 	flag.Parse()
+ 	if *showVersion {
+-		fmt.Println("cua-netgw", version)
++		fmt.Println("mcomp-netgw", version, "(metacomputer's build of Cua's cua-netgw)")
+ 		return nil
+ 	}
+ 	if *check != "" {
+diff --git a/libs/cua/netgw/internal/gateway/control.go b/libs/cua/netgw/internal/gateway/control.go
+index 1e3a6aa..3095345 100644
+--- a/libs/cua/netgw/internal/gateway/control.go
++++ b/libs/cua/netgw/internal/gateway/control.go
+@@ -20,6 +20,7 @@ import (
+ //   - "probe <guest address>:<port>": "ok" when the gateway can open a TCP
+ //     connection to that port in the guest (readiness of a published port),
+ //     "no <why>" otherwise. Only addresses in the virtual network.
++//   - "rules": "ok <sha256>" of the rules file in force (mcomp patch).
+ //   - "lease <mac>": "ok <address>" when the gateway's DHCP has leased an
+ //     address to that MAC address (how a host finds its guest's address),
+ //     "no <why>" otherwise.
+@@ -42,6 +43,10 @@ func (g *Gateway) ServeControl(ln net.Listener) {
+ }
+ 
+ func (g *Gateway) probe(line string) string {
++	if line == "rules" {
++		// mcomp patch: the sha256 of the rules file in force.
++		return "ok " + g.rules.Digest()
++	}
+ 	if mac, ok := strings.CutPrefix(line, "lease "); ok {
+ 		return g.lease(strings.TrimSpace(mac))
+ 	}
+diff --git a/libs/cua/netgw/internal/gateway/dns.go b/libs/cua/netgw/internal/gateway/dns.go
+index d408a30..9e29f13 100644
+--- a/libs/cua/netgw/internal/gateway/dns.go
++++ b/libs/cua/netgw/internal/gateway/dns.go
+@@ -141,8 +141,10 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
+ 		return m
+ 	}
+ 	rules := r.g.rules.Current()
+-	if q.Qtype != dns.TypePTR && !rules.DNSAllowed(name) {
+-		// A denied name, or no network: the question goes no further.
++	if !rules.DNSAllowed(name) {
++		// A denied name, or no network: the question goes no further. A PTR
++		// question too (mcomp patch): its name can carry anything, so with no
++		// network by default it is answered only for a name the rules allow.
+ 		m.Rcode = dns.RcodeRefused
+ 		return m
+ 	}
+@@ -199,10 +201,14 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
+ 		got.Id = req.Id
+ 		m = got
+ 	}
+-	r.filter(m)
++	allowed := rules.DomainVerdict(name) == 1
++	// An allowed name's addresses are kept unless the rules or the platform
++	// refuse them by address (mcomp patch: before, the default deny removed
++	// them, so an allowed name resolved to nothing).
++	r.filterFor(m, allowed)
+ 	// The addresses an allowed name resolved to stay reachable for as long
+ 	// as the answer lives.
+-	if rules.DomainVerdict(name) == 1 {
++	if allowed {
+ 		for _, rr := range m.Answer {
+ 			switch a := rr.(type) {
+ 			case *dns.A:
+@@ -273,21 +279,28 @@ func (r *resolver) strip(ip netip.Addr) (bool, string) {
+ }
+ 
+ // filter removes the refused addresses from every section of m.
+-func (r *resolver) filter(m *dns.Msg) {
+-	m.Answer = r.filterRRs(m.Answer)
++func (r *resolver) filter(m *dns.Msg) { r.filterFor(m, false) }
++
++// filterFor is filter for an answer to a name the rules allow by name when
++// allowed (mcomp patch): the answer's own addresses are judged as reachable
++// by default (StripAnswerFor), the other sections as before.
++func (r *resolver) filterFor(m *dns.Msg, allowed bool) {
++	m.Answer = r.filterRRsFor(m.Answer, allowed)
+ 	m.Ns = r.filterRRs(m.Ns)
+ 	m.Extra = r.filterRRs(m.Extra)
+ }
+ 
+-func (r *resolver) filterRRs(rrs []dns.RR) []dns.RR {
++func (r *resolver) filterRRs(rrs []dns.RR) []dns.RR { return r.filterRRsFor(rrs, false) }
++
++func (r *resolver) filterRRsFor(rrs []dns.RR, allowed bool) []dns.RR {
+ 	out := rrs[:0]
+ 	for _, rr := range rrs {
+ 		keep := true
+ 		switch v := rr.(type) {
+ 		case *dns.A:
+-			keep = r.keep(v.A)
++			keep = r.keepFor(v.A, allowed)
+ 		case *dns.AAAA:
+-			keep = r.keep(v.AAAA)
++			keep = r.keepFor(v.AAAA, allowed)
+ 		case *dns.SVCB:
+ 			v.Value = r.filterHints(v.Value)
+ 		case *dns.HTTPS:
+@@ -330,12 +343,16 @@ func (r *resolver) keepIPs(ips []net.IP) []net.IP {
+ 	return out
+ }
+ 
+-func (r *resolver) keep(ip net.IP) bool {
++func (r *resolver) keep(ip net.IP) bool { return r.keepFor(ip, false) }
++
++// keepFor is keep for an address an allowed name resolved to when allowed
++// (mcomp patch): only the rules' and the platform's denies remove it.
++func (r *resolver) keepFor(ip net.IP, allowed bool) bool {
+ 	a, ok := netip.AddrFromSlice(ip)
+ 	if !ok {
+ 		return false
+ 	}
+-	if strip, reason := r.strip(a); strip {
++	if strip, reason := r.g.rules.Current().StripAnswerFor(&r.g.network, a, allowed); strip {
+ 		r.g.events.Emit(events.DNSStripped, reason, "", netip.AddrPortFrom(a.Unmap(), 0))
+ 		return false
+ 	}
+diff --git a/libs/cua/netgw/internal/gateway/forward.go b/libs/cua/netgw/internal/gateway/forward.go
+index 33b3427..17ebf9c 100644
+--- a/libs/cua/netgw/internal/gateway/forward.go
++++ b/libs/cua/netgw/internal/gateway/forward.go
+@@ -110,6 +110,11 @@ func (g *Gateway) tcpForwarder() *tcp.Forwarder {
+ 		key := g.conns.add(&conn{proto: policy.TCP, dst: dst, port: port, close: closeBoth})
+ 		defer g.conns.remove(key)
+ 		defer closeBoth()
++		// The rules may have changed while it was dialing, after the check
++		// above and before recheck could see it (mcomp patch): decide again.
++		if !g.decide(policy.TCP, dst, port).Accept {
++			return
++		}
+ 		remote := tcpproxy.DialProxy{
+ 			DialContext: func(context.Context, string, string) (net.Conn, error) {
+ 				return outbound, nil
+@@ -150,6 +155,13 @@ func (g *Gateway) udpForwarder() *udp.Forwarder {
+ 			return net.Dial("udp", target)
+ 		})
+ 		key := g.conns.add(&conn{proto: policy.UDP, dst: dst, port: port, close: func() { _ = p.Close() }})
++		if !g.decide(policy.UDP, dst, port).Accept {
++			// The rules changed since the check above (mcomp patch).
++			_ = p.Close()
++			g.conns.remove(key)
++			ep.Close()
++			return true
++		}
+ 		go func() {
+ 			p.Run()
+ 			g.conns.remove(key)
+diff --git a/libs/cua/netgw/internal/gateway/mcomp_test.go b/libs/cua/netgw/internal/gateway/mcomp_test.go
+new file mode 100644
+index 0000000..f962953
+--- /dev/null
++++ b/libs/cua/netgw/internal/gateway/mcomp_test.go
+@@ -0,0 +1,123 @@
++// Tests for metacomputer's patch to cua-netgw (mcomp-netgw): names allowed
++// under a default deny resolve and bind, PTR questions follow the name rules,
++// and the control socket reports the rules in force.
++package gateway
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"net"
++	"net/netip"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/miekg/dns"
++
++	"github.com/trycua/cua/libs/cua/netgw/internal/policy"
++)
++
++func askDNS(t *testing.T, h *harness, name string, qtype uint16) *dns.Msg {
++	t.Helper()
++	c := h.dialUDP(gwIP, 53)
++	defer c.Close()
++	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
++	q := new(dns.Msg)
++	q.SetQuestion(name, qtype)
++	wire, _ := q.Pack()
++	if _, err := c.Write(wire); err != nil {
++		t.Fatal(err)
++	}
++	buf := make([]byte, 4096)
++	n, err := c.Read(buf)
++	if err != nil {
++		t.Fatal(err)
++	}
++	m := new(dns.Msg)
++	if err := m.Unpack(buf[:n]); err != nil {
++		t.Fatal(err)
++	}
++	return m
++}
++
++const allowlist = `{"version":1,"default_accept":false,"default_reason":"lab:allowlist",
++	"rules":[{"net":"10.0.0.0/8","accept":false,"reason":"lab:private-lan"}],
++	"domains":{"allow":["example.com","*.example.com"]}}`
++
++func TestAllowedNamesResolveAndBindUnderADefaultDeny(t *testing.T) {
++	h := newHarness(t, allowlist)
++	h.gw.dns.lookup = func(_ context.Context, network, host string) ([]netip.Addr, error) {
++		if host == "www.example.com." && network == "ip4" {
++			return []netip.Addr{netip.MustParseAddr("93.184.216.34"), netip.MustParseAddr("10.0.0.7"),
++				netip.MustParseAddr("127.0.0.1")}, nil
++		}
++		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
++	}
++	m := askDNS(t, h, "www.example.com.", dns.TypeA)
++	if len(m.Answer) != 1 || m.Answer[0].(*dns.A).A.String() != "93.184.216.34" {
++		t.Fatalf("an allowed name's public address must be kept, its private and loopback ones removed: %v", m.Answer)
++	}
++	if v := h.gw.decide(policy.TCP, netip.MustParseAddr("93.184.216.34"), 443); !v.Accept {
++		t.Fatalf("the address an allowed name resolved to must be reachable: %+v", v)
++	}
++	if v := h.gw.decide(policy.TCP, netip.MustParseAddr("93.184.216.35"), 443); v.Accept {
++		t.Fatalf("an address no allowed name resolved to must be refused: %+v", v)
++	}
++	if m := askDNS(t, h, "other.org.", dns.TypeA); m.Rcode != dns.RcodeRefused {
++		t.Fatalf("a name not on the list must not be answered: %v", m)
++	}
++}
++
++func TestPTRQuestionsFollowTheNameRules(t *testing.T) {
++	h := newHarness(t, allowlist)
++	for _, name := range []string{"secret-data.attacker.example.org.", "34.216.184.93.in-addr.arpa.",
++		"1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."} {
++		if m := askDNS(t, h, name, dns.TypePTR); m.Rcode != dns.RcodeRefused {
++			t.Fatalf("with nothing reachable by default, a PTR question for %s must be refused: %v", name, m)
++		}
++	}
++	open := newHarness(t, `{"version":1,"default_accept":true,"rules":[{"net":"10.0.0.0/8","accept":false,"reason":"lan"}]}`)
++	if m := askDNS(t, open, "7.0.0.10.in-addr.arpa.", dns.TypePTR); m.Rcode != dns.RcodeNameError {
++		t.Fatalf("with the default accept, PTR questions behave as before (a refused address: NXDOMAIN): %v", m)
++	}
++}
++
++func TestStripAnswerForKeepsWhatOnlyTheDefaultRefuses(t *testing.T) {
++	f, err := policy.Parse([]byte(allowlist))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for ip, want := range map[string]bool{"93.184.216.34": false, "10.0.0.1": true, "127.0.0.1": true,
++		"169.254.169.254": true} {
++		if strip, _ := f.StripAnswerFor(&h0Net, netip.MustParseAddr(ip), true); strip != want {
++			t.Errorf("%s named: strip=%v, want %v", ip, strip, want)
++		}
++	}
++	if strip, _ := f.StripAnswer(&h0Net, netip.MustParseAddr("93.184.216.34")); !strip {
++		t.Errorf("not named, the default deny still removes a public address")
++	}
++}
++
++var h0Net = policy.Network{Subnet: netip.MustParsePrefix("172.16.0.0/29")}
++
++func TestTheControlSocketReportsTheRulesInForce(t *testing.T) {
++	h := newHarness(t, allowlist)
++	data, err := os.ReadFile(h.rules)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	if got, want := h.gw.probe("rules"), "ok "+hex.EncodeToString(sum[:]); got != want {
++		t.Fatalf("rules digest: %q, want %q", got, want)
++	}
++	h.writeRules(`{"version":1,"default_accept":true,"rules":[]}`)
++	if _, err := h.store.Reload(); err != nil {
++		t.Fatal(err)
++	}
++	data2, _ := os.ReadFile(h.rules)
++	sum2 := sha256.Sum256(data2)
++	if got := h.gw.probe("rules"); got != "ok "+hex.EncodeToString(sum2[:]) {
++		t.Fatalf("after a reload the digest follows the file: %q", got)
++	}
++}
+diff --git a/libs/cua/netgw/internal/policy/policy.go b/libs/cua/netgw/internal/policy/policy.go
+index 5bcf73a..379a723 100644
+--- a/libs/cua/netgw/internal/policy/policy.go
++++ b/libs/cua/netgw/internal/policy/policy.go
+@@ -401,6 +401,14 @@ func (f *File) DecideNamed(n *Network, proto Proto, dst netip.Addr, port uint16,
+ // it (a rebinding answer such as 127.0.0.1 or 10.0.0.1) never reaches the
+ // guest. Rules limited to ports or one protocol do not count.
+ func (f *File) StripAnswer(n *Network, dst netip.Addr) (bool, string) {
++	return f.StripAnswerFor(n, dst, false)
++}
++
++// StripAnswerFor is StripAnswer for an answer to a name the rules allow by
++// name when named (mcomp patch): what no rule names is kept, as for a
++// default accept, since the name's binding makes it reachable. The
++// platform's, the host's and the rules' own denies still remove it.
++func (f *File) StripAnswerFor(n *Network, dst netip.Addr, named bool) (bool, string) {
+ 	dst = Normalize(dst)
+ 	switch {
+ 	case inAny(loopbackNets, dst):
+@@ -427,7 +435,7 @@ func (f *File) StripAnswer(n *Network, dst netip.Addr) (bool, string) {
+ 		}
+ 		return true, r.Reason
+ 	}
+-	if f.DefaultAccept {
++	if f.DefaultAccept || named {
+ 		return false, ""
+ 	}
+ 	return true, f.DefaultReason
+diff --git a/libs/cua/netgw/internal/policy/store.go b/libs/cua/netgw/internal/policy/store.go
+index 03aaaa1..ed0724c 100644
+--- a/libs/cua/netgw/internal/policy/store.go
++++ b/libs/cua/netgw/internal/policy/store.go
+@@ -2,6 +2,8 @@ package policy
+ 
+ import (
+ 	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
+ 	"os"
+ 	"sync"
+ 	"sync/atomic"
+@@ -109,3 +111,12 @@ func (s *Store) Watch(interval time.Duration, kick <-chan struct{}, stop <-chan
+ 		}
+ 	}
+ }
++
++// Digest is the sha256 (hex) of the rules file as last loaded (mcomp patch):
++// the host compares it with the file it wrote to know the gateway took it.
++func (s *Store) Digest() string {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	sum := sha256.Sum256(s.last)
++	return hex.EncodeToString(sum[:])
++}

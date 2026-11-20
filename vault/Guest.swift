@@ -140,8 +140,9 @@ func processPath(_ pid: Int32) -> String? {
 
 let rebindHint = "if you moved the checkout or rebuilt the gateway, run `metacomputer secrets bind` again"
 
-/// The VM's SSH port on this Mac is a forward served by the gateway, cua-netgw
-/// (scripts/lib.sh netgw_render). The program listening there must have that name, be
+/// The VM's SSH port on this Mac is a forward served by the gateway, mcomp-netgw (cua-netgw with
+/// metacomputer's patch; scripts/build-tools.sh), or cua-netgw itself for a VM whose gateway was
+/// built by an earlier version (scripts/lib.sh netgw_render). The program listening there must have that name, be
 /// the gateway binary pinned at bind (its path, as the kernel reports it), and that file
 /// must still have the contents pinned at bind (sha256).
 /// Returns nil when it is, else why not (and whether it's a refusal).
@@ -200,7 +201,7 @@ final class GuestRunner {
 
     init() {
         var ssh = "/usr/bin/ssh"
-        var names = ["cua-netgw"]
+        var names = ["mcomp-netgw", "cua-netgw"]
         #if MCOMP_VAULT_TESTING
         // Test builds only (scripts/build-vault.sh --test): a stub instead of ssh, and
         // other listener names (the pinned gateway path is still checked). Release builds

@@ -53,7 +53,7 @@ struct VMBinding: Codable {
     var proxy_key_path: String?     // the proxy account (mcproxy): api tokens. nil: none on this VM
     var proxy_user: String?
     var proxy_port: Int?            // where the proxy listens inside the VM (127.0.0.1)
-    var gateway_path: String?       // the program that must serve ssh_port (cua-netgw)
+    var gateway_path: String?       // the program that must serve ssh_port (mcomp-netgw)
     var gateway_sha256: String?     // ...and its contents when bound
     var bound: String
 }

@@ -683,7 +683,7 @@ def esc_all(o, depth=0):
 gs, mcp, lease, fwd = esc_all(gs), esc_all(mcp), _esc(lease), _esc(fwd)
 def m(b): return "\033[32m✓\033[0m" if b else "\033[31m✗\033[0m"
 print(f"VM            {vm}    baseline: {base}")
-print(f"gateway       {m(out['gateway'])} cua-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
+print(f"gateway       {m(out['gateway'])} mcomp-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
 if layout == "old":
     print("guest         \033[33mbuilt by an earlier version (older layout)\033[0m: rebuild it with "
@@ -764,8 +764,8 @@ try:                                          # the network allowlist (metacompu
     np_state = netpolicy.read_state(np_paths)
     if np_state is not None:
         print("network       " + _esc(netpolicy.describe(np_state)) + "   (metacomputer net)")
-        if out["gateway"] and netpolicy.gateway_reads_it(np_paths) is False:
-            print("              \033[33mthe running gateway doesn't read it\033[0m: metacomputer stop, then start")
+        if out["gateway"] and netpolicy.gateway_reads_it(np_paths) is not True:
+            print("              \033[33mnot in force: the running gateway doesn't read it\033[0m: metacomputer stop, then start")
 except Exception as e:
     print(f"network       \033[33mallowlist unreadable\033[0m ({_esc(str(e))[:160]})   (metacomputer net status)")
 print(recording.status_line(out["recordings"]))
@@ -1770,7 +1770,7 @@ Live view of the guest desktop (VNC, view + take over):
                         then connect a VNC client to localhost:$VNC_PORT
   password:             $(vnc_password_hint)
   over your tailnet:    metacomputer view --tailnet   (prints the command; publishing it is your choice)
-The port listens on 127.0.0.1 only (cua-netgw forward) and the guest firewall
+The port listens on 127.0.0.1 only (the gateway's forward) and the guest firewall
 admits it only from the gateway.
 EOF
 }

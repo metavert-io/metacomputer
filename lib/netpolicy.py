@@ -2,11 +2,11 @@
 """Per-task network allowlists for the VM (`metacomputer net ...`), enforced by the gateway on this Mac.
 
   net status [--json]                      what the VM can reach now
-  net allow NAME... [--for D] [--exact] [--no-check]
+  net allow NAME... [--for D] [--exact]
                                            with no list in force: start one (anyone, Claude too), for D
                                            (default 2h, at most 24h). With one in force: add names or time
                                            (your own terminal only: that widens it)
-  net remove NAME... [--no-check]          take names off the list in force (anyone: that narrows it)
+  net remove NAME...                       take names off the list in force (anyone: that narrows it)
   net clear                                lift the list before it ends (your own terminal only)
 
 While a list is in force the VM reaches only the names on it (NAME also covers its subdomains unless
@@ -17,17 +17,22 @@ by itself when its time is up (a small timer on this Mac lifts it); nothing in t
 
 Files (this VM's RUN_DIR, never in the checkout's config): net-allow.json (the list), netgw-rules.json
 (the rules the gateway reads: config/netgw-rules.json plus the list; the gateway reloads it within a
-second and closes connections the new rules refuse). The rules file is checked with the gateway's own
--check-rules before it replaces the old one, so a list that the gateway would reject never takes the
-place of rules in force.
+second and closes connections the new rules refuse). Every change happens under one lock: the list is
+saved first, then the rules file is written (checked with the gateway's own -check-rules before it
+replaces the old one), then, while the VM runs, the gateway is asked which rules it has in force (a
+digest over its control socket, on this Mac) until it's the file just written. So an interrupted change
+never leaves the saved list wider than the gateway's rules, and "in force" is the gateway's word, not
+the VM's.
 
 Internal: `net render` (start writes the rules file), `net _expire TS` (the timer).
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -44,7 +49,7 @@ MAX_NAMES = 64                     # patterns in one list (a name without --exac
 REASON = "lab:allowlist"
 STATE_VERSION = 1
 LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-CHECK_ADDR = ("1.1.1.1", 443)      # a public address no allowed name resolves to through the gateway (checked below)
+CONFIRM_S = 4.0                    # how long the gateway gets to load a new rules file (it looks every 250 ms)
 
 
 class Refused(Exception):
@@ -192,7 +197,7 @@ def compose(base, st):
 def check_rules(path):
     gw = os.environ.get("MCOMP_NETGW_BIN") or ""
     if not gw or not os.access(gw, os.X_OK):
-        raise Refused("the gateway (cua-netgw) isn't installed here, so the rules can't be checked; nothing changed")
+        raise Refused("the gateway (mcomp-netgw) isn't installed here, so the rules can't be checked; nothing changed")
     r = subprocess.run([gw, "-check-rules", path], capture_output=True, text=True, timeout=20)
     if r.returncode != 0:
         raise Refused("the gateway refused the rules ({}); nothing changed".format(
@@ -200,7 +205,8 @@ def check_rules(path):
 
 
 def render(p, st):
-    """Write the rules file the gateway reads, checked first; the old file stays until the new one passes."""
+    """Write the rules file the gateway reads, checked first; the old file stays until the new one passes. Returns
+    the sha256 of what was written (the gateway's control socket reports the same for the file it loaded)."""
     text = json.dumps(compose(base_rules(), st), indent=2) + "\n"
     tmp = write_private(p["rules"], text)
     try:
@@ -210,6 +216,47 @@ def render(p, st):
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def gateway_digest():
+    """The sha256 of the rules the running gateway has in force (mcomp-netgw's control socket, `rules`), "old" for a
+    gateway that doesn't report it (cua-netgw before the patch), or None when it can't be asked."""
+    path = os.environ.get("MCOMP_NETGW_CONTROL") or ""
+    if not path:
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX) as c:
+            c.settimeout(3)
+            c.connect(path)
+            c.sendall(b"rules\n")
+            reply = c.recv(256).decode("ascii", "replace").strip()
+    except OSError:
+        return None
+    m = re.fullmatch(r"ok ([0-9a-f]{64})", reply)
+    if m:
+        return m.group(1)
+    return "old" if reply.startswith("no unknown request") else None
+
+
+def confirm(p, digest):
+    """Whether the running gateway has the rules file just written in force: True, False with why, or None (the VM
+    isn't running: the file is read when it starts)."""
+    if not gateway_running():
+        return None, ""
+    if gateway_reads_it(p) is not True:
+        return False, "the running gateway was started by an earlier version and reads other rules"
+    deadline = time.monotonic() + CONFIRM_S
+    while True:
+        have = gateway_digest()
+        if have == digest:
+            return True, ""
+        if have == "old":
+            return False, "the running gateway is an earlier build that can't take an allowlist"
+        if time.monotonic() >= deadline:
+            return False, ("the gateway didn't take the new rules (see `metacomputer logs`)" if have else
+                           "the gateway's control socket didn't answer")
+        time.sleep(0.25)
 
 
 def gateway_reads_it(p):
@@ -266,27 +313,6 @@ def stop_timer(p):
         pass
 
 
-def check_in_vm():
-    """From inside the VM, whether a public address that isn't on the list is refused now. True (refused), False
-    (reached: the list isn't in force), None (couldn't check: no shell channel, the computer busy, ...)."""
-    cli = os.path.join(LAB, "bin", "metacomputer")
-    host, port = CHECK_ADDR
-    probe = (f"if timeout 4 bash -c 'exec 3<>/dev/tcp/{host}/{port}' 2>/dev/null; then echo NET-REACHED; "
-             "else echo NET-REFUSED; fi")
-    for _ in range(3):
-        time.sleep(0.8)                   # the gateway reloads its rules every 250 ms
-        try:
-            r = subprocess.run([cli, "sh", "-c", probe], capture_output=True, text=True, timeout=40)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        out = r.stdout.strip().splitlines()[-1:] if r.returncode == 0 else []
-        if out == ["NET-REFUSED"]:
-            return True
-        if out != ["NET-REACHED"]:
-            return None
-    return False
-
-
 def until(ts):
     return time.strftime("%H:%M", time.localtime(ts)) + (
         "" if time.localtime(ts).tm_yday == time.localtime().tm_yday else time.strftime(" on %b %d", time.localtime(ts)))
@@ -304,44 +330,67 @@ def describe(st):
 
 
 # --- commands ---------------------------------------------------------------------------------------------------
+def in_force(p):
+    """Whether the running gateway has this VM's rules file in force: True, False, or None (not running, or it
+    can't be asked)."""
+    if not gateway_running():
+        return None
+    if gateway_reads_it(p) is not True:
+        return False
+    try:
+        with open(p["rules"], "rb") as f:
+            want = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return False
+    have = gateway_digest()
+    return None if have is None else have == want
+
+
 def cmd_status(a, p):
     st = read_state(p)
     reads = gateway_reads_it(p)
+    force = in_force(p)
     if a.json:
         print(json.dumps({"allowlist": None if st is None else {"allow": sorted(st["allow"]), "expires": st["expires"],
                                                                 "started": st["started"]},
-                          "gateway_reads_list": reads, "gateway_running": gateway_running()}))
+                          "gateway_reads_list": reads, "gateway_running": gateway_running(), "in_force": force}))
         return 0
     print("network       " + describe(st))
-    if st is not None and gateway_running() and reads is not True:
-        print("              the running gateway was started by an earlier version and doesn't read this list: "
-              "`metacomputer stop` and `start` to put it in force")
+    if st is not None and force is False:
+        print("              not in force: the running gateway doesn't have these rules (an earlier version, or it "
+              "couldn't load them): `metacomputer stop` and `start`")
     return 0
 
 
-def apply(p, st, check, what):
-    """Render, then say whether it's in force. Returns the exit code."""
-    render(p, st)
-    if not gateway_running():
+def report(p, digest, what):
+    """After a change (rendered under the lock, digest of what was written): say whether it's in force. Exit code."""
+    ok, why = confirm(p, digest)
+    if ok is None:
         print(f"{what}; the VM isn't running, so it takes effect when it starts")
         return 0
-    if gateway_reads_it(p) is not True:
-        print(f"{what}, but the running gateway was started by an earlier version and doesn't read it: "
-              "`metacomputer stop` and `start` to put it in force", file=sys.stderr)
-        return 4
-    if not check or st is None:
-        print(what)
+    if ok:
+        print(f"{what} (in force: the gateway reports these rules)")
         return 0
-    seen = check_in_vm()
-    if seen is True:
-        print(f"{what} (checked from inside the VM: an address not on the list is refused)")
-        return 0
-    if seen is False:
-        print(f"{what}, but from inside the VM an address not on the list was still reached: the gateway may not "
-              "have taken the new rules (see `metacomputer logs`)", file=sys.stderr)
-        return 4
-    print(f"{what} (not checked from inside the VM: the shell channel wasn't available)")
-    return 0
+    print(f"{what}, but {why}: `metacomputer stop` and `start` to put it in force. The saved list stays and "
+          "applies at the next start", file=sys.stderr)
+    return 4
+
+
+def commit(p, new):
+    """Save the list (or remove it: new None), then write the rules for it. The list goes first, so an interruption
+    leaves the saved list no wider than the gateway's rules: the next render applies the saved one."""
+    if new is None:
+        try:
+            os.unlink(p["state"])
+        except FileNotFoundError:
+            pass
+    else:
+        os.replace(write_private(p["state"], json.dumps(new) + "\n"), p["state"])
+    try:
+        return render(p, new)
+    except Refused as e:
+        raise Refused(f"{e}. The change to the list was saved: it applies at the next start, or once the rules can "
+                      "be written (metacomputer net status)") from None
 
 
 def cmd_allow(a, p):
@@ -357,22 +406,17 @@ def cmd_allow(a, p):
             if len(allow) > MAX_NAMES:
                 raise Refused(f"at most {MAX_NAMES} patterns in one list (a name without --exact counts twice)")
             new = {"version": STATE_VERSION, "allow": allow, "started": int(now), "expires": int(now + secs)}
-            tmp = write_private(p["state"], json.dumps(new) + "\n")
-            try:
-                render(p, new)
-            except BaseException:
-                os.unlink(tmp)
-                raise
-            os.replace(tmp, p["state"])
+            digest = commit(p, new)
             start_timer(p, new["expires"])
+            rc = report(p, digest, "network: " + describe(new))
             emit("net_allowlist_started", f"network allowlist started: {len(allow)} names until {until(new['expires'])}",
                  {"names": len(allow), "minutes": secs // 60}, severity="info")
-            return apply(p, new, not a.no_check, "network: " + describe(new))
+            return rc
         wider = [x for x in pats if not covered(x, st["allow"])]
         longer = a.for_ and now + parse_for(a.for_) > st["expires"]
         if not wider and not longer:
-            print("network: already allowed; nothing changed (" + describe(st) + ")")
-            return 0
+            digest = render(p, st)            # the same rules again: is the gateway enforcing them?
+            return report(p, digest, "network: already allowed; nothing changed (" + describe(st) + ")")
         if not at_terminal():
             raise Refused("an allowlist is in force, and adding names or time widens it, which only you can do, at your "
                           "own terminal: metacomputer net allow " + " ".join(a.names) +
@@ -383,18 +427,13 @@ def cmd_allow(a, p):
         new = dict(st, allow=allow)
         if longer:
             new["expires"] = int(now + parse_for(a.for_))
-        tmp = write_private(p["state"], json.dumps(new) + "\n")
-        try:
-            render(p, new)
-        except BaseException:
-            os.unlink(tmp)
-            raise
-        os.replace(tmp, p["state"])
+        digest = commit(p, new)
         if longer:
             start_timer(p, new["expires"])
+        rc = report(p, digest, "network: " + describe(new))
         emit("net_allowlist_changed", f"network allowlist widened at the terminal: {len(allow)} names until "
              f"{until(new['expires'])}", {"names": len(allow), "added": len(wider), "longer": bool(longer)})
-        return apply(p, new, not a.no_check, "network: " + describe(new))
+        return rc
 
 
 def cmd_remove(a, p):
@@ -407,59 +446,49 @@ def cmd_remove(a, p):
             raise Refused("no allowlist is in force; nothing to remove")
         allow = sorted(set(st["allow"]) - gone)
         if allow == st["allow"]:
-            print("network: none of those are on the list; nothing changed (" + describe(st) + ")")
-            return 0
+            digest = render(p, st)
+            return report(p, digest, "network: none of those are on the list; nothing changed (" + describe(st) + ")")
         new = dict(st, allow=allow)
-        tmp = write_private(p["state"], json.dumps(new) + "\n")
-        try:
-            render(p, new)
-        except BaseException:
-            os.unlink(tmp)
-            raise
-        os.replace(tmp, p["state"])
+        digest = commit(p, new)
+        rc = report(p, digest, "network: " + describe(new) if allow else
+                    "network: allowlist in force with no names left: nothing outside is reachable until "
+                    + until(new["expires"]))
         emit("net_allowlist_changed", f"network allowlist narrowed: {len(allow)} names",
              {"names": len(allow), "removed": len(st["allow"]) - len(allow)}, severity="info")
-        return apply(p, new, not a.no_check, "network: " + describe(new) if allow else
-                     "network: allowlist in force with no names left: nothing outside is reachable until "
-                     + until(new["expires"]))
-
-
-def lift(p, why):
-    try:
-        os.unlink(p["state"])
-    except FileNotFoundError:
-        pass
-    render(p, None)
+        return rc
 
 
 def cmd_clear(a, p):
     with Lock(p["lock"]):
         st = read_state(p)
         if st is None and not os.path.exists(p["state"]):
-            print("network: no allowlist is in force")
-            return 0
+            digest = render(p, None)
+            return report(p, digest, "network: no allowlist is in force")
         if st is not None and not at_terminal():
             raise Refused("lifting the allowlist before it ends widens what the VM can reach, which only you can do, at "
                           "your own terminal: metacomputer net clear. Nothing changed")
-        lift(p, "cleared")
+        digest = commit(p, None)
         stop_timer(p)
+        rc = report(p, digest, "network: allowlist lifted; " + describe(None))
     emit("net_allowlist_lifted", "network allowlist lifted at the terminal", {"why": "cleared"})
-    return apply(p, None, False, "network: allowlist lifted; " + describe(None))
+    return rc
 
 
 def cmd_render(a, p):
+    """For start: write the rules for the saved list (a list whose time is up is removed first). No confirmation:
+    the gateway starts after this, with this file."""
+    ended = False
     with Lock(p["lock"]):
-        try:
-            st = read_state(p)
-        except Refused:
-            raise
+        st = read_state(p)
         if st is None and os.path.exists(p["state"]):
-            lift(p, "ended")              # a list whose time ran out while nothing was watching
-            emit("net_allowlist_lifted", "network allowlist ended", {"why": "ended"}, severity="info")
+            commit(p, None)               # a list whose time ran out while nothing was watching
+            ended = True
         else:
             render(p, st)
         if st is not None:
             start_timer(p, st["expires"])
+    if ended:
+        emit("net_allowlist_lifted", "network allowlist ended", {"why": "ended"}, severity="info")
     return 0
 
 
@@ -475,10 +504,14 @@ def cmd_expire(a, p):
                 if not isinstance(st, dict) or st.get("expires") != ts:
                     return 0              # cleared, replaced or extended: another timer (or none) is in charge
                 if time.time() >= ts:
-                    lift(p, "ended")
-                    emit("net_allowlist_lifted", "network allowlist ended", {"why": "ended"}, severity="info")
-                    return 0
+                    commit(p, None)
+                    done = True
+                else:
+                    done = False
         except Refused:
+            return 0
+        if done:
+            emit("net_allowlist_lifted", "network allowlist ended", {"why": "ended"}, severity="info")
             return 0
         time.sleep(min(30.0, max(1.0, ts - time.time())))
 
@@ -492,11 +525,9 @@ def main(argv):
     s.add_argument("names", nargs="+")
     s.add_argument("--for", dest="for_")
     s.add_argument("--exact", action="store_true")
-    s.add_argument("--no-check", action="store_true")
     s = sub.add_parser("remove")
     s.add_argument("names", nargs="+")
     s.add_argument("--exact", action="store_true")
-    s.add_argument("--no-check", action="store_true")
     sub.add_parser("clear")
     sub.add_parser("render")
     s = sub.add_parser("_expire")

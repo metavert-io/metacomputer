@@ -4,8 +4,12 @@ rule, the rules file the gateway reads (checked with the real cua-netgw when it'
 reads it the same way), the end of a list, files it can't read, and the start path's wiring."""
 import json
 import os
+import hashlib
 import pty
+import re
 import select
+import socket
+import threading
 import subprocess
 import sys
 import tempfile
@@ -17,7 +21,7 @@ sys.path.insert(0, os.path.join(LAB, "lib"))
 import netpolicy  # noqa: E402
 
 NP = os.path.join(LAB, "lib", "netpolicy.py")
-REAL_GW = os.path.join(LAB, "vendor", "bin", "cua-netgw")
+REAL_GW = os.path.join(LAB, "vendor", "bin", "mcomp-netgw")
 TD = tempfile.mkdtemp(prefix="mcomp-np-")
 results = []
 
@@ -119,7 +123,7 @@ def names_checks():
 def allow_checks():
     print("starting, narrowing and widening a list")
     run = run_dir("a")
-    rc, out = net(run, "allow", "example.com", "Wikipedia.org", "--for", "30m", "--no-check")
+    rc, out = net(run, "allow", "example.com", "Wikipedia.org", "--for", "30m")
     st = state(run)
     check("a list starts without a terminal (narrowing the open internet)", rc == 0 and "allowlist until" in out
           and sorted(st["allow"]) == ["*.example.com", "*.wikipedia.org", "example.com", "wikipedia.org"], (rc, out))
@@ -134,43 +138,43 @@ def allow_checks():
     check("…written private (0600)", mode == 0o600 and os.stat(os.path.join(run, "net-allow.json")).st_mode & 0o777 == 0o600,
           oct(mode))
     check("a timer that lifts it when it ends is running", os.path.exists(os.path.join(run, "net-expiry.pid")))
-    rc, out = net(run, "allow", "www.example.com", "--no-check")
+    rc, out = net(run, "allow", "www.example.com")
     check("a name the list already covers changes nothing, even without a terminal", rc == 0 and "nothing changed" in out
           and state(run) == st, out)
-    rc, out = net(run, "allow", "github.com", "--no-check")
+    rc, out = net(run, "allow", "github.com")
     check("adding a name without a terminal is refused (it widens the list), and nothing changes",
           rc == 3 and "your own terminal" in out and state(run) == st, (rc, out))
-    rc, out = net(run, "allow", "example.com", "--for", "20h", "--no-check")
+    rc, out = net(run, "allow", "example.com", "--for", "20h")
     check("more time without a terminal is refused too", rc == 3 and state(run) == st, (rc, out))
     rc, out = net(run, "clear")
     check("lifting it early without a terminal is refused", rc == 3 and os.path.exists(os.path.join(run, "net-allow.json")),
           (rc, out))
-    rc, out = net(run, "remove", "wikipedia.org", "--no-check")
+    rc, out = net(run, "remove", "wikipedia.org")
     st2 = state(run)
     check("removing a name works without a terminal (it narrows the list)", rc == 0
           and sorted(st2["allow"]) == ["*.example.com", "example.com"] and st2["expires"] == st["expires"], (rc, out))
     check("…and the gateway's rules follow", sorted(rules(run)["domains"]["allow"]) == ["*.example.com", "example.com"])
-    rc, out = net_tty(run, "allow", "github.com", "--no-check")
+    rc, out = net_tty(run, "allow", "github.com")
     check("at a terminal, a name can be added", rc == 0 and "github.com" in state(run)["allow"]
           and "github.com" in rules(run)["domains"]["allow"], (rc, out))
     rc, out = net_tty(run, "clear")
     check("at a terminal, the list can be lifted: the rules are config/netgw-rules.json's again", rc == 0
           and not os.path.exists(os.path.join(run, "net-allow.json")) and rules(run) == base, (rc, out))
     check("…and its timer stops", not os.path.exists(os.path.join(run, "net-expiry.pid")))
-    rc, out = net(run, "allow", "x.org", "--for", "25h", "--no-check")
+    rc, out = net(run, "allow", "x.org", "--for", "25h")
     check("a list lasts at most 24 hours", rc == 3 and not os.path.exists(os.path.join(run, "net-allow.json")), out)
     names = [f"n{i}.example.org" for i in range(40)]
-    rc, out = net(run, "allow", *names, "--no-check")
+    rc, out = net(run, "allow", *names)
     check(f"at most {netpolicy.MAX_NAMES} patterns in a list", rc == 3 and not os.path.exists(os.path.join(run, "net-allow.json")),
           out)
-    rc, out = net(run, "allow", "1.1.1.1", "--no-check")
+    rc, out = net(run, "allow", "1.1.1.1")
     check("an address is refused (names only)", rc == 3 and "addresses aren't accepted" in out, out)
 
 
 def failure_checks():
     print("what can't be checked or read")
     run = run_dir("f")
-    net(run, "allow", "example.com", "--no-check")
+    net(run, "allow", "example.com")
     st, before = state(run), open(os.path.join(run, "netgw-rules.json")).read()
     kill_timer(run)
     stub_dir = os.path.join(TD, "refusing")
@@ -180,12 +184,15 @@ def failure_checks():
         g.write(f.read())
     os.chmod(refusing, 0o755)
     open(os.path.join(stub_dir, "refuse"), "w").close()
-    rc, out = net(run, "remove", "example.com", "--no-check", gw=refusing)
-    check("rules the gateway refuses never replace the ones in force, and the list stays as it was",
-          rc == 3 and "refused the rules" in out and state(run) == st
-          and open(os.path.join(run, "netgw-rules.json")).read() == before, (rc, out))
-    rc, out = net(run, "remove", "example.com", "--no-check", gw=os.path.join(TD, "missing"))
-    check("…and without the gateway's binary nothing changes", rc == 3 and state(run) == st, out)
+    rc, out = net(run, "remove", "example.com", gw=refusing)
+    check("rules the gateway refuses never replace the ones in force; the narrower list is saved first (it applies at "
+          "the next start), and the command fails", rc == 3 and "refused the rules" in out and "saved" in out
+          and state(run)["allow"] == [] and open(os.path.join(run, "netgw-rules.json")).read() == before, (rc, out))
+    json.dump(st, open(os.path.join(run, "net-allow.json"), "w"))
+    rc, out = net(run, "remove", "example.com", gw=os.path.join(TD, "missing"))
+    check("…and without the gateway's binary the rules aren't written (the narrower list waits for the next start)",
+          rc == 3 and open(os.path.join(run, "netgw-rules.json")).read() == before, out)
+    json.dump(st, open(os.path.join(run, "net-allow.json"), "w"))
     with open(os.path.join(run, "net-allow.json"), "w") as f:
         f.write("{not json")
     rc, out = net(run, "render")
@@ -219,9 +226,12 @@ def failure_checks():
     finally:
         netpolicy.BASE_RULES = old
     check("a base file that opens an address range of its own isn't combined with a list (the list wouldn't hold)", ok)
-    rc, out = net(run2, "allow", "example.com", "--no-check", MCOMP_NETGW_ALIVE="1")
+    rc, out = net(run2, "allow", "example.com", MCOMP_NETGW_ALIVE="1")
     check("a running gateway that doesn't read RUN_DIR's rules (started by an earlier version): told to restart, "
           "exit 4", rc == 4 and "earlier version" in out, (rc, out))
+    rc, out = net(run2, "allow", "example.com", MCOMP_NETGW_ALIVE="1")
+    check("…and asking again for the same names says so again (not \"already allowed\" with exit 0)",
+          rc == 4 and "earlier version" in out, (rc, out))
     kill_timer(run2)
     with open(os.path.join(run2, "gw.json"), "w") as f:
         json.dump({"rules": os.path.join(run2, "netgw-rules.json")}, f)
@@ -235,7 +245,7 @@ def failure_checks():
 def end_checks():
     print("the end of a list")
     run = run_dir("e")
-    net(run, "allow", "example.com", "--no-check")
+    net(run, "allow", "example.com")
     kill_timer(run)
     st = state(run)
     st["expires"] = int(time.time()) + 2
@@ -246,7 +256,7 @@ def end_checks():
     check("the timer lifts the list when its time is up, and the rules are the base file's again",
           r.returncode == 0 and not os.path.exists(os.path.join(run, "net-allow.json"))
           and rules(run) == json.load(open(netpolicy.BASE_RULES)) and time.time() - t0 >= 1.0, r.stderr)
-    net(run, "allow", "example.com", "--no-check")
+    net(run, "allow", "example.com")
     kill_timer(run)
     st = state(run)
     r = subprocess.run([sys.executable, NP, "_expire", str(st["expires"] - 100)], env=env(run), timeout=30,
@@ -276,16 +286,120 @@ def wiring_checks():
     cli = open(os.path.join(LAB, "bin", "metacomputer")).read()
     check("`metacomputer net` reaches lib/netpolicy.py through net_policy (the gateway binary, whether it runs)",
           "net)        export_options; net_policy \"$@\"; exit $? ;;" in cli
-          and 'MCOMP_NETGW_BIN="$NETGW_BIN" MCOMP_NETGW_ALIVE="$alive"' in lib)
+          and 'MCOMP_NETGW_BIN="$NETGW_BIN" MCOMP_NETGW_ALIVE="$alive" MCOMP_NETGW_CONTROL="$SOCK_DIR/control.sock"' in lib)
+
+
+class FakeControl:
+    """A stand-in for the gateway's control socket: `rules` gets "ok <digest>" of the file it was told it loaded."""
+    def __init__(self, reply):
+        self.path = os.path.join(tempfile.mkdtemp(prefix="np-", dir="/tmp"), "c.sock")
+        self.reply = reply
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.bind(self.path)
+        self.sock.listen(8)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            with c:
+                if c.recv(64).strip() == b"rules":
+                    r = self.reply() if callable(self.reply) else self.reply
+                    if r is not None:
+                        c.sendall((r + "\n").encode())
+
+
+def confirm_checks():
+    print("in force: the gateway's own word")
+    run = run_dir("c")
+    with open(os.path.join(run, "gw.json"), "w") as f:
+        json.dump({"rules": os.path.join(run, "netgw-rules.json")}, f)
+    def loaded():
+        try:
+            return "ok " + hashlib.sha256(open(os.path.join(run, "netgw-rules.json"), "rb").read()).hexdigest()
+        except OSError:
+            return "ok " + "0" * 64
+    good = FakeControl(loaded)
+    rc, out = net(run, "allow", "example.com", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=good.path)
+    check("a change the gateway reports loading: exit 0, \"in force\"", rc == 0 and "in force" in out, (rc, out))
+    rc, out = net(run, "status", "--json", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=good.path)
+    check("status --json says it's in force", rc == 0 and json.loads(out)["in_force"] is True, out)
+    stale = FakeControl("ok " + "1" * 64)
+    t0 = time.time()
+    rc, out = net(run, "remove", "example.com", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=stale.path)
+    check("a gateway still on other rules after the wait: exit 4, \"didn't take\" (the saved list stays)",
+          rc == 4 and "didn't take" in out and state(run)["allow"] == [] and time.time() - t0 >= 3, (rc, out))
+    rc, out = net(run, "status", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=stale.path)
+    check("…and status says it isn't in force", rc == 0 and "not in force" in out, out)
+    old = FakeControl("no unknown request")
+    rc, out = net(run, "remove", "example.com", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=old.path)
+    check("a gateway that can't report its rules (cua-netgw before the patch): exit 4 at once, even for a change that "
+          "changes nothing", rc == 4 and "earlier build" in out, (rc, out))
+    silent = FakeControl(None)
+    rc, out = net(run, "remove", "example.com", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=silent.path)
+    check("a control socket that doesn't answer: exit 4, never success", rc == 4, (rc, out))
+    rc, out = net(run, "remove", "example.com", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=os.path.join(TD, "none.sock"))
+    check("no control socket at all: exit 4", rc == 4, (rc, out))
+    kill_timer(run)
+    src = open(NP).read()
+    body = src[src.index("def cmd_clear("):src.index("def cmd_render(")]
+    check("clear writes the rules and confirms them while it holds the lock (no render after it's released)",
+          body.index("commit(p, None)") < body.index("rc = report(") < body.index("emit(")
+          and "    emit(" in body.split("with Lock")[1].split("\n    emit(")[0] + "\n    emit(")
+    for fn in ("cmd_allow", "cmd_remove", "cmd_render", "cmd_expire"):
+        b2 = src[src.index(f"def {fn}("):]
+        b2 = b2[b2.index("\n"):b2.index("\ndef ", 10)]       # the body, without the def line
+        lock = b2.index("with Lock(")
+        check(f"{fn}: every rules write is inside the lock", all(b2.index(c) > lock for c in ("commit(", "render(") if c in b2))
+    com = src[src.index("def commit("):src.index("def cmd_allow(")]
+    check("the list is saved before the rules are written", com.index('os.replace(write_private(p["state"]')
+          < com.index("return render(p, new)"))
+
+
+def patch_checks():
+    """The gateway patch applies to the pinned cua-netgw source and its tests (with the patch's own) pass. Needs Go and
+    the source build-tools.sh fetched (.cache/cua-src); without them this says SKIP, as build-tools.sh checks it too."""
+    print("the gateway patch (patches/netgw/)")
+    import shutil
+    src = os.path.join(LAB, ".cache", "cua-src")
+    commit = re.search(r"^CUA_SRC_COMMIT=(\w+)", open(os.path.join(LAB, "config", "defaults.env")).read(), re.M).group(1)
+    if not shutil.which("go") or not os.path.isdir(os.path.join(src, ".git")):
+        print("SKIP  Go or the pinned source (.cache/cua-src) isn't here: run scripts/build-tools.sh first")
+        return
+    tree = tempfile.mkdtemp(prefix="mcomp-netgw-test-")
+    try:
+        arc = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", src, "archive", commit, "libs/cua/netgw"],
+                             capture_output=True, timeout=60)
+        if arc.returncode != 0:
+            print("SKIP  the pinned commit isn't in .cache/cua-src yet (scripts/build-tools.sh fetches it)")
+            return
+        subprocess.run(["tar", "-x", "-C", tree], input=arc.stdout, check=True)
+        pats = sorted(f for f in os.listdir(os.path.join(LAB, "patches", "netgw")) if f.endswith(".patch"))
+        ok = all(subprocess.run(["git", "apply", "--whitespace=nowarn", os.path.join(LAB, "patches", "netgw", f)],
+                                cwd=tree, capture_output=True).returncode == 0 for f in pats)
+        check("every patch applies to the pinned source, in order", ok and pats, pats)
+        r = subprocess.run(["go", "test", "-count=1", "./..."], cwd=os.path.join(tree, "libs", "cua", "netgw"),
+                           capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, GOTOOLCHAIN="local", CGO_ENABLED="0", GOFLAGS="-mod=readonly"))
+        check("the patched gateway's tests pass (Cua's and the patch's: allowed names resolve and bind under a default "
+              "deny, PTR questions follow the name rules, the control socket reports the rules in force)",
+              r.returncode == 0 and "internal/gateway" in r.stdout, (r.stdout + r.stderr)[-600:])
+    finally:
+        shutil.rmtree(tree, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    print(f"(rules checked with {'the real cua-netgw' if GW == REAL_GW else 'a stand-in for cua-netgw'})")
+    print(f"(rules checked with {'the real mcomp-netgw' if GW == REAL_GW else 'a stand-in for the gateway'})")
     names_checks()
     allow_checks()
     failure_checks()
     end_checks()
+    confirm_checks()
     wiring_checks()
+    patch_checks()
     for d in os.listdir(TD):
         if os.path.isdir(os.path.join(TD, d)):
             kill_timer(os.path.join(TD, d))
