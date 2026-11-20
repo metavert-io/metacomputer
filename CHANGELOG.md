@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-20
+
 ### Added
 
 - **`metacomputer update`** (`--check` to only see what's new): moves the checkout to the latest release (main only forward; a checkout with local changes or on a branch of its own is left to you), runs `install.sh`, and finishes the install. **`metacomputer version`** shows what's installed and what built each VM, and `metacomputer status` says when a newer release is out (a check of the repository's release tags at most once a day; `UPDATE_CHECK=off`).
