@@ -149,6 +149,38 @@ check("trace list names them", rc == 0 and "e2" in out and "shop" in out, out)
 rc, out = cli("delete", "e2")
 check("trace delete", rc == 0 and not os.path.exists(os.path.join(TD, "traces", "e2.jsonl")), out)
 
+# A click by element token alone (no pid): the hub records the app of the read the token came from.
+import types  # noqa: E402
+import mcp_hub  # noqa: E402
+got = []
+fake = types.SimpleNamespace(tracer=types.SimpleNamespace(wants=lambda s: True, call=lambda n, a, s, app: got.append(app)),
+                             snapshots={"s0000000e": (77, 5, "firefox")}, app_of={77: "firefox"}, window_pid={},
+                             note=lambda *a, **k: None)
+mcp_hub.Hub.trace_call(fake, "click", {"element_token": "s0000000e:41"}, "s1")
+mcp_hub.Hub.trace_call(fake, "click", {"element_token": "s0000000f:2"}, "s1")
+check("a call by element token alone is recorded with its window's app (from the read the token came from); an "
+      "unknown snapshot stays without one", got == ["firefox", ""], got)
+# …and a trace recorded before that (no app on such calls) still exports, from the read's window title.
+old = [{"kind": "read", "snapshot": "s00000006", "title": "Larkspur Supply \u2014 Mozilla Firefox",
+        "rows": {"41": ["link", "Account"]}},
+       {"kind": "call", "tool": "click", "app": "", "args": {"element_token": "s00000006:41"}},
+       {"kind": "read", "snapshot": "s00000007", "title": "notes.txt - Mousepad", "rows": {"3": ["push button", "Save"]}},
+       {"kind": "call", "tool": "click", "app": "", "args": {"element_token": "s00000007:3"}}]
+ex = traces.Exporter(old)
+code = ex.run("old")
+check("an older trace's token-only click in a browser window is exported (from the window title); one in another "
+      "app is still left out", 'getByRole("link", { name: "Account" })' in code and "Save" not in code
+      and ex.skipped == 1, code)
+rep = [{"kind": "read", "snapshot": "s00000009", "title": "Invoices \u2014 Mozilla Firefox",
+        "rows": {"20": ["link", "Download invoice"], "37": ["document web", "Invoices"], "55": ["link", "Download invoice"],
+                 "61": ["link", "Download invoice"], "67": ["link", "Download invoice"], "70": ["link", "Help"]}},
+       {"kind": "call", "tool": "click", "app": "firefox", "args": {"element_token": "s00000009:61"}},
+       {"kind": "call", "tool": "click", "app": "firefox", "args": {"element_token": "s00000009:70"}}]
+code = traces.Exporter(rep).run("rep")
+check("several elements with the same role and name: the one clicked is picked by its place on the page (.nth, "
+      "counted from the page's document, not the browser's own controls); a unique one has no .nth",
+      'getByRole("link", { name: "Download invoice" }).nth(1).click()' in code
+      and 'getByRole("link", { name: "Help" }).click()' in code, code)
 hub = open(os.path.join(LAB, "lib", "mcp_hub.py")).read()
 disp = hub[hub.index("def on_tools_call("):hub.index("def session_for(")]
 check("the hub records a call after every guard and pacing, as it goes to the driver",

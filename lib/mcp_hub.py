@@ -2786,6 +2786,12 @@ class Hub:
             v = window_keys(args) if isinstance(args, dict) else {}
             pid = v.get("pid") if isinstance(v.get("pid"), int) else self.window_pid.get(v.get("window_id"))
             app = self.app_of.get(pid, "") if pid is not None else (v.get("app") if isinstance(v.get("app"), str) else "")
+            tok = args.get("element_token") if isinstance(args, dict) else None
+            if not app and isinstance(tok, str):         # a call by element token alone: the app of the read it came from
+                m = TOKEN_RE.match(tok)
+                snap = self.snapshots.get(m.group(1)) if m else None
+                if snap:
+                    app = snap[2] or self.app_of.get(snap[0], "")
             self.tracer.call(name, json.loads(json.dumps(args)), sess, app)
         except Exception as e:
             self.note(f"trace skipped a call: {type(e).__name__}", kind="trace failed")

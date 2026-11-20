@@ -12,6 +12,10 @@ All notable changes to metacomputer are recorded here. The format follows
 - **Every install ends the same way** (`update`, the install line run again, or `git pull && ./install.sh`): the event watcher on older code is restarted, and so is the hub once nothing uses it (`metacomputer hub stop --if-idle`: no client connected, no call running, no recording, no handoff; a hub in use picks up the new code when it next exits), a VM on an earlier gateway is restarted (it asks at a terminal; `update --restart` doesn't ask; a VM in use or in a handoff is never stopped), it offers `secrets bind` when the gateway changed and a vault exists, notes what a VM rebuild would add (never rebuilding on its own), records what's installed (`~/.local/share/metacomputer/installed.json`) and sums up what's new. A build records which version and guest files made the VM (`RUN_DIR/vm-build.json`).
 - **`install.sh` notices an install that's already there**: run from another checkout than the one the `metacomputer` command runs, it asks before switching (`--switch` without a terminal); a checkout older than what's installed is refused (`--allow-downgrade`).
 
+### Fixed
+
+- **`metacomputer trace export`** kept no step for a click made by element token alone (the way the skill teaches), so a typical browser session exported an empty test: the hub now records such a call with the app of the read the token came from, and the exporter tells a browser window from its title for traces recorded before. When a page has several elements with the same role and name, the export picks the one clicked with `.nth(k)`.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added
