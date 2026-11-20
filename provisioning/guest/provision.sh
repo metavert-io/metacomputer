@@ -81,6 +81,8 @@ PKGS=(
   # archives, SQLite, and a venv/pip for one-off Python tools
   python3-openpyxl python3-docx python3-odf python3-pil poppler-utils sqlite3 zip unzip
   python3-venv python3-pip
+  # Vulkan in software (Mesa's lavapipe): WebGPU and Vulkan apps run, slowly, with no GPU in the VM
+  mesa-vulkan-drivers
   # capture / diagnostics / clipboard / live view
   ffmpeg x11vnc xdotool wmctrl xclip imagemagick xinput
   # metacomputer claude runs Claude Code in a tmux session (Ubuntu's base image has it; named so it stays)
@@ -152,6 +154,39 @@ SRC
   dpkg-query -W -f='${Package} ${Version}\n' google-chrome-stable | tee -a "$STATE/package-versions.txt"
   ;;
 esac
+
+case " ${MCOMP_BROWSERS:-firefox} " in *" webkit "*)
+  step "GNOME Web (optional; WebKitGTK, for Safari-family checks)"
+  "${APT[@]}" install --no-install-recommends epiphany-browser
+  purge_unwanted
+  dpkg-query -W -f='${Package} ${Version}\n' epiphany-browser libwebkitgtk-6.0-4 2>/dev/null | tee -a "$STATE/package-versions.txt" || true
+  ;;
+esac
+
+# Browser extensions (BROWSER_EXTENSIONS), for every profile: Firefox installs them from its policies,
+# Chrome from its managed policy (each fetches the extension when it first starts).
+if [ -n "${MCOMP_BROWSER_EXTENSIONS:-}" ]; then
+  step "browser extensions (BROWSER_EXTENSIONS): $MCOMP_BROWSER_EXTENSIONS"
+  ff_urls=() cr_ids=()
+  for e in $MCOMP_BROWSER_EXTENSIONS; do
+    case "$e" in
+      ublock) ff_urls+=("https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi")
+              cr_ids+=("ddkjiahejlhfcafbddmgiahcphecmpfh") ;;      # uBlock Origin Lite
+      consent-o-matic) ff_urls+=("https://addons.mozilla.org/firefox/downloads/latest/consent-o-matic/latest.xpi")
+              cr_ids+=("mdjildafknihdffpkfmmpnpoiajfjnjd") ;;
+      *) echo "BROWSER_EXTENSIONS: unknown $e"; false ;;
+    esac
+  done
+  pol=/etc/firefox/policies/policies.json
+  jq --args '.policies.Extensions = {"Install": $ARGS.positional}' "${ff_urls[@]}" < "$pol" > "$pol.new" && mv "$pol.new" "$pol"
+  chmod 0644 "$pol"
+  if [ -d /etc/opt/chrome/policies/managed ]; then
+    printf '%s\n' "${cr_ids[@]}" | jq -R '. + ";https://clients2.google.com/service/update2/crx"' | jq -s '{ExtensionInstallForcelist: .}' \
+      > /etc/opt/chrome/policies/managed/metacomputer-extensions.json
+    chmod 0644 /etc/opt/chrome/policies/managed/metacomputer-extensions.json
+  fi
+  echo "extensions: $MCOMP_BROWSER_EXTENSIONS" | tee -a "$STATE/package-versions.txt"
+fi
 
 if [ -n "${MCOMP_EXTRA_PACKAGES:-}" ]; then
   step "extra packages (EXTRA_PACKAGES): $MCOMP_EXTRA_PACKAGES"

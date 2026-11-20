@@ -285,7 +285,7 @@ do_start() { # [--no-volumes]
   fi
   vm_start "$VM_NAME"
   storage_started
-  ok "VM running (gateway policy: config/netgw-rules.json)"
+  ok "VM running (gateway rules: config/netgw-rules.json, and a network allowlist when one is in force)"
   wait_ssh ops 240 || { storage_abort; die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"; }
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
   sync_guest_options
