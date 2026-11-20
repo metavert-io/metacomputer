@@ -93,7 +93,7 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `logs [N]` | The last lines of the Lume, gateway and VM logs |
 | `where` | Project, config, skill, docs and results folders; VM names |
 | `mcp-lazy` / `mcp` | The MCP bridge Claude Code uses, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise) |
-| `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time |
+| `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop [--if-idle]]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time; `stop --if-idle` stops it only when no client is connected, no call or recording is running and no handoff is open (exit 3 otherwise) |
 
 `stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart`, `sh` and
 `claude` (but `claude read`, `wait` and `status`) refuse while another session is

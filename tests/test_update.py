@@ -47,7 +47,7 @@ echo "$*" >> "$STUB_LOG"
 vm=main; [ "$1" = --vm ] && { vm="$2"; shift 2; }
 case "$1" in
   _runinfo) cat "$STUB_RUNINFO/$vm.json" ;;
-  hub) [ "$2" = status ] && { echo "{\"clients\": ${STUB_HUB_CLIENTS:-[]}}"; exit 0; } ;;
+  hub) [ "$2 $3" = "stop --if-idle" ] && [ -n "${STUB_HUB_CLIENTS:-}" ] && { echo "hub not stopped: 1 client(s) connected"; exit 3; } ;;
   stop|start|events) [ -z "${STUB_FAIL_STOP:-}" ] || [ "$1" != stop ] || { echo "the VM is in use by another controller"; exit 1; }
      [ "$1" = events ] || echo "expect=${MCOMP_EXPECT_VM:-}:${MCOMP_EXPECT_CONFIG_SHA:-}" >> "$STUB_LOG" ;;
 esac
@@ -204,9 +204,9 @@ runinfo("b", state="running", netgw_bin=NETGW, vault_exists=False, config_sha="c
         build={"guest": "g1", "version": "v0.3.0"})
 out, calls, res = after(co, "no")
 check("an idle hub on older code, on a VM whose gateway is current (b): stopped; the watcher on older code: restarted",
-      "--vm b hub stop" in calls and "events watcher stop" in calls and "events watcher start" in calls, calls)
+      "--vm b hub stop --if-idle" in calls and "--vm b hub stop" not in calls and "events watcher stop" in calls and "events watcher start" in calls, calls)
 check("…but main's hub, whose VM needs a restart anyway, is left to that restart (it stops the hub after its own "
-      "owners check)", "hub stop" not in calls, calls)
+      "owners check)", "hub stop --if-idle" not in calls and "hub stop" not in calls, calls)
 check("a VM on an earlier gateway, restarts not allowed: not stopped, and told how", "stop" not in calls
       and any("restart the VM to run the new gateway" in t for t in res.get("todo", [])), (calls, res))
 check("the gateway changed and a vault exists: told to bind it again", any("secrets bind" in t for t in res.get("todo", [])), res)
@@ -230,15 +230,29 @@ r = subprocess.run([sys.executable, "-c", DRIVER, co, "no"], capture_output=True
                    stdin=subprocess.DEVNULL)
 res = json.loads(r.stdout.split("RESULT ", 1)[1])
 calls = open(LOG).read().splitlines()
-check("a hub on older code that a session is using: not stopped, and said so", "--vm b hub stop" not in calls
-      and any("a session is using it" in t for t in res.get("todo", [])), (calls, res))
+check("a hub on older code that a session is using: only the guarded stop is asked for (the hub refuses it: exit 3), "
+      "and said so", "--vm b hub stop --if-idle" in calls and "--vm b hub stop" not in calls
+      and any("is in use (1 client(s) connected)" in t for t in res.get("todo", [])), (calls, res))
 del os.environ["STUB_HUB_CLIENTS"]
+sys.path.insert(0, os.path.join(LAB, "lib"))
+import mcp_hub  # noqa: E402
+idle = {"pid": 9, "clients": [], "driver": {"connected": True, "pending": 0, "left_running": 0}, "recordings": 0, "idle_s": 40}
+check("`hub stop --if-idle`: idle = no client, no call pending or left running, no recording, unused for a few seconds",
+      mcp_hub.idle_reason(idle) is None
+      and mcp_hub.idle_reason(dict(idle, clients=[{"kind": "claude-code"}])) == "1 client(s) connected"
+      and mcp_hub.idle_reason(dict(idle, driver={"pending": 1, "left_running": 0})) == "a call is still running"
+      and mcp_hub.idle_reason(dict(idle, driver={"pending": 0, "left_running": 2})) == "a call is still running"
+      and mcp_hub.idle_reason(dict(idle, recordings=1)) == "a recording is running"
+      and mcp_hub.idle_reason(dict(idle, idle_s=1)) == "it was used moments ago", idle)
+check("…and a report it can't read is never taken for idle", all(mcp_hub.idle_reason(x) for x in
+      (None, {}, {"clients": None}, dict(idle, driver=None), dict(idle, idle_s="40"), dict(idle, recordings=None))))
 runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=NETGW,
         gateway={"pid": 1, "started": time.time(), "command": NETGW + " -config /x/gw.json"},
         gateway_started={"bin": NETGW, "sha256": GW_SHA}, hub={"pid": 2, "started": time.time(), "command": "x", "code": CODE})
 out, calls, res = after(co, "no")
 check("the next run, everything current: nothing restarted, but the bind reminder stays until it's done (or 30 days)",
-      "stop" not in calls and "hub stop" not in calls and res.get("bind_pending") == ["main"]
+      "stop" not in calls and "hub stop" not in calls and "hub stop --if-idle" not in calls
+      and res.get("bind_pending") == ["main"]
       and any("secrets bind" in t for t in res.get("todo", [])), (calls, res))
 st = json.load(open(stamp))
 st["bind_pending"] = {"main": time.time() - 31 * 86400}

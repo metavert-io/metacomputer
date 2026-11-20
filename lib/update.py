@@ -341,18 +341,15 @@ def after_install(restart="ask", quiet=False):
         if hub and hub.get("code") != code_now and not old_gw:
             # Only an idle hub is stopped: one with clients is left (it exits by itself after HUB_IDLE with none, and
             # the next call starts it on the new code). A VM restart below stops it after its own owners check.
-            rc, out = mc(vm, "hub", "status", "--json", timeout=30)
-            try:
-                clients = json.loads(out.splitlines()[-1]).get("clients")
-            except (ValueError, IndexError, AttributeError):
-                clients = None
-            if clients == [] or clients == 0:
-                rc, out = mc(vm, "hub", "stop", timeout=60)
-                (done if rc == 0 else todo).append(f"{label}: hub " + ("stopped (it starts again, on the new code, at the "
-                                                                       "next call)" if rc == 0 else f"not stopped: {out[-160:]}"))
+            # The check and the stop are one command (`hub stop --if-idle`, the hub's own status report): exit 3 = in use.
+            rc, out = mc(vm, "hub", "stop", "--if-idle", timeout=60)
+            if rc == 0:
+                done.append(f"{label}: hub stopped (it starts again, on the new code, at the next call)")
+            elif rc == 3:
+                todo.append(f"{label}: the hub runs older code and is in use ({out.strip().rsplit(': ', 1)[-1][:120]}): "
+                            f"it restarts on the new code once it's idle, or run `{cmd} hub stop` then")
             else:
-                todo.append(f"{label}: the hub runs older code and a session is using it: it restarts on the new code once "
-                            "it's idle (or run `" + ("metacomputer" + (f" --vm {vm}" if vm else "")) + " hub stop` then)")
+                todo.append(f"{label}: hub not stopped: {out[-160:]}")
         if watcher and (watcher.get("started") or 0) + 2 < mtime:
             rc1, _ = mc(vm, "events", "watcher", "stop", timeout=60)
             rc2, out = mc(vm, "events", "watcher", "start", timeout=60)

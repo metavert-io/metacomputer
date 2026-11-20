@@ -452,6 +452,7 @@ def multiplex_checks():
           and st["driver"]["connected"], st)
     q = mcp_hub.query_status(r.env)
     check("`hub status` reads the same from outside", q and q["pid"] == os.getpid() and len(q["clients"]) == 2, q)
+    check("…and `hub stop --if-idle` reads that report as in use", mcp_hub.idle_reason(q) == "2 client(s) connected", q)
     a.close()
     b.close()
     r.stop()

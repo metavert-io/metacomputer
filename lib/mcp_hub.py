@@ -3752,6 +3752,30 @@ def stop_hub(env=None, wait=8.0):
     return True
 
 
+IDLE_STOP_MIN_S = 5
+
+
+def idle_reason(st):
+    """Why a running hub (its own status report, as query_status returns it) isn't idle, or None when it is: no client
+    connected, no call pending or left running, no recording, and nothing for IDLE_STOP_MIN_S."""
+    if not isinstance(st, dict):
+        return "its status couldn't be read"
+    drv = st.get("driver") if isinstance(st.get("driver"), dict) else {}
+    clients = st.get("clients")
+    if not isinstance(clients, list):
+        return "its status couldn't be read"
+    if clients:
+        return f"{len(clients)} client(s) connected"
+    if drv.get("pending") != 0 or drv.get("left_running") != 0:
+        return "a call is still running"
+    if st.get("recordings") != 0:
+        return "a recording is running"
+    idle = st.get("idle_s")
+    if not isinstance(idle, (int, float)) or idle < IDLE_STOP_MIN_S:
+        return "it was used moments ago"
+    return None
+
+
 def query_status(env=None, timeout=5.0):
     """The running hub's status (its own report), or None when no hub runs."""
     if not hub_pid(env):
@@ -3826,6 +3850,20 @@ def main(argv):
         print(describe_status(query_status(), brief=True) or "hub started")
         return 0
     if cmd == "stop":
+        if "--if-idle" in argv:              # metacomputer update: a hub on older code, stopped only while nothing uses it
+            st = query_status()
+            why = idle_reason(st) if st else None
+            if why:
+                print(f"hub not stopped: {why}")
+                return 3
+            if st:
+                try:
+                    if owners.open_handoff() is not None:
+                        print("hub not stopped: the user has the computer (a handoff)")
+                        return 3
+                except Exception:
+                    print("hub not stopped: couldn't check for a handoff")
+                    return 3
         stopped = stop_hub()
         if "--quiet" not in argv:
             print("hub stopped" if stopped else "no hub was running")
