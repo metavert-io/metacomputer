@@ -2174,19 +2174,29 @@ class Hub:
             return cached[1]
         r = self.ask_up("tools/call", {"name": "list_windows", "arguments": {}}, timeout=10) if self.connected() else None
         ws = (((r or {}).get("result") or {}).get("structuredContent") or {}).get("windows")
-        out = None
+        out, complete = None, False
         if isinstance(ws, list):
-            out = []
+            out, complete = [], len(ws) <= MAX_WINDOW_PIDS
             for order, w in enumerate(ws[:MAX_WINDOW_PIDS]):
                 if not isinstance(w, dict) or not (isinstance(w.get("pid"), int) and not isinstance(w.get("pid"), bool)):
+                    complete = False                 # a window the hub can't place could be the one a name matches
                     continue
                 z = w.get("z_index")
+                app, title = str(w.get("app_name") or ""), str(w.get("title") or "")
+                if len(app) > 400 or len(title) > 2000:
+                    complete = False                 # cut short: the driver matches the whole name, the hub can't
                 out.append({"pid": w["pid"], "window_id": w.get("window_id") if isinstance(w.get("window_id"), int) else None,
-                            "app": str(w.get("app_name") or "")[:400], "title": str(w.get("title") or "")[:2000],
+                            "app": app[:400], "title": title[:2000],
                             "on_screen": w.get("is_on_screen") is not False, "z": z if _num(z) else None,
                             "order": order})
-        self._named = (self.call_seq, out)
+        self._named = (self.call_seq, out, complete)
         return out
+
+    def named_complete(self):
+        """Whether the window list named_windows read this call is whole: every window listed, none skipped, no name or
+        title cut short. When it isn't, a name may match a window the hub didn't see (or saw only part of)."""
+        cached = self._named
+        return bool(cached is not None and cached[0] == self.call_seq and cached[1] is not None and cached[2])
 
     def resolve_named(self, spec):
         """The windows a spec that names an app or a title can resolve to, by the driver's own rules (locate.rs
@@ -2230,6 +2240,16 @@ class Hub:
             if isinstance(v, str) and v and rx.search(v):
                 return True, None
         if any(isinstance(layer.get(k), str) and layer.get(k).strip() for k in ("app", "window")):
+            pinned = any(isinstance(layer.get(k), int) and not isinstance(layer.get(k), bool) for k in ("pid", "window_id"))
+            if strict and not pinned:
+                # Named without a numeric pid or window_id: the driver resolves the name again at each step. Titles
+                # change (a page loads, a wait_for passes), so a window named by title gets the app's rules while any
+                # window of that app is open; app names don't change, so one named only by app is resolved below. Either
+                # way, a list that can't be read whole (windows skipped, names cut short) gets the app's rules.
+                ws = self.named_windows()
+                titled = isinstance(layer.get("window"), str) and layer.get("window").strip()
+                if ws is None or not self.named_complete() or (titled and any(rx.search(w["app"]) for w in ws)):
+                    return True, None
             pool = self.resolve_named({k: layer.get(k) for k in ("pid", "window_id", "app", "window")})
             if not pool:
                 return (True, None) if strict else (False, None)
@@ -2479,6 +2499,8 @@ class Hub:
                 wid = snap[1] if snap and isinstance(snap[1], int) else None
             if wid is None and (w.get("app") or w.get("window")):
                 pool = self.resolve_named(w)              # a pixel step runs in the best match (locate.rs window)
+                if pool is not None and not self.named_complete():
+                    return None                           # the driver may pick a window the hub couldn't see whole
                 wid = pool[0]["window_id"] if pool else None
             if wid is None:
                 unknown += 1

@@ -1854,6 +1854,42 @@ def named_target_checks():
     check("typing in a window named by Chrome's title goes in the foreground",
           "foreground" in (fwd.get("delivery_mode"), (fwd.get("steps") or [{}])[0].get("args", {}).get("delivery_mode")),
           fwd)
+    n0 = len(calls())
+    res = h.call("run_steps", {"window": "Untitled", "steps": [json.loads(json.dumps(sv))]})
+    check("set_value in a window named by a title only Mousepad has now, while Chrome is open: Chrome rules (titles "
+          "change and the driver resolves the name again at each step), refused",
+          res.is_error and "set_value" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    res = h.call("run_steps", {"pid": 50, "window": "Untitled", "steps": [json.loads(json.dumps(sv))]})
+    check("…but pinned by Mousepad's numeric pid it's resolved there and left alone", not res.is_error
+          and sent_args("run_steps", n0), res.text[:160])
+    long_chrome = [win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(W, 50, "Mousepad", 100, 100, 800, 600, "Inbox"),
+                   win(CHROME, 77, "Google-chrome", 1000, 100, 800, 700, "x" * 2000 + "Inbox"),
+                   win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)]
+    long_chrome[2]["z_index"], long_chrome[1]["z_index"] = 9, 1
+    set_windows(long_chrome)
+    n0 = len(calls())
+    res = h.call("run_steps", {"window": "Inbox", "steps": [json.loads(json.dumps(sv))]})
+    check("a title past the hub's cut (Chrome's, frontmost, ends in the name) with Mousepad also matching: Chrome "
+          "rules, refused", res.is_error and "set_value" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    n0 = len(calls())
+    res = h.call("run_steps", {"window": "Inbox", "steps": [{"click": {"x": 10, "y": 10}}]})
+    check("…and a pixel click in that window is refused as unclear (the driver may pick the window the hub saw only "
+          "part of)", res.is_error and res.structured.get("code") == mcp_hub.UNCLEAR_CODE
+          and not sent_args("run_steps", n0), res.text[:200])
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(W, 50, "Mousepad", 100, 100, 800, 600),
+                 win(31, 60, "M" * 401, 0, 0, 10, 10), win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    n0 = len(calls())
+    res = h.call("run_steps", {"app": "mousepad", "steps": [json.loads(json.dumps(sv))]})
+    check("an app name with a window list the hub can't read whole (an app name past its cut): Chrome rules, refused",
+          res.is_error and "set_value" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(W, 50, "Mousepad", 100, 100, 800, 600, "Untitled"),
+                 win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    n0 = len(calls())
+    res = h.call("run_steps", {"window": "Untitled", "steps": [json.loads(json.dumps(sv))]})
+    check("with no Chrome window open, a title that resolves only to Mousepad is left alone", not res.is_error
+          and sent_args("run_steps", n0), res.text[:160])
+    set_windows(ws)
     for label, call in (("pid and window_id", ("type_text", {"pid": "0" * 65 + "77", "window_id": "0" * 65 + str(CHROME),
                                                                "text": "abc"})),
                         ("x and y", ("click", {"pid": 50, "window_id": W, "x": "0" * 65 + "10", "y": "0" * 65 + "10"})),

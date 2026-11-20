@@ -389,7 +389,12 @@ the hub, and the hub applies, to each one:
   driver's own rules (a case-folded substring of the app name or title, on-screen
   windows first): when Chrome is among the windows it could be, or it matches none
   the hub can see, it counts as Chrome (`set_value` doesn't take a nested target,
-  and `run_script` can't run inside `run_steps`);
+  and `run_script` can't run inside `run_steps`). Titles change while a batch runs
+  and the driver matches the name again at each step, so a window named by title
+  without a numeric `pid` or `window_id` counts as Chrome whenever a Chrome window
+  is open; a list the hub can't read whole (windows skipped, a name or title past
+  its length cut) counts as Chrome too. A Chrome window that opens during a batch
+  isn't seen until the next call;
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
@@ -483,7 +488,8 @@ pacing (`step_windows`: what a `wait_for` or a step before it named, not a read
 written as a step); a nested target with an inherited window beside it must hold
 for both, and a step that could be in several windows, one of them named only by
 app or title the hub can't resolve, is refused (code `pixel_window_unclear`); one
-named by app or title is checked against the window the driver would pick. The
+named by app or title is checked against the window the driver would pick, and
+refused the same way when the hub can't read the window list whole. The
 live layout is read again for each call it checks. `COORD_GUARD=off` leaves only the driver's own
 checks.
 
