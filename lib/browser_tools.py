@@ -716,6 +716,9 @@ def _s(v, n=300):
     return (v if isinstance(v, str) else "" if v is None else str(v))[:n]
 
 
+# CSS widths of the devices `responsive --device` emulates (lib/page_guest.py DEVICES), for the report's notes
+DEVICE_WIDTHS = {"iphone-15": 393, "pixel-8": 412, "galaxy-s24": 360, "ipad-air": 820, "laptop": 1366, "desktop": 1920}
+
 NO_GPU = ("The VM has no GPU: WebGL and WebGPU run in software there (Mesa's llvmpipe and lavapipe, Chrome's "
           "SwiftShader), so a page that needs them works, slowly; frame rates and GPU limits there say nothing "
           "about real hardware.")
@@ -831,9 +834,11 @@ def cmd_responsive_devices(a):
         r = page_guest("shots", {"browser": a.browser, "url": a.url, "wait": a.wait, "device": dev}, a.override)
         shot = fetch_shot(r.get("screenshot"), d, f"{a.browser}-{dev}.png")
         vp = r.get("viewport") if isinstance(r.get("viewport"), dict) else {}
+        spec = DEVICE_WIDTHS.get(dev)
+        wide = isinstance(vp.get("w"), int) and spec is not None and vp["w"] > spec + 8
         rows.append({"device": dev, "width": vp.get("w"), "height": vp.get("h"), "dpr": vp.get("dpr"),
                      "touch_points": vp.get("touch"), "overflows_sideways": r.get("overflow_x") is True,
-                     "screenshot": shot})
+                     "laid_out_wider": wide, "screenshot": shot})
         if shot:
             shots.append(shot)
     if shots:
@@ -842,6 +847,11 @@ def cmd_responsive_devices(a):
              "|---|---|---|---|---|"]
     lines += [f"| {x['device']} | {x['width']}x{x['height']} | {x['dpr']} | {x['touch_points']} | "
               f"{'yes' if x['overflows_sideways'] else 'no'} |" for x in rows]
+    wide = [x["device"] for x in rows if x["laid_out_wider"]]
+    if wide:
+        lines += ["", f"On {', '.join(wide)} the page is laid out wider than the screen ({rows[0]['width'] if rows else '?'} px "
+                  "for the first): it most likely has no `<meta name=\"viewport\" content=\"width=device-width\">`, so "
+                  "phones show it zoomed out."]
     lines += ["", f"Sheet: {os.path.join(d, 'sheet.png') if shots else '(no screenshots)'}", "",
               "Emulation, not the device: the page renders in " + a.browser + "'s engine at that size, pixel ratio and "
               "user agent (Chrome also with touch); Safari's own quirks need GNOME Web (--browser webkit) or a real device."]

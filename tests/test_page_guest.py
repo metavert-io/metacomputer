@@ -144,6 +144,8 @@ check("query strings are cut from URLs by default", pg.strip_query("https://ex.c
       and pg.strip_query("https://ex.com/a?x=1", keep=True) == "https://ex.com/a?x=1")
 check("devices: sizes, ratios, mobile", pg.DEVICES["iphone-15"][:4] == (393, 852, 3, True)
       and pg.DEVICES["desktop"][3] is False)
+check("the Mac's device widths (for the report's notes) match the helper's devices",
+      bt.DEVICE_WIDTHS == {k: v[0] for k, v in pg.DEVICES.items()})
 out = subprocess.run([sys.executable, os.path.join(LAB, "lib", "page_guest.py"), "gpu", '{"url": "ftp://x"}'],
                      capture_output=True, text=True, timeout=30)
 check("the helper refuses a URL that isn't http(s), with one JSON line", json.loads(out.stdout) ==
