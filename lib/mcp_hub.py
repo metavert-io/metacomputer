@@ -65,6 +65,7 @@ import batch_steps  # noqa: E402
 import driver_profiles  # noqa: E402
 import hidden_text  # noqa: E402
 import botcheck  # noqa: E402
+import traces  # noqa: E402
 import hub_notes  # noqa: E402
 import labconfig  # noqa: E402
 import owners  # noqa: E402
@@ -681,6 +682,7 @@ class Hub:
         self.bot_marks = collections.OrderedDict()       # window id -> (kind, pid, when): a human check at its last read
         self.bot_events = collections.OrderedDict()      # window id -> when its needs_you.captcha last went out
         self.handoff_seen = 0.0                          # the last time a call met an open handoff
+        self.tracer = traces.Recorder(self.settings["run_dir"])   # metacomputer trace (lib/traces.py)
         self.call_seq = 0           # one per tools/call: what named_windows reads is fresh for each call
         self._named = None
         self.pace_rng = pacing.rng()
@@ -1997,6 +1999,7 @@ class Hub:
                 pace_note = self.pace(name, args, sess)   # after every guard: it changes only delays and adds moves
                 if pace_note:
                     note = (note + "; " if note else "") + pace_note
+            self.trace_call(name, args, sess)
             self.act_seq += 1
         pre = None
         if self.coord_on and name == "get_window_state" and args.get("include_screenshot", True) is not False \
@@ -2765,9 +2768,32 @@ class Hub:
             self.mark_hidden_text(pend, res)     # the VM's own words only: before the hub adds its notes
         if self.bot_mode != "off" and tool == "get_window_state" and not pend.get("orphan"):
             self.mark_bot_check(pend, res, args, sc)
+        if not pend.get("orphan"):
+            self.trace_result(tool, res, sess)
         note = pend.get("note")
         if note:
             hub_notes.add(res, note, front=True)
+
+    # --- traces (metacomputer trace; lib/traces.py) ------------------------------------------------------------------
+    def trace_call(self, name, args, sess):
+        """An acting call, as it goes to the driver (after every guard), into the trace being recorded, if any; the app
+        of its window so the export keeps only browser steps. Never raises."""
+        try:
+            if not self.tracer.wants(sess):
+                return
+            v = window_keys(args) if isinstance(args, dict) else {}
+            pid = v.get("pid") if isinstance(v.get("pid"), int) else self.window_pid.get(v.get("window_id"))
+            app = self.app_of.get(pid, "") if pid is not None else (v.get("app") if isinstance(v.get("app"), str) else "")
+            self.tracer.call(name, json.loads(json.dumps(args)), sess, app)
+        except Exception as e:
+            self.note(f"trace skipped a call: {type(e).__name__}", kind="trace failed")
+
+    def trace_result(self, tool, res, sess):
+        try:
+            if self.tracer.wants(sess):
+                self.tracer.result(tool, res, sess)
+        except Exception as e:
+            self.note(f"trace skipped a result: {type(e).__name__}", kind="trace failed")
 
     # --- human checks on screen (BOT_CHECK; lib/botcheck.py) ------------------------------------------------------
     def mark_bot_check(self, pend, res, args, sc):

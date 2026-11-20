@@ -861,8 +861,8 @@ and the event without refusing; `off` turns both off.
 
 This is for the agent's sake (no flailing at a check it mustn't pass), not a boundary:
 a page can hide the marks, or fake them to stop Claude in that window, and the hub sees
-only what the accessibility tree and the title say (a check drawn only in pixels isn't
-seen). Page-mode tools addressed by `target_id` aren't matched to the window.
+only what the accessibility tree and the title say in that read (a check drawn only in
+pixels isn't seen, nor one past where a read was cut short or outside its `query`). Page-mode tools addressed by `target_id` aren't matched to the window.
 
 ## Hidden page text
 

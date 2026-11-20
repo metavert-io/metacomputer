@@ -29,6 +29,8 @@
 #   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
 #   net status | allow NAME... [--for 2h] | remove NAME... | clear   a network allowlist for the VM (the gateway)
+#   trace start NAME | stop | list | show NAME | export NAME [--out F]   record browser steps; export a Playwright test
+#   each VM,VM,... -- COMMAND [ARGS]    the same metacomputer command on several VMs at once ("main" = this VM)
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
 #   task start SLUG [--no-sync] | finish NAME   one folder per task (guest + host), artifacts listed; finished recording
 #                                  turns copied to the Mac while it's open (TASK_SYNC_INTERVAL)
@@ -2232,6 +2234,8 @@ case "$cmd" in
   rename)     do_rename "$@" ;;
   web)        export_options; exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
   net)        export_options; net_policy "$@"; exit $? ;;
+  trace)      export_options; exec "$PY" "$LAB_ROOT/lib/traces.py" "$@" ;;
+  each)       exec "$PY" "$LAB_ROOT/lib/each.py" "$@" ;;
   release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;
   get)        do_get "$@" ;;
