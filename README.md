@@ -42,8 +42,9 @@ the plugin), then ask:
 
 Claude says which computer it's using before it acts, starts the VM if it isn't
 running, checks its own results and tells you where the evidence is. To watch it
-work, `metacomputer view --open` opens the live desktop in Screen Sharing, with
-its password on your clipboard. More ideas:
+work, `metacomputer view --open` opens the live desktop in Screen Sharing; say
+yes once and Screen Sharing remembers its password, so there's nothing to paste.
+More ideas:
 [Prompt a computer into existence](#prompt-a-computer-into-existence).
 
 <details>
@@ -113,7 +114,9 @@ what goes where, updating, uninstalling and troubleshooting.
 **Security: walled off from your Mac.** Out of the box the VM shares no
 clipboard, audio or files with your Mac, and its only network is a gateway that
 reaches the public internet and nothing of yours: not your Mac, your LAN or your
-tailnet. Page text that's likely hidden from you, or that addresses AI agents, is
+tailnet. For a task that needs only a few sites, `metacomputer net allow
+example.com --for 2h` narrows it to those: the gateway on your Mac enforces it,
+and only you can widen it. Page text that's likely hidden from you, or that addresses AI agents, is
 marked in what Claude reads, so it can point it out to you; and at a CAPTCHA or a
 sign-in that's yours, Claude hands you the computer and waits. A signed log of
 every action, a restricted mode that holds Cua Driver to the apps and sites you
@@ -139,7 +142,7 @@ number of VMs the same read-only files. Nothing is attached until you list it
 which is Anthropic's service, and the install's downloads from GitHub, Ubuntu and
 the projects it builds on, it needs nothing else in the cloud: no account, no
 subscription. It's the self-hosted way to run Cua's open-source stack (Lume, Cua
-Driver, cua-netgw), at pinned versions you can fork. Your keys stay on your Mac,
+Driver, the cua-netgw gateway), at pinned versions you can fork. Your keys stay on your Mac,
 in the vault and your own Keychain; logs and events go only where you send them;
 and moving from Cua Spaces' Keyvault is [documented](docs/moving-from-spaces.md).
 
@@ -191,12 +194,25 @@ with Claude Code's normal tools.
   for Inkscape, Audacity, Kdenlive and pygame
   ([EXTRA-APPS.md](skills/metacomputer/EXTRA-APPS.md)); `VIRTUAL_AUDIO=on` adds a
   sound card that plays into nothing.
-- **Firefox and Chrome:** *human* mode (clicks and typing like a person), *page*
-  mode (Chrome's page elements: exact forms, uploads, downloads, dialogs) and
-  *hybrid* (page reads, real clicks and typing for a recording).
+- **Firefox and Chrome:** *human* mode (clicks and typing like a person, at a
+  person's pace: the default, and the one for sign-ins, checkout and posting),
+  *page* mode (Chrome's page elements: bulk forms, uploads, downloads, dialogs),
+  *hybrid* (page reads, real clicks and typing for a recording), and precise tools
+  in a Firefox of their own (`web page`: controls by ref, exact values, uploads).
+  Kept Firefox profiles keep a sign-in until a reset; GNOME Web (WebKit) is there
+  for visual checks when `BROWSERS` includes `webkit`. Firefox rejects the cookie
+  banners it knows, and `BROWSER_EXTENSIONS` adds uBlock Origin and Consent-O-Matic.
 - **Web checks that need no model:** `web compare` (Firefox against Chrome),
-  `web responsive` (several widths, with difference images against a past run)
-  and `web a11y`.
+  `web responsive` (several widths, with difference images against a past run, or
+  phones and tablets with `--device`), `web a11y`, `web debug` (console errors,
+  failed and slow requests, timings), `web read` (a page's main text) and `web gpu`
+  (what WebGL and WebGPU a page gets).
+- **3D pages, honestly:** the browsers render on a real display, so what a canvas
+  draws is what you'd see; but the VM has no GPU, so WebGL and WebGPU run in
+  software: they work, slowly, and say nothing about frame rates on real hardware.
+- **From a session to a test:** `metacomputer trace` records Claude's browser steps
+  and `trace export` writes them as a Playwright test you can run in CI without a
+  model.
 - **Your own web app:** its static build served on the VM's localhost and clicked
   through in both browsers.
 
@@ -205,7 +221,9 @@ with Claude Code's normal tools.
   LibreOffice headless, pdftotext, sqlite3, ImageMagick and ffmpeg; `put` and
   `get` move files.
 - **Sign-ins:** saved passwords and 2FA codes typed by the vault into page-mode
-  Chrome, signed-in profiles sealed and restored, or you sign in yourself through
+  Chrome (or the VM's own Firefox, `--human`), emailed or texted one-time codes and
+  sign-in links filled by the vault too, bound to their site (`secrets ask`, `code`,
+  `relay`), signed-in profiles sealed and restored, or you sign in yourself through
   the live view, in a handoff.
 - **API keys:** short-lived tokens for a proxy on your Mac that adds the real key;
   a long job renews its token (`secrets token renew`) instead of getting a new one.
@@ -225,12 +243,14 @@ with Claude Code's normal tools.
   throwaway profile without clicking anything; suspicious files are read inside
   the VM.
 - **Watching and taking over:** the live view (`metacomputer view --open` opens
-  Screen Sharing with the password on your clipboard; `view` shows the SSH tunnel
+  Screen Sharing, which remembers the password once you let it, in your login
+  keychain; otherwise it's on your clipboard; `view` over SSH shows the tunnel
   from another device), `inspect`, checkpoints and `reset`.
 - **Handing it to you:** at a CAPTCHA or bot check, or a sign-in or 2FA prompt
   that's yours to do, Claude runs `metacomputer handoff` instead of trying to get
-  past it. You get a notice, do that step in the live view and run
-  `metacomputer handoff done`; Claude's actions wait until then.
+  past it. You get a notice (and, if you turn on `INTERACTIVE_PROMPTS`, a dialog
+  on the Mac with an Open live view button), do that step in the live view and
+  run `metacomputer handoff done`; Claude's actions wait until then.
 - **Notifications and events:** `metacomputer notify` when Claude is blocked on
   you, and events to your phone (ntfy), Slack, an OpenTelemetry Collector or a
   SIEM, once you add a sink. The first blocked connection after a quiet spell
@@ -243,7 +263,8 @@ with Claude Code's normal tools.
   one change at a time ([bench/README.md](bench/README.md)).
 - **More than one computer:** `metacomputer vm create NAME` makes another VM
   beside the first, with its own settings, keys, ports and vault; `--vm NAME`
-  picks it ([More than one computer](#more-than-one-computer)).
+  picks it, and `metacomputer each a,b -- COMMAND` runs one command on several at
+  once ([More than one computer](#more-than-one-computer)).
 
 The [guide](docs/guide.md) covers each one with what to ask and the commands
 behind it.
@@ -522,7 +543,7 @@ Claude Code
  metacomputer sh ───────────────────────────────────── SSH ──▶ bash, as the desktop user
  the secrets vault, unlocked in your terminal ──────── SSH ──▶ locked fill and proxy accounts
  volumes and folders you attach ─────────────────────────────▶ mounted at start
- cua-netgw: the VM's only network, to the public internet
+ mcomp-netgw: the VM's only network, to the public internet
  mcomp-vm: runs the VM on Apple's Virtualization framework
 ```
 
@@ -621,10 +642,13 @@ they're here for when you want to yourself.
 | --- | --- |
 | `start`, `stop`, `status` | Boot the VM (about 12 s), shut it down, check every layer |
 | `who`, `release` | Which session is using the VM; hand it over |
-| `view [--open]` | Watch or take over the live desktop (`--open`: Screen Sharing, password on the clipboard) |
+| `view [--open]` | Watch or take over the live desktop (`--open`: Screen Sharing, with the password it remembers, or on the clipboard) |
 | `handoff done`, `handoff cancel` | Hand the computer back to Claude after a step it handed you, or call it off |
 | `sh -c 'CMD'`, `put FILE`, `get PATH` | Bash in the VM; copy files in and out |
-| `web compare\|responsive\|a11y\|open-untrusted URL` | Browser checks that need no model |
+| `web compare\|responsive\|a11y\|open-untrusted\|debug\|read\|gpu URL` | Browser checks that need no model |
+| `web page open URL \| read \| fill REF VALUE \| click REF \| close` | Precise page tools in a Firefox of their own |
+| `net allow NAME... --for 2h \| status \| clear` | A network allowlist for the VM, enforced by the gateway on your Mac |
+| `trace start NAME \| stop \| export NAME --out t.spec.ts` | Record browser steps; write them as a Playwright test |
 | `record start NAME`, `record stop` | Record the whole desktop |
 | `checkpoint NAME`, `restore NAME`, `reset` | Save the stopped VM, go back to a save or to the clean baseline |
 | `vm list`, `vm create NAME`, `vm delete NAME`, `--vm NAME` | Your VMs; another one beside the first; delete one; act on one |
@@ -685,8 +709,9 @@ unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 | A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `plugin:metacomputer:metacomputer`, or restart Claude Code. `./install.sh --only-claude` sets it up again. |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
 | "Paused: the user has the computer" | Claude handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
-| Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` puts it on the clipboard; paste it with Cmd+V. |
+| Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` brings the one Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard instead (paste with Cmd+V). |
 | A site's "Verify you are human" check keeps failing | Sites with bot checks may refuse the VM's automated browser, even when you tick the box yourself: page-mode Chrome is driven through DevTools, which they detect. metacomputer doesn't disguise it, and Claude hands such checks to you rather than trying to get past them. If one keeps failing, do that step on your own computer. |
+| A sign-in looks different from usual (no code box, "check your email" but nothing arrives) | The site has likely flagged an automated browser: page-mode Chrome is driven through DevTools. Account pages start in human mode (the VM's Firefox, real clicks and keys); when a flow looks degraded anyway, Claude switches to human mode and tries once more. |
 | Chrome ignores typing | `metacomputer input-reset`. |
 | The vault says it's locked | Run `metacomputer secrets unlock` in your own terminal, and keep it open. |
 | The install stops | Fix what it names and run it again; finished steps are skipped and it never deletes a VM. |
@@ -748,8 +773,9 @@ describes. Bugs in Cua Driver or Lume themselves belong upstream at
 ## Credits
 
 metacomputer is built on [Cua](https://github.com/trycua/cua) by Cua AI, Inc.
-(MIT): Cua Driver runs the desktop, Lume runs the VM, and `cua-netgw`, built from
-Cua's source, is the network gateway (it uses gvisor-tap-vsock, Apache-2.0).
+(MIT): Cua Driver runs the desktop, Lume runs the VM, and the network gateway is
+Cua's `cua-netgw`, built from Cua's source with a small patch that makes its name
+rules hold (so it runs as mcomp-netgw; it uses gvisor-tap-vsock, Apache-2.0).
 [mcomp-vm](https://github.com/metavert-io/metacomputer-vm), metacomputer's build
 of Lume, adds the host-sharing flags; like metacomputer, it's made by Metavert,
 not by Cua, and isn't endorsed by them. The shell channel's routing, the hub and

@@ -704,6 +704,37 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_traces.py`: the trace recorder (on only while a trace is active, one session or all, capped,
+  0600) and the Playwright export: tokens resolve through the rows of reads, clicks/fills/keys/checks/navigations
+  translate, other apps are left out, and page text written to break out of the code (quotes, newlines,
+  U+2028, backticks, `${}`, `*/`) stays inside escaped literals (the output parses with `node --check` when node is here).
+- `python3 tests/test_page_guest.py`: the page helper's WebSocket client against a stand-in server (masking, long
+  frames, ping, close, a wrong handshake key, loopback only), its cutting of page text and query strings, the Mac's
+  reading of its answer (refusals, a cut-short or malformed answer, screenshots only from the VM's own folder), and
+  `metacomputer each` (in parallel, the highest exit status, its refusals).
+- `MCOMP_CONFIG=... python3 tests/test_web_vm.py` (a test VM started by this checkout): a one-minute allowlist
+  enforced by the gateway (an allowed site loads, an unlisted one and PTR and escaped-name questions don't,
+  widening without a terminal is refused, the list ends on time), web gpu in both browsers, debug, read,
+  responsive --device, the Firefox page tools on the form fixture (and a password field refused), a trace
+  exported as a Playwright test, and the hub's human-check note and refusal.
+- `python3 tests/test_botcheck.py`: `lib/botcheck.py`: each common human check (reCAPTCHA, hCaptcha, Cloudflare's
+  widget, wording and "Just a moment..." title, press-and-hold, DataDome, Arkose, Google's "unusual traffic" page)
+  is recognised from a window read, pages that only talk about CAPTCHAs aren't, a huge tree is read only so far, and
+  the event carries the kind only. The hub's note and refusal are in `test_hub.py` ("human checks on screen").
+- `python3 tests/test_netpolicy.py`: network allowlists (`lib/netpolicy.py`, `metacomputer net`) against a
+  temporary run folder: names (subdomains, `--exact`, wildcards; addresses and malformed names refused), starting
+  and narrowing a list without a terminal, widening it and lifting it early refused without one and accepted at a
+  pty, the rules file the gateway reads (no default reach, only the listed names, every refusal of
+  config/netgw-rules.json kept, 0600), rules the gateway's own `-check-rules` refuses never replacing the ones in
+  force (with the real mcomp-netgw when `vendor/bin` has it), list files that can't be read or are links stopping
+  `render`, a base file that opens ranges refused, the timer lifting a list at its end, and the start path's wiring.
+- `python3 tests/test_guest_profiles.py`: `lib/guest_profiles.py`, which makes and deletes browser profile
+  folders inside the VM (`metacomputer browser profiles --new|--delete`), run against a temporary home and a
+  stand-in `/proc`. A profiles folder that is a link (to the home folder), a link further up the way, and a profile
+  that is a link are refused with nothing outside touched; a running Firefox with `--profile DIR`, `-profile DIR`,
+  `--profile=DIR`, another spelling of the path or a relative path from its own working folder, and Chrome with
+  `--user-data-dir`, block the delete; bad names
+  are refused; a delete removes the profile without following a link inside it.
 - `python3 tests/test_guest_import.py` (54 checks; needs ffmpeg): files copied from the
   VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
   stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
@@ -746,7 +777,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (99 checks, about a minute): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (176 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -757,7 +788,10 @@ Each of these needs no VM and takes seconds.
   future modification time doesn't stretch it, or from the first failure when nothing about the file can be
   read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
-  stopped (exit 4) with the vault never asked, a fill naming another VM refused, a handoff that can't open
+  stopped (exit 4) with the vault never asked, `secrets approve` of a waiting one-time code request stopped too
+  (`--json` before or after the id, `--scope`, a list that can't be read, an id it doesn't show) while an approval
+  the list shows as another kind goes on, `give`, `fill --request` and a code `approve` passing this VM to the vault
+  (and `approve` naming another VM refused), a fill naming another VM refused, a handoff that can't open
   while a fill is still on its way (a stand-in vault that waits) or while one that ended unconfirmed (exit 5) is
   settling, and the marker that makes the next handoff settle first when that didn't confirm, kept for any exit
   that isn't an answer from the unlock process (a crash too); `sh` holding the
@@ -772,7 +806,35 @@ Each of these needs no VM and takes seconds.
   and empties in one step, never pbpaste, and leaves the clipboard alone after any copy, even
   of the same text); over SSH or outside the screen session it prints instructions and touches
   nothing; with the VM off it opens nothing; `--tailnet` prints the commands and runs
-  only `tailscale status`.
+  only `tailscale status`. Screen Sharing's remembered password, with a stand-in osascript
+  keychain: asked once at a terminal (Enter saves, a no writes `VIEW_REMEMBER=off`), the
+  password only on osascript's stdin, then no clipboard; refreshed in place without a
+  terminal; nothing saved for the first time without one; `--remember` and `--forget`
+  refused without a terminal even when an item is there, `off` refusing every write
+  (`--remember` at a terminal too), an explicit save that fails (a locked keychain, no
+  login keychain) an error with its reason, `--open --remember` then opening with the
+  clipboard and failing; `--no-remember`, `on`, a locked keychain falling back to the
+  clipboard for `--open`; plain `view` opening at a terminal on the Mac and printing over SSH.
+  `lib/liveview.py` called directly: `remember` and `forget` refused without a terminal
+  on stdin or `--from-view`, `remember` and `refresh` refused while `VIEW_REMEMBER`
+  is off (in the settings file, in the environment, or an unknown value in either), an
+  environment that says `on` not loosening the file's `off`, `refresh` never making an
+  item, a password typed at a terminal accepted with echo off on it (and never seen on the
+  terminal). Then
+  the real osascript and Security framework in a keychain the test makes in its own
+  folder, with HOME there too (the login keychain and the search list untouched;
+  `security` is a stand-in that only names that keychain; nothing reads a password
+  back): `refresh` making nothing, `remember` refused without consent, then created with
+  Screen Sharing's key (server `127.0.0.1:PORT`, port 0, type `vncl`), updated in place by
+  `refresh` and `remember`, `forget` refused without consent, then removed. The handoff's dialog (`INTERACTIVE_PROMPTS`): none
+  when off, over SSH, outside the screen session or for a person's own handoff; with it on,
+  a stand-in osascript gets the fixed script and the `--say` text as an argument (quotes,
+  backslashes, `do shell script`, `end run` and `tell`, verbatim, and the real osascript's
+  compose mode runs none of it), handoff doesn't wait for it, it's taken down when the
+  handoff ends, Open live view runs `view --open` and Later nothing; `handoff.py _dialog ID`
+  run directly shows nothing when the setting is off or unset, over SSH, outside the
+  screen session, for another id or for a handoff the record says was opened at a
+  terminal, and shows it when the rules allow.
 - `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (18 checks, a test VM only; it starts the VM if
   it's off and stops it again): Claude's handoff opens without a terminal and waits; meanwhile an acting call
   through the hub is refused ("Paused: the user has the computer"), reads work, `sh` is refused with or
@@ -997,7 +1059,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (213 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (285 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1060,6 +1122,45 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   by then keeps it);
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
+- human pacing (`BROWSER_PACING`, `lib/pacing.py`): `type_text` into Firefox and Chrome gets a pause between
+  characters within 60-140 ms that varies from call to call, Mousepad gets none, a `delay_ms` the caller set
+  (0 too) is kept, and a 1,000-character text adds at most 15 s; a batch into Firefox gets a pause between
+  steps, its text typed in runs (each with its own pause) that put it back together exactly, pointer moves at
+  desktop scope toward a pixel click inside the box from the pointer to the target, the `expect` kept on the last
+  run, and a note saying steps were added; a Mousepad batch goes as sent; a 1,800-character batch stays within the
+  cap; `hub.log` gets counts, never the typed text; `BROWSER_PACING=fast` sends every call as it came; bounded
+  mode gets delays but no moves. A caller's own `delay_ms` counts against the caps (10 clicks 2 s apart go as they
+  came; 100 batches with caller pauses stay within 15 s and the driver's limit); text whose step names its field
+  or its window by app is typed in one run; no pointer moves before a click with a `wait_for`; a nested
+  `target: {kind: "window", …}` counts as that window; after a check naming another app (by name or by pid and
+  window_id) nothing more is paced; the typing pauses a batch's steps set themselves count (250 characters at
+  200 ms leave no room); a field named by `label` is typed in one run. The Chrome guard reads nested window
+  targets: direct `type_text` and `click` and a batch with no default window go in the foreground with the input
+  reset; a nested target on another app is left alone.
+- the driver's own call forms (`lib/batch_steps.py`): its lists (batchable tools, tool aliases, key names as tools,
+  symbol names, shifted symbols, renamed tools) are pinned against copies of driver 0.53.0's, each one and every step
+  form becomes the canonical step, which is a fixed point; through the hub, each shorthand form and alias aimed at
+  Chrome by a nested target goes in the foreground with the input reset, `set` to Chrome is refused, the old names
+  `type_text_chars` and `run_actions` are guarded as type_text and run_steps, typing pauses written as `{type: ...}`
+  or a string count in pacing's budget, a mixed batch of shorthand forms is paced and guarded step by step, and
+  `triple_click` and pixels sent as strings reach the coordinate guard. (Against the hub of dba0af9 these fail.)
+  Rewrites chain to a fixed point (a key name, hotkey or press alias with a symbol key ends as type_text: 1,007
+  cases); 200,000-digit near-numbers are read in linear time and strings over 64 characters aren't tried; a batch over
+  64 items is refused on the list as sent, before folding, by the normaliser and by the hub.
+- the window a batch step inherits, as the driver decides it: a read of Mousepad between a Chrome action and an
+  untargeted set_value changes nothing (refused), a check-only wait_for or expect naming Chrome moves later steps
+  there (set_value refused, typing in the foreground), a wait_for on the step itself moves that step, a nested
+  target on Mousepad isn't passed on, and an expect on an action step changes nothing.
+- the coordinate guard on that same model: a pixel click after a check-only wait_for that moved to another window,
+  and after a skipped read, is checked against the window the driver uses (resized: refused); a nested-target pixel
+  click must hold for its target and the inherited window; one that could be in several windows, one named only by
+  app no window has, is refused (`pixel_window_unclear`); one in a window named by app is checked against the
+  window the driver picks; a live layout kept from a refused call doesn't vouch for the next.
+- targets named by app or title, resolved like the driver: set_value in a window named by an app name or a title
+  that matches Chrome's, by a name several apps match (Chrome among them), by one no window has, or after a
+  check-only wait_for naming Chrome's title, is refused, and typing there goes in the foreground; a name that
+  resolves only to Mousepad is left alone; zero-padded pid, window_id, x and y over 64 characters are refused.
+  (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;
 - the action log through the hub (the real relay in front of the stand-in): one
@@ -1363,7 +1464,7 @@ writes the lists with cloud-init's key options, `provision.sh` installs them roo
 before the config that names them, and `finalize.sh` removes the homes' copies only
 after `sshd -T` shows the lists in use.
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_codes.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -1677,7 +1778,56 @@ fixture pages and a cookie-echo page in the VM, then:
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 
-`python3 tests/test_secret_fill.py` (169 checks) covers the VM side,
+`python3 tests/test_vault_codes.py` (132 checks, about 3 minutes; no VM) covers one-time codes and sign-in
+links and human-mode fills, with its own ssh stub (the fill account's check, fill, read and open, and the
+desktop account's human-mode script) and a stand-in for osascript (`MCOMP_VAULT_TEST_OSASCRIPT`, test builds
+only), so no dialog is ever shown:
+- **stdin only:** a value on `give`'s or `code`'s command line is a usage error and never echoed; a line over
+  4096 bytes and a value that isn't a code are refused before anything reaches the VM;
+- **by hand:** `ask` returns the id at once, `requests` lists it, `needs_you.code_requested` reaches the spool
+  with the site, kind, id and `why`; `give` from a pipe with no rule exits 7 naming `secrets approve ID`, and
+  `approve ID` (the test build's Touch ID stand-in) fills it, with the value only on the stub's stdin; single
+  use; expiry (exit 6; `MCOMP_VAULT_TEST_CODE_MIN_TTL` lets a test request live 2 s); `ask --wait`;
+- **rules:** `rule add code --from stdin` fills at once and is recorded as `rule:ID`; after it expires the same
+  command needs approval again; `--project` covers only Claude Code sessions there; identity providers can't
+  be a rule's site or link host, and a code for one always needs approval;
+- **binding:** a VM reporting another site keeps nothing as filled; a fill refused before typing stays given
+  for `fill --request`; a VM answer holding the value is withheld; links to the site open, links to another
+  host need the rule's `--link-host`, non-https links are refused;
+- **relay:** needs approval without a rule; under one, Claude sees only `relayed: filled`; two codes, no code,
+  or a source tab on another site are refused; `--kind link` opens the site's link, not another host's;
+- **human mode:** `fill --human` checks then fills through the desktop account's script, an address bar
+  naming another site and a non-password field for `password` are refused; `code --human`; and the script
+  itself against a fake accessibility tree: a page whose title names another site, an address typed but not
+  opened, Firefox's trimmed https bar, a field in a frame, the bar focused, two windows with one title
+  (picked by place and size), the typed value counted, never echoed;
+- **a terminal and the dialog:** `give` at a terminal reads the value hidden and the unlock terminal asks;
+  with `INTERACTIVE_PROMPTS=on` the dialog's script is fixed and `why` (with quotes and an AppleScript
+  injection attempt) arrives as one argument, nothing in it runs, and the dialog's answer is filled after the
+  approval; the AppleScript compiles (`osacompile`, never run);
+- **a hostile VM** (each of these fails against the first version of this feature): a relayed link whose host spells a
+  code is refused and its host appears in no output, listing or audit record; how many codes an element held isn't
+  said; a given link to an unlisted host waits for approval without its host in `requests` or the audit log; a
+  rule's `--link-host` doesn't cover the same host on another port; a VM that answers "refused" after getting the
+  value can't have it sent again; a refused value-free check keeps the request and sends nothing; a rule that
+  expired while a request waited doesn't cover its retry; a slow step is cut at the request's expiry; a request
+  expires while a question waits at the unlock terminal, and while an unrelated step in the VM runs; stopping `approve`
+  while it fills ends the step in the VM; an answer in the dialog gives and approves but fills nothing until
+  `fill --request`; `fill --request`, `give` and `approve` run for one VM are refused for another VM's request (two
+  VMs bound to one vault), and with no VM named; a client trickling half a request holds the unlock process at most
+  about 10 s while requests expire on time;
+- no value in any output, the audit log or the events, and none of the test switches in a release build.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_codes_vm.py` (a test VM, 26 checks) serves a "mail" page
+(a code and links, on `http://localhost:8000`) and a "site" page (a code field that says whether it got the
+right code, on `http://127.0.0.1:8000`) in the VM, then: `code` from a pipe (needs approval, then filled under
+a rule, and the page sees it), `relay` of the code and of the site's sign-in link from the mail page (another
+host's link refused), and human mode in the VM's Firefox (`code --human`; `fill --human --field password`
+refused on a text field and filled on the password field; a page whose title names another site refused for
+it). A VM built before the relay's read and the link's open has an older secret-fill: for those two modes
+only, the test's ssh stand-in runs this repository's secret-fill as the desktop user over the real ssh.
+
+`python3 tests/test_secret_fill.py` (185 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -1700,7 +1850,13 @@ It uses its own vault folder in /tmp and a TEST build, and never the installed v
     it (reported);
   - the keyboard route when a page won't take `execCommand`;
   - focus moving or lost, length limits and invalid selectors;
-  - no known desktop user (nothing filled), and a hung browser (the deadline).
+  - no known desktop user (nothing filled), and a hung browser (the deadline);
+  - open mode (a one-time sign-in link), with the fake's `Fetch` interception: a link that lands on the site; a server
+    redirect to another site, a hop through another site and back, and the page's own move soon after it loads and two
+    seconds later, each stopped before the tab visits it (unnamed); a protocol error while it watches with a move to
+    another site paused behind it (refused and loading stopped before the interception ends, as Chromium continues
+    what's paused when it's turned off); a navigation that never commits; and a link to
+    another origin than the vault named (refused before anything is opened).
 - **The whole program against a real headless Chromium**, when one is found
   (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:
   - fills a dummy login page, through the element itself, with fields in a same-origin

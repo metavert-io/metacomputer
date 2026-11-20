@@ -19,7 +19,7 @@ Your Mac (Apple silicon, macOS 14+) - trusted controller
 │     └── bin/metacomputer mcp (MCOMP_DIRECT_BRIDGE=1) ──ssh─────────────────┐
 ├── bin/metacomputer (start/stop/status/reset/test/record/recordings/view)    │
 │                                                                            │
-├── cua-netgw (user-mode gateway, host-enforced egress policy)               │
+├── mcomp-netgw (cua-netgw + patch: user-mode gateway, host egress policy)   │
 │     127.0.0.1:2277 ─▶ guest :22      127.0.0.1:5977 ─▶ guest :5900 (VNC)   │
 │     unixgram socket ◀──▶ Lume VM network device                           │
 └── Lume 0.7.2 (Apple Virtualization.framework, native arm64)               │
@@ -56,7 +56,7 @@ driver directly, Lume for the VM, and a loopback-only VNC view.
 | --- | --- | --- | --- |
 | mcomp-vm (default; formerly lume-secure) | metacomputer's build of Lume (made by Metavert, not by Cua): Lume 0.7.2 (`lume-v0.7.2`, `f30fbc0`) + one patch: `lume run --no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing` (Lume's default sharing is unchanged); built from source, ad-hoc signed with Lume's virtualization entitlement | `~/.local/share/mcomp-vm/`, wrapper `~/.local/bin/mcomp-vm`, from github.com/metavert-io/metacomputer-vm (`MCOMP_VM_TAG`, `MCOMP_VM_COMMIT`). While `LUME`'s runner isn't installed and `~/.local/bin/lume-secure` is, `scripts/lib.sh` uses that one and prints a notice | VM lifecycle on Virtualization.framework; telemetry disabled; no LaunchAgent |
 | Lume (alternative) | 0.7.2 (Developer ID, notarized; sha256 `c96cf5a7…`) | `~/.local/share/lume/lume.app`, wrapper `~/.local/bin/lume` | the same, with clipboard, audio and Rosetta always attached |
-| cua-netgw | built from trycua/cua `ca6a643` (`libs/cua/netgw`) | `vendor/bin/cua-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
+| mcomp-netgw | cua-netgw, built from trycua/cua `ca6a643` (`libs/cua/netgw`) with `patches/netgw/` | `vendor/bin/mcomp-netgw` | user-mode network for the VM (Lume `gateway:` mode); egress rules; loopback forwards |
 | rclone (only for S3 volumes) | 1.75.2 osx-arm64 (sha256 `610ab7d4…`; `SHA256SUMS` signed by `FBF737EC…54FA`) | `.cache/rclone-v1.75.2/rclone`, fetched on first use | two-way sync of S3 volumes' local copies with their buckets, on the Mac |
 | Cua Driver | 0.53.0 linux-arm64 (sha256 `fd5e6a9d…`) | guest `/opt/cua-driver/0.53.0` | desktop observation/control, MCP server, recording |
 | Ubuntu | 24.04 LTS arm64 cloud image, release 20261017 (sha256 `50e24e1f…`, SHA256SUMS signed by `D2EB4462…7C81`) | VM disk | guest OS |
@@ -71,7 +71,7 @@ and `/var/lib/metacomputer/package-versions.txt` (copied to `logs/` at build).
 
 `metacomputer build` → `scripts/build-vm.sh`:
 
-1. `build-tools.sh` builds cua-netgw (pinned commit) and qcow2raw.
+1. `build-tools.sh` builds mcomp-netgw (cua-netgw at the pinned commit, with `patches/netgw/` applied to a clean copy) and qcow2raw.
 2. `fetch-artifacts.sh` downloads and verifies the Ubuntu image (GPG-signed
    SHA256SUMS, pinned key fingerprint, pinned digest), the Cua Driver release
    tarball (pinned digest, cross-checked against the release SHA256SUMS) and
@@ -317,6 +317,12 @@ against 20.2 turns, no refusals; per-task records in
   that connects later gets a new driver connection (each connection used to
   have its own session).
 - **The coordinate guard** (`COORD_GUARD=on`, below).
+- **Human pacing** (`BROWSER_PACING=human`; `lib/pacing.py`, SECURITY.md "Human mode and human pacing"): last,
+  after every guard passed an acting call, a `type_text` or `run_steps` aimed at a Firefox or Chrome window (by the
+  same target rules as the Chrome guard) gets the driver's own pauses (`delay_ms` per character and between steps,
+  random within fixed ranges), a long text in a batch split into two or three runs, and `move_cursor` steps
+  (desktop scope) toward a pixel click, whose screen point comes from the coordinate guard's layout of the
+  screenshot it was aimed from and the live window list. At most 15 s per call; `hub.log` gets counts only.
 - **Hidden page text** (`HIDDEN_TEXT=on`; `lib/hidden_text.py`, SECURITY.md "Hidden page text"): for a
   window read whose client wants markdown, the hub asks the driver for the element list too
   (`tree_format` `both`), reads hidden rows off their frames (and Chrome snapshots' visibility),
@@ -548,7 +554,7 @@ their own, `mcomp-vault`: a Swift program in `vault/`, installed to
 secrets fill ...`) talks only to `mcomp-vault unlock`, which runs in the user's own
 terminal and holds the decrypted vault. The unlock process:
 - checks the request;
-- checks that the VM's port is served by the pinned cua-netgw binary (its path and contents);
+- checks that the VM's port is served by the pinned gateway binary (mcomp-netgw; its path and contents);
 - asks the user when the secret says so (they type its name);
 - runs `/usr/bin/ssh` with the pinned endpoint as the VM's fill account, `mcfill`,
   writing the value to ssh's standard input.
@@ -722,18 +728,41 @@ images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-
 ## Network
 
 Lume runs the VM in `gateway:` mode: its network device is a datagram socket
-to cua-netgw, a user-mode gateway (gvisor-tap-vsock) on the host. The guest
+to mcomp-netgw (Cua's cua-netgw with metacomputer's patch, below), a user-mode gateway (gvisor-tap-vsock) on the host. The guest
 gets `10.213.77.2/24` by static DHCP lease; DNS goes to the gateway, which
 resolves through 1.1.1.1 / 9.9.9.9 (not the Mac's resolvers or MagicDNS).
 Every connection the guest opens is checked on the host:
 
-- always refused (cua-netgw built-ins): the Mac's loopback, every address of
+- always refused (the gateway's built-ins): the Mac's loopback, every address of
   the Mac's own interfaces (LAN and tailnet IPs), the gateway itself, cloud
   metadata, multicast/broadcast
 - refused by `config/netgw-rules.json`: RFC 1918 (your LAN, its router and
   devices), 100.64.0.0/10 (Tailscale/CGNAT), link-local, ULA (tailnet v6),
   benchmark/reserved ranges, outbound SMTP
-- everything else (the public internet): allowed
+- everything else (the public internet): allowed, unless a network allowlist
+  is in force (`metacomputer net allow NAME... --for D`): then only the names on it
+  (SECURITY.md, "Network allowlists")
+
+The gateway reads `RUN_DIR/netgw-rules.json`, which `metacomputer start` (and
+`metacomputer net`) writes from `config/netgw-rules.json` plus the list in
+`RUN_DIR/net-allow.json` (lib/netpolicy.py), checked with `mcomp-netgw -check-rules`
+first; the gateway reloads it within a second of a change.
+
+The patch (`patches/netgw/`, applied by `scripts/build-tools.sh` to a clean export of the pinned
+source; the gateway's own tests plus the patch's run against it) changes these things, each needed for
+an allowlist to hold: the addresses a name on the list resolves to are kept (before, a default deny
+removed every answer, so an allowed name resolved to nothing); a PTR question follows the same name
+rules as any other (before, any PTR question went upstream, which carries data out in its name); with
+name rules in use, a name with escaped characters is refused (the rules compare presentation text, and
+an escaped dot would let `a\.b.example.com` pass for a subdomain of `b.example.com`); a question
+forwarded upstream carries nothing but itself (not the guest's other sections or EDNS options); a
+connection is checked again once it's registered (a rule change while it was being dialled was missed);
+every answer is bound to its name, allowed or not (so an answer the guest cached before a list
+started still leads to its name; a binding grants nothing to a name the rules don't allow);
+and the control socket answers `rules` with the sha256 of the rules file in force, reported only once
+the connections the new rules refuse have been closed, which `metacomputer net` compares with what the
+saved list makes. With the stock kind of rules file (everything
+public accepted), the gateway behaves as cua-netgw does.
 
 Blocked attempts are logged to `logs/netgw-blocked.jsonl` (with an event
 sink configured, the event watcher reports new ones; see "Event stream"). Inbound: there is
@@ -815,15 +844,15 @@ streamed recording whose stream had ended before it starts a new one.
 
 | Command | Implementation |
 | --- | --- |
-| `start` | check and lock the storage (`VOLUMES`, `REFDISKS`; none with `--no-volumes`), start cua-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags) and the storage's `--disk`/`--mount`/`--usb-storage`, wait for SSH, mount the storage, wait for the XFCE session and an MCP handshake |
-| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop cua-netgw, release the storage locks |
+| `start` | check and lock the storage (`VOLUMES`, `REFDISKS`; none with `--no-volumes`), start mcomp-netgw (fresh per run: a gateway serves one VM process), `lume run --display none --vnc disabled --network gateway:…` plus `--no-share-*` for each `SHARE_*` that isn't `on` (when the Lume has the flags) and the storage's `--disk`/`--mount`/`--usb-storage`, wait for SSH, mount the storage, wait for the XFCE session and an MCP handshake |
+| `stop` | stop the hub, `lume stop` (ACPI power button → systemd poweroff; forced after 90 s), stop the gateway, release the storage locks |
 | `status` | Lume state, gateway + forwards, DHCP lease, SSH, `guest-status` (Xorg, XFCE, AT-SPI, resolution, active window, driver doctor), MCP probe (through the hub, as a status client), the hub (pid, clients, idle time) |
 | `reset` | finish a desktop recording → sync guest recordings (`sync_or_stop`: stop here, deleting nothing, unless the copy is whole or `--discard-unsynced`) → stop → `lume delete` working VM → `lume clone` baseline → start |
 | `baseline` | sync guest recordings (`sync_or_stop`, as for `reset`) and remove them from the VM, then re-snapshot the working VM (previous baseline kept as `-prev`) |
 
 The VMs are not started at login and no LaunchAgent or daemon was added.
 With an event sink configured (or a sink-change announcement still waiting),
-`start` also starts the event watcher (a detached process, like cua-netgw) and
+`start` also starts the event watcher (a detached process, like the gateway) and
 `stop` stops it; see below.
 
 ## Event stream (optional)
@@ -1027,7 +1056,7 @@ mcp_lazy / hub: initialize ─▶ IDENTITY + HABITS + learned_notes() + the driv
   gateway's loopback forward instead.
 - **`lume stop` is a hard power-off for detached Linux VMs.** `metacomputer stop`
   shuts down from inside the guest and uses Lume's stop only as a fallback.
-- **One cua-netgw per VM run.** A gateway keeps talking to the Lume process it
+- **One gateway per VM run.** A gateway keeps talking to the Lume process it
   first heard from, so `start` always launches a fresh one (and kills it on
   stop: it ignores SIGTERM while a forwarded connection is stuck).
 - **No compositor.** With xfwm4 compositing on, client-side-decorated windows

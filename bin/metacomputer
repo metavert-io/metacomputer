@@ -21,12 +21,16 @@
 #   hub [status [--json] | start | stop]   the hub: one connection per VM shared by every client
 #   inspect [system|windows|processes|ports|files|browser] [--minutes N] [--json]
 #                                  read-only snapshot of the VM (no GUI, changes nothing)
-#   browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]
+#   browser [default firefox|chrome | mode human|page|hybrid | pacing human|fast |
+#            profiles [--new NAME | --delete NAME [--firefox]]]
 #   input-reset [--check]          remove the driver's leftover virtual input devices
 #                                  (while one exists, Chrome ignores the keyboard); prints the count
 #   desktop-restart                log the desktop out and in again (closes every app)
 #   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
+#   net status | allow NAME... [--for 2h] | remove NAME... | clear   a network allowlist for the VM (the gateway)
+#   trace start NAME | stop | list | show NAME | export NAME [--out F]   record browser steps; export a Playwright test
+#   each VM,VM,... -- COMMAND [ARGS]    the same metacomputer command on several VMs at once ("main" = this VM)
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
 #   task start SLUG [--no-sync] | finish NAME   one folder per task (guest + host), artifacts listed; finished recording
 #                                  turns copied to the Mac while it's open (TASK_SYNC_INTERVAL)
@@ -50,8 +54,12 @@
 #                                  S3 volumes: a folder kept in step with a bucket (rclone bisync, on the Mac)
 #   refdisk create NAME --from FOLDER [--dir PATH] | list [--json] | delete NAME [--yes]
 #                                  read-only reference disks, attached with REFDISKS=name[:mountpoint]
-#   view [--open | --tailnet]      how to watch / take over the desktop (VNC); --open: Screen Sharing on this Mac,
-#                                  the password on the clipboard for 45 s; --tailnet: how to publish it (you run it)
+#   view [--open | --print | --tailnet | --forget] [--remember | --no-remember]
+#                                  watch / take over the desktop (VNC). --open (and plain view at a terminal on the
+#                                  Mac's screen): Screen Sharing on this Mac, with the password it remembers in the
+#                                  login keychain once you agree (VIEW_REMEMBER), else on the clipboard for 45 s;
+#                                  --print: how to connect from elsewhere; --tailnet: how to publish it (you run it);
+#                                  --remember: save it for Screen Sharing now; --forget: remove what it saved
 #   sh -c CMD | --file SCRIPT | -  [--cwd DIR] [--timeout S] [--max-output B] [--read-only] [--json] [--raw] [-- ARGS]
 #                                  run bash in the VM as the desktop user, with the desktop's environment;
 #                                  exit status = the script's (124 timeout, 125 refused, 255 couldn't run)
@@ -90,9 +98,13 @@
 #           | import-passwords --browser chrome|--csv FILE | import-session --browser chrome --site HOST --name N --to-profile P
 #           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
+#           | fill NAME --field password|username|otp --human [--window-id N]   (a human-mode browser: Firefox)
 #           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove | lock
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | token renew ID|--all [--ttl 15m] | tokens | revoke ID|--all
+#           | ask --site S --kind code|link --why TEXT [--into TAB/FIELD | --human] [--wait 5m] | give ID (stdin only)
+#           | code --site S (--into TAB/FIELD | --human) < value | relay --from TAB/ELEMENT --to TAB/FIELD --site S
+#           | fill --request ID | rule add code|relay ...   one-time codes and sign-in links (SECURITY.md)
 #                                  use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
@@ -275,7 +287,7 @@ do_start() { # [--no-volumes]
   fi
   vm_start "$VM_NAME"
   storage_started
-  ok "VM running (gateway policy: config/netgw-rules.json)"
+  ok "VM running (gateway rules: config/netgw-rules.json, and a network allowlist when one is in force)"
   wait_ssh ops 240 || { storage_abort; die "guest SSH did not come up (see logs/lume-$VM_NAME.log)"; }
   ok "SSH (127.0.0.1:$SSH_PORT, pinned host key)"
   sync_guest_options
@@ -673,7 +685,7 @@ def esc_all(o, depth=0):
 gs, mcp, lease, fwd = esc_all(gs), esc_all(mcp), _esc(lease), _esc(fwd)
 def m(b): return "\033[32m✓\033[0m" if b else "\033[31m✗\033[0m"
 print(f"VM            {vm}    baseline: {base}")
-print(f"gateway       {m(out['gateway'])} cua-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
+print(f"gateway       {m(out['gateway'])} mcomp-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
 if layout == "old":
     print("guest         \033[33mbuilt by an earlier version (older layout)\033[0m: rebuild it with "
@@ -747,6 +759,17 @@ if stg:
     import storage
     for line in storage.describe_status(stg, gs.get("storage") if isinstance(gs.get("storage"), dict) else None, vm == "running"):
         print(line)
+try:                                          # the network allowlist (metacomputer net), if one is in force
+    sys.path.insert(0, lib)
+    import netpolicy
+    np_paths = netpolicy.paths()
+    np_state = netpolicy.read_state(np_paths)
+    if np_state is not None:
+        print("network       " + _esc(netpolicy.describe(np_state)) + "   (metacomputer net)")
+        if out["gateway"] and netpolicy.gateway_reads_it(np_paths) is not True:
+            print("              \033[33mnot in force: the running gateway doesn't read it\033[0m: metacomputer stop, then start")
+except Exception as e:
+    print(f"network       \033[33mallowlist unreadable\033[0m ({_esc(str(e))[:160]})   (metacomputer net status)")
 print(recording.status_line(out["recordings"]))
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
@@ -1204,36 +1227,78 @@ browser_set() { # KEY VALUE: written to this machine's config (config/local.env)
     echo "$1=$2"; } > "$tmp"
   mv "$tmp" "$LOCAL_CONFIG"
 }
-do_browser() { # [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME [--yes]] | --json]
+do_browser() { # [default firefox|chrome | mode human|page|hybrid | pacing human|fast | profiles [--new NAME | --delete NAME [--firefox] [--yes]] | --json]
+  local kept_root="/home/$GUEST_USER/.local/state/metacomputer/firefox-profiles"   # lib/guest_inspect.py has the same
   case "${1:-}" in
     ""|--json)
-      local b m; b="$(browser_get BROWSER firefox)"; m="$(browser_get MODE human)"
-      if [ "${1:-}" = --json ]; then printf '{"browser":"%s","mode":"%s"}\n' "$b" "$m"
+      local b m p; b="$(browser_get BROWSER firefox)"; m="$(browser_get MODE human)"; p="$(browser_get BROWSER_PACING human)"
+      if [ "${1:-}" = --json ]; then printf '{"browser":"%s","mode":"%s","pacing":"%s"}\n' "$b" "$m" "$p"
       else
         echo "default browser: $b   (firefox | chrome)"
-        echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome)"
-        echo "Words in a request override these. Change with: metacomputer browser default chrome | metacomputer browser mode page"
+        echo "default mode:    $m   (human | page | hybrid; page and hybrid need chrome; sign-ins and other account pages: human)"
+        echo "pacing:          $p   (human: typing, steps and pixel clicks in browser windows at a person's pace | fast)"
+        echo "Words in a request override the browser and mode. Change with: metacomputer browser default chrome | mode page | pacing fast"
       fi ;;
     default) case "${2:-}" in firefox|chrome) browser_set BROWSER "$2"; echo "default browser: $2" ;;
                               *) die "usage: metacomputer browser default firefox|chrome" ;; esac ;;
     mode)    case "${2:-}" in human|page|hybrid) browser_set MODE "$2"; echo "default mode: $2" ;;
                               *) die "usage: metacomputer browser mode human|page|hybrid" ;; esac ;;
+    pacing)  case "${2:-}" in human|fast) browser_set BROWSER_PACING "$2"
+                                          echo "pacing: $2 (the hub picks it up when no session is using it; metacomputer hub stop restarts it)" ;;
+                              *) die "usage: metacomputer browser pacing human|fast" ;; esac ;;
     profiles)
       need_running
-      if [ "${2:-}" = --delete ]; then
-        local name="${3:-}"; shift 3 2>/dev/null || true
-        [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "usage: metacomputer browser profiles --delete NAME [--yes]"
-        parse_flags "$@"
-        local dir="/home/$GUEST_USER/.local/state/cua-driver/browser-profiles/$name"
-        gssh ops "test -d '$dir'" >/dev/null || die "no driver profile named $name (metacomputer browser profiles)"
-        # [-] keeps pgrep from matching this very ssh command line
-        gssh ops "pgrep -u \"\$(id -u)\" -f -- '[-]-user-data-dir=$dir' >/dev/null" >/dev/null && die "profile $name is in use by a running Chrome; close it first"
-        confirm "Delete the Chrome profile '$name' in the VM (its cookies and sign-ins go with it)?"
-        gssh ops "rm -rf -- '$dir'" >/dev/null && echo "deleted profile $name"
-      else
-        gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles
-      fi ;;
-    *) die "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | profiles [--delete NAME]]" ;;
+      local name="${3:-}"
+      case "${2:-}" in
+        --new|--delete)
+          { [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$ ]] && [ "$name" != . ] && [ "$name" != .. ]; } \
+            || die "usage: metacomputer browser profiles --new NAME | --delete NAME [--firefox] [--yes] (NAME: letters, digits, . _ -)" ;;
+      esac
+      case "${2:-}" in
+        --new)
+          # A kept Firefox profile for human mode: sign in once (the user, in a handoff), stay signed in until a reset.
+          # Made in the VM by lib/guest_profiles.py, which refuses a link anywhere on the way.
+          local rc=0
+          gssh ops "python3 -I - new firefox '$name'" < "$LAB_ROOT/lib/guest_profiles.py" >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0) ;;
+            5) die "refused: a link or something other than a folder is on the way to $kept_root/$name in the VM" ;;
+            *) die "couldn't make the profile folder in the VM (exit $rc)" ;;
+          esac
+          echo "kept Firefox profile $name: $kept_root/$name"
+          echo "open it with launch_app:"
+          printf '  {"name": "firefox", "additional_arguments": ["--profile", "%s", "--no-remote", "URL"]}\n' "$kept_root/$name"
+          echo "(--no-remote lets it run beside another Firefox; its cookies and sign-ins stay until a VM reset)" ;;
+        --delete)
+          shift 3 2>/dev/null || true
+          local firefox=0 rest=() kind label rc=0
+          for a in "$@"; do [ "$a" = --firefox ] && firefox=1 || rest+=("$a"); done
+          parse_flags ${rest[@]+"${rest[@]}"}
+          if [ "$firefox" = 1 ]; then kind=firefox label="kept Firefox profile"; else kind=chrome label="Chrome profile"; fi
+          # Checked and deleted in the VM by lib/guest_profiles.py: only a direct child of the profiles folder, reached
+          # without following a link, never one a running browser uses (either way of naming it on its command line).
+          gssh ops "python3 -I - check $kind '$name'" < "$LAB_ROOT/lib/guest_profiles.py" >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0) ;;
+            3) if [ "$firefox" = 1 ]; then die "no kept Firefox profile named $name (metacomputer browser profiles)"
+               else die "no driver profile named $name (metacomputer browser profiles; a kept Firefox profile needs --firefox)"; fi ;;
+            4) die "profile $name is in use by a running $([ "$firefox" = 1 ] && echo Firefox || echo Chrome); close it first" ;;
+            5) die "refused: the $label $name, or the folder that holds it, is a link or not a folder in the VM" ;;
+            *) die "couldn't check the $label $name in the VM (exit $rc)" ;;
+          esac
+          confirm "Delete the $label '$name' in the VM (its cookies and sign-ins go with it)?"
+          rc=0
+          gssh ops "python3 -I - delete $kind '$name'" < "$LAB_ROOT/lib/guest_profiles.py" >/dev/null 2>&1 || rc=$?
+          case $rc in
+            0) echo "deleted $label $name" ;;
+            4) die "profile $name came into use by a running browser; close it first" ;;
+            *) die "the $label $name wasn't deleted (exit $rc)" ;;
+          esac ;;
+        "")
+          gssh ops "python3 -I - browser" < "$LAB_ROOT/lib/guest_inspect.py" | "$PY" "$LAB_ROOT/lib/guest_inspect.py" --render-profiles ;;
+        *) die "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;;
+      esac ;;
+    *) die "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | pacing human|fast | profiles [--new NAME | --delete NAME [--firefox]]]" ;;
   esac
 }
 
@@ -1672,29 +1737,132 @@ vnc_password_get() {
 
 view_host() { scutil --get LocalHostName 2>/dev/null || hostname -s; }
 
-do_view() { # [--open | --tailnet]
-  case "${1:-}" in
-    --open) view_open; return $? ;;
-    --tailnet) view_tailnet; return 0 ;;
-    "") ;;
-    *) die "usage: metacomputer view [--open | --tailnet]" ;;
+do_view() { # [--open | --print | --tailnet | --forget] [--remember | --no-remember]
+  local a mode="" flag=""
+  for a in "$@"; do
+    case "$a" in
+      --open|--print|--tailnet|--forget) [ -z "$mode" ] || die "usage: metacomputer view: one of --open, --print, --tailnet, --forget"
+                                         mode="${a#--}" ;;
+      --remember|--no-remember) [ -z "$flag" ] || die "usage: metacomputer view: --remember or --no-remember, not both"
+                                flag="${a#--}" ;;
+      *) die "usage: metacomputer view [--open | --print | --tailnet | --forget] [--remember | --no-remember]" ;;
+    esac
+  done
+  case "$mode:$flag" in tailnet:?*|print:?*|forget:?*) die "usage: --$flag goes with --open or plain view" ;; esac
+  case "$mode" in
+    open) view_open "$flag"; return $? ;;
+    print) view_print; return 0 ;;
+    tailnet) view_tailnet; return 0 ;;
+    forget) view_forget; return $? ;;
   esac
+  [ "$flag" = remember ] && { view_remember_now; return $?; }
+  # Plain view: a person at a terminal on the Mac's own screen gets the live view itself; anyone else (SSH, another
+  # device, a script or Claude, whose output isn't a terminal) gets how to connect.
+  if [ -t 0 ] && [ -t 1 ] && "$PY" "$LAB_ROOT/lib/liveview.py" gui >/dev/null; then view_open "$flag"; return $?; fi
+  view_print
+}
+
+view_print() {
   cat <<EOF
 Live view of the guest desktop (VNC, view + take over):
-  on this Mac:          metacomputer view --open
-                        (opens Screen Sharing and puts the live-view password on your clipboard)
+  on this Mac:          metacomputer view --open   (or plain metacomputer view, in Terminal on the Mac's screen)
+                        (opens Screen Sharing; it connects with the password it remembers once you agree,
+                        or the live-view password is on your clipboard)
   from another device:  ssh -N -L $VNC_PORT:127.0.0.1:$VNC_PORT $(view_host)
                         then connect a VNC client to localhost:$VNC_PORT
   password:             $(vnc_password_hint)
   over your tailnet:    metacomputer view --tailnet   (prints the command; publishing it is your choice)
-The port listens on 127.0.0.1 only (cua-netgw forward) and the guest firewall
+The port listens on 127.0.0.1 only (the gateway's forward) and the guest firewall
 admits it only from the gateway.
 EOF
 }
 
-# --open: Screen Sharing on this Mac, with the password on the clipboard for a short while. Never in the URL.
+# Screen Sharing's remembered password (SECURITY.md, "The live view"; lib/liveview.py remember): the login keychain
+# item Screen Sharing reads for vnc://127.0.0.1:VNC_PORT, written by osascript with the password on its stdin (never
+# an argument, the environment, a log or the output). Who may write it:
+#   - an explicit save (`view --remember`, `view --open --remember`): only typed at a terminal, and never while
+#     VIEW_REMEMBER=off; a failure is an error with its reason;
+#   - view --open without the flag: the first save only with a yes typed at a terminal here, or VIEW_REMEMBER=on;
+#     an item that's already there is brought up to date in place (a rebuilt VM's new password), unless off.
+# VIEW_REMEMBER=off means no writes at all. Removing it (`view --forget`) is typed at a terminal too. lib/liveview.py
+# checks the same rules itself, against mistakes rather than as a barrier: `remember` and `forget` only with a terminal
+# on stdin or --from-view (the internal flag passed here, after these checks; not proof of consent), `refresh` only
+# into an item that's already there, and never while VIEW_REMEMBER is off (its settings file's value, made stricter
+# by MCOMP_VIEW_REMEMBER, which these calls pass). A VIEW_REMEMBER that isn't ask, on or off counts as off.
+view_remember_setting() { case "${VIEW_REMEMBER:-ask}" in on|off|ask) echo "${VIEW_REMEMBER:-ask}" ;; *) echo off ;; esac; }
+view_remembered() { "$PY" "$LAB_ROOT/lib/liveview.py" remembered --port "$VNC_PORT" </dev/null >/dev/null 2>&1; }
+view_save() { # create | refresh: 0 = Screen Sharing's item holds the current live-view password; prints what happened
+  local how op=remember extra=--from-view
+  [ "$1" = refresh ] && op=refresh extra=""
+  how="$(vnc_password_get | MCOMP_VIEW_REMEMBER="$(view_remember_setting)" \
+           "$PY" "$LAB_ROOT/lib/liveview.py" "$op" --port "$VNC_PORT" ${extra:+"$extra"})" || return 1
+  case "$how" in
+    created) echo "Saved the live-view password in your login keychain, where Screen Sharing finds it for this"
+             echo "live view (vnc://127.0.0.1:$VNC_PORT). metacomputer view --forget removes it." ;;
+  esac
+  return 0
+}
+view_off_note() { echo "VIEW_REMEMBER=off in $LOCAL_CONFIG: nothing is saved for Screen Sharing while it's off. To save it, set VIEW_REMEMBER=ask (or remove that line), then run metacomputer view --remember"; }
+# FLAG (remember | no-remember | ""): sets VIEW_SAVE=create when the remembered password may be written now, made or
+# updated (the user's yes), refresh when it may only be brought up to date in the item that's there, else 0;
+# VIEW_HINT=1 when it could be saved, once the user says so. An explicit --remember that isn't allowed
+# stops here with the reason.
+view_remember_decide() {
+  local flag="$1" setting a rc=0
+  VIEW_SAVE=0 VIEW_HINT=0
+  setting="$(view_remember_setting)"
+  case "${VIEW_REMEMBER:-ask}" in on|off|ask) ;; *) warn "VIEW_REMEMBER=${VIEW_REMEMBER} isn't ask, on or off, so it counts as off" ;; esac
+  [ "$flag" = no-remember ] && return 0
+  if [ "$flag" = remember ]; then
+    [ -t 0 ] || die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal"
+    [ "$setting" = off ] && die "$(view_off_note)"
+    VIEW_SAVE=create                              # made or updated; lib/liveview.py says why if it can't
+    return 0
+  fi
+  view_remembered || rc=$?
+  if [ "$setting" = off ]; then
+    [ $rc = 0 ] && { echo "Screen Sharing still has the live-view password saved earlier (VIEW_REMEMBER=off doesn't remove it;"
+                     echo "metacomputer view --forget does)."; }
+    return 0
+  fi
+  [ $rc = 0 ] && { VIEW_SAVE=refresh; return 0; } # there already, with the user's yes: brought up to date
+  [ $rc = 1 ] || return 0                         # the keychain couldn't say: the clipboard, as before
+  [ "$setting" = on ] && { VIEW_SAVE=create; return 0; }
+  if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi
+  echo "Screen Sharing can remember the live-view password, so the live view opens without asking for it:"
+  echo "metacomputer saves it in your login keychain, where Screen Sharing (and osascript, which writes it) can"
+  echo "read it without asking, and updates it after each rebuild. It isn't your Mac's password."
+  printf 'Save it? [Y/n] '
+  read -r a || a=n
+  case "$a" in
+    ""|y|Y|yes|Yes) VIEW_SAVE=create ;;
+    *) browser_set VIEW_REMEMBER off
+       echo "Not saved, and not asked again (VIEW_REMEMBER=off in $LOCAL_CONFIG). To save it later, set VIEW_REMEMBER=ask"
+       echo "there (or remove that line), then run metacomputer view --remember." ;;
+  esac
+}
+
+view_remember_now() { # view --remember: save it now, without opening anything
+  view_remember_decide remember
+  view_save create || die "the live-view password wasn't saved for Screen Sharing (the reason is above)"
+  echo "Screen Sharing now connects to the live view without asking for the password: metacomputer view --open"
+}
+
+view_forget() { # view --forget: remove Screen Sharing's saved live-view password (only the item metacomputer made)
+  local how
+  [ -t 0 ] || die "view --forget changes your login keychain, so it's yours to run: in your own terminal"
+  how="$("$PY" "$LAB_ROOT/lib/liveview.py" forget --port "$VNC_PORT" --from-view </dev/null)" || die "couldn't remove it (above)"
+  case "$how" in
+    removed) echo "Removed the live-view password metacomputer saved for Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+             [ "$(view_remember_setting)" = off ] || echo "(view --open asks again next time; VIEW_REMEMBER=off stops that.)" ;;
+    *) echo "Screen Sharing has no live-view password from metacomputer for vnc://127.0.0.1:$VNC_PORT." ;;
+  esac
+}
+
+# --open: Screen Sharing on this Mac, with the password it remembers, or on the clipboard for a short while. Never in
+# the URL. FLAG: remember | no-remember | "".
 view_open() {
-  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}"
+  local why secs="${MCOMP_VIEW_CLIPBOARD_S:-${VIEW_CLIPBOARD_S:-45}}" saved=0 failed=0
   [[ "$secs" =~ ^[0-9]{1,4}$ ]] || secs=45
   vm_running "$VM_NAME" || die "the virtual computer is off: metacomputer start, then metacomputer view --open"
   if ! why="$("$PY" "$LAB_ROOT/lib/liveview.py" gui)"; then
@@ -1710,18 +1878,31 @@ metacomputer view --open needs the Mac's own screen, and $why.
 EOF
     return 1
   fi
-  if vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip --clear-after "$secs"; then
+  view_remember_decide "${1:-}"
+  if [ "$VIEW_SAVE" != 0 ]; then
+    if view_save "$VIEW_SAVE"; then saved=1
+    else
+      warn "Screen Sharing's saved password couldn't be saved or brought up to date (the reason is above); using the clipboard instead"
+      [ "${1:-}" = remember ] && failed=1         # asked for explicitly: the command fails, after opening the live view
+    fi
+  fi
+  if [ "$saved" = 1 ]; then
+    echo "Screen Sharing connects with the live-view password saved in your login keychain: nothing to paste."
+    echo "(If it asks anyway: metacomputer view --open --no-remember puts it on the clipboard.)"
+  elif vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip --clear-after "$secs"; then
     echo "The live-view password is on your clipboard: paste it with Cmd+V when Screen Sharing asks (it isn't"
     if [ "$secs" -gt 0 ]; then
       echo "your Mac's password). It's cleared from the clipboard in $secs s, if it's still there then."
     else
       echo "your Mac's password)."
     fi
+    [ "$VIEW_HINT" = 1 ] && echo "To have Screen Sharing remember it instead, run once in your own terminal: metacomputer view --remember"
   else
     warn "the password isn't on the clipboard; when Screen Sharing asks, read it with: $(vnc_password_hint)"
   fi
   open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
   echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+  return $failed
 }
 
 # --tailnet: the commands that would publish the port to your own tailnet. Printed, never run: it changes this
@@ -1870,6 +2051,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
   [ $# -gt 0 ] && shift
   # This VM's vault and spool (scripts/lib.sh): empty for the main VM, which leaves the vault's own defaults.
   [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"
+  # Dialogs that wait for you (`secrets ask`'s): only the unlock reads it, from your own settings, when you unlock.
+  export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
   [ -z "${EVENTS_SPOOL:-}" ] || export MCOMP_EVENTS_SPOOL="$EVENTS_SPOOL"
   # A per-VM vault folder's parent (the vault makes only the last folder, 0700).
   case "${VAULT_DIR:-}" in "$MC_VMS_APP_DIR/"*) ( umask 077; mkdir -p "$MC_VMS_APP_DIR" ) || die "couldn't make $(mc_tilde "$MC_VMS_APP_DIR")" ;; esac
@@ -1897,7 +2080,31 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # The session is for this VM (its approval policy, and where `session load` puts it).
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
       exec "$VAULT_BIN" import-session "$@" ;;
-    fill|login|session|token)
+    ask)
+      # A request for you: nothing acts on the VM until a value comes (give, the dialog), which follows the approvals.
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      exec "$VAULT_BIN" ask "$@" ;;
+    status)
+      "$VAULT_BIN" status "$@"; rc=$?
+      case " $* " in *" --json "*) ;; *)
+        echo "codes:    $([ "${CODES_VIA:-vault}" = claude ] && echo "Claude may read and type one-time codes itself (CODES_VIA=claude; guidance, not enforced)" || echo "through the vault: secrets code, relay or ask (CODES_VIA=vault)"); dialogs: ${INTERACTIVE_PROMPTS:-off} (INTERACTIVE_PROMPTS, read at unlock)" ;;
+      esac
+      return $rc ;;
+    approve)
+      # Approving a waiting one-time code request fills it in the VM once you've allowed it: that waits for an open
+      # handoff like any fill, and runs like one (withdrawn if this is stopped, with its in-flight marker and `settle`).
+      # Only an approval the vault's own list shows as another kind (one that answers a fill already holding this)
+      # goes straight on; anything unclear (an id not listed, a list that can't be read) counts as one that may fill.
+      if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then
+        # The VM whose handoff this checks goes with it: the vault refuses to fill another VM's request.
+        secrets_vm_is_this "$@" || die "secrets approve acts on this VM ($VM_NAME), whose handoff it checks; for another VM's request, use that VM's settings (metacomputer --vm NAME, or MCOMP_CONFIG)"
+        handoff_hold
+        [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+        secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"
+        return $?
+      fi
+      exec "$VAULT_BIN" approve "$@" ;;
+    fill|login|session|token|code|relay|give)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
       # While the user has the computer (metacomputer handoff), a fill, login or session load waits like any acting
@@ -1905,7 +2112,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # can take minutes), so a handoff can't open while it's on its way. That check is this VM's, so --vm must
       # name this VM; another VM is chosen by its own settings (MCOMP_CONFIG).
       local inflight=""
-      if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
+      if [ "$sub" = fill ] || [ "$sub" = login ] || [ "$sub" = code ] || [ "$sub" = relay ] || [ "$sub" = give ] \
+         || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
         secrets_vm_is_this "$@" || die "secrets $sub acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
         handoff_hold
         inflight="$RUN_DIR/owners/vault-inflight.$$"
@@ -1916,35 +2124,63 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         # certificates refuses: say so before anyone is asked to approve.
         [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
+      # The VM whose handoff this checked: the vault refuses a request (give, fill --request) that's another VM's.
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
-      # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
-      # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
-      # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
-      trap ':' INT TERM HUP
-      # Until the unlock process is known to be done with this request, a marker says one may still be working: a
-      # handoff opened after this command ended without that knowledge settles the vault first.
-      if [ -n "$inflight" ]; then
-        ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
-      fi
-      out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
-      if [ -n "$inflight" ]; then
-        # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
-        # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error) or 64 (usage). Anything else (5:
-        # withdrawn without its confirmation; a crash, a signal) may leave it working: keep the dispatch lock while
-        # `settle` waits for it, and the marker if even that doesn't confirm.
-        case "$rc" in
-          0|1|2|3|4|64) rm -f "$inflight" ;;
-          *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
-        esac
-      fi
-      trap - INT TERM HUP
-      printf '%s\n' "$out"
-      # The action log gets metadata only: never the token itself.
-      printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
-      # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
-      return $rc ;;
+      secrets_run_acting "$kind" "$inflight" "$sub" "$@"
+      return $? ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_approve_id() { # APPROVE_ARGS...: the request id, read as the vault reads `approve`'s arguments (vault/Approvals.swift:
+  # --scope takes a value, --scope=V and the other options don't; the id is the one argument left). Empty when unclear.
+  local a id="" n=0 skip=0
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in --scope|--vm) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac
+  done
+  [ "$n" = 1 ] && printf '%s' "$id"
+}
+secrets_plain_approval() { # ID: 0 only when the vault's own list (read now) shows ID as an approval that isn't a one-time
+  # code request's: those fill once allowed. A list that can't be read, or an id it doesn't show, is 1 (may fill).
+  [[ "${1:-}" =~ ^[0-9a-f]{8}$ ]] || return 1
+  local listing
+  listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1
+  printf '%s' "$listing" | "$PY" -c 'import json,sys
+want = sys.argv[1]
+rows = json.load(sys.stdin).get("requests")
+sys.exit(0 if isinstance(rows, list) and any(isinstance(r, dict) and r.get("id") == want and "kind" not in r for r in rows) else 1)' "$1" 2>/dev/null
+}
+secrets_run_acting() { # KIND INFLIGHT VAULT_ARGS...: the vault client for a request that may act on the VM (a fill, a
+  # sign-in, a session load, a one-time code, an approval that fills), called with the dispatch lock held (handoff_hold)
+  # when INFLIGHT names a marker. Its output goes to stdout and, as metadata only, to the signed action log.
+  local kind="$1" inflight="$2" out rc
+  shift 2
+  # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
+  # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
+  # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
+  trap ':' INT TERM HUP
+  # Until the unlock process is known to be done with this request, a marker says one may still be working: a
+  # handoff opened after this command ended without that knowledge settles the vault first.
+  if [ -n "$inflight" ]; then
+    ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
+  fi
+  out="$("$VAULT_BIN" "$@")"; rc=$?
+  if [ -n "$inflight" ]; then
+    # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
+    # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error), 6 (expired), 7 (needs approval) or 64
+    # (usage). Anything else (5: withdrawn without its confirmation; a crash, a signal) may leave it working: keep the
+    # dispatch lock while `settle` waits for it, and the marker if even that doesn't confirm.
+    case "$rc" in
+      0|1|2|3|4|6|7|64) rm -f "$inflight" ;;
+      *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
+    esac
+  fi
+  trap - INT TERM HUP
+  printf '%s\n' "$out"
+  # The action log gets metadata only: never the token itself.
+  printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
+  # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
+  return $rc
 }
 secrets_vm_is_this() { # ARGS...: 0 when every --vm among them names this VM (the vault takes the last one)
   local a want=0
@@ -1997,6 +2233,9 @@ case "$cmd" in
   input-reset) do_input_reset "$@" ;;
   rename)     do_rename "$@" ;;
   web)        export_options; exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
+  net)        export_options; net_policy "$@"; exit $? ;;
+  trace)      export_options; exec "$PY" "$LAB_ROOT/lib/traces.py" "$@" ;;
+  each)       exec "$PY" "$LAB_ROOT/lib/each.py" "$@" ;;
   release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;
   get)        do_get "$@" ;;

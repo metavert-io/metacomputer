@@ -41,16 +41,23 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   focus with a fresh read. Details: `skills/metacomputer/SKILL.md` ("How to
   drive it") and `DESKTOP.md` (with its error table).
 - Browsers: Firefox is the default; Chrome is installed. Modes and steps
-  (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Never
+  (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Sign-in, sign-up, checkout,
+  account settings and posting go through human mode first (sites can flag page-mode Chrome as automated); no
+  fingerprint spoofing, stealth plugins or CAPTCHA services, ever. Human pacing (`BROWSER_PACING=human`,
+  `lib/pacing.py`) runs in the hub after every guard: it may change only delays and add pointer moves, and never
+  puts typed text in a log. Never
   send background input or `set_value` to Chrome (the hub enforces it);
   `metacomputer input-reset` if Chrome ignores typing.
 - Logins, 2FA codes and API keys: never ask for or type passwords, codes, keys or
   the vault passphrase. Use `metacomputer secrets list` / `fill NAME --field
-  password|username|otp` in page-mode Chrome, and `token NAME` (a short-lived token and
+  password|username|otp` in page-mode Chrome (`--human` for the focused field of the VM's
+  regular Firefox: its site from the address bar), and `token NAME` (a short-lived token and
   the proxy URL inside the VM) for API keys; never put a real key in the VM
-  (`skills/metacomputer/SECRETS.md`). If it says locked, ask the user to run
+  (`skills/metacomputer/SECRETS.md`). Emailed or texted codes and sign-in links go through
+  `secrets code|relay|ask` (`vault/Codes.swift`, SECURITY.md "One-time codes"); Claude types
+  one itself only when the user set `CODES_VIA=claude`. If it says locked, ask the user to run
   `metacomputer secrets unlock` in their own terminal. Only the user runs `init`,
-  `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add`,
+  `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add`, `give`,
   `import-passwords`, `import-session` and `audit-sink add|remove` (`approve` and `rule add`
   show a Touch ID dialog: never trigger it). Tests never read the real Chrome profile or its
   "Chrome Safe Storage" Keychain item: they use synthetic profiles and the test build's stand-ins.
@@ -60,11 +67,13 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   all go through it, and it applies every guard to every client: one controller
   (check and claim under `owners.lock()`, a lease for calls a client left
   running), the Chrome guard, bounded mode, the coordinate guard
-  (`COORD_GUARD`), action-log notes, events. A refusal from any of them is the
+  (`COORD_GUARD`), human pacing (`BROWSER_PACING`), action-log notes, events. A refusal from any of them is the
   user's control: report it, never route around it (`call`, a script,
   `MCOMP_DIRECT_BRIDGE=1`, the shell). The raw driver connection is for the hub
   and transport tests only (`MCPClient(transport_test=True)`). New guards go in
-  the hub, never in one client. The VM is untrusted: keep the hub's frame limits,
+  the hub, never in one client, and read the call `lib/batch_steps.py` normalised at the hub's entry (the driver's
+  own step shorthand, aliases and string scalars, mirrored for the pinned driver: re-check it on a driver update).
+  The VM is untrusted: keep the hub's frame limits,
   per-client backlogs and caps on what the driver can make it keep, parse wire
   JSON and drain stderr with `lib/wirelimits.py`, and escape the VM's text on a
   terminal (`lib/termsafe.py`).
@@ -117,8 +126,13 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   under `owners.acting()` (bash: `handoff_hold`), the dispatch lock that opening a handoff
   takes exclusively; never act between a check and a dispatch. Never try to pass a check, switch
   browsers or profiles to get around one, or run `handoff done` for the user. Live
-  view for the user: `metacomputer view --open` (the password goes on the clipboard,
-  never into argv, output, logs or events); `view --tailnet` only prints the command.
+  view for the user: `metacomputer view --open` (Screen Sharing's remembered password in the
+  login keychain, written by osascript, or the clipboard; never in argv, output, logs or events;
+  lib/liveview.py, which checks the same rules when run by itself; its `--from-view` is the wrapper's
+  internal flag, not consent). Only the user saves or removes it (`view --remember` / `--forget` refuse
+  without a terminal; never run them, or the helper; `VIEW_REMEMBER=off` = no writes); `view --tailnet` only prints the command. Dialogs that wait for the user
+  need `INTERACTIVE_PROMPTS=on` (off by default): the handoff's dialog takes `--say` as osascript
+  argv data, never script text.
   Tests: `python3 tests/test_handoff.py` (no VM), test_hub.py's handoff checks, and
   `tests/test_handoff_vm.py` (test VM only: `MCOMP_CONFIG`).
 - Optional event stream (docs/events.md): `metacomputer notify` when blocked
@@ -141,7 +155,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
 ## Useful commands
 
 ```bash
-metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--tailnet] | where
+metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--print|--tailnet|--forget] | where
 metacomputer handoff --why captcha|login|2fa|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
 metacomputer --vm NAME COMMAND | vm list | vm create NAME | vm delete NAME   # more than one VM (config/vms/NAME.env)
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
@@ -247,11 +261,11 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
-  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vm_claude_vm.py` and
+  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_vm_claude_vm.py` and
   `tests/test_hidden_text_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
@@ -259,7 +273,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   command line; keep `tests/test_secrets.py`, `tests/test_vault_ops.py` and
   `tests/test_vault_approvals.py` passing. No approval may be producible by a program: only a
   line typed at the unlock terminal, macOS's LocalAuthentication dialog or the passphrase.
-  Test-only switches (`MCOMP_VAULT_TEST_*`) stay inside `#if MCOMP_VAULT_TESTING`.
+  Test-only switches (`MCOMP_VAULT_TEST_*`) stay inside `#if MCOMP_VAULT_TESTING`. Dialogs that wait for
+  the user only with `INTERACTIVE_PROMPTS=on` (default off; never from a command without a terminal), their
+  words passed as arguments, never spliced into a script.
   Its audit sinks use the same wrappings as the event stream (CloudEvents, OTLP,
   syslog, ntfy) and its needs_you files follow the event spool contract.
 

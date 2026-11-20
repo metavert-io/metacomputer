@@ -1824,7 +1824,7 @@ def final7_fixes(td):
 DELETE_EXCEPTIONS = [
     ("scripts/lib.sh", '"$LUME" delete "$1" --force', "runner"),     # runner_delete: its folder checked first
     ("bin/metacomputer", "gssh ops 'rm -rf ~/metacomputer-runs/*'", "guest"),
-    ("bin/metacomputer", 'gssh ops "rm -rf -- \'$dir\'"', "guest"),
+    ("lib/guest_profiles.py", "shutil.rmtree(name, dir_fd=root)", "guest"),   # a browser profile, in the VM
     ("scripts/build-vm.sh", "gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'", "guest"),
     ("lib/guest_put.py", "shutil.rmtree(target)", "guest"),
     ("lib/guest_put.py", "shutil.rmtree(tmp, ignore_errors=True)", "guest"),
@@ -1834,6 +1834,8 @@ DELETE_EXCEPTIONS = [
     ("lib/vm_claude_guest.sh", 'rm -rf "$STATE"', "guest"),
     ("lib/vm_shell_guest.py", "shutil.rmtree(p, ignore_errors=True)", "guest"),
     ("lib/vm_shell_guest.py", "shutil.rmtree(d, ignore_errors=True)", "guest"),
+    ("lib/page_guest.py", "shutil.rmtree(self.profile, ignore_errors=True)", "guest"),   # its own throwaway profile, in the VM
+    ("lib/page_guest.py", "shutil.rmtree(prof, ignore_errors=True)", "guest"),           # ...a kept page's, checked as one
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),
@@ -1845,6 +1847,12 @@ DELETE_HELPER = ("lib/safedelete.py", "scripts/safe-rmtree.sh")
 # the function). A program's own records go through safedelete.remove_records; an event spool through check_spool.
 NAMED = "only files it names itself (not ones it found by listing)"
 DELETE_WALK_EXCEPTIONS = {
+    # In the VM (`metacomputer browser profiles --delete`): its one listing is /proc, to see whether a browser uses the
+    # profile; it deletes one folder, a direct child of the profiles folder reached without following a link.
+    ("lib/guest_profiles.py", "main"): ("one browser profile in the VM: a plain name, a real folder directly in the "
+                                        "profiles folder (opened link by link with O_NOFOLLOW), by descriptor",
+                                        ["root = open_root(kind", "os.stat(name, dir_fd=root, follow_symlinks=False)",
+                                         "shutil.rmtree(name, dir_fd=root)"]),
     # Consuming or rewriting what a listing found, behind a guard:
     ("lib/events.py", "drain_spool"): ("the event spool, consumed only after lib/safedelete.py check_spool passed (it "
                                        "may not be, hold or reach another protected folder); a file that can't be "

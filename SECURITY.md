@@ -319,6 +319,57 @@ How it's enforced:
   driver had launched, even with `terminate: driver_launched`. Close them from
   their own window, or use `metacomputer desktop-restart`.
 
+## Network allowlists (`metacomputer net`)
+
+By default the VM reaches the public internet and nothing of yours: the gateway on
+this Mac (mcomp-netgw: Cua's cua-netgw with a small patch, below) refuses your LAN, your tailnet, this Mac's own addresses, cloud
+metadata and outbound mail (architecture.md, "Network"). For a task that only needs
+a few sites, `metacomputer net allow example.com stripe.com --for 2h` narrows that to
+those names for that long:
+
+- **Enforced on this Mac, by name.** The gateway (mcomp-netgw: Cua's cua-netgw with a small
+  patch that makes name rules hold; architecture.md, "Network") answers DNS only for the names on the
+  list (PTR questions included; a name with escaped characters is refused; a question
+  goes upstream with nothing else the guest put in it) (a name also covers its subdomains unless `--exact`; `*.example.com` covers only
+  the subdomains) and lets the guest open connections only to the addresses its own
+  resolver returned for them, within 1 to 5 minutes of each answer. Every other
+  connection is refused and logged like any other blocked connection, and connections
+  open when the list starts or changes are closed if it refuses them. Nothing in the VM
+  can change the list.
+- **Claude can narrow it, only you can widen it.** Starting a list (with no list in
+  force) and `net remove` work from anywhere, Claude included, because they only take
+  reach away. Adding names or time to a list in force, and `net clear`, run only at a
+  terminal (`metacomputer net` refuses them otherwise, with the command to run). That
+  keeps a page that talks Claude into it from opening the network mid-task; it doesn't
+  stop a program running as you, which could edit the files itself.
+- **It ends on time.** The length is fixed when the list starts (1 minute to 24 hours,
+  2 hours by default), and a small timer on this Mac lifts it then (or the next start,
+  if the Mac was asleep). Events `security.net_allowlist_started`, `net_allowlist_changed`
+  and `net_allowlist_lifted` carry counts and minutes, never the names.
+- **It fails closed.** The rules file the gateway reads (`RUN_DIR/netgw-rules.json`:
+  config/netgw-rules.json plus the list) is checked with the gateway's own
+  `-check-rules` before it replaces the one in force; a list file that can't be read
+  stops `metacomputer start` instead of starting with the internet open. Each change saves
+  the list before it writes the rules, under one lock, so an interrupted change never
+  leaves the saved list wider than the gateway's rules. While the VM runs, `net` then asks
+  the gateway, over its control socket on this Mac, for a digest of the rules it has in
+  force, and says the list is in force only when that's the file it just wrote; otherwise
+  it exits 4 with what to do (a gateway that couldn't load the file keeps its earlier
+  rules). The VM's word is never taken for it. A list goes only on top of the stock kind of
+  config/netgw-rules.json (refusals, everything else accepted); one that opens address
+  ranges or names of its own is refused.
+
+**Where it ends:** the list is about where connections go, not what they carry. A connection to an allowed address stays open after its name's answer runs out (only new connections need a fresh lookup), until it closes or the list changes. Names on the list and their subdomains are looked up upstream, so whoever runs an allowed name's DNS sees the questions for it. If the gateway can't load a new rules file it keeps the rules it has; `net` then exits 4 instead of saying the list is in force. An
+allowed site that takes uploads or posts (a code host, a form) can still receive
+anything, so list only what the task needs. Sites on a shared address (a CDN serves
+many sites from one address) are reachable by that address while an allowed name
+points there, whatever name a connection then asks for. The SSH and live-view
+forwards and the vault's API proxy don't go out through the gateway, so they keep
+working. A VM whose gateway was started by an earlier version keeps reading the
+checkout's rules: `metacomputer stop` and `start` once (and, if you use the secrets
+vault, `metacomputer secrets bind` again: the vault pins the gateway program, and this
+one is new).
+
 ## The hub and its guards (`MCP_HUB`, `COORD_GUARD`)
 
 One process per VM on your Mac, the hub (`lib/mcp_hub.py`), holds the single
@@ -335,6 +386,23 @@ complex", the Chrome guard's and bounded mode's notes, under `metacomputer_note`
 the hidden-text marks under `metacomputer_hidden_text`. Those names are the hub's own:
 the VM's answers can't use them ([Hidden page text](#hidden-page-text), "The hub's names
 are its own").
+
+**The call as the driver reads it.** Cua Driver accepts more than its schemas show: a `run_steps` step may be
+`{tool, args}`, flat fields beside `tool`, or the shorthand `{<tool>: args}`; step tool names have aliases (`type`,
+`set`, `press`, `key`, `hover`, …); a key name can be the tool (`{"tool": "down"}`); `triple_click` is a click with
+count 3; a one-key hotkey is a press_key and a press_key of a printable symbol types it; `type_text_chars` and
+`run_actions` are old names of type_text and run_steps; and a string where the schema wants a number or a boolean
+(`"pid": "77"`, `"delay_ms": "200"`) is turned into one. Guards that tested only the canonical forms could be walked
+past with the others (a `{"type": …}` step aimed at Chrome went out as background input, and pixels sent as strings
+skipped the coordinate guard). So the hub normalises each call once, as it arrives, with a copy of the driver's own
+rules for the pinned version (`lib/batch_steps.py`), before any guard; every guard and human pacing read that
+normalised call, and it's what the hub sends the driver. The canonical forms are a fixed point of the driver's own
+normalisation, so what the guards checked is what runs (rewrites are applied until nothing changes, as the driver's
+own second pass would). A step the driver would refuse is left as it came (the driver then refuses the whole batch
+before running any of it), and argument spellings no guard reads (key names, scroll deltas) are left to the driver.
+A batch over the driver's 64 items is refused on the list as sent, before trailing reads are folded, as the driver
+does. Numbers in strings are read in one linear pass, and a number field holding a string over 64 characters is
+refused (the driver would still read a zero-padded one). A call the hub can't normalise isn't passed on.
 
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
 the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
@@ -360,12 +428,28 @@ the hub, and the hub applies, to each one:
   hub doesn't have is refused whatever else the call names (a non-Chrome window or
   app name next to it proves nothing about the token), and so are a window id the
   driver doesn't list (`window_unknown`) and a pid, window id and token that
-  don't all belong to one app (`target_conflict`). A `run_steps` step that names
-  no window is judged by the window it inherits from the last step that named one
-  (or the batch's), as the driver runs it;
+  don't all belong to one app (`target_conflict`). A `run_steps` step is judged by
+  the window the driver runs it in, by the driver's own rules (`step_targets`): the
+  batch's window, then the last window a step's own pid, window_id, app or window
+  named, or a `wait_for` named (or an `expect` on a step that is only a check); a read
+  written as a step between actions changes nothing, an `expect` on an action step
+  changes nothing, and a nested `target: {kind: "window", pid, window_id}` counts for
+  its own step (with the inherited window beside it, which the driver adds) but isn't
+  passed on. Where a step could run in more than one window, Chrome among them counts.
+  A window named by app or title is resolved against the live window list by the
+  driver's own rules (a case-folded substring of the app name or title, on-screen
+  windows first): when Chrome is among the windows it could be (off-screen ones too:
+  a step can bring one forward), or it matches none the hub can see, it counts as Chrome (`set_value` doesn't take a nested target,
+  and `run_script` can't run inside `run_steps`). Titles change while a batch runs
+  and the driver matches the name again at each step, so a window named by title
+  without a numeric `pid` or `window_id` counts as Chrome whenever a Chrome window
+  is open; a list the hub can't read whole (windows skipped, a name or title past
+  its length cut) counts as Chrome too. A Chrome window that opens during a batch
+  isn't seen until the next call;
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
+- human pacing for browser windows ([below](#human-mode-and-human-pacing-browser_pacing)), after every guard;
 - a handoff ([below](#handing-the-computer-to-you-metacomputer-handoff)): while the user has the
   computer, every acting call waits, from every client, the session that asked included;
 - the action log's notes (which client made each call) and the event stream.
@@ -449,8 +533,16 @@ edge), a click on a dialog's button or the window's own control named by role
 and name (OK, Cancel, Save, …, Maximize, Minimize, Restore), Escape, or keys
 with Super, Alt or Meta, a function key (F11 is full screen) or
 Ctrl+N/W/Q/O/S/P. Run the steps up to that one, take a fresh screenshot, and
-send the pixel steps in a new batch. `COORD_GUARD=off` leaves only the driver's
-own checks.
+send the pixel steps in a new batch. A batch pixel step is checked against the
+window the driver runs it in, by the same model as the Chrome guard and human
+pacing (`step_windows`: what a `wait_for` or a step before it named, not a read
+written as a step); a nested target with an inherited window beside it must hold
+for both, and a step that could be in several windows, one of them named only by
+app or title the hub can't resolve, is refused (code `pixel_window_unclear`); one
+named by app or title is checked against the window the driver would pick, and
+refused the same way when the hub can't read the window list, or not whole. The
+live layout is read again for each call it checks. `COORD_GUARD=off` leaves only the driver's own
+checks.
 
 **Where it ends:**
 - The socket and the uid checks keep out other users of this Mac. They don't keep
@@ -502,9 +594,48 @@ own checks.
   kept for the activity window after the last call even when that shell exits,
   and the same controller for later calls from the same terminal session.
 
+## Human mode and human pacing (`BROWSER_PACING`)
+
+Sign-ins, sign-ups, checkout, account settings and posting go through human mode by default: the VM's regular
+Firefox, or Chrome started with `launch_app`, driven with real pointer clicks and foreground keys
+([BROWSER.md](skills/metacomputer/BROWSER.md#account-pages-human-mode-first)). Page-mode Chrome is launched with
+the driver's DevTools route, which sites can detect and treat as automated (one site gave it a degraded sign-in
+that never sent its email). This is about getting the ordinary flow on the user's own accounts and testing a site
+as a person meets it. It isn't a protection, and it isn't a way past bot defences:
+- no fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services;
+- a CAPTCHA or "prove you're human" check still goes to you, through `metacomputer handoff`
+  ([below](#handing-the-computer-to-you-metacomputer-handoff)).
+
+**Human pacing (`BROWSER_PACING=human`, the default).** The hub (`lib/pacing.py`) paces `type_text` and
+`run_steps` calls aimed at a Firefox or Chrome window, for every client, after every guard has passed the call.
+It changes only the call's delays (`delay_ms`: a random 60-140 ms per key, 120-320 ms between batch steps),
+splits a long text typed into the focus into two or three typing runs (never a step that names its field, by role
+and name or label, token or x,y, or its window by app or title: each run would resolve it again), and adds `move_cursor` steps (desktop scope, the real
+pointer) toward a pixel click that has no `wait_for`; nothing else in the call changes, and a `delay_ms` the call
+sets is kept. Every added step also waits the batch's pause, the caller's own included, and that counts: at most
+15 s is added per call, and a batch whose own steps, pauses and typing pauses leave no room under the driver's 60 s
+limit isn't paced. From a step aimed at another app, the desktop or a target the hub can't tell, or a check naming
+another app (by name, title, or pid and window_id), nothing more is split or added. Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came.
+What it keeps:
+- **No values in new places.** `hub.log` gets each plan as counts and milliseconds, never text. The action log
+  records the call as sent to the driver: with `ACTION_LOG_TEXT=redact` a text split into runs shows as two or
+  three redacted runs with their lengths (split at random places), instead of one.
+- **The vault isn't paced.** Fills type on the vault's own path (SSH to the VM), never through the hub.
+- **The added moves aren't guarded.** They're the hub's own, aimed between where the pointer is and the point
+  the coordinate guard already checked; they move the pointer and press nothing, but a page can react to the
+  pointer passing over it (a hover menu). Bounded mode gets the delays but no moves (a manifest may not list
+  `move_cursor`).
+
+**Kept profiles.** `metacomputer browser profiles --new` and `--delete` work inside the VM through
+`lib/guest_profiles.py`: the profiles folder is reached from the home folder without following a link (a link
+anywhere on the way is refused), a profile is only ever a real folder directly inside it, named by letters, digits,
+`.`, `_` and `-`, and it's deleted by descriptor without following links inside it. A profile a running browser
+uses (`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome; a relative path counted
+from that browser's own working folder) isn't deleted.
+
 ## The live view (`metacomputer view`)
 
-The VM runs a VNC server (x11vnc) for its desktop. cua-netgw forwards it to
+The VM runs a VNC server (x11vnc) for its desktop. The gateway forwards it to
 `127.0.0.1:VNC_PORT` on your Mac only, and the VM's firewall admits it only from
 the gateway. Lume's own VNC server, which listens on every interface, is never
 started.
@@ -512,7 +643,8 @@ started.
 **The password** is random, 8 characters (VNC's own authentication uses at most
 8), made at each build and kept where `VNC_PASSWORD_STORE` says: the login
 Keychain (item `metacomputer-vnc`, account the VM's name), a 0600 file in
-`SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin.
+`SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin. Once you
+agree, a copy is also kept for Screen Sharing in the login keychain (below).
 
 **`metacomputer view --open`**, on the Mac's own screen, reads the password from
 that store into a pipe, puts it on the clipboard and opens Screen Sharing at
@@ -532,6 +664,59 @@ still be cleared; while the password is on the clipboard, any app you run can
 read it; a clipboard manager that ignores the markers may keep a copy; Universal
 Clipboard can pass it to your other Apple devices nearby. Run from an SSH session,
 `view --open` touches nothing and says how to connect instead.
+
+**Screen Sharing's remembered password** (`VIEW_REMEMBER`, `ask` by default). So
+that the live view opens without the paste, `view --open` can save the
+live-view password where Screen Sharing looks for a remembered one: an
+internet-password item in your **login keychain**, server `127.0.0.1:PORT`,
+protocol `vnc `, port 0, type `vncl` (a VNC password), labelled "metacomputer
+live view (127.0.0.1:PORT)". That is how Screen Sharing itself keys a VNC
+password for `vnc://127.0.0.1:PORT` (read from its framework; it matches on
+protocol, server, port and type, and takes the newest). It's saved only after
+you say yes: at a terminal the first time `view --open` (or plain `view` in
+Terminal on the Mac's screen) asks, and a "no" writes `VIEW_REMEMBER=off` to your
+settings so it isn't asked again; `view --remember` typed in your terminal, or
+`VIEW_REMEMBER=on`, also say yes. Without a terminal (Claude, a script, a
+dialog's button) nothing is saved for the first time; an item you agreed to is
+updated, in place, at each `view --open`, so a rebuilt VM's new password
+reaches it. `view --remember` and `view --forget` (which removes only the item
+metacomputer made) refuse without a terminal, whether or not an item is there,
+and an explicit save that fails is an error with its reason (`view --open`
+falls back to the clipboard). `off` means no writes at all: nothing is saved,
+`view --remember` refuses, and an item saved earlier is no longer updated; a
+value that isn't `ask`, `on` or `off` counts as `off`. No Screen Sharing setting
+is changed.
+
+**Who can write it.** The CLI refuses to make or remove the item without a
+terminal (unless you set `VIEW_REMEMBER=on`, which makes it without asking);
+without one it only brings an item you agreed to up to date. Claude's skill
+never runs the commands that save or remove it. A program running as you could
+still write the item directly, as with any keychain item it can reach: that's the same-user limit
+this page states for the vault and the event sinks. The helper that writes and
+removes it, `lib/liveview.py`, checks the same rules when it's run by itself
+(stdin must be a terminal unless its internal `--from-view` flag says
+`metacomputer view` is calling; nothing while `VIEW_REMEMBER` is off; the silent
+update only changes an item that's already there), as a guard against mistakes,
+not a barrier: the flag says who's calling and proves nothing. A password typed
+into the helper at a terminal isn't echoed.
+
+The item is written by osascript (Apple's scripting tool) through the Security
+framework, with the password on osascript's stdin: never in an argument, the
+environment, a log, an event or the output. Its arguments are the address, the
+keychain's path, the label, Screen Sharing's path and a one-time tag that a
+check reads back from the item's attributes afterwards (never its password). It isn't written by
+`security`, as the live-view password's own Keychain item is: the keychain puts
+an item into the partition of the program that makes it, and `security` has a
+partition of its own that Apple's apps, Screen Sharing among them, can't read
+without asking for your keychain password. Keychain dialogs are switched off
+for that osascript run, so a locked keychain fails (and the clipboard is used)
+instead of asking. Where it ends: the item's access list lets Screen Sharing and
+osascript read it without asking, so any program running as you can read it
+through osascript (as any can read the live-view password's own Keychain item
+through `security`, or its file); Screen Sharing fills it in for whatever answers
+on `127.0.0.1:PORT`, so a program that took that port while the VM is off would
+get Screen Sharing's VNC response, which a weak 8-character password doesn't
+protect for long (the same as a paste, but without your looking).
 
 **From another device.** The port stays on 127.0.0.1. `metacomputer view`
 prints an SSH tunnel. `view --tailnet` prints the `tailscale serve` command that
@@ -566,7 +751,9 @@ notice (`--say` cleaned like every event) and writes a record,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
   nothing, so its claim isn't kept fresh by what changes on its screen meanwhile;
-- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`;
+- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`; so do the one-time code
+  commands that fill (`secrets code`, `relay`, `give`, and `approve` of a waiting code request, which fills once
+  allowed; the code dialog never fills by itself, its value waits for `fill --request`);
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
@@ -602,6 +789,20 @@ or a crash or a signal) keeps the lock while `secrets settle` waits for the unlo
 process (up to 2 minutes); if that doesn't confirm either, or the command itself
 was stopped, a marker (`RUN_DIR/owners/vault-inflight.*`) makes the next handoff
 run `secrets settle` first, and refuse until it confirms.
+
+**A dialog on the Mac (`INTERACTIVE_PROMPTS`, `off` by default).** That setting
+allows metacomputer to show dialogs on this Mac that wait for you; off, nothing
+pops up on your screen by itself, since Claude may run commands while you're
+away, and a handoff tells you through its notice, its output and the events.
+With it on, a handoff Claude opens also shows a dialog on the Mac's screen:
+"Claude needs you: " and the `--say` text (cleaned like an event, at most 240
+characters), with **Open live view** (it runs `metacomputer view --open`) and
+**Later**. The text reaches osascript as an argument of a fixed AppleScript,
+never as part of one, so nothing in it runs. A detached helper shows it, so
+`handoff` goes on at once, and takes it down when the handoff ends. It isn't
+shown over SSH, without your screen session, or for a handoff you opened at your
+own terminal; the helper checks all of that again itself, whoever starts it,
+from the handoff's own record.
 
 It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
@@ -641,6 +842,54 @@ are accepted, not oversights:
   way, or have Claude run `claude stop` before it hands over.
 - Two settings files that name the same VM with different `RUN_DIR`s don't see
   each other's handoff (the same holds for the one-controller rule).
+
+## Human checks on screen (`BOT_CHECK`)
+
+A CAPTCHA, Cloudflare's "Verify you are human" page or a press-and-hold check is
+yours to do, never Claude's (SKILL.md). The hub helps it keep to that (`BOT_CHECK=on`,
+the default): when a window read shows one of the common checks (the accessible names of
+reCAPTCHA's, hCaptcha's and Turnstile's widgets, Cloudflare's "Just a moment..." title
+and its fixed wording, press-and-hold, DataDome, Arkose, Google's "unusual traffic"
+page), the result gets a note telling Claude to hand it to you with `metacomputer
+handoff --why captcha`, `needs_you.captcha` goes out (once per window in 10 minutes,
+with the kind only, never page text), and acting calls aimed at that window (by window,
+element token, pid, or an app or title that could resolve to it) are refused with
+`bot_check` until a whole read of it (no `query`, no `since`) no longer shows the check,
+or any read does after a handoff opened. Reads still work. A page that only talks
+about CAPTCHAs carries none of the marks it looks for. `BOT_CHECK=note` keeps the note
+and the event without refusing; `off` turns both off.
+
+This is for the agent's sake (no flailing at a check it mustn't pass), not a boundary:
+a page can hide the marks, or fake them to stop Claude in that window, and the hub sees
+only what the accessibility tree and the title say in that read (a check drawn only in
+pixels isn't seen, nor one past where a read was cut short or outside its `query`). Page-mode tools addressed by `target_id` aren't matched to the window.
+
+## Browsers of their own (`metacomputer web gpu|debug|read|page`) and traces
+
+`web gpu`, `debug`, `read`, `responsive --device` and `web page` run a helper in the VM
+(`lib/page_guest.py`) through the shell channel, so the hub's claim, refusals and action
+log apply to them. It starts a browser of its own on the VM's desktop, in a new throwaway
+profile, with its remote control (Chrome's DevTools, Firefox's WebDriver BiDi) on the VM's
+loopback only, and closes it again (`web page` keeps one until `web page close`; a page
+that fails to open is closed at once).
+- **What comes back is the VM's:** one JSON object of a known shape, read only from a run
+  of the shell channel that finished cleanly (a timeout, a cancelled run or an action log
+  that couldn't be signed is a failure, whatever the VM printed), cut short and escaped
+  before it's shown; screenshots are copied only from the VM's own `web-shots` folder,
+  only as PNG files, within 60 seconds. Query strings are cut from URLs in `web debug`.
+- **`web page` refuses password and one-time-code fields** (checked again after the field
+  is focused and after it's filled), and a field's name never comes from what's in it.
+  That's a guard against mistakes: the check runs in the page, which can disguise a field,
+  so values from the vault go only through `metacomputer secrets fill --human` or
+  `secrets code`, never through `web page`.
+- **Where it ends:** the remote-control port is unauthenticated, as these protocols are, so
+  any program in the VM can reach it (the VM is one desktop user's, and nothing in it is
+  trusted); these browsers are for checking and testing pages, never for signing in.
+- **Traces** (`metacomputer trace`) hold what the calls said, typed text included, and
+  names read from pages, in `RUN_DIR/traces/` (0600, at most 20 MB, a trace stops after 24
+  hours). Values the vault types never pass through the hub, so they're never in a trace.
+  `trace export` puts page text only inside JSON-escaped string literals, never in comments
+  or code, so a page can't put code into the test.
 
 ## Hidden page text
 
@@ -1457,7 +1706,7 @@ metacomputer secrets unlock --for 1h        # keep this terminal open while Clau
    - the field fits its kind: `password` and `username` for a password, `otp` for
      a TOTP seed (it works out the current 6-digit code), `text` for text;
    - the VM is bound;
-   - the program listening on the VM's SSH port is named `cua-netgw`, is the gateway
+   - the program listening on the VM's SSH port is named `mcomp-netgw` (or `cua-netgw`, built by an earlier version), is the gateway
      program pinned at bind (the kernel's path for that process), and that file still
      has the contents pinned at bind.
 4. If the secret or the unlock says `each`, it first asks the VM to check the page
@@ -1781,6 +2030,189 @@ question allows that one use only. This is a tightening: before, a secret set to
 - A sealed session that holds a provider's sign-in asks at every load, and so does
   every whole browser profile saved from the VM, since its contents aren't known.
   Replacing a session keeps that mark.
+
+### One-time codes and sign-in links (`ask`, `give`, `code`, `relay`)
+
+A site that sends a one-time code by email or text, or a sign-in link, needs that value typed into the page. Typed
+by Claude, the code lands in the transcript, and nothing ties it to the site it was meant for. The vault handles
+these as **requests**, and Claude learns only the outcome.
+
+**One request model, three ways in.** A request has an id (8 hex digits), a site (`--site`, as for `--origin`), a
+kind (`code` or `link`), why it's wanted (`--why`, cleaned, at most 200 characters), the requester (as for every
+use: "Who is asking" above), the VM, an optional target (below), when it was made, when it expires (10 minutes by
+default, `--ttl`, at most 15) and a state: `pending` (no value yet), `given` (it holds the value), `filled`,
+`expired` or `refused`. A request is used once. It lives only in the unlock process's memory: the value is held
+there between its give (or the relay's read) and its fill, and wiped then, at expiry and at lock (`requests` lists
+none after a new unlock). A page in the VM can't make one: requests come only through the vault's socket, from the
+`metacomputer secrets` commands.
+1. **By hand.** `metacomputer secrets ask --site S --kind code --why TEXT [--into TAB/FIELD | --human] [--wait 5m]
+   [--json]` prints the request id at once. `--wait` blocks until it's filled, refused or expired.
+   - It sends `needs_you.code_requested` through the event stream (the site, the kind, the request id and the
+     cleaned `why`; never a value), so it can reach your phone or Slack, and `secrets requests` lists it.
+   - You give the value with `metacomputer secrets give ID`, in your own terminal. The value comes from stdin only:
+     on a terminal, a prompt with the echo off; from a pipe, one line of at most 4096 bytes (a longer one is
+     refused, not cut). Never from the command line or the environment: a value on the command line is a usage
+     error, and nothing is sent.
+   - With `INTERACTIVE_PROMPTS=on` (off by default; it's read when you unlock), the unlock process also shows a
+     dialog on this Mac with a hidden field (`osascript`'s `display dialog ... with hidden answer`). The script is
+     fixed; the site's host, `why`, the id and the time left are passed to it as arguments (`on run argv`), so
+     nothing in `why` can become AppleScript. The answer comes back on the dialog's own output, a pipe only the
+     unlock process reads: never stdout, an argument or a log. Cancelling leaves the request pending. A command
+     without a terminal never prompts or opens a dialog itself, whatever the setting. An answer in the dialog gives
+     the value and, with your approval, approves it, but never fills by itself: nothing there holds this VM's
+     dispatch lock or checks for an open handoff. The request waits, given, for `metacomputer secrets fill
+     --request ID` (Claude runs it when `ask --wait` says so), which bin/metacomputer runs like any fill.
+2. **From a script.** `fetch-code | metacomputer secrets code --site S --into TAB/FIELD [--kind link] [--json]`
+   asks, gives and fills in one step, the value from stdin. The script gets `{"status": "filled"}` or a refusal and
+   its reason, never the value.
+3. **From inside the session (relay).** `metacomputer secrets relay --from TAB/ELEMENT --to TAB/FIELD --site S
+   [--kind code|link]`. The vault reads one element of a page in the VM's page-mode Chrome (an email open in a
+   webmail tab) through the fill account, in the browser's isolated world, as a fill checks a page: the tab must be
+   on `--from`'s site and the selector must match exactly one element in the page itself (not in a frame). At most
+   8192 characters of its text (or 20 of its links) come back, to the unlock process's memory only, where the vault
+   checks it. A code is the one run of letters and digits that fits the shape (4 to 10 long with at least one digit;
+   `--pattern digits|alnum` and `--length N` or `MIN-MAX`, 4 to 16, narrow it): none, or more than one, refuses, in
+   fixed words (how many there were is the page's choice, so it isn't said). A link must go to the site, or to a
+   host a relay rule lists (by origin, below); a link to any other host is refused in fixed words, its host never
+   named or asked about, since the VM chose it and could spell a value in it. Then it's filled into `--to`, or the
+   link opened in the tab on the site. Claude learns only `relayed: filled` or the failure and its reason. A relayed
+   code's length isn't recorded either.
+
+**Where it goes.** `--into TAB/FIELD`: TAB is the site (`https://host[:port]`, a bare host meaning https, or
+`http://localhost:PORT` and `http://127.0.0.1:PORT` for testing), FIELD a CSS selector (empty: the focused field).
+- **A code is filled only into a tab whose origin is the request's site**, through the same path as `fill`, with the
+  same checks: the one tab on that site in the driver's Chrome (`--profile`, `--browser-pid` narrow it), the field's
+  site and kind (a text, phone or number field), the element checked is the one typed into. `--into` naming another
+  site than `--site` is refused before anything is sent. `--human` sends it to a human-mode browser instead (below).
+- **A link is opened only if it's https and its host is the site's** (its origin equal to the site's), in the tab on
+  the site, by navigating that tab (`Page.navigate`); the VM's secret-fill opens nothing but the origin the vault
+  checked. A link to another host, a tracking redirect, isn't opened without you: refused under a rule unless the rule
+  lists that origin (`--link-host H` covers `https://H` only: not another port, not http), in fixed words that don't
+  name the host. When you're asked about a link someone gave, the unlock terminal's question and macOS's dialog show
+  its real host (`the link goes to H, not S`); `requests`, results, refusals, the audit log and events name a link's
+  host only when it's the site's or one a rule lists.
+- **Where a link goes is held to the sites named.** For 8 seconds after the fill account opens a link, every request
+  for the tab's own page (the link, each redirect hop, a move the page's script makes after it loads) is paused by the
+  browser before it's sent (DevTools' `Fetch` domain, document requests), and one to any site but the request's site
+  or the link's own origin (an identity provider's included) is failed there: the tab never visits it, a hop through
+  another site and back is stopped at that hop, and the outcome is a failure that doesn't name the site. The frame
+  tree is read throughout too: a site outside the list that shows there anyway (a navigation the interception didn't
+  see) refuses afterwards. If watching breaks (a protocol error, the frame tree unreadable), every paused request is
+  refused and loading is stopped (`Page.stopLoading`) before the interception is turned off, since the browser lets
+  whatever is still paused go on when it ends, and the outcome is a failure. The request is used either way. After
+  the 8 seconds nothing is watched. Human-mode browsers take codes only, for now.
+- **A code is checked first, without the value**: the tab on the site and the field, as a fill's check. A refusal
+  there (no tab on the site yet, no field focused) leaves the request `given`, since nothing reached the VM:
+  `metacomputer secrets fill --request ID [--selector CSS | --human]` tries again until it expires. **Once the value
+  is sent, the request is used**, whatever the VM answers: a VM that says "refused" after it got the value can't have
+  it sent again. A link has no such check: it's used once it's sent. Without `--into`, a given request waits for
+  `fill --request`.
+- **Time and approval are checked at every step.** Right before anything goes to the VM (the check, the value), the
+  request must not have expired, and an approval that came from a rule must still be covered by a live rule: a rule
+  that expired or was removed while the request waited sends it back to waiting for `approve ID`. No step in the VM
+  may take longer than the request has left (its ssh is ended then, and the request expires), and requests expire on
+  time even while the unlock process waits on a question or a dialog, or on a step in the VM for another request
+  (checked several times a second), or on a client's request arriving: each request must arrive whole within 10
+  seconds of its connection, however slowly the bytes come, and expiries are serviced while it's read, every 0.2
+  seconds whether or not bytes arrive meanwhile. An expired
+  request's value is wiped within about a second. Only a delivery to a slow audit sink, at most 20 seconds a round,
+  can hold it longer.
+
+**Approvals.** Nothing a program does approves, here as anywhere in the vault.
+- A value given at a terminal (`give`, `code` typed at a prompt) or in the dialog follows the vault's approval path,
+  as a fill of an `each` secret does: in presence mode Touch ID or your login password in macOS's dialog (or `approve
+  ID --passphrase`), otherwise the request id typed at the unlock terminal. After the dialog, macOS's dialog shows at
+  once, since you're at this Mac. Approvals of codes cover this one use only: `session` and `unlock` don't apply.
+- A value from a pipe or a script with no terminal, and every relay, goes ahead **without a question only under a
+  standing rule** you made, like any rule (Touch ID / your login password, or `--passphrase`; "Unattended rules"):
+
+  ```
+  metacomputer secrets rule add code --site https://x.com --from stdin [--link-host H ...] [--project DIR] [--expires 30d]
+  metacomputer secrets rule add relay --from-host mail.example.com --to https://x.com [--link-host H ...] [--project DIR] [--expires 30d]
+  ```
+
+  A code rule covers codes piped in with no terminal (`--from stdin`, the only source it covers) for that site; a
+  relay rule covers codes and links read from pages on that host and filled into that site. `--expires` is 7 days
+  when left out, at most 30 days. Without `--project` a code or relay rule covers any program that asks, a script
+  included (that's what a code rule is for); with it, only Claude Code sessions working in that folder.
+- **Without a rule, the command exits at once** with exit 7 ("needs approval"). It prints the request id and the one
+  command you run: `metacomputer secrets approve ID` (Touch ID or your login password; `--passphrase` for the vault
+  passphrase). It never waits for you, and the request expires on its own; `deny ID` refuses it. `approve` then
+  fills it (or opens the link) and says how that went. Since it acts on the VM, that `approve` runs like a fill: it
+  waits for an open handoff, keeps the in-flight marker and the dispatch lock until the unlock process is done (with
+  `settle` when it ends unconfirmed), and stopping it (Ctrl-C, a signal, its wrapper killed) withdraws it: the unlock
+  process cancels the dialog, or ends the step in the VM, and confirms. bin/metacomputer reads `approve`'s id as the
+  vault does (`--json` and `--scope` anywhere), and only an approval the vault's own list shows as another kind goes
+  straight on: an id the list doesn't show, or a list it can't read, counts as one that may fill.
+- **The VM a command protects is the request's VM.** VMs can share a vault (the main VM and `MCOMP_CONFIG` VMs do by
+  default), so a request is bound to the VM it was made for, and every command that acts on one (`give`, `fill
+  --request`, a code request's `approve`) names the VM whose handoff its wrapper checked and whose dispatch lock it
+  holds (bin/metacomputer adds `--vm`). The vault refuses a request that's another VM's, or a command that names none:
+  run it with that VM's settings (`metacomputer --vm NAME secrets ...`). The question and the dialog name the site, the kind, a
+  link's real host and where it was read from. `secrets requests` lists what waits, and the
+  `needs_you.approval_waiting` event says so.
+- **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its
+  site or as a link's host, and a code or link for one from a pipe or a relay always needs `approve ID`.
+
+**Exit codes** (`ask`, `give`, `code`, `relay`, `fill --request`; `--json` on each prints one JSON line with `status`):
+
+| Exit | `status` | Means |
+| --- | --- | --- |
+| 0 | `filled` (`given` without a target, `pending` for `ask`) | done |
+| 2 | `denied` | refused: the reason says why (not a code, wrong site, a link to another host, you refused, a check in the VM) |
+| 3 | `locked` | the vault is locked |
+| 6 | `expired` | the request expired, or was used already |
+| 7 | `needs_approval` | it waits for `metacomputer secrets approve ID`; nothing waits here |
+
+**Audit.** The hash-chained audit log records each step with no value: `code_request` (the site, kind, `why`, target,
+requester), `code_give` (where the value came from: `terminal`, `dialog`, `stdin` or `relay`, and a link's host),
+`request` and `authorize` when you're asked, `code_fill` or `code_relay` (the outcome, the approval, `rule:ID` for a
+rule), `code_refuse` and `code_expire`. Events are cleaned the usual way.
+
+**Who types codes: `CODES_VIA`.** `CODES_VIA=vault` (the default) is guidance for Claude: it uses `secrets code`,
+`relay` or `ask` and never reads or types a one-time code itself. `CODES_VIA=claude` is your opt-in to let Claude read
+a code (from a page, a mail) and type it itself, with the trade-offs: the value lands in the transcript, and nothing
+ties it to the site it's typed into. The hub can't tell a code from other text, so this is guidance the skill follows,
+not something metacomputer enforces.
+
+**Use a dedicated mailbox for relays.** A relay reads from a mailbox signed in inside the VM, and anything signed in
+there is reachable by a misbehaving agent with a shell (below, "What doesn't hold"). Give the VM an automation
+mailbox: an alias or a separate account that only receives sign-in mail, never your main inbox.
+
+### Human-mode fills: the address bar instead of DevTools
+
+`metacomputer secrets fill NAME --field password|username|otp --human [--window-id N]` (and `code --human`, `ask
+--human`, `fill --request ID --human`) fill the focused field of a human-mode browser: the VM's regular Firefox, or a
+Chrome started normally, which have no DevTools port. Some sites treat a DevTools-driven Chrome as automated and offer
+it a degraded sign-in; a regular browser gets the normal one. Page-mode fills stay as they were.
+- **The site comes from the browser's address bar**, read through the accessibility tree (the toolbar's address
+  entry, the browser's own control, never the page's title or text), and it must agree with the address the browser
+  reports for the page's document (AT-SPI's `DocURL`). A bar showing something that isn't the page's address (an
+  address typed but not opened, a search, the bar being edited) is refused. Firefox leaves out `https://` for a secure
+  page; a bar with no scheme counts only when the page's own address is https.
+- **The field is the focused element**, which must be in that page's top document (not in the browser's own controls
+  and not in a frame, whose site the bar doesn't show) and be the expected kind: a password text for `password`, an
+  entry for `username` and `otp` (or a spin button for a numeric code), editable and not read-only.
+- **The value is typed as real foreground keystrokes through Cua Driver** (`type_text`, `delivery_mode:
+  "foreground"`), never handed to Claude; a field that already holds text is selected first, so the value replaces it.
+  Then the same field must still have the focus, on the same site, and hold that many characters (the browser's count,
+  never its text). The answer is held to the form a page-mode fill's is, and nothing the VM says after the value is
+  passed on: the reason is one of the vault's own sentences.
+- It's checked before every use (a human-mode fill always checks first, then asks where the secret or the unlock says
+  to), and the value then goes only to the site that check named.
+
+**How this binding differs from page mode.** A page-mode fill gets each frame's site from Chrome's DevTools
+(`Page.getFrameTree`, confirmed inside an isolated world) and types into the very element it checked, in the same
+document. A human-mode fill gets the site from the address bar and the page's address as the browser reports them to
+the accessibility tree, and types keystrokes into whatever has the focus. So:
+- it runs in the VM as the desktop account (the key sealed sessions use, `SSH_AUTH=key` for now), not the fill
+  account, which can't reach the desktop's accessibility bus or keyboard. Code running as the desktop user (a
+  misbehaving agent with a shell) can see the value on its way there, as it can pose as DevTools for a page-mode fill;
+- keystrokes aren't bound to an element: a page that moves the focus between the check and the typing gets the
+  keys (the vault reads the field again afterwards and reports a change, but can't undo it);
+- a field inside a frame is refused rather than checked;
+- a VM whose driver policy accepts only bounded sessions refuses human-mode fills (they type through the driver in its
+  standard mode).
 
 ### Signing in with one approval (`login`)
 
@@ -2243,7 +2675,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper`, `code_request`, `code_give`, `code_fill`, `code_relay`, `code_refuse`, `code_expire` |
 | `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
 | `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
@@ -2259,6 +2691,7 @@ no spaces, ASCII), and each event is chained to the one before:
 | `presence`, `presence_why`, `confirmed` | on `unlock` and `authorize`: whether presence mode was on and why, and what confirmed the approval |
 | `truncated`, `NAME_more` | a list past 32 items keeps 32 and counts the rest in `NAME_more`; a record still over 64 KiB keeps only its core fields, with `truncated: true` |
 | `chars`, `bytes`, `route` | how much was typed or sealed, and how |
+| `kind`, `source`, `link_host`, `from`, `target`, `why`, `step` | a one-time code request's kind (`code` or `link`), where its value came from (`terminal`, `dialog`, `stdin`, `relay`), a link's host (only when it's the site's or one a rule lists), the page a relay read from, where it goes (`page` or `human`), why it was asked for, and `check` for a refusal before the value was sent (never the value) |
 | `token_id`, `ttl_s`, `renewer` | a token's id, and on `token` and `renew` the seconds it has to live then (the vault's own numbers); on `renew`, who renewed it: `same` (its own Claude Code session), `terminal` (you at a terminal) or `other` |
 | `method`, `host`, `path_within`, `status`, `bytes`, `token_id`, `key_withheld` | a proxied API request: never its path, which the VM chose; `path_within` is the secret's own prefix; `status` the API's class (`2xx`) or the proxy's own; `bytes` a size class; `key_withheld` true or absent |
 
@@ -2440,6 +2873,10 @@ something waits for you:
   renamed; the event stream takes it from there. Fields: `family`, `type`,
   `severity`, `vm`, `message`, `action`, `project` (the requester's folder), `data`.
   Never a value or a token, and writing it never blocks or fails a request.
+- `needs_you.code_requested` (severity `warn`), when `metacomputer secrets ask` files a one-time code request: the
+  site, the kind (`code` or `link`), the request id and the cleaned `why` in `data`, with the action `metacomputer
+  secrets give ID`. A code or relay request that waits for `approve ID` sends `needs_you.approval_waiting` with
+  `data.op` `code`. Never a value.
 - `needs_you.vault_locked`, when `metacomputer secrets fill`, `session save|load` or
   `token` exits 3 because the vault is locked: the event stream's own exit hook in
   `bin/metacomputer` reports it (once, at most every 5 minutes, and not when you ran
@@ -2601,7 +3038,7 @@ something waits for you:
     can't tell;
   - tamper with the VM, or read it: the VM's disk image (in Lume's VM folder) is
     readable by your account.
-  - **Pose as the VM.** The gateway pin can't tell a copy of the real cua-netgw,
+  - **Pose as the VM.** The gateway pin can't tell a copy of the real gateway,
     started by the agent on the VM's port, from the VM's own. Only the pinned host key
     then stops a fill, and the private half of that key exists only in the VM:
     - builds delete the Mac's copy, `$SSH_DIR/hostkey`;
@@ -2612,6 +3049,21 @@ something waits for you:
 
   The terminal requirement keeps values off pipes and command lines. It isn't a
   barrier against your own account, since a program can open a pseudo-terminal.
+- **One-time codes from inside the VM are only as trustworthy as the page they're read from.** A relay reads a
+  mailbox signed in inside the VM, and anything signed in there is reachable by a misbehaving agent with a shell (it
+  can read the mail itself, and ask for codes). Use a dedicated automation mailbox that only receives sign-in mail.
+  The vault binds where a relayed code goes, not where it came from: a code rule or relay rule is a standing approval
+  for whatever can pose as the requester it names (any program, without `--project`), for that site, until it expires.
+  Where an opened link lands is watched for 8 seconds only: a page that moves on later, or after a click, isn't. If
+  the DevTools connection itself is lost while it watches, Chrome ends the interception on its own, and what was
+  paused then goes on: nothing can refuse it without that connection (the outcome is still a failure).
+  A hostile VM still chooses which of a few fixed outcomes a relay reports, and when.
+- **The code dialog isn't an approval.** It's `osascript`'s dialog, which an app with Accessibility access could type
+  into; that's why a value given there still needs Touch ID, your login password or a typed line at the unlock terminal.
+- **`CODES_VIA` is guidance.** Nothing stops Claude from reading a code shown in the VM (a page, a screenshot) and
+  typing it; `CODES_VIA=vault` tells it not to, and the skill follows that.
+- **Human-mode fills are weaker than page-mode fills** ("Human-mode fills" above): the value goes to the desktop
+  account, where code running as that user can see it, and keystrokes go wherever the focus is when they arrive.
 - **A compromised guest kernel or root** can do anything in the VM, including
   replacing `secret-fill`. Values go only to the VM you bound, but what happens
   inside it is up to the VM.
@@ -2715,6 +3167,10 @@ something waits for you:
 | `settle [--timeout S]` | anywhere | Return once the unlock process has finished every request it got before (or none runs); for a requester that got no confirmation (exit 5) |
 | `list [--json]` | anywhere, while unlocked | Names, kinds, sites or API hosts, usernames, approval, projects, ages, use counts; never values |
 | `fill NAME --field password\|username\|otp\|text [--profile P] [--selector CSS]` | anywhere | Type a value into the focused field (`--selector` focuses exactly one element of the page first) |
+| `fill NAME --field password\|username\|otp --human [--window-id N]` | anywhere | The same into a human-mode browser's focused field, its site from the address bar ("Human-mode fills") |
+| `ask --site S --kind code\|link --why TEXT [--into TAB/FIELD \| --human] [--wait D]`, `code --site S (--into TAB/FIELD \| --human) < value`, `relay --from TAB/ELEMENT --to TAB/FIELD --site S`, `fill --request ID` | anywhere | One-time codes and sign-in links ("One-time codes and sign-in links"); never print the value |
+| `give ID` | you, any terminal (the value from stdin only) | The value for a waiting request: a terminal follows the usual approval, a pipe needs a `rule add code` |
+| `rule add code --site S --from stdin [--expires D]`, `rule add relay --from-host H --to S [--expires D]` | you, any terminal (Touch ID / login password, or the passphrase) | Standing approvals for codes piped in with no terminal, or relayed; never an identity provider |
 | `login NAME --password-selector CSS [--username-selector CSS] [--profile P]` | anywhere | Sign in: the username and password into those fields, under one approval |
 | `session save NAME --profile P [--replace]`, `session load NAME` | anywhere | Seal a Chrome profile from the VM, or put one back (asks you) |
 | `token NAME [--ttl 15m]`, `token renew ID\|--all [--ttl 15m]`, `tokens`, `revoke ID\|--all` | anywhere | A short-lived token for an API secret and the proxy's URL in the VM; keep live ones going (the same token, asked like a new one); the live ones; end them |

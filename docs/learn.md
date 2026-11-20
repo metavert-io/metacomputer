@@ -107,6 +107,11 @@ ran in that folder or below it.
   before one worked cleanly, with at least one switch made without reading the
   app first. A route is the tool, its target kind (element, pixel, keys), its
   delivery mode and its scope.
+- **Sign-ins through page-mode Chrome:** sessions that used the page tools
+  (`browser_prepare`, `browser_type`, …) and also ran `metacomputer secrets fill`
+  or `login`, or a handoff `--why login`, `2fa` or `captcha`. Only that a session
+  did both is kept: the tool names and the CLI's own subcommand and `--why` value,
+  never the command's other text or anything the page showed.
 - **Time per app on the virtual computer:** the model's time before each call
   plus the call's own time, by the app its window belongs to (from a fixed list),
   plus the VM's shell and other `metacomputer` commands. Gaps over ten minutes
@@ -127,7 +132,9 @@ an ID you approve it by.
 `not-found`, `check-text`, `malformed`, `menu-path`, `menu-foreground`,
 `no-extents`, the four guards (`guard-controller`, `guard-chrome`,
 `guard-coordinate`, `guard-bounded`), `unverified`, `repeat-class`,
-`route-churn`, and `app-notes-<app>` (read the skill's notes for an app that
+`route-churn`, `human-signin` (sign in, sign up, check out and post in human mode,
+and what a degraded sign-in looks like; proposed after one sign-in through
+page-mode Chrome) and `app-notes-<app>` (read the skill's notes for an app that
 takes 15% or more of your time). A failure class is proposed once it occurs
 `--min` times (2 by default); a guard refusal once. The wording is fixed in
 `lib/learn.py`; only counts, the fixed class names, an app name from the fixed

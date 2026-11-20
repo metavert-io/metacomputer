@@ -1,5 +1,5 @@
 #!/bin/bash
-# metacomputer host library: configuration, Lume + cua-netgw
+# metacomputer host library: configuration, Lume + mcomp-netgw (cua-netgw)
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -408,7 +408,7 @@ RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"   # RUN_DIR / LOG_DIR: config/defaults.env
 SOCK_DIR="/tmp/mcomp-$(id -u)-$(printf '%s' "$LAB_ROOT:$VM_NAME" | shasum | cut -c1-8)"
 CACHE_DIR="$LAB_ROOT/.cache"
 LOG_DIR="${LOG_DIR:-$LAB_ROOT/logs}"
-NETGW_BIN="$LAB_ROOT/vendor/bin/cua-netgw"
+NETGW_BIN="$LAB_ROOT/vendor/bin/mcomp-netgw"   # cua-netgw with patches/netgw/ (scripts/build-tools.sh)
 QCOW2RAW_BIN="$LAB_ROOT/vendor/bin/qcow2raw"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 export LUME_TELEMETRY_ENABLED=0
@@ -672,7 +672,7 @@ os.closerange(3, 4096)
 os.execvp(sys.argv[2], sys.argv[2:])' "$log" "$@" &
 }
 
-# --- cua-netgw (host-enforced egress policy, loopback-only forwards) -------
+# --- mcomp-netgw: cua-netgw patched (host-enforced egress policy, loopback-only forwards) -------
 netgw_pid() { if [ -s "$RUN_DIR/netgw.pid" ]; then cat "$RUN_DIR/netgw.pid"; fi; return 0; }
 netgw_alive() { local p; p="$(netgw_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 netgw_stop() {
@@ -683,6 +683,11 @@ netgw_stop() {
     kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
   fi
   rm -f "$RUN_DIR/netgw.pid" "$SOCK_DIR/net.sock" "$SOCK_DIR/control.sock" "$SOCK_DIR"/lume-*.sock
+}
+net_policy() { # ARGS... -> lib/netpolicy.py for this VM (its RUN_DIR, the gateway binary, whether it runs)
+  local alive=0; netgw_alive && alive=1
+  MCOMP_NETGW_BIN="$NETGW_BIN" MCOMP_NETGW_ALIVE="$alive" MCOMP_NETGW_CONTROL="$SOCK_DIR/control.sock" \
+    "$PY" "$LAB_ROOT/lib/netpolicy.py" "$@"
 }
 netgw_render() { # MAC -> writes $RUN_DIR/gw.json
   local mac="$1"
@@ -700,7 +705,7 @@ netgw_render() { # MAC -> writes $RUN_DIR/gw.json
   ],
   "control": "unix://$SOCK_DIR/control.sock",
   "listen": { "vfkit": "unixgram://$SOCK_DIR/net.sock" },
-  "rules": "$LAB_ROOT/config/netgw-rules.json",
+  "rules": "$RUN_DIR/netgw-rules.json",
   "events": "$LOG_DIR/netgw-blocked.jsonl",
   "pid_file": "$RUN_DIR/netgw.pid",
   "log_level": "warning"
@@ -710,11 +715,14 @@ EOF
 netgw_start() { # MAC
   [ -x "$NETGW_BIN" ] || die "missing $NETGW_BIN (run scripts/build-tools.sh)"
   netgw_stop
-  netgw_render "$1"
   "$NETGW_BIN" -check-rules "$LAB_ROOT/config/netgw-rules.json" >/dev/null || die "bad netgw rules"
+  # The rules the gateway reads: config/netgw-rules.json plus this VM's network allowlist, if one is in force
+  # (lib/netpolicy.py; checked with -check-rules before it's written). A list it can't read stops the start.
+  net_policy render || die "the network allowlist's rules couldn't be written (metacomputer net status)"
+  netgw_render "$1"
   daemonize "$LOG_DIR/netgw.log" "$NETGW_BIN" -config "$RUN_DIR/gw.json"
   local i=0; while [ ! -S "$SOCK_DIR/net.sock" ] && [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done
-  [ -S "$SOCK_DIR/net.sock" ] || { tail -5 "$LOG_DIR/netgw.log" >&2; die "cua-netgw did not start"; }
+  [ -S "$SOCK_DIR/net.sock" ] || { tail -5 "$LOG_DIR/netgw.log" >&2; die "the gateway (mcomp-netgw) did not start"; }
 }
 netgw_control() { # "lease MAC" | "probe IP:PORT"
   "$PY" - "$SOCK_DIR/control.sock" "$1" <<'EOF'
@@ -812,10 +820,15 @@ export_options() {
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
          MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}" \
          MCOMP_VM_EVENTS_SPOOL="${EVENTS_SPOOL:-}"   # this VM's spool (empty: lib/events.py's default)
-  # The hub (lib/mcp_hub.py), its coordinate guard and its hidden-text marks. MCOMP_MCP_HUB / MCOMP_COORD_GUARD /
-  # MCOMP_HIDDEN_TEXT already in the environment win over the config (the benchmark's switches).
+  # Dialogs on this Mac that wait for the user (a handoff's "Open live view"): off unless the user turned them on.
+  export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
+  # The hub (lib/mcp_hub.py), its coordinate guard, its hidden-text marks and its human pacing (lib/pacing.py).
+  # MCOMP_MCP_HUB / MCOMP_COORD_GUARD / MCOMP_HIDDEN_TEXT / MCOMP_BROWSER_PACING already in the environment win
+  # over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
-         MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}"
+         MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}" \
+         MCOMP_BOT_CHECK="${MCOMP_BOT_CHECK:-${BOT_CHECK:-on}}" \
+         MCOMP_BROWSER_PACING="${MCOMP_BROWSER_PACING:-${BROWSER_PACING:-human}}"
   # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
   # lessons switch, an isolated store for tests).
   export MCOMP_LESSONS="${MCOMP_LESSONS:-${LESSONS:-on}}" MCOMP_LESSONS_DIR="${MCOMP_LESSONS_DIR:-${LESSONS_DIR:-}}"

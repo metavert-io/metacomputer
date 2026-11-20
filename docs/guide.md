@@ -342,6 +342,46 @@ Limits to know:
 
 The full model is in [SECURITY.md](../SECURITY.md#secrets-and-logins-metacomputer-secrets).
 
+### One-time codes and sign-in links
+
+- "Sign in to example.com; it emails a code. Ask me for it."
+- "The sign-in code is in the test mailbox in the VM: relay it."
+- "My script fetches the code: pipe it in."
+
+Some sites send a one-time code or a sign-in link by email or text. Claude doesn't type
+those itself: the vault fills them, bound to the site, and Claude learns only the outcome.
+
+```bash
+metacomputer secrets ask --site https://example.com --kind code --why "example.com sign-in" --into example.com/#otp
+metacomputer secrets give 5f2c9a0e          # you, in your own terminal: the code is typed hidden (or piped in)
+fetch-code | metacomputer secrets code --site https://example.com --into example.com/#otp   # a script, one step
+metacomputer secrets relay --from mail.example.net/#code --to example.com/#otp --site https://example.com
+```
+
+- **`ask`** files a request and prints its id at once (`--wait 5m` waits for it). You get a
+  `needs_you.code_requested` notice and run `give ID`; the value comes from stdin only, never the
+  command line. With `INTERACTIVE_PROMPTS=on` in `config/local.env` (off by default), a dialog
+  on the Mac asks for it too, when the vault was unlocked after you set it; Claude then fills
+  what you gave there with `secrets fill --request ID`.
+- **Approvals.** A code you give at a terminal or in the dialog is approved like any use (Touch ID or
+  your login password in presence mode, else the request id typed at the unlock terminal). One piped
+  in with no terminal, and every relay, goes ahead without a question only under a rule you made:
+  `metacomputer secrets rule add code --site https://example.com --from stdin [--expires 30d]`, or
+  `rule add relay --from-host mail.example.net --to https://example.com`. Without one, the command
+  exits 7 at once and names the one command to run, `metacomputer secrets approve ID`. Identity
+  providers always ask.
+- **Site binding.** A code goes only into a tab on the request's site. A link opens only if it's https
+  and goes to the site's own host (a tracking redirect's host only if the rule lists it, `--link-host`).
+- **Human mode.** `--human` (on `ask`, `code`, and `fill NAME --field ... --human` for saved logins)
+  fills the focused field of the VM's regular Firefox instead of page-mode Chrome: its site comes from
+  the address bar, and the value is typed as real keys. Some sites offer a degraded sign-in to a
+  DevTools-driven Chrome and the normal one to Firefox. The binding is weaker than page mode's
+  ([SECURITY.md](../SECURITY.md#human-mode-fills-the-address-bar-instead-of-devtools)).
+- **Relays read a mailbox signed in inside the VM**, which anything running there can read too: give it
+  an automation mailbox that only receives sign-in mail, not your own inbox.
+- `CODES_VIA=claude` is your opt-in to let Claude read and type codes itself instead (the code then
+  lands in the transcript, with no site binding). It's guidance the skill follows, not enforced.
+
 ### Use an API key from the VM without the VM seeing it
 
 - "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there."
@@ -708,16 +748,23 @@ running. Command lines are masked.
 
 - "Let me watch what you're doing." / "I'll take over for a minute."
 
-- **On the Mac:** `metacomputer view --open`. Screen Sharing opens the live
-  view, and the live-view password is on your clipboard: paste it with Cmd+V
+- **On the Mac:** `metacomputer view --open` (or just `metacomputer view` in
+  Terminal on the Mac's screen). Screen Sharing opens the live view. The first
+  time, it asks whether Screen Sharing should remember the live-view password:
+  say yes and it's saved in your login keychain, where Screen Sharing finds it,
+  so from then on the live view opens without asking for a password (each
+  `view --open` keeps it up to date after a rebuild; `view --forget` removes it;
+  `VIEW_REMEMBER=off` never saves it, or updates one saved before; `--remember`
+  and `--forget` run only in your own terminal). Say no, or run it where nobody can answer,
+  and the live-view password is on your clipboard instead: paste it with Cmd+V
   when Screen Sharing asks for a password (it isn't your Mac's password). It's
   cleared from the clipboard after 45 seconds, if nothing else was copied since
   (`VIEW_CLIPBOARD_S` changes that). It's never put in the `vnc://` link,
   on a command line, in a log or in an event.
-- **From another device:** `metacomputer view` prints the SSH tunnel
-  (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`); then connect a VNC client to
-  `localhost:5977`. Run `view --open` over SSH and it says this instead, since
-  that terminal isn't on the Mac's screen.
+- **From another device:** `metacomputer view` (over SSH) or `view --print`
+  prints the SSH tunnel (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`); then
+  connect a VNC client to `localhost:5977`. Run `view --open` over SSH and it
+  says this instead, since that terminal isn't on the Mac's screen.
 - **Over your own tailnet:** `metacomputer view --tailnet` prints the
   `tailscale serve` command that publishes the port to your tailnet, and its
   undo. metacomputer never runs it: it changes your Mac's networking, so it's
@@ -727,11 +774,13 @@ The password comes from where your setup keeps it: the login Keychain (item
 `metacomputer-vnc`) on an install made with get.sh or `./install.sh`,
 `~/.ssh/metacomputer/vnc-pass` on an older one, or your own secret store (see
 `VNC_PASSWORD_STORE` under [Configuration](commands.md#configuration)).
-`metacomputer view` prints the command that reads it, for your own terminal.
+`metacomputer view --print` shows the command that reads it, for your own terminal.
 On the clipboard it's marked concealed and transient, which clipboard managers
 that follow those markers don't keep in their history (one that ignores them
 may), and with Universal Clipboard your other Apple devices nearby can paste it
-too.
+too. The copy Screen Sharing remembers is an item in your login keychain that
+Screen Sharing and osascript can read without asking; how it's written, and
+where that ends, is in [SECURITY.md](../SECURITY.md#the-live-view-metacomputer-view).
 
 ### When Claude needs you: handoffs and the live view
 
@@ -745,8 +794,11 @@ past them. It hands the computer to you and waits:
 1. It runs `metacomputer handoff --why captcha --say "Tick the 'Verify you are human' box on example.com"`.
    That tells you through your event sinks (your phone, with an ntfy sink), and
    Claude says the same in the chat.
-2. You run `metacomputer view --open`, paste the password (Cmd+V), and do the
-   step in the live view.
+2. You run `metacomputer view --open` (Screen Sharing connects with the password
+   it remembers; if you didn't let it, paste the password with Cmd+V), and do the
+   step in the live view. With `INTERACTIVE_PROMPTS=on` in your settings, a dialog
+   on the Mac's screen also says what Claude needs, and its **Open live view**
+   button does the same (it's off by default, so nothing pops up while you're away).
 3. You run `metacomputer handoff done` in your terminal (add
    `--note "use the second account"` for anything Claude should know), or
    `metacomputer handoff cancel` to call it off.
@@ -787,7 +839,7 @@ say "done" for you from its own shell; it can only call its handoff off.
 metacomputer handoff status            # the open handoff, what to do, how long it has left
 metacomputer handoff done [--note T]   # you: finished, Claude carries on
 metacomputer handoff cancel            # you: called off, Claude stops and asks
-metacomputer view --open               # Screen Sharing, with the password on the clipboard
+metacomputer view --open               # Screen Sharing: the password it remembers, or on the clipboard
 ```
 
 **Sites with bot checks.** Some sites refuse the VM's browser even when you tick
@@ -1068,7 +1120,7 @@ the following. These are **always on**:
 | Protection | What it does |
 | --- | --- |
 | **mcomp-vm** (the installer's default) | Lume attaches your Mac's clipboard, its speakers and microphone, and Rosetta to every VM. [mcomp-vm](https://github.com/metavert-io/metacomputer-vm) is metacomputer's build of Lume, made by Metavert, not by Cua and not endorsed by them. It's Lume 0.7.2 plus `--no-share-clipboard`, `--no-share-audio`, `--no-share-rosetta` and `--no-host-sharing`, and metacomputer starts the VM without all three unless you turn one on. `metacomputer status` reports what the VM actually has, read from inside it. |
-| **Public internet only** | The VM's network is a user-mode gateway on the Mac (Cua's `cua-netgw`) that checks every connection the VM opens. It refuses your Mac, your LAN and router, Tailscale and CGNAT addresses, link-local and cloud-metadata addresses, and outbound mail ports. Blocked attempts are logged. |
+| **Public internet only** | The VM's network is a user-mode gateway on the Mac (Cua's `cua-netgw`, as mcomp-netgw: with a small patch) that checks every connection the VM opens. It refuses your Mac, your LAN and router, Tailscale and CGNAT addresses, link-local and cloud-metadata addresses, and outbound mail ports. Blocked attempts are logged. |
 | **Nothing listens off loopback** | SSH and the live view are forwarded only to `127.0.0.1` on your Mac. Lume's own VNC server, which listens on every interface, is never started. The live view is a password-protected VNC server inside the VM, and the VM's firewall admits it, and SSH, only from the gateway. |
 | **SSH by role** | Keys only, with the VM's host key generated on your Mac and pinned before the first boot. A key per role: `mcp` can only start Cua Driver's MCP server (a forced command, no shell), `ops` is a shell for the desktop user, `admin` is for maintenance, `fill` can only run the vault's fill program, and `proxy` can only open one port on the VM's loopback for the vault's API proxy. The VM reads every account's keys from root-owned files in `/etc/ssh/metacomputer-keys/` (and the vault accounts' own), never `~/.ssh`, so nothing running as the desktop user can add a key or lock your Mac out by wiping its home folder. The Mac's ssh ignores your SSH config and forwards nothing to the VM: no agent, no X11, no ports. |
 | **Narrow accounts** | The desktop user has no sudo. After the build, the maintenance account can run only one root script with a fixed list of verbs, cloud-init is turned off, and its cached user-data (which held the host key) is deleted. All accounts have locked passwords. |
@@ -1105,7 +1157,7 @@ every VM.
 - With standard Lume all three are always attached. The VM has no `spice-vdagent` and `virtio_snd` is blacklisted, but a process with root in the VM could start an agent and read or set your clipboard. Don't keep secrets on the clipboard while it runs untrusted tasks.
 - `metacomputer status` shows what the VM actually has, read from inside it (virtio console ports, a sound device, a Rosetta tag). With mcomp-vm and the defaults it reads `clipboard off  audio off  rosetta off`.
 
-**Network.** The VM's network device talks to `cua-netgw`, a user-mode gateway
+**Network.** The VM's network device talks to mcomp-netgw (Cua's `cua-netgw`), a user-mode gateway
 on your Mac built from Cua's source at a pinned commit. Every connection the
 VM opens is checked on the Mac, not inside the VM:
 - **Always refused:** your Mac's loopback and every address of its own interfaces (LAN and tailnet), the gateway itself, cloud metadata, multicast and broadcast.
@@ -1229,7 +1281,7 @@ Problems during the install are in [install.md](install.md#troubleshooting).
 | "The virtual computer is off" | `metacomputer start`, then try again. |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release` (or `--override` on the command). |
 | "Paused: the user has the computer" | A handoff is open (`metacomputer handoff status`): Claude waits for you. Run `metacomputer handoff done` when you've finished in the live view, or `handoff cancel`. `release` doesn't end it. |
-| Screen Sharing rejects the password | It wants the live-view password, not your Mac's. `metacomputer view --open` puts it on the clipboard for 45 s; paste it with Cmd+V. |
+| Screen Sharing rejects the password | It wants the live-view password, not your Mac's. `metacomputer view --open` brings the password Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard for 45 s instead (paste with Cmd+V). |
 | `view --open` says it needs the Mac's own screen | You're in over SSH. Run it in Terminal on the Mac's screen (in person, or through Screen Sharing or another remote-desktop app), or use the SSH tunnel `metacomputer view` prints, or `view --tailnet`. |
 | A site's "Verify you are human" check keeps failing or looping | The site is refusing the VM's automated browser (page-mode Chrome is driven through DevTools). Do that step on your own computer; Claude won't try to get around it ([Known limitations](#known-limitations)). |
 | Chrome ignores typing | `metacomputer input-reset`. |

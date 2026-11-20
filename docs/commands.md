@@ -43,9 +43,20 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `record start [NAME] [FPS]` / `record stop` / `record status` / `record moments FILE` | Record the whole desktop, streamed to the Mac as it records; its key moments when the action log is on |
 | `recordings [--sync] [N]` | List recent recordings; copy the VM's task runs to the Mac |
 | `contact-sheet MP4 [OUT.png]` | 12 frames of a recording in one image |
-| `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model |
-| `browser [default firefox\|chrome] [mode human\|page\|hybrid] [profiles [--delete NAME]]` | The skill's defaults; named Chrome profiles |
-| `view [--open \| --tailnet]` | Watch or take over the desktop (VNC on loopback). `--open`: Screen Sharing on this Mac, with the live-view password on the clipboard for 45 s (`VIEW_CLIPBOARD_S`); over SSH it says how instead. `--tailnet`: the `tailscale serve` command that would publish it to your tailnet, and its undo (printed, never run) |
+| `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model (`responsive --browser webkit`: GNOME Web, when the VM has it; `responsive --device iphone-15,pixel-8,...`: phone and tablet emulation) |
+| `web gpu [URL] [--browser chrome\|firefox\|both]` | What WebGL and WebGPU a page gets in the VM (software: the VM has no GPU), whether the page asked for a GPU, its GPU-related errors, a screenshot |
+| `web debug URL [--browser B] [--device D] [--keep-query]` | Console messages, uncaught errors, failed and slowest requests, timings, a screenshot |
+| `web read URL [--max-chars N]` | The page's main text as Markdown |
+| `web page open URL [--name N] \| read [--text] \| fill REF VALUE \| select REF OPTION \| click REF \| upload REF GUEST_PATH \| close` | Precise page tools in a Firefox of its own (WebDriver BiDi): controls by ref, exact values, uploads; refuses password and one-time-code fields |
+| `trace start NAME [--session S] \| stop \| list \| show NAME \| delete NAME` | Record a session's browser steps through the hub (`RUN_DIR/traces/`, 0600; at most 24 h and 20 MB) |
+| `trace export NAME [--url URL] [--out FILE]` | The trace as a Playwright test (TypeScript): role/name locators, fills, keys, assertions, navigations; pixel clicks marked; page text only in escaped string literals |
+| `each VM,VM,... -- COMMAND [ARGS]` | The same metacomputer command on several VMs at once (`main` is this checkout's VM), without a terminal; output per VM, exit status the highest |
+| `net [status [--json]]` | What the VM can reach now: the open internet (with config/netgw-rules.json's refusals) or a network allowlist and when it ends |
+| `net allow NAME... [--for D] [--exact]` | With no list in force: start one (anyone, Claude too; 2 h by default, 1 min to 24 h); the VM then reaches only those names (and their subdomains unless `--exact`), enforced by the gateway on this Mac. With one in force: add names or time, at your own terminal only. With the VM running it says the list is in force only when the gateway reports the rules just written (exit 4 otherwise) |
+| `net remove NAME... [--exact]` | Take names off the list in force (anyone) |
+| `net clear` | Lift the list before it ends (your own terminal only); it also ends by itself when its time is up |
+| `browser [default firefox\|chrome] [mode human\|page\|hybrid] [pacing human\|fast] [profiles [--new NAME \| --delete NAME [--firefox]]]` | The skill's defaults and human pacing; kept Firefox profiles (`--new`: made in the VM, with the `launch_app` call that opens one) and named Chrome profiles |
+| `view [--open \| --print \| --tailnet \| --forget] [--remember \| --no-remember]` | Watch or take over the desktop (VNC on loopback). `--open` (and plain `view` in Terminal on the Mac's screen): Screen Sharing on this Mac. The first time, at a terminal, it offers to save the live-view password in your login keychain, where Screen Sharing finds it (`VIEW_REMEMBER`); once saved, Screen Sharing connects without asking, and each `--open` keeps it up to date. Otherwise the password goes on the clipboard for 45 s (`VIEW_CLIPBOARD_S`); `--no-remember` does that this once. Over SSH, or with no terminal, plain `view` prints how to connect, as `--print` does. `--remember`: save it now; `--forget`: remove it (both only in your own terminal; `--remember` refuses while `VIEW_REMEMBER=off`). `--tailnet`: the `tailscale serve` command that would publish it to your tailnet, and its undo (printed, never run) |
 | `input-reset [--check]` | Remove the driver's leftover virtual input devices (when Chrome ignores typing) |
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
 | `security [apply] [--json]` | The optional hardening and the shell channel, as configured and as the VM has them |
@@ -57,10 +68,16 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `secrets approve ID [--passphrase] [--scope session\|unlock]`, `secrets rule add ... --for D`, `secrets presence on\|off\|auto` | Approve a waiting use, make an unattended rule, or set presence mode: you, from any terminal, with Touch ID, your login password or the passphrase |
 | `secrets requests`, `secrets deny ID`, `secrets rule list\|remove ID`, `secrets lock`, `secrets settle` | What waits for you; refuse one; the rules; lock now; wait until the vault has finished what it was sent |
 | `secrets list\|fill\|login\|session save\|session load` | What Claude uses while the vault is unlocked (`login NAME --password-selector CSS [--username-selector CSS]` fills both fields under one approval); values never come back |
+| `secrets fill NAME --field password\|username\|otp --human [--window-id N]` | The same into a human-mode browser (the VM's regular Firefox, or a Chrome started normally): its site from the address bar, the focused field checked, typed as real keys through the driver ([SECURITY.md](../SECURITY.md#human-mode-fills-the-address-bar-instead-of-devtools)) |
+| `secrets ask --site S --kind code\|link --why TEXT [--into TAB/FIELD \| --human] [--ttl 10m] [--wait 5m] [--json]` | A one-time code or sign-in link request for you: prints its id at once, sends `needs_you.code_requested`, and with `INTERACTIVE_PROMPTS=on` a dialog asks for it on the Mac. `--wait` blocks until it's filled, refused or expired |
+| `secrets give ID [--json]` | The value for a waiting request, from stdin only (hidden at a terminal, one line from a pipe; never the command line): a terminal follows the usual approval, a pipe needs `rule add code` or exits 7 |
+| `secrets code --site S (--into TAB/FIELD \| --human) [--kind link] [--json] < value` | Ask, give and fill in one step from a script: it gets `{"status":"filled"}` or a refusal, never the value |
+| `secrets relay --from TAB/ELEMENT --to TAB/FIELD --site S [--kind code\|link] [--pattern digits\|alnum] [--length N\|A-B] [--json]` | Read a code (or the site's sign-in link) from a page element in the VM's page-mode Chrome and fill (open) it: `relayed: filled` or why not |
+| `secrets fill --request ID [--selector CSS \| --human]`, `secrets rule add code --site S --from stdin [--link-host H] [--project DIR] [--expires 7d]`, `secrets rule add relay --from-host H --to S [...]` | A given request into the tab on its site; your standing approvals for codes piped in with no terminal, or relayed (never an identity provider). Exit codes for these: 0 filled, 2 refused, 3 locked, 6 expired, 7 needs approval (`secrets approve ID`) |
 | `secrets token NAME [--ttl 15m]`, `secrets token renew ID\|--all [--ttl 15m]`, `secrets tokens`, `secrets revoke ID\|--all` | A short-lived API token and the proxy's URL in the VM; keep live ones going (the same token in the VM); the live tokens; end them |
 | `secrets status\|audit\|selftest`, `secrets audit --verify\|--head`, `secrets audit-sink list\|test NAME` | State, the audit history (no values) and its checks, the vault's self-test; the sinks and their backlog |
 | `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action TEXT]` | Tell your event sinks that Claude is blocked on you |
-| `handoff --why captcha\|login\|2fa\|other --say "TEXT" [--timeout 15m] [--json] [--override]` | Claude hands the computer to you and waits: it notifies you, and every acting call waits until you're done. Exit 0 done, 4 cancelled, 124 time limit (at most 2 h), 5 stopped waiting (still open), 3 refused (one is open, another session is acting, or an action is still on its way, such as a fill waiting for approval) |
+| `handoff --why captcha\|login\|2fa\|other --say "TEXT" [--timeout 15m] [--json] [--override]` | Claude hands the computer to you and waits: it notifies you (and, with `INTERACTIVE_PROMPTS=on`, shows a dialog on the Mac's screen with an Open live view button), and every acting call waits until you're done. Exit 0 done, 4 cancelled, 124 time limit (at most 2 h), 5 stopped waiting (still open), 3 refused (one is open, another session is acting, or an action is still on its way, such as a fill waiting for approval) |
 | `handoff done [--note TEXT]`, `handoff cancel [--note TEXT]` | You: hand the computer back (Claude carries on), or call the handoff off (Claude stops and asks). The session that asked can't say "done" for you without a terminal |
 | `handoff wait [--json]`, `handoff status [--json]` | Wait again for the open handoff (or see how the last one ended); show it |
 | `events sink add\|remove NAME ...` | Add or remove an event sink (your own terminal) |
@@ -174,7 +191,8 @@ Refused rather than guessed (nothing runs):
 | --- | --- | --- |
 | `VM_NAME`, `BASELINE_NAME` | `metacomputer`, `metacomputer-baseline` | Lume VM names |
 | `VM_CPU`, `VM_MEMORY` | `4`, `8GB` | VM size |
-| `BROWSERS` | `firefox chrome` | Browsers built in; `firefox` alone leaves Chrome out |
+| `BROWSERS` | `firefox chrome` | Browsers built in; `firefox` alone leaves Chrome out; add `webkit` for GNOME Web (WebKitGTK, for visual checks) |
+| `BROWSER_EXTENSIONS` | (none) | Extensions for every Firefox and Chrome profile, at the next build: `ublock` (uBlock Origin; uBlock Origin Lite in Chrome), `consent-o-matic` (says no to cookie banners). Each is fetched at its latest version when the browser first starts. Firefox rejects the cookie banners it knows either way |
 | `EXTRA_PACKAGES` | (none) | More Ubuntu packages, e.g. `inkscape gimp` |
 | `VIRTUAL_AUDIO` | `off` | `on`: a sound card inside the VM that plays into nothing |
 | `SECRETS_PROXY_PORT` | `18765` | The port inside the VM (on its loopback) where the secrets API proxy appears |
@@ -195,6 +213,8 @@ Refused rather than guessed (nothing runs):
 | `RUN_DIR`, `LOG_DIR` | `.run/`, `logs/` in the checkout (`.run-vms/NAME`, `logs-vms/NAME` for a `config/vms/` VM) | Runtime files and logs; a second VM needs its own |
 | `VNC_PASSWORD_STORE` | `file` (a new install writes `keychain`) | `keychain` (the login Keychain, item `metacomputer-vnc`), `file` (0600 in `SSH_DIR`), or `command` with `VNC_PASSWORD_GET` / `VNC_PASSWORD_SET` for your own secret store |
 | `VIEW_CLIPBOARD_S` | `45` | How long `view --open` leaves the live-view password on the clipboard; it's cleared then only if the clipboard still holds it (`0`: never) |
+| `VIEW_REMEMBER` | `ask` | Screen Sharing's remembered password (the login keychain item it reads for the live view). `ask`: the first time, at a terminal, `view --open` asks (a no sets `off`); once saved, each `view --open` keeps it up to date. `on`: save without asking. `off`: no writes at all (nothing saved or updated; `view --remember` refuses); the clipboard instead. Any other value counts as `off` |
+| `INTERACTIVE_PROMPTS` | `off` | Allow metacomputer to show dialogs on this Mac that wait for you. `on`: a handoff Claude opens shows one on the Mac's screen, with an Open live view button (never over SSH or without your screen session), and `secrets ask` also shows a dialog with a hidden field for the one-time code (read when you unlock). `off`: nothing pops up by itself. A command without a terminal never prompts or opens a dialog itself, whatever this says |
 | `IMPORT_MIN_FREE_GB` | `10` | Copies from the VM, and read-write folder and S3 volumes, stop before the Mac's free space falls below this |
 
 **Skill defaults** (`metacomputer browser` changes them):
@@ -211,6 +231,8 @@ Refused rather than guessed (nothing runs):
 | `MCP_HUB` | `on` | `on`: Claude Code's bridge, `metacomputer call` and scripts share one hub per VM, which applies every guard to each of them; `off`: each connects on its own, with the same guards |
 | `HUB_IDLE` | `10m` | The hub exits after this long with no client and no driver recording |
 | `COORD_GUARD` | `on` | `on`: pixel input is refused when certain window-layout changes happened since the screenshot it was aimed from (a window resized, or covered by a dialog or another app; it compares geometry, not content); `off`: only Cua Driver's own checks |
+| `BROWSER_PACING` | `human` | `human`: typing, batch steps and pixel clicks aimed at a Firefox or Chrome window go at a person's pace (a random 60-140 ms per key, 120-320 ms between steps, the pointer moved toward a pixel click first; at most 15 s added per call; a `delay_ms` the call sets is kept; [BROWSER.md](../skills/metacomputer/BROWSER.md#human-pacing-browser_pacing)); `fast`: as fast as the driver goes. `metacomputer browser pacing` changes it |
+| `BOT_CHECK` | `on` | `on`: a window read that shows a human check (reCAPTCHA's or hCaptcha's box, Cloudflare's "Verify you are human" or "Just a moment...", press-and-hold, DataDome, Arkose, Google's "unusual traffic") gets the hub's note to hand it to you, sends `needs_you.captcha`, and acting calls aimed at that window are refused (`bot_check`) until a whole read of it (no `query`, no `since`) no longer shows it, or any read after a handoff; `note`: the note and the event, no refusal; `off`: neither ([SECURITY.md](../SECURITY.md#human-checks-on-screen-bot_check)) |
 | `HIDDEN_TEXT` | `on` | `on`: page text a person likely can't see (too small, off the page, no size on screen) or that addresses AI agents is marked in the results that carry it, for Claude to tell you about, and reported as `security.hidden_text` ([SECURITY.md](../SECURITY.md#hidden-page-text)); it labels, never removes or blocks; `off`: results as the driver sends them |
 
 **Lessons** (`metacomputer learn`; [docs/learn.md](learn.md)):
@@ -219,6 +241,12 @@ Refused rather than guessed (nothing runs):
 | --- | --- | --- |
 | `LESSONS` | `on` | `on`: the lessons you approved go in every new session's MCP instructions, as advice; `off`: kept, not sent |
 | `LESSONS_DIR` | `~/.local/share/metacomputer/lessons` | Their private store (a 0700 folder, 0600 files, read only when private) |
+
+**One-time codes** ([SECURITY.md](../SECURITY.md#one-time-codes-and-sign-in-links-ask-give-code-relay)):
+
+| Key | Default | |
+| --- | --- | --- |
+| `CODES_VIA` | `vault` | `vault`: Claude uses `secrets code`, `relay` or `ask` and never reads or types a one-time code itself. `claude`: your opt-in to let it (the code lands in the transcript, and nothing ties it to the site). Guidance the skill follows, not enforced |
 
 **Shell channel** (`metacomputer sh`; [docs/shell.md](shell.md)):
 

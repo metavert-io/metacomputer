@@ -11,6 +11,8 @@ enum Exit {
     static let locked: Int32 = 3
     static let error: Int32 = 4
     static let unconfirmed: Int32 = 5   // a request was sent and no answer came: the unlock process may still be on it (`settle`)
+    static let expired: Int32 = 6       // a one-time code request ran out of time (or was already used) before it was filled
+    static let needsApproval: Int32 = 7 // a one-time code request waits for `secrets approve ID`: nothing asked, nothing waits here
     static let usage: Int32 = 64
 }
 

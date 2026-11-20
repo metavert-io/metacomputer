@@ -33,6 +33,8 @@ for p in $EXTRA_PACKAGES; do   # names go into the guest's provisioning script
   [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_PACKAGES: '$p' is not an Ubuntu package name"
 done
 case "${VIRTUAL_AUDIO:-off}" in on|off) ;; *) die "VIRTUAL_AUDIO must be on or off" ;; esac
+for b in $BROWSERS; do case "$b" in firefox|chrome|webkit) ;; *) die "BROWSERS: '$b' isn't firefox, chrome or webkit" ;; esac; done
+for e in ${BROWSER_EXTENSIONS:-}; do case "$e" in ublock|consent-o-matic) ;; *) die "BROWSER_EXTENSIONS: '$e' isn't ublock or consent-o-matic" ;; esac; done
 # One build of a VM at a time, across checkouts and homes: this lock is held from before the first look at
 # the VM until the build ends, so another build can't create or delete it in between.
 lock_rc=0; lock_hold "$(vm_lock_name "$VM_NAME")" "${MCOMP_LOCK_WAIT:-10}" "a build of $VM_NAME" || lock_rc=$?
@@ -134,6 +136,7 @@ case " $BROWSERS " in *" chrome "*) cp "$CACHE_DIR/google/pinned-key.asc" "$SEED
   echo "LUME_VERSION=$LUME_VERSION"; echo "CUA_SRC_COMMIT=$CUA_SRC_COMMIT"; echo "BUILD_ID=$TS"
   echo "MCOMP_BROWSERS=\"$BROWSERS\""
   echo "MCOMP_EXTRA_PACKAGES=\"$(echo $EXTRA_PACKAGES)\""
+  echo "MCOMP_BROWSER_EXTENSIONS=\"$(echo ${BROWSER_EXTENSIONS:-})\""
   echo "MCOMP_VIRTUAL_AUDIO=${VIRTUAL_AUDIO:-off}"
   echo "SECRETS_PROXY_PORT=${SECRETS_PROXY_PORT:-18765}"
 } > "$SEED/payload/versions.env"

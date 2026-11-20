@@ -16,3 +16,7 @@ session-restore='never'
 
 [org/xfce/mousepad/preferences/window]
 always-show-tabs=false
+
+[org/gnome/epiphany]
+ask-for-default=false
+restore-session-policy='crashed'

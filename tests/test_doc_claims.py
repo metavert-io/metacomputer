@@ -114,6 +114,7 @@ with clean_env():
     import hub_notes  # noqa: E402
     import mcp_hub  # noqa: E402
     import owners  # noqa: E402
+    import pacing  # noqa: E402
     import vm_claude  # noqa: E402
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
@@ -122,6 +123,30 @@ with clean_env():
 PROXY, CMDS, IMPORT, APPROVALS, CRYPTO, SERVER = (f"vault/{f}.swift" for f in
                                                   ("Proxy", "Commands", "Import", "Approvals", "Crypto", "Server"))
 FILL = "provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill"
+CODES, HUMAN = "vault/Codes.swift", "vault/Human.swift"
+
+
+def human_script():
+    return re.search(r'let humanFillScript = #"""\n(.*?)\n"""#', raw(HUMAN), re.S).group(1)
+
+
+def code_dialog_args_after_script():
+    """The dialog's words go after its fixed script lines, as arguments; none is spliced into a line."""
+    src = raw(CODES)
+    lines = re.search(r"let codeDialogScript: \[String\] = \[\n(.*?)\n\]", src, re.S).group(1)
+    start = src[src.index("static func start(kind: String"):]
+    return (lines.strip().startswith('"on run argv"') and "\\(" not in lines
+            and start.index('for line in codeDialogScript { args += ["-e", line] }') < start.index("args += [kind, host, clean(why"))
+
+
+def code_requests_only_from_the_socket():
+    """Requests are made in one place, newCode, called only by the three ops the socket dispatches."""
+    src = raw(CODES)
+    callers = re.findall(r"func (op\w+)\([^)]*\)[^{]*\{(?:(?!\n    func ).)*?newCode\(", src, re.S)
+    disp = raw(SERVER)
+    return (sorted(callers) == ["opCodeAsk", "opCodePut", "opCodeRelay"] and src.count("newCode(") == 4
+            and all(f'case "{op}": res = {fn}(req, who)' in disp for op, fn in
+                    (("code_ask", "opCodeAsk"), ("code_put", "opCodePut"), ("code_relay", "opCodeRelay"))))
 
 
 def set_default():
@@ -551,7 +576,210 @@ def no_web_apps_match():
 
 # --- the table -------------------------------------------------------------------------------------------------
 # (document, phrase that must be in it, check(match) -> bool or (bool, detail)). Keep rows short: one promise each.
+def pacing_after_guards():
+    """The hub paces a call only after the coordinate guard and the Chrome guard passed it, and only browser
+    windows (Firefox, Chrome), with nothing else in the call changed."""
+    c = raw("lib/mcp_hub.py")
+    body = c[c.index("    def on_tools_call("):c.index("    def session_for(")]
+    order = [body.find(x) for x in ("self.coord_guard(", "self.chrome_guard(", "self.pace(name, args, sess)",
+                                    "with owners.acting():")]
+    rx = mcp_hub.BROWSER_RE
+    return all(i > 0 for i in order) and order == sorted(order) and bool(rx.search("firefox")) \
+        and bool(rx.search("Google-chrome")) and not rx.search("Mousepad") and not rx.search("libreoffice")
+
+
+def pacing_keeps_text_and_own_delay():
+    """A plan never carries text, hub.log gets only the plan's description, the text a batch types is put back
+    together exactly, and a delay_ms the call sets is kept."""
+    text = "Doc-Claims-Typed-Text-5521 with more words"
+    a = {"steps": [{"tool": "type_text", "args": {"text": text}}, {"click": {"x": 10, "y": 10}}]}
+    plan = pacing.pace_batch(a, {0, 1}, {1: ((900, 700), (10, 10))}, pacing.rng(3))
+    typed = "".join(pacing.step_parts(st)[1].get("text", "") for st in a["steps"]
+                    if pacing.step_parts(st)[0] == "type_text")
+    own = {"text": "abc", "delay_ms": 0}
+    own_batch = {"delay_ms": 0, "steps": [{"tool": "type_text", "args": {"text": "abc", "delay_ms": 0}}]}
+    hub = raw("lib/mcp_hub.py")
+    return (plan and text not in json.dumps(plan) and text not in pacing.describe(plan) and typed == text
+            and pacing.pace_type(own, pacing.rng(1)) is None and own == {"text": "abc", "delay_ms": 0}
+            and pacing.pace_batch(own_batch, {0}, {}, pacing.rng(1)) is None
+            and 'self.note(pacing.describe(plan), kind="pacing")' in hub
+            and "moves_on = not self.bounded_mode" in hub)
+
+
+def caller_pause_counted():
+    """A caller's own run_steps delay_ms counts: ten pixel clicks 2 s apart get nothing added (each added step would
+    wait 2 s too, past the cap), while the same batch without a pause gets pointer moves."""
+    def batch(own):
+        b = {"steps": [{"click": {"x": 10 * i, "y": 10}} for i in range(10)]}
+        if own is not None:
+            b["delay_ms"] = own
+        return b
+    b = batch(2000)
+    keep = json.dumps(b)
+    none = pacing.pace_batch(b, set(range(10)), {i: ((1900, 1000), (10 * i, 10)) for i in range(10)}, pacing.rng(1))
+    plain = pacing.pace_batch(batch(None), set(range(10)), {i: ((1900, 1000), (10 * i, 10)) for i in range(10)},
+                              pacing.rng(1))
+    return none is None and json.dumps(b) == keep and bool(plain and plain["moves"])
+
+
+def normaliser():
+    import batch_steps
+    return batch_steps
+
+
+def function_src(rel, name):
+    text = raw(rel)
+    i = text.index(f"\ndef {name}(")
+    j = text.find("\ndef ", i + 1)
+    return text[i:j if j > 0 else len(text)]
+
+
+def refuses_over_limit():
+    b = normaliser()
+    try:
+        b.normalize_batch({"steps": [{"type": {"text": "x"}}] + [{"tool": "screenshot"}] * b.MAX_STEPS}, {})
+    except b.Refused:
+        return True
+    return False
+
+
+def normalised_first():
+    """The hub normalises a call (lib/batch_steps.py, for the pinned driver) before every guard and sends that call;
+    one it can't normalise isn't passed on."""
+    import batch_steps
+    c = raw("lib/mcp_hub.py")
+    body = c[c.index("    def on_tools_call("):c.index("    def session_for(")]
+    order = [body.find(x) for x in ("batch_steps.normalize_call(", "self.check_and_claim(", "self.coord_guard(",
+                                    "self.chrome_guard(", "self.pace(name, args, sess)", "self.forward(client, msg")]
+    return (batch_steps.DRIVER_VERSION == D["CUA_DRIVER_VERSION"] and all(i > 0 for i in order)
+            and order == sorted(order) and "couldn't read this call's arguments the way the driver" in body
+            and 'name = params["name"] = batch_steps.tool_name(name)' in body)
+
+
+def own_typing_counted():
+    """The typing pauses a batch's own steps set count against the driver's limit: 250 characters at 200 ms, then
+    250 more to pace, leave no room, so the batch goes as it came."""
+    b = {"steps": [{"tool": "type_text", "args": {"text": "a" * 250, "delay_ms": 200}},
+                   {"tool": "type_text", "args": {"text": "b" * 250}}]}
+    keep = json.dumps(b)
+    return pacing.pace_batch(b, {0, 1}, {}, pacing.rng(1)) is None and json.dumps(b) == keep
+
+
+def profiles_deleted_in_the_vm():
+    """`browser profiles --new|--delete` go through lib/guest_profiles.py in the VM (no rm -rf on a path), which
+    opens the way with O_NOFOLLOW and deletes a direct child by descriptor."""
+    fn = function_text("do_browser")
+    g = raw("lib/guest_profiles.py")
+    return ("lib/guest_profiles.py" in fn and "rm -rf" not in fn and "os.O_NOFOLLOW" in g
+            and "shutil.rmtree(name, dir_fd=root)" in g and "follow_symlinks=False" in g)
+
+
+def vault_types_on_its_own_path():
+    """The vault reaches the VM with /usr/bin/ssh itself; nothing in vault/ talks to the hub."""
+    files = [f for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift")]
+    return '"/usr/bin/ssh"' in raw("vault/Guest.swift") and not any(
+        re.search(r"mcp_hub|hub/sock|mcomp-hub", raw(f"vault/{f}")) for f in files)
+
+
 CLAIMS = [
+    ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
+     lambda m: "def resolve_named(self, spec, every=False):" in raw("lib/mcp_hub.py") and "every=strict)" in raw("lib/mcp_hub.py")
+     and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")
+     and "(any(hits) if strict else all(hits))" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"a window named by title\s+without a numeric `pid` or `window_id` counts as Chrome whenever a Chrome window\s+is open",
+     lambda m: "(titled and any(rx.search(w[\"app\"]) for w in ws))" in raw("lib/mcp_hub.py")
+     and "not self.named_complete()" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"refused the same way when the hub can't read the window list, or not whole",
+     lambda m: "if pool is None or not self.named_complete():" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A batch pixel step is checked against the window the driver runs it in, by the same model as the "
+                    r"Chrome guard and human pacing \(`step_windows`",
+     lambda m: "wins = {i: w for i, _t, _a, w in self.step_windows(args)}" in raw("lib/mcp_hub.py")
+     and "self.step_windows(args)]" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"is refused \(code `(pixel_window_unclear)`\)", lambda m: mcp_hub.UNCLEAR_CODE == m[1]),
+    ("SECURITY.md", r"The live layout is read again for each call it checks",
+     lambda m: "self._live = (0.0, -1, None)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A `run_steps` step is judged by the window the driver runs it in, by the driver's own rules "
+                    r"\(`step_targets`\)",
+     lambda m: "self.step_targets(args, CHROME_RE)" in raw("lib/mcp_hub.py")
+     and "self.step_targets(args, BROWSER_RE, strict=False)" in raw("lib/mcp_hub.py")
+     and "(acts and reads[i] is not None)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A batch over the driver's (\d+) items is refused on the list as sent, before trailing reads are folded",
+     lambda m: int(m[1]) == normaliser().MAX_STEPS and refuses_over_limit()),
+    ("SECURITY.md", r"Numbers in strings are read in one linear pass, and a number field holding a string over (\d+) "
+                    r"characters is refused",
+     lambda m: int(m[1]) == normaliser().MAX_SCALAR and "re.compile" not in function_src("lib/batch_steps.py", "_float_text")
+     and "re.compile" not in function_src("lib/batch_steps.py", "_int_text")),
+    ("SECURITY.md", r"rewrites are applied until nothing changes, as the driver's own second pass would",
+     lambda m: normaliser().normalize_step({"tool": "enter", "args": {"key": "*"}}, {})
+     == {"tool": "type_text", "args": {"text": "*"}}),
+    ("SECURITY.md", r"So the hub normalises each call once, as it arrives, with a copy of the driver's own rules for the "
+                    r"pinned version \(`lib/batch_steps\.py`\), before any guard",
+     lambda m: normalised_first()),
+    ("SECURITY.md", r"A call the hub can't normalise isn't passed on", lambda m: normalised_first()),
+    # Human mode and human pacing (lib/pacing.py, the hub's BROWSER_PACING)
+    ("SECURITY.md", r"\*\*Human pacing \(`BROWSER_PACING=human`, the default\)\.\*\*",
+     lambda m: D["BROWSER_PACING"] == "human" and mcp_hub.settings_of({})["browser_pacing"] == "human"
+     and pacing.mode({}) == "human" and pacing.mode({"MCOMP_BROWSER_PACING": "fast"}) == "fast"),
+    ("SECURITY.md", r"for every client, after every guard has passed the call", lambda m: pacing_after_guards()),
+    ("SECURITY.md", r"a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between batch steps",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))),
+    ("SECURITY.md", r"at most (\d+) s is added per call, and a batch whose own steps, pauses and typing pauses leave no "
+                    r"room under the driver's (\d+) s limit isn't paced",
+     lambda m: pacing.CAP_S == int(m[1]) and pacing.BATCH_LIMIT_S == int(m[2]) and own_typing_counted()),
+    ("SECURITY.md", r"never a step that names its field, by role and name or label, token or x,y, or its window by app or title",
+     lambda m: {"role", "name", "label", "element_token", "x", "y", "app", "window"} <= set(pacing.ELEMENT_TARGET_KEYS)),
+    ("SECURITY.md", r"or a check naming another app \(by name, title, or pid and window_id\), nothing more is split or added",
+     lambda m: 'if window(wf):' in raw("lib/mcp_hub.py") and "elif limit is None:" in raw("lib/mcp_hub.py")
+     and '"pid", "window_id", "app", "window"' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"a relative path counted from that browser's own working folder\) isn't deleted",
+     lambda m: 'os.readlink(os.path.join(proc, pid, "cwd"))' in raw("lib/guest_profiles.py")),
+    ("SECURITY.md", r"a nested `target: \{kind: \"window\", pid, window_id\}` counts for its own step \(with the inherited "
+                    r"window beside it, which the driver adds\) but isn't passed on",
+     lambda m: mcp_hub.names_target({"target": {"kind": "window", "pid": 7, "window_id": 9}})
+     and mcp_hub.window_keys({"target": {"kind": "window", "pid": 7, "window_id": 9}})["pid"] == 7
+     and "args = window_keys(args)" in raw("lib/mcp_hub.py")
+     and 'elif t is not None and t.get("kind") == "window" and window(t):' in raw("lib/mcp_hub.py")
+     and not mcp_hub.names_target({"target": {"kind": "desktop", "display_id": "primary"}})),
+    ("SECURITY.md", r"`hub\.log` gets each plan as counts and milliseconds, never text",
+     lambda m: pacing_keeps_text_and_own_delay()),
+    ("SECURITY.md", r"Fills type on the vault's own path \(SSH to the VM\), never through the hub",
+     lambda m: vault_types_on_its_own_path()),
+    ("SECURITY.md", r"no fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services",
+     lambda m: "no fingerprint spoofing, stealth plugins or CAPTCHA services" in doc("CLAUDE.md")
+     and "No fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services"
+     in doc("skills/metacomputer/BROWSER.md")),
+    ("skills/metacomputer/BROWSER.md", r"`delay_ms`\), a random (\d+)-(\d+) ms per call",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2]))),
+    ("skills/metacomputer/BROWSER.md", r"a pause between steps \(`delay_ms`, (\d+)-(\d+) ms\)",
+     lambda m: pacing.STEP_MS == (int(m[1]), int(m[2]))),
+    ("skills/metacomputer/BROWSER.md", r"at most (\d+) s added per call, less in a long batch; a `delay_ms` you set "
+                                       r"yourself is kept, and every added step waits it too",
+     lambda m: pacing.CAP_S == int(m[1]) and pacing_keeps_text_and_own_delay() and pacing_after_guards()
+     and caller_pause_counted()),
+    ("SECURITY.md", r"Every added step also waits the batch's pause, the caller's own included, and that counts",
+     lambda m: caller_pause_counted()),
+    ("SECURITY.md", r"the profiles folder is reached from the home folder without following a link",
+     lambda m: profiles_deleted_in_the_vm()),
+    ("SECURITY.md", r"\(`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome;",
+     lambda m: '("--profile", "-profile")' in raw("lib/guest_profiles.py") and '("--user-data-dir",)' in raw("lib/guest_profiles.py")
+     and 'a.startswith(fl + "=")' in raw("lib/guest_profiles.py")),
+    ("skills/metacomputer/BROWSER.md", r"the result starts with a note `(metacomputer hub \(human pacing\):)",
+     lambda m: m[1] == pacing.NOTE_PREFIX and pacing.note_of({"moves": 1}).startswith(pacing.NOTE_PREFIX)),
+    ("skills/metacomputer/BROWSER.md", r"Sign-in, sign-up, checkout, account settings and posting go through human mode",
+     lambda m: "Sign-ins, sign-ups, checkout, account settings and posting: human mode first" in mcp_hub.HABITS),
+    ("skills/metacomputer/SKILL.md", r"Anything account-facing goes through human mode first",
+     lambda m: "Sign-ins, sign-ups, checkout, account settings and posting: human mode first" in mcp_hub.HABITS
+     and D["MODE"] == "human"),
+    ("config/defaults.env", r"\(a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between batch steps",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))),
+    ("config/defaults.env", r"at most (\d+) s added per call\); fast", lambda m: pacing.CAP_S == int(m[1])),
+    ("docs/commands.md", r"\(a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between steps, .{0,60}at most (\d+) s "
+                         r"added per call; a `delay_ms` the call sets is kept",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))
+     and pacing.CAP_S == int(m[5])),
+    ("CHANGELOG.md", r"\(a random (\d+)-(\d+) ms per call; .{0,90}\(120-320 ms\)|a random (\d+)-(\d+) ms per call",
+     lambda m: pacing.KEY_MS == (int(m[1] or m[3]), int(m[2] or m[4]))),
+    ("CHANGELOG.md", r"At most (\d+) s is added per call", lambda m: pacing.CAP_S == int(m[1])),
     ("README.md", r"Python 3\.11 or later on the Mac\. Apple's own `python3` is 3\.9, so where that's the only one, the install\s+adds Homebrew's",
      lambda m: python_311()),
     ("docs/install.md", r"Python 3\.11 \(or later\) is missing; Apple's own `python3` \(3\.9\) doesn't count", lambda m: python_311()),
@@ -898,8 +1126,9 @@ CLAIMS = [
      and gateway_rules()["block_host_addrs"] is True),
     ("docs/guide.md", r"\*\*Always refused:\*\* your Mac's loopback and every address of its own interfaces",
      lambda m: gateway_rules()["block_host_addrs"] is True and gateway_rules()["default_accept"] is True
-     and '"rules": "$LAB_ROOT/config/netgw-rules.json"' in raw("scripts/lib.sh")
-     and '-check-rules "$LAB_ROOT/config/netgw-rules.json"' in raw("scripts/lib.sh")),
+     and '"rules": "$RUN_DIR/netgw-rules.json"' in raw("scripts/lib.sh")      # written from config/netgw-rules.json
+     and '-check-rules "$LAB_ROOT/config/netgw-rules.json"' in raw("scripts/lib.sh")
+     and "return base\n" in raw("lib/netpolicy.py")),                       # (lib/netpolicy.py compose: as is, no list)
     # mcomp-vm leaves out host sharing: the flags the docs name are the ones scripts/lib.sh passes
     ("architecture.md", r"`lume run (--no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing)`",
      lambda m: share_flags_match(re.findall(r"--[a-z-]+", m[1]))),
@@ -912,7 +1141,20 @@ CLAIMS = [
      lambda m: m[1] == D["LUME_VERSION"] and D["LUME_TARBALL_SHA256"].startswith(m[2])),
     ("architecture.md", r"Lume ([\d.]+) \(`lume-v([\d.]+)`, `[0-9a-f]+`\) \+ one patch",
      lambda m: m[1] == m[2] == D["LUME_VERSION"]),
-    ("architecture.md", r"\| cua-netgw \| built from trycua/cua `([0-9a-f]+)`", lambda m: D["CUA_SRC_COMMIT"].startswith(m[1])),
+    ("architecture.md", r"\| mcomp-netgw \| cua-netgw, built from trycua/cua `([0-9a-f]+)`", lambda m: D["CUA_SRC_COMMIT"].startswith(m[1])),
+    ("architecture.md", r"The patch \(`patches/netgw/`, applied by `scripts/build-tools.sh` to a clean export of the pinned\s+source",
+     lambda m: 'G -C "$SRC" archive "$CUA_SRC_COMMIT" libs/cua/netgw | tar -x -C "$tree"' in raw("scripts/build-tools.sh")
+     and 'NETGW_BIN="$LAB_ROOT/vendor/bin/mcomp-netgw"' in raw("scripts/lib.sh")
+     and all(x in raw("patches/netgw/0001-mcomp-allowlist-ptr-recheck-digest.patch") for x in (
+         "+\tif !rules.DNSAllowed(name) {", "StripAnswerFor(", "if !g.decide(policy.TCP, dst, port).Accept {",
+         'return "ok " + g.rules.Digest()', "+\tif strings.ContainsRune(name, '\\\\') && (rules.Domains != nil || !rules.DefaultAccept) {",
+         "got := r.forward(onlyQuestion(req, q))", "s.applied = data // only now"))),
+    ("SECURITY.md", r"a name with escaped characters is refused; a question\s+goes upstream with nothing else the guest put in it",
+     lambda m: "func onlyQuestion(req *dns.Msg, q dns.Question) *dns.Msg {" in raw("patches/netgw/0001-mcomp-allowlist-ptr-recheck-digest.patch")),
+    ("SECURITY.md", r"says the list is in force only when that's the file it just wrote",
+     lambda m: "want = expected_digest(st)" in raw("lib/netpolicy.py") and "if have == digest:" in raw("lib/netpolicy.py")),
+    ("SECURITY.md", r"named `mcomp-netgw` \(or `cua-netgw`, built by an earlier version\)",
+     lambda m: 'var names = ["mcomp-netgw", "cua-netgw"]' in raw("vault/Guest.swift")),
     ("architecture.md", r"\| rclone \(only for S3 volumes\) \| ([\d.]+) osx-arm64 \(sha256 `([0-9a-f]+)…`; `SHA256SUMS` signed by "
                         r"`([0-9A-F]+)…([0-9A-F]+)`\) \| `\.cache/rclone-v([\d.]+)/rclone`",
      lambda m: m[1] == m[5] == D["RCLONE_VERSION"] and D["RCLONE_SHA256"].startswith(m[2])
@@ -1001,7 +1243,7 @@ CLAIMS = [
     ("SECURITY.md", r"\*\*Claude Code comes from Anthropic's installer\*\* \(https://claude\.ai/install\.sh, over HTTPS, as the "
                     r"desktop user, saved whole before it runs\)", lambda m: claude_installer()),
     # The live view (bin/metacomputer view, lib/liveview.py): loopback only, the password through a pipe
-    ("SECURITY.md", r"cua-netgw forwards it to `127\.0\.0\.1:VNC_PORT` on your Mac only",
+    ("SECURITY.md", r"The gateway forwards it to `127\.0\.0\.1:VNC_PORT` on your Mac only",
      lambda m: '"host": "127.0.0.1:$VNC_PORT"' in raw("scripts/lib.sh")),
     ("SECURITY.md", r"It's never in the link, an argument, the environment, a log, an event or the command's output",
      lambda m: view_open_pipes_password()),
@@ -1020,6 +1262,67 @@ CLAIMS = [
                     r"tailnet, and its undo; metacomputer never runs it", lambda m: tailnet_runs_only_status()),
     ("docs/guide.md", r"cleared from the clipboard after (\d+) seconds, if nothing else was copied since",
      lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
+    # Screen Sharing's remembered password (bin/metacomputer view_remember_*, lib/liveview.py remember)
+    ("SECURITY.md", r"\*\*Screen Sharing's remembered password\*\* \(`VIEW_REMEMBER`, `(\w+)` by default\)",
+     lambda m: m[1] == D["VIEW_REMEMBER"] == "ask"
+     and 'case "${VIEW_REMEMBER:-ask}" in on|off|ask) echo "${VIEW_REMEMBER:-ask}" ;; *) echo off ;; esac' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"an internet-password item in your \*\*login keychain\*\*, server `127\.0\.0\.1:PORT`, protocol `vnc `, "
+                    r"port 0, type `vncl` \(a VNC password\)", lambda m: remembered_item_shape()),
+    ("SECURITY.md", r"a \"no\" writes `VIEW_REMEMBER=off` to your settings so it isn't asked again",
+     lambda m: "*) browser_set VIEW_REMEMBER off" in raw("bin/metacomputer")),
+    ("SECURITY.md", r"Without a terminal \(Claude, a script, a dialog's button\) nothing is saved for the first time",
+     lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"The item is written by osascript \(Apple's scripting tool\) through the Security framework, with "
+                    r"the password on osascript's stdin: never in an argument, the environment, a log, an event or the "
+                    r"output", lambda m: remember_pipes_password()),
+    ("SECURITY.md", r"Keychain dialogs are switched off for that osascript run, so a locked keychain fails",
+     lambda m: "$.SecKeychainSetUserInteractionAllowed(false);" in raw("lib/liveview.py")),
+    ("SECURITY.md", r"the item's access list lets Screen Sharing and osascript read it without asking",
+     lambda m: "SecTrustedApplicationCreateFromPath('/usr/bin/osascript', me)" in raw("lib/liveview.py")
+     and 'SS_APP = "/System/Applications/Utilities/Screen Sharing.app"' in raw("lib/liveview.py")
+     and "trusted.addObject(me[0]); trusted.addObject(ss[0]);" in raw("lib/liveview.py")),
+    ("docs/guide.md", r"`VIEW_REMEMBER=off` never saves it, or updates one saved before; `--remember` and `--forget` "
+                      r"run only in your own terminal", lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"`view --remember` and `view --forget` \(which removes only the item metacomputer made\) refuse "
+                    r"without a terminal, whether or not an item is there, and an explicit save that fails is an error "
+                    r"with its reason", lambda m: remember_flag_gated()),
+    ("SECURITY.md", r"`off` means no writes at all: nothing is saved, `view --remember` refuses, and an item saved "
+                    r"earlier is no longer updated; a value that isn't `ask`, `on` or `off` counts as `off`",
+     lambda m: unknown_setting_is_off()),
+    ("SECURITY.md", r"\*\*Who can write it\.\*\* The CLI refuses to make or remove the item without a terminal \(unless "
+                    r"you set `VIEW_REMEMBER=on`, which makes it without asking\); without one it only brings an item you "
+                    r"agreed to up to date\. Claude's skill never runs the commands that save or remove it\. A program "
+                    r"running as you could still write the item directly, as with any keychain item it can reach",
+     lambda m: remember_flag_gated() and remember_needs_a_person() and skill_never_saves()),
+    ("SECURITY.md", r"checks the same rules when it's run by itself \(stdin must be a terminal unless its internal "
+                    r"`--from-view` flag says `metacomputer view` is calling; nothing while `VIEW_REMEMBER` is off; the "
+                    r"silent update only changes an item that's already there\), as a guard against mistakes, not a "
+                    r"barrier: the flag says who's calling and proves nothing", lambda m: helper_gated()),
+    ("SECURITY.md", r"A password typed into the helper at a terminal isn't echoed",
+     lambda m: "quiet[3] &= ~termios.ECHO\n        termios.tcsetattr(fd, termios.TCSAFLUSH, quiet)" in raw("lib/liveview.py")
+     and "data = read_hidden() if sys.stdin.isatty() else sys.stdin.buffer.readline(MAX_PASSWORD + 2)"
+     in raw("lib/liveview.py")),
+    ("SECURITY.md", r"the helper checks all of that again itself, whoever starts it, from the handoff's own record",
+     lambda m: 'if dialog_off_reason(rec.get("interactive") is not False) is not None:\n        return 0'
+     in raw("lib/handoff.py") and raw("lib/handoff.py").index("if dialog_off_reason(rec.get(")
+     < raw("lib/handoff.py").index('p = subprocess.Popen(["osascript", "-e", DIALOG_SCRIPT')),
+    # The handoff's dialog (lib/handoff.py; INTERACTIVE_PROMPTS)
+    ("SECURITY.md", r"\*\*A dialog on the Mac \(`INTERACTIVE_PROMPTS`, `(\w+)` by default\)\.\*\* That setting allows "
+                    r"metacomputer to show dialogs on this Mac that wait for you",
+     lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
+    ("SECURITY.md", r"\"Claude needs you: \" and the `--say` text \(cleaned like an event, at most (\d+) characters\)",
+     lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and '"Claude needs you: " & msg' in handoff.DIALOG_SCRIPT
+     and "t = clean_text(say)" in raw("lib/handoff.py")),
+    ("SECURITY.md", r"The text reaches osascript as an argument of a fixed AppleScript, never as part of one",
+     lambda m: dialog_text_is_data()),
+    ("SECURITY.md", r"A detached helper shows it, so `handoff` goes on at once, and takes it down when the handoff ends",
+     lambda m: "os.setsid()" in raw("lib/handoff.py") and 'if not h or h.get("id") != hid:\n                p.terminate()'
+     in raw("lib/handoff.py")),
+    ("SECURITY.md", r"It isn't shown over SSH, without your screen session, or for a handoff you opened at your own terminal",
+     lambda m: "return liveview.gui_reason()" in raw("lib/handoff.py") and 'if interactive:\n        return "you\'re at '
+     'this terminal"' in raw("lib/handoff.py")),
+    ("docs/guide.md", r"it's off by default, so nothing pops up while you're away",
+     lambda m: D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
     # Handoffs (lib/handoff.py, owners.py): what an open one pauses, and its limits
     ("SECURITY.md", r'with "Paused: the user has the computer" \(code `(user_has_computer)`\)',
      lambda m: f'"code": "{m[1]}"' in raw("lib/mcp_hub.py")
@@ -1051,7 +1354,7 @@ CLAIMS = [
      in raw("lib/mcp_relay.py") and "text = STALLED.format(int(WRITE_TIMEOUT_S))" in raw("lib/mcp_relay.py")),
     ("SECURITY.md", r"A fill or session load that ends without an answer from the vault's unlock process \(`secrets` exit "
                     r"5, when the vault withdrew the request unconfirmed, or a crash or a signal\)",
-     lambda m: re.search(r'case "\$rc" in\n\s+0\|1\|2\|3\|4\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle ',
+     lambda m: re.search(r'case "\$rc" in\n\s+0\|1\|2\|3\|4\|6\|7\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle ',
                          raw("bin/metacomputer")) is not None),
     ("SECURITY.md", r"`metacomputer claude` refuses the steps that act \(`start`, `send`, `keys`, `show`, `stop`\), with "
                     r"or without `--override` \(`start` before any token is asked for",
@@ -1244,6 +1547,176 @@ CLAIMS = [
     # An honest limit, kept honest: the typed name is a terminal read, not a person check.
     ("SECURITY.md", r"The typed name guards against a slip, not against a program\.\*\* It isn't proof that a person is there",
      lambda m: '[ -t 0 ] || die "deleting a VM needs its name typed' in vm_delete_src()),
+    # One-time codes and sign-in links (vault/Codes.swift), human-mode fills (vault/Human.swift)
+    ("SECURITY.md", r"when it expires \(10 minutes by\s+default, `--ttl`, at most 15\)",
+     lambda m: swift_num(CODES, r"let codeDefaultTTL = ([^\n]+)") == 600 and swift_num(CODES, r"let codeMaxTTL = ([^\n]+)") == 900),
+    ("SECURITY.md", r"from a pipe, one line of at most (\d+) bytes \(a longer one is\s+refused, not cut\)",
+     lambda m: f"if line.count > {m[1]} {{ wipe(&line); throw VaultError(" in raw(CODES)),
+    ("SECURITY.md", r"Never from the command line or the environment: a value on the command line is a usage\s+error",
+     lambda m: "guard a.positional.count == 1, validRequestID(a.positional[0]), a.last(\"vm\").map(validName) ?? true else {" in raw(CODES)
+     and "`code` takes the value from stdin only, never from the command line" in raw(CODES)
+     and "let n = read(0, &c, 1)" in raw(CODES)),
+    ("SECURITY.md", r"With `INTERACTIVE_PROMPTS=on` \(off by default; it's read when you unlock\)",
+     lambda m: D["INTERACTIVE_PROMPTS"] == "off" and 'environment["MCOMP_INTERACTIVE_PROMPTS"] == "on"' in raw(SERVER)
+     and 'export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"the site's host, `why`, the id and the time left are passed to it as arguments \(`on run argv`\)",
+     lambda m: code_dialog_args_after_script()),
+    ("SECURITY.md", r"A page in the VM can't make one: requests come only through the vault's socket",
+     lambda m: code_requests_only_from_the_socket()),
+    ("SECURITY.md", r"At most\s+(\d+) characters of its text \(or (\d+) of its links\) come back",
+     lambda m: int(m[1]) == swift_num(CODES, r"let relayTextMax = (\d+)") == int(re.search(r"READ_MAX = (\d+)", raw(FILL))[1])
+     and int(m[2]) == int(re.search(r"LINKS_MAX = (\d+)", raw(FILL))[1]) and "arr.count <= 20" in raw("vault/Guest.swift")),
+    ("SECURITY.md", r"\(4 to 10 long with at least one digit;",
+     lambda m: "var minLen = 4" in raw(CODES) and "var maxLen = 10" in raw(CODES)
+     and "shape.digitsOnly || s.unicodeScalars.contains { $0 >= \"0\" && $0 <= \"9\" }" in raw(CODES)),
+    ("SECURITY.md", r"`--expires` is (\d+) days\s+when left out, at most (\d+) days",
+     lambda m: int(m[1]) * 86400 == swift_num(APPROVALS, r"let defaultCodeRuleSeconds = ([^\n]+)")
+     and int(m[2]) * 86400 == swift_num(APPROVALS, r"let maxRuleSeconds = ([^\n]+)")),
+    ("SECURITY.md", r"\*\*Without a rule, the command exits at once\*\* with exit (\d+)",
+     lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
+    ("SECURITY.md", r"\| (\d+) \| `expired` \| the request expired, or was used already \|",
+     lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")),
+    ("SECURITY.md", r"no rule can name one as its\s+site or as a link's host",
+     lambda m: "is an identity provider's sign-in page, which always asks: no rule can cover it" in raw(APPROVALS)
+     and "which always asks: no rule can send links there" in raw(APPROVALS)
+     and "if !cr.identityProvider && !interactive {" in raw(CODES)),
+    ("SECURITY.md", r"\*\*A link is opened only if it's https and its host is the site's\*\* \(its origin equal to the site's\)",
+     lambda m: "if link.origin == site { return true }" in raw(CODES)
+     and "parse_origin(value) != parse_origin(req.get(\"link_origin\") or \"\")" in raw(FILL)),
+    ("SECURITY.md", r"\*\*A code is filled only into a tab whose origin is the request's site\*\*",
+     lambda m: ': ["field": "otp", "origins": [cr.site]]' in raw(CODES) and 'rq["mode"] = "fill"' in raw(CODES)
+     and "a code goes only into a tab on its own site" in raw(CODES)),
+    ("SECURITY.md", r"`CODES_VIA=vault` \(the default\) is guidance for Claude", lambda m: D["CODES_VIA"] == "vault"),
+    ("SECURITY.md", r"must agree with the address the browser\s+reports for the page's document \(AT-SPI's `DocURL`\)",
+     lambda m: 'GetAttributeValue("DocURL"' in human_script() and "the page's address and the address bar disagree" in human_script()),
+    ("SECURITY.md", r"a password text for `password`, an\s+entry for `username` and `otp` \(or a spin button for a numeric code\)",
+     lambda m: 'FIELD_ROLES = {"password": {"password text"}, "username": {"entry"}, "otp": {"entry", "spin button"}}' in human_script()),
+    ("SECURITY.md", r"\*\*The value is typed as real foreground keystrokes through Cua Driver\*\*",
+     lambda m: 'target = {"pid": pid, "window_id": window_id, "delivery_mode": "foreground"}' in human_script()
+     and '"name": "type_text"' in human_script()),
+    ("SECURITY.md", r"a VM whose driver policy accepts only bounded sessions refuses human-mode fills",
+     lambda m: 'if any(line.strip() == "bounded" for line in f):' in human_script()),
+    ("SECURITY.md", r"not in a frame, whose site the bar doesn't\s+show",
+     lambda m: "the field is inside a frame, whose site the address bar doesn't show" in human_script()),
+    ("SECURITY.md", r"a bar with no scheme counts only when the page's own address is https",
+     lambda m: 'if not doc.startswith("https://"):' in human_script()),
+    ("SECURITY.md", r"a link to any other host is refused in fixed words, its host never\s+named or asked about",
+     lambda m: "guard onSite.count == 1 else {" in raw(CODES) and "(other hosts aren't shown); nothing was opened" in raw(CODES)
+     and "pick = parsed[0]" not in raw(CODES)),
+    ("SECURITY.md", r"name a link's\s+host only when it's the site's or one a rule lists",
+     lambda m: 'd["link_host"] = h' not in raw(CODES).replace('if let h = reportedLinkHost { d["link_host"] = h }', "")
+     and raw(CODES).count("cr.linkHost {") == 0 and "return linkHostAllowed((o, h), site: site, extra: listedHosts) ? h : nil" in raw(CODES)),
+    ("SECURITY.md", r"`--link-host H` covers `https://H` only: not another port, not http",
+     lambda m: 'return link.origin.hasPrefix("https://") && link.origin == "https://" + link.host && extra.contains(link.host)' in raw(CODES)
+     and "covering.first { linkHostAllowed((o, h), site: cr.site, extra: $0.link_hosts ?? []) }" in raw(CODES)),
+    ("SECURITY.md", r"For (\d+) seconds after the fill account opens a link, every request\s+for the tab's own page .{0,200}?is paused by the\s+browser before it's sent",
+     lambda m: int(m[1]) == int(re.search(r"LAND_WAIT = (\d+)", raw(FILL))[1])
+     and '"resourceType": "Document", "requestStage": "Request"' in raw(FILL)
+     and 'dt.send("Fetch.failRequest", {"requestId": p.get("requestId"), "errorReason": "BlockedByClient"})' in raw(FILL)
+     and 'end, last = time.monotonic() + opts["land_wait"], None' in raw(FILL)
+     and 'rq["final_origins"] = lo == cr.site || lo.isEmpty ? [cr.site] : [cr.site, lo]' in raw(CODES)),
+    ("SECURITY.md", r"a site outside the list that shows there anyway \(a navigation the interception didn't\s+see\) refuses afterwards",
+     lambda m: "seen_off.append(True)" in raw(FILL) and "if seen_off or (last and last[1] not in finals):" in raw(FILL)),
+    ("SECURITY.md", r"An answer in the dialog gives\s+the value and, with your approval, approves it, but never fills by itself",
+     lambda m: 'codeGive(cr, value: v, source: "dialog", interactive: true, presentAtMac: true, act: false)' in raw(CODES)
+     and "guard act else {" in raw(CODES)),
+    ("SECURITY.md", r"bin/metacomputer reads `approve`'s id as the\s+vault does .{0,120}?an id the list doesn't show, or a list it can't read, counts as one that may fill",
+     lambda m: 'if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then' in raw("bin/metacomputer")
+     and 'listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1' in raw("bin/metacomputer")
+     and 'case "$a" in --scope|--vm) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"or on a step in the VM for another request\s+\(checked several times a second\), or on a client's request arriving: .{0,200}?An expired\s+request's value is wiped within about a second",
+     lambda m: "if Thread.isMainThread, let hook = waitHook {" in raw("vault/Guest.swift")
+     and "waitHook = { [unowned self] in self.codeExpirySweep(duringStep: true) }" in raw(SERVER)
+     and "poll(&fds, nfds_t(fds.count), 250)" in raw("vault/Guest.swift")),
+    ("SECURITY.md", r"\*\*Once the value\s+is sent, the request is used\*\*, whatever the VM answers",
+     lambda m: 'chk["mode"] = "check"' in raw(CODES) and "// The value went to the VM: the request is used, whatever came back." in raw(CODES)),
+    ("SECURITY.md", r"an approval that came from a rule must still be covered by a live rule",
+     lambda m: "if !approvalStillHolds(cr) {" in raw(CODES) and "guard cr.approval.hasPrefix(\"rule:\") else { return cr.approved }" in raw(CODES)),
+    ("SECURITY.md", r"No step in the VM\s+may take longer than the request has left",
+     lambda m: "let left = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)" in raw(CODES)),
+    ("SECURITY.md", r"requests expire on\s+time even while the unlock process waits on a question or a dialog, or on a step in the VM",
+     lambda m: "codeExpirySweep()               // one-time code requests expire on time, even while this question waits" in raw(SERVER)),
+    ("SECURITY.md", r"and stopping it \(Ctrl-C, a signal, its wrapper killed\) withdraws it",
+     lambda m: '|| (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }' in raw(SERVER)
+     and 'secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"' in raw("bin/metacomputer")
+     and "request(paths, req, timeout: 200, cancellable: fills)" in raw(APPROVALS)),
+    ("SECURITY.md", r"The vault refuses a request that's another VM's, or a command that names none",
+     lambda m: all(raw(CODES).count(x) == 1 for x in ("        if let no = vmMismatch(cr, req) { return no }\n        var v = Array(",
+                                                      "        if cr.final { return codeResult(cr) }\n        if let no = vmMismatch(cr, req) { return no }",
+                                                      "        // Approving it fills it: only for the VM whose handoff the wrapper checked (asked before any dialog shows).\n        if let no = vmMismatch(cr, req) { return no }"))
+     and 'let named = req["vm"] as? String\n        if named == cr.vm { return nil }' in raw(CODES)
+     and '      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"\n      secrets_run_acting "$kind" "$inflight" "$sub" "$@"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"every paused request is\s+refused and loading is stopped \(`Page.stopLoading`\) before the interception is turned off",
+     lambda m: 0 < raw(FILL).find('dt.on_event = fail_all') < raw(FILL).find('dt.send("Page.stopLoading")')
+     < raw(FILL).find("dt.wait_events(0.5)") < raw(FILL).rfind('dt.call("Fetch.disable")')),
+    ("SECURITY.md", r"each request must arrive whole within (\d+)\s+seconds of its connection, however slowly the bytes come, "
+                    r"and expiries are serviced while it's read, every ([\d.]+)\s+seconds whether or not bytes arrive meanwhile",
+     lambda m: int(m[1]) == int(swift_num(SERVER, r"let clientMessageSeconds: TimeInterval = (\d+)"))
+     and float(m[2]) == float(swift(SERVER, r"let readHookEvery: TimeInterval = ([\d.]+)"))
+     and raw(SERVER).count("readMessage(c, within: clientMessageSeconds)") == 2
+     and "let deadline = within.map { now() + $0 }" in raw(SERVER) and "ProcessInfo.processInfo.systemUptime" in raw(SERVER)
+     # the hook's turn comes before the wait for bytes, on its own clock, not only when a wait ends with nothing read
+     and 0 < raw(SERVER).find("if now() - hookRan >= readHookEvery {") < raw(SERVER).find("let r = poll(&pfd, 1, Int32(Swift.max(1, wait * 1000)))")),
+    ("docs/events.md", r"\| `needs_you` \| `code_requested` \| warn \|",
+     lambda m: 'dropEvent(type: "code_requested", severity: "warn"' in raw(CODES)),
+    ("docs/guide.md", r"With `INTERACTIVE_PROMPTS=on` in `config/local.env` \(off by default\)", lambda m: D["INTERACTIVE_PROMPTS"] == "off"),
+    ("CHANGELOG.md", r"`INTERACTIVE_PROMPTS` \(`(\w+)` by default\): allow metacomputer to show dialogs",
+     lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off"),
+    ("CHANGELOG.md", r"New exit codes for these commands: (\d+) expired \(or used already\), (\d+) needs approval",
+     lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")
+     and int(m[2]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
+    # Network allowlists (lib/netpolicy.py, `metacomputer net`)
+    ("SECURITY.md", r"answers DNS only for the names on the\s+list \(PTR questions included;",
+     lambda m: 'out["default_accept"] = False' in raw("lib/netpolicy.py")
+     and 'out["domains"] = {"allow": sorted(set(st["allow"]))}' in raw("lib/netpolicy.py")),
+    ("SECURITY.md", r"Adding names or time to a\s+list in force, and `net clear`, run only at a\s+terminal",
+     lambda m: raw("lib/netpolicy.py").count("if not at_terminal():") == 1
+     and "if st is not None and not at_terminal():" in raw("lib/netpolicy.py")
+     and "return sys.stdin.isatty() and sys.stderr.isatty()" in raw("lib/netpolicy.py")),
+    ("SECURITY.md", r"\(1 minute to 24 hours,\s+2 hours by default\)",
+     lambda m: (__import__("netpolicy").MIN_FOR_S, __import__("netpolicy").MAX_FOR_S, __import__("netpolicy").DEFAULT_FOR_S)
+     == (60, 86400, 7200)),
+    ("SECURITY.md", r"is checked with the gateway's own\s+`-check-rules` before it replaces the one in force",
+     lambda m: re.search(r"check_rules\(tmp\)\n\s+os\.replace\(tmp, p\[\"rules\"\]\)", raw("lib/netpolicy.py")) is not None),
+    ("SECURITY.md", r"says the list is in force only when that's the file it just wrote",
+     lambda m: "if have == digest:" in raw("lib/netpolicy.py") and 'c.sendall(b"rules\\n")' in raw("lib/netpolicy.py")
+     and "check_in_vm" not in raw("lib/netpolicy.py")),
+    ("SECURITY.md", r"a list file that can't be read\s+stops `metacomputer start` instead of starting with the internet open",
+     lambda m: 'net_policy render || die' in raw("scripts/lib.sh") and '"rules": "$RUN_DIR/netgw-rules.json",' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"`net_allowlist_lifted` carry counts and minutes, never the names",
+     lambda m: all(not re.search(r'"allow"|a\.names|pats|wider\b(?!\))|st\["allow"\](?!\))', c.split("{", 1)[1])
+                   for c in re.findall(r'emit\("net_allowlist_\w+".*?\}', raw("lib/netpolicy.py"), re.S))
+     and len(re.findall(r'emit\("net_allowlist_\w+"', raw("lib/netpolicy.py"))) >= 6),
+    # Human checks on screen (lib/botcheck.py, the hub's BOT_CHECK)
+    ("config/defaults.env", r"BOT_CHECK=(\w+) # on: a window read that shows a human check",
+     lambda m: m[1] == "on" and D["BOT_CHECK"] == "on" and 'out["bot_check"] = bc if bc in ("on", "note", "off") else "on"' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"acting calls aimed at that window \(by window,\s+element token, pid, or an app or title that could resolve to it\) are refused with\s+`bot_check`",
+     lambda m: "hit = self.bot_target(name, args) if self.bot_mode == \"on\" and self.bot_marks else None" in raw("lib/mcp_hub.py")
+     and "self.resolve_named(spec, every=True)" in raw("lib/mcp_hub.py") and '"code": "bot_check"' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"until a whole read of it \(no `query`, no `since`\) no longer shows the check,\s+or any read does after a handoff opened",
+     lambda m: 'whole = (args.get("query") in (None, "") and args.get("since") in (None, "")' in raw("lib/mcp_hub.py")
+     and "self.handoff_seen > self.bot_marks[wid][2]" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"with the kind only, never page text",
+     lambda m: 'return (f"Claude is stopped at {LABEL.get(kind, \'a human check\')}: it needs you to complete it",' in raw("lib/botcheck.py")
+     and '{"kind": kind if kind in KINDS else "generic"})' in raw("lib/botcheck.py")),
+    # Browser tools in a browser of their own (lib/page_guest.py), traces (lib/traces.py), each (lib/each.py)
+    ("docs/commands.md", r"page text only in escaped string literals",
+     lambda m: 'return json.dumps(str(s), ensure_ascii=True)' in raw("lib/traces.py")
+     and all(not re.search(r"\{(?!self\.(steps|pixels|skipped)\})[^}]*\}", l) for l in raw("lib/traces.py").splitlines()
+             if re.match(r'\s*(f?")// ', l.strip()) or re.match(r'\s*"//', l))),
+    ("docs/commands.md", r"refuses password and one-time-code fields",
+     lambda m: "el.type === 'password'" in raw("lib/page_guest.py") and "one-time-code" in raw("lib/page_guest.py")),
+    ("CHANGELOG.md", r"the remote control on the VM's loopback only",
+     lambda m: '"--remote-debugging-address=127.0.0.1"' in raw("lib/page_guest.py")
+     and "--remote-allow-hosts" not in raw("lib/page_guest.py") and not re.search(r"[\"'=]0\.0\.0\.0", raw("lib/page_guest.py"))),
+    ("docs/commands.md", r"The same metacomputer command on several VMs at once \(`main` is this checkout's VM\), without a terminal",
+     lambda m: "stdin=subprocess.DEVNULL" in raw("lib/each.py")),
+    ("SECURITY.md", r"read only from a run\s+of the shell channel that finished cleanly",
+     lambda m: 'if res.get("status") != "exited" or res.get("exit") not in (0, 1) or r.returncode not in (0, 1):' in raw("lib/browser_tools.py")),
+    ("SECURITY.md", r"only as PNG files, within 60 seconds",
+     lambda m: 'timeout=60' in raw("lib/browser_tools.py") and 'if head != b"\\x89PNG\\r\\n\\x1a\\n":' in raw("lib/browser_tools.py")),
+    ("SECURITY.md", r"checked again after the field\s+is focused and after it's filled\), and a field's name never comes from what's in it",
+     lambda m: raw("lib/page_guest.py").count("secret()") >= 3 and "if (a || field(el)) return a;" in raw("lib/page_guest.py")),
 ]
 
 
@@ -1265,6 +1738,91 @@ def view_open_pipes_password():
     return ('vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip' in b and 'open "vnc://127.0.0.1:$VNC_PORT"' in b
             and 'count = pasteboard(["copy"], pw)' in lv and '"-e", PASTEBOARD_JS] + args, input=data' in lv
             and "print(pw" not in lv)
+
+
+def remembered_item_shape():
+    """Screen Sharing's item: server 127.0.0.1:PORT, protocol 'vnc ', port 0, type 'vncl', in the keychain
+    `security login-keychain` names; updated in place when it's metacomputer's."""
+    lv = raw("lib/liveview.py")
+    return ('return f"127.0.0.1:{port}"' in lv and "['ptcl', u32(fcc('vnc '))], ['port', u32(0)]" in lv
+            and "['type', u32(fcc('vncl'))]" in lv and '["security", "login-keychain"]' in lv
+            and "SecKeychainItemModifyAttributesAndData(item, changed.mutableBytes" in lv)
+
+
+def remember_needs_a_person():
+    """The item is made only with a person's yes: a terminal for the question and for --remember, or
+    VIEW_REMEMBER=on; off never writes; the silent update goes through the helper's refresh, which never makes one.
+    The helper checks the same rules when run by itself, as a guard against mistakes (helper_gated)."""
+    b = raw("bin/metacomputer")
+    return ('if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi' in b
+            and '[ "$setting" = on ] && { VIEW_SAVE=create; return 0; }' in b and remember_flag_gated()
+            and re.search(r'view_remembered \|\| rc=\$\?\n  if \[ "\$setting" = off \]; then\n(?:    [^\n]*\n)+?'
+                          r'    return 0\n  fi\n  \[ \$rc = 0 \] && \{ VIEW_SAVE=refresh', b) is not None
+            and '[ "$1" = refresh ] && op=refresh extra=""' in b and helper_gated())
+
+
+def remember_flag_gated():
+    """An explicit --remember: a terminal, and never while VIEW_REMEMBER=off, before anything is looked up or
+    written; --forget needs a terminal too."""
+    b = raw("bin/metacomputer")
+    return ('  if [ "$flag" = remember ]; then\n    [ -t 0 ] || die "view --remember saves the live-view password in '
+            'your login keychain, so it\'s yours to run: in your own terminal"\n    [ "$setting" = off ] && die '
+            '"$(view_off_note)"\n    VIEW_SAVE=create' in b
+            and '[ -t 0 ] || die "view --forget changes your login keychain, so it\'s yours to run: in your own '
+            'terminal"' in b
+            and 'view_save create || die "the live-view password wasn\'t saved for Screen Sharing (the reason is above)"'
+            in b)
+
+
+def helper_gated():
+    """lib/liveview.py itself: remember and forget only with a terminal on stdin or --from-view; remember and
+    refresh never while VIEW_REMEMBER is off (the settings file's value, made stricter, never looser, by the
+    environment; an unknown value there is off); refresh never makes an item."""
+    lv = raw("lib/liveview.py")
+    return ('if from_view or sys.stdin.isatty():\n        return None' in lv
+            and 'if op == "save":\n        why = consent_refusal(' in lv
+            and 'why = consent_refusal("removing Screen Sharing\'s saved live-view password", from_view)' in lv
+            and 'if remember_setting() == "off":' in lv
+            and 'given = given if given in ORDER else "off"\n    return max(conf, given, key=ORDER.get)' in lv
+            and "if (op === 'refresh' && item === null) { return 'none'; }" in lv)
+
+
+def unknown_setting_is_off():
+    """VIEW_REMEMBER that isn't ask, on or off counts as off, in bin/metacomputer and in lib/liveview.py (the file's
+    value and the environment's); off writes nothing."""
+    lv = raw("lib/liveview.py")
+    return ('*) echo off ;; esac' in raw("bin/metacomputer") and 'conf = conf if conf in ORDER else "off"' in lv
+            and 'given = given if given in ORDER else "off"' in lv and remember_needs_a_person())
+
+
+def skill_never_saves():
+    """The skill tells Claude never to run the saving or removing commands."""
+    return re.search(r"Saving or removing the password for Screen Sharing \(`view --remember`, `view --forget`\) is "
+                     r"theirs too: never run them", re.sub(r"\s+", " ", raw("skills/metacomputer/SKILL.md"))) is not None
+
+
+def remember_pipes_password():
+    """view --open's save: the password from its store through a pipe to liveview.py, then osascript's stdin; the
+    arguments are the address, the keychain, the label, the tag and Screen Sharing's path."""
+    b, lv = raw("bin/metacomputer"), raw("lib/liveview.py")
+    return ('how="$(vnc_password_get | MCOMP_VIEW_REMEMBER="$(view_remember_setting)" \\\n           "$PY" '
+            '"$LAB_ROOT/lib/liveview.py" "$op" --port "$VNC_PORT"' in b
+            and 'keychain_js([op, ss_server(port), kc, ss_label(port), tag, SS_APP], pw)' in lv
+            and 'input=data if data is not None else b""' in lv and "print(pw" not in lv)
+
+
+def dialog_default_off():
+    """INTERACTIVE_PROMPTS: off unless set, in the environment the handoff reads and in its own fallback."""
+    return ('export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"' in raw("scripts/lib.sh")
+            and 'if os.environ.get("MCOMP_INTERACTIVE_PROMPTS", "off") != "on":' in raw("lib/handoff.py"))
+
+
+def dialog_text_is_data():
+    """The dialog's AppleScript is a constant; the --say text is one of its arguments."""
+    h = raw("lib/handoff.py")
+    return ('["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs]' in h
+            and h.count("DIALOG_SCRIPT") == 2 and "on run argv" in handoff.DIALOG_SCRIPT
+            and "item 2 of argv" in handoff.DIALOG_SCRIPT and "do shell script" not in handoff.DIALOG_SCRIPT)
 
 
 def clear_compares_change_count():
@@ -1353,7 +1911,8 @@ def fills_guarded():
     fill, login and session load reach the vault."""
     b = raw("bin/metacomputer")
     hold = re.search(r"^handoff_hold\(\) \{\n(.*?)^\}", b, re.S | re.M)
-    return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \{ \[ "\$sub" = session \] && '
+    return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \[ "\$sub" = code \] \|\| \[ "\$sub" = relay \] '
+                      r'\|\| \[ "\$sub" = give \] \\\n\s+\|\| \{ \[ "\$sub" = session \] && '
                       r'\[ "\$\{1:-\}" = load \]; \}; then\n\s+secrets_vm_is_this "\$@" \|\| die [^\n]*\n\s+handoff_hold\n',
                       b) is not None and hold is not None
             and 'exec 6>>"$f"' in hold.group(1)
@@ -1533,7 +2092,7 @@ def settings_tables():
 
 SECURITY_SETTINGS = ("ACTION_LOG", "ACTION_LOG_TEXT", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",
                      "HIDDEN_TEXT", "MCP_HUB", "LESSONS", "SHARE_CLIPBOARD", "SHARE_AUDIO", "SHARE_ROSETTA",
-                     "RECORD_TO", "TASK_SYNC_INTERVAL")
+                     "RECORD_TO", "TASK_SYNC_INTERVAL", "VIEW_REMEMBER", "INTERACTIVE_PROMPTS")
 FALLBACKS = (re.compile(r"\$\{(?:MCOMP_)?([A-Z][A-Z0-9_]+):-([^}$]+)\}"),
              re.compile(r"""\.get\(\s*["'](?:MCOMP_)?([A-Z][A-Z0-9_]+)["']\s*,\s*["']([^"']+)["']\s*\)"""),
              re.compile(r"""onoff\(\s*env\.get\(\s*["']MCOMP_([A-Z][A-Z0-9_]+)["']\s*\)\s*,\s*["']([^"']+)["']\s*\)"""))

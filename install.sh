@@ -550,7 +550,7 @@ if [ "$vm_state" = vmonly ]; then
 fi
 vault_ok=0
 if [ "$major" -ge 15 ] && clt_ok && tool_ok swiftc; then vault_ok=1; fi
-# The host tools (cua-netgw, qcow2raw): built on every install that finds them missing, out of date or not
+# The host tools (mcomp-netgw, qcow2raw): built on every install that finds them missing, out of date or not
 # the binaries that were built (scripts/build-tools.sh --check), whether or not the VM is built.
 tools_ok=0
 [ "$FRESH_SOURCES" = 0 ] && "$ROOT/scripts/build-tools.sh" --check >/dev/null 2>&1 && tools_ok=1
@@ -608,7 +608,7 @@ if [ -f "$CONF" ]; then case " $BROWSERS " in *" chrome "*) ;; *) chrome_in=0 ;;
 elif [ "$CHROME" = no ]; then chrome_in=0; fi
 todo=(); done_=()
 [ ${#need[@]} = 0 ] && done_+=("tools") || todo+=("install with Homebrew: ${pkgs[*]}  ${d}(a few minutes; ffmpeg brings many libraries)${o}")
-[ "$tools_ok" = 1 ] && done_+=("host tools") || todo+=("build the host tools (cua-netgw, qcow2raw) from their pinned sources  ${d}(under a minute)${o}")
+[ "$tools_ok" = 1 ] && done_+=("host tools") || todo+=("build the host tools (mcomp-netgw, qcow2raw) from their pinned sources  ${d}(under a minute)${o}")
 if [ "$lume_have" = 1 ]; then done_+=("$(basename "$LUME_BIN")")
 elif [ "$LUME_CHOICE" = mcomp-vm ]; then todo+=("build mcomp-vm, the VM runner, from source  ${d}(about 1 minute; --lume=standard: Cua's release instead)${o}")
 else todo+=("download Cua's standard Lume, the VM runner (it always shares your clipboard, audio and Rosetta with the VM)"); fi
@@ -646,10 +646,10 @@ if [ ${#need[@]} -gt 0 ]; then
 fi
 ok "tools: git curl go gpg ffmpeg python3"
 if [ "$tools_ok" = 1 ]; then
-  ok "host tools (cua-netgw, qcow2raw): up to date"
+  ok "host tools (mcomp-netgw, qcow2raw): up to date"
 else
   FAIL_HINT=("The host tools didn't build (scripts/build-tools.sh). They need Go and github.com; run ./install.sh again.")
-  what="building the host tools (cua-netgw, qcow2raw) with Go"; finished="host tools (cua-netgw, qcow2raw): built"
+  what="building the host tools (mcomp-netgw, qcow2raw) with Go"; finished="host tools (mcomp-netgw, qcow2raw): built"
   if [ "$FRESH_SOURCES" = 1 ]; then quiet_build tools "$what" "$finished" "$ROOT/scripts/build-tools.sh" --rebuild --fresh-source
   else quiet_build tools "$what" "$finished" "$ROOT/scripts/build-tools.sh"; fi
 fi

@@ -65,6 +65,7 @@ def main():
                                                            "driver_owned": True, "page_tools": True,
                                                            "windows": ["w" + HOSTILE]}],
                     "named_profiles": [{"name": "n" + HOSTILE, "bytes": 1 << 20, "in_use": True}],
+                    "firefox_profiles": [{"name": "f" + HOSTILE, "bytes": 1 << 20, "in_use": False}],
                     "downloading": ["/x" + HOSTILE]},
     }
     r = subprocess.run([sys.executable, INSPECT, "--render"], input=json.dumps(snap), capture_output=True, text=True)
@@ -72,8 +73,8 @@ def main():
           and raw_controls(r.stdout) == [] and "\\x1b]52;c;SGk=\\x07" in r.stdout and "\\u202e" in r.stdout
           and r.stdout.count("\\x1b]52") >= 10, (r.returncode, r.stderr, raw_controls(r.stdout)[:5]))
     r = subprocess.run([sys.executable, INSPECT, "--render-profiles"], input=json.dumps(snap), capture_output=True, text=True)
-    check("browser (profiles): names escaped", r.returncode == 0 and raw_controls(r.stdout) == [] and "\\x1b]52" in r.stdout,
-          (r.stdout, r.stderr))
+    check("browser (profiles): names escaped, kept Firefox profiles' too", r.returncode == 0
+          and raw_controls(r.stdout) == [] and r.stdout.count("\\x1b]52") >= 2, (r.stdout, r.stderr))
     r = subprocess.run([sys.executable, INSPECT, "--render-profiles"], input=json.dumps({"browser": {"named_profiles": []}}),
                        capture_output=True, text=True)
     check("browser (profiles): none", r.returncode == 0 and "no driver-owned Chrome profiles" in r.stdout, r.stdout)
