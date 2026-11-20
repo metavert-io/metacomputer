@@ -330,26 +330,31 @@ def describe(st):
 
 
 # --- commands ---------------------------------------------------------------------------------------------------
-def in_force(p):
-    """Whether the running gateway has this VM's rules file in force: True, False, or None (not running, or it
-    can't be asked)."""
+def expected_digest(st):
+    """The sha256 of the rules file the saved list (st, or None) makes: what render() writes for it."""
+    return hashlib.sha256((json.dumps(compose(base_rules(), st), indent=2) + "\n").encode()).hexdigest()
+
+
+def in_force(p, st):
+    """Whether the running gateway has in force the rules the saved list makes (not merely the file on disk, which an
+    interrupted change can leave behind): True, False, or None (not running, or it can't be asked)."""
     if not gateway_running():
         return None
     if gateway_reads_it(p) is not True:
         return False
     try:
-        with open(p["rules"], "rb") as f:
-            want = hashlib.sha256(f.read()).hexdigest()
-    except OSError:
+        want = expected_digest(st)
+    except Refused:
         return False
     have = gateway_digest()
     return None if have is None else have == want
 
 
 def cmd_status(a, p):
-    st = read_state(p)
-    reads = gateway_reads_it(p)
-    force = in_force(p)
+    with Lock(p["lock"]):                 # not halfway through a change
+        st = read_state(p)
+        reads = gateway_reads_it(p)
+        force = in_force(p, st)
     if a.json:
         print(json.dumps({"allowlist": None if st is None else {"allow": sorted(st["allow"]), "expires": st["expires"],
                                                                 "started": st["started"]},

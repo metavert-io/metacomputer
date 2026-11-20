@@ -749,13 +749,17 @@ The gateway reads `RUN_DIR/netgw-rules.json`, which `metacomputer start` (and
 first; the gateway reloads it within a second of a change.
 
 The patch (`patches/netgw/`, applied by `scripts/build-tools.sh` to a clean export of the pinned
-source; the gateway's own tests plus the patch's run against it) changes four things, each needed for
+source; the gateway's own tests plus the patch's run against it) changes these things, each needed for
 an allowlist to hold: the addresses a name on the list resolves to are kept (before, a default deny
 removed every answer, so an allowed name resolved to nothing); a PTR question follows the same name
-rules as any other (before, any PTR question went upstream, which carries data out in its name); a
+rules as any other (before, any PTR question went upstream, which carries data out in its name); with
+name rules in use, a name with escaped characters is refused (the rules compare presentation text, and
+an escaped dot would let `a\.b.example.com` pass for a subdomain of `b.example.com`); a question
+forwarded upstream carries nothing but itself (not the guest's other sections or EDNS options); a
 connection is checked again once it's registered (a rule change while it was being dialled was missed);
-and the control socket answers `rules` with the sha256 of the rules file in force, which
-`metacomputer net` compares with the file it wrote. With the stock kind of rules file (everything
+and the control socket answers `rules` with the sha256 of the rules file in force, reported only once
+the connections the new rules refuse have been closed, which `metacomputer net` compares with what the
+saved list makes. With the stock kind of rules file (everything
 public accepted), the gateway behaves as cua-netgw does.
 
 Blocked attempts are logged to `logs/netgw-blocked.jsonl` (with an event

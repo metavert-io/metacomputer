@@ -51,15 +51,22 @@ index 1e3a6aa..3095345 100644
  		return g.lease(strings.TrimSpace(mac))
  	}
 diff --git a/libs/cua/netgw/internal/gateway/dns.go b/libs/cua/netgw/internal/gateway/dns.go
-index d408a30..9e29f13 100644
+index d408a30..8364645 100644
 --- a/libs/cua/netgw/internal/gateway/dns.go
 +++ b/libs/cua/netgw/internal/gateway/dns.go
-@@ -141,8 +141,10 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
+@@ -141,8 +141,17 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
  		return m
  	}
  	rules := r.g.rules.Current()
 -	if q.Qtype != dns.TypePTR && !rules.DNSAllowed(name) {
 -		// A denied name, or no network: the question goes no further.
++	if strings.ContainsRune(name, '\\') && (rules.Domains != nil || !rules.DefaultAccept) {
++		// mcomp patch: a name with an escaped character (an escaped dot, a
++		// byte) is never a host name, and the name rules, which compare
++		// presentation text, can't be matched on it safely.
++		m.Rcode = dns.RcodeRefused
++		return m
++	}
 +	if !rules.DNSAllowed(name) {
 +		// A denied name, or no network: the question goes no further. A PTR
 +		// question too (mcomp patch): its name can carry anything, so with no
@@ -67,7 +74,16 @@ index d408a30..9e29f13 100644
  		m.Rcode = dns.RcodeRefused
  		return m
  	}
-@@ -199,10 +201,14 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
+@@ -191,7 +200,7 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
+ 			m.Rcode = dns.RcodeServerFailure
+ 			return m
+ 		}
+-		got := r.forward(req)
++		got := r.forward(onlyQuestion(req, q))
+ 		if got == nil {
+ 			m.Rcode = dns.RcodeServerFailure
+ 			return m
+@@ -199,10 +208,14 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
  		got.Id = req.Id
  		m = got
  	}
@@ -84,7 +100,29 @@ index d408a30..9e29f13 100644
  		for _, rr := range m.Answer {
  			switch a := rr.(type) {
  			case *dns.A:
-@@ -273,21 +279,28 @@ func (r *resolver) strip(ip netip.Addr) (bool, string) {
+@@ -252,6 +265,21 @@ func (r *resolver) exists(ctx context.Context, name string) bool {
+ }
+ 
+ // forward sends req to the host's name servers in turn.
++// onlyQuestion is the guest's query rebuilt with its question alone (mcomp
++// patch): nothing else the guest put in it (other sections, EDNS options)
++// reaches the upstream resolver.
++func onlyQuestion(req *dns.Msg, q dns.Question) *dns.Msg {
++	out := new(dns.Msg)
++	out.Id = req.Id
++	out.RecursionDesired = true
++	out.CheckingDisabled = req.CheckingDisabled
++	out.Question = []dns.Question{q}
++	if opt := req.IsEdns0(); opt != nil {
++		out.SetEdns0(1232, opt.Do())
++	}
++	return out
++}
++
+ func (r *resolver) forward(req *dns.Msg) *dns.Msg {
+ 	for _, ns := range r.nameservers {
+ 		resp, _, err := r.client.Exchange(req, ns)
+@@ -273,21 +301,28 @@ func (r *resolver) strip(ip netip.Addr) (bool, string) {
  }
  
  // filter removes the refused addresses from every section of m.
@@ -118,7 +156,7 @@ index d408a30..9e29f13 100644
  		case *dns.SVCB:
  			v.Value = r.filterHints(v.Value)
  		case *dns.HTTPS:
-@@ -330,12 +343,16 @@ func (r *resolver) keepIPs(ips []net.IP) []net.IP {
+@@ -330,12 +365,16 @@ func (r *resolver) keepIPs(ips []net.IP) []net.IP {
  	return out
  }
  
@@ -169,10 +207,10 @@ index 33b3427..17ebf9c 100644
  			g.conns.remove(key)
 diff --git a/libs/cua/netgw/internal/gateway/mcomp_test.go b/libs/cua/netgw/internal/gateway/mcomp_test.go
 new file mode 100644
-index 0000000..f962953
+index 0000000..49bc278
 --- /dev/null
 +++ b/libs/cua/netgw/internal/gateway/mcomp_test.go
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,188 @@
 +// Tests for metacomputer's patch to cua-netgw (mcomp-netgw): names allowed
 +// under a default deny resolve and bind, PTR questions follow the name rules,
 +// and the control socket reports the rules in force.
@@ -296,6 +334,71 @@ index 0000000..f962953
 +		t.Fatalf("after a reload the digest follows the file: %q", got)
 +	}
 +}
++
++func TestEscapedNamesAreRefusedUnderNameRules(t *testing.T) {
++	h := newHarness(t, `{"version":1,"default_accept":false,"rules":[],"domains":{"allow":["*.allowed.example.com"]}}`)
++	q := new(dns.Msg)
++	q.SetQuestion(`secret\.allowed.example.com.`, dns.TypeTXT)
++	if m := askMsg(t, h, q); m.Rcode != dns.RcodeRefused {
++		t.Fatalf("a name whose labels aren't under the allowed subtree (an escaped dot) must be refused: %v", m)
++	}
++}
++
++func TestForwardedQuestionsCarryNothingElse(t *testing.T) {
++	q := new(dns.Msg)
++	q.SetQuestion("example.com.", dns.TypeTXT)
++	q.SetEdns0(4096, true)
++	q.Extra = append(q.Extra, &dns.TXT{Hdr: dns.RR_Header{Name: "x.", Rrtype: dns.TypeTXT, Class: dns.ClassINET}, Txt: []string{"secret"}})
++	opt := q.IsEdns0()
++	opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{Code: 65001, Data: []byte("secret")})
++	out := onlyQuestion(q, q.Question[0])
++	if len(out.Question) != 1 || len(out.Answer) != 0 || len(out.Ns) != 0 {
++		t.Fatalf("question only: %v", out)
++	}
++	for _, rr := range out.Extra {
++		if o, ok := rr.(*dns.OPT); !ok || len(o.Option) != 0 {
++			t.Fatalf("nothing but a bare OPT may go upstream: %v", out.Extra)
++		}
++	}
++}
++
++func TestDigestFollowsOnlyOnceTheChangeIsApplied(t *testing.T) {
++	h := newHarness(t, allowlist)
++	before := h.gw.probe("rules")
++	seen := ""
++	h.store.OnChange(func(*policy.File) { seen = h.gw.probe("rules") })
++	h.writeRules(`{"version":1,"default_accept":true,"rules":[]}`)
++	if _, err := h.store.Reload(); err != nil {
++		t.Fatal(err)
++	}
++	if seen != before {
++		t.Fatalf("while the change callbacks run, the digest must still be the old one: %q vs %q", seen, before)
++	}
++	if h.gw.probe("rules") == before {
++		t.Fatalf("after them it's the new file's")
++	}
++}
++
++func askMsg(t *testing.T, h *harness, q *dns.Msg) *dns.Msg {
++	t.Helper()
++	c := h.dialUDP(gwIP, 53)
++	defer c.Close()
++	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
++	wire, _ := q.Pack()
++	if _, err := c.Write(wire); err != nil {
++		t.Fatal(err)
++	}
++	buf := make([]byte, 4096)
++	n, err := c.Read(buf)
++	if err != nil {
++		t.Fatal(err)
++	}
++	m := new(dns.Msg)
++	if err := m.Unpack(buf[:n]); err != nil {
++		t.Fatal(err)
++	}
++	return m
++}
 diff --git a/libs/cua/netgw/internal/policy/policy.go b/libs/cua/netgw/internal/policy/policy.go
 index 5bcf73a..379a723 100644
 --- a/libs/cua/netgw/internal/policy/policy.go
@@ -325,7 +428,7 @@ index 5bcf73a..379a723 100644
  	}
  	return true, f.DefaultReason
 diff --git a/libs/cua/netgw/internal/policy/store.go b/libs/cua/netgw/internal/policy/store.go
-index 03aaaa1..ed0724c 100644
+index 03aaaa1..15fdcfd 100644
 --- a/libs/cua/netgw/internal/policy/store.go
 +++ b/libs/cua/netgw/internal/policy/store.go
 @@ -2,6 +2,8 @@ package policy
@@ -337,16 +440,45 @@ index 03aaaa1..ed0724c 100644
  	"os"
  	"sync"
  	"sync/atomic"
-@@ -109,3 +111,12 @@ func (s *Store) Watch(interval time.Duration, kick <-chan struct{}, stop <-chan
+@@ -19,6 +21,7 @@ type Store struct {
+ 
+ 	mu       sync.Mutex
+ 	last     []byte
++	applied  []byte // mcomp patch: the file whose OnChange callbacks have all run (Digest)
+ 	onChange []func(*File)
+ }
+ 
+@@ -32,7 +35,7 @@ func Open(path string) (*Store, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s := &Store{path: path, last: data}
++	s := &Store{path: path, last: data, applied: data}
+ 	s.current.Store(f)
+ 	return s, nil
+ }
+@@ -83,6 +86,9 @@ func (s *Store) Reload() (bool, error) {
+ 	for _, fn := range fns {
+ 		fn(f)
+ 	}
++	s.mu.Lock()
++	s.applied = data // only now: the open connections the new rules refuse have been closed
++	s.mu.Unlock()
+ 	return true, nil
+ }
+ 
+@@ -109,3 +115,14 @@ func (s *Store) Watch(interval time.Duration, kick <-chan struct{}, stop <-chan
  		}
  	}
  }
 +
-+// Digest is the sha256 (hex) of the rules file as last loaded (mcomp patch):
-+// the host compares it with the file it wrote to know the gateway took it.
++// Digest is the sha256 (hex) of the rules file in force (mcomp patch): the
++// last one loaded whose change callbacks (the gateway closing the open
++// connections it refuses) have all run. The host compares it with the file it
++// wrote to know the gateway took it.
 +func (s *Store) Digest() string {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
-+	sum := sha256.Sum256(s.last)
++	sum := sha256.Sum256(s.applied)
 +	return hex.EncodeToString(sum[:])
 +}

@@ -329,11 +329,13 @@ those names for that long:
 
 - **Enforced on this Mac, by name.** The gateway (mcomp-netgw: Cua's cua-netgw with a small
   patch that makes name rules hold; architecture.md, "Network") answers DNS only for the names on the
-  list (PTR questions included) (a name also covers its subdomains unless `--exact`; `*.example.com` covers only
-  the subdomains) and lets the guest connect only to the addresses its own resolver
-  returned for them, for as long as each answer lives. Every other connection is
-  refused and logged like any other blocked connection, and connections open when the
-  list starts are closed if it refuses them. Nothing in the VM can change the list.
+  list (PTR questions included; a name with escaped characters is refused; a question
+  goes upstream with nothing else the guest put in it) (a name also covers its subdomains unless `--exact`; `*.example.com` covers only
+  the subdomains) and lets the guest open connections only to the addresses its own
+  resolver returned for them, within 1 to 5 minutes of each answer. Every other
+  connection is refused and logged like any other blocked connection, and connections
+  open when the list starts or changes are closed if it refuses them. Nothing in the VM
+  can change the list.
 - **Claude can narrow it, only you can widen it.** Starting a list (with no list in
   force) and `net remove` work from anywhere, Claude included, because they only take
   reach away. Adding names or time to a list in force, and `net clear`, run only at a
@@ -357,7 +359,7 @@ those names for that long:
   config/netgw-rules.json (refusals, everything else accepted); one that opens address
   ranges or names of its own is refused.
 
-**Where it ends:** the list is about where connections go, not what they carry. An
+**Where it ends:** the list is about where connections go, not what they carry. A connection to an allowed address stays open after its name's answer runs out (only new connections need a fresh lookup), until it closes or the list changes. Names on the list and their subdomains are looked up upstream, so whoever runs an allowed name's DNS sees the questions for it. If the gateway can't load a new rules file it keeps the rules it has; `net` then exits 4 instead of saying the list is in force. An
 allowed site that takes uploads or posts (a code host, a form) can still receive
 anything, so list only what the task needs. Sites on a shared address (a CDN serves
 many sites from one address) are reachable by that address while an allowed name

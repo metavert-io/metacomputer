@@ -334,6 +334,12 @@ def confirm_checks():
           rc == 4 and "didn't take" in out and state(run)["allow"] == [] and time.time() - t0 >= 3, (rc, out))
     rc, out = net(run, "status", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=stale.path)
     check("…and status says it isn't in force", rc == 0 and "not in force" in out, out)
+    st_now = state(run)
+    json.dump(dict(st_now, allow=["example.org"]), open(os.path.join(run, "net-allow.json"), "w"))
+    rc, out = net(run, "status", "--json", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=good.path)
+    check("a saved list whose rules were never written (a change cut off after saving it): status says not in force, "
+          "even though the gateway has the file on disk in force", rc == 0 and json.loads(out)["in_force"] is False, out)
+    json.dump(st_now, open(os.path.join(run, "net-allow.json"), "w"))
     old = FakeControl("no unknown request")
     rc, out = net(run, "remove", "example.com", MCOMP_NETGW_ALIVE="1", MCOMP_NETGW_CONTROL=old.path)
     check("a gateway that can't report its rules (cua-netgw before the patch): exit 4 at once, even for a change that "

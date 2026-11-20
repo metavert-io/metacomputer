@@ -1147,7 +1147,12 @@ CLAIMS = [
      and 'NETGW_BIN="$LAB_ROOT/vendor/bin/mcomp-netgw"' in raw("scripts/lib.sh")
      and all(x in raw("patches/netgw/0001-mcomp-allowlist-ptr-recheck-digest.patch") for x in (
          "+\tif !rules.DNSAllowed(name) {", "StripAnswerFor(", "if !g.decide(policy.TCP, dst, port).Accept {",
-         'return "ok " + g.rules.Digest()'))),
+         'return "ok " + g.rules.Digest()', "+\tif strings.ContainsRune(name, '\\\\') && (rules.Domains != nil || !rules.DefaultAccept) {",
+         "got := r.forward(onlyQuestion(req, q))", "s.applied = data // only now"))),
+    ("SECURITY.md", r"a name with escaped characters is refused; a question\s+goes upstream with nothing else the guest put in it",
+     lambda m: "func onlyQuestion(req *dns.Msg, q dns.Question) *dns.Msg {" in raw("patches/netgw/0001-mcomp-allowlist-ptr-recheck-digest.patch")),
+    ("SECURITY.md", r"says the list is in force only when that's the file it just wrote",
+     lambda m: "want = expected_digest(st)" in raw("lib/netpolicy.py") and "if have == digest:" in raw("lib/netpolicy.py")),
     ("SECURITY.md", r"named `mcomp-netgw` \(or `cua-netgw`, built by an earlier version\)",
      lambda m: 'var names = ["mcomp-netgw", "cua-netgw"]' in raw("vault/Guest.swift")),
     ("architecture.md", r"\| rclone \(only for S3 volumes\) \| ([\d.]+) osx-arm64 \(sha256 `([0-9a-f]+)…`; `SHA256SUMS` signed by "
@@ -1661,7 +1666,7 @@ CLAIMS = [
      lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")
      and int(m[2]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
     # Network allowlists (lib/netpolicy.py, `metacomputer net`)
-    ("SECURITY.md", r"answers DNS only for the names on the\s+list \(PTR questions included\)",
+    ("SECURITY.md", r"answers DNS only for the names on the\s+list \(PTR questions included;",
      lambda m: 'out["default_accept"] = False' in raw("lib/netpolicy.py")
      and 'out["domains"] = {"allow": sorted(set(st["allow"]))}' in raw("lib/netpolicy.py")),
     ("SECURITY.md", r"Adding names or time to a\s+list in force, and `net clear`, run only at a\s+terminal",
