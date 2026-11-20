@@ -164,6 +164,7 @@ LIMIT_MSG = ("The call reached the virtual computer, but its answer was too comp
              "read a file through `metacomputer sh`.").format(
                  wirelimits.MAX_JSON_NODES, wirelimits.MAX_JSON_DEPTH)
 # While the user has the computer (metacomputer handoff, lib/handoff.py): what an acting call gets.
+BOT_MARK_MAX_S = 1800              # a human check's mark lasts at most this long (BOT_CHECK)
 HANDOFF_REFUSED = {"code": "user_has_computer", "effect": "refused",
                    "hint": "wait for the handoff to end (metacomputer handoff wait); read-only tools work"}
 DEFERRED_MAX = 256                  # driver sessions waiting to be ended until a handoff ends
@@ -1388,6 +1389,7 @@ class Hub:
         self.zooms.clear()
         self.recordings.clear()
         self._live = (0.0, -1, None)
+        self.bot_marks.clear()          # window ids and pids of an earlier runtime: they may be reused
 
     def connect(self):
         """None when connected, else a message for the caller."""
@@ -2834,6 +2836,16 @@ class Hub:
         element token's window, a pid with a marked window, or an app or title that could resolve to one (every match,
         off-screen ones too). run_steps: every step's windows (step_windows) and the batch's own."""
         if name not in INPUT_TOOLS and name not in ("set_value", "run_steps"):
+            return None
+        now = time.time()
+        for w in [w for w, m in self.bot_marks.items() if now - m[2] > BOT_MARK_MAX_S]:
+            self.bot_marks.pop(w, None)               # 30 minutes on, it's no longer the check that was seen
+        live = self.named_windows()
+        if live is not None and self.named_complete():
+            ids = {w["window_id"] for w in live}
+            for w in [w for w in self.bot_marks if w not in ids]:
+                self.bot_marks.pop(w, None)           # the window has gone (closed, or a new runtime)
+        if not self.bot_marks:
             return None
         specs = []
         if name == "run_steps":

@@ -1834,6 +1834,8 @@ DELETE_EXCEPTIONS = [
     ("lib/vm_claude_guest.sh", 'rm -rf "$STATE"', "guest"),
     ("lib/vm_shell_guest.py", "shutil.rmtree(p, ignore_errors=True)", "guest"),
     ("lib/vm_shell_guest.py", "shutil.rmtree(d, ignore_errors=True)", "guest"),
+    ("lib/page_guest.py", "shutil.rmtree(self.profile, ignore_errors=True)", "guest"),   # its own throwaway profile, in the VM
+    ("lib/page_guest.py", "shutil.rmtree(prof, ignore_errors=True)", "guest"),           # ...a kept page's, checked as one
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),

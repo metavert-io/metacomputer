@@ -359,6 +359,47 @@ class Exporter:
         return "\n".join(head + self.lines + ["});", ""])
 
 
+def start_trace(run_dir, name, session):
+    if not NAME_RE.match(name):
+        raise Refused("a trace name is letters, digits, - and _ (at most 64)")
+    if session is not None and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", session):
+        raise Refused("--session: a session label (letters, digits, _ . : -)")
+    tmp = os.path.join(tdir(run_dir), ".active.tmp")
+    with open(tmp, "w") as f:
+        json.dump({"name": name, "session": session, "started": time.time()}, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, active_path(run_dir))
+    print(f"trace '{name}' recording" + (f" session {session}" if session else " every client") +
+          " (the hub picks it up within a second; metacomputer trace stop ends it)")
+
+
+def stop_trace(run_dir):
+    try:
+        os.unlink(active_path(run_dir))
+        print("trace stopped")
+    except FileNotFoundError:
+        print("no trace is recording")
+
+
+def delete_trace(run_dir, name):
+    """Deletes the one trace it's named (a checked name), never one it found by listing."""
+    if not NAME_RE.match(name or ""):
+        raise Refused("a trace name is letters, digits, - and _")
+    os.unlink(os.path.join(tdir(run_dir), name + ".jsonl"))
+    print(f"deleted trace '{name}'")
+
+
+def list_traces(run_dir):
+    d = tdir(run_dir)
+    act = Recorder(run_dir).active()
+    for f in sorted(os.listdir(d)):
+        if f.endswith(".jsonl"):
+            st = os.lstat(os.path.join(d, f))
+            n = f[:-6]
+            print(f"{n}  {st.st_size // 1024} KB  {time.strftime('%Y-%m-%d %H:%M', time.localtime(st.st_mtime))}"
+                  + ("  (recording)" if act and act.get("name") == n else ""))
+
+
 def cmd(argv):
     ap = argparse.ArgumentParser(prog="metacomputer trace", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -375,31 +416,11 @@ def cmd(argv):
     d = tdir(run_dir)
     os.makedirs(d, mode=0o700, exist_ok=True)
     if a.cmd == "start":
-        if not NAME_RE.match(a.name):
-            raise Refused("a trace name is letters, digits, - and _ (at most 64)")
-        if a.session is not None and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", a.session):
-            raise Refused("--session: a session label (letters, digits, _ . : -)")
-        tmp = os.path.join(d, ".active.tmp")
-        with open(tmp, "w") as f:
-            json.dump({"name": a.name, "session": a.session, "started": time.time()}, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, active_path(run_dir))
-        print(f"trace '{a.name}' recording" + (f" session {a.session}" if a.session else " every client") +
-              " (the hub picks it up within a second; metacomputer trace stop ends it)")
+        start_trace(run_dir, a.name, a.session)
     elif a.cmd == "stop":
-        try:
-            os.unlink(active_path(run_dir))
-            print("trace stopped")
-        except FileNotFoundError:
-            print("no trace is recording")
+        stop_trace(run_dir)
     elif a.cmd == "list":
-        act = Recorder(run_dir).active()
-        for f in sorted(os.listdir(d)):
-            if f.endswith(".jsonl"):
-                st = os.lstat(os.path.join(d, f))
-                n = f[:-6]
-                print(f"{n}  {st.st_size // 1024} KB  {time.strftime('%Y-%m-%d %H:%M', time.localtime(st.st_mtime))}"
-                      + ("  (recording)" if act and act.get("name") == n else ""))
+        list_traces(run_dir)
     elif a.cmd == "show":
         recs = load(run_dir, a.name)
         calls = [r for r in recs if r.get("kind") == "call"]
@@ -410,10 +431,7 @@ def cmd(argv):
               f"{a.name}: {summary['calls']} calls, {summary['reads']} reads, {summary['errors']} errors; "
               f"tools: {', '.join(summary['tools'])}")
     elif a.cmd == "delete":
-        if not NAME_RE.match(a.name):
-            raise Refused("a trace name is letters, digits, - and _")
-        os.unlink(os.path.join(d, a.name + ".jsonl"))
-        print(f"deleted trace '{a.name}'")
+        delete_trace(run_dir, a.name)
     elif a.cmd == "export":
         if a.url and not URL_TEXT_RE.match(a.url):
             raise Refused("--url: an http:// or https:// URL")

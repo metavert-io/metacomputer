@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -23,6 +24,7 @@ import page_guest as pg  # noqa: E402
 import browser_tools as bt  # noqa: E402
 
 TD = tempfile.mkdtemp(prefix="mcomp-pg-")
+GH = "/home/" + re.search(r"^GUEST_USER=(\S+)", open(os.path.join(LAB, "config", "defaults.env")).read(), re.M).group(1)
 results = []
 
 
@@ -122,6 +124,35 @@ try:
 except pg.Fail as e:
     ok = "closed" in str(e)
 check("a close frame ends it with a Fail", ok)
+class FakeSock:
+    def __init__(self, data):
+        self.data = data
+    def recv(self, n):
+        out, self.data = self.data[:n], self.data[n:]
+        return out
+w2 = pg.WebSocket.__new__(pg.WebSocket)
+w2.sock, w2.buf = FakeSock(b""), bytes([0x81, 127]) + struct.pack(">Q", 1 << 40)
+try:
+    w2.recv()
+    ok = False
+except pg.Fail as e:
+    ok = "too large" in str(e)
+check("a frame that says it's 1 TiB is refused before anything is read", ok)
+w3 = pg.WebSocket.__new__(pg.WebSocket)
+pings = bytes([0x89, 0]) * 1200
+w3.sock, w3.buf = FakeSock(b""), pings
+class NullSend:
+    def sendall(self, b):
+        pass
+    def recv(self, n):
+        return b""
+w3.sock = NullSend()
+try:
+    w3.recv()
+    ok = False
+except pg.Fail as e:
+    ok = "control frames" in str(e)
+check("a flood of pings ends with a Fail instead of keeping the read going", ok)
 for bad in ("ws://10.0.0.1:9222/x", "ws://example.com:80/x", "wss://127.0.0.1:1/x", "http://127.0.0.1:1/"):
     try:
         pg.WebSocket(bad)
@@ -181,20 +212,27 @@ def guest(action="read"):
         return None, str(e)
 
 
-answer({"status": "exited", "exit_code": 0, "stdout": json.dumps({"ok": True, "result": {"title": "T"}}) + "\n"})
+OKLINE = json.dumps({"ok": True, "result": {"title": "T"}}) + "\n"
+answer({"status": "exited", "exit": 0, "exit_code": 0, "stdout": OKLINE})
 check("an answer: its result", guest() == ({"title": "T"}, None))
+answer({"status": "error", "kind": "log", "exit": 255, "exit_code": 0, "stdout": OKLINE,
+        "message": "the action log's final signature failed"})
+check("a run whose action log couldn't be signed is a Fail, even with the helper's success line",
+      "didn't finish cleanly" in (guest()[1] or ""))
+answer({"status": "timeout", "exit": 124, "exit_code": 0, "stdout": OKLINE})
+check("…and so is a timeout", "didn't finish cleanly" in (guest()[1] or ""))
 answer({"status": "refused", "message": "another session is using it"})
 check("a refusal from the shell channel is a Fail with its words", "refused: another session" in (guest()[1] or ""))
-answer({"status": "exited", "exit_code": 0, "stdout": "x" * 10, "stdout_truncated": True})
+answer({"status": "exited", "exit": 0, "exit_code": 0, "stdout": "x" * 10, "stdout_truncated": True})
 check("an answer cut short at the shell channel's limit is a Fail, never parsed", "larger than" in (guest()[1] or ""))
-answer({"status": "exited", "exit_code": 1, "stdout": "Traceback...\n"})
+answer({"status": "exited", "exit": 1, "exit_code": 1, "stdout": "Traceback...\n"})
 check("a malformed answer is a Fail", "didn't answer as expected" in (guest()[1] or ""))
-answer({"status": "exited", "exit_code": 1, "stdout": json.dumps({"ok": False, "error": "the page didn't load"})})
+answer({"status": "exited", "exit": 1, "exit_code": 1, "stdout": json.dumps({"ok": False, "error": "the page didn't load"})})
 check("the helper's own error comes through", guest()[1] == "the page didn't load")
 answer("not json at all")
 check("output that isn't the shell channel's JSON is a Fail", (guest()[1] or "").startswith("metacomputer sh"))
-for p in ("/etc/passwd", "/home/cua/metacomputer-runs/web-shots/../../.ssh/id.png", "/home/cua/elsewhere/x.png",
-          "/home/cua/metacomputer-runs/web-shots/x.txt", 12):
+for p in ("/etc/passwd", GH + "/metacomputer-runs/web-shots/../../.ssh/id.png", GH + "/elsewhere/x.png",
+          GH + "/metacomputer-runs/web-shots/x.txt", 12):
     check(f"a screenshot path outside the VM's web-shots folder isn't fetched: {p!r}",
           bt.fetch_shot(p, TD, "x.png") is None)
 
@@ -218,6 +256,17 @@ r2 = subprocess.run([sys.executable, "-c", f"import sys, time; sys.path.insert(0
                      "print('took', round(time.time() - t, 1))"], capture_output=True, text=True, timeout=30)
 took = float(r2.stdout.strip().split("took")[-1])
 check("…at the same time (4 VMs of 1 s each in well under 4 s)", took < 2.5, took)
+os.environ["MCOMP_VM"], os.environ["MCOMP_CONFIG"] = "other", "/tmp/other.env"
+check("each's children don't inherit a VM picked by the caller (MCOMP_VM, MCOMP_CONFIG)",
+      "MCOMP_VM" not in each.child_env() and "MCOMP_CONFIG" not in each.child_env())
+del os.environ["MCOMP_VM"], os.environ["MCOMP_CONFIG"]
+kstub = os.path.join(TD, "each-kill")
+with open(kstub, "w") as f:
+    f.write('#!/bin/sh\n[ "$1" = --vm ] && kill -TERM $$\nexit 0\n')
+os.chmod(kstub, 0o755)
+each.CLI = kstub
+check("a child killed by a signal counts as a failure (128 + the signal)", each.run_one("a", ["status"], 30)[1] == 143)
+each.CLI = estub
 for args, why in ((["a,,a", "--", "status"], "the same VM twice"), (["../x", "--", "status"], "a path"),
                   (["a", "--", "each", "status"], "each inside each"), (["a", "--", "setup"], "setup"),
                   (["a", "status"], "no --")):

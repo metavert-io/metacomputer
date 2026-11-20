@@ -16,21 +16,23 @@ import re
 MAX_SCAN = 400_000                      # characters of a result looked at (a big tree is cut there)
 
 # (kind, what it is for a person, pattern). Matched case-insensitively against each tree row and the title.
-# The rows look like `- [12] check box "I'm not a robot" [actions=[...]]`; names are in double quotes.
+# The rows look like `- [12] check box "I'm not a robot" [actions=[...]]`; names are in double quotes. A challenge's
+# domain or product name counts only as the name of a frame or document (where its widget sits), never in a page's
+# ordinary text, so a page that links to or writes about one isn't marked.
 MARKS = [
     ("cloudflare", "Cloudflare's \"Verify you are human\" check",
      r"verify you are human by completing the action below|checking if the site connection is secure|"
      r"needs to review the security of your connection before proceeding|"
-     r"widget containing a cloudflare security challenge|challenges\.cloudflare\.com"),
-    ("turnstile", "a Cloudflare Turnstile check", r"\bcf-turnstile\b|turnstile[^\"\n]{0,40}security challenge"),
+     r"widget containing a cloudflare security challenge|" + r'(?:frame|document web) "[^"\n]{0,200}challenges\.cloudflare\.com'),
+    ("turnstile", "a Cloudflare Turnstile check", r'(?:frame|document web) "[^"\n]{0,200}turnstile[^"\n]{0,40}security challenge'),
     ("hcaptcha", "an hCaptcha check",
-     r"widget containing checkbox for hcaptcha security challenge|hcaptcha challenge|\bhcaptcha\.com/\b"),
+     r'widget containing checkbox for hcaptcha security challenge|(?:frame|document web) "[^"\n]{0,200}hcaptcha'),
     ("recaptcha", "a reCAPTCHA check",
      r"\"i'm not a robot\"|\"i am not a robot\"|title=\"recaptcha\"|\brecaptcha challenge expires\b|"
      r"(?:frame|iframe|document|section|panel)[^\n]{0,20}\"recaptcha\""),
     ("press_and_hold", "a press-and-hold check", r"press (?:&|and) hold(?: the button)? to confirm you are a human"),
-    ("datadome", "a DataDome check", r"captcha-delivery\.com|\bdatadome\b[^\n]{0,40}(?:captcha|blocked)"),
-    ("arkose", "an Arkose (FunCaptcha) check", r"\bfuncaptcha\b|arkoselabs\.com|verification challenge[^\n]{0,40}arkose"),
+    ("datadome", "a DataDome check", r'(?:frame|document web) "[^"\n]{0,200}captcha-delivery\.com'),
+    ("arkose", "an Arkose (FunCaptcha) check", r'(?:frame|document web) "[^"\n]{0,200}(?:funcaptcha|arkoselabs\.com)'),
     ("google_sorry", "Google's \"unusual traffic\" check",
      r"our systems have detected unusual traffic from your computer network"),
     ("generic", "a human check",

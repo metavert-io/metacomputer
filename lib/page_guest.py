@@ -123,7 +123,7 @@ class WebSocket:
         return out
 
     def recv(self, limit=64 << 20):
-        msg = b""
+        msg, controls = b"", 0
         while True:
             b0, b1 = self._read(2)
             op, n = b0 & 0x0F, b1 & 0x7F
@@ -131,6 +131,12 @@ class WebSocket:
                 n = struct.unpack(">H", self._read(2))[0]
             elif n == 127:
                 n = struct.unpack(">Q", self._read(8))[0]
+            if n > limit or len(msg) + n > limit or (op >= 0x8 and n > 125):
+                raise Fail("a message from the browser was too large")
+            if op >= 0x8:
+                controls += 1
+                if controls > 1000:
+                    raise Fail("the browser sent only control frames")
             if b1 & 0x80:
                 mk = self._read(4)
                 payload = bytes(b ^ mk[i % 4] for i, b in enumerate(self._read(n)))
@@ -253,7 +259,11 @@ class Browser:
                     "--new-instance", "about:blank"]
         self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      env=env, start_new_session=True)
-        self.connect()
+        try:
+            self.connect()
+        except BaseException:
+            self.close()                     # never leave a browser behind that nothing can close
+            raise
 
     def connect(self, attempts=60):
         last = None
@@ -530,11 +540,15 @@ READ_JS = r"""((max) => {
 
 ELEMENTS_JS = r"""(() => {
   const els = []; let i = 0;
-  const label = el => {
+  const field = el => ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName);
+  const label = el => {          // a field's name comes from its label and attributes, never from what's in it
     if (el.labels && el.labels[0]) return el.labels[0].innerText;
-    return el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') ||
-           el.getAttribute('name') || el.innerText || el.value || '';
+    const a = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') ||
+              el.getAttribute('name') || '';
+    if (a || field(el)) return a;
+    return el.innerText || '';
   };
+  const secretish = el => el.type === 'password' || /one-time-code/i.test(el.autocomplete || '');
   for (const el of document.querySelectorAll('a[href],button,input,select,textarea,[role=button],[role=link],[contenteditable=true]')) {
     const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
     if (r.width === 0 || r.height === 0 || st.visibility === 'hidden' || st.display === 'none') continue;
@@ -542,7 +556,7 @@ ELEMENTS_JS = r"""(() => {
     const ref = 'e' + (++i); el.setAttribute('data-mcomp-ref', ref);
     els.push({ref, tag: el.tagName.toLowerCase(), type: (el.getAttribute('type') || '').toLowerCase(),
               role: el.getAttribute('role') || '', name: String(label(el)).trim().replace(/\s+/g, ' ').slice(0, 200),
-              value: (el.type === 'password') ? '' : String(el.value === undefined ? '' : el.value).slice(0, 200),
+              value: secretish(el) ? '' : String(el.value === undefined ? '' : el.value).slice(0, 200),
               checked: !!el.checked, disabled: !!el.disabled,
               options: el.tagName === 'SELECT' ? Array.from(el.options).slice(0, 50).map(o => o.text.slice(0, 80)) : undefined});
     if (els.length >= 400) break;
@@ -577,8 +591,8 @@ def run(action, a):
         raise Fail("device: one of " + ", ".join(DEVICES))
     if action.startswith("page-") and action != "page-open":
         return page_action(action, a)
-    keep = action == "page-open"
-    b = Browser(engine, device=device, webgpu=action == "gpu" or bool(a.get("webgpu")), keep=keep,
+    keep = False                          # page-open keeps its browser only once it's saved
+    b = Browser(engine, device=device, webgpu=action == "gpu" or bool(a.get("webgpu")), keep=action == "page-open",
                 downloads=a.get("downloads"))
     try:
         if action == "gpu":
@@ -606,6 +620,7 @@ def run(action, a):
             b.navigate(url, wait)
             out = b.evaluate(ELEMENTS_JS)
             out["session"] = save_page(a.get("name") or "default", b)
+            keep = True
         else:
             raise Fail(f"unknown action {action}")
         out["engine"] = engine
@@ -696,17 +711,24 @@ class Kept(Browser):
 SET_JS = r"""((ref, kind, value) => {
   const el = document.querySelector('[data-mcomp-ref="' + ref + '"]');
   if (!el) return {ok: false, why: 'no element ' + ref + ' (read the page again: web page read)'};
-  const lbl = [el.autocomplete, el.name, el.id, el.getAttribute('aria-label'), el.placeholder,
-               el.labels && el.labels[0] ? el.labels[0].innerText : ''].join(' ');
-  if (kind !== 'click' && (el.type === 'password' || /one-time-code|one[- ]?time|\botp\b|2fa|verification code|security code|passcode/i.test(lbl)))
-    return {ok: false, why: 'a password or one-time-code field: fill it with metacomputer secrets fill --human (or secrets code), never web page fill'};
+  const secret = () => {
+    const lbl = [el.autocomplete, el.name, el.id, el.getAttribute('aria-label'), el.placeholder,
+                 el.labels && el.labels[0] ? el.labels[0].innerText : ''].join(' ');
+    return el.type === 'password' || /one-time-code|one[- ]?time|\botp\b|2fa|verification code|security code|passcode/i.test(lbl);
+  };
+  const NO = {ok: false, why: 'a password or one-time-code field: fill it with metacomputer secrets fill --human (or secrets code), never web page fill'};
+  if (kind !== 'click' && secret()) return NO;
   el.scrollIntoView({block: 'center'}); el.focus();
+  if (kind !== 'click' && secret()) return NO;          // a page can change a field when it's focused
   if (kind === 'click') { el.click(); return {ok: true}; }
   if (kind === 'select') { const o = Array.from(el.options || []).find(o => o.text.trim() === value || o.value === value);
     if (!o) return {ok: false, why: 'no such option'}; el.value = o.value; }
   else if (el.isContentEditable) { el.textContent = value; }
   else { const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const set = Object.getOwnPropertyDescriptor(proto, 'value').set; set.call(el, value); }
+  if (kind !== 'click' && secret()) {                  // ...or while it's filled: take the value back out
+    try { if (el.isContentEditable) el.textContent = ''; else el.value = ''; } catch (e) {}
+    return NO; }
   el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true}));
   return {ok: true, value_now: el.type === 'password' ? '' : String(el.value === undefined ? el.textContent : el.value).slice(0, 200)};
 })"""
@@ -737,7 +759,7 @@ def page_action(action, a):
             out = k.evaluate(f"({SET_JS})({json.dumps(ref)}, 'click', '')")
             k.sess.pump(float(a.get("wait", 1.5)))
         elif action == "page-upload":
-            path = a.get("path") or ""
+            path = os.path.expanduser(a.get("path") or "")
             if not os.path.isabs(path) or not os.path.isfile(path):
                 raise Fail("give the full path of a file in the VM to upload")
             if k.engine != "firefox":

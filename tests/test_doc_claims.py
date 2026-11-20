@@ -1711,6 +1711,12 @@ CLAIMS = [
      and "--remote-allow-hosts" not in raw("lib/page_guest.py") and not re.search(r"[\"'=]0\.0\.0\.0", raw("lib/page_guest.py"))),
     ("docs/commands.md", r"The same metacomputer command on several VMs at once \(`main` is this checkout's VM\), without a terminal",
      lambda m: "stdin=subprocess.DEVNULL" in raw("lib/each.py")),
+    ("SECURITY.md", r"read only from a run\s+of the shell channel that finished cleanly",
+     lambda m: 'if res.get("status") != "exited" or res.get("exit") not in (0, 1) or r.returncode not in (0, 1):' in raw("lib/browser_tools.py")),
+    ("SECURITY.md", r"only as PNG files, within 60 seconds",
+     lambda m: 'timeout=60' in raw("lib/browser_tools.py") and 'if head != b"\\x89PNG\\r\\n\\x1a\\n":' in raw("lib/browser_tools.py")),
+    ("SECURITY.md", r"checked again after the field\s+is focused and after it's filled\), and a field's name never comes from what's in it",
+     lambda m: raw("lib/page_guest.py").count("secret()") >= 3 and "if (a || field(el)) return a;" in raw("lib/page_guest.py")),
 ]
 
 

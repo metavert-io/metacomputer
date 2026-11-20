@@ -1978,6 +1978,24 @@ def bot_check_checks():
     set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), about, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
     res = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
     check("a page that only talks about CAPTCHAs isn't marked", "bot check" not in res.text, res.text[:200])
+    robot2 = win(W, 50, "Mousepad", 100, 100, 800, 600, "Sign in")
+    robot2["tree"] = '- [3] check box "I\'m not a robot" [actions=[press]]'
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), robot2, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(2, 11, "Xfce4-panel", 0, 0, 1920, 27),
+                 win(12, 50, "Mousepad", 100, 100, 800, 600, "Untitled")])
+    n0 = len(calls())
+    res = h.call("press_key", {"pid": 50, "window_id": 12, "key": "Return"})
+    check("a marked window that has gone (closed, or a new runtime reusing its pid) no longer blocks the pid's new "
+          "window", not res.is_error and sent_args("press_key", n0), res.text[:160])
+    r.hub.bot_marks[W] = ("recaptcha", 50, time.time() - mcp_hub.BOT_MARK_MAX_S - 1)
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), robot2, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    n0 = len(calls())
+    res = h.call("press_key", {"pid": 50, "window_id": W, "key": "Return"})
+    check("…and a mark older than 30 minutes lapses", not res.is_error and sent_args("press_key", n0), res.text[:160])
+    r.hub.bot_marks[W] = ("recaptcha", 50, time.time())
+    r.hub._reset_runtime()
+    check("a new driver runtime clears the marks", not r.hub.bot_marks)
     cf = win(W, 50, "Mousepad", 100, 100, 800, 600, "Just a moment...")
     cf["tree"] = '- [0] document "Just a moment..." [actions=[]]'
     set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), cf, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])

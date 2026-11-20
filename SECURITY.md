@@ -864,6 +864,33 @@ a page can hide the marks, or fake them to stop Claude in that window, and the h
 only what the accessibility tree and the title say in that read (a check drawn only in
 pixels isn't seen, nor one past where a read was cut short or outside its `query`). Page-mode tools addressed by `target_id` aren't matched to the window.
 
+## Browsers of their own (`metacomputer web gpu|debug|read|page`) and traces
+
+`web gpu`, `debug`, `read`, `responsive --device` and `web page` run a helper in the VM
+(`lib/page_guest.py`) through the shell channel, so the hub's claim, refusals and action
+log apply to them. It starts a browser of its own on the VM's desktop, in a new throwaway
+profile, with its remote control (Chrome's DevTools, Firefox's WebDriver BiDi) on the VM's
+loopback only, and closes it again (`web page` keeps one until `web page close`; a page
+that fails to open is closed at once).
+- **What comes back is the VM's:** one JSON object of a known shape, read only from a run
+  of the shell channel that finished cleanly (a timeout, a cancelled run or an action log
+  that couldn't be signed is a failure, whatever the VM printed), cut short and escaped
+  before it's shown; screenshots are copied only from the VM's own `web-shots` folder,
+  only as PNG files, within 60 seconds. Query strings are cut from URLs in `web debug`.
+- **`web page` refuses password and one-time-code fields** (checked again after the field
+  is focused and after it's filled), and a field's name never comes from what's in it.
+  That's a guard against mistakes: the check runs in the page, which can disguise a field,
+  so values from the vault go only through `metacomputer secrets fill --human` or
+  `secrets code`, never through `web page`.
+- **Where it ends:** the remote-control port is unauthenticated, as these protocols are, so
+  any program in the VM can reach it (the VM is one desktop user's, and nothing in it is
+  trusted); these browsers are for checking and testing pages, never for signing in.
+- **Traces** (`metacomputer trace`) hold what the calls said, typed text included, and
+  names read from pages, in `RUN_DIR/traces/` (0600, at most 20 MB, a trace stops after 24
+  hours). Values the vault types never pass through the hub, so they're never in a trace.
+  `trace export` puts page text only inside JSON-escaped string literals, never in comments
+  or code, so a page can't put code into the test.
+
 ## Hidden page text
 
 **Hidden page text (`HIDDEN_TEXT=on`, the default).** In a test, a web page in the

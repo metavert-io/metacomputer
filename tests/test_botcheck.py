@@ -32,7 +32,8 @@ SEEN = [
     ("cloudflare_title", read('- [0] document "Just a moment..."', title="Just a moment...")),
     ("press_and_hold", read('- [7] text "Press & Hold to confirm you are a human (and not a bot)."')),
     ("datadome", read('- [8] frame "https://geo.captcha-delivery.com/captcha/?initialCid=x"')),
-    ("arkose", read('- [9] frame "Verification challenge" [src=arkoselabs.com]')),
+    ("arkose", read('- [9] internal frame "https://client-api.arkoselabs.com/fc/gc/?token=x" [actions=[]]')),
+    ("cloudflare", read('- [4] internal frame "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/x" [actions=[]]')),
     ("google_sorry", read('- [1] text "Our systems have detected unusual traffic from your computer network."')),
     ("generic", read('- [2] heading "Verify you are human" [actions=[]]')),
 ]
@@ -42,6 +43,9 @@ for kind, res in SEEN:
 NOT = [
     ("an article about CAPTCHAs", read('- [0] heading "How reCAPTCHA and hCaptcha work"\n- [1] text "A CAPTCHA asks '
                                         'whether you are a robot. Cloudflare Turnstile is another."')),
+    ("docs that name FunCaptcha", read('- [1] text "Documentation for FunCaptcha integration" [actions=[]]')),
+    ("a link to Cloudflare's challenge domain", read('- [2] link "https://challenges.cloudflare.com" [actions=[jump]]')),
+    ("an article mentioning hcaptcha.com", read('- [3] paragraph "See hcaptcha.com/ for pricing" [actions=[]]')),
     ("a robots.txt guide", read('- [0] heading "Are robots allowed?" [actions=[]]\n- [1] text "robots.txt tells robots"')),
     ("a title that only starts like the interstitial", read("", title="Just a moment of your time - Blog")),
     ("an error result", read('- [3] check box "I\'m not a robot"', err=True)),

@@ -88,7 +88,8 @@ def net_checks():
 
 def web_checks():
     print("web gpu, debug, read, devices")
-    rc, out = mc("put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", "/home/cua/Inbox", "--overwrite")
+    gh = "/home/" + re.search(r"^GUEST_USER=(\S+)", open(os.path.join(LAB, "config", "defaults.env")).read(), re.M).group(1)
+    rc, out = mc("put", os.path.join(LAB, "tests", "fixtures", "site"), "--to", gh + "/Inbox", "--overwrite")
     mc("sh", "-c", "pkill -f 'http.server 8000' ; cd ~/Inbox/site && setsid -f python3 -m http.server 8000 "
                    "--bind 127.0.0.1 </dev/null >/dev/null 2>&1; sleep 1")
     u = "http://127.0.0.1:8000"

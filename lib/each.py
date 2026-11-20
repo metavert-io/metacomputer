@@ -24,13 +24,20 @@ MAX_VMS = 16
 NOT_HERE = {"each", "setup", "build", "mcp", "mcp-lazy", "ssh", "view", "handoff"}   # interactive, or one at a time
 
 
+def child_env():
+    """The environment without a VM already picked (MCOMP_VM, MCOMP_CONFIG): each child names its own, and `main` is
+    this checkout's config/local.env, whatever the caller had selected."""
+    return {k: v for k, v in os.environ.items() if k not in ("MCOMP_VM", "MCOMP_CONFIG")}
+
+
 def run_one(vm, cmd, timeout):
     args = [CLI] + ([] if vm == "main" else ["--vm", vm]) + cmd
     t0 = time.monotonic()
     try:
         r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
-                           errors="replace")
-        return vm, r.returncode, r.stdout, r.stderr, time.monotonic() - t0
+                           errors="replace", env=child_env())
+        code = r.returncode if r.returncode >= 0 else 128 - r.returncode   # killed by a signal: 128 + its number
+        return vm, code, r.stdout, r.stderr, time.monotonic() - t0
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         return vm, 124, out, f"metacomputer each: stopped after {timeout} s\n", time.monotonic() - t0

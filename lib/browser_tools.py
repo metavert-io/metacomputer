@@ -83,8 +83,11 @@ def say(msg):
     print(escape_for_terminal(msg), file=sys.stderr, flush=True)
 
 
-def lab(*args, check=True):
-    r = subprocess.run([MCOMP_CLI, *args], capture_output=True, text=True)
+def lab(*args, check=True, timeout=None):
+    try:
+        r = subprocess.run([MCOMP_CLI, *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Fail(f"metacomputer {' '.join(args[:2])} didn't finish in {timeout} s")
     if check and r.returncode != 0:
         raise Fail(f"metacomputer {' '.join(args)} failed: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout
@@ -658,6 +661,10 @@ def page_guest(action, args, override=False, timeout=240):
         raise Fail("metacomputer sh gave no result")
     if res.get("status") == "refused":
         raise Fail("refused: " + str(res.get("message") or "")[:300])
+    if res.get("status") != "exited" or res.get("exit") not in (0, 1) or r.returncode not in (0, 1):
+        # A timeout, a cancelled run, an action log that couldn't be signed: never success, whatever the VM printed
+        raise Fail("metacomputer sh didn't finish cleanly (" + str(res.get("status"))[:20] + "): "
+                   + str(res.get("message") or "")[:300])
     if res.get("stdout_truncated"):
         raise Fail("the VM's answer was larger than the shell channel keeps (1 MB)")
     out = (res.get("stdout") or "").strip().splitlines()
@@ -676,24 +683,25 @@ def page_guest(action, args, override=False, timeout=240):
 
 
 def fetch_shot(guest_path, dest_dir, name):
-    """Copy a screenshot the helper saved in the VM to dest_dir/name (only a PNG under ~/metacomputer-runs/web-shots)."""
+    """Copy a screenshot the helper saved in the VM to dest_dir/name (only a PNG under ~/metacomputer-runs/web-shots,
+    within 60 s). The copy lands in dest_dir under the VM's file name, a name this checked; anything that isn't a plain
+    PNG file there is removed again."""
     if not isinstance(guest_path, str) or not GUEST_SHOT_RE.fullmatch(guest_path):
         return None
-    tmp = os.path.join(dest_dir, ".fetch")
-    os.makedirs(tmp, exist_ok=True)
-    got = lab("get", guest_path, tmp, check=False).strip().splitlines()
-    src = got[-1] if got else ""
-    if not src.startswith(tmp + os.sep) or not os.path.isfile(src) or os.path.islink(src):
-        shutil.rmtree(tmp, ignore_errors=True)
+    landed = os.path.join(dest_dir, os.path.basename(guest_path))
+    try:
+        got = lab("get", guest_path, dest_dir, check=False, timeout=60).strip().splitlines()
+    except Fail:
+        got = []
+    if (got[-1] if got else "") != landed or not os.path.isfile(landed) or os.path.islink(landed):
         return None
-    with open(src, "rb") as f:
+    with open(landed, "rb") as f:
         head = f.read(8)
     if head != b"\x89PNG\r\n\x1a\n":
-        shutil.rmtree(tmp, ignore_errors=True)
+        os.unlink(landed)
         return None
     dst = os.path.join(dest_dir, name)
-    os.replace(src, dst)
-    shutil.rmtree(tmp, ignore_errors=True)
+    os.replace(landed, dst)
     return dst
 
 

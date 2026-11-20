@@ -155,7 +155,7 @@ Options: `--task NAME` puts the results in that task's folder, `--record` record
 ## Precise mode in Firefox: `metacomputer web page`
 
 1. `metacomputer web page open URL [--name N] [--device D] [--downloads ~/Downloads/x]` starts a Firefox of its own on the VM's desktop and lists the page's controls: `e12  input[text]  'Name'`.
-2. `web page fill REF VALUE`, `select REF OPTION`, `click REF`, `upload REF /home/cua/file` act on them exactly (fills fire the page's input and change events).
+2. `web page fill REF VALUE`, `select REF OPTION`, `click REF`, `upload REF ~/file` act on them exactly (fills fire the page's input and change events).
 3. `web page read [--text]` lists them again (refs are renewed on each read) and, with `--text`, the main text. Check the outcome there.
 4. `web page close` ends it. Each page is kept under its `--name` until then.
 
