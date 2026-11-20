@@ -1853,6 +1853,12 @@ DELETE_WALK_EXCEPTIONS = {
                                         "profiles folder (opened link by link with O_NOFOLLOW), by descriptor",
                                         ["root = open_root(kind", "os.stat(name, dir_fd=root, follow_symlinks=False)",
                                          "shutil.rmtree(name, dir_fd=root)"]),
+    # Listing only to fingerprint code or guest files (read, hashed); the one write is a record of its own at a fixed path:
+    ("lib/update.py", "after_install"): ("metacomputer update / install.sh's last step: lists the checkout's code to "
+                                         "fingerprint it; writes only the install record (STAMP), whole, by rename",
+                                         ["write_json(STAMP, new_stamp)"]),
+    ("lib/update.py", "record_build"): ("build-vm.sh: hashes the guest files; writes only RUN_DIR/vm-build.json",
+                                        ['write_json(os.path.join(run_dir, "vm-build.json")']),
     # Consuming or rewriting what a listing found, behind a guard:
     ("lib/events.py", "drain_spool"): ("the event spool, consumed only after lib/safedelete.py check_spool passed (it "
                                        "may not be, hold or reach another protected folder); a file that can't be "

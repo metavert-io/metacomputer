@@ -739,7 +739,8 @@ def test_build_vm_locks():
         json.dump(["mcbuild", "mcbuild-baseline"], open(os.path.join(t, "vms5.json"), "w"))
         p = subprocess.run([build, "--replace"], env=env(5), capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         check("with --replace, an existing VM and baseline are deleted, then the VM is created",
-              "delete mcbuild" in calls(5) and "delete mcbuild-baseline" in calls(5) and "create mcbuild" in calls(5), calls(5))
+              "delete mcbuild" in calls(5) and "delete mcbuild-baseline" in calls(5) and "create mcbuild" in calls(5),
+              (calls(5), (p.stdout + p.stderr)[-600:]))
     finally:
         shutil.rmtree(t, ignore_errors=True)
 

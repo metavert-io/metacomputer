@@ -3485,6 +3485,7 @@ class Server:
         self.lock_fd = None
         self.gated_why = None       # a stop the hub decided on itself (a restart for other settings), not yet made
         self.teardown_hold = None   # the dispatch lock, held from that decision through close()
+        self.code = code_digest()   # which code this hub runs (hub.pid: metacomputer update compares it)
 
     def stop(self, why="stopped", gated=False):
         """Stop serving. gated: the hub's own decision (a restart for other settings; idle exit goes the same way): the
@@ -3537,7 +3538,7 @@ class Server:
             pass
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps({"pid": os.getpid(), "socket": self.paths["sock"], "started": self.hub.started,
-                                 "vm": self.hub.settings.get("vm_name"), "code": code_digest()}).encode())
+                                 "vm": self.hub.settings.get("vm_name"), "code": self.code}).encode())
         try:
             os.unlink(self.paths["sock"])
         except FileNotFoundError:
