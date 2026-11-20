@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-20
+
 ### Added
 
 - **Browser checks in a browser of their own** (`lib/page_guest.py`, run in the VM through the shell channel; DevTools for Chrome, WebDriver BiDi for Firefox, the remote control on the VM's loopback only): `metacomputer web gpu [URL]` (WebGL and WebGPU in the VM: renderer, adapter, whether the page asked for a GPU, GPU errors), `web debug URL` (console messages, uncaught errors, failed and slowest requests, timings), `web read URL` (the main text as Markdown), `web responsive URL --device iphone-15,pixel-8,...` (phone and tablet emulation; whether the page scrolls sideways).
