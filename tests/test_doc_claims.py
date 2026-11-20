@@ -683,14 +683,14 @@ def vault_types_on_its_own_path():
 
 CLAIMS = [
     ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
-     lambda m: "def resolve_named(self, spec):" in raw("lib/mcp_hub.py")
+     lambda m: "def resolve_named(self, spec, every=False):" in raw("lib/mcp_hub.py") and "every=strict)" in raw("lib/mcp_hub.py")
      and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")
      and "(any(hits) if strict else all(hits))" in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"a window named by title\s+without a numeric `pid` or `window_id` counts as Chrome whenever a Chrome window\s+is open",
      lambda m: "(titled and any(rx.search(w[\"app\"]) for w in ws))" in raw("lib/mcp_hub.py")
      and "not self.named_complete()" in raw("lib/mcp_hub.py")),
-    ("SECURITY.md", r"refused the same way when the hub can't read the window list whole",
-     lambda m: "if pool is not None and not self.named_complete():" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"refused the same way when the hub can't read the window list, or not whole",
+     lambda m: "if pool is None or not self.named_complete():" in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"A batch pixel step is checked against the window the driver runs it in, by the same model as the "
                     r"Chrome guard and human pacing \(`step_windows`",
      lambda m: "wins = {i: w for i, _t, _a, w in self.step_windows(args)}" in raw("lib/mcp_hub.py")

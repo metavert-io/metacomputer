@@ -2198,7 +2198,7 @@ class Hub:
         cached = self._named
         return bool(cached is not None and cached[0] == self.call_seq and cached[1] is not None and cached[2])
 
-    def resolve_named(self, spec):
+    def resolve_named(self, spec, every=False):
         """The windows a spec that names an app or a title can resolve to, by the driver's own rules (locate.rs
         listed_windows and search_windows, 0.53.0): the pid's windows if it names one; an app matches a window whose app
         name contains it, a title one whose title contains it (both trimmed, case folded); the window_id if named; the
@@ -2221,7 +2221,7 @@ class Hub:
         if title:
             cands = [w for w in cands if title in w["title"].strip().lower()]
         on = [w for w in cands if w["on_screen"]]
-        pool = on or cands
+        pool = cands if every else (on or cands)   # every: off-screen matches too (a step can bring one forward)
         return sorted(pool, key=lambda w: (-(w["z"] if w["z"] is not None else -(1 << 62)), w["order"]))
 
     def app_verdict(self, args, outer, rx, strict=True):
@@ -2250,7 +2250,9 @@ class Hub:
                 titled = isinstance(layer.get("window"), str) and layer.get("window").strip()
                 if ws is None or not self.named_complete() or (titled and any(rx.search(w["app"]) for w in ws)):
                     return True, None
-            pool = self.resolve_named({k: layer.get(k) for k in ("pid", "window_id", "app", "window")})
+            # strict: every window the name matches, off-screen ones too (a minimised Chrome that a step in the batch
+            # brings forward is one the driver can resolve the name to later)
+            pool = self.resolve_named({k: layer.get(k) for k in ("pid", "window_id", "app", "window")}, every=strict)
             if not pool:
                 return (True, None) if strict else (False, None)
             hits = [bool(rx.search(w["app"])) for w in pool]
@@ -2499,8 +2501,8 @@ class Hub:
                 wid = snap[1] if snap and isinstance(snap[1], int) else None
             if wid is None and (w.get("app") or w.get("window")):
                 pool = self.resolve_named(w)              # a pixel step runs in the best match (locate.rs window)
-                if pool is not None and not self.named_complete():
-                    return None                           # the driver may pick a window the hub couldn't see whole
+                if pool is None or not self.named_complete():
+                    return None                           # the driver may pick a window the hub couldn't see (whole)
                 wid = pool[0]["window_id"] if pool else None
             if wid is None:
                 unknown += 1
