@@ -19,6 +19,13 @@
 #                              server, as before the plugin (tools: mcp__metacomputer__*)
 #   ./install.sh --only-claude only the Claude Code step (no tools, Lume, settings, vault or VM)
 #   ./install.sh --uninstall   remove the Claude Code hooks this installed (the VM stays)
+#   ./install.sh --switch      the metacomputer command runs another checkout: move it (and the Claude Code
+#                              plugin) to this one. Without a terminal, or with --yes, that's refused otherwise
+#   ./install.sh --allow-downgrade   install this checkout though it's older than what's installed
+#
+# Updating: `metacomputer update` (or the install line again). Run by hand after `git pull`, this ends the
+# same way: the hub and event watcher on the new code, a VM on an earlier gateway restarted (it asks at a
+# terminal), what's left to do, and what a VM rebuild would add (lib/update.py).
 #
 # What it does (each step is skipped when already done, so running it again is safe and
 # carries on where an interrupted run stopped):
@@ -36,10 +43,12 @@
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 YES=0; CHROME=""; BUILD=""; CLAUDE=1; PLUGIN=1; ONLY_CLAUDE=0; UNINSTALL=0; LUME_CHOICE=""; REPLACE_VM=0; FRESH_SOURCES=0
+SWITCH=0; ALLOW_DOWNGRADE=0
 for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;; --no-chrome) CHROME=no ;; --no-build) BUILD=no ;; --replace-vm) REPLACE_VM=1 ;; --fresh-sources) FRESH_SOURCES=1 ;;
     --no-claude) CLAUDE=0 ;; --no-plugin) PLUGIN=0 ;; --only-claude) ONLY_CLAUDE=1 ;; --uninstall) UNINSTALL=1 ;;
+    --switch) SWITCH=1 ;; --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
     --lume=mcomp-vm|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
     --lume=secure) LUME_CHOICE=mcomp-vm ;;   # mcomp-vm's former name, lume-secure
     -h|--help) sed -n '2,/^set -Eeuo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -626,6 +635,39 @@ case "$vm_state:$build_vm:$vm_replace" in
   unknown:*) todo+=("leave the VM alone (Lume couldn't list the VMs)") ;;
   *) todo+=("not build the VM yet (--no-build; later: metacomputer build)") ;;
 esac
+# An install that's already here: from another checkout (the command and plugin would move to this one), or
+# newer than this checkout. Neither changes without saying so.
+other_checkout=""
+if [ "$CLAUDE" = 1 ] && [ -L "$CMD_LINK" ]; then
+  cmd_target="$(readlink "$CMD_LINK")"
+  case "$cmd_target" in */bin/metacomputer)
+    other_dir="${cmd_target%/bin/metacomputer}"
+    if [ "$other_dir" != "$ROOT" ] && [ -f "$other_dir/install.sh" ] && [ -f "$other_dir/bin/metacomputer" ]; then
+      other_checkout="$other_dir"
+    fi ;; esac
+fi
+if [ -n "$other_checkout" ]; then
+  if [ "$SWITCH" = 1 ]; then
+    todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other_checkout") to this checkout (--switch)")
+  elif [ "$YES" = 1 ] || [ ! -t 0 ]; then
+    die "the metacomputer command runs another checkout, $(tildify "$other_checkout"), and this run would switch it (and the Claude Code plugin) to $(tildify "$ROOT")." \
+        "To update that install instead: metacomputer update." \
+        "To move to this checkout: ./install.sh --switch (that checkout's VM, settings and vault are left as they are)."
+  elif ask "The metacomputer command runs another checkout, $(tildify "$other_checkout"). Switch it and the Claude Code plugin to this one?" N; then
+    todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other_checkout") to this checkout")
+  else
+    echo "  Nothing was changed. To update the install that's there: metacomputer update."; exit 0
+  fi
+fi
+installed_tag=""
+[ ! -f "$HOME/.local/share/metacomputer/installed.json" ] \
+  || installed_tag="$(sed -n 's/.*"tag": "\(v[0-9][0-9.]*\)".*/\1/p' "$HOME/.local/share/metacomputer/installed.json" 2>/dev/null | head -1 || true)"
+this_tag="$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+if [ -n "$installed_tag" ] && [ -n "$this_tag" ] && [ "$installed_tag" != "$this_tag" ] && [ "$ALLOW_DOWNGRADE" = 0 ] \
+   && [ "$(printf '%s\n%s\n' "$installed_tag" "$this_tag" | sort -V | tail -1)" = "$installed_tag" ]; then
+  die "this checkout ($this_tag) is older than what's installed ($installed_tag): nothing was changed." \
+      "To update: metacomputer update. To go back to $this_tag anyway: ./install.sh --allow-downgrade."
+fi
 echo "  This run will:"
 for t in "${todo[@]}"; do printf '%s\n' "    - $t"; done
 [ ${#done_[@]} = 0 ] || printf '%s\n' "  Already done: $(IFS=,; echo "${done_[*]}" | sed 's/,/, /g')."
@@ -810,3 +852,6 @@ cat <<EOF
 In Claude Code (restart open sessions, or run /reload-plugins in them), try:
   "Get yourself a virtual computer and tell me what's on its screen."
 EOF
+# What's running now, against this checkout: services on older code, a VM on an earlier gateway, a vault to bind
+# again, a rebuild that would add something, and the version installed (lib/update.py; it never fails the install).
+if [ -f "$ROOT/lib/update.py" ] && { [ -n "${PY311:-}" ] || py311_ok; }; then "$PY311" "$ROOT/lib/update.py" _after-install || true; fi

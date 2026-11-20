@@ -1237,6 +1237,51 @@ def test_install_vm_decisions():
           0 < i_mark < src.find('say "--replace: deleting') and i_mark < i_create and i_base < i_rm, (i_mark, i_create, i_base, i_rm))
 
 
+def test_install_existing():
+    """An install that's already here: the metacomputer command runs another checkout (not switched without --switch
+    or a yes at a terminal), or it's newer than this checkout (refused without --allow-downgrade)."""
+    def go(extra=(), other=True, stamp_tag=None, root_tag=None):
+        b, root = vm_box("mctest,mctest-baseline")
+        try:
+            link = os.path.join(b.home, ".local", "bin", "metacomputer")
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            if other:
+                od = os.path.join(b.t, "elsewhere")
+                write(os.path.join(od, "install.sh"), "#!/bin/sh\n", 0o755)
+                write(os.path.join(od, "bin", "metacomputer"), "#!/bin/sh\n", 0o755)
+                os.symlink(os.path.join(od, "bin", "metacomputer"), link)
+            if root_tag:
+                git("init", "-q", "-b", "main", cwd=root)
+                git("-c", "user.email=t@example.com", "-c", "user.name=t", "add", "-A", cwd=root)
+                git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "x", cwd=root)
+                git("tag", root_tag, cwd=root)
+            if stamp_tag:
+                write(os.path.join(b.home, ".local", "share", "metacomputer", "installed.json"),
+                      json.dumps({"version": stamp_tag, "tag": stamp_tag, "commit": "0" * 40}, indent=2))
+            p, _ = b.run([os.path.join(root, "install.sh"), "--yes", *extra])
+            return p, (os.readlink(link) if os.path.islink(link) else None), root
+        finally:
+            b.close()
+    p, target, root = go()
+    check("the command runs another checkout, --yes: refused, says how to update that one or switch, link unchanged",
+          p.returncode != 0 and "runs another checkout" in p.stderr and "metacomputer update" in p.stderr
+          and "--switch" in p.stderr and target.endswith("elsewhere/bin/metacomputer"), (p.stderr[-400:], target))
+    p, target, root = go(extra=("--switch",))
+    check("…with --switch: it goes ahead and the command runs this checkout", p.returncode == 0
+          and target == os.path.join(root, "bin", "metacomputer"), (p.returncode, p.stderr[-300:], target))
+    p, target, root = go(other=False, stamp_tag="v0.9.0", root_tag="v0.4.0")
+    check("this checkout older than what's installed: refused, nothing changed", p.returncode != 0
+          and "older than what's installed" in p.stderr and "--allow-downgrade" in p.stderr, p.stderr[-300:])
+    p, target, root = go(other=False, stamp_tag="v0.9.0", root_tag="v0.4.0", extra=("--allow-downgrade",))
+    check("…with --allow-downgrade: it goes ahead", p.returncode == 0, p.stderr[-300:])
+    p, target, root = go(other=False, stamp_tag="v0.3.0", root_tag="v0.4.0")
+    check("a newer checkout than what's installed (an update): goes ahead", p.returncode == 0, p.stderr[-300:])
+    src = open(INSTALL).read()
+    check("install.sh ends with the after-install step (lib/update.py), which can't fail the install",
+          '"$PY311" "$ROOT/lib/update.py" _after-install || true' in src
+          and src.index('"Get yourself a virtual computer') < src.index("_after-install"))
+
+
 # --- scripts/lib.sh: the VM's folder ------------------------------------------------------------------
 def test_vm_dir():
     t = tempfile.mkdtemp(prefix="mcomp-install-")
@@ -1838,6 +1883,7 @@ test_build_vm_locks()
 test_lock_lifetime()
 test_vm_mutation_locks()
 test_build_tools_stamps()
+test_install_existing()
 test_install_tools_and_space()
 test_vm_dir()
 test_vnc_password()

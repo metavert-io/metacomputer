@@ -296,12 +296,29 @@ above).
 ## Updating
 
 ```bash
-cd ~/metacomputer && git pull && ./install.sh
+metacomputer update             # --check: only what's new; --restart: restart VMs without asking
 ```
 
-Or run get.sh again: it updates the checkout to the latest release, then runs
-`./install.sh`, which rebuilds only what changed (a new mcomp-vm pin, a changed
-vault). An update doesn't rebuild the VM, and its check only reads from the VM
+It updates the checkout to the latest release (main moves forward only; a checkout
+with local changes, or on a branch of its own, is left to you), then runs
+`./install.sh --yes --no-build`, which rebuilds only what changed (the gateway, a new
+mcomp-vm pin, a changed vault). Every install then ends the same way, whether it ran
+from `update`, from the install line run again (get.sh), or by hand after `git pull`:
+- the hub and the event watcher, when they run older code, are restarted;
+- a VM whose gateway is an earlier program is restarted: at a terminal it asks first,
+  without one only with `--restart`; a VM another session is using, or that you have
+  in a handoff, is never stopped (it says what to run later);
+- when the gateway program changed and you have a secrets vault, it offers to run
+  `metacomputer secrets bind` (the vault pins the gateway program);
+- a VM built from older guest files gets a note on what a rebuild would add;
+- it records what's installed (`~/.local/share/metacomputer/installed.json`) and sums
+  up what's new since the version before.
+
+`./install.sh` run in another checkout than the one the `metacomputer` command runs
+asks before switching to it (`--switch` without a terminal), and one older than what's
+installed is refused (`--allow-downgrade`). `metacomputer version` shows what's
+installed and what built each VM; `metacomputer status` says when a newer release is
+out (`UPDATE_CHECK=off` turns that check off). An update doesn't rebuild the VM, and its check only reads from the VM
 (no self-test), so windows and unsaved work in it are left alone. When the
 CHANGELOG says a change takes effect on the next build, rebuild with
 `metacomputer build --replace` when you're ready (it replaces the VM and its

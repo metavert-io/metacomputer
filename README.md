@@ -723,12 +723,16 @@ The guide has [the full table](docs/guide.md#troubleshooting) and
 ## Updating and uninstalling
 
 ```bash
-cd ~/metacomputer && git pull && ./install.sh   # or run the install line again
+metacomputer update          # --check: only say what's new
 ```
 
-An update rebuilds only what changed and leaves the VM alone. When the
-[CHANGELOG](CHANGELOG.md) says a change takes effect on the next build, run
-`metacomputer build --replace` when you're ready. A plugin installed from GitHub
+It moves your checkout to the latest release, rebuilds only what changed, restarts
+what runs older code (it asks before restarting a VM) and tells you what's left:
+a `secrets bind` when the gateway changed, or what a VM rebuild would add
+(`metacomputer build --replace`, when you're ready; it never rebuilds on its own).
+Before v0.4.1 there's no `update` command: run the install line again, which ends
+the same way. `metacomputer version` shows what's installed and what built each VM,
+and `metacomputer status` says when a newer release is out. A plugin installed from GitHub
 updates with `claude plugin update metacomputer@metacomputer`.
 
 ```bash

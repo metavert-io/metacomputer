@@ -704,6 +704,12 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_update.py`: `metacomputer update` and `version` and the step every install ends with
+  (`lib/update.py`) against a temporary repository with three releases: `--check` says what's new and changes
+  nothing; main moves forward to the latest release (a detached checkout to it) and install.sh runs; local changes,
+  another branch and going back are refused; services on older code are restarted, a VM on an earlier gateway only
+  when allowed (and not when another session holds it), a vault is asked to be bound again, a VM built from other
+  guest files gets a rebuild note, what's installed is recorded, and status's update line comes from a daily check.
 - `python3 tests/test_traces.py`: the trace recorder (on only while a trace is active, one session or all, capped,
   0600) and the Playwright export: tokens resolve through the rows of reads, clicks/fills/keys/checks/navigations
   translate, other apps are left out, and page text written to break out of the code (quotes, newlines,
