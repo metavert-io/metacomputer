@@ -1126,8 +1126,9 @@ CLAIMS = [
      and gateway_rules()["block_host_addrs"] is True),
     ("docs/guide.md", r"\*\*Always refused:\*\* your Mac's loopback and every address of its own interfaces",
      lambda m: gateway_rules()["block_host_addrs"] is True and gateway_rules()["default_accept"] is True
-     and '"rules": "$LAB_ROOT/config/netgw-rules.json"' in raw("scripts/lib.sh")
-     and '-check-rules "$LAB_ROOT/config/netgw-rules.json"' in raw("scripts/lib.sh")),
+     and '"rules": "$RUN_DIR/netgw-rules.json"' in raw("scripts/lib.sh")      # written from config/netgw-rules.json
+     and '-check-rules "$LAB_ROOT/config/netgw-rules.json"' in raw("scripts/lib.sh")
+     and "return base\n" in raw("lib/netpolicy.py")),                       # (lib/netpolicy.py compose: as is, no list)
     # mcomp-vm leaves out host sharing: the flags the docs name are the ones scripts/lib.sh passes
     ("architecture.md", r"`lume run (--no-share-clipboard / --no-share-audio / --no-share-rosetta / --no-host-sharing)`",
      lambda m: share_flags_match(re.findall(r"--[a-z-]+", m[1]))),
@@ -1651,6 +1652,25 @@ CLAIMS = [
     ("CHANGELOG.md", r"New exit codes for these commands: (\d+) expired \(or used already\), (\d+) needs approval",
      lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")
      and int(m[2]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
+    # Network allowlists (lib/netpolicy.py, `metacomputer net`)
+    ("SECURITY.md", r"The gateway answers DNS only for the names on the\s+list",
+     lambda m: 'out["default_accept"] = False' in raw("lib/netpolicy.py")
+     and 'out["domains"] = {"allow": sorted(set(st["allow"]))}' in raw("lib/netpolicy.py")),
+    ("SECURITY.md", r"Adding names or time to a\s+list in force, and `net clear`, run only at a\s+terminal",
+     lambda m: raw("lib/netpolicy.py").count("if not at_terminal():") == 1
+     and "if st is not None and not at_terminal():" in raw("lib/netpolicy.py")
+     and "return sys.stdin.isatty() and sys.stderr.isatty()" in raw("lib/netpolicy.py")),
+    ("SECURITY.md", r"\(1 minute to 24 hours,\s+2 hours by default\)",
+     lambda m: (__import__("netpolicy").MIN_FOR_S, __import__("netpolicy").MAX_FOR_S, __import__("netpolicy").DEFAULT_FOR_S)
+     == (60, 86400, 7200)),
+    ("SECURITY.md", r"is checked with the gateway's own\s+`-check-rules` before it replaces the one in force",
+     lambda m: re.search(r"check_rules\(tmp\)\n\s+os\.replace\(tmp, p\[\"rules\"\]\)", raw("lib/netpolicy.py")) is not None),
+    ("SECURITY.md", r"a list file that can't be read\s+stops `metacomputer start` instead of starting with the internet open",
+     lambda m: 'net_policy render || die' in raw("scripts/lib.sh") and '"rules": "$RUN_DIR/netgw-rules.json",' in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"`net_allowlist_lifted` carry counts and minutes, never the names",
+     lambda m: all(not re.search(r'"allow"|a\.names|pats|wider\b(?!\))|st\["allow"\](?!\))', c.split("{", 1)[1])
+                   for c in re.findall(r'emit\("net_allowlist_\w+".*?\}', raw("lib/netpolicy.py"), re.S))
+     and len(re.findall(r'emit\("net_allowlist_\w+"', raw("lib/netpolicy.py"))) >= 6),
 ]
 
 

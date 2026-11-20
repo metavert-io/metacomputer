@@ -28,6 +28,7 @@
 #   desktop-restart                log the desktop out and in again (closes every app)
 #   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
+#   net status | allow NAME... [--for 2h] | remove NAME... | clear   a network allowlist for the VM (the gateway)
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
 #   task start SLUG [--no-sync] | finish NAME   one folder per task (guest + host), artifacts listed; finished recording
 #                                  turns copied to the Mac while it's open (TASK_SYNC_INTERVAL)
@@ -756,6 +757,17 @@ if stg:
     import storage
     for line in storage.describe_status(stg, gs.get("storage") if isinstance(gs.get("storage"), dict) else None, vm == "running"):
         print(line)
+try:                                          # the network allowlist (metacomputer net), if one is in force
+    sys.path.insert(0, lib)
+    import netpolicy
+    np_paths = netpolicy.paths()
+    np_state = netpolicy.read_state(np_paths)
+    if np_state is not None:
+        print("network       " + _esc(netpolicy.describe(np_state)) + "   (metacomputer net)")
+        if out["gateway"] and netpolicy.gateway_reads_it(np_paths) is False:
+            print("              \033[33mthe running gateway doesn't read it\033[0m: metacomputer stop, then start")
+except Exception as e:
+    print(f"network       \033[33mallowlist unreadable\033[0m ({_esc(str(e))[:160]})   (metacomputer net status)")
 print(recording.status_line(out["recordings"]))
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
@@ -2219,6 +2231,7 @@ case "$cmd" in
   input-reset) do_input_reset "$@" ;;
   rename)     do_rename "$@" ;;
   web)        export_options; exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
+  net)        export_options; net_policy "$@"; exit $? ;;
   release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;
   get)        do_get "$@" ;;

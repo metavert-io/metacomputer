@@ -684,6 +684,10 @@ netgw_stop() {
   fi
   rm -f "$RUN_DIR/netgw.pid" "$SOCK_DIR/net.sock" "$SOCK_DIR/control.sock" "$SOCK_DIR"/lume-*.sock
 }
+net_policy() { # ARGS... -> lib/netpolicy.py for this VM (its RUN_DIR, the gateway binary, whether it runs)
+  local alive=0; netgw_alive && alive=1
+  MCOMP_NETGW_BIN="$NETGW_BIN" MCOMP_NETGW_ALIVE="$alive" "$PY" "$LAB_ROOT/lib/netpolicy.py" "$@"
+}
 netgw_render() { # MAC -> writes $RUN_DIR/gw.json
   local mac="$1"
   cat > "$RUN_DIR/gw.json" <<EOF
@@ -700,7 +704,7 @@ netgw_render() { # MAC -> writes $RUN_DIR/gw.json
   ],
   "control": "unix://$SOCK_DIR/control.sock",
   "listen": { "vfkit": "unixgram://$SOCK_DIR/net.sock" },
-  "rules": "$LAB_ROOT/config/netgw-rules.json",
+  "rules": "$RUN_DIR/netgw-rules.json",
   "events": "$LOG_DIR/netgw-blocked.jsonl",
   "pid_file": "$RUN_DIR/netgw.pid",
   "log_level": "warning"
@@ -710,8 +714,11 @@ EOF
 netgw_start() { # MAC
   [ -x "$NETGW_BIN" ] || die "missing $NETGW_BIN (run scripts/build-tools.sh)"
   netgw_stop
-  netgw_render "$1"
   "$NETGW_BIN" -check-rules "$LAB_ROOT/config/netgw-rules.json" >/dev/null || die "bad netgw rules"
+  # The rules the gateway reads: config/netgw-rules.json plus this VM's network allowlist, if one is in force
+  # (lib/netpolicy.py; checked with -check-rules before it's written). A list it can't read stops the start.
+  net_policy render || die "the network allowlist's rules couldn't be written (metacomputer net status)"
+  netgw_render "$1"
   daemonize "$LOG_DIR/netgw.log" "$NETGW_BIN" -config "$RUN_DIR/gw.json"
   local i=0; while [ ! -S "$SOCK_DIR/net.sock" ] && [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done
   [ -S "$SOCK_DIR/net.sock" ] || { tail -5 "$LOG_DIR/netgw.log" >&2; die "cua-netgw did not start"; }

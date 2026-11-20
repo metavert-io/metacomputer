@@ -704,6 +704,13 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_netpolicy.py`: network allowlists (`lib/netpolicy.py`, `metacomputer net`) against a
+  temporary run folder: names (subdomains, `--exact`, wildcards; addresses and malformed names refused), starting
+  and narrowing a list without a terminal, widening it and lifting it early refused without one and accepted at a
+  pty, the rules file the gateway reads (no default reach, only the listed names, every refusal of
+  config/netgw-rules.json kept, 0600), rules the gateway's own `-check-rules` refuses never replacing the ones in
+  force (with the real cua-netgw when `vendor/bin` has it), list files that can't be read or are links stopping
+  `render`, a base file that opens ranges refused, the timer lifting a list at its end, and the start path's wiring.
 - `python3 tests/test_guest_profiles.py`: `lib/guest_profiles.py`, which makes and deletes browser profile
   folders inside the VM (`metacomputer browser profiles --new|--delete`), run against a temporary home and a
   stand-in `/proc`. A profiles folder that is a link (to the home folder), a link further up the way, and a profile

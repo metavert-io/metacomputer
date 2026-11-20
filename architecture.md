@@ -739,7 +739,14 @@ Every connection the guest opens is checked on the host:
 - refused by `config/netgw-rules.json`: RFC 1918 (your LAN, its router and
   devices), 100.64.0.0/10 (Tailscale/CGNAT), link-local, ULA (tailnet v6),
   benchmark/reserved ranges, outbound SMTP
-- everything else (the public internet): allowed
+- everything else (the public internet): allowed, unless a network allowlist
+  is in force (`metacomputer net allow NAME... --for D`): then only the names on it
+  (SECURITY.md, "Network allowlists")
+
+The gateway reads `RUN_DIR/netgw-rules.json`, which `metacomputer start` (and
+`metacomputer net`) writes from `config/netgw-rules.json` plus the list in
+`RUN_DIR/net-allow.json` (lib/netpolicy.py), checked with `cua-netgw -check-rules`
+first; the gateway reloads it within a second of a change.
 
 Blocked attempts are logged to `logs/netgw-blocked.jsonl` (with an event
 sink configured, the event watcher reports new ones; see "Event stream"). Inbound: there is

@@ -319,6 +319,48 @@ How it's enforced:
   driver had launched, even with `terminate: driver_launched`. Close them from
   their own window, or use `metacomputer desktop-restart`.
 
+## Network allowlists (`metacomputer net`)
+
+By default the VM reaches the public internet and nothing of yours: the gateway on
+this Mac (cua-netgw) refuses your LAN, your tailnet, this Mac's own addresses, cloud
+metadata and outbound mail (architecture.md, "Network"). For a task that only needs
+a few sites, `metacomputer net allow example.com stripe.com --for 2h` narrows that to
+those names for that long:
+
+- **Enforced on this Mac, by name.** The gateway answers DNS only for the names on the
+  list (a name also covers its subdomains unless `--exact`; `*.example.com` covers only
+  the subdomains) and lets the guest connect only to the addresses its own resolver
+  returned for them, for as long as each answer lives. Every other connection is
+  refused and logged like any other blocked connection, and connections open when the
+  list starts are closed if it refuses them. Nothing in the VM can change the list.
+- **Claude can narrow it, only you can widen it.** Starting a list (with no list in
+  force) and `net remove` work from anywhere, Claude included, because they only take
+  reach away. Adding names or time to a list in force, and `net clear`, run only at a
+  terminal (`metacomputer net` refuses them otherwise, with the command to run). That
+  keeps a page that talks Claude into it from opening the network mid-task; it doesn't
+  stop a program running as you, which could edit the files itself.
+- **It ends on time.** The length is fixed when the list starts (1 minute to 24 hours,
+  2 hours by default), and a small timer on this Mac lifts it then (or the next start,
+  if the Mac was asleep). Events `security.net_allowlist_started`, `net_allowlist_changed`
+  and `net_allowlist_lifted` carry counts and minutes, never the names.
+- **It fails closed.** The rules file the gateway reads (`RUN_DIR/netgw-rules.json`:
+  config/netgw-rules.json plus the list) is checked with the gateway's own
+  `-check-rules` before it replaces the one in force; a list file that can't be read
+  stops `metacomputer start` instead of starting with the internet open. After a change
+  to a running VM, `net` checks from inside the VM that a public address not on the list
+  is refused (`--no-check` skips it). A list goes only on top of the stock kind of
+  config/netgw-rules.json (refusals, everything else accepted); one that opens address
+  ranges or names of its own is refused.
+
+**Where it ends:** the list is about where connections go, not what they carry. An
+allowed site that takes uploads or posts (a code host, a form) can still receive
+anything, so list only what the task needs. Sites on a shared address (a CDN serves
+many sites from one address) are reachable by that address while an allowed name
+points there, whatever name a connection then asks for. The SSH and live-view
+forwards and the vault's API proxy don't go out through the gateway, so they keep
+working. A VM whose gateway was started by an earlier version keeps reading the
+checkout's rules: `metacomputer stop` and `start` once.
+
 ## The hub and its guards (`MCP_HUB`, `COORD_GUARD`)
 
 One process per VM on your Mac, the hub (`lib/mcp_hub.py`), holds the single
