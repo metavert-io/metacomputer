@@ -75,6 +75,11 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     let deadline = Date().addingTimeInterval(timeout)
     var buf = [UInt8](repeating: 0, count: 1 << 16)
     while outOpen || errOpen {
+        if Thread.isMainThread, let hook = waitHook {
+            waitHook = nil              // never nested
+            hook()
+            waitHook = hook
+        }
         if receivedSignal != 0 { res.interrupted = true; break }
         if requesterLeft() { res.cancelled = true; break }
         if Date() > deadline { res.timedOut = true; break }
@@ -281,9 +286,10 @@ final class GuestRunner {
         // named (this process's own copy, else none: a VM could spell a value in a host name); the count of characters
         // as this process counts the value (a fill that worked); mode and field the request's; the route one of two words.
         if let reason = out["reason"] as? String { out["reason"] = fillReason(reason) }
-        let allowed = request["origins"] as? [String] ?? []
+        // An opened link reports where it landed: kept only as one of the sites the request named for that.
+        let allowed = (request["final_origins"] as? [String]) ?? (request["origins"] as? [String] ?? [])
         out["origin"] = (out["origin"] as? String).flatMap { o in allowed.first { $0 == o } }
-        out["chars"] = (ok && valueString != nil) ? valueString!.utf16.count : nil
+        out["chars"] = (ok && valueString != nil && request["mode"] as? String != "open") ? valueString!.utf16.count : nil
         out["mode"] = request["mode"] as? String
         out["field"] = request["field"] as? String
         out["profile"] = nil
@@ -291,12 +297,75 @@ final class GuestRunner {
         out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
         return out
     }
+
+    /// A relay's source (Codes.swift): the text of one element of the tab on `origins`, or the links in it, as the fill
+    /// account reads them in the browser's isolated world. What comes back is held to a fixed form and size, kept in this
+    /// process's memory only for the code check, and never printed, logged or recorded.
+    func read(_ t: GuestTarget, request: [String: Any], timeout: TimeInterval) throws -> GuestRead {
+        guard let user = t.binding.fill_user, let key = t.binding.fill_key_path else {
+            return GuestRead(ok: false, origin: nil, text: "", links: [],
+                             reason: "VM \(t.vm) was bound by an earlier version without the fill account: run `metacomputer secrets bind` again")
+        }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: request) else { throw VaultError("cannot encode the request", code: Exit.error) }
+        let r = try ssh(t, user: user, key: key, remote: secretFillCommand, input: Array(encoded) + [0x0A], timeout: timeout, maxStdout: 256 << 10)
+        if r.cancelled { return GuestRead(ok: false, origin: nil, text: "", links: [], reason: requesterLeftReason) }
+        if r.timedOut || r.interrupted { return GuestRead(ok: false, origin: nil, text: "", links: [], reason: "the VM didn't answer in time") }
+        if r.tooLarge { return GuestRead(ok: false, origin: nil, text: "", links: [], reason: "the VM's answer was too large") }
+        var raw = r.stdout
+        defer { wipe(&raw) }
+        let last = raw.split(separator: 0x0A).last.map(Array.init) ?? []
+        guard let o = parseJSONObject(last), let okN = o["ok"] as? NSNumber, CFGetTypeID(okN) == CFBooleanGetTypeID() else {
+            return GuestRead(ok: false, origin: nil, text: "", links: [], reason: "the VM side failed (its own output isn't passed on)")
+        }
+        guard okN.boolValue else {
+            return GuestRead(ok: false, origin: nil, text: "", links: [], reason: (o["reason"] as? String).map(fillReason) ?? "the VM refused to read the page")
+        }
+        let allowed = request["origins"] as? [String] ?? []
+        let origin = (o["origin"] as? String).flatMap { v in allowed.first { $0 == v } }
+        var text = ""
+        if let tx = o["text"] { guard let s = tx as? String else { return GuestRead(ok: false, origin: nil, text: "", links: [], reason: "the VM side answered in an unexpected form") }; text = String(s.prefix(relayTextMax)) }
+        var links: [String] = []
+        if let ls = o["links"] {
+            guard let arr = ls as? [Any], arr.count <= 20, arr.allSatisfy({ ($0 as? String).map { $0.count <= codeLinkMax } ?? false }) else {
+                return GuestRead(ok: false, origin: nil, text: "", links: [], reason: "the VM side answered in an unexpected form")
+            }
+            links = arr.compactMap { $0 as? String }
+        }
+        return GuestRead(ok: origin != nil, origin: origin, text: text, links: links, reason: origin == nil ? "the VM reported a page outside --from's site" : nil)
+    }
+}
+
+/// What a relay read in the VM (only ever in this process's memory).
+struct GuestRead {
+    var ok: Bool
+    var origin: String?
+    var text: String
+    var links: [String]
+    var reason: String?
 }
 
 /// Why a fill or a check failed, in this process's words: the reasons secret-fill gives, matched by what they say,
 /// never copied, since the VM has every value it was ever given and could put one in any form into its answer.
 func fillReason(_ guest: String) -> String {
     let known: [(String, String)] = [
+        ("couldn't be watched to the end", "the link's page couldn't be watched to the end; its loading was stopped and anything paused was refused, and nothing more was done (check the page)"),
+        ("the link tried to take the tab to another site", "the link tried to take the tab to another site (not shown); that was stopped before it was visited, and nothing more was done (check the page)"),
+        ("the link led to another site", "the link led to another site (not shown); nothing more was done (check the page)"),
+        ("the tab didn't settle on the link's page", "the tab didn't settle on the link's page in time; check the page"),
+        ("the selector matches no element", "the selector matches no element on the page"),
+        ("the element is in a frame", "the element is inside a frame; open what it shows in its own tab"),
+        ("the link isn't one this", "the VM refused the link"),
+        ("navigation failed", "the tab didn't open the link"),
+        ("the page's address and the address bar disagree", "the address bar and the page's own address disagree (an address typed but not opened?); nothing was typed"),
+        ("the address bar", "the browser's address bar doesn't name the page's site; nothing was typed"),
+        ("no browser window", "no human-mode browser window is active (click into the field in Firefox, or a Chrome started normally)"),
+        ("the window isn't a browser", "the active window isn't a browser (Firefox, or a Chrome started normally)"),
+        ("no accessibility", "the browser's accessibility tree isn't reachable"),
+        ("the focused element is in the browser's own", "the focus is in the browser's own controls (its address bar), not the page; click into the field"),
+        ("the field is inside a frame", "the focused field is inside a frame, whose site the address bar doesn't show; human mode refuses it"),
+        ("human-mode fills need a standard driver", "this VM takes only bounded driver sessions, and human-mode fills type through the driver in standard mode"),
+        ("human-mode typing failed", "the driver didn't type it (its own words aren't passed on)"),
+        ("the human-mode site", "the page isn't on the expected site; nothing was typed"),
         ("the page changed during the fill", "the page changed during the fill; the value may have gone elsewhere (check the page)"),
         ("the focus moved while filling", "the focus moved while filling; the text may have gone to another field (check the page)"),
         ("the field holds", "the field doesn't hold as many characters as were typed (a length limit, or the page changed it)"),
@@ -338,7 +407,7 @@ func fillResultSchema(_ raw: [String: Any]) -> [String: Any]? {
     let strings: Set<String> = ["mode", "field", "origin", "route", "reason", "profile"]
     let ints: Set<String> = ["chars"]
     // The fields that name one of a few things take only those: anything else is dropped, here, before it's kept anywhere.
-    let enums: [String: Set<String>] = ["route": ["element", "keyboard"], "mode": ["fill", "check"],
+    let enums: [String: Set<String>] = ["route": ["element", "keyboard"], "mode": ["fill", "check", "open"],
                                         "field": ["password", "username", "otp", "text"]]
     var out: [String: Any] = [:]
     for (k, v) in raw {

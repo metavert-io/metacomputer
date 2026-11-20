@@ -50,11 +50,28 @@ You, from any terminal (they need Touch ID / your login password, or the passphr
   rule add (--secret NAME | --site https://site | --session NAME) --project DIR --for 8h [--passphrase]
                                          an unattended rule: that use by Claude Code sessions in DIR doesn't ask,
                                          until it expires (at most 30d); never for an identity provider
+  rule add code --site https://site --from stdin [--link-host H ...] [--project DIR] [--expires 7d] [--passphrase]
+  rule add relay --from-host H --to https://site [--link-host H ...] [--project DIR] [--expires 7d] [--passphrase]
+                                         one-time codes piped in with no terminal, or relayed from pages on H, go
+                                         into that site without asking (at most 30d); never an identity provider
+  give ID --vm VM                        the value for a waiting one-time code request (of that VM), from stdin only (typed
+                                         hidden at a terminal, or one line from a pipe); a terminal follows the
+                                         usual approval, a pipe needs a `rule add code`
 
 From anywhere (Claude uses these; they work only while the vault is unlocked):
   list [--json]                          names, kinds, sites, approval, age, use counts (never values)
   fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin URL] [--request-id ID]
                                          type a value into the focused field of the VM's page-mode Chrome
+  fill NAME --vm VM --field password|username|otp --human [--window-id N]
+                                         ...or of a human-mode browser (Firefox, a Chrome started normally): its site
+                                         from the address bar, typed as real keys through the driver
+  ask --vm VM --site https://site --kind code|link --why TEXT [--into TAB/FIELD | --human] [--ttl 10m] [--wait 5m] [--json]
+                                         a one-time code or sign-in link request for the person; prints its id at once
+  code --vm VM --site https://site (--into TAB/FIELD | --human) [--kind link] [--json] < value
+                                         ask, give (from stdin) and fill in one step; never prints the value
+  relay --vm VM --from TAB/ELEMENT --to TAB/FIELD --site https://site [--kind code|link] [--json]
+                                         read a code (or link) from a page element in the VM and fill (open) it
+  fill --request ID --vm VM [--selector CSS | --human]   a given, approved request (of that VM) into the tab on its site
   login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--origin URL] [--request-id ID]
                                          sign in: username and password into those fields, under one approval
   session save NAME --vm VM --profile P [--replace]   seal a Chrome profile from the VM (always asks)
@@ -77,7 +94,8 @@ Any time:
   status [--json]    audit [--tail N] [--json] | --head | --verify    selftest    version [--json]
 
 fill, login, session and token: exit 0 ok, 2 refused, 3 locked, 4 error, 5 no confirmation (the request was sent and
-no answer came: run `settle` before relying on it having stopped). Ctrl-C, SIGTERM or SIGHUP withdraws one: the unlock
+no answer came: run `settle` before relying on it having stopped). ask, give, code, relay and fill --request also: 6 the
+request expired (or was used already), 7 it needs your approval (`approve ID`; nothing waits, it expires on its own). Ctrl-C, SIGTERM or SIGHUP withdraws one: the unlock
 process stops it (before its next step; a step in progress is ended) and confirms. A program outside Claude Code that
 passes a request on for a Claude Code process adds --on-behalf-pid PID (recorded, unverified).
 """
@@ -114,6 +132,10 @@ func runMain(_ argv: [String]) -> Int32 {
         case "list": return try cmdList(paths, rest)
         case "fill": return try cmdFill(paths, rest)
         case "login": return try cmdLogin(paths, rest)
+        case "ask": return try cmdAsk(paths, rest)
+        case "give": return try cmdGive(paths, rest)
+        case "code": return try cmdCode(paths, rest)
+        case "relay": return try cmdRelay(paths, rest)
         case "requests": return try cmdRequests(paths, rest)
         case "settle": return try cmdSettle(paths, rest)
         case "approve": return try cmdApprove(paths, rest)
@@ -675,9 +697,11 @@ func lockedHint(_ paths: Paths) -> String { vaultExists(paths) ? lockedMessage :
 
 func exitFor(_ res: [String: Any]) -> Int32 {
     switch res["status"] as? String {
-    case "ok": return Exit.ok
+    case "ok", "filled", "given": return Exit.ok
     case "denied": return Exit.denied
     case "locked": return Exit.locked
+    case "needs_approval": return Exit.needsApproval
+    case "expired": return Exit.expired
     default: return Exit.error
     }
 }
@@ -726,14 +750,29 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
+    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid", "request",
+                                         "window-id"], flags: ["human", "json"])
+    if a.last("request") != nil { return try cmdFillRequest(paths, a) }
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
-        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]")
+        throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]"
+                         + " | fill NAME --vm VM --field password|username|otp --human [--window-id N] | fill --request ID [--selector CSS | --human]")
     }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
     guard ["password", "username", "otp", "text"].contains(field) else { throw usageError("--field password, username, otp or text") }
     var req: [String: Any] = ["op": "fill", "name": name, "vm": vm, "field": field]
+    if a.has("human") {
+        guard field != "text", a.last("profile") == nil, a.last("selector") == nil, a.last("browser-pid") == nil else {
+            throw usageError("--human fills the focused field of a human-mode browser (Firefox, or a Chrome started normally): --field password|username|otp, and no --profile, --selector or --browser-pid")
+        }
+        req["human"] = true
+        if let w = a.last("window-id") {
+            guard let n = Int(w), n > 0 else { throw usageError("--window-id: the browser window's id (list_windows)") }
+            req["window_id"] = n
+        }
+    } else if a.last("window-id") != nil {
+        throw usageError("--window-id goes with --human")
+    }
     if let p = a.last("profile") {
         guard validName(p) else { throw usageError("--profile: a driver profile name") }
         req["profile"] = p
@@ -752,7 +791,7 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     do { res = try request(paths, req, timeout: 300, cancellable: true) } catch ClientError.locked {
         return lockedUse(paths, "fill", ["name": name, "vm": vm, "field": field])
     }
-    printResult(res)
+    printResult(res, ["ok", "name", "vm", "field", "profile", "origin", "chars", "bytes", "route", "mode", "request_id", "reason"])
     return exitFor(res)
 }
 

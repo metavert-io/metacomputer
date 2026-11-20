@@ -201,16 +201,23 @@ class FakeChrome:
             if op != 0x1:
                 continue
             msg = json.loads(payload)
+            if page is not None:
+                page["_mid"] = msg["id"]
             try:
-                reply = {"id": msg["id"], "result": self.answer(page, msg["method"], msg.get("params") or {})}
+                result = self.answer(page, msg["method"], msg.get("params") or {})
+                reply = None if result is DEFER else {"id": msg["id"], "result": result}
             except LookupError as e:
                 reply = {"id": msg["id"], "error": {"code": -32000, "message": str(e)}}
             n += 1
             # An event and a ping before each answer; every other answer in two fragments.
             c.sendall(server_frame(0x1, json.dumps({"method": "Runtime.consoleAPICalled", "params": {}}).encode()))
             c.sendall(server_frame(0x9, b"hi"))
-            data = json.dumps(reply).encode()
-            c.sendall(server_frame(0x1, data[:7], fin=False) + server_frame(0x0, data[7:]) if n % 2 else server_frame(0x1, data))
+            if reply is not None:
+                data = json.dumps(reply).encode()
+                c.sendall(server_frame(0x1, data[:7], fin=False) + server_frame(0x0, data[7:]) if n % 2 else server_frame(0x1, data))
+            # What the page queued meanwhile: paused requests (Fetch) and an answer it held back (Page.navigate).
+            while page is not None and page.get("outbox"):
+                c.sendall(server_frame(0x1, json.dumps(page["outbox"].pop(0)).encode()))
 
     def tree(self, page, fid):
         f = page["frames"][fid]
@@ -237,8 +244,75 @@ class FakeChrome:
         frames = page["frames"]
         ctx_of = {fid: 100 + i for i, fid in enumerate(frames)}
         fid_of = {v: k for k, v in ctx_of.items()}
+        if method in ("Fetch.enable", "Fetch.disable"):
+            page["fetch"] = method == "Fetch.enable"
+            if method == "Fetch.disable" and page.get("nav"):
+                # As Chromium's interceptor does when it's torn down: what's still paused goes on.
+                nav, page["nav"] = page["nav"], None
+                page.setdefault("visited", []).append(nav["hops"][nav["i"]])
+                self.commit(page, nav["hops"][nav["i"]])
+            return {}
+        if method == "Page.stopLoading":
+            page["stopped_loading"] = True
+            if page.get("nav"):
+                page["nav"] = None           # the paused navigation is cancelled
+            return {}
+        if method == "Page.navigate":
+            # An opened link (secret-fill's open mode). The hops: the link's site, then each server redirect (hops=[...],
+            # or redirect_to). Without Fetch the tab simply ends on the last hop. With Fetch each hop's request is paused
+            # (Fetch.requestPaused) until it's continued or failed, and the answer to Page.navigate waits for that.
+            # no_commit: it never commits.
+            page["navigated"] = params.get("url")
+            hops = [sf.parse_origin(params["url"])] + list(page.get("hops") or ([page["redirect_to"]] if page.get("redirect_to") else []))
+            page["visited"] = []
+            if page.get("no_commit"):
+                return {"frameId": "F0", "loaderId": "L-0"}
+            if not page.get("fetch"):
+                self.commit(page, hops[-1])
+                page["visited"] += hops
+                return {"frameId": "F0", "loaderId": "L-nav"}
+            page["nav"] = {"id": page["_mid"], "hops": hops, "i": 0}
+            self.pause(page)
+            return DEFER
+        if method in ("Fetch.continueRequest", "Fetch.failRequest"):
+            nav = page.get("nav")
+            if not nav:
+                return {}
+            hop = nav["hops"][nav["i"]]
+            if method == "Fetch.failRequest":
+                page.setdefault("blocked", []).append(hop)
+                if nav["id"] is not None:
+                    page.setdefault("outbox", []).append({"id": nav["id"], "result": {"frameId": "F0", "loaderId": "L-nav",
+                                                                                      "errorText": "net::ERR_BLOCKED_BY_CLIENT"}})
+                page["nav"] = None
+                return {}
+            page["visited"].append(hop)
+            nav["i"] += 1
+            if nav["i"] < len(nav["hops"]):
+                self.pause(page)
+            else:
+                self.commit(page, hop)
+                if nav["id"] is not None:
+                    page.setdefault("outbox", []).append({"id": nav["id"], "result": {"frameId": "F0", "loaderId": "L-nav"}})
+                page["nav"] = None
+            return {}
         if method == "Page.getFrameTree":
             page["tree_calls"] = page.get("tree_calls", 0) + 1
+            if "after_nav" in page and page.get("tree_error_at") and page["after_nav"] + 1 == page["tree_error_at"] and page.get("fetch"):
+                # A protocol error while it watches, with a move to another site paused right behind the error's answer.
+                page["after_nav"] += 1
+                page["nav"] = {"id": None, "hops": [page["tree_error_to"]], "i": 0}
+                self.pause(page)
+                raise LookupError("Internal error while reading the frame tree")
+            if "after_nav" in page:
+                page["after_nav"] += 1
+                # The page's own script moves it on, a few tree reads (a quarter second each) after it loaded.
+                if page.get("redirect_later") and page["after_nav"] == page.get("later_at", 3):
+                    if page.get("fetch"):
+                        page["nav"] = {"id": None, "hops": [page["redirect_later"]], "i": 0}
+                        self.pause(page)
+                    else:
+                        self.commit(page, page["redirect_later"])
             if page.get("hang"):
                 time.sleep(60)
             if page.get("reload_after") and page["tree_calls"] > page["reload_after"]:
@@ -315,10 +389,23 @@ class FakeChrome:
             return {}
         return {}
 
+    def commit(self, page, origin):
+        f0 = page["frames"]["F0"]
+        f0.update({"origin": origin, "url": origin + "/", "loader": "L-nav" if f0.get("loader", "L-F0") != "L-nav" else "L-nav2"})
+        f0.pop("self_origin", None)
+        page["after_nav"] = 0
+
+    def pause(self, page):
+        nav = page["nav"]
+        page.setdefault("outbox", []).append({"method": "Fetch.requestPaused", "params": {
+            "requestId": "R%d-%d" % (len(page.get("visited") or []), nav["i"]), "frameId": "F0", "resourceType": "Document",
+            "request": {"url": nav["hops"][nav["i"]] + "/next"}}})
+
     def close(self):
         self.sock.close()
 
 
+DEFER = object()
 SITE = "https://login.example.com"
 EVIL = "https://evil.example"
 PW = {"tag": "input", "type": "password"}
@@ -418,6 +505,37 @@ def fake_suite(td):
              lambda r, c: r.get("denied") and "not a password field" in r["reason"] and not c.inserted)
     scenario("username into an email field", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": {"tag": "input", "type": "email"}}}})],
              {"field": "username", "value": "dummy-user-qx7"}, lambda r, c: r.get("ok") and c.inserted == [("A", "dummy-user-qx7")])
+    # Open mode (a one-time sign-in link): every navigation of the tab's page to a site the vault didn't name is stopped
+    # before it's sent (Fetch interception), for the whole window; the tab must end on a named site.
+    link = SITE + "/verify?t=" + VALUE
+    opn = {"mode": "open", "field": "text", "value": link, "link_origin": SITE, "final_origins": [SITE]}
+    lw = ("--land-wait", "3")
+    scenario("open: a link that lands on the site is opened, and says where it landed", [page()], opn,
+             lambda r, c: r.get("ok") is True and r.get("mode") == "open" and r.get("origin") == SITE and c.pages[0].get("navigated") == link,
+             extra=lw)
+    scenario("open: a server redirect to another site is stopped before the tab visits it, without naming it", [page(redirect_to=EVIL)], opn,
+             lambda r, c: r.get("ok") is False and "stopped before it was visited" in r.get("reason", "") and "evil" not in json.dumps(r)
+             and EVIL not in c.pages[0].get("visited", []) and c.pages[0].get("blocked") == [EVIL], extra=lw)
+    scenario("open: a redirect through another site and back to the site is stopped at that hop (it never passes)",
+             [page(hops=[EVIL, SITE])], opn,
+             lambda r, c: r.get("ok") is False and "stopped" in r.get("reason", "") and EVIL not in c.pages[0].get("visited", []),
+             extra=lw)
+    scenario("open: a page that moves to another site soon after it loads is stopped too", [page(redirect_later=EVIL)], opn,
+             lambda r, c: r.get("ok") is False and "stopped" in r.get("reason", "") and "evil" not in json.dumps(r), extra=lw)
+    scenario("open: a page that moves two seconds after it loads (long after it looked settled) is stopped too",
+             [page(redirect_later=EVIL, later_at=9)], opn,
+             lambda r, c: r.get("ok") is False and "stopped" in r.get("reason", "") and "evil" not in json.dumps(r), extra=lw)
+    scenario("open: an error while it watches, with a move to another site paused behind it: the paused request is "
+             "refused and loading stopped before the interception ends (the tab never visits it), and it's a failure",
+             [page(tree_error_at=2, tree_error_to=EVIL)], opn,
+             lambda r, c: r.get("ok") is False and "couldn't be watched to the end" in r.get("reason", "")
+             and EVIL not in c.pages[0].get("visited", []) and c.pages[0].get("stopped_loading") is True and "evil" not in json.dumps(r),
+             extra=lw)
+    scenario("open: a navigation that never commits isn't reported as opened", [page(no_commit=True)], opn,
+             lambda r, c: r.get("ok") is False and "didn't settle" in r.get("reason", ""), extra=lw)
+    scenario("open: a link whose own site isn't the one the vault named is refused before anything is opened", [page()],
+             dict(opn, value=EVIL + "/x?t=" + VALUE),
+             lambda r, c: r.get("denied") and "the link isn't one" in r.get("reason", "") and not c.pages[0].get("navigated"))
     two = {"F0": {"origin": SITE, "url": SITE, "active": {"iframe": "F1"}},
            "F1": {"origin": EVIL, "url": EVIL + "/f", "parent": "F0", "active": {"element": PW}}}
     scenario("field in a cross-origin frame refused", [page(frames=two)], {},

@@ -122,6 +122,30 @@ with clean_env():
 PROXY, CMDS, IMPORT, APPROVALS, CRYPTO, SERVER = (f"vault/{f}.swift" for f in
                                                   ("Proxy", "Commands", "Import", "Approvals", "Crypto", "Server"))
 FILL = "provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill"
+CODES, HUMAN = "vault/Codes.swift", "vault/Human.swift"
+
+
+def human_script():
+    return re.search(r'let humanFillScript = #"""\n(.*?)\n"""#', raw(HUMAN), re.S).group(1)
+
+
+def code_dialog_args_after_script():
+    """The dialog's words go after its fixed script lines, as arguments; none is spliced into a line."""
+    src = raw(CODES)
+    lines = re.search(r"let codeDialogScript: \[String\] = \[\n(.*?)\n\]", src, re.S).group(1)
+    start = src[src.index("static func start(kind: String"):]
+    return (lines.strip().startswith('"on run argv"') and "\\(" not in lines
+            and start.index('for line in codeDialogScript { args += ["-e", line] }') < start.index("args += [kind, host, clean(why"))
+
+
+def code_requests_only_from_the_socket():
+    """Requests are made in one place, newCode, called only by the three ops the socket dispatches."""
+    src = raw(CODES)
+    callers = re.findall(r"func (op\w+)\([^)]*\)[^{]*\{(?:(?!\n    func ).)*?newCode\(", src, re.S)
+    disp = raw(SERVER)
+    return (sorted(callers) == ["opCodeAsk", "opCodePut", "opCodeRelay"] and src.count("newCode(") == 4
+            and all(f'case "{op}": res = {fn}(req, who)' in disp for op, fn in
+                    (("code_ask", "opCodeAsk"), ("code_put", "opCodePut"), ("code_relay", "opCodeRelay"))))
 
 
 def set_default():
@@ -1112,7 +1136,7 @@ CLAIMS = [
      in raw("lib/mcp_relay.py") and "text = STALLED.format(int(WRITE_TIMEOUT_S))" in raw("lib/mcp_relay.py")),
     ("SECURITY.md", r"A fill or session load that ends without an answer from the vault's unlock process \(`secrets` exit "
                     r"5, when the vault withdrew the request unconfirmed, or a crash or a signal\)",
-     lambda m: re.search(r'case "\$rc" in\n\s+0\|1\|2\|3\|4\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle ',
+     lambda m: re.search(r'case "\$rc" in\n\s+0\|1\|2\|3\|4\|6\|7\|64\) rm -f "\$inflight" ;;\n\s+\*\) "\$VAULT_BIN" settle ',
                          raw("bin/metacomputer")) is not None),
     ("SECURITY.md", r"`metacomputer claude` refuses the steps that act \(`start`, `send`, `keys`, `show`, `stop`\), with "
                     r"or without `--override` \(`start` before any token is asked for",
@@ -1305,6 +1329,124 @@ CLAIMS = [
     # An honest limit, kept honest: the typed name is a terminal read, not a person check.
     ("SECURITY.md", r"The typed name guards against a slip, not against a program\.\*\* It isn't proof that a person is there",
      lambda m: '[ -t 0 ] || die "deleting a VM needs its name typed' in vm_delete_src()),
+    # One-time codes and sign-in links (vault/Codes.swift), human-mode fills (vault/Human.swift)
+    ("SECURITY.md", r"when it expires \(10 minutes by\s+default, `--ttl`, at most 15\)",
+     lambda m: swift_num(CODES, r"let codeDefaultTTL = ([^\n]+)") == 600 and swift_num(CODES, r"let codeMaxTTL = ([^\n]+)") == 900),
+    ("SECURITY.md", r"from a pipe, one line of at most (\d+) bytes \(a longer one is\s+refused, not cut\)",
+     lambda m: f"if line.count > {m[1]} {{ wipe(&line); throw VaultError(" in raw(CODES)),
+    ("SECURITY.md", r"Never from the command line or the environment: a value on the command line is a usage\s+error",
+     lambda m: "guard a.positional.count == 1, validRequestID(a.positional[0]), a.last(\"vm\").map(validName) ?? true else {" in raw(CODES)
+     and "`code` takes the value from stdin only, never from the command line" in raw(CODES)
+     and "let n = read(0, &c, 1)" in raw(CODES)),
+    ("SECURITY.md", r"With `INTERACTIVE_PROMPTS=on` \(off by default; it's read when you unlock\)",
+     lambda m: D["INTERACTIVE_PROMPTS"] == "off" and 'environment["MCOMP_INTERACTIVE_PROMPTS"] == "on"' in raw(SERVER)
+     and 'export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"the site's host, `why`, the id and the time left are passed to it as arguments \(`on run argv`\)",
+     lambda m: code_dialog_args_after_script()),
+    ("SECURITY.md", r"A page in the VM can't make one: requests come only through the vault's socket",
+     lambda m: code_requests_only_from_the_socket()),
+    ("SECURITY.md", r"At most\s+(\d+) characters of its text \(or (\d+) of its links\) come back",
+     lambda m: int(m[1]) == swift_num(CODES, r"let relayTextMax = (\d+)") == int(re.search(r"READ_MAX = (\d+)", raw(FILL))[1])
+     and int(m[2]) == int(re.search(r"LINKS_MAX = (\d+)", raw(FILL))[1]) and "arr.count <= 20" in raw("vault/Guest.swift")),
+    ("SECURITY.md", r"\(4 to 10 long with at least one digit;",
+     lambda m: "var minLen = 4" in raw(CODES) and "var maxLen = 10" in raw(CODES)
+     and "shape.digitsOnly || s.unicodeScalars.contains { $0 >= \"0\" && $0 <= \"9\" }" in raw(CODES)),
+    ("SECURITY.md", r"`--expires` is (\d+) days\s+when left out, at most (\d+) days",
+     lambda m: int(m[1]) * 86400 == swift_num(APPROVALS, r"let defaultCodeRuleSeconds = ([^\n]+)")
+     and int(m[2]) * 86400 == swift_num(APPROVALS, r"let maxRuleSeconds = ([^\n]+)")),
+    ("SECURITY.md", r"\*\*Without a rule, the command exits at once\*\* with exit (\d+)",
+     lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
+    ("SECURITY.md", r"\| (\d+) \| `expired` \| the request expired, or was used already \|",
+     lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")),
+    ("SECURITY.md", r"no rule can name one as its\s+site or as a link's host",
+     lambda m: "is an identity provider's sign-in page, which always asks: no rule can cover it" in raw(APPROVALS)
+     and "which always asks: no rule can send links there" in raw(APPROVALS)
+     and "if !cr.identityProvider && !interactive {" in raw(CODES)),
+    ("SECURITY.md", r"\*\*A link is opened only if it's https and its host is the site's\*\* \(its origin equal to the site's\)",
+     lambda m: "if link.origin == site { return true }" in raw(CODES)
+     and "parse_origin(value) != parse_origin(req.get(\"link_origin\") or \"\")" in raw(FILL)),
+    ("SECURITY.md", r"\*\*A code is filled only into a tab whose origin is the request's site\*\*",
+     lambda m: ': ["field": "otp", "origins": [cr.site]]' in raw(CODES) and 'rq["mode"] = "fill"' in raw(CODES)
+     and "a code goes only into a tab on its own site" in raw(CODES)),
+    ("SECURITY.md", r"`CODES_VIA=vault` \(the default\) is guidance for Claude", lambda m: D["CODES_VIA"] == "vault"),
+    ("SECURITY.md", r"must agree with the address the browser\s+reports for the page's document \(AT-SPI's `DocURL`\)",
+     lambda m: 'GetAttributeValue("DocURL"' in human_script() and "the page's address and the address bar disagree" in human_script()),
+    ("SECURITY.md", r"a password text for `password`, an\s+entry for `username` and `otp` \(or a spin button for a numeric code\)",
+     lambda m: 'FIELD_ROLES = {"password": {"password text"}, "username": {"entry"}, "otp": {"entry", "spin button"}}' in human_script()),
+    ("SECURITY.md", r"\*\*The value is typed as real foreground keystrokes through Cua Driver\*\*",
+     lambda m: 'target = {"pid": pid, "window_id": window_id, "delivery_mode": "foreground"}' in human_script()
+     and '"name": "type_text"' in human_script()),
+    ("SECURITY.md", r"a VM whose driver policy accepts only bounded sessions refuses human-mode fills",
+     lambda m: 'if any(line.strip() == "bounded" for line in f):' in human_script()),
+    ("SECURITY.md", r"not in a frame, whose site the bar doesn't\s+show",
+     lambda m: "the field is inside a frame, whose site the address bar doesn't show" in human_script()),
+    ("SECURITY.md", r"a bar with no scheme counts only when the page's own address is https",
+     lambda m: 'if not doc.startswith("https://"):' in human_script()),
+    ("SECURITY.md", r"a link to any other host is refused in fixed words, its host never\s+named or asked about",
+     lambda m: "guard onSite.count == 1 else {" in raw(CODES) and "(other hosts aren't shown); nothing was opened" in raw(CODES)
+     and "pick = parsed[0]" not in raw(CODES)),
+    ("SECURITY.md", r"name a link's\s+host only when it's the site's or one a rule lists",
+     lambda m: 'd["link_host"] = h' not in raw(CODES).replace('if let h = reportedLinkHost { d["link_host"] = h }', "")
+     and raw(CODES).count("cr.linkHost {") == 0 and "return linkHostAllowed((o, h), site: site, extra: listedHosts) ? h : nil" in raw(CODES)),
+    ("SECURITY.md", r"`--link-host H` covers `https://H` only: not another port, not http",
+     lambda m: 'return link.origin.hasPrefix("https://") && link.origin == "https://" + link.host && extra.contains(link.host)' in raw(CODES)
+     and "covering.first { linkHostAllowed((o, h), site: cr.site, extra: $0.link_hosts ?? []) }" in raw(CODES)),
+    ("SECURITY.md", r"For (\d+) seconds after the fill account opens a link, every request\s+for the tab's own page .{0,200}?is paused by the\s+browser before it's sent",
+     lambda m: int(m[1]) == int(re.search(r"LAND_WAIT = (\d+)", raw(FILL))[1])
+     and '"resourceType": "Document", "requestStage": "Request"' in raw(FILL)
+     and 'dt.send("Fetch.failRequest", {"requestId": p.get("requestId"), "errorReason": "BlockedByClient"})' in raw(FILL)
+     and 'end, last = time.monotonic() + opts["land_wait"], None' in raw(FILL)
+     and 'rq["final_origins"] = lo == cr.site || lo.isEmpty ? [cr.site] : [cr.site, lo]' in raw(CODES)),
+    ("SECURITY.md", r"a site outside the list that shows there anyway \(a navigation the interception didn't\s+see\) refuses afterwards",
+     lambda m: "seen_off.append(True)" in raw(FILL) and "if seen_off or (last and last[1] not in finals):" in raw(FILL)),
+    ("SECURITY.md", r"An answer in the dialog gives\s+the value and, with your approval, approves it, but never fills by itself",
+     lambda m: 'codeGive(cr, value: v, source: "dialog", interactive: true, presentAtMac: true, act: false)' in raw(CODES)
+     and "guard act else {" in raw(CODES)),
+    ("SECURITY.md", r"bin/metacomputer reads `approve`'s id as the\s+vault does .{0,120}?an id the list doesn't show, or a list it can't read, counts as one that may fill",
+     lambda m: 'if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then' in raw("bin/metacomputer")
+     and 'listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1' in raw("bin/metacomputer")
+     and 'case "$a" in --scope|--vm) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"or on a step in the VM for another request\s+\(checked several times a second\), or on a client's request arriving: .{0,200}?An expired\s+request's value is wiped within about a second",
+     lambda m: "if Thread.isMainThread, let hook = waitHook {" in raw("vault/Guest.swift")
+     and "waitHook = { [unowned self] in self.codeExpirySweep(duringStep: true) }" in raw(SERVER)
+     and "poll(&fds, nfds_t(fds.count), 250)" in raw("vault/Guest.swift")),
+    ("SECURITY.md", r"\*\*Once the value\s+is sent, the request is used\*\*, whatever the VM answers",
+     lambda m: 'chk["mode"] = "check"' in raw(CODES) and "// The value went to the VM: the request is used, whatever came back." in raw(CODES)),
+    ("SECURITY.md", r"an approval that came from a rule must still be covered by a live rule",
+     lambda m: "if !approvalStillHolds(cr) {" in raw(CODES) and "guard cr.approval.hasPrefix(\"rule:\") else { return cr.approved }" in raw(CODES)),
+    ("SECURITY.md", r"No step in the VM\s+may take longer than the request has left",
+     lambda m: "let left = min(Double(remaining()), cr.expires.timeIntervalSinceNow, 60)" in raw(CODES)),
+    ("SECURITY.md", r"requests expire on\s+time even while the unlock process waits on a question or a dialog, or on a step in the VM",
+     lambda m: "codeExpirySweep()               // one-time code requests expire on time, even while this question waits" in raw(SERVER)),
+    ("SECURITY.md", r"and stopping it \(Ctrl-C, a signal, its wrapper killed\) withdraws it",
+     lambda m: '|| (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }' in raw(SERVER)
+     and 'secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"' in raw("bin/metacomputer")
+     and "request(paths, req, timeout: 200, cancellable: fills)" in raw(APPROVALS)),
+    ("SECURITY.md", r"The vault refuses a request that's another VM's, or a command that names none",
+     lambda m: all(raw(CODES).count(x) == 1 for x in ("        if let no = vmMismatch(cr, req) { return no }\n        var v = Array(",
+                                                      "        if cr.final { return codeResult(cr) }\n        if let no = vmMismatch(cr, req) { return no }",
+                                                      "        // Approving it fills it: only for the VM whose handoff the wrapper checked (asked before any dialog shows).\n        if let no = vmMismatch(cr, req) { return no }"))
+     and 'let named = req["vm"] as? String\n        if named == cr.vm { return nil }' in raw(CODES)
+     and '      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"\n      secrets_run_acting "$kind" "$inflight" "$sub" "$@"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"every paused request is\s+refused and loading is stopped \(`Page.stopLoading`\) before the interception is turned off",
+     lambda m: 0 < raw(FILL).find('dt.on_event = fail_all') < raw(FILL).find('dt.send("Page.stopLoading")')
+     < raw(FILL).find("dt.wait_events(0.5)") < raw(FILL).rfind('dt.call("Fetch.disable")')),
+    ("SECURITY.md", r"each request must arrive whole within (\d+)\s+seconds of its connection, however slowly the bytes come, "
+                    r"and expiries are serviced while it's read, every ([\d.]+)\s+seconds whether or not bytes arrive meanwhile",
+     lambda m: int(m[1]) == int(swift_num(SERVER, r"let clientMessageSeconds: TimeInterval = (\d+)"))
+     and float(m[2]) == float(swift(SERVER, r"let readHookEvery: TimeInterval = ([\d.]+)"))
+     and raw(SERVER).count("readMessage(c, within: clientMessageSeconds)") == 2
+     and "let deadline = within.map { now() + $0 }" in raw(SERVER) and "ProcessInfo.processInfo.systemUptime" in raw(SERVER)
+     # the hook's turn comes before the wait for bytes, on its own clock, not only when a wait ends with nothing read
+     and 0 < raw(SERVER).find("if now() - hookRan >= readHookEvery {") < raw(SERVER).find("let r = poll(&pfd, 1, Int32(Swift.max(1, wait * 1000)))")),
+    ("docs/events.md", r"\| `needs_you` \| `code_requested` \| warn \|",
+     lambda m: 'dropEvent(type: "code_requested", severity: "warn"' in raw(CODES)),
+    ("docs/guide.md", r"With `INTERACTIVE_PROMPTS=on` in `config/local.env` \(off by default\)", lambda m: D["INTERACTIVE_PROMPTS"] == "off"),
+    ("CHANGELOG.md", r"`INTERACTIVE_PROMPTS` \(`(\w+)` by default\): allow metacomputer to show dialogs",
+     lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off"),
+    ("CHANGELOG.md", r"New exit codes for these commands: (\d+) expired \(or used already\), (\d+) needs approval",
+     lambda m: int(m[1]) == swift_num("vault/Util.swift", r"static let expired: Int32 = (\d+)")
+     and int(m[2]) == swift_num("vault/Util.swift", r"static let needsApproval: Int32 = (\d+)")),
 ]
 
 
@@ -1499,7 +1641,8 @@ def fills_guarded():
     fill, login and session load reach the vault."""
     b = raw("bin/metacomputer")
     hold = re.search(r"^handoff_hold\(\) \{\n(.*?)^\}", b, re.S | re.M)
-    return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \{ \[ "\$sub" = session \] && '
+    return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \[ "\$sub" = code \] \|\| \[ "\$sub" = relay \] '
+                      r'\|\| \[ "\$sub" = give \] \\\n\s+\|\| \{ \[ "\$sub" = session \] && '
                       r'\[ "\$\{1:-\}" = load \]; \}; then\n\s+secrets_vm_is_this "\$@" \|\| die [^\n]*\n\s+handoff_hold\n',
                       b) is not None and hold is not None
             and 'exec 6>>"$f"' in hold.group(1)

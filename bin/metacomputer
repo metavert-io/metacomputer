@@ -94,9 +94,13 @@
 #           | import-passwords --browser chrome|--csv FILE | import-session --browser chrome --site HOST --name N --to-profile P
 #           | audit-sink add|remove|show|test|list   the vault (in your own terminal; SECURITY.md "Secrets and logins")
 #   secrets list | fill NAME --field password|username|otp|text [--profile P] | status | audit
+#           | fill NAME --field password|username|otp --human [--window-id N]   (a human-mode browser: Firefox)
 #           | login NAME --password-selector CSS [--username-selector CSS] | requests | deny ID | rule list|remove | lock
 #           | session save NAME --profile P | session load NAME
 #           | token NAME [--ttl 15m] | token renew ID|--all [--ttl 15m] | tokens | revoke ID|--all
+#           | ask --site S --kind code|link --why TEXT [--into TAB/FIELD | --human] [--wait 5m] | give ID (stdin only)
+#           | code --site S (--into TAB/FIELD | --human) < value | relay --from TAB/ELEMENT --to TAB/FIELD --site S
+#           | fill --request ID | rule add code|relay ...   one-time codes and sign-in links (SECURITY.md)
 #                                  use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
@@ -1990,6 +1994,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
   [ $# -gt 0 ] && shift
   # This VM's vault and spool (scripts/lib.sh): empty for the main VM, which leaves the vault's own defaults.
   [ -z "${VAULT_DIR:-}" ] || export MCOMP_VAULT_DIR="$VAULT_DIR"
+  # Dialogs that wait for you (`secrets ask`'s): only the unlock reads it, from your own settings, when you unlock.
+  export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
   [ -z "${EVENTS_SPOOL:-}" ] || export MCOMP_EVENTS_SPOOL="$EVENTS_SPOOL"
   # A per-VM vault folder's parent (the vault makes only the last folder, 0700).
   case "${VAULT_DIR:-}" in "$MC_VMS_APP_DIR/"*) ( umask 077; mkdir -p "$MC_VMS_APP_DIR" ) || die "couldn't make $(mc_tilde "$MC_VMS_APP_DIR")" ;; esac
@@ -2017,7 +2023,31 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # The session is for this VM (its approval policy, and where `session load` puts it).
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
       exec "$VAULT_BIN" import-session "$@" ;;
-    fill|login|session|token)
+    ask)
+      # A request for you: nothing acts on the VM until a value comes (give, the dialog), which follows the approvals.
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      exec "$VAULT_BIN" ask "$@" ;;
+    status)
+      "$VAULT_BIN" status "$@"; rc=$?
+      case " $* " in *" --json "*) ;; *)
+        echo "codes:    $([ "${CODES_VIA:-vault}" = claude ] && echo "Claude may read and type one-time codes itself (CODES_VIA=claude; guidance, not enforced)" || echo "through the vault: secrets code, relay or ask (CODES_VIA=vault)"); dialogs: ${INTERACTIVE_PROMPTS:-off} (INTERACTIVE_PROMPTS, read at unlock)" ;;
+      esac
+      return $rc ;;
+    approve)
+      # Approving a waiting one-time code request fills it in the VM once you've allowed it: that waits for an open
+      # handoff like any fill, and runs like one (withdrawn if this is stopped, with its in-flight marker and `settle`).
+      # Only an approval the vault's own list shows as another kind (one that answers a fill already holding this)
+      # goes straight on; anything unclear (an id not listed, a list that can't be read) counts as one that may fill.
+      if ! secrets_plain_approval "$(secrets_approve_id "$@")"; then
+        # The VM whose handoff this checks goes with it: the vault refuses to fill another VM's request.
+        secrets_vm_is_this "$@" || die "secrets approve acts on this VM ($VM_NAME), whose handoff it checks; for another VM's request, use that VM's settings (metacomputer --vm NAME, or MCOMP_CONFIG)"
+        handoff_hold
+        [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+        secrets_run_acting secrets_approve_code "$RUN_DIR/owners/vault-inflight.$$" approve "$@"
+        return $?
+      fi
+      exec "$VAULT_BIN" approve "$@" ;;
+    fill|login|session|token|code|relay|give)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
       # While the user has the computer (metacomputer handoff), a fill, login or session load waits like any acting
@@ -2025,7 +2055,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # can take minutes), so a handoff can't open while it's on its way. That check is this VM's, so --vm must
       # name this VM; another VM is chosen by its own settings (MCOMP_CONFIG).
       local inflight=""
-      if [ "$sub" = fill ] || [ "$sub" = login ] || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
+      if [ "$sub" = fill ] || [ "$sub" = login ] || [ "$sub" = code ] || [ "$sub" = relay ] || [ "$sub" = give ] \
+         || { [ "$sub" = session ] && [ "${1:-}" = load ]; }; then
         secrets_vm_is_this "$@" || die "secrets $sub acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
         handoff_hold
         inflight="$RUN_DIR/owners/vault-inflight.$$"
@@ -2036,35 +2067,63 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         # certificates refuses: say so before anyone is asked to approve.
         [ "${SSH_AUTH:-key}" = cert ] && die "sealed sessions need SSH_AUTH=key for now: the vault signs in with the VM's static desktop key, which SSH_AUTH=cert turns off (fills and API tokens use their own accounts and still work)"
       fi
+      # The VM whose handoff this checked: the vault refuses a request (give, fill --request) that's another VM's.
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
-      # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
-      # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
-      # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
-      trap ':' INT TERM HUP
-      # Until the unlock process is known to be done with this request, a marker says one may still be working: a
-      # handoff opened after this command ended without that knowledge settles the vault first.
-      if [ -n "$inflight" ]; then
-        ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
-      fi
-      out="$("$VAULT_BIN" "$sub" "$@")"; rc=$?
-      if [ -n "$inflight" ]; then
-        # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
-        # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error) or 64 (usage). Anything else (5:
-        # withdrawn without its confirmation; a crash, a signal) may leave it working: keep the dispatch lock while
-        # `settle` waits for it, and the marker if even that doesn't confirm.
-        case "$rc" in
-          0|1|2|3|4|64) rm -f "$inflight" ;;
-          *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
-        esac
-      fi
-      trap - INT TERM HUP
-      printf '%s\n' "$out"
-      # The action log gets metadata only: never the token itself.
-      printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
-      # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
-      return $rc ;;
+      secrets_run_acting "$kind" "$inflight" "$sub" "$@"
+      return $? ;;
     *) exec "$VAULT_BIN" "$sub" "$@" ;;
   esac
+}
+secrets_approve_id() { # APPROVE_ARGS...: the request id, read as the vault reads `approve`'s arguments (vault/Approvals.swift:
+  # --scope takes a value, --scope=V and the other options don't; the id is the one argument left). Empty when unclear.
+  local a id="" n=0 skip=0
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in --scope|--vm) skip=1 ;; --*) ;; *) id="$a"; n=$((n + 1)) ;; esac
+  done
+  [ "$n" = 1 ] && printf '%s' "$id"
+}
+secrets_plain_approval() { # ID: 0 only when the vault's own list (read now) shows ID as an approval that isn't a one-time
+  # code request's: those fill once allowed. A list that can't be read, or an id it doesn't show, is 1 (may fill).
+  [[ "${1:-}" =~ ^[0-9a-f]{8}$ ]] || return 1
+  local listing
+  listing="$("$VAULT_BIN" requests --json 2>/dev/null)" || return 1
+  printf '%s' "$listing" | "$PY" -c 'import json,sys
+want = sys.argv[1]
+rows = json.load(sys.stdin).get("requests")
+sys.exit(0 if isinstance(rows, list) and any(isinstance(r, dict) and r.get("id") == want and "kind" not in r for r in rows) else 1)' "$1" 2>/dev/null
+}
+secrets_run_acting() { # KIND INFLIGHT VAULT_ARGS...: the vault client for a request that may act on the VM (a fill, a
+  # sign-in, a session load, a one-time code, an approval that fills), called with the dispatch lock held (handoff_hold)
+  # when INFLIGHT names a marker. Its output goes to stdout and, as metadata only, to the signed action log.
+  local kind="$1" inflight="$2" out rc
+  shift 2
+  # Ctrl-C, SIGTERM or SIGHUP to this wrapper's process group reaches the vault client too, which withdraws the
+  # request and waits for the unlock process to confirm that it stopped: this shell outlives it to pass that on.
+  # (Killed outright, the client sees its parent gone and withdraws the request all the same.)
+  trap ':' INT TERM HUP
+  # Until the unlock process is known to be done with this request, a marker says one may still be working: a
+  # handoff opened after this command ended without that knowledge settles the vault first.
+  if [ -n "$inflight" ]; then
+    ( umask 077; date +%s > "$inflight" ) 2>/dev/null || die "couldn't record the vault request ($inflight)"
+  fi
+  out="$("$VAULT_BIN" "$@")"; rc=$?
+  if [ -n "$inflight" ]; then
+    # Only an answer the client got from the unlock process (or a refusal before anything was sent) says it's done
+    # with the request: exit 0, 1 (failed), 2 (denied), 3 (locked), 4 (error), 6 (expired), 7 (needs approval) or 64
+    # (usage). Anything else (5: withdrawn without its confirmation; a crash, a signal) may leave it working: keep the
+    # dispatch lock while `settle` waits for it, and the marker if even that doesn't confirm.
+    case "$rc" in
+      0|1|2|3|4|6|7|64) rm -f "$inflight" ;;
+      *) "$VAULT_BIN" settle --timeout "${MCOMP_VAULT_SETTLE_S:-120}" >/dev/null 2>&1 && rm -f "$inflight" ;;
+    esac
+  fi
+  trap - INT TERM HUP
+  printf '%s\n' "$out"
+  # The action log gets metadata only: never the token itself.
+  printf '%s\n' "$out" | secrets_metadata | secrets_log "$kind"
+  # Exit 3 (locked): the EXIT trap above reports it to the event stream (events_hook_secrets_exit).
+  return $rc
 }
 secrets_vm_is_this() { # ARGS...: 0 when every --vm among them names this VM (the vault takes the last one)
   local a want=0

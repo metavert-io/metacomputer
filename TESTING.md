@@ -757,7 +757,10 @@ Each of these needs no VM and takes seconds.
   future modification time doesn't stretch it, or from the first failure when nothing about the file can be
   read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
-  stopped (exit 4) with the vault never asked, a fill naming another VM refused, a handoff that can't open
+  stopped (exit 4) with the vault never asked, `secrets approve` of a waiting one-time code request stopped too
+  (`--json` before or after the id, `--scope`, a list that can't be read, an id it doesn't show) while an approval
+  the list shows as another kind goes on, `give`, `fill --request` and a code `approve` passing this VM to the vault
+  (and `approve` naming another VM refused), a fill naming another VM refused, a handoff that can't open
   while a fill is still on its way (a stand-in vault that waits) or while one that ended unconfirmed (exit 5) is
   settling, and the marker that makes the next handoff settle first when that didn't confirm, kept for any exit
   that isn't an answer from the unlock process (a crash too); `sh` holding the
@@ -1391,7 +1394,7 @@ writes the lists with cloud-init's key options, `provision.sh` installs them roo
 before the config that names them, and `finalize.sh` removes the homes' copies only
 after `sshd -T` shows the lists in use.
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_codes.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_secret_fill.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -1705,7 +1708,56 @@ fixture pages and a cookie-echo page in the VM, then:
 
 It uses its own vault folder in /tmp and a TEST build, and never the installed vault.
 
-`python3 tests/test_secret_fill.py` (169 checks) covers the VM side,
+`python3 tests/test_vault_codes.py` (132 checks, about 3 minutes; no VM) covers one-time codes and sign-in
+links and human-mode fills, with its own ssh stub (the fill account's check, fill, read and open, and the
+desktop account's human-mode script) and a stand-in for osascript (`MCOMP_VAULT_TEST_OSASCRIPT`, test builds
+only), so no dialog is ever shown:
+- **stdin only:** a value on `give`'s or `code`'s command line is a usage error and never echoed; a line over
+  4096 bytes and a value that isn't a code are refused before anything reaches the VM;
+- **by hand:** `ask` returns the id at once, `requests` lists it, `needs_you.code_requested` reaches the spool
+  with the site, kind, id and `why`; `give` from a pipe with no rule exits 7 naming `secrets approve ID`, and
+  `approve ID` (the test build's Touch ID stand-in) fills it, with the value only on the stub's stdin; single
+  use; expiry (exit 6; `MCOMP_VAULT_TEST_CODE_MIN_TTL` lets a test request live 2 s); `ask --wait`;
+- **rules:** `rule add code --from stdin` fills at once and is recorded as `rule:ID`; after it expires the same
+  command needs approval again; `--project` covers only Claude Code sessions there; identity providers can't
+  be a rule's site or link host, and a code for one always needs approval;
+- **binding:** a VM reporting another site keeps nothing as filled; a fill refused before typing stays given
+  for `fill --request`; a VM answer holding the value is withheld; links to the site open, links to another
+  host need the rule's `--link-host`, non-https links are refused;
+- **relay:** needs approval without a rule; under one, Claude sees only `relayed: filled`; two codes, no code,
+  or a source tab on another site are refused; `--kind link` opens the site's link, not another host's;
+- **human mode:** `fill --human` checks then fills through the desktop account's script, an address bar
+  naming another site and a non-password field for `password` are refused; `code --human`; and the script
+  itself against a fake accessibility tree: a page whose title names another site, an address typed but not
+  opened, Firefox's trimmed https bar, a field in a frame, the bar focused, two windows with one title
+  (picked by place and size), the typed value counted, never echoed;
+- **a terminal and the dialog:** `give` at a terminal reads the value hidden and the unlock terminal asks;
+  with `INTERACTIVE_PROMPTS=on` the dialog's script is fixed and `why` (with quotes and an AppleScript
+  injection attempt) arrives as one argument, nothing in it runs, and the dialog's answer is filled after the
+  approval; the AppleScript compiles (`osacompile`, never run);
+- **a hostile VM** (each of these fails against the first version of this feature): a relayed link whose host spells a
+  code is refused and its host appears in no output, listing or audit record; how many codes an element held isn't
+  said; a given link to an unlisted host waits for approval without its host in `requests` or the audit log; a
+  rule's `--link-host` doesn't cover the same host on another port; a VM that answers "refused" after getting the
+  value can't have it sent again; a refused value-free check keeps the request and sends nothing; a rule that
+  expired while a request waited doesn't cover its retry; a slow step is cut at the request's expiry; a request
+  expires while a question waits at the unlock terminal, and while an unrelated step in the VM runs; stopping `approve`
+  while it fills ends the step in the VM; an answer in the dialog gives and approves but fills nothing until
+  `fill --request`; `fill --request`, `give` and `approve` run for one VM are refused for another VM's request (two
+  VMs bound to one vault), and with no VM named; a client trickling half a request holds the unlock process at most
+  about 10 s while requests expire on time;
+- no value in any output, the audit log or the events, and none of the test switches in a release build.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_vault_codes_vm.py` (a test VM, 26 checks) serves a "mail" page
+(a code and links, on `http://localhost:8000`) and a "site" page (a code field that says whether it got the
+right code, on `http://127.0.0.1:8000`) in the VM, then: `code` from a pipe (needs approval, then filled under
+a rule, and the page sees it), `relay` of the code and of the site's sign-in link from the mail page (another
+host's link refused), and human mode in the VM's Firefox (`code --human`; `fill --human --field password`
+refused on a text field and filled on the password field; a page whose title names another site refused for
+it). A VM built before the relay's read and the link's open has an older secret-fill: for those two modes
+only, the test's ssh stand-in runs this repository's secret-fill as the desktop user over the real ssh.
+
+`python3 tests/test_secret_fill.py` (185 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -1728,7 +1780,13 @@ It uses its own vault folder in /tmp and a TEST build, and never the installed v
     it (reported);
   - the keyboard route when a page won't take `execCommand`;
   - focus moving or lost, length limits and invalid selectors;
-  - no known desktop user (nothing filled), and a hung browser (the deadline).
+  - no known desktop user (nothing filled), and a hung browser (the deadline);
+  - open mode (a one-time sign-in link), with the fake's `Fetch` interception: a link that lands on the site; a server
+    redirect to another site, a hop through another site and back, and the page's own move soon after it loads and two
+    seconds later, each stopped before the tab visits it (unnamed); a protocol error while it watches with a move to
+    another site paused behind it (refused and loading stopped before the interception ends, as Chromium continues
+    what's paused when it's turned off); a navigation that never commits; and a link to
+    another origin than the vault named (refused before anything is opened).
 - **The whole program against a real headless Chromium**, when one is found
   (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:
   - fills a dummy login page, through the element itself, with fields in a same-origin

@@ -46,11 +46,14 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `metacomputer input-reset` if Chrome ignores typing.
 - Logins, 2FA codes and API keys: never ask for or type passwords, codes, keys or
   the vault passphrase. Use `metacomputer secrets list` / `fill NAME --field
-  password|username|otp` in page-mode Chrome, and `token NAME` (a short-lived token and
+  password|username|otp` in page-mode Chrome (`--human` for the focused field of the VM's
+  regular Firefox: its site from the address bar), and `token NAME` (a short-lived token and
   the proxy URL inside the VM) for API keys; never put a real key in the VM
-  (`skills/metacomputer/SECRETS.md`). If it says locked, ask the user to run
+  (`skills/metacomputer/SECRETS.md`). Emailed or texted codes and sign-in links go through
+  `secrets code|relay|ask` (`vault/Codes.swift`, SECURITY.md "One-time codes"); Claude types
+  one itself only when the user set `CODES_VIA=claude`. If it says locked, ask the user to run
   `metacomputer secrets unlock` in their own terminal. Only the user runs `init`,
-  `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add`,
+  `set`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `approve`, `rule add`, `give`,
   `import-passwords`, `import-session` and `audit-sink add|remove` (`approve` and `rule add`
   show a Touch ID dialog: never trigger it). Tests never read the real Chrome profile or its
   "Chrome Safe Storage" Keychain item: they use synthetic profiles and the test build's stand-ins.
@@ -252,11 +255,11 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
-  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vm_claude_vm.py` and
+  `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_vm_claude_vm.py` and
   `tests/test_hidden_text_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
@@ -264,7 +267,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   command line; keep `tests/test_secrets.py`, `tests/test_vault_ops.py` and
   `tests/test_vault_approvals.py` passing. No approval may be producible by a program: only a
   line typed at the unlock terminal, macOS's LocalAuthentication dialog or the passphrase.
-  Test-only switches (`MCOMP_VAULT_TEST_*`) stay inside `#if MCOMP_VAULT_TESTING`.
+  Test-only switches (`MCOMP_VAULT_TEST_*`) stay inside `#if MCOMP_VAULT_TESTING`. Dialogs that wait for
+  the user only with `INTERACTIVE_PROMPTS=on` (default off; never from a command without a terminal), their
+  words passed as arguments, never spliced into a script.
   Its audit sinks use the same wrappings as the event stream (CloudEvents, OTLP,
   syslog, ntfy) and its needs_you files follow the event spool contract.
 

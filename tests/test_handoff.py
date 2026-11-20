@@ -650,6 +650,8 @@ def web_cleanup_checks():
 VAULT_STUB = """#!/bin/sh
 case "$1" in
   version) echo '{"build":"test"}'; exit 0 ;;
+  requests) [ "$STUB_REQUESTS" = fail ] && { echo 'not json'; exit 3; }
+            [ -n "$STUB_REQUESTS" ] && printf '%s\\n' "$STUB_REQUESTS" || echo '{"requests": []}'; exit 0 ;;
   settle) echo "settle $*" >> "$VAULT_LOG"; sleep "${STUB_SETTLE_S:-0}"
           if [ -n "$STUB_SETTLE_FAIL" ] && [ -f "$STUB_SETTLE_FAIL" ]; then echo '{"ok":false,"settled":false}'; exit 1; fi
           echo "settled" >> "$VAULT_LOG"; echo '{"ok":true,"settled":true}'; exit 0 ;;
@@ -723,6 +725,41 @@ def fill_checks():
     r = subprocess.run([mc, "input-reset"], env=e, capture_output=True, text=True, timeout=60)
     check("input-reset (it acts on the desktop) stops too", r.returncode == 4 and "the user has the computer" in r.stderr,
           (r.returncode, r.stderr[-300:]))
+    # `secrets approve` of a waiting one-time code request fills once allowed: it stops too, however its arguments are
+    # ordered, and when the vault's list can't be read (it may fill). Only an approval the list shows as another kind
+    # (one that answers a fill already on its way) goes straight on.
+    code_req = json.dumps({"requests": [{"id": "1a2b3c4d", "kind": "code", "needs_approval": True}]})
+    plain_req = json.dumps({"requests": [{"id": "5e6f7a8b", "use": "fill", "name": "site"}]})
+    cases = [(["approve", "1a2b3c4d"], code_req), (["approve", "--json", "1a2b3c4d"], code_req), (["approve", "1a2b3c4d", "--json"], code_req),
+             (["approve", "--scope", "use", "1a2b3c4d"], code_req), (["approve", "--json", "1a2b3c4d"], "fail"),
+             (["approve", "--json", "9f9f9f9f"], code_req)]
+    rs = []
+    for args, listing in cases:
+        open(log, "w").close()
+        x = subprocess.run([mc, "secrets"] + args, env=dict(e, STUB_REQUESTS=listing), capture_output=True, text=True, timeout=60)
+        rs.append((args, listing == "fail", x.returncode, "the user has the computer" in x.stderr, any(y.startswith("start approve") for y in lines())))
+    check("approve of a waiting code request stops (exit 4) while the user has the computer, with --json before or after the "
+          "id, with --scope, when the list can't be read, and for an id the list doesn't show; the vault isn't asked",
+          all(rc == 4 and said and not asked for _, _, rc, said, asked in rs), rs)
+    open(log, "w").close()
+    x = subprocess.run([mc, "secrets", "approve", "--json", "5e6f7a8b"], env=dict(e, STUB_REQUESTS=plain_req), capture_output=True,
+                       text=True, timeout=60)
+    check("...while an approval the list shows as another kind (answering a fill on its way) goes straight to the vault",
+          any(y.startswith("start approve --json 5e6f7a8b") for y in lines()), (x.returncode, x.stderr[-200:], lines()))
+    # The commands that act on a one-time code request name this VM (whose handoff they checked) to the vault, which
+    # refuses another VM's request; an approve naming another VM is refused here.
+    clear()
+    got = {}
+    for args, stdin in ((["give", "1a2b3c4d"], "123456\n"), (["fill", "--request", "1a2b3c4d"], ""), (["approve", "1a2b3c4d"], "")):
+        open(log, "w").close()
+        subprocess.run([mc, "secrets"] + args, env=dict(e, STUB_REQUESTS=code_req), input=stdin, capture_output=True, text=True, timeout=60)
+        got[args[0]] = [y for y in lines() if y.startswith("start " + args[0])]
+    open(log, "w").close()
+    x = subprocess.run([mc, "secrets", "approve", "1a2b3c4d", "--vm", "othervm"], env=dict(e, STUB_REQUESTS=code_req), capture_output=True,
+                       text=True, timeout=60)
+    check("give, fill --request and approve of a code request pass this VM (--vm fltest) to the vault; approve naming another "
+          "VM is refused before the vault", all(v and v[-1].endswith("--vm fltest") for v in got.values())
+          and x.returncode != 0 and "acts on this VM (fltest)" in x.stderr and not lines(), (got, x.returncode, x.stderr[-200:], lines()))
     clear()
 
     # The vault withdrew the request but its unlock process didn't confirm it stopped (exit 5): the wrapper keeps the

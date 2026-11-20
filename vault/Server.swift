@@ -37,11 +37,41 @@ func setTimeouts(_ fd: Int32, seconds: Int) {
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
 }
 
-/// One newline-terminated message (at most max bytes).
-func readMessage(_ fd: Int32, max: Int = 1 << 20) -> [UInt8]? {
+/// How long the unlock process waits for a client to send its whole request, from when it accepted the connection,
+/// however slowly the bytes come.
+let clientMessageSeconds: TimeInterval = 10
+
+/// How often waitHook runs while the unlock process reads a client's request, whether or not bytes arrive meanwhile.
+let readHookEvery: TimeInterval = 0.2
+
+/// One newline-terminated message (at most max bytes). With `within`, an absolute deadline for the whole message (a
+/// client that sends part of one and stalls, or trickles it, gets nil at that time), and waitHook runs at least every
+/// readHookEvery seconds while it reads, however the bytes come (one-time code requests expire on time meanwhile): the
+/// unlock process's reads of its clients use it. Both clocks are monotonic (the system's uptime).
+func readMessage(_ fd: Int32, max: Int = 1 << 20, within: TimeInterval? = nil) -> [UInt8]? {
     var out = [UInt8]()
     var buf = [UInt8](repeating: 0, count: 4096)
+    let now = { ProcessInfo.processInfo.systemUptime }
+    let deadline = within.map { now() + $0 }
+    var hookRan = now()
     while true {
+        if let d = deadline {
+            if now() - hookRan >= readHookEvery {
+                hookRan = now()
+                if Thread.isMainThread, let hook = waitHook {
+                    waitHook = nil
+                    hook()
+                    waitHook = hook
+                }
+            }
+            let left = d - now()
+            if left <= 0 { return nil }
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let wait = Swift.min(left, Swift.max(0.001, readHookEvery - (now() - hookRan)))
+            let r = poll(&pfd, 1, Int32(Swift.max(1, wait * 1000)))
+            if r < 0 && errno == EINTR { continue }
+            if r == 0 { continue }
+        }
         let n = read(fd, &buf, buf.count)
         if n < 0 && errno == EINTR { continue }
         if n <= 0 { return out.isEmpty ? nil : out }
@@ -164,7 +194,8 @@ struct ApprovalOutcome {
 /// Why a request stopped when the program that asked went away (or withdrew it) while it was being served.
 let requesterLeftReason = "stopped: the program that asked went away or withdrew the request, so nothing further was done (a step in progress was ended)"
 /// The requests whose requester may withdraw them while they run (Commands.swift, request(): cancellable).
-let withdrawableOps: Set<String> = ["fill", "login", "session_save", "session_load", "token", "renew"]
+let withdrawableOps: Set<String> = ["fill", "login", "session_save", "session_load", "token", "renew", "code_give", "code_put", "code_relay",
+                                     "code_fill"]
 
 /// A connection read while the unlock process waited for an answer, served once it's free.
 struct DeferredRequest {
@@ -196,6 +227,9 @@ final class UnlockServer {
     var requesterFD: Int32 = -1
     var requesterWithdrew = false
     var promptOpen = false              // a question waits on the terminal, its cursor at the end of the prompt
+    var codeRequests: [String: CodeRequest] = [:]   // one-time code requests (Codes.swift): in memory only, gone at lock
+    var codeInFlight: String?           // the code request a step in the VM is serving right now
+    let interactivePrompts: Bool        // INTERACTIVE_PROMPTS=on at unlock: `ask` also shows a dialog on this Mac
     lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
     // The audit log and its sinks. The audit key (from the vault) MACs every record this
     // process writes; `known` holds their hashes. Sink places, backoff and acknowledged begins
@@ -230,6 +264,8 @@ final class UnlockServer {
         self.touchID = touchID
         (self.requirePresence, self.presenceWhy, self.presenceWarning) = presence
         self.expires = Date().addingTimeInterval(TimeInterval(seconds))
+        // The person's own setting, as bin/metacomputer passed it to this unlock (the unlock always has their terminal).
+        self.interactivePrompts = ProcessInfo.processInfo.environment["MCOMP_INTERACTIVE_PROMPTS"] == "on"
         #if MCOMP_VAULT_TESTING
         if let t = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_PROMPT_TIMEOUT"], let n = Int(t), n > 0 { promptTimeout = n }
         #endif
@@ -299,8 +335,9 @@ final class UnlockServer {
     /// request list (`requests`), the dialog and the audit log.
     func approve(_ kind: String, _ name: String, _ question: String, _ who: Requester, vm: String, site: String?,
                  use: String, summary: String, usernameHint: String? = nil, identityProvider: Bool = false,
-                 proposedID: String? = nil, ruleUse: String? = nil) -> ApprovalOutcome {
-        if !identityProvider {
+                 proposedID: String? = nil, ruleUse: String? = nil, fixedID: String? = nil, singleUse: Bool = false,
+                 forceLocalAuth: Bool = false, dialogSummary: String? = nil) -> ApprovalOutcome {
+        if !identityProvider && !singleUse {
             if let g = granted(kind, name, who) { return ApprovalOutcome(yes: true, how: g, why: "") }
             if let ru = ruleUse, let r = coveringRule(ru, name: name, site: site, who) {
                 return ApprovalOutcome(yes: true, how: "rule:\(r.id)", why: "")
@@ -313,12 +350,16 @@ final class UnlockServer {
         }
         let t = min(promptTimeout, remaining())
         guard t > 0 else { return ApprovalOutcome(yes: false, how: "each:no", why: "the vault's time is up") }
-        guard let id = newRequestID(proposedID) else {
+        guard let id = fixedID ?? newRequestID(proposedID) else {
             return ApprovalOutcome(yes: false, how: "each:no", why: "the request id \(clean(proposedID ?? "", max: 12)) isn't 8 hex digits, or was used already in this unlock")
         }
         let fullSummary = clean(summary + " on VM \(vm), asked by \(who.describe)", max: 400)
         let p = PendingRequest(id: id, use: use, name: name, vm: vm, site: site, usernameHint: usernameHint, who: who,
                                identityProvider: identityProvider, summary: fullSummary)
+        p.singleUse = singleUse
+        p.forceLocalAuth = forceLocalAuth
+        // macOS's dialog (the person's own) may say more than `requests` does: a given link's real host.
+        p.dialogSummary = dialogSummary.map { clean($0 + " on VM \(vm), asked by \(who.describe)", max: 400) }
         pendingRequests[id] = p
         defer { pendingRequests[id] = nil }
         var rec: [String: Any] = ["op": "request", "result": "pending", "request_id": id, "use": use, "name": name, "vm": vm,
@@ -336,6 +377,7 @@ final class UnlockServer {
         let q = question.components(separatedBy: "\n").prefix(4).map { clean($0, max: 500) }.joined(separator: "\n")
             + "\n  Request \(id): or approve it from any terminal with `metacomputer secrets approve \(id)` (Touch ID or your login password)"
             + (identityProvider ? "\n  An identity provider's sign-in (or one that may hold one): what you allow covers this one use." : "")
+            + (singleUse && !identityProvider ? "\n  A one-time code or link: what you allow covers this one use." : "")
         var prompt: String?
         if terminalOK && requirePresence {
             prompt = presencePrompt(q, name: name, id: id)
@@ -352,6 +394,9 @@ final class UnlockServer {
             switch scope {
             case _ where identityProvider && scope != .use:
                 say("  (an identity provider's sign-in: allowed for this use only)")
+                return oneUse
+            case _ where singleUse && scope != .use:
+                say("  (a one-time code or link: allowed for this use only)")
                 return oneUse
             case .unlock:
                 grants.append(Grant(kind: kind, name: name, claudePID: nil, claudeStart: nil))
@@ -400,7 +445,7 @@ final class UnlockServer {
     /// How far an approval of `p` can reach: an identity provider's use, and a use from outside Claude Code, never
     /// further than this use (so no dialog claims more than it can grant).
     func reachable(_ p: PendingRequest, _ scope: ApprovalScope) -> ApprovalScope {
-        if p.identityProvider { return .use }
+        if p.identityProvider || p.singleUse { return .use }
         if scope == .session && p.who.claudePID == nil { return .use }
         return scope
     }
@@ -408,7 +453,7 @@ final class UnlockServer {
     /// macOS's dialog for `p`, naming how far allowing it reaches; allowing it grants that and nothing more.
     func scopedLocalAuth(_ p: PendingRequest, _ scope: ApprovalScope) -> LocalAuthAttempt {
         let sc = reachable(p, scope)
-        return startLocalAuth("approve request \(p.id), \(scopeWords(sc, name: p.name)): \(p.summary)", scope: sc)
+        return startLocalAuth("approve request \(p.id), \(scopeWords(sc, name: p.name)): \(p.dialogSummary ?? p.summary)", scope: sc)
     }
 
     func waitForDecision(_ p: PendingRequest, prompt: String?, name: String, timeout: Int) -> Decision {
@@ -417,7 +462,7 @@ final class UnlockServer {
             eprintRaw(pr)
             promptOpen = true
         }
-        if touchID || requirePresence {
+        if touchID || requirePresence || p.forceLocalAuth {
             p.localAuth = scopedLocalAuth(p, .use)
             p.autoLocalAuth = true
         }
@@ -438,6 +483,7 @@ final class UnlockServer {
             checkVault()                    // a rekey or a damaged vault while the question waits locks it now
             if stopReason != nil { result = .denied("the vault was locked"); return result }
             if let d = p.decision { result = d; return d }
+            codeExpirySweep()               // one-time code requests expire on time, even while this question waits
             if requesterGone() {
                 // The program that asked went away (or withdrew it): nobody is left to act for, so no approval is taken.
                 say("  (request \(p.id) withdrawn: the program that asked went away)")
@@ -547,7 +593,7 @@ final class UnlockServer {
             return
         }
         let pid = peerPID(c)
-        guard let msg = readMessage(c), let req = parseJSONObject(msg), let op = req["op"] as? String else {
+        guard let msg = readMessage(c, within: clientMessageSeconds), let req = parseJSONObject(msg), let op = req["op"] as? String else {
             reply(c, ["ok": false, "status": "error", "reason": "bad request"])
             close(c)
             return
@@ -560,6 +606,7 @@ final class UnlockServer {
         case "tokens": res = opTokens()
         case "requests": res = opRequests()
         case "rule_list": res = opRuleList()
+        case "code_status": res = opCodeStatus(req)
         case "deny": res = opDeny(req, who)
         // A revoke only restricts, and must win at once: it doesn't wait behind a question (a renewal that's waiting then
         // finds its token gone). Its audit record is written now; the sinks get it on the next delivery.
@@ -570,6 +617,11 @@ final class UnlockServer {
             say("\(clockTime())  `lock` from \(who.describe)")
             res = ["ok": true, "status": "ok"]
         case "approve":
+            // A waiting code request's approval acts on the VM once it's allowed: it waits its turn behind the question.
+            if let id = req["id"] as? String, let cr = codeRequests[id], pendingRequests[id] == nil, cr.parked {
+                deferred.append(DeferredRequest(fd: c, req: req, op: op, pid: pid))
+                return
+            }
             res = opApprove(c, req, who)
             if res == nil { return }            // it waits for the dialog: replyWaiters answers it
         default:
@@ -583,11 +635,16 @@ final class UnlockServer {
     // MARK: requests, approve, deny
 
     func opRequests() -> [String: Any] {
-        ["ok": true, "status": "ok", "requests": pendingRequests.values.sorted { $0.created < $1.created }.map { $0.listing }]
+        let waiting = pendingRequests.values.sorted { $0.created < $1.created }.map { $0.listing }
+        // One-time code requests still open (waiting for a value, a fill or an approval), unless one is also a question above.
+        let codes = codeRequests.values.filter { !$0.final && pendingRequests[$0.id] == nil && Date() < $0.expires }
+            .sorted { $0.created < $1.created }.map { $0.listing }
+        return ["ok": true, "status": "ok", "requests": waiting + codes]
     }
 
     /// nil: the client waits for the Touch ID dialog's answer (its connection stays open).
     func opApprove(_ c: Int32, _ req: [String: Any], _ who: Requester) -> [String: Any]? {
+        if let id = req["id"] as? String, pendingRequests[id] == nil, let cr = codeRequests[id] { return opApproveCode(req, who, cr) }
         guard let id = req["id"] as? String, validRequestID(id), let p = pendingRequests[id] else {
             return failed("no request \(clean(req["id"] as? String ?? "", max: 12)) waits for approval (metacomputer secrets requests)")
         }
@@ -628,6 +685,7 @@ final class UnlockServer {
     }
 
     func opDeny(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        if let id = req["id"] as? String, pendingRequests[id] == nil, let cr = codeRequests[id] { return opDenyCode(cr, who) }
         guard let id = req["id"] as? String, validRequestID(id), let p = pendingRequests[id] else {
             return failed("no request \(clean(req["id"] as? String ?? "", max: 12)) waits for approval (metacomputer secrets requests)")
         }
@@ -646,18 +704,30 @@ final class UnlockServer {
 
     /// A rule made with Touch ID or the login password: the unlock process asks macOS, then writes it.
     func opRuleAdd(_ req: [String: Any], _ who: Requester) -> [String: Any] {
-        guard let project = req["project"] as? String, project.hasPrefix("/"), clean(project, max: 4096) == project,
+        let codeUse = req["use"] as? String
+        let isCodeRule = codeUse == "code" || codeUse == "relay"
+        guard let project = req["project"] as? String, (isCodeRule && project.isEmpty) || project.hasPrefix("/"), clean(project, max: 4096) == project,
               let secs = (req["for_s"] as? NSNumber)?.intValue, secs > 0, secs <= maxRuleSeconds else {
             return failed("bad request")
         }
         let secret = req["secret"] as? String, site = req["site"] as? String, session = req["session"] as? String
-        guard [secret, site, session].compactMap({ $0 }).count == 1, secret.map(validName) ?? true, session.map(validName) ?? true,
-              site.map({ canonicalOrigin($0) == $0 }) ?? true else { return failed("bad request") }
-        let p: Payload
-        do { p = try load() } catch { return failed("cannot read the vault") }
-        // One rule, built now with its absolute expiry; the dialog shows exactly its stored fields, and it's stored as is.
-        let (rule, why) = buildRule(p, use: "", secret: secret, site: site, session: session, project: project,
-                                    expires: Date().addingTimeInterval(TimeInterval(secs)), confirmed: "local-auth")
+        let built: (UnattendedRule?, String?)
+        if isCodeRule {
+            guard let st = site, secret == nil, session == nil else { return failed("bad request") }
+            let links = (req["link_hosts"] as? [String]) ?? []
+            guard links.count <= 8 else { return failed("bad request") }
+            built = buildCodeRule(use: codeUse!, site: st, fromHost: req["from_host"] as? String, linkHosts: links, project: project,
+                                  expires: Date().addingTimeInterval(TimeInterval(secs)), confirmed: "local-auth")
+        } else {
+            guard [secret, site, session].compactMap({ $0 }).count == 1, secret.map(validName) ?? true, session.map(validName) ?? true,
+                  site.map({ canonicalOrigin($0) == $0 }) ?? true else { return failed("bad request") }
+            let p: Payload
+            do { p = try load() } catch { return failed("cannot read the vault") }
+            // One rule, built now with its absolute expiry; the dialog shows exactly its stored fields, and it's stored as is.
+            built = buildRule(p, use: "", secret: secret, site: site, session: session, project: project,
+                              expires: Date().addingTimeInterval(TimeInterval(secs)), confirmed: "local-auth")
+        }
+        let (rule, why) = built
         guard let rule else { return failed(why ?? "can't make that rule") }
         let text = rule.confirmText
         guard clean(text, max: maxConfirmText) == text else {
@@ -669,6 +739,7 @@ final class UnlockServer {
         let deadline = Date().addingTimeInterval(TimeInterval(min(promptTimeout, max(1, remaining()))))
         while !la.done {
             checkVault()
+            codeExpirySweep()
             if receivedSignal != 0 || stopReason != nil || Date() >= deadline { la.cancel(); break }
             var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
             if poll(&pfd, 1, 200) > 0, pfd.revents & Int16(POLLIN) != 0 {
@@ -908,6 +979,9 @@ final class UnlockServer {
         guard let ak = vaultAuditKey(paths, key) else { throw VaultError("cannot read the vault's audit key") }
         auditKey = ak
         hub.recorder = { [unowned self] rec in self.record(rec) }
+        // One-time code requests expire on time (their values wiped) even while a step in the VM runs.
+        waitHook = { [unowned self] in self.codeExpirySweep(duringStep: true) }
+        defer { waitHook = nil }
         hub.preUse = { [unowned self] fields, requester in self.requiredSinkProblem("api", fields, requester: requester) }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw VaultError("cannot make a socket") }
@@ -973,6 +1047,7 @@ final class UnlockServer {
             }
             if let s = stopReason { why = s; break }
             if Date() >= expires { why = "time is up"; break }
+            codeExpirySweep()
             // Requests that arrived while a question waited, in the order they came.
             if !deferred.isEmpty {
                 let d = deferred.removeFirst()
@@ -992,6 +1067,7 @@ final class UnlockServer {
                 }
             }
             sinkTick()
+            codeTick()                      // one-time code requests: expiries, and answers from a dialog
             checkVault()                    // a secret replaced or deleted meanwhile ends its tokens (and their answers)
         }
         for d in deferred {
@@ -1002,6 +1078,7 @@ final class UnlockServer {
         close(fd)
         listenFD = -1
         unlink(paths.socket)
+        codeLockdown()
         hub.shutdown()
         record(["op": "lock", "result": "ok", "reason": why])
         flushSinks(force: true)
@@ -1019,7 +1096,7 @@ final class UnlockServer {
             return
         }
         let pid = peerPID(c)
-        guard let msg = readMessage(c), let req = parseJSONObject(msg), let op = req["op"] as? String else {
+        guard let msg = readMessage(c, within: clientMessageSeconds), let req = parseJSONObject(msg), let op = req["op"] as? String else {
             reply(c, ["ok": false, "status": "error", "reason": "bad request"])
             return
         }
@@ -1037,7 +1114,10 @@ final class UnlockServer {
         // A fill, sign-in, session or token request stops when its requester goes away or withdraws it (closes its side
         // of the connection): checked before each step, while it waits for an approval and during each ssh, whose process
         // group is then killed. Its answer, written below once it has stopped, is the acknowledgement the requester waits for.
+        // An `approve` of a waiting one-time code request fills it once allowed: it's withdrawn like a fill when its
+        // client goes away (the wrapper keeps its in-flight marker and settles, as for a fill).
         let withdrawable = withdrawableOps.contains(op)
+            || (op == "approve" && (req["id"] as? String).flatMap { codeRequests[$0] }.map { $0.parked && pendingRequests[$0.id] == nil } == true)
         if withdrawable {
             requesterFD = c
             requesterWithdrew = false
@@ -1083,6 +1163,12 @@ final class UnlockServer {
         case "rule_add": res = opRuleAdd(req, who)
         case "rule_list": res = opRuleList()
         case "rule_remove": res = opRuleRemove(req, who)
+        case "code_ask": res = opCodeAsk(req, who)
+        case "code_status": res = opCodeStatus(req)
+        case "code_give": res = opCodeGive(req, who)
+        case "code_put": res = opCodePut(req, who)
+        case "code_relay": res = opCodeRelay(req, who)
+        case "code_fill": res = opCodeFill(req, who)
         case "settle":
             // Answered only here, in order: every request that reached this process before it has finished (requests
             // that arrive during a question wait behind it). A requester that couldn't confirm its own request stopped
@@ -1282,8 +1368,22 @@ final class UnlockServer {
         if let o = only { fields["for_origin"] = clean(o, max: 300) }
         let browserPID = (req["browser_pid"] as? NSNumber)?.intValue
         if let bp = browserPID { fields["browser_pid"] = bp }
+        // Human mode: the focused field of a browser without DevTools (Firefox, a Chrome started normally), its site from the
+        // address bar (Human.swift). No selector, profile or browser pid there: those name page-mode things.
+        let human = req["human"] as? Bool == true
+        let windowID = (req["window_id"] as? NSNumber)?.intValue
+        if human {
+            guard selector == nil, profile == nil, browserPID == nil, windowID.map({ $0 > 0 }) ?? true, field != "text" else {
+                return finish("fill", fields, failed("bad request: a human-mode fill takes --field password|username|otp and optionally --window-id, nothing else"), who, approval: "-")
+            }
+            fields["mode"] = "human"
+            if let w = windowID { fields["window_id"] = w }
+        } else if windowID != nil {
+            return finish("fill", fields, failed("bad request: --window-id goes with --human"), who, approval: "-")
+        }
         if let why = browserBindingProblem(req, profile: profile, who) { return finish("fill", fields, denied(why), who, approval: "-") }
-        say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (profile.map { ", profile \($0)" } ?? "")
+        say("\(clockTime())  fill \(name) (\(field)) on VM \(vm)" + (human ? ", human-mode browser" + (windowID.map { " window \($0)" } ?? "") : "")
+            + (profile.map { ", profile \($0)" } ?? "")
             + (selector.map { ", selector '\(promptText($0, max: 80))'" } ?? "") + ", asked by \(who.describe)")
         let p: Payload
         do { p = try load() } catch let e as VaultError { return finish("fill", fields, e.code == Exit.locked ? lockedResult(e.message) : failed(e.message), who, approval: "-") } catch {
@@ -1317,6 +1417,12 @@ final class UnlockServer {
         if let pr = profile { base["profile"] = pr }
         if let bp = browserPID { base["browser_pid"] = bp }
         if let sel = selector { base["selector"] = sel }
+        if let w = windowID { base["window_id"] = w }
+        /// One step in the VM: the fill account's secret-fill (page mode) or the desktop account's human-mode script.
+        func guest(_ request: [String: Any], _ value: [UInt8]?) throws -> [String: Any] {
+            human ? try runner.human(t, request: request, value: value, timeout: TimeInterval(min(60, remaining())))
+                  : try runner.fill(t, request: request, value: value, timeout: TimeInterval(min(60, remaining())))
+        }
         // --origin: the one site the caller checked; a tab on any other of the secret's sites is refused, not filled.
         var origins = only.map { [$0] } ?? s.origins
         let hint = s.kind == "password" ? s.username.map(maskUsername) : nil
@@ -1329,13 +1435,13 @@ final class UnlockServer {
         // provider among its sites is always checked too: a use on that site asks.
         let hasIdP = s.origins.contains(where: isIdentityProviderOrigin)
         var approval = "session"
-        if confirmEach || s.approval == "each" || hasIdP {
+        if confirmEach || s.approval == "each" || hasIdP || human {
             do {
                 var chk = base
                 chk["mode"] = "check"
                 chk["origins"] = origins
                 let r: [String: Any]
-                do { r = try runner.fill(t, request: chk, value: nil, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
+                do { r = try guest(chk, nil) } catch let e as VaultError {
                     return finish("fill", fields, failed(e.message), who, approval: "each")
                 } catch { return finish("fill", fields, failed("the check failed"), who, approval: "each") }
                 guard r["ok"] as? Bool == true else { return finish("fill", fields, r, who, approval: "each") }
@@ -1382,7 +1488,7 @@ final class UnlockServer {
         req2["mode"] = "fill"
         req2["origins"] = origins
         let r: [String: Any]
-        do { r = try runner.fill(t, request: req2, value: value, timeout: TimeInterval(min(60, remaining()))) } catch let e as VaultError {
+        do { r = try guest(req2, value) } catch let e as VaultError {
             return finish("fill", fields, failed(e.message), who, approval: approval, requestID: requestID)
         } catch {
             return finish("fill", fields, failed("the fill failed"), who, approval: approval, requestID: requestID)
