@@ -336,6 +336,23 @@ the hidden-text marks under `metacomputer_hidden_text`. Those names are the hub'
 the VM's answers can't use them ([Hidden page text](#hidden-page-text), "The hub's names
 are its own").
 
+**The call as the driver reads it.** Cua Driver accepts more than its schemas show: a `run_steps` step may be
+`{tool, args}`, flat fields beside `tool`, or the shorthand `{<tool>: args}`; step tool names have aliases (`type`,
+`set`, `press`, `key`, `hover`, …); a key name can be the tool (`{"tool": "down"}`); `triple_click` is a click with
+count 3; a one-key hotkey is a press_key and a press_key of a printable symbol types it; `type_text_chars` and
+`run_actions` are old names of type_text and run_steps; and a string where the schema wants a number or a boolean
+(`"pid": "77"`, `"delay_ms": "200"`) is turned into one. Guards that tested only the canonical forms could be walked
+past with the others (a `{"type": …}` step aimed at Chrome went out as background input, and pixels sent as strings
+skipped the coordinate guard). So the hub normalises each call once, as it arrives, with a copy of the driver's own
+rules for the pinned version (`lib/batch_steps.py`), before any guard; every guard and human pacing read that
+normalised call, and it's what the hub sends the driver. The canonical forms are a fixed point of the driver's own
+normalisation, so what the guards checked is what runs (rewrites are applied until nothing changes, as the driver's
+own second pass would). A step the driver would refuse is left as it came (the driver then refuses the whole batch
+before running any of it), and argument spellings no guard reads (key names, scroll deltas) are left to the driver.
+A batch over the driver's 64 items is refused on the list as sent, before trailing reads are folded, as the driver
+does. Numbers in strings are read in one linear pass, and a number field holding a string over 64 characters is
+refused (the driver would still read a zero-padded one). A call the hub can't normalise isn't passed on.
+
 **Every way in has the same guards.** Before the hub, Claude Code's bridge held
 the one-controller rule, the Chrome guard and bounded mode's launch rewrite, and
 `metacomputer call` skipped all of them: a session's logs showed it doing a whole
@@ -360,12 +377,28 @@ the hub, and the hub applies, to each one:
   hub doesn't have is refused whatever else the call names (a non-Chrome window or
   app name next to it proves nothing about the token), and so are a window id the
   driver doesn't list (`window_unknown`) and a pid, window id and token that
-  don't all belong to one app (`target_conflict`). A `run_steps` step that names
-  no window is judged by the window it inherits from the last step that named one
-  (or the batch's), as the driver runs it;
+  don't all belong to one app (`target_conflict`). A `run_steps` step is judged by
+  the window the driver runs it in, by the driver's own rules (`step_targets`): the
+  batch's window, then the last window a step's own pid, window_id, app or window
+  named, or a `wait_for` named (or an `expect` on a step that is only a check); a read
+  written as a step between actions changes nothing, an `expect` on an action step
+  changes nothing, and a nested `target: {kind: "window", pid, window_id}` counts for
+  its own step (with the inherited window beside it, which the driver adds) but isn't
+  passed on. Where a step could run in more than one window, Chrome among them counts.
+  A window named by app or title is resolved against the live window list by the
+  driver's own rules (a case-folded substring of the app name or title, on-screen
+  windows first): when Chrome is among the windows it could be, or it matches none
+  the hub can see, it counts as Chrome (`set_value` doesn't take a nested target,
+  and `run_script` can't run inside `run_steps`). Titles change while a batch runs
+  and the driver matches the name again at each step, so a window named by title
+  without a numeric `pid` or `window_id` counts as Chrome whenever a Chrome window
+  is open; a list the hub can't read whole (windows skipped, a name or title past
+  its length cut) counts as Chrome too. A Chrome window that opens during a batch
+  isn't seen until the next call;
 - bounded mode's launch rewrite, its refusal events and the end of a bounded
   session (every client attached to it has to reconnect);
 - the coordinate guard (below);
+- human pacing for browser windows ([below](#human-mode-and-human-pacing-browser_pacing)), after every guard;
 - a handoff ([below](#handing-the-computer-to-you-metacomputer-handoff)): while the user has the
   computer, every acting call waits, from every client, the session that asked included;
 - the action log's notes (which client made each call) and the event stream.
@@ -449,8 +482,16 @@ edge), a click on a dialog's button or the window's own control named by role
 and name (OK, Cancel, Save, …, Maximize, Minimize, Restore), Escape, or keys
 with Super, Alt or Meta, a function key (F11 is full screen) or
 Ctrl+N/W/Q/O/S/P. Run the steps up to that one, take a fresh screenshot, and
-send the pixel steps in a new batch. `COORD_GUARD=off` leaves only the driver's
-own checks.
+send the pixel steps in a new batch. A batch pixel step is checked against the
+window the driver runs it in, by the same model as the Chrome guard and human
+pacing (`step_windows`: what a `wait_for` or a step before it named, not a read
+written as a step); a nested target with an inherited window beside it must hold
+for both, and a step that could be in several windows, one of them named only by
+app or title the hub can't resolve, is refused (code `pixel_window_unclear`); one
+named by app or title is checked against the window the driver would pick, and
+refused the same way when the hub can't read the window list whole. The
+live layout is read again for each call it checks. `COORD_GUARD=off` leaves only the driver's own
+checks.
 
 **Where it ends:**
 - The socket and the uid checks keep out other users of this Mac. They don't keep
@@ -501,6 +542,45 @@ own checks.
   Code it's held like `metacomputer sh`'s: in the name of the shell that ran it,
   kept for the activity window after the last call even when that shell exits,
   and the same controller for later calls from the same terminal session.
+
+## Human mode and human pacing (`BROWSER_PACING`)
+
+Sign-ins, sign-ups, checkout, account settings and posting go through human mode by default: the VM's regular
+Firefox, or Chrome started with `launch_app`, driven with real pointer clicks and foreground keys
+([BROWSER.md](skills/metacomputer/BROWSER.md#account-pages-human-mode-first)). Page-mode Chrome is launched with
+the driver's DevTools route, which sites can detect and treat as automated (one site gave it a degraded sign-in
+that never sent its email). This is about getting the ordinary flow on the user's own accounts and testing a site
+as a person meets it. It isn't a protection, and it isn't a way past bot defences:
+- no fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services;
+- a CAPTCHA or "prove you're human" check still goes to you, through `metacomputer handoff`
+  ([below](#handing-the-computer-to-you-metacomputer-handoff)).
+
+**Human pacing (`BROWSER_PACING=human`, the default).** The hub (`lib/pacing.py`) paces `type_text` and
+`run_steps` calls aimed at a Firefox or Chrome window, for every client, after every guard has passed the call.
+It changes only the call's delays (`delay_ms`: a random 60-140 ms per key, 120-320 ms between batch steps),
+splits a long text typed into the focus into two or three typing runs (never a step that names its field, by role
+and name or label, token or x,y, or its window by app or title: each run would resolve it again), and adds `move_cursor` steps (desktop scope, the real
+pointer) toward a pixel click that has no `wait_for`; nothing else in the call changes, and a `delay_ms` the call
+sets is kept. Every added step also waits the batch's pause, the caller's own included, and that counts: at most
+15 s is added per call, and a batch whose own steps, pauses and typing pauses leave no room under the driver's 60 s
+limit isn't paced. From a step aimed at another app, the desktop or a target the hub can't tell, or a check naming
+another app (by name, title, or pid and window_id), nothing more is split or added. Other apps aren't paced; `BROWSER_PACING=fast` sends everything as it came.
+What it keeps:
+- **No values in new places.** `hub.log` gets each plan as counts and milliseconds, never text. The action log
+  records the call as sent to the driver: with `ACTION_LOG_TEXT=redact` a text split into runs shows as two or
+  three redacted runs with their lengths (split at random places), instead of one.
+- **The vault isn't paced.** Fills type on the vault's own path (SSH to the VM), never through the hub.
+- **The added moves aren't guarded.** They're the hub's own, aimed between where the pointer is and the point
+  the coordinate guard already checked; they move the pointer and press nothing, but a page can react to the
+  pointer passing over it (a hover menu). Bounded mode gets the delays but no moves (a manifest may not list
+  `move_cursor`).
+
+**Kept profiles.** `metacomputer browser profiles --new` and `--delete` work inside the VM through
+`lib/guest_profiles.py`: the profiles folder is reached from the home folder without following a link (a link
+anywhere on the way is refused), a profile is only ever a real folder directly inside it, named by letters, digits,
+`.`, `_` and `-`, and it's deleted by descriptor without following links inside it. A profile a running browser
+uses (`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome; a relative path counted
+from that browser's own working folder) isn't deleted.
 
 ## The live view (`metacomputer view`)
 

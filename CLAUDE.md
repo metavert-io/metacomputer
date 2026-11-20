@@ -41,7 +41,11 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   focus with a fresh read. Details: `skills/metacomputer/SKILL.md` ("How to
   drive it") and `DESKTOP.md` (with its error table).
 - Browsers: Firefox is the default; Chrome is installed. Modes and steps
-  (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Never
+  (human / page / hybrid) are in `skills/metacomputer/BROWSER.md`. Sign-in, sign-up, checkout,
+  account settings and posting go through human mode first (sites can flag page-mode Chrome as automated); no
+  fingerprint spoofing, stealth plugins or CAPTCHA services, ever. Human pacing (`BROWSER_PACING=human`,
+  `lib/pacing.py`) runs in the hub after every guard: it may change only delays and add pointer moves, and never
+  puts typed text in a log. Never
   send background input or `set_value` to Chrome (the hub enforces it);
   `metacomputer input-reset` if Chrome ignores typing.
 - Logins, 2FA codes and API keys: never ask for or type passwords, codes, keys or
@@ -63,11 +67,13 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   all go through it, and it applies every guard to every client: one controller
   (check and claim under `owners.lock()`, a lease for calls a client left
   running), the Chrome guard, bounded mode, the coordinate guard
-  (`COORD_GUARD`), action-log notes, events. A refusal from any of them is the
+  (`COORD_GUARD`), human pacing (`BROWSER_PACING`), action-log notes, events. A refusal from any of them is the
   user's control: report it, never route around it (`call`, a script,
   `MCOMP_DIRECT_BRIDGE=1`, the shell). The raw driver connection is for the hub
   and transport tests only (`MCPClient(transport_test=True)`). New guards go in
-  the hub, never in one client. The VM is untrusted: keep the hub's frame limits,
+  the hub, never in one client, and read the call `lib/batch_steps.py` normalised at the hub's entry (the driver's
+  own step shorthand, aliases and string scalars, mirrored for the pinned driver: re-check it on a driver update).
+  The VM is untrusted: keep the hub's frame limits,
   per-client backlogs and caps on what the driver can make it keep, parse wire
   JSON and drain stderr with `lib/wirelimits.py`, and escape the VM's text on a
   terminal (`lib/termsafe.py`).
@@ -255,7 +261,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

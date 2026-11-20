@@ -8,7 +8,8 @@ logs, event logs and benchmark results where present, and reports:
   acted again without checking;
 - the same failure class repeating within a session;
 - time per app on the virtual computer;
-- retries that changed approach on one app without re-checking the premise.
+- retries that changed approach on one app without re-checking the premise;
+- sessions that signed in through page-mode Chrome (page tools plus `secrets fill|login` or a sign-in handoff).
 
 What it keeps is structured only: tool names, failure and refusal classes (matched by fixed patterns,
 never copied), counts, durations, app names matched against a fixed list, and labels made from the
@@ -35,6 +36,12 @@ READS = {"list_apps", "list_windows", "get_window_state", "get_desktop_state", "
 NEUTRAL = {"start_recording", "stop_recording", "end_session", "set_config", "check_for_update",
            "install_extension", "clipboard_read"}
 KEYS = {"type_text", "press_key", "hotkey"}
+# Page-mode Chrome (driven through the DevTools route) and the CLI commands that mark a sign-in: a session with
+# both signed in through page mode (the `human-signin` lesson). Only the fact is kept, never the command's text.
+PAGE_TOOLS = {"browser_prepare", "browser_navigate", "browser_click", "browser_type", "browser_select",
+              "browser_dialog", "browser_pointer"}
+SIGNIN_CMD = re.compile(r"(?:^|[\s/;&|(])(?:metacomputer|mcomp)\s+(?:--vm\s+[A-Za-z0-9._-]+\s+)?"
+                        r"(?:secrets\s+(?:fill|login)\b|handoff\b[^\n;&|]{0,200}?--why[ =](?:login|2fa|captcha)\b)")
 ELEMENT_KEYS = ("element_token", "element_index", "role", "name", "target", "selector", "element", "ref", "label")
 MODES = {"foreground", "background"}
 SCOPES = {"desktop", "window", "screen"}
@@ -310,8 +317,8 @@ def mine_transcript(tr, source, label):
          "driver_calls": 0, "failed": 0, "classes": collections.Counter(), "warnings": collections.Counter(),
          "tool_classes": collections.Counter(),
          "examples": collections.defaultdict(list), "repeats": {}, "churn": [], "unverified": 0,
-         "acted_without_check": 0, "time": collections.defaultdict(lambda: {"model_s": 0.0, "tool_s": 0.0, "calls": 0,
-                                                                              "failed": 0}),
+         "acted_without_check": 0, "page_tools": False, "signin": False,
+         "time": collections.defaultdict(lambda: {"model_s": 0.0, "tool_s": 0.0, "calls": 0, "failed": 0}),
          "cost_usd": tr.final.get("total_cost_usd") if isinstance(tr.final.get("total_cost_usd"), (int, float)) else None}
     apps = AppMap()
     last_app = None
@@ -320,6 +327,7 @@ def mine_transcript(tr, source, label):
         tool = c["tool"]
         if tool:
             s["driver_calls"] += 1
+            s["page_tools"] = s["page_tools"] or tool in PAGE_TOOLS
             app = apps.app_for(tool, c["input"]) or last_app or "Desktop"
             if tool in ("launch_app", "list_windows", "get_window_state", "bring_to_front"):
                 apps.learn(tool, c["input"], c["text"] if not c["error"] else "")
@@ -345,6 +353,7 @@ def mine_transcript(tr, source, label):
             subs = transcripts.CLI_SUB.findall(cmd)
             if not subs:
                 continue
+            s["signin"] = s["signin"] or bool(SIGNIN_CMD.search(cmd[:4000]))
             app = SHELL if any(x in ("sh", "ssh") for x in subs) else CLI_APP
             per_ctx[c["ctx"]].append((i, c, app))
             bucket = s["time"][app]
@@ -645,6 +654,7 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
             if len(r["examples"]) < 6:
                 r["examples"].append(f"{m['label']} ({k}x)")
     churn = [dict(e, session=m["label"]) for m in mined for e in m["churn"]]
+    page_signin = [m["label"] for m in mined if m.get("page_tools") and m.get("signin")]
     time_by = collections.defaultdict(lambda: {"model_s": 0.0, "tool_s": 0.0, "calls": 0, "failed": 0, "sessions": 0})
     for m in mined:
         for app, b in m["time"].items():
@@ -682,6 +692,7 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
                     "by_class": sorted(({"class": c, "label": LABELS.get(c, c), **v} for c, v in rep_by.items()),
                                        key=lambda x: (-x["sessions"], -x["max"]))},
         "churn": {"episodes": len(churn), "sessions": len({e["session"] for e in churn}), "examples": churn[:8]},
+        "page_signin": {"sessions": len(page_signin), "examples": page_signin[:6]},
         "time": {"vm_minutes": round(total_s / 60, 1), "model_share": round(model_s / total_s, 3) if total_s else 0,
                  "by_app": by_app},
         "action_logs": {"files": action["files"], "calls": action["calls"], "errors": action["errors"],

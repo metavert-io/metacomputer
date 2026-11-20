@@ -317,6 +317,12 @@ against 20.2 turns, no refusals; per-task records in
   that connects later gets a new driver connection (each connection used to
   have its own session).
 - **The coordinate guard** (`COORD_GUARD=on`, below).
+- **Human pacing** (`BROWSER_PACING=human`; `lib/pacing.py`, SECURITY.md "Human mode and human pacing"): last,
+  after every guard passed an acting call, a `type_text` or `run_steps` aimed at a Firefox or Chrome window (by the
+  same target rules as the Chrome guard) gets the driver's own pauses (`delay_ms` per character and between steps,
+  random within fixed ranges), a long text in a batch split into two or three runs, and `move_cursor` steps
+  (desktop scope) toward a pixel click, whose screen point comes from the coordinate guard's layout of the
+  screenshot it was aimed from and the live window list. At most 15 s per call; `hub.log` gets counts only.
 - **Hidden page text** (`HIDDEN_TEXT=on`; `lib/hidden_text.py`, SECURITY.md "Hidden page text"): for a
   window read whose client wants markdown, the hub asks the driver for the element list too
   (`tree_format` `both`), reads hidden rows off their frames (and Chrome snapshots' visibility),

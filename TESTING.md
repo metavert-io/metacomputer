@@ -704,6 +704,13 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_guest_profiles.py`: `lib/guest_profiles.py`, which makes and deletes browser profile
+  folders inside the VM (`metacomputer browser profiles --new|--delete`), run against a temporary home and a
+  stand-in `/proc`. A profiles folder that is a link (to the home folder), a link further up the way, and a profile
+  that is a link are refused with nothing outside touched; a running Firefox with `--profile DIR`, `-profile DIR`,
+  `--profile=DIR`, another spelling of the path or a relative path from its own working folder, and Chrome with
+  `--user-data-dir`, block the delete; bad names
+  are refused; a delete removes the profile without following a link inside it.
 - `python3 tests/test_guest_import.py` (54 checks; needs ffmpeg): files copied from the
   VM (`lib/guest_import.py`). A fake `ssh` and Lume stand in for a hostile VM whose tar
   stream holds a link named `x-contact.png` pointing at a Mac file, a FIFO, a hard link,
@@ -1028,7 +1035,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (213 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (285 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1091,6 +1098,45 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   by then keeps it);
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
+- human pacing (`BROWSER_PACING`, `lib/pacing.py`): `type_text` into Firefox and Chrome gets a pause between
+  characters within 60-140 ms that varies from call to call, Mousepad gets none, a `delay_ms` the caller set
+  (0 too) is kept, and a 1,000-character text adds at most 15 s; a batch into Firefox gets a pause between
+  steps, its text typed in runs (each with its own pause) that put it back together exactly, pointer moves at
+  desktop scope toward a pixel click inside the box from the pointer to the target, the `expect` kept on the last
+  run, and a note saying steps were added; a Mousepad batch goes as sent; a 1,800-character batch stays within the
+  cap; `hub.log` gets counts, never the typed text; `BROWSER_PACING=fast` sends every call as it came; bounded
+  mode gets delays but no moves. A caller's own `delay_ms` counts against the caps (10 clicks 2 s apart go as they
+  came; 100 batches with caller pauses stay within 15 s and the driver's limit); text whose step names its field
+  or its window by app is typed in one run; no pointer moves before a click with a `wait_for`; a nested
+  `target: {kind: "window", …}` counts as that window; after a check naming another app (by name or by pid and
+  window_id) nothing more is paced; the typing pauses a batch's steps set themselves count (250 characters at
+  200 ms leave no room); a field named by `label` is typed in one run. The Chrome guard reads nested window
+  targets: direct `type_text` and `click` and a batch with no default window go in the foreground with the input
+  reset; a nested target on another app is left alone.
+- the driver's own call forms (`lib/batch_steps.py`): its lists (batchable tools, tool aliases, key names as tools,
+  symbol names, shifted symbols, renamed tools) are pinned against copies of driver 0.53.0's, each one and every step
+  form becomes the canonical step, which is a fixed point; through the hub, each shorthand form and alias aimed at
+  Chrome by a nested target goes in the foreground with the input reset, `set` to Chrome is refused, the old names
+  `type_text_chars` and `run_actions` are guarded as type_text and run_steps, typing pauses written as `{type: ...}`
+  or a string count in pacing's budget, a mixed batch of shorthand forms is paced and guarded step by step, and
+  `triple_click` and pixels sent as strings reach the coordinate guard. (Against the hub of dba0af9 these fail.)
+  Rewrites chain to a fixed point (a key name, hotkey or press alias with a symbol key ends as type_text: 1,007
+  cases); 200,000-digit near-numbers are read in linear time and strings over 64 characters aren't tried; a batch over
+  64 items is refused on the list as sent, before folding, by the normaliser and by the hub.
+- the window a batch step inherits, as the driver decides it: a read of Mousepad between a Chrome action and an
+  untargeted set_value changes nothing (refused), a check-only wait_for or expect naming Chrome moves later steps
+  there (set_value refused, typing in the foreground), a wait_for on the step itself moves that step, a nested
+  target on Mousepad isn't passed on, and an expect on an action step changes nothing.
+- the coordinate guard on that same model: a pixel click after a check-only wait_for that moved to another window,
+  and after a skipped read, is checked against the window the driver uses (resized: refused); a nested-target pixel
+  click must hold for its target and the inherited window; one that could be in several windows, one named only by
+  app no window has, is refused (`pixel_window_unclear`); one in a window named by app is checked against the
+  window the driver picks; a live layout kept from a refused call doesn't vouch for the next.
+- targets named by app or title, resolved like the driver: set_value in a window named by an app name or a title
+  that matches Chrome's, by a name several apps match (Chrome among them), by one no window has, or after a
+  check-only wait_for naming Chrome's title, is refused, and typing there goes in the foreground; a name that
+  resolves only to Mousepad is left alone; zero-padded pid, window_id, x and y over 64 characters are refused.
+  (Without the hub's pacing call these checks fail.)
 - bounded mode: `launch_app` by path; when the session ends its clients stay
   ended and a later client gets a new driver connection;
 - the action log through the hub (the real relay in front of the stand-in): one

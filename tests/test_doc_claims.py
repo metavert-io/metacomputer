@@ -114,6 +114,7 @@ with clean_env():
     import hub_notes  # noqa: E402
     import mcp_hub  # noqa: E402
     import owners  # noqa: E402
+    import pacing  # noqa: E402
     import vm_claude  # noqa: E402
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
@@ -575,7 +576,210 @@ def no_web_apps_match():
 
 # --- the table -------------------------------------------------------------------------------------------------
 # (document, phrase that must be in it, check(match) -> bool or (bool, detail)). Keep rows short: one promise each.
+def pacing_after_guards():
+    """The hub paces a call only after the coordinate guard and the Chrome guard passed it, and only browser
+    windows (Firefox, Chrome), with nothing else in the call changed."""
+    c = raw("lib/mcp_hub.py")
+    body = c[c.index("    def on_tools_call("):c.index("    def session_for(")]
+    order = [body.find(x) for x in ("self.coord_guard(", "self.chrome_guard(", "self.pace(name, args, sess)",
+                                    "with owners.acting():")]
+    rx = mcp_hub.BROWSER_RE
+    return all(i > 0 for i in order) and order == sorted(order) and bool(rx.search("firefox")) \
+        and bool(rx.search("Google-chrome")) and not rx.search("Mousepad") and not rx.search("libreoffice")
+
+
+def pacing_keeps_text_and_own_delay():
+    """A plan never carries text, hub.log gets only the plan's description, the text a batch types is put back
+    together exactly, and a delay_ms the call sets is kept."""
+    text = "Doc-Claims-Typed-Text-5521 with more words"
+    a = {"steps": [{"tool": "type_text", "args": {"text": text}}, {"click": {"x": 10, "y": 10}}]}
+    plan = pacing.pace_batch(a, {0, 1}, {1: ((900, 700), (10, 10))}, pacing.rng(3))
+    typed = "".join(pacing.step_parts(st)[1].get("text", "") for st in a["steps"]
+                    if pacing.step_parts(st)[0] == "type_text")
+    own = {"text": "abc", "delay_ms": 0}
+    own_batch = {"delay_ms": 0, "steps": [{"tool": "type_text", "args": {"text": "abc", "delay_ms": 0}}]}
+    hub = raw("lib/mcp_hub.py")
+    return (plan and text not in json.dumps(plan) and text not in pacing.describe(plan) and typed == text
+            and pacing.pace_type(own, pacing.rng(1)) is None and own == {"text": "abc", "delay_ms": 0}
+            and pacing.pace_batch(own_batch, {0}, {}, pacing.rng(1)) is None
+            and 'self.note(pacing.describe(plan), kind="pacing")' in hub
+            and "moves_on = not self.bounded_mode" in hub)
+
+
+def caller_pause_counted():
+    """A caller's own run_steps delay_ms counts: ten pixel clicks 2 s apart get nothing added (each added step would
+    wait 2 s too, past the cap), while the same batch without a pause gets pointer moves."""
+    def batch(own):
+        b = {"steps": [{"click": {"x": 10 * i, "y": 10}} for i in range(10)]}
+        if own is not None:
+            b["delay_ms"] = own
+        return b
+    b = batch(2000)
+    keep = json.dumps(b)
+    none = pacing.pace_batch(b, set(range(10)), {i: ((1900, 1000), (10 * i, 10)) for i in range(10)}, pacing.rng(1))
+    plain = pacing.pace_batch(batch(None), set(range(10)), {i: ((1900, 1000), (10 * i, 10)) for i in range(10)},
+                              pacing.rng(1))
+    return none is None and json.dumps(b) == keep and bool(plain and plain["moves"])
+
+
+def normaliser():
+    import batch_steps
+    return batch_steps
+
+
+def function_src(rel, name):
+    text = raw(rel)
+    i = text.index(f"\ndef {name}(")
+    j = text.find("\ndef ", i + 1)
+    return text[i:j if j > 0 else len(text)]
+
+
+def refuses_over_limit():
+    b = normaliser()
+    try:
+        b.normalize_batch({"steps": [{"type": {"text": "x"}}] + [{"tool": "screenshot"}] * b.MAX_STEPS}, {})
+    except b.Refused:
+        return True
+    return False
+
+
+def normalised_first():
+    """The hub normalises a call (lib/batch_steps.py, for the pinned driver) before every guard and sends that call;
+    one it can't normalise isn't passed on."""
+    import batch_steps
+    c = raw("lib/mcp_hub.py")
+    body = c[c.index("    def on_tools_call("):c.index("    def session_for(")]
+    order = [body.find(x) for x in ("batch_steps.normalize_call(", "self.check_and_claim(", "self.coord_guard(",
+                                    "self.chrome_guard(", "self.pace(name, args, sess)", "self.forward(client, msg")]
+    return (batch_steps.DRIVER_VERSION == D["CUA_DRIVER_VERSION"] and all(i > 0 for i in order)
+            and order == sorted(order) and "couldn't read this call's arguments the way the driver" in body
+            and 'name = params["name"] = batch_steps.tool_name(name)' in body)
+
+
+def own_typing_counted():
+    """The typing pauses a batch's own steps set count against the driver's limit: 250 characters at 200 ms, then
+    250 more to pace, leave no room, so the batch goes as it came."""
+    b = {"steps": [{"tool": "type_text", "args": {"text": "a" * 250, "delay_ms": 200}},
+                   {"tool": "type_text", "args": {"text": "b" * 250}}]}
+    keep = json.dumps(b)
+    return pacing.pace_batch(b, {0, 1}, {}, pacing.rng(1)) is None and json.dumps(b) == keep
+
+
+def profiles_deleted_in_the_vm():
+    """`browser profiles --new|--delete` go through lib/guest_profiles.py in the VM (no rm -rf on a path), which
+    opens the way with O_NOFOLLOW and deletes a direct child by descriptor."""
+    fn = function_text("do_browser")
+    g = raw("lib/guest_profiles.py")
+    return ("lib/guest_profiles.py" in fn and "rm -rf" not in fn and "os.O_NOFOLLOW" in g
+            and "shutil.rmtree(name, dir_fd=root)" in g and "follow_symlinks=False" in g)
+
+
+def vault_types_on_its_own_path():
+    """The vault reaches the VM with /usr/bin/ssh itself; nothing in vault/ talks to the hub."""
+    files = [f for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift")]
+    return '"/usr/bin/ssh"' in raw("vault/Guest.swift") and not any(
+        re.search(r"mcp_hub|hub/sock|mcomp-hub", raw(f"vault/{f}")) for f in files)
+
+
 CLAIMS = [
+    ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
+     lambda m: "def resolve_named(self, spec):" in raw("lib/mcp_hub.py")
+     and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")
+     and "(any(hits) if strict else all(hits))" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"a window named by title\s+without a numeric `pid` or `window_id` counts as Chrome whenever a Chrome window\s+is open",
+     lambda m: "(titled and any(rx.search(w[\"app\"]) for w in ws))" in raw("lib/mcp_hub.py")
+     and "not self.named_complete()" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"refused the same way when the hub can't read the window list whole",
+     lambda m: "if pool is not None and not self.named_complete():" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A batch pixel step is checked against the window the driver runs it in, by the same model as the "
+                    r"Chrome guard and human pacing \(`step_windows`",
+     lambda m: "wins = {i: w for i, _t, _a, w in self.step_windows(args)}" in raw("lib/mcp_hub.py")
+     and "self.step_windows(args)]" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"is refused \(code `(pixel_window_unclear)`\)", lambda m: mcp_hub.UNCLEAR_CODE == m[1]),
+    ("SECURITY.md", r"The live layout is read again for each call it checks",
+     lambda m: "self._live = (0.0, -1, None)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A `run_steps` step is judged by the window the driver runs it in, by the driver's own rules "
+                    r"\(`step_targets`\)",
+     lambda m: "self.step_targets(args, CHROME_RE)" in raw("lib/mcp_hub.py")
+     and "self.step_targets(args, BROWSER_RE, strict=False)" in raw("lib/mcp_hub.py")
+     and "(acts and reads[i] is not None)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"A batch over the driver's (\d+) items is refused on the list as sent, before trailing reads are folded",
+     lambda m: int(m[1]) == normaliser().MAX_STEPS and refuses_over_limit()),
+    ("SECURITY.md", r"Numbers in strings are read in one linear pass, and a number field holding a string over (\d+) "
+                    r"characters is refused",
+     lambda m: int(m[1]) == normaliser().MAX_SCALAR and "re.compile" not in function_src("lib/batch_steps.py", "_float_text")
+     and "re.compile" not in function_src("lib/batch_steps.py", "_int_text")),
+    ("SECURITY.md", r"rewrites are applied until nothing changes, as the driver's own second pass would",
+     lambda m: normaliser().normalize_step({"tool": "enter", "args": {"key": "*"}}, {})
+     == {"tool": "type_text", "args": {"text": "*"}}),
+    ("SECURITY.md", r"So the hub normalises each call once, as it arrives, with a copy of the driver's own rules for the "
+                    r"pinned version \(`lib/batch_steps\.py`\), before any guard",
+     lambda m: normalised_first()),
+    ("SECURITY.md", r"A call the hub can't normalise isn't passed on", lambda m: normalised_first()),
+    # Human mode and human pacing (lib/pacing.py, the hub's BROWSER_PACING)
+    ("SECURITY.md", r"\*\*Human pacing \(`BROWSER_PACING=human`, the default\)\.\*\*",
+     lambda m: D["BROWSER_PACING"] == "human" and mcp_hub.settings_of({})["browser_pacing"] == "human"
+     and pacing.mode({}) == "human" and pacing.mode({"MCOMP_BROWSER_PACING": "fast"}) == "fast"),
+    ("SECURITY.md", r"for every client, after every guard has passed the call", lambda m: pacing_after_guards()),
+    ("SECURITY.md", r"a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between batch steps",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))),
+    ("SECURITY.md", r"at most (\d+) s is added per call, and a batch whose own steps, pauses and typing pauses leave no "
+                    r"room under the driver's (\d+) s limit isn't paced",
+     lambda m: pacing.CAP_S == int(m[1]) and pacing.BATCH_LIMIT_S == int(m[2]) and own_typing_counted()),
+    ("SECURITY.md", r"never a step that names its field, by role and name or label, token or x,y, or its window by app or title",
+     lambda m: {"role", "name", "label", "element_token", "x", "y", "app", "window"} <= set(pacing.ELEMENT_TARGET_KEYS)),
+    ("SECURITY.md", r"or a check naming another app \(by name, title, or pid and window_id\), nothing more is split or added",
+     lambda m: 'if window(wf):' in raw("lib/mcp_hub.py") and "elif limit is None:" in raw("lib/mcp_hub.py")
+     and '"pid", "window_id", "app", "window"' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"a relative path counted from that browser's own working folder\) isn't deleted",
+     lambda m: 'os.readlink(os.path.join(proc, pid, "cwd"))' in raw("lib/guest_profiles.py")),
+    ("SECURITY.md", r"a nested `target: \{kind: \"window\", pid, window_id\}` counts for its own step \(with the inherited "
+                    r"window beside it, which the driver adds\) but isn't passed on",
+     lambda m: mcp_hub.names_target({"target": {"kind": "window", "pid": 7, "window_id": 9}})
+     and mcp_hub.window_keys({"target": {"kind": "window", "pid": 7, "window_id": 9}})["pid"] == 7
+     and "args = window_keys(args)" in raw("lib/mcp_hub.py")
+     and 'elif t is not None and t.get("kind") == "window" and window(t):' in raw("lib/mcp_hub.py")
+     and not mcp_hub.names_target({"target": {"kind": "desktop", "display_id": "primary"}})),
+    ("SECURITY.md", r"`hub\.log` gets each plan as counts and milliseconds, never text",
+     lambda m: pacing_keeps_text_and_own_delay()),
+    ("SECURITY.md", r"Fills type on the vault's own path \(SSH to the VM\), never through the hub",
+     lambda m: vault_types_on_its_own_path()),
+    ("SECURITY.md", r"no fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services",
+     lambda m: "no fingerprint spoofing, stealth plugins or CAPTCHA services" in doc("CLAUDE.md")
+     and "No fingerprint spoofing, stealth plugins or anti-detection patches, and no CAPTCHA-solving services"
+     in doc("skills/metacomputer/BROWSER.md")),
+    ("skills/metacomputer/BROWSER.md", r"`delay_ms`\), a random (\d+)-(\d+) ms per call",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2]))),
+    ("skills/metacomputer/BROWSER.md", r"a pause between steps \(`delay_ms`, (\d+)-(\d+) ms\)",
+     lambda m: pacing.STEP_MS == (int(m[1]), int(m[2]))),
+    ("skills/metacomputer/BROWSER.md", r"at most (\d+) s added per call, less in a long batch; a `delay_ms` you set "
+                                       r"yourself is kept, and every added step waits it too",
+     lambda m: pacing.CAP_S == int(m[1]) and pacing_keeps_text_and_own_delay() and pacing_after_guards()
+     and caller_pause_counted()),
+    ("SECURITY.md", r"Every added step also waits the batch's pause, the caller's own included, and that counts",
+     lambda m: caller_pause_counted()),
+    ("SECURITY.md", r"the profiles folder is reached from the home folder without following a link",
+     lambda m: profiles_deleted_in_the_vm()),
+    ("SECURITY.md", r"\(`--profile`, `-profile` or `--profile=` for Firefox, `--user-data-dir` for Chrome;",
+     lambda m: '("--profile", "-profile")' in raw("lib/guest_profiles.py") and '("--user-data-dir",)' in raw("lib/guest_profiles.py")
+     and 'a.startswith(fl + "=")' in raw("lib/guest_profiles.py")),
+    ("skills/metacomputer/BROWSER.md", r"the result starts with a note `(metacomputer hub \(human pacing\):)",
+     lambda m: m[1] == pacing.NOTE_PREFIX and pacing.note_of({"moves": 1}).startswith(pacing.NOTE_PREFIX)),
+    ("skills/metacomputer/BROWSER.md", r"Sign-in, sign-up, checkout, account settings and posting go through human mode",
+     lambda m: "Sign-ins, sign-ups, checkout, account settings and posting: human mode first" in mcp_hub.HABITS),
+    ("skills/metacomputer/SKILL.md", r"Anything account-facing goes through human mode first",
+     lambda m: "Sign-ins, sign-ups, checkout, account settings and posting: human mode first" in mcp_hub.HABITS
+     and D["MODE"] == "human"),
+    ("config/defaults.env", r"\(a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between batch steps",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))),
+    ("config/defaults.env", r"at most (\d+) s added per call\); fast", lambda m: pacing.CAP_S == int(m[1])),
+    ("docs/commands.md", r"\(a random (\d+)-(\d+) ms per key, (\d+)-(\d+) ms between steps, .{0,60}at most (\d+) s "
+                         r"added per call; a `delay_ms` the call sets is kept",
+     lambda m: pacing.KEY_MS == (int(m[1]), int(m[2])) and pacing.STEP_MS == (int(m[3]), int(m[4]))
+     and pacing.CAP_S == int(m[5])),
+    ("CHANGELOG.md", r"\(a random (\d+)-(\d+) ms per call; .{0,90}\(120-320 ms\)|a random (\d+)-(\d+) ms per call",
+     lambda m: pacing.KEY_MS == (int(m[1] or m[3]), int(m[2] or m[4]))),
+    ("CHANGELOG.md", r"At most (\d+) s is added per call", lambda m: pacing.CAP_S == int(m[1])),
     ("README.md", r"Python 3\.11 or later on the Mac\. Apple's own `python3` is 3\.9, so where that's the only one, the install\s+adds Homebrew's",
      lambda m: python_311()),
     ("docs/install.md", r"Python 3\.11 \(or later\) is missing; Apple's own `python3` \(3\.9\) doesn't count", lambda m: python_311()),

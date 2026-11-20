@@ -157,6 +157,11 @@ TEMPLATES = {
                     "target (a screenshot or a query read) and check the premise (the right window, focus, selection "
                     "or edit mode, a dialog already open or closed, a frozen app), then change mechanism one step at "
                     "a time."),
+    "human-signin": ("page_signin", "Sign in in human mode",
+                     "Sign in, sign up, check out and post in human mode (Firefox, or Chrome from launch_app; real "
+                     "clicks, foreground keys), not page-mode Chrome, which sites can flag as automated. A sign-in that "
+                     "looks degraded (no code box, an email that never arrives, extra checks): switch to human mode and "
+                     "retry once. A CAPTCHA still goes to the user (metacomputer handoff)."),
     "app-notes": ("time", "Read {app}'s notes first",
                   "Before working in {app}, read its notes in the metacomputer skill's {file}: it is one of the "
                   "biggest time sinks in your sessions on the virtual computer."),
@@ -219,6 +224,10 @@ def build_proposals(rep, min_count=2):
         ex = [f"{e['session']} #{e['from']}-#{e['to']}" for e in c["examples"]]
         add("route-churn", _evidence(rep, c["episodes"], c["sessions"], "runs of 3+ different routes after a failure",
                                      ex))
+    ps = rep.get("page_signin") or {}
+    if ps.get("sessions", 0) >= 1:
+        add("human-signin", _evidence(rep, ps["sessions"], ps["sessions"], "sign-ins through page-mode Chrome",
+                                      ps.get("examples") or []))
     t = rep["time"]
     for a in t["by_app"]:
         app = a["app"]

@@ -41,7 +41,7 @@ On an identity provider's page, and for a whole-profile session load, every use 
 
 ## Signing in to a site (fill)
 
-Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mode Chrome.
+Fills work only in page-mode Chrome (`browser_prepare`), not Firefox or human-mode Chrome; fills in human mode are coming with the one-time codes change. Until then, on a site that flags page-mode Chrome as automated, the user signs in once in human mode instead ([BROWSER.md](BROWSER.md), "Sign in once, stay signed in").
 
 1. Open the sign-in page in page mode (`browser_prepare`, `browser_navigate`).
 2. Focus the field with a trusted click: `browser_click {ref, delivery_mode: "foreground"}`. A `dom_event` click may not focus it.

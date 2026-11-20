@@ -814,10 +814,12 @@ export_options() {
          MCOMP_VM_EVENTS_SPOOL="${EVENTS_SPOOL:-}"   # this VM's spool (empty: lib/events.py's default)
   # Dialogs on this Mac that wait for the user (a handoff's "Open live view"): off unless the user turned them on.
   export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
-  # The hub (lib/mcp_hub.py), its coordinate guard and its hidden-text marks. MCOMP_MCP_HUB / MCOMP_COORD_GUARD /
-  # MCOMP_HIDDEN_TEXT already in the environment win over the config (the benchmark's switches).
+  # The hub (lib/mcp_hub.py), its coordinate guard, its hidden-text marks and its human pacing (lib/pacing.py).
+  # MCOMP_MCP_HUB / MCOMP_COORD_GUARD / MCOMP_HIDDEN_TEXT / MCOMP_BROWSER_PACING already in the environment win
+  # over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
-         MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}"
+         MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}" \
+         MCOMP_BROWSER_PACING="${MCOMP_BROWSER_PACING:-${BROWSER_PACING:-human}}"
   # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
   # lessons switch, an isolated store for tests).
   export MCOMP_LESSONS="${MCOMP_LESSONS:-${LESSONS:-on}}" MCOMP_LESSONS_DIR="${MCOMP_LESSONS_DIR:-${LESSONS_DIR:-}}"
