@@ -118,6 +118,8 @@ The hub spots the common checks too: a read whose note says `metacomputer hub: b
 ## Also available
 
 - **Claude inside the VM** ("Claude inside the metacomputer", "run Claude Code in the VM"): `metacomputer claude --token NAME [--show]` installs and starts Claude Code there, signed in through the vault's proxy (the key stays on the Mac); drive it with `metacomputer claude send "PROMPT" --wait` and `claude read`, never by typing into its window; `claude renew` before its token runs out; `claude stop --revoke` when done. Read [SECRETS.md](SECRETS.md#claude-code-inside-the-vm-metacomputer-claude) first.
+- **Browser work beyond clicking:** `metacomputer web debug|read|gpu URL`, `web responsive URL --device ...`, precise Firefox tools (`web page`), and turning a flow into a Playwright test (`metacomputer trace`): [BROWSER.md](BROWSER.md).
+- **Several VMs at once:** `metacomputer each a,b -- COMMAND` runs one command on each (`main` is this VM).
 - **Checkpoints:** `metacomputer checkpoint NAME` while the VM is stopped; `checkpoints` lists them; `restore NAME` needs the user's OK.
 - **Testing a web app the user is building** (the VM can't reach the Mac): `metacomputer put` its static files, serve them with `metacomputer sh -c 'cd ~/Inbox/DIR && setsid -f python3 -m http.server 8000 </dev/null >/dev/null 2>&1'`, open `http://localhost:8000`.
 - **The VM without the GUI:** `metacomputer inspect [system|windows|processes|ports|files|browser] [--json]`, read-only, fine while another session controls it.

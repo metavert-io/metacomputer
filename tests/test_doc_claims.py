@@ -1699,6 +1699,18 @@ CLAIMS = [
     ("SECURITY.md", r"with the kind only, never page text",
      lambda m: 'return (f"Claude is stopped at {LABEL.get(kind, \'a human check\')}: it needs you to complete it",' in raw("lib/botcheck.py")
      and '{"kind": kind if kind in KINDS else "generic"})' in raw("lib/botcheck.py")),
+    # Browser tools in a browser of their own (lib/page_guest.py), traces (lib/traces.py), each (lib/each.py)
+    ("docs/commands.md", r"page text only in escaped string literals",
+     lambda m: 'return json.dumps(str(s), ensure_ascii=True)' in raw("lib/traces.py")
+     and all(not re.search(r"\{(?!self\.(steps|pixels|skipped)\})[^}]*\}", l) for l in raw("lib/traces.py").splitlines()
+             if re.match(r'\s*(f?")// ', l.strip()) or re.match(r'\s*"//', l))),
+    ("docs/commands.md", r"refuses password and one-time-code fields",
+     lambda m: "el.type === 'password'" in raw("lib/page_guest.py") and "one-time-code" in raw("lib/page_guest.py")),
+    ("CHANGELOG.md", r"the remote control on the VM's loopback only",
+     lambda m: '"--remote-debugging-address=127.0.0.1"' in raw("lib/page_guest.py")
+     and "--remote-allow-hosts" not in raw("lib/page_guest.py") and not re.search(r"[\"'=]0\.0\.0\.0", raw("lib/page_guest.py"))),
+    ("docs/commands.md", r"The same metacomputer command on several VMs at once \(`main` is this checkout's VM\), without a terminal",
+     lambda m: "stdin=subprocess.DEVNULL" in raw("lib/each.py")),
 ]
 
 

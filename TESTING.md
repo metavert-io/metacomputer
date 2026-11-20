@@ -704,6 +704,19 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_traces.py`: the trace recorder (on only while a trace is active, one session or all, capped,
+  0600) and the Playwright export: tokens resolve through the rows of reads, clicks/fills/keys/checks/navigations
+  translate, other apps are left out, and page text written to break out of the code (quotes, newlines,
+  U+2028, backticks, `${}`, `*/`) stays inside escaped literals (the output parses with `node --check` when node is here).
+- `python3 tests/test_page_guest.py`: the page helper's WebSocket client against a stand-in server (masking, long
+  frames, ping, close, a wrong handshake key, loopback only), its cutting of page text and query strings, the Mac's
+  reading of its answer (refusals, a cut-short or malformed answer, screenshots only from the VM's own folder), and
+  `metacomputer each` (in parallel, the highest exit status, its refusals).
+- `MCOMP_CONFIG=... python3 tests/test_web_vm.py` (a test VM started by this checkout): a one-minute allowlist
+  enforced by the gateway (an allowed site loads, an unlisted one and PTR and escaped-name questions don't,
+  widening without a terminal is refused, the list ends on time), web gpu in both browsers, debug, read,
+  responsive --device, the Firefox page tools on the form fixture (and a password field refused), a trace
+  exported as a Playwright test, and the hub's human-check note and refusal.
 - `python3 tests/test_botcheck.py`: `lib/botcheck.py`: each common human check (reCAPTCHA, hCaptcha, Cloudflare's
   widget, wording and "Just a moment..." title, press-and-hold, DataDome, Arkose, Google's "unusual traffic" page)
   is recognised from a window read, pages that only talk about CAPTCHAs aren't, a huge tree is read only so far, and

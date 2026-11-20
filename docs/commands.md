@@ -43,7 +43,14 @@ runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
 | `record start [NAME] [FPS]` / `record stop` / `record status` / `record moments FILE` | Record the whole desktop, streamed to the Mac as it records; its key moments when the action log is on |
 | `recordings [--sync] [N]` | List recent recordings; copy the VM's task runs to the Mac |
 | `contact-sheet MP4 [OUT.png]` | 12 frames of a recording in one image |
-| `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model |
+| `web compare\|responsive\|a11y\|open-untrusted URL [...]` | Browser checks that need no model (`responsive --browser webkit`: GNOME Web, when the VM has it; `responsive --device iphone-15,pixel-8,...`: phone and tablet emulation) |
+| `web gpu [URL] [--browser chrome\|firefox\|both]` | What WebGL and WebGPU a page gets in the VM (software: the VM has no GPU), whether the page asked for a GPU, its GPU-related errors, a screenshot |
+| `web debug URL [--browser B] [--device D] [--keep-query]` | Console messages, uncaught errors, failed and slowest requests, timings, a screenshot |
+| `web read URL [--max-chars N]` | The page's main text as Markdown |
+| `web page open URL [--name N] \| read [--text] \| fill REF VALUE \| select REF OPTION \| click REF \| upload REF GUEST_PATH \| close` | Precise page tools in a Firefox of its own (WebDriver BiDi): controls by ref, exact values, uploads; refuses password and one-time-code fields |
+| `trace start NAME [--session S] \| stop \| list \| show NAME \| delete NAME` | Record a session's browser steps through the hub (`RUN_DIR/traces/`, 0600; at most 24 h and 20 MB) |
+| `trace export NAME [--url URL] [--out FILE]` | The trace as a Playwright test (TypeScript): role/name locators, fills, keys, assertions, navigations; pixel clicks marked; page text only in escaped string literals |
+| `each VM,VM,... -- COMMAND [ARGS]` | The same metacomputer command on several VMs at once (`main` is this checkout's VM), without a terminal; output per VM, exit status the highest |
 | `net [status [--json]]` | What the VM can reach now: the open internet (with config/netgw-rules.json's refusals) or a network allowlist and when it ends |
 | `net allow NAME... [--for D] [--exact]` | With no list in force: start one (anyone, Claude too; 2 h by default, 1 min to 24 h); the VM then reaches only those names (and their subdomains unless `--exact`), enforced by the gateway on this Mac. With one in force: add names or time, at your own terminal only. With the VM running it says the list is in force only when the gateway reports the rules just written (exit 4 otherwise) |
 | `net remove NAME... [--exact]` | Take names off the list in force (anyone) |
@@ -184,7 +191,8 @@ Refused rather than guessed (nothing runs):
 | --- | --- | --- |
 | `VM_NAME`, `BASELINE_NAME` | `metacomputer`, `metacomputer-baseline` | Lume VM names |
 | `VM_CPU`, `VM_MEMORY` | `4`, `8GB` | VM size |
-| `BROWSERS` | `firefox chrome` | Browsers built in; `firefox` alone leaves Chrome out |
+| `BROWSERS` | `firefox chrome` | Browsers built in; `firefox` alone leaves Chrome out; add `webkit` for GNOME Web (WebKitGTK, for visual checks) |
+| `BROWSER_EXTENSIONS` | (none) | Extensions for every Firefox and Chrome profile, at the next build: `ublock` (uBlock Origin; uBlock Origin Lite in Chrome), `consent-o-matic` (says no to cookie banners). Each is fetched at its latest version when the browser first starts. Firefox rejects the cookie banners it knows either way |
 | `EXTRA_PACKAGES` | (none) | More Ubuntu packages, e.g. `inkscape gimp` |
 | `VIRTUAL_AUDIO` | `off` | `on`: a sound card inside the VM that plays into nothing |
 | `SECRETS_PROXY_PORT` | `18765` | The port inside the VM (on its loopback) where the secrets API proxy appears |
