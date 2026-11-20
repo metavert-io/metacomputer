@@ -29,6 +29,7 @@
 #   rename GUEST_PATH NEW_NAME     rename a file in the VM (a download saved under its id)
 #   web compare|responsive|a11y|open-untrusted URL [...]   browser checks, no model needed
 #   net status | allow NAME... [--for 2h] | remove NAME... | clear   a network allowlist for the VM (the gateway)
+#   version [--json] | update [--check] [--restart|--no-restart]   what's installed; update to the latest release
 #   trace start NAME | stop | list | show NAME | export NAME [--out F]   record browser steps; export a Playwright test
 #   each VM,VM,... -- COMMAND [ARGS]    the same metacomputer command on several VMs at once ("main" = this VM)
 #   test [A B C D E F ...]         run the GUI smoke suite (records each test)
@@ -193,7 +194,7 @@ unset mc_hint
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
-case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions) ;; *) vm_target_check ;; esac
+case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions|version) ;; *) vm_target_check ;; esac
 case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
@@ -275,6 +276,7 @@ do_start() { # [--no-volumes]
   # The VM's lock (held already by reset, restore and baseline, which start it): never during a build, a delete
   # (`vm delete` holds it through its prompt) or another change of it.
   vm_lock_or_die "metacomputer start"
+  expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
@@ -434,19 +436,38 @@ mcp_probe() { ( export_options; "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" probe ); }   
 
 # --- the hub (lib/mcp_hub.py): one process per VM holds the connection to the driver -----
 hub_stop() { ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) || true; }
-do_hub() { # [status [--json|--brief] | start | stop | env --json]
+do_runinfo() { # for lib/update.py: this VM's processes and the programs they run, as JSON (no secrets, no VM contact)
+  local state=off gw="" watcher=""
+  vm_running "$VM_NAME" 2>/dev/null && state=running
+  gw="$(netgw_pid)"; [ -n "$gw" ] && ! kill -0 "$gw" 2>/dev/null && gw=""
+  watcher="$(events_watcher_pid)"
+  local exists=1; vm_exists "$VM_NAME" || exists=0
+  # What this VM's guest would be built from (lib/update.py guest_digest), to tell whether a rebuild would add something.
+  MCOMP_G_CUA_DRIVER_VERSION="$CUA_DRIVER_VERSION" MCOMP_G_CUA_DRIVER_SHA256="$CUA_DRIVER_SHA256" \
+  MCOMP_G_UBUNTU_IMAGE="$UBUNTU_IMAGE" MCOMP_G_UBUNTU_RELEASE="$UBUNTU_RELEASE" MCOMP_G_BROWSERS="$BROWSERS" \
+  MCOMP_G_EXTRA_PACKAGES="${EXTRA_PACKAGES:-}" MCOMP_G_BROWSER_EXTENSIONS="${BROWSER_EXTENSIONS:-}" \
+  MCOMP_G_VIRTUAL_AUDIO="${VIRTUAL_AUDIO:-off}" MCOMP_G_GUEST_USER="$GUEST_USER" \
+  MCOMP_G_SECRETS_PROXY_PORT="${SECRETS_PROXY_PORT:-18765}" MCOMP_G_EXISTS="$exists" \
+  MCOMP_G_ADMIN_USER="${ADMIN_USER:-}" MCOMP_G_NET_GATEWAY_IP="${NET_GATEWAY_IP:-}" \
+  MCOMP_G_CONFIG_FILE="${LOCAL_CONFIG:-}" \
+  "$PY" "$LAB_ROOT/lib/update.py" _runinfo-json "$VM_NAME" "$state" "$RUN_DIR" "$NETGW_BIN" "$gw" "$RUN_DIR/hub/hub.pid" "$watcher" \
+    "${VAULT_DIR:-}" "${MC_SETTINGS_KIND:-}"
+}
+
+do_hub() { # [status [--json|--brief] | start | stop [--if-idle] | env --json]
   export_options
   case "${1:-status}" in
     env)    "$PY" -c 'import json, os; print(json.dumps({k: v for k, v in os.environ.items() if k.startswith("MCOMP_")}))' ;;
     status|start|stop) exec "$PY" "$LAB_ROOT/lib/mcp_hub.py" "$@" ;;
     serve)  exec "$PY" "$LAB_ROOT/lib/mcp_hub.py" serve ;;
-    *) die "usage: metacomputer hub [status [--json|--brief] | start | stop]" ;;
+    *) die "usage: metacomputer hub [status [--json|--brief] | start | stop [--if-idle]]" ;;
   esac
 }
 
 do_stop() { # [--force] (immediate power-off) [--override] (even if another session is using it)
   parse_flags "$@"
   local force=""; for a in ${REST[@]+"${REST[@]}"}; do [ "$a" = --force ] && force=--force; done
+  expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   if vm_running "$VM_NAME"; then
     owners_check
@@ -771,6 +792,11 @@ try:                                          # the network allowlist (metacompu
 except Exception as e:
     print(f"network       \033[33mallowlist unreadable\033[0m ({_esc(str(e))[:160]})   (metacomputer net status)")
 print(recording.status_line(out["recordings"]))
+try:                                          # an update that's out (a check at most once a day, in the background)
+    import update as _update
+    _update.status_line()
+except Exception:
+    pass
 print(f"READY         {m(out['ready'])}")
 sys.exit(0 if out["ready"] else 1)
 EOF
@@ -789,7 +815,7 @@ expect_guard() {
     sha="$(shasum -a 256 < "$LOCAL_CONFIG" 2>/dev/null | cut -d' ' -f1)"
     [ "$sha" = "$MCOMP_EXPECT_CONFIG_SHA" ] || why="the settings file $LOCAL_CONFIG changed since it was confirmed (sha256 ${sha:0:12}, confirmed ${MCOMP_EXPECT_CONFIG_SHA:0:12})"
   fi
-  [ -z "$why" ] || die "refusing to replace the VM: $why"
+  [ -z "$why" ] || die "refusing to change the VM: $why"
 }
 
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it
@@ -2235,6 +2261,8 @@ case "$cmd" in
   web)        export_options; exec "$PY" "$LAB_ROOT/lib/browser_tools.py" "$@" ;;
   net)        export_options; net_policy "$@"; exit $? ;;
   trace)      export_options; exec "$PY" "$LAB_ROOT/lib/traces.py" "$@" ;;
+  version|update) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/update.py" "$cmd" "$@" ;;
+  _runinfo)   do_runinfo ;;
   each)       exec "$PY" "$LAB_ROOT/lib/each.py" "$@" ;;
   release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;

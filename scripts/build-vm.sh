@@ -115,6 +115,13 @@ MAC="$(vm_mac "$VM_NAME")"
 SEED="$RUN_DIR/seed"; "$LAB_ROOT/scripts/safe-rmtree.sh" "$SEED" "$RUN_DIR/seed.iso" || die "not deleting the old seed (above)"
 mkdir -p "$SEED/payload"
 cp -R "$LAB_ROOT/provisioning/guest/." "$SEED/payload/"
+guest_env() { MCOMP_G_CUA_DRIVER_VERSION="$CUA_DRIVER_VERSION" MCOMP_G_CUA_DRIVER_SHA256="$CUA_DRIVER_SHA256" \
+  MCOMP_G_UBUNTU_IMAGE="$UBUNTU_IMAGE" MCOMP_G_UBUNTU_RELEASE="$UBUNTU_RELEASE" MCOMP_G_BROWSERS="$BROWSERS" \
+  MCOMP_G_EXTRA_PACKAGES="${EXTRA_PACKAGES:-}" MCOMP_G_BROWSER_EXTENSIONS="${BROWSER_EXTENSIONS:-}" \
+  MCOMP_G_VIRTUAL_AUDIO="${VIRTUAL_AUDIO:-off}" MCOMP_G_GUEST_USER="$GUEST_USER" MCOMP_G_ADMIN_USER="${ADMIN_USER:-}" \
+  MCOMP_G_SECRETS_PROXY_PORT="${SECRETS_PROXY_PORT:-18765}" MCOMP_G_NET_GATEWAY_IP="${NET_GATEWAY_IP:-}" "$@"; }
+# The guest files as this build copied them (recorded once it succeeds: metacomputer version, update).
+GUEST_DIGEST="$(guest_env "$PY" "$LAB_ROOT/lib/update.py" _guest-digest 2>/dev/null || true)"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$SEED/payload/"
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$SEED/payload/mozilla-repo-signing-key.gpg"   # only the pinned key (fetch-artifacts.sh)
 cp "$SSH_DIR/fill.pub" "$SEED/payload/fill.pub"   # the fill account's key (provision.sh installs it under /etc)
@@ -260,6 +267,9 @@ vm_stop "$VM_NAME"
 "$LUME" clone "$VM_NAME" "$BASELINE_NAME"
 rm -f "$RUN_DIR/seed.iso"
 ok "baseline $BASELINE_NAME created"
+# Which version and guest files built this VM (metacomputer version, update: whether a rebuild would add something).
+guest_env "$PY" "$LAB_ROOT/lib/update.py" _record-build "$RUN_DIR" "$GUEST_DIGEST" \
+  || warn "couldn't record which version built the VM (metacomputer version)"
 rm -f "$BUILD_MARKER"
 # The VM's private host key now lives only in its disk and the baseline (reset restores
 # it from there). On the Mac only the public half is needed (known_hosts, the secrets

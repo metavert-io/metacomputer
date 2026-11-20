@@ -673,7 +673,14 @@ os.execvp(sys.argv[2], sys.argv[2:])' "$log" "$@" &
 }
 
 # --- mcomp-netgw: cua-netgw patched (host-enforced egress policy, loopback-only forwards) -------
-netgw_pid() { if [ -s "$RUN_DIR/netgw.pid" ]; then cat "$RUN_DIR/netgw.pid"; fi; return 0; }
+# The gateway's pid, only while that process is this VM's gateway: started with this VM's gw.json (a pid left in the
+# file from an earlier run can belong to another process, even another VM's gateway, by now).
+netgw_pid() {
+  local p; p="$(head -1 "$RUN_DIR/netgw.pid" 2>/dev/null | tr -cd '0-9')"
+  [ -n "$p" ] || return 0
+  case "$(ps -o command= -p "$p" 2>/dev/null)" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
+  return 0
+}
 netgw_alive() { local p; p="$(netgw_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 netgw_stop() {
   local p; p="$(netgw_pid)"
@@ -721,6 +728,8 @@ netgw_start() { # MAC
   net_policy render || die "the network allowlist's rules couldn't be written (metacomputer net status)"
   netgw_render "$1"
   daemonize "$LOG_DIR/netgw.log" "$NETGW_BIN" -config "$RUN_DIR/gw.json"
+  # Which program this gateway runs (metacomputer update compares it with the one installed now).
+  printf 'bin=%s\nsha256=%s\n' "$NETGW_BIN" "$(shasum -a 256 "$NETGW_BIN" | cut -d' ' -f1)" > "$RUN_DIR/netgw.started" 2>/dev/null || true
   local i=0; while [ ! -S "$SOCK_DIR/net.sock" ] && [ $i -lt 40 ]; do sleep 0.25; i=$((i+1)); done
   [ -S "$SOCK_DIR/net.sock" ] || { tail -5 "$LOG_DIR/netgw.log" >&2; die "the gateway (mcomp-netgw) did not start"; }
 }
@@ -827,7 +836,7 @@ export_options() {
   # over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
          MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}" \
-         MCOMP_BOT_CHECK="${MCOMP_BOT_CHECK:-${BOT_CHECK:-on}}" \
+         MCOMP_BOT_CHECK="${MCOMP_BOT_CHECK:-${BOT_CHECK:-on}}" MCOMP_UPDATE_CHECK="${UPDATE_CHECK:-on}" \
          MCOMP_BROWSER_PACING="${MCOMP_BROWSER_PACING:-${BROWSER_PACING:-human}}"
   # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
   # lessons switch, an isolated store for tests).

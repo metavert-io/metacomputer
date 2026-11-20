@@ -452,6 +452,34 @@ def multiplex_checks():
           and st["driver"]["connected"], st)
     q = mcp_hub.query_status(r.env)
     check("`hub status` reads the same from outside", q and q["pid"] == os.getpid() and len(q["clients"]) == 2, q)
+    check("…and `hub stop --if-idle` reads that report as in use", mcp_hub.idle_reason(q) == "2 client(s) connected", q)
+    sent = []
+    real = (mcp_hub._signal_hub, mcp_hub._wait_gone, mcp_hub.query_status)
+    mcp_hub._signal_hub, mcp_hub._wait_gone = (lambda pid: sent.append(pid) or True), (lambda pid, wait=8.0: None)
+    try:
+        rc = mcp_hub.stop_if_idle(r.env)
+        check("`hub stop --if-idle` with two clients connected: not stopped (exit 3), and says why",
+              rc == (3, "hub not stopped: 2 client(s) connected") and not sent, (rc, sent))
+        mcp_hub.query_status = lambda env=None, timeout=5.0: None
+        rc = mcp_hub.stop_if_idle(r.env)
+        check("…a running hub whose report can't be read: not stopped either", rc == (3, "hub not stopped: its status "
+              "couldn't be read") and not sent, (rc, sent))
+        mcp_hub.query_status = lambda env=None, timeout=5.0: dict(q, clients=[], idle_s=60, recordings=0,
+                                                                 driver={"pending": 0, "left_running": 0})
+        rc = mcp_hub.stop_if_idle(r.env)
+        check("…an idle one: signalled (under the dispatch lock) and reported stopped", rc == (0, "hub stopped")
+              and sent == [mcp_hub.hub_pid(r.env)], (rc, sent))
+        sent.clear()
+        wait0, mcp_hub.IDLE_STOP_LOCK_S = mcp_hub.IDLE_STOP_LOCK_S, 0.3
+        try:
+            with mcp_hub.owners.dispatch(shared=True, timeout=5):     # an action on its way to the VM
+                rc = mcp_hub.stop_if_idle(r.env)
+        finally:
+            mcp_hub.IDLE_STOP_LOCK_S = wait0
+        check("…but not while an action is on its way (the dispatch lock is held): exit 3, nothing signalled",
+              rc[0] == 3 and "an action is on its way" in rc[1] and not sent, (rc, sent))
+    finally:
+        mcp_hub._signal_hub, mcp_hub._wait_gone, mcp_hub.query_status = real
     a.close()
     b.close()
     r.stop()

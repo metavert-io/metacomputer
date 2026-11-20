@@ -1237,6 +1237,65 @@ def test_install_vm_decisions():
           0 < i_mark < src.find('say "--replace: deleting') and i_mark < i_create and i_base < i_rm, (i_mark, i_create, i_base, i_rm))
 
 
+def test_install_existing():
+    """An install that's already here: the metacomputer command runs another checkout (not switched without --switch
+    or a yes at a terminal, --only-claude included; the same checkout reached another way isn't another), or it's
+    newer than this checkout by history (refused without --allow-downgrade)."""
+    def go(extra=(), link_to=None, relative=False, downgrade=False, forward=False):
+        b, root = vm_box("mctest,mctest-baseline")
+        try:
+            link = os.path.join(b.home, ".local", "bin", "metacomputer")
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            od = os.path.join(b.t, "elsewhere")
+            write(os.path.join(od, "install.sh"), "#!/bin/sh\n", 0o755)
+            write(os.path.join(od, "bin", "metacomputer"), "#!/bin/sh\n", 0o755)
+            os.symlink(os.path.join(b.t, "checkout"), os.path.join(b.t, "alias"))     # the same checkout, another path
+            if link_to:
+                target = {"other": os.path.join(od, "bin", "metacomputer"),
+                          "alias": os.path.join(b.t, "alias", "bin", "metacomputer")}[link_to]
+                os.symlink(os.path.relpath(target, os.path.dirname(link)) if relative else target, link)
+            if downgrade or forward:
+                g = lambda *x: git("-c", "user.email=t@example.com", "-c", "user.name=t", *x, cwd=root)
+                g("init", "-q", "-b", "main"); g("add", "-A"); g("commit", "-qm", "one"); g("tag", "v0.4.0")
+                write(os.path.join(root, "later.txt"), "x\n"); g("add", "-A"); g("commit", "-qm", "two"); g("tag", "v0.5.0")
+                later = git("rev-parse", "HEAD", cwd=root)
+                if downgrade:
+                    git("reset", "-q", "--hard", "v0.4.0", cwd=root)
+                stamp_commit = later if downgrade else git("rev-parse", "v0.4.0", cwd=root)
+                write(os.path.join(b.home, ".local", "share", "metacomputer", "installed.json"),
+                      json.dumps({"version": "v0.5.0", "tag": None, "after": "v0.5.0", "commit": stamp_commit,
+                                  "checkout": root}, indent=2))
+            p, _ = b.run([os.path.join(root, "install.sh"), "--yes", *extra])
+            return p, (os.readlink(link) if os.path.islink(link) else None), root, od
+        finally:
+            b.close()
+    p, target, root, od = go(link_to="other")
+    check("the command runs another checkout, --yes: refused, says how to update that one or switch, link unchanged",
+          p.returncode != 0 and "runs another checkout" in p.stderr and "metacomputer update" in p.stderr
+          and "--switch" in p.stderr and target.endswith("elsewhere/bin/metacomputer"), (p.stderr[-400:], target))
+    p, target, root, od = go(link_to="other", relative=True)
+    check("…a relative link to it too", p.returncode != 0 and "runs another checkout" in p.stderr, p.stderr[-300:])
+    p, target, root, od = go(link_to="other", extra=("--only-claude",))
+    check("…and --only-claude doesn't get around it", p.returncode != 0 and "runs another checkout" in p.stderr,
+          p.stderr[-300:])
+    p, target, root, od = go(link_to="other", extra=("--switch",))
+    check("…with --switch: it goes ahead and the command runs this checkout", p.returncode == 0
+          and target == os.path.join(root, "bin", "metacomputer"), (p.returncode, p.stderr[-300:], target))
+    p, target, root, od = go(link_to="alias")
+    check("the command runs this same checkout through another path: not taken for another checkout", p.returncode == 0,
+          p.stderr[-300:])
+    p, target, root, od = go(downgrade=True)
+    check("this checkout behind what was installed from it (by history, with no exact tag recorded): refused",
+          p.returncode != 0 and "older than what's installed" in p.stderr and "--allow-downgrade" in p.stderr, p.stderr[-300:])
+    p, target, root, od = go(downgrade=True, extra=("--allow-downgrade",))
+    check("…with --allow-downgrade: it goes ahead", p.returncode == 0, p.stderr[-300:])
+    p, target, root, od = go(forward=True)
+    check("ahead of what was installed (an update): goes ahead", p.returncode == 0, p.stderr[-300:])
+    src = open(INSTALL).read()
+    check("install.sh ends with the after-install step (lib/update.py), which can't fail the install",
+          '"$PY311" "$ROOT/lib/update.py" _after-install || true' in src
+          and src.index('"Get yourself a virtual computer') < src.index("_after-install"))
+
 # --- scripts/lib.sh: the VM's folder ------------------------------------------------------------------
 def test_vm_dir():
     t = tempfile.mkdtemp(prefix="mcomp-install-")
@@ -1838,6 +1897,7 @@ test_build_vm_locks()
 test_lock_lifetime()
 test_vm_mutation_locks()
 test_build_tools_stamps()
+test_install_existing()
 test_install_tools_and_space()
 test_vm_dir()
 test_vnc_password()

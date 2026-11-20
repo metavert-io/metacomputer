@@ -3062,6 +3062,21 @@ def _wait_exit_unreaped(proc, timeout):
 TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
 
 
+def code_digest():
+    """sha256 of the checkout's lib/*.py (names and contents) as this process loaded it: `metacomputer update` compares
+    it with the files now there to tell a hub on older code."""
+    h = hashlib.sha256()
+    d = os.path.dirname(os.path.abspath(__file__))
+    try:
+        for f in sorted(os.listdir(d)):
+            if f.endswith(".py"):
+                with open(os.path.join(d, f), "rb") as fh:
+                    h.update(f.encode() + b"\0" + hashlib.sha256(fh.read()).digest())
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 def window_keys(a):
     """A call's or step's target keys with a nested `target: {kind: "window", pid, window_id}` folded into pid and
     window_id, so every guard reads the window it names (a copy when it folds anything; the original isn't changed,
@@ -3522,7 +3537,7 @@ class Server:
             pass
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps({"pid": os.getpid(), "socket": self.paths["sock"], "started": self.hub.started,
-                                 "vm": self.hub.settings.get("vm_name")}).encode())
+                                 "vm": self.hub.settings.get("vm_name"), "code": code_digest()}).encode())
         try:
             os.unlink(self.paths["sock"])
         except FileNotFoundError:
@@ -3713,18 +3728,18 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     raise HubError(f"the metacomputer hub didn't open its socket within {timeout:.0f} s (log: {p['log']})")
 
 
-def stop_hub(env=None, wait=8.0):
-    """Stop this VM's hub, if one runs. True when one was stopped."""
-    pid = hub_pid(env)
-    if not pid:
-        return False
-    cmd = owners.full_command(pid)
-    if "mcp_hub.py" not in cmd:
+def _signal_hub(pid):
+    """SIGTERM to this VM's hub process. False when pid isn't a hub (any more) or the signal can't be sent."""
+    if "mcp_hub.py" not in owners.full_command(pid):
         return False
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         return False
+    return True
+
+
+def _wait_gone(pid, wait=8.0):
     end = time.monotonic() + wait
     while time.monotonic() < end and owners.alive(pid):
         time.sleep(0.1)
@@ -3734,7 +3749,68 @@ def stop_hub(env=None, wait=8.0):
         except OSError:
             pass
         time.sleep(0.2)
+
+
+def stop_hub(env=None, wait=8.0):
+    """Stop this VM's hub, if one runs. True when one was stopped."""
+    pid = hub_pid(env)
+    if not pid or not _signal_hub(pid):
+        return False
+    _wait_gone(pid, wait)
     return True
+
+
+def stop_if_idle(env=None):
+    """`hub stop --if-idle` (metacomputer update, for a hub on older code): (exit code, message). Stops the hub only
+    when its own report says nothing uses it and no handoff is open, deciding under this VM's dispatch lock held
+    exclusively (as opening a handoff does), so no action is sent and no handoff opens between the look and the
+    signal. 3 = not stopped: in use, or anything that couldn't be checked."""
+    pid = hub_pid(env)
+    if not pid:
+        return 0, "no hub was running"
+    try:
+        with owners.dispatch(shared=False, timeout=IDLE_STOP_LOCK_S):
+            try:
+                handoff = owners.open_handoff()
+            except Exception:
+                return 3, "hub not stopped: couldn't check for a handoff"
+            if handoff is not None:
+                return 3, "hub not stopped: the user has the computer (a handoff)"
+            st = query_status(env)
+            why = idle_reason(st) if st else "its status couldn't be read"
+            if why:
+                return 3, f"hub not stopped: {why}"
+            if hub_pid(env) != pid or not _signal_hub(pid):
+                return 3, "hub not stopped: it changed while it was being checked"
+    except (OSError, TimeoutError) as e:
+        return 3, f"hub not stopped: an action is on its way ({e})"
+    _wait_gone(pid)
+    return 0, "hub stopped"
+
+
+IDLE_STOP_MIN_S = 5
+IDLE_STOP_LOCK_S = 10
+
+
+def idle_reason(st):
+    """Why a running hub (its own status report, as query_status returns it) isn't idle, or None when it is: no client
+    connected, no call pending or left running, no recording, and nothing for IDLE_STOP_MIN_S."""
+    if not isinstance(st, dict):
+        return "its status couldn't be read"
+    drv = st.get("driver") if isinstance(st.get("driver"), dict) else {}
+    clients = st.get("clients")
+    if not isinstance(clients, list):
+        return "its status couldn't be read"
+    if clients:
+        return f"{len(clients)} client(s) connected"
+    if drv.get("pending") != 0 or drv.get("left_running") != 0:
+        return "a call is still running"
+    if st.get("recordings") != 0:
+        return "a recording is running"
+    idle = st.get("idle_s")
+    if not isinstance(idle, (int, float)) or idle < IDLE_STOP_MIN_S:
+        return "it was used moments ago"
+    return None
 
 
 def query_status(env=None, timeout=5.0):
@@ -3811,6 +3887,10 @@ def main(argv):
         print(describe_status(query_status(), brief=True) or "hub started")
         return 0
     if cmd == "stop":
+        if "--if-idle" in argv:              # metacomputer update: a hub on older code, stopped only while nothing uses it
+            rc, msg = stop_if_idle()
+            print(msg)
+            return rc
         stopped = stop_hub()
         if "--quiet" not in argv:
             print("hub stopped" if stopped else "no hub was running")
