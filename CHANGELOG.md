@@ -6,6 +6,15 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Screen Sharing remembers the live-view password: the first time `metacomputer view --open` runs at a terminal, it asks, and on a yes saves the password in your login keychain, as the internet-password item Screen Sharing reads for `vnc://127.0.0.1:PORT` (server `127.0.0.1:PORT`, protocol `vnc `, port 0, type `vncl`). From then on the live view opens with nothing to paste, and each `view --open` brings the item up to date (in place), so a rebuild's new password reaches it. A no writes `VIEW_REMEMBER=off` so it isn't asked again; `VIEW_REMEMBER` (`ask` by default, `on`, `off`), `view --remember` and `view --forget` (which removes only the item metacomputer made; both refuse without a terminal, and an explicit save that fails is an error) and `view --open --no-remember` (the clipboard, this once) control it; `off` means no writes at all. The helper that writes and removes the item (`lib/liveview.py`) checks the same rules when run by itself, as a guard against mistakes (a program running as you could still write the item, as with any keychain item it can reach), doesn't echo a password typed into it, and its silent update only changes an item that's already there; a `VIEW_REMEMBER` that isn't `ask`, `on` or `off` counts as `off`. It's written by osascript through the Security framework with the password on its stdin (never an argument, the environment, a log or the output), checked afterwards by its attributes only, with keychain dialogs switched off; nothing is saved for the first time without a person's yes, and no Screen Sharing setting changes. Screen Sharing and osascript can read the item without asking (SECURITY.md, "The live view").
+- `INTERACTIVE_PROMPTS` (`off` by default): allow metacomputer to show dialogs on this Mac that wait for you. With it on, `metacomputer handoff` (opened by Claude) also shows a dialog on the Mac's screen, "Claude needs you: " and the `--say` text, with Open live view (runs `view --open`) and Later; it's started detached, so the handoff goes on at once, and taken down when the handoff ends. The text is an argument to a fixed AppleScript, never part of it. Not over SSH, without your screen session, or for a handoff you opened at your own terminal; the helper checks those rules again itself, however it's started.
+
+### Changed
+
+- Plain `metacomputer view`, typed in Terminal on the Mac's own screen, opens the live view (as `--open` does); over SSH, or when its output isn't a terminal (Claude, scripts), it prints how to connect as before, and `view --print` always does. The handoff's instructions and its `needs_you` action no longer say the password is on the clipboard (it may be remembered).
+
 ## [0.3.2] - 2026-11-19
 
 ### Changed

@@ -1020,6 +1020,67 @@ CLAIMS = [
                     r"tailnet, and its undo; metacomputer never runs it", lambda m: tailnet_runs_only_status()),
     ("docs/guide.md", r"cleared from the clipboard after (\d+) seconds, if nothing else was copied since",
      lambda m: int(m[1]) == int(D["VIEW_CLIPBOARD_S"]) and clear_compares_change_count()),
+    # Screen Sharing's remembered password (bin/metacomputer view_remember_*, lib/liveview.py remember)
+    ("SECURITY.md", r"\*\*Screen Sharing's remembered password\*\* \(`VIEW_REMEMBER`, `(\w+)` by default\)",
+     lambda m: m[1] == D["VIEW_REMEMBER"] == "ask"
+     and 'case "${VIEW_REMEMBER:-ask}" in on|off|ask) echo "${VIEW_REMEMBER:-ask}" ;; *) echo off ;; esac' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"an internet-password item in your \*\*login keychain\*\*, server `127\.0\.0\.1:PORT`, protocol `vnc `, "
+                    r"port 0, type `vncl` \(a VNC password\)", lambda m: remembered_item_shape()),
+    ("SECURITY.md", r"a \"no\" writes `VIEW_REMEMBER=off` to your settings so it isn't asked again",
+     lambda m: "*) browser_set VIEW_REMEMBER off" in raw("bin/metacomputer")),
+    ("SECURITY.md", r"Without a terminal \(Claude, a script, a dialog's button\) nothing is saved for the first time",
+     lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"The item is written by osascript \(Apple's scripting tool\) through the Security framework, with "
+                    r"the password on osascript's stdin: never in an argument, the environment, a log, an event or the "
+                    r"output", lambda m: remember_pipes_password()),
+    ("SECURITY.md", r"Keychain dialogs are switched off for that osascript run, so a locked keychain fails",
+     lambda m: "$.SecKeychainSetUserInteractionAllowed(false);" in raw("lib/liveview.py")),
+    ("SECURITY.md", r"the item's access list lets Screen Sharing and osascript read it without asking",
+     lambda m: "SecTrustedApplicationCreateFromPath('/usr/bin/osascript', me)" in raw("lib/liveview.py")
+     and 'SS_APP = "/System/Applications/Utilities/Screen Sharing.app"' in raw("lib/liveview.py")
+     and "trusted.addObject(me[0]); trusted.addObject(ss[0]);" in raw("lib/liveview.py")),
+    ("docs/guide.md", r"`VIEW_REMEMBER=off` never saves it, or updates one saved before; `--remember` and `--forget` "
+                      r"run only in your own terminal", lambda m: remember_needs_a_person()),
+    ("SECURITY.md", r"`view --remember` and `view --forget` \(which removes only the item metacomputer made\) refuse "
+                    r"without a terminal, whether or not an item is there, and an explicit save that fails is an error "
+                    r"with its reason", lambda m: remember_flag_gated()),
+    ("SECURITY.md", r"`off` means no writes at all: nothing is saved, `view --remember` refuses, and an item saved "
+                    r"earlier is no longer updated; a value that isn't `ask`, `on` or `off` counts as `off`",
+     lambda m: unknown_setting_is_off()),
+    ("SECURITY.md", r"\*\*Who can write it\.\*\* The CLI refuses to make or remove the item without a terminal \(unless "
+                    r"you set `VIEW_REMEMBER=on`, which makes it without asking\); without one it only brings an item you "
+                    r"agreed to up to date\. Claude's skill never runs the commands that save or remove it\. A program "
+                    r"running as you could still write the item directly, as with any keychain item it can reach",
+     lambda m: remember_flag_gated() and remember_needs_a_person() and skill_never_saves()),
+    ("SECURITY.md", r"checks the same rules when it's run by itself \(stdin must be a terminal unless its internal "
+                    r"`--from-view` flag says `metacomputer view` is calling; nothing while `VIEW_REMEMBER` is off; the "
+                    r"silent update only changes an item that's already there\), as a guard against mistakes, not a "
+                    r"barrier: the flag says who's calling and proves nothing", lambda m: helper_gated()),
+    ("SECURITY.md", r"A password typed into the helper at a terminal isn't echoed",
+     lambda m: "quiet[3] &= ~termios.ECHO\n        termios.tcsetattr(fd, termios.TCSAFLUSH, quiet)" in raw("lib/liveview.py")
+     and "data = read_hidden() if sys.stdin.isatty() else sys.stdin.buffer.readline(MAX_PASSWORD + 2)"
+     in raw("lib/liveview.py")),
+    ("SECURITY.md", r"the helper checks all of that again itself, whoever starts it, from the handoff's own record",
+     lambda m: 'if dialog_off_reason(rec.get("interactive") is not False) is not None:\n        return 0'
+     in raw("lib/handoff.py") and raw("lib/handoff.py").index("if dialog_off_reason(rec.get(")
+     < raw("lib/handoff.py").index('p = subprocess.Popen(["osascript", "-e", DIALOG_SCRIPT')),
+    # The handoff's dialog (lib/handoff.py; INTERACTIVE_PROMPTS)
+    ("SECURITY.md", r"\*\*A dialog on the Mac \(`INTERACTIVE_PROMPTS`, `(\w+)` by default\)\.\*\* That setting allows "
+                    r"metacomputer to show dialogs on this Mac that wait for you",
+     lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
+    ("SECURITY.md", r"\"Claude needs you: \" and the `--say` text \(cleaned like an event, at most (\d+) characters\)",
+     lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and '"Claude needs you: " & msg' in handoff.DIALOG_SCRIPT
+     and "t = clean_text(say)" in raw("lib/handoff.py")),
+    ("SECURITY.md", r"The text reaches osascript as an argument of a fixed AppleScript, never as part of one",
+     lambda m: dialog_text_is_data()),
+    ("SECURITY.md", r"A detached helper shows it, so `handoff` goes on at once, and takes it down when the handoff ends",
+     lambda m: "os.setsid()" in raw("lib/handoff.py") and 'if not h or h.get("id") != hid:\n                p.terminate()'
+     in raw("lib/handoff.py")),
+    ("SECURITY.md", r"It isn't shown over SSH, without your screen session, or for a handoff you opened at your own terminal",
+     lambda m: "return liveview.gui_reason()" in raw("lib/handoff.py") and 'if interactive:\n        return "you\'re at '
+     'this terminal"' in raw("lib/handoff.py")),
+    ("docs/guide.md", r"it's off by default, so nothing pops up while you're away",
+     lambda m: D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
     # Handoffs (lib/handoff.py, owners.py): what an open one pauses, and its limits
     ("SECURITY.md", r'with "Paused: the user has the computer" \(code `(user_has_computer)`\)',
      lambda m: f'"code": "{m[1]}"' in raw("lib/mcp_hub.py")
@@ -1265,6 +1326,91 @@ def view_open_pipes_password():
     return ('vnc_password_get | "$PY" "$LAB_ROOT/lib/liveview.py" clip' in b and 'open "vnc://127.0.0.1:$VNC_PORT"' in b
             and 'count = pasteboard(["copy"], pw)' in lv and '"-e", PASTEBOARD_JS] + args, input=data' in lv
             and "print(pw" not in lv)
+
+
+def remembered_item_shape():
+    """Screen Sharing's item: server 127.0.0.1:PORT, protocol 'vnc ', port 0, type 'vncl', in the keychain
+    `security login-keychain` names; updated in place when it's metacomputer's."""
+    lv = raw("lib/liveview.py")
+    return ('return f"127.0.0.1:{port}"' in lv and "['ptcl', u32(fcc('vnc '))], ['port', u32(0)]" in lv
+            and "['type', u32(fcc('vncl'))]" in lv and '["security", "login-keychain"]' in lv
+            and "SecKeychainItemModifyAttributesAndData(item, changed.mutableBytes" in lv)
+
+
+def remember_needs_a_person():
+    """The item is made only with a person's yes: a terminal for the question and for --remember, or
+    VIEW_REMEMBER=on; off never writes; the silent update goes through the helper's refresh, which never makes one.
+    The helper checks the same rules when run by itself, as a guard against mistakes (helper_gated)."""
+    b = raw("bin/metacomputer")
+    return ('if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi' in b
+            and '[ "$setting" = on ] && { VIEW_SAVE=create; return 0; }' in b and remember_flag_gated()
+            and re.search(r'view_remembered \|\| rc=\$\?\n  if \[ "\$setting" = off \]; then\n(?:    [^\n]*\n)+?'
+                          r'    return 0\n  fi\n  \[ \$rc = 0 \] && \{ VIEW_SAVE=refresh', b) is not None
+            and '[ "$1" = refresh ] && op=refresh extra=""' in b and helper_gated())
+
+
+def remember_flag_gated():
+    """An explicit --remember: a terminal, and never while VIEW_REMEMBER=off, before anything is looked up or
+    written; --forget needs a terminal too."""
+    b = raw("bin/metacomputer")
+    return ('  if [ "$flag" = remember ]; then\n    [ -t 0 ] || die "view --remember saves the live-view password in '
+            'your login keychain, so it\'s yours to run: in your own terminal"\n    [ "$setting" = off ] && die '
+            '"$(view_off_note)"\n    VIEW_SAVE=create' in b
+            and '[ -t 0 ] || die "view --forget changes your login keychain, so it\'s yours to run: in your own '
+            'terminal"' in b
+            and 'view_save create || die "the live-view password wasn\'t saved for Screen Sharing (the reason is above)"'
+            in b)
+
+
+def helper_gated():
+    """lib/liveview.py itself: remember and forget only with a terminal on stdin or --from-view; remember and
+    refresh never while VIEW_REMEMBER is off (the settings file's value, made stricter, never looser, by the
+    environment; an unknown value there is off); refresh never makes an item."""
+    lv = raw("lib/liveview.py")
+    return ('if from_view or sys.stdin.isatty():\n        return None' in lv
+            and 'if op == "save":\n        why = consent_refusal(' in lv
+            and 'why = consent_refusal("removing Screen Sharing\'s saved live-view password", from_view)' in lv
+            and 'if remember_setting() == "off":' in lv
+            and 'given = given if given in ORDER else "off"\n    return max(conf, given, key=ORDER.get)' in lv
+            and "if (op === 'refresh' && item === null) { return 'none'; }" in lv)
+
+
+def unknown_setting_is_off():
+    """VIEW_REMEMBER that isn't ask, on or off counts as off, in bin/metacomputer and in lib/liveview.py (the file's
+    value and the environment's); off writes nothing."""
+    lv = raw("lib/liveview.py")
+    return ('*) echo off ;; esac' in raw("bin/metacomputer") and 'conf = conf if conf in ORDER else "off"' in lv
+            and 'given = given if given in ORDER else "off"' in lv and remember_needs_a_person())
+
+
+def skill_never_saves():
+    """The skill tells Claude never to run the saving or removing commands."""
+    return re.search(r"Saving or removing the password for Screen Sharing \(`view --remember`, `view --forget`\) is "
+                     r"theirs too: never run them", re.sub(r"\s+", " ", raw("skills/metacomputer/SKILL.md"))) is not None
+
+
+def remember_pipes_password():
+    """view --open's save: the password from its store through a pipe to liveview.py, then osascript's stdin; the
+    arguments are the address, the keychain, the label, the tag and Screen Sharing's path."""
+    b, lv = raw("bin/metacomputer"), raw("lib/liveview.py")
+    return ('how="$(vnc_password_get | MCOMP_VIEW_REMEMBER="$(view_remember_setting)" \\\n           "$PY" '
+            '"$LAB_ROOT/lib/liveview.py" "$op" --port "$VNC_PORT"' in b
+            and 'keychain_js([op, ss_server(port), kc, ss_label(port), tag, SS_APP], pw)' in lv
+            and 'input=data if data is not None else b""' in lv and "print(pw" not in lv)
+
+
+def dialog_default_off():
+    """INTERACTIVE_PROMPTS: off unless set, in the environment the handoff reads and in its own fallback."""
+    return ('export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"' in raw("scripts/lib.sh")
+            and 'if os.environ.get("MCOMP_INTERACTIVE_PROMPTS", "off") != "on":' in raw("lib/handoff.py"))
+
+
+def dialog_text_is_data():
+    """The dialog's AppleScript is a constant; the --say text is one of its arguments."""
+    h = raw("lib/handoff.py")
+    return ('["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs]' in h
+            and h.count("DIALOG_SCRIPT") == 2 and "on run argv" in handoff.DIALOG_SCRIPT
+            and "item 2 of argv" in handoff.DIALOG_SCRIPT and "do shell script" not in handoff.DIALOG_SCRIPT)
 
 
 def clear_compares_change_count():
@@ -1533,7 +1679,7 @@ def settings_tables():
 
 SECURITY_SETTINGS = ("ACTION_LOG", "ACTION_LOG_TEXT", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",
                      "HIDDEN_TEXT", "MCP_HUB", "LESSONS", "SHARE_CLIPBOARD", "SHARE_AUDIO", "SHARE_ROSETTA",
-                     "RECORD_TO", "TASK_SYNC_INTERVAL")
+                     "RECORD_TO", "TASK_SYNC_INTERVAL", "VIEW_REMEMBER", "INTERACTIVE_PROMPTS")
 FALLBACKS = (re.compile(r"\$\{(?:MCOMP_)?([A-Z][A-Z0-9_]+):-([^}$]+)\}"),
              re.compile(r"""\.get\(\s*["'](?:MCOMP_)?([A-Z][A-Z0-9_]+)["']\s*,\s*["']([^"']+)["']\s*\)"""),
              re.compile(r"""onoff\(\s*env\.get\(\s*["']MCOMP_([A-Z][A-Z0-9_]+)["']\s*\)\s*,\s*["']([^"']+)["']\s*\)"""))

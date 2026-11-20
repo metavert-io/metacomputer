@@ -512,7 +512,8 @@ started.
 **The password** is random, 8 characters (VNC's own authentication uses at most
 8), made at each build and kept where `VNC_PASSWORD_STORE` says: the login
 Keychain (item `metacomputer-vnc`, account the VM's name), a 0600 file in
-`SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin.
+`SSH_DIR`, or your own secret store. It reaches the VM on ssh's stdin. Once you
+agree, a copy is also kept for Screen Sharing in the login keychain (below).
 
 **`metacomputer view --open`**, on the Mac's own screen, reads the password from
 that store into a pipe, puts it on the clipboard and opens Screen Sharing at
@@ -532,6 +533,59 @@ still be cleared; while the password is on the clipboard, any app you run can
 read it; a clipboard manager that ignores the markers may keep a copy; Universal
 Clipboard can pass it to your other Apple devices nearby. Run from an SSH session,
 `view --open` touches nothing and says how to connect instead.
+
+**Screen Sharing's remembered password** (`VIEW_REMEMBER`, `ask` by default). So
+that the live view opens without the paste, `view --open` can save the
+live-view password where Screen Sharing looks for a remembered one: an
+internet-password item in your **login keychain**, server `127.0.0.1:PORT`,
+protocol `vnc `, port 0, type `vncl` (a VNC password), labelled "metacomputer
+live view (127.0.0.1:PORT)". That is how Screen Sharing itself keys a VNC
+password for `vnc://127.0.0.1:PORT` (read from its framework; it matches on
+protocol, server, port and type, and takes the newest). It's saved only after
+you say yes: at a terminal the first time `view --open` (or plain `view` in
+Terminal on the Mac's screen) asks, and a "no" writes `VIEW_REMEMBER=off` to your
+settings so it isn't asked again; `view --remember` typed in your terminal, or
+`VIEW_REMEMBER=on`, also say yes. Without a terminal (Claude, a script, a
+dialog's button) nothing is saved for the first time; an item you agreed to is
+updated, in place, at each `view --open`, so a rebuilt VM's new password
+reaches it. `view --remember` and `view --forget` (which removes only the item
+metacomputer made) refuse without a terminal, whether or not an item is there,
+and an explicit save that fails is an error with its reason (`view --open`
+falls back to the clipboard). `off` means no writes at all: nothing is saved,
+`view --remember` refuses, and an item saved earlier is no longer updated; a
+value that isn't `ask`, `on` or `off` counts as `off`. No Screen Sharing setting
+is changed.
+
+**Who can write it.** The CLI refuses to make or remove the item without a
+terminal (unless you set `VIEW_REMEMBER=on`, which makes it without asking);
+without one it only brings an item you agreed to up to date. Claude's skill
+never runs the commands that save or remove it. A program running as you could
+still write the item directly, as with any keychain item it can reach: that's the same-user limit
+this page states for the vault and the event sinks. The helper that writes and
+removes it, `lib/liveview.py`, checks the same rules when it's run by itself
+(stdin must be a terminal unless its internal `--from-view` flag says
+`metacomputer view` is calling; nothing while `VIEW_REMEMBER` is off; the silent
+update only changes an item that's already there), as a guard against mistakes,
+not a barrier: the flag says who's calling and proves nothing. A password typed
+into the helper at a terminal isn't echoed.
+
+The item is written by osascript (Apple's scripting tool) through the Security
+framework, with the password on osascript's stdin: never in an argument, the
+environment, a log, an event or the output. Its arguments are the address, the
+keychain's path, the label, Screen Sharing's path and a one-time tag that a
+check reads back from the item's attributes afterwards (never its password). It isn't written by
+`security`, as the live-view password's own Keychain item is: the keychain puts
+an item into the partition of the program that makes it, and `security` has a
+partition of its own that Apple's apps, Screen Sharing among them, can't read
+without asking for your keychain password. Keychain dialogs are switched off
+for that osascript run, so a locked keychain fails (and the clipboard is used)
+instead of asking. Where it ends: the item's access list lets Screen Sharing and
+osascript read it without asking, so any program running as you can read it
+through osascript (as any can read the live-view password's own Keychain item
+through `security`, or its file); Screen Sharing fills it in for whatever answers
+on `127.0.0.1:PORT`, so a program that took that port while the VM is off would
+get Screen Sharing's VNC response, which a weak 8-character password doesn't
+protect for long (the same as a paste, but without your looking).
 
 **From another device.** The port stays on 127.0.0.1. `metacomputer view`
 prints an SSH tunnel. `view --tailnet` prints the `tailscale serve` command that
@@ -602,6 +656,20 @@ or a crash or a signal) keeps the lock while `secrets settle` waits for the unlo
 process (up to 2 minutes); if that doesn't confirm either, or the command itself
 was stopped, a marker (`RUN_DIR/owners/vault-inflight.*`) makes the next handoff
 run `secrets settle` first, and refuse until it confirms.
+
+**A dialog on the Mac (`INTERACTIVE_PROMPTS`, `off` by default).** That setting
+allows metacomputer to show dialogs on this Mac that wait for you; off, nothing
+pops up on your screen by itself, since Claude may run commands while you're
+away, and a handoff tells you through its notice, its output and the events.
+With it on, a handoff Claude opens also shows a dialog on the Mac's screen:
+"Claude needs you: " and the `--say` text (cleaned like an event, at most 240
+characters), with **Open live view** (it runs `metacomputer view --open`) and
+**Later**. The text reaches osascript as an argument of a fixed AppleScript,
+never as part of one, so nothing in it runs. A detached helper shows it, so
+`handoff` goes on at once, and takes it down when the handoff ends. It isn't
+shown over SSH, without your screen session, or for a handoff you opened at your
+own terminal; the helper checks all of that again itself, whoever starts it,
+from the handoff's own record.
 
 It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at

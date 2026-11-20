@@ -708,16 +708,23 @@ running. Command lines are masked.
 
 - "Let me watch what you're doing." / "I'll take over for a minute."
 
-- **On the Mac:** `metacomputer view --open`. Screen Sharing opens the live
-  view, and the live-view password is on your clipboard: paste it with Cmd+V
+- **On the Mac:** `metacomputer view --open` (or just `metacomputer view` in
+  Terminal on the Mac's screen). Screen Sharing opens the live view. The first
+  time, it asks whether Screen Sharing should remember the live-view password:
+  say yes and it's saved in your login keychain, where Screen Sharing finds it,
+  so from then on the live view opens without asking for a password (each
+  `view --open` keeps it up to date after a rebuild; `view --forget` removes it;
+  `VIEW_REMEMBER=off` never saves it, or updates one saved before; `--remember`
+  and `--forget` run only in your own terminal). Say no, or run it where nobody can answer,
+  and the live-view password is on your clipboard instead: paste it with Cmd+V
   when Screen Sharing asks for a password (it isn't your Mac's password). It's
   cleared from the clipboard after 45 seconds, if nothing else was copied since
   (`VIEW_CLIPBOARD_S` changes that). It's never put in the `vnc://` link,
   on a command line, in a log or in an event.
-- **From another device:** `metacomputer view` prints the SSH tunnel
-  (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`); then connect a VNC client to
-  `localhost:5977`. Run `view --open` over SSH and it says this instead, since
-  that terminal isn't on the Mac's screen.
+- **From another device:** `metacomputer view` (over SSH) or `view --print`
+  prints the SSH tunnel (`ssh -N -L 5977:127.0.0.1:5977 <your-mac>`); then
+  connect a VNC client to `localhost:5977`. Run `view --open` over SSH and it
+  says this instead, since that terminal isn't on the Mac's screen.
 - **Over your own tailnet:** `metacomputer view --tailnet` prints the
   `tailscale serve` command that publishes the port to your tailnet, and its
   undo. metacomputer never runs it: it changes your Mac's networking, so it's
@@ -727,11 +734,13 @@ The password comes from where your setup keeps it: the login Keychain (item
 `metacomputer-vnc`) on an install made with get.sh or `./install.sh`,
 `~/.ssh/metacomputer/vnc-pass` on an older one, or your own secret store (see
 `VNC_PASSWORD_STORE` under [Configuration](commands.md#configuration)).
-`metacomputer view` prints the command that reads it, for your own terminal.
+`metacomputer view --print` shows the command that reads it, for your own terminal.
 On the clipboard it's marked concealed and transient, which clipboard managers
 that follow those markers don't keep in their history (one that ignores them
 may), and with Universal Clipboard your other Apple devices nearby can paste it
-too.
+too. The copy Screen Sharing remembers is an item in your login keychain that
+Screen Sharing and osascript can read without asking; how it's written, and
+where that ends, is in [SECURITY.md](../SECURITY.md#the-live-view-metacomputer-view).
 
 ### When Claude needs you: handoffs and the live view
 
@@ -745,8 +754,11 @@ past them. It hands the computer to you and waits:
 1. It runs `metacomputer handoff --why captcha --say "Tick the 'Verify you are human' box on example.com"`.
    That tells you through your event sinks (your phone, with an ntfy sink), and
    Claude says the same in the chat.
-2. You run `metacomputer view --open`, paste the password (Cmd+V), and do the
-   step in the live view.
+2. You run `metacomputer view --open` (Screen Sharing connects with the password
+   it remembers; if you didn't let it, paste the password with Cmd+V), and do the
+   step in the live view. With `INTERACTIVE_PROMPTS=on` in your settings, a dialog
+   on the Mac's screen also says what Claude needs, and its **Open live view**
+   button does the same (it's off by default, so nothing pops up while you're away).
 3. You run `metacomputer handoff done` in your terminal (add
    `--note "use the second account"` for anything Claude should know), or
    `metacomputer handoff cancel` to call it off.
@@ -787,7 +799,7 @@ say "done" for you from its own shell; it can only call its handoff off.
 metacomputer handoff status            # the open handoff, what to do, how long it has left
 metacomputer handoff done [--note T]   # you: finished, Claude carries on
 metacomputer handoff cancel            # you: called off, Claude stops and asks
-metacomputer view --open               # Screen Sharing, with the password on the clipboard
+metacomputer view --open               # Screen Sharing: the password it remembers, or on the clipboard
 ```
 
 **Sites with bot checks.** Some sites refuse the VM's browser even when you tick
@@ -1229,7 +1241,7 @@ Problems during the install are in [install.md](install.md#troubleshooting).
 | "The virtual computer is off" | `metacomputer start`, then try again. |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release` (or `--override` on the command). |
 | "Paused: the user has the computer" | A handoff is open (`metacomputer handoff status`): Claude waits for you. Run `metacomputer handoff done` when you've finished in the live view, or `handoff cancel`. `release` doesn't end it. |
-| Screen Sharing rejects the password | It wants the live-view password, not your Mac's. `metacomputer view --open` puts it on the clipboard for 45 s; paste it with Cmd+V. |
+| Screen Sharing rejects the password | It wants the live-view password, not your Mac's. `metacomputer view --open` brings the password Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard for 45 s instead (paste with Cmd+V). |
 | `view --open` says it needs the Mac's own screen | You're in over SSH. Run it in Terminal on the Mac's screen (in person, or through Screen Sharing or another remote-desktop app), or use the SSH tunnel `metacomputer view` prints, or `view --tailnet`. |
 | A site's "Verify you are human" check keeps failing or looping | The site is refusing the VM's automated browser (page-mode Chrome is driven through DevTools). Do that step on your own computer; Claude won't try to get around it ([Known limitations](#known-limitations)). |
 | Chrome ignores typing | `metacomputer input-reset`. |

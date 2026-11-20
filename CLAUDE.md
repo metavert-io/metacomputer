@@ -117,8 +117,13 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   under `owners.acting()` (bash: `handoff_hold`), the dispatch lock that opening a handoff
   takes exclusively; never act between a check and a dispatch. Never try to pass a check, switch
   browsers or profiles to get around one, or run `handoff done` for the user. Live
-  view for the user: `metacomputer view --open` (the password goes on the clipboard,
-  never into argv, output, logs or events); `view --tailnet` only prints the command.
+  view for the user: `metacomputer view --open` (Screen Sharing's remembered password in the
+  login keychain, written by osascript, or the clipboard; never in argv, output, logs or events;
+  lib/liveview.py, which checks the same rules when run by itself; its `--from-view` is the wrapper's
+  internal flag, not consent). Only the user saves or removes it (`view --remember` / `--forget` refuse
+  without a terminal; never run them, or the helper; `VIEW_REMEMBER=off` = no writes); `view --tailnet` only prints the command. Dialogs that wait for the user
+  need `INTERACTIVE_PROMPTS=on` (off by default): the handoff's dialog takes `--say` as osascript
+  argv data, never script text.
   Tests: `python3 tests/test_handoff.py` (no VM), test_hub.py's handoff checks, and
   `tests/test_handoff_vm.py` (test VM only: `MCOMP_CONFIG`).
 - Optional event stream (docs/events.md): `metacomputer notify` when blocked
@@ -141,7 +146,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
 ## Useful commands
 
 ```bash
-metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--tailnet] | where
+metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--print|--tailnet|--forget] | where
 metacomputer handoff --why captcha|login|2fa|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
 metacomputer --vm NAME COMMAND | vm list | vm create NAME | vm delete NAME   # more than one VM (config/vms/NAME.env)
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI

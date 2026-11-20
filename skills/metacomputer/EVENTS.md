@@ -9,7 +9,7 @@ What the stream is for: getting the user's attention, and telling them about sin
 Run it the moment you stop to wait for a person, every time. For a CAPTCHA or bot check, a sign-in the user does themselves or a 2FA prompt, use `metacomputer handoff` instead (next section): it sends this notice for you and pauses your actions until they're done.
 
 ```
-~/.local/bin/metacomputer notify "Approval needed to send the order at example.com" --why approval --action "Run metacomputer view --open (the live-view password goes on your clipboard: paste with Cmd+V), check the order, then tell Claude to carry on"
+~/.local/bin/metacomputer notify "Approval needed to send the order at example.com" --why approval --action "Run metacomputer view --open (paste the live-view password with Cmd+V if Screen Sharing asks), check the order, then tell Claude to carry on"
 ```
 
 | You hit | `--why` |
@@ -23,7 +23,7 @@ Run it the moment you stop to wait for a person, every time. For a CAPTCHA or bo
 
 - **The message:** one line saying what you need, where, and why. Write "Sign-in needed at example.com to download the March report", not "I'm stuck".
 - **`--action`:** what the user should do, short and concrete. When it's in the live view, give the exact command and say where the password is. For example:
-  - "Run metacomputer view --open (the live-view password goes on your clipboard: paste with Cmd+V), accept the dialog, then tell Claude to carry on";
+  - "Run metacomputer view --open (paste the live-view password with Cmd+V if Screen Sharing asks), accept the dialog, then tell Claude to carry on";
   - "Run metacomputer secrets unlock in your own terminal".
 - **Never put a secret in either.** That means no passwords, codes, tokens, cookies, personal data from the page, or full links. Name the site, not the URL: queries are cut off anyway, but don't rely on that.
 - **Say it in your reply too.** `notify` adds to the chat; it doesn't replace it. Its output says which sinks took it. "Nobody was pinged" means no sink is set up. On a phone it starts with "[from Claude]", so the user knows who asked.
