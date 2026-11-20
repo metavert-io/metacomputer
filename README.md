@@ -114,7 +114,9 @@ what goes where, updating, uninstalling and troubleshooting.
 **Security: walled off from your Mac.** Out of the box the VM shares no
 clipboard, audio or files with your Mac, and its only network is a gateway that
 reaches the public internet and nothing of yours: not your Mac, your LAN or your
-tailnet. Page text that's likely hidden from you, or that addresses AI agents, is
+tailnet. For a task that needs only a few sites, `metacomputer net allow
+example.com --for 2h` narrows it to those: the gateway on your Mac enforces it,
+and only you can widen it. Page text that's likely hidden from you, or that addresses AI agents, is
 marked in what Claude reads, so it can point it out to you; and at a CAPTCHA or a
 sign-in that's yours, Claude hands you the computer and waits. A signed log of
 every action, a restricted mode that holds Cua Driver to the apps and sites you
@@ -194,12 +196,23 @@ with Claude Code's normal tools.
   sound card that plays into nothing.
 - **Firefox and Chrome:** *human* mode (clicks and typing like a person, at a
   person's pace: the default, and the one for sign-ins, checkout and posting),
-  *page* mode (Chrome's page elements: bulk forms, uploads, downloads, dialogs)
-  and *hybrid* (page reads, real clicks and typing for a recording). Kept Firefox
-  profiles keep a sign-in until a reset.
+  *page* mode (Chrome's page elements: bulk forms, uploads, downloads, dialogs),
+  *hybrid* (page reads, real clicks and typing for a recording), and precise tools
+  in a Firefox of their own (`web page`: controls by ref, exact values, uploads).
+  Kept Firefox profiles keep a sign-in until a reset; GNOME Web (WebKit) is there
+  for visual checks when `BROWSERS` includes `webkit`. Firefox rejects the cookie
+  banners it knows, and `BROWSER_EXTENSIONS` adds uBlock Origin and Consent-O-Matic.
 - **Web checks that need no model:** `web compare` (Firefox against Chrome),
-  `web responsive` (several widths, with difference images against a past run)
-  and `web a11y`.
+  `web responsive` (several widths, with difference images against a past run, or
+  phones and tablets with `--device`), `web a11y`, `web debug` (console errors,
+  failed and slow requests, timings), `web read` (a page's main text) and `web gpu`
+  (what WebGL and WebGPU a page gets).
+- **3D pages, honestly:** the browsers render on a real display, so what a canvas
+  draws is what you'd see; but the VM has no GPU, so WebGL and WebGPU run in
+  software: they work, slowly, and say nothing about frame rates on real hardware.
+- **From a session to a test:** `metacomputer trace` records Claude's browser steps
+  and `trace export` writes them as a Playwright test you can run in CI without a
+  model.
 - **Your own web app:** its static build served on the VM's localhost and clicked
   through in both browsers.
 
@@ -250,7 +263,8 @@ with Claude Code's normal tools.
   one change at a time ([bench/README.md](bench/README.md)).
 - **More than one computer:** `metacomputer vm create NAME` makes another VM
   beside the first, with its own settings, keys, ports and vault; `--vm NAME`
-  picks it ([More than one computer](#more-than-one-computer)).
+  picks it, and `metacomputer each a,b -- COMMAND` runs one command on several at
+  once ([More than one computer](#more-than-one-computer)).
 
 The [guide](docs/guide.md) covers each one with what to ask and the commands
 behind it.
@@ -631,7 +645,10 @@ they're here for when you want to yourself.
 | `view [--open]` | Watch or take over the live desktop (`--open`: Screen Sharing, with the password it remembers, or on the clipboard) |
 | `handoff done`, `handoff cancel` | Hand the computer back to Claude after a step it handed you, or call it off |
 | `sh -c 'CMD'`, `put FILE`, `get PATH` | Bash in the VM; copy files in and out |
-| `web compare\|responsive\|a11y\|open-untrusted URL` | Browser checks that need no model |
+| `web compare\|responsive\|a11y\|open-untrusted\|debug\|read\|gpu URL` | Browser checks that need no model |
+| `web page open URL \| read \| fill REF VALUE \| click REF \| close` | Precise page tools in a Firefox of their own |
+| `net allow NAME... --for 2h \| status \| clear` | A network allowlist for the VM, enforced by the gateway on your Mac |
+| `trace start NAME \| stop \| export NAME --out t.spec.ts` | Record browser steps; write them as a Playwright test |
 | `record start NAME`, `record stop` | Record the whole desktop |
 | `checkpoint NAME`, `restore NAME`, `reset` | Save the stopped VM, go back to a save or to the clean baseline |
 | `vm list`, `vm create NAME`, `vm delete NAME`, `--vm NAME` | Your VMs; another one beside the first; delete one; act on one |
@@ -756,8 +773,9 @@ describes. Bugs in Cua Driver or Lume themselves belong upstream at
 ## Credits
 
 metacomputer is built on [Cua](https://github.com/trycua/cua) by Cua AI, Inc.
-(MIT): Cua Driver runs the desktop, Lume runs the VM, and `cua-netgw` (as mcomp-netgw: with a small patch), built from
-Cua's source, is the network gateway (it uses gvisor-tap-vsock, Apache-2.0).
+(MIT): Cua Driver runs the desktop, Lume runs the VM, and the network gateway is
+Cua's `cua-netgw`, built from Cua's source with a small patch that makes its name
+rules hold (so it runs as mcomp-netgw; it uses gvisor-tap-vsock, Apache-2.0).
 [mcomp-vm](https://github.com/metavert-io/metacomputer-vm), metacomputer's build
 of Lume, adds the host-sharing flags; like metacomputer, it's made by Metavert,
 not by Cua, and isn't endorsed by them. The shell channel's routing, the hub and
