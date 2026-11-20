@@ -51,7 +51,7 @@ index 1e3a6aa..3095345 100644
  		return g.lease(strings.TrimSpace(mac))
  	}
 diff --git a/libs/cua/netgw/internal/gateway/dns.go b/libs/cua/netgw/internal/gateway/dns.go
-index d408a30..8364645 100644
+index d408a30..1879bfb 100644
 --- a/libs/cua/netgw/internal/gateway/dns.go
 +++ b/libs/cua/netgw/internal/gateway/dns.go
 @@ -141,8 +141,17 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
@@ -83,24 +83,29 @@ index d408a30..8364645 100644
  		if got == nil {
  			m.Rcode = dns.RcodeServerFailure
  			return m
-@@ -199,10 +208,14 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
+@@ -199,10 +208,17 @@ func (r *resolver) answer(req *dns.Msg) *dns.Msg {
  		got.Id = req.Id
  		m = got
  	}
 -	r.filter(m)
+-	// The addresses an allowed name resolved to stay reachable for as long
+-	// as the answer lives.
+-	if rules.DomainVerdict(name) == 1 {
 +	allowed := rules.DomainVerdict(name) == 1
 +	// An allowed name's addresses are kept unless the rules or the platform
 +	// refuse them by address (mcomp patch: before, the default deny removed
 +	// them, so an allowed name resolved to nothing).
 +	r.filterFor(m, allowed)
- 	// The addresses an allowed name resolved to stay reachable for as long
- 	// as the answer lives.
--	if rules.DomainVerdict(name) == 1 {
-+	if allowed {
++	// The addresses a name resolved to are bound to it for as long as the
++	// answer lives; they're reachable while the rules allow the name. Every
++	// answer is bound, allowed or not (mcomp patch): an answer the guest
++	// cached before a list started still leads to its name, and a binding
++	// grants nothing to a name the rules don't allow.
++	{
  		for _, rr := range m.Answer {
  			switch a := rr.(type) {
  			case *dns.A:
-@@ -252,6 +265,21 @@ func (r *resolver) exists(ctx context.Context, name string) bool {
+@@ -252,6 +268,21 @@ func (r *resolver) exists(ctx context.Context, name string) bool {
  }
  
  // forward sends req to the host's name servers in turn.
@@ -122,7 +127,7 @@ index d408a30..8364645 100644
  func (r *resolver) forward(req *dns.Msg) *dns.Msg {
  	for _, ns := range r.nameservers {
  		resp, _, err := r.client.Exchange(req, ns)
-@@ -273,21 +301,28 @@ func (r *resolver) strip(ip netip.Addr) (bool, string) {
+@@ -273,21 +304,28 @@ func (r *resolver) strip(ip netip.Addr) (bool, string) {
  }
  
  // filter removes the refused addresses from every section of m.
@@ -156,7 +161,7 @@ index d408a30..8364645 100644
  		case *dns.SVCB:
  			v.Value = r.filterHints(v.Value)
  		case *dns.HTTPS:
-@@ -330,12 +365,16 @@ func (r *resolver) keepIPs(ips []net.IP) []net.IP {
+@@ -330,12 +368,16 @@ func (r *resolver) keepIPs(ips []net.IP) []net.IP {
  	return out
  }
  
@@ -207,10 +212,10 @@ index 33b3427..17ebf9c 100644
  			g.conns.remove(key)
 diff --git a/libs/cua/netgw/internal/gateway/mcomp_test.go b/libs/cua/netgw/internal/gateway/mcomp_test.go
 new file mode 100644
-index 0000000..49bc278
+index 0000000..0b15b78
 --- /dev/null
 +++ b/libs/cua/netgw/internal/gateway/mcomp_test.go
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,213 @@
 +// Tests for metacomputer's patch to cua-netgw (mcomp-netgw): names allowed
 +// under a default deny resolve and bind, PTR questions follow the name rules,
 +// and the control socket reports the rules in force.
@@ -398,6 +403,31 @@ index 0000000..49bc278
 +		t.Fatal(err)
 +	}
 +	return m
++}
++
++func TestAnAnswerGivenBeforeAListStartsStillLeadsToItsName(t *testing.T) {
++	h := newHarness(t, `{"version":1,"default_accept":true,"rules":[{"net":"10.0.0.0/8","accept":false,"reason":"lan"}]}`)
++	h.gw.dns.lookup = func(_ context.Context, network, host string) ([]netip.Addr, error) {
++		switch host {
++		case "www.example.com.":
++			return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
++		case "other.org.":
++			return []netip.Addr{netip.MustParseAddr("93.184.216.99")}, nil
++		}
++		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
++	}
++	askDNS(t, h, "www.example.com.", dns.TypeA)
++	askDNS(t, h, "other.org.", dns.TypeA)
++	h.writeRules(allowlist)
++	if _, err := h.store.Reload(); err != nil {
++		t.Fatal(err)
++	}
++	if v := h.gw.decide(policy.TCP, netip.MustParseAddr("93.184.216.34"), 443); !v.Accept {
++		t.Fatalf("an allowed name's address the guest learned before the list started must be reachable: %+v", v)
++	}
++	if v := h.gw.decide(policy.TCP, netip.MustParseAddr("93.184.216.99"), 443); v.Accept {
++		t.Fatalf("a name not on the list gets nothing from its binding: %+v", v)
++	}
 +}
 diff --git a/libs/cua/netgw/internal/policy/policy.go b/libs/cua/netgw/internal/policy/policy.go
 index 5bcf73a..379a723 100644

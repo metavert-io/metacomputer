@@ -757,6 +757,8 @@ name rules in use, a name with escaped characters is refused (the rules compare 
 an escaped dot would let `a\.b.example.com` pass for a subdomain of `b.example.com`); a question
 forwarded upstream carries nothing but itself (not the guest's other sections or EDNS options); a
 connection is checked again once it's registered (a rule change while it was being dialled was missed);
+every answer is bound to its name, allowed or not (so an answer the guest cached before a list
+started still leads to its name; a binding grants nothing to a name the rules don't allow);
 and the control socket answers `rules` with the sha256 of the rules file in force, reported only once
 the connections the new rules refuse have been closed, which `metacomputer net` compares with what the
 saved list makes. With the stock kind of rules file (everything
