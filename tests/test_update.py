@@ -147,7 +147,8 @@ rc, out, calls = upd(co5, "update")
 check("another branch: refused", rc == 3 and "branch mywork" in out and not calls, out)
 co6 = fresh("0.3.0")
 rc, out, calls = upd(co6, "update", "--ref", "v0.2.0")
-check("going back (--ref an older release): refused", rc == 3 and "older" in out and not calls, out)
+check("going back (--ref an older release): refused", rc == 3 and "isn't ahead" in out and "--allow-downgrade" in out
+      and not calls, out)
 rc, out, calls = upd(co6, "update", "--ref", "v0.2.0", "--allow-downgrade")
 check("…and on main it can't be moved back even with --allow-downgrade (main only goes forward)", rc == 3
       and git("rev-parse", "HEAD", cwd=co6) == tags["0.3.0"] and not calls, out)
@@ -178,14 +179,27 @@ os.makedirs(os.path.join(co, "vendor", "bin"))
 write(os.path.join(co, "vendor", "bin", "mcomp-netgw"), "new gateway\n", 0o755)
 long_ago = time.time() - 30 * 86400
 stamp = os.path.join(HOME, ".local", "share", "metacomputer", "installed.json")
-write(stamp, json.dumps({"version": "v0.1.0", "tag": "v0.1.0", "commit": tags["0.1.0"],
-                         "gateway": {"program": "/old/cua-netgw", "sha": "old"}}))
-runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=os.path.join(co, "vendor", "bin", "mcomp-netgw"),
-        gateway={"pid": 1, "started": long_ago, "program": "/old/vendor/bin/cua-netgw"},
-        hub={"pid": 2, "started": long_ago, "program": "python3"}, watcher={"pid": 3, "started": long_ago, "program": "python3"})
-runinfo("b", state="running", netgw_bin=os.path.join(co, "vendor", "bin", "mcomp-netgw"),
-        gateway={"pid": 4, "started": time.time() + 60, "program": os.path.join(co, "vendor", "bin", "mcomp-netgw")},
-        hub={"pid": 5, "started": time.time() + 60, "program": "python3"}, build={"guest": "g1", "version": "v0.3.0"})
+NETGW = os.path.join(co, "vendor", "bin", "mcomp-netgw")
+import hashlib  # noqa: E402
+GW_SHA = hashlib.sha256(open(NETGW, "rb").read()).hexdigest()
+CODE = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {os.path.join(co, 'lib')!r}); import update; "
+                       "print(update.code_digest())"], capture_output=True, text=True, env=GENV).stdout.strip()
+
+
+def old_stamp():
+    write(stamp, json.dumps({"version": "v0.1.0", "tag": "v0.1.0", "commit": tags["0.1.0"], "checkout": co,
+                             "gateway": {"program": "/old/cua-netgw", "sha": "old"}}))
+
+
+old_stamp()
+runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=NETGW,
+        gateway={"pid": 1, "started": long_ago, "command": "/old/vendor/bin/cua-netgw -config /x/gw.json"},
+        gateway_started={}, hub={"pid": 2, "started": long_ago, "command": "python3 mcp_hub.py", "code": "older"},
+        watcher={"pid": 3, "started": long_ago, "command": "python3 events.py watch"})
+runinfo("b", state="running", netgw_bin=NETGW, vault_exists=False,
+        gateway={"pid": 4, "started": time.time(), "command": NETGW + " -config /y/gw.json"},
+        gateway_started={"bin": NETGW, "sha256": GW_SHA}, hub={"pid": 5, "started": time.time(), "command": "x", "code": CODE},
+        build={"guest": "g1", "version": "v0.3.0"})
 out, calls, res = after(co, "no")
 check("the hub and the watcher on older code: hub stopped, watcher stopped and started; the current VM b left alone",
       "hub stop" in calls and "events watcher stop" in calls and "events watcher start" in calls
@@ -199,15 +213,29 @@ st = json.load(open(stamp))
 check("what's installed is recorded (version, commit, the gateway program)", st["version"] == "v0.3.0"
       and st["commit"] == tags["0.3.0"] and st["gateway"]["program"].endswith("mcomp-netgw") and st["gateway"]["sha"], st)
 check("…and the update is summed up with what's new since v0.1.0", "Updated: v0.1.0 → v0.3.0" in out and "0.2.0:" in out, out)
-write(stamp, json.dumps({"version": "v0.1.0", "tag": "v0.1.0", "commit": tags["0.1.0"],
-                         "gateway": {"program": "/old/cua-netgw", "sha": "old"}}))
+old_stamp()
 out, calls, res = after(co, "yes")
 check("restarts allowed (update --restart): the VM is stopped and started", "stop" in calls and "start" in calls
       and any("restarted on the new gateway" in t for t in res.get("done", [])), (calls, res))
-out, calls, res = after(co, "yes")
-check("the next run, nothing changed: no bind request (the gateway is the one recorded)",
-      not any("secrets bind" in t for t in res.get("todo", [])), res)
+runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=NETGW,
+        gateway={"pid": 1, "started": time.time(), "command": NETGW + " -config /x/gw.json"},
+        gateway_started={"bin": NETGW, "sha256": GW_SHA}, hub={"pid": 2, "started": time.time(), "command": "x", "code": CODE})
+out, calls, res = after(co, "no")
+check("the next run, everything current: nothing restarted, but the bind reminder stays until it's done (or 30 days)",
+      "stop" not in calls and "hub stop" not in calls and res.get("bind_pending") == ["main"]
+      and any("secrets bind" in t for t in res.get("todo", [])), (calls, res))
+st = json.load(open(stamp))
+st["bind_pending"] = {"main": time.time() - 31 * 86400}
+write(stamp, json.dumps(st))
+out, calls, res = after(co, "no")
+check("…and a reminder older than 30 days lapses", res.get("bind_pending") == [], res)
+write(stamp, json.dumps({"version": "v0.1.0", "tag": "v0.1.0", "commit": tags["0.1.0"], "checkout": "/somewhere/else",
+                         "gateway": {"program": NETGW, "sha": GW_SHA}}))
+out, calls, res = after(co, "no")
+check("another checkout's record says nothing about this one: no 'Updated from' it", "Updated:" not in out, out)
 out, calls, res = (lambda: (None, None, None))()
+runinfo("main", state="running", vms=[], vault_exists=False, netgw_bin=NETGW,
+        gateway={"pid": 1, "started": long_ago, "command": "/old/cua-netgw -config /x/gw.json"}, gateway_started={})
 r = subprocess.run([sys.executable, "-c", DRIVER, co, "yes"], capture_output=True, text=True, timeout=120,
                    env=dict(GENV, STUB_LOG=LOG, STUB_RUNINFO=RUNINFO, STUB_FAIL_STOP="1"), stdin=subprocess.DEVNULL)
 res = json.loads(r.stdout.split("RESULT ", 1)[1])
@@ -247,6 +275,33 @@ check("a check older than a day: a new one starts in the background (status does
 
 src = open(os.path.join(LAB, "lib", "update.py")).read()
 check("update never moves main backwards (fast-forward only)", '"merge", "-q", "--ff-only"' in src)
+low = fresh("0.1.0")
+r = subprocess.run([sys.executable, os.path.join(low, "lib", "update.py"), "update", "--check"], capture_output=True, text=True,
+                   env=dict(GENV, STUB_LOG=LOG, STUB_RUNINFO=RUNINFO, GIT_DIR=os.path.join(co3, ".git"),
+                            GIT_WORK_TREE=co3), timeout=60)
+check("the caller's GIT_DIR / GIT_WORK_TREE (another checkout, at v0.3.0) don't point it at another repository",
+      "v0.1.0 → v0.3.0" in r.stdout, r.stdout + r.stderr)
+tag_branch = fresh("0.3.0")
+git("checkout", "-q", "-b", "side", cwd=origin)
+write(os.path.join(origin, "side.txt"), "x\n")
+git("add", "-A", cwd=origin)
+git("commit", "-qm", "side", cwd=origin)
+git("tag", "v0.9.0", cwd=origin)
+git("checkout", "-q", "main", cwd=origin)
+rc, out, calls = upd(tag_branch, "update", "--check")
+check("a release tag that isn't on main (a side branch's v0.9.0) isn't taken as the latest", "up to date" in out
+      and "v0.9.0" not in out, out)
+rc, out, calls = upd(tag_branch, "update", "--ref", "v0.9.0")
+check("…nor accepted with --ref", rc == 3 and "isn't on the repository's main branch" in out and not calls, out)
+rc, out, calls = upd(tag_branch, "update", "--ref", "main")
+check("--ref takes only a release tag", rc == 3 and "release tag" in out, out)
+link_co = fresh("0.1.0")
+os.rename(os.path.join(link_co, "install.sh"), os.path.join(TD, "elsewhere-install.sh"))
+os.symlink(os.path.join(TD, "elsewhere-install.sh"), os.path.join(link_co, "install.sh"))
+git("update-index", "--assume-unchanged", "install.sh", cwd=link_co)
+rc, out, calls = upd(link_co, "update")
+check("an install.sh that's a link out of the checkout isn't run", rc == 3 and "isn't a file of this checkout" in out
+      and not calls, (rc, out, calls))
 shutil.rmtree(TD, ignore_errors=True)
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

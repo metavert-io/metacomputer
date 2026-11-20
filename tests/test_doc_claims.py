@@ -1723,8 +1723,9 @@ CLAIMS = [
     ("docs/install.md", r"at a terminal it asks first,\s+without one only with `--restart`; a VM another session is using, or that you have\s+in a handoff, is never stopped",
      lambda m: 'go = restart == "yes" or (t is not None and ask(t,' in raw("lib/update.py")
      and 'mc(vm, "stop", timeout=300)' in raw("lib/update.py") and "--override" not in raw("lib/update.py")),
-    ("docs/commands.md", r"nothing about you or this Mac is sent",
-     lambda m: 'out = git("ls-remote", "--tags", "--refs", "origin", "v[0-9]*", timeout=timeout)' in raw("lib/update.py")
+    ("docs/commands.md", r"it asks the project's public GitHub repository for its release tags, without credentials, and only for a checkout of the project",
+     lambda m: '"git", "-c", "credential.helper=", "ls-remote", "--tags", "--refs", PUBLIC_REPO' in raw("lib/update.py")
+     and 'if PROJECT_SLUG not in origin:' in raw("lib/update.py") and 'GIT_TERMINAL_PROMPT="0"' in raw("lib/update.py")
      and "urllib" not in raw("lib/update.py")),
     ("config/defaults.env", r"UPDATE_CHECK=(\w+) # on: metacomputer status says when a newer release is out",
      lambda m: m[1] == "on" and D["UPDATE_CHECK"] == "on"),

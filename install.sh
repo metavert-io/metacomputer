@@ -350,7 +350,60 @@ claude_step() {
     skill_link_and_server
   fi
 }
+tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+# --- an install that's already here: another checkout's (switching needs a yes), or a newer one (downgrading needs --allow-downgrade)
+resolve_link() { # PATH -> where it ends up, following links (relative ones from their own folder), at most 20 of them
+  local p="$1" i=0 t
+  while [ -L "$p" ] && [ $i -lt 20 ]; do
+    t="$(readlink "$p")"; case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac; i=$((i + 1))
+  done
+  printf '%s\n' "$p"
+}
+real_dir() { (cd "$1" 2>/dev/null && pwd -P); }
+stamp_field() { sed -n "s/^ *\"$1\": \"\\([^\"]*\\)\".*/\\1/p" "$HOME/.local/share/metacomputer/installed.json" 2>/dev/null | head -1 || true; }
+existing_checks() { # main | claude: the plan's lines go into todo only for main
+  local here other="" tgt od s_dir s_commit s_tag this_tag head
+  here="$(real_dir "$ROOT")"
+  if [ "$CLAUDE" = 1 ] && [ -L "$CMD_LINK" ]; then
+    tgt="$(resolve_link "$CMD_LINK")"
+    case "$tgt" in */bin/metacomputer)
+      od="$(real_dir "$(dirname "$tgt")/..")"
+      if [ -n "$od" ] && [ "$od" != "$here" ] && [ -f "$od/install.sh" ] && [ -f "$od/bin/metacomputer" ]; then other="$od"; fi ;; esac
+  fi
+  if [ -n "$other" ]; then
+    if [ "$SWITCH" = 1 ]; then
+      [ "$1" != main ] || todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other") to this checkout (--switch)")
+    elif [ "$YES" = 1 ] || [ ! -t 0 ]; then
+      die "the metacomputer command runs another checkout, $(tildify "$other"), and this run would switch it (and the Claude Code plugin) to $(tildify "$ROOT")." \
+          "To update that install instead: metacomputer update." \
+          "To move to this checkout: ./install.sh --switch (that checkout's VM, settings and vault are left as they are)."
+    elif ask "The metacomputer command runs another checkout, $(tildify "$other"). Switch it and the Claude Code plugin to this one?" N; then
+      [ "$1" != main ] || todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other") to this checkout")
+    else
+      echo "  Nothing was changed. To update the install that's there: metacomputer update."; exit 0
+    fi
+  fi
+  # Older than what's installed from this checkout: by history when both commits are here, else by release tag.
+  [ "$ALLOW_DOWNGRADE" = 0 ] && [ -f "$HOME/.local/share/metacomputer/installed.json" ] || return 0
+  s_dir="$(stamp_field checkout)"; [ -n "$s_dir" ] && [ "$(real_dir "$s_dir")" = "$here" ] || return 0
+  s_commit="$(stamp_field commit)"; head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$s_commit" ] && [ -n "$head" ] && [ "$s_commit" != "$head" ] || return 0
+  if git -C "$ROOT" merge-base --is-ancestor "$s_commit" "$head" 2>/dev/null; then return 0; fi     # forward: an update
+  if git -C "$ROOT" merge-base --is-ancestor "$head" "$s_commit" 2>/dev/null; then
+    die "this checkout ($(git -C "$ROOT" describe --tags --always 2>/dev/null)) is older than what's installed from it ($(stamp_field version)): nothing was changed." \
+        "To update: metacomputer update. To go back anyway: ./install.sh --allow-downgrade."
+  fi
+  s_tag="$(stamp_field tag)"; [ -n "$s_tag" ] || s_tag="$(stamp_field after)"
+  this_tag="$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+  if [ -n "$s_tag" ] && [ -n "$this_tag" ] && [ "$s_tag" != "$this_tag" ] \
+     && [ "$(printf '%s\n%s\n' "$s_tag" "$this_tag" | sort -V | tail -1)" = "$s_tag" ]; then
+    die "this checkout ($this_tag) is older than what's installed from it ($s_tag): nothing was changed." \
+        "To update: metacomputer update. To go back anyway: ./install.sh --allow-downgrade."
+  fi
+  return 0
+}
 if [ "$ONLY_CLAUDE" = 1 ]; then
+  existing_checks claude
   claude_step
   printf '\n%s\n' "Restart open Claude Code sessions (or run /reload-plugins in them) to pick this up."
   exit 0
@@ -635,39 +688,7 @@ case "$vm_state:$build_vm:$vm_replace" in
   unknown:*) todo+=("leave the VM alone (Lume couldn't list the VMs)") ;;
   *) todo+=("not build the VM yet (--no-build; later: metacomputer build)") ;;
 esac
-# An install that's already here: from another checkout (the command and plugin would move to this one), or
-# newer than this checkout. Neither changes without saying so.
-other_checkout=""
-if [ "$CLAUDE" = 1 ] && [ -L "$CMD_LINK" ]; then
-  cmd_target="$(readlink "$CMD_LINK")"
-  case "$cmd_target" in */bin/metacomputer)
-    other_dir="${cmd_target%/bin/metacomputer}"
-    if [ "$other_dir" != "$ROOT" ] && [ -f "$other_dir/install.sh" ] && [ -f "$other_dir/bin/metacomputer" ]; then
-      other_checkout="$other_dir"
-    fi ;; esac
-fi
-if [ -n "$other_checkout" ]; then
-  if [ "$SWITCH" = 1 ]; then
-    todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other_checkout") to this checkout (--switch)")
-  elif [ "$YES" = 1 ] || [ ! -t 0 ]; then
-    die "the metacomputer command runs another checkout, $(tildify "$other_checkout"), and this run would switch it (and the Claude Code plugin) to $(tildify "$ROOT")." \
-        "To update that install instead: metacomputer update." \
-        "To move to this checkout: ./install.sh --switch (that checkout's VM, settings and vault are left as they are)."
-  elif ask "The metacomputer command runs another checkout, $(tildify "$other_checkout"). Switch it and the Claude Code plugin to this one?" N; then
-    todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other_checkout") to this checkout")
-  else
-    echo "  Nothing was changed. To update the install that's there: metacomputer update."; exit 0
-  fi
-fi
-installed_tag=""
-[ ! -f "$HOME/.local/share/metacomputer/installed.json" ] \
-  || installed_tag="$(sed -n 's/.*"tag": "\(v[0-9][0-9.]*\)".*/\1/p' "$HOME/.local/share/metacomputer/installed.json" 2>/dev/null | head -1 || true)"
-this_tag="$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
-if [ -n "$installed_tag" ] && [ -n "$this_tag" ] && [ "$installed_tag" != "$this_tag" ] && [ "$ALLOW_DOWNGRADE" = 0 ] \
-   && [ "$(printf '%s\n%s\n' "$installed_tag" "$this_tag" | sort -V | tail -1)" = "$installed_tag" ]; then
-  die "this checkout ($this_tag) is older than what's installed ($installed_tag): nothing was changed." \
-      "To update: metacomputer update. To go back to $this_tag anyway: ./install.sh --allow-downgrade."
-fi
+existing_checks main
 echo "  This run will:"
 for t in "${todo[@]}"; do printf '%s\n' "    - $t"; done
 [ ${#done_[@]} = 0 ] || printf '%s\n' "  Already done: $(IFS=,; echo "${done_[*]}" | sed 's/,/, /g')."

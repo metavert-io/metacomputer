@@ -436,10 +436,9 @@ mcp_probe() { ( export_options; "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" probe ); }   
 # --- the hub (lib/mcp_hub.py): one process per VM holds the connection to the driver -----
 hub_stop() { ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) || true; }
 do_runinfo() { # for lib/update.py: this VM's processes and the programs they run, as JSON (no secrets, no VM contact)
-  local state=off gw="" hub="" watcher=""
+  local state=off gw="" watcher=""
   vm_running "$VM_NAME" 2>/dev/null && state=running
   gw="$(netgw_pid)"; [ -n "$gw" ] && ! kill -0 "$gw" 2>/dev/null && gw=""
-  hub="$(head -1 "$RUN_DIR/hub/hub.pid" 2>/dev/null | tr -cd '0-9')"; [ -n "$hub" ] && ! kill -0 "$hub" 2>/dev/null && hub=""
   watcher="$(events_watcher_pid)"
   local exists=1; vm_exists "$VM_NAME" || exists=0
   # What this VM's guest would be built from (lib/update.py guest_digest), to tell whether a rebuild would add something.
@@ -448,7 +447,8 @@ do_runinfo() { # for lib/update.py: this VM's processes and the programs they ru
   MCOMP_G_EXTRA_PACKAGES="${EXTRA_PACKAGES:-}" MCOMP_G_BROWSER_EXTENSIONS="${BROWSER_EXTENSIONS:-}" \
   MCOMP_G_VIRTUAL_AUDIO="${VIRTUAL_AUDIO:-off}" MCOMP_G_GUEST_USER="$GUEST_USER" \
   MCOMP_G_SECRETS_PROXY_PORT="${SECRETS_PROXY_PORT:-18765}" MCOMP_G_EXISTS="$exists" \
-  "$PY" "$LAB_ROOT/lib/update.py" _runinfo-json "$VM_NAME" "$state" "$RUN_DIR" "$NETGW_BIN" "$gw" "$hub" "$watcher" \
+  MCOMP_G_ADMIN_USER="${ADMIN_USER:-}" MCOMP_G_NET_GATEWAY_IP="${NET_GATEWAY_IP:-}" \
+  "$PY" "$LAB_ROOT/lib/update.py" _runinfo-json "$VM_NAME" "$state" "$RUN_DIR" "$NETGW_BIN" "$gw" "$RUN_DIR/hub/hub.pid" "$watcher" \
     "${VAULT_DIR:-}" "${MC_SETTINGS_KIND:-}"
 }
 

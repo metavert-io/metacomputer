@@ -3062,6 +3062,21 @@ def _wait_exit_unreaped(proc, timeout):
 TARGET_KEYS = ("app", "window", "pid", "window_id", "element_token")
 
 
+def code_digest():
+    """sha256 of the checkout's lib/*.py (names and contents) as this process loaded it: `metacomputer update` compares
+    it with the files now there to tell a hub on older code."""
+    h = hashlib.sha256()
+    d = os.path.dirname(os.path.abspath(__file__))
+    try:
+        for f in sorted(os.listdir(d)):
+            if f.endswith(".py"):
+                with open(os.path.join(d, f), "rb") as fh:
+                    h.update(f.encode() + b"\0" + hashlib.sha256(fh.read()).digest())
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 def window_keys(a):
     """A call's or step's target keys with a nested `target: {kind: "window", pid, window_id}` folded into pid and
     window_id, so every guard reads the window it names (a copy when it folds anything; the original isn't changed,
@@ -3522,7 +3537,7 @@ class Server:
             pass
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps({"pid": os.getpid(), "socket": self.paths["sock"], "started": self.hub.started,
-                                 "vm": self.hub.settings.get("vm_name")}).encode())
+                                 "vm": self.hub.settings.get("vm_name"), "code": code_digest()}).encode())
         try:
             os.unlink(self.paths["sock"])
         except FileNotFoundError:
