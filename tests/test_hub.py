@@ -127,7 +127,9 @@ for line in sys.stdin:
         continue
     name, a = m["params"]["name"], m["params"].get("arguments") or {}
     sess = a.get("session") or ""
-    if name == "list_windows":
+    if name == "list_windows" and os.path.exists(os.path.join(STATE, "list_fail")):
+        ok(mid, "list_windows failed", err=True)     # a driver that can't list its windows right now
+    elif name == "list_windows":
         ws = [w for w in windows() if (not a.get("pid") or w["pid"] == a["pid"])
               and (not a.get("app") or a["app"].lower() in w["app_name"].lower())]
         ok(mid, f"{len(ws)} windows", {"windows": ranked(ws)})
@@ -1883,6 +1885,25 @@ def named_target_checks():
     res = h.call("run_steps", {"app": "mousepad", "steps": [json.loads(json.dumps(sv))]})
     check("an app name with a window list the hub can't read whole (an app name past its cut): Chrome rules, refused",
           res.is_error and "set_value" in res.text and not sent_args("run_steps", n0), res.text[:160])
+    hidden = win(30, 77, "Google-chrome", 1000, 100, 800, 700, "Mail")
+    hidden["is_on_screen"] = False                      # minimised: a foreground step can bring it back
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(W, 50, "Mousepad", 100, 100, 800, 600), hidden,
+                 win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    n0 = len(calls())
+    res = h.call("run_steps", {"steps": [{"press_key": {"pid": 77, "window_id": 30, "key": "Escape",
+                                                       "delivery_mode": "foreground"}},
+                                         {"set_value": {"app": "e", "role": "textfield", "name": "q", "value": "x"}}]})
+    check("an app name that matches a visible Mousepad and a minimised Chrome (which a step can bring forward): "
+          "Chrome rules, refused", res.is_error and "set_value" in res.text and not sent_args("run_steps", n0),
+          res.text[:160])
+    set_windows(ws)
+    open(os.path.join(STATE, "list_fail"), "w").close()
+    n0 = len(calls())
+    res = h.call("run_steps", {"app": "Mousepad", "steps": [{"click": {"x": 10, "y": 10}}]})
+    os.unlink(os.path.join(STATE, "list_fail"))
+    check("a pixel click in a window named by app while the window list can't be read is refused as unclear",
+          res.is_error and res.structured.get("code") == mcp_hub.UNCLEAR_CODE and not sent_args("run_steps", n0),
+          res.text[:200])
     set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), win(W, 50, "Mousepad", 100, 100, 800, 600, "Untitled"),
                  win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
     n0 = len(calls())
