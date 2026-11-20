@@ -3728,18 +3728,18 @@ def connect_or_start(env=None, timeout=15.0, start=True):
     raise HubError(f"the metacomputer hub didn't open its socket within {timeout:.0f} s (log: {p['log']})")
 
 
-def stop_hub(env=None, wait=8.0):
-    """Stop this VM's hub, if one runs. True when one was stopped."""
-    pid = hub_pid(env)
-    if not pid:
-        return False
-    cmd = owners.full_command(pid)
-    if "mcp_hub.py" not in cmd:
+def _signal_hub(pid):
+    """SIGTERM to this VM's hub process. False when pid isn't a hub (any more) or the signal can't be sent."""
+    if "mcp_hub.py" not in owners.full_command(pid):
         return False
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         return False
+    return True
+
+
+def _wait_gone(pid, wait=8.0):
     end = time.monotonic() + wait
     while time.monotonic() < end and owners.alive(pid):
         time.sleep(0.1)
@@ -3749,10 +3749,47 @@ def stop_hub(env=None, wait=8.0):
         except OSError:
             pass
         time.sleep(0.2)
+
+
+def stop_hub(env=None, wait=8.0):
+    """Stop this VM's hub, if one runs. True when one was stopped."""
+    pid = hub_pid(env)
+    if not pid or not _signal_hub(pid):
+        return False
+    _wait_gone(pid, wait)
     return True
 
 
+def stop_if_idle(env=None):
+    """`hub stop --if-idle` (metacomputer update, for a hub on older code): (exit code, message). Stops the hub only
+    when its own report says nothing uses it and no handoff is open, deciding under this VM's dispatch lock held
+    exclusively (as opening a handoff does), so no action is sent and no handoff opens between the look and the
+    signal. 3 = not stopped: in use, or anything that couldn't be checked."""
+    pid = hub_pid(env)
+    if not pid:
+        return 0, "no hub was running"
+    try:
+        with owners.dispatch(shared=False, timeout=IDLE_STOP_LOCK_S):
+            try:
+                handoff = owners.open_handoff()
+            except Exception:
+                return 3, "hub not stopped: couldn't check for a handoff"
+            if handoff is not None:
+                return 3, "hub not stopped: the user has the computer (a handoff)"
+            st = query_status(env)
+            why = idle_reason(st) if st else "its status couldn't be read"
+            if why:
+                return 3, f"hub not stopped: {why}"
+            if hub_pid(env) != pid or not _signal_hub(pid):
+                return 3, "hub not stopped: it changed while it was being checked"
+    except (OSError, TimeoutError) as e:
+        return 3, f"hub not stopped: an action is on its way ({e})"
+    _wait_gone(pid)
+    return 0, "hub stopped"
+
+
 IDLE_STOP_MIN_S = 5
+IDLE_STOP_LOCK_S = 10
 
 
 def idle_reason(st):
@@ -3851,19 +3888,9 @@ def main(argv):
         return 0
     if cmd == "stop":
         if "--if-idle" in argv:              # metacomputer update: a hub on older code, stopped only while nothing uses it
-            st = query_status()
-            why = idle_reason(st) if st else None
-            if why:
-                print(f"hub not stopped: {why}")
-                return 3
-            if st:
-                try:
-                    if owners.open_handoff() is not None:
-                        print("hub not stopped: the user has the computer (a handoff)")
-                        return 3
-                except Exception:
-                    print("hub not stopped: couldn't check for a handoff")
-                    return 3
+            rc, msg = stop_if_idle()
+            print(msg)
+            return rc
         stopped = stop_hub()
         if "--quiet" not in argv:
             print("hub stopped" if stopped else "no hub was running")
