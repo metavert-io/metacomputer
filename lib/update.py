@@ -22,7 +22,9 @@ The installed version is kept in ~/.local/share/metacomputer/installed.json. `me
 that's available, from a check against the repository's tags at most once a day (UPDATE_CHECK=off turns it off).
 """
 import argparse
+import fcntl
 import hashlib
+import signal
 import tempfile
 import json
 import os
@@ -59,8 +61,8 @@ def git_env():
 
 
 def clean_env(**extra):
-    """The environment for this checkout's own commands: no VM picked by the caller."""
-    env = {k: v for k, v in os.environ.items() if k not in SELECTION}
+    """The environment for this checkout's own commands: no VM picked by the caller, none of its GIT_*."""
+    env = {k: v for k, v in os.environ.items() if k not in SELECTION and not k.startswith("GIT_")}
     env.update(extra)
     return env
 
@@ -130,8 +132,9 @@ def anonymous_latest(timeout=15):
     origin = git("remote", "get-url", "origin", check=False)
     if PROJECT_SLUG not in origin:
         return None
+    env = dict(git_env(), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")   # no rewrites, headers or helpers
     r = subprocess.run(["git", "-c", "credential.helper=", "ls-remote", "--tags", "--refs", PUBLIC_REPO, "v[0-9]*"],
-                       capture_output=True, text=True, timeout=timeout, env=git_env(), stdin=subprocess.DEVNULL)
+                       capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
     tags = [ln.split("refs/tags/", 1)[1] for ln in r.stdout.splitlines() if "refs/tags/" in ln]
     tags = [t for t in tags if vkey(t)]
     return max(tags, key=vkey) if tags else None
@@ -144,7 +147,7 @@ def whats_new(since, upto_ref, limit=8, only=None):
         text = git("show", f"{upto_ref}:CHANGELOG.md")
     except Refused:
         return []
-    lo = (vkey(since) or (0, 0, 0)) if since else (0, 0, 0)
+    lo = (vkey(str(since).split("+")[0]) or (0, 0, 0)) if since else (0, 0, 0)
     out, cur = [], None
     for line in text.splitlines():
         m = re.match(r"^## \[(\d+\.\d+\.\d+)\]", line)
@@ -263,15 +266,30 @@ def runinfo(vm=None):
         return {"vm": vm or "main", "error": str(e)[:200]}
 
 
-def mc(vm, *args, timeout=600):
-    """This checkout's command for one VM (main: none named), with no VM inherited from the caller. A timeout is a
-    result (124), never the end of the whole run."""
+def mc(vm, *args, timeout=600, expect=None):
+    """This checkout's command for one VM (main: none named), with no VM inherited from the caller; `expect` (the
+    VM's name and settings file hash as inspected) makes stop and start refuse another VM (expect_guard). A timeout
+    is a result (124), never the end of the whole run, and stops the command's whole process group."""
+    env = clean_env()
+    if expect:
+        env.update(MCOMP_EXPECT_VM=expect.get("vm") or "")
+        if expect.get("config_sha"):
+            env["MCOMP_EXPECT_CONFIG_SHA"] = expect["config_sha"]
+    p = subprocess.Popen([own("bin/metacomputer")] + (["--vm", vm] if vm else []) + list(args), stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
     try:
-        r = subprocess.run([own("bin/metacomputer")] + (["--vm", vm] if vm else []) + list(args), capture_output=True,
-                           text=True, timeout=timeout, env=clean_env(), stdin=subprocess.DEVNULL, start_new_session=True)
+        out, _ = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait(10)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
         return 124, f"didn't finish in {timeout} s"
-    return r.returncode, (r.stdout + r.stderr).strip()
+    return p.returncode, (out or "").strip()
 
 
 # --- the step every install ends with ---------------------------------------------------------------------------
@@ -316,26 +334,38 @@ def after_install(restart="ask", quiet=False):
             todo.append(f"{label}: couldn't read its state ({info['error']})")
             continue
         hub, watcher, gw = info.get("hub"), info.get("watcher"), info.get("gateway")
-        if hub and hub.get("code") != code_now:
-            rc, out = mc(vm, "hub", "stop", timeout=60)
-            (done if rc == 0 else todo).append(f"{label}: hub " + ("stopped (it starts again, on the new code, at the "
-                                                                   "next call)" if rc == 0 else f"not stopped: {out[-160:]}"))
+        pin = {"vm": info.get("vm"), "config_sha": info.get("config_sha")}
+        started = info.get("gateway_started") or {}
+        old_gw = bool(gw) and info.get("state") == "running" and (
+            started.get("sha256") != now_gw["sha"] or os.path.realpath(started.get("bin") or "") != os.path.realpath(netgw))
+        if hub and hub.get("code") != code_now and not old_gw:
+            # Only an idle hub is stopped: one with clients is left (it exits by itself after HUB_IDLE with none, and
+            # the next call starts it on the new code). A VM restart below stops it after its own owners check.
+            rc, out = mc(vm, "hub", "status", "--json", timeout=30)
+            try:
+                clients = json.loads(out.splitlines()[-1]).get("clients")
+            except (ValueError, IndexError, AttributeError):
+                clients = None
+            if clients == [] or clients == 0:
+                rc, out = mc(vm, "hub", "stop", timeout=60)
+                (done if rc == 0 else todo).append(f"{label}: hub " + ("stopped (it starts again, on the new code, at the "
+                                                                       "next call)" if rc == 0 else f"not stopped: {out[-160:]}"))
+            else:
+                todo.append(f"{label}: the hub runs older code and a session is using it: it restarts on the new code once "
+                            "it's idle (or run `" + ("metacomputer" + (f" --vm {vm}" if vm else "")) + " hub stop` then)")
         if watcher and (watcher.get("started") or 0) + 2 < mtime:
             rc1, _ = mc(vm, "events", "watcher", "stop", timeout=60)
             rc2, out = mc(vm, "events", "watcher", "start", timeout=60)
             (done if rc1 == 0 and rc2 == 0 else todo).append(
                 f"{label}: event watcher " + ("restarted" if rc1 == 0 and rc2 == 0 else f"not restarted: {out[-160:]}"))
-        started = info.get("gateway_started") or {}
-        old_gw = bool(gw) and info.get("state") == "running" and (
-            started.get("sha256") != now_gw["sha"] or os.path.realpath(started.get("bin") or "") != os.path.realpath(netgw))
         if old_gw:
             if gateway_changed is None:
                 gateway_changed = True                     # no record of the last install: the running one is older
             go = restart == "yes" or (t is not None and ask(t, f"{label}'s VM runs an earlier gateway program. Restart "
                                                                 "the VM now (its open apps close)?"))
             if go:
-                rc1, out1 = mc(vm, "stop", timeout=300)
-                rc2, out2 = mc(vm, "start", timeout=600) if rc1 == 0 else (1, "")
+                rc1, out1 = mc(vm, "stop", timeout=300, expect=pin)
+                rc2, out2 = mc(vm, "start", timeout=600, expect=pin) if rc1 == 0 else (1, "")
                 if rc1 == 0 and rc2 == 0:
                     done.append(f"{label}: VM restarted on the new gateway")
                 else:
@@ -421,7 +451,20 @@ def cmd_version(a):
     return 0
 
 
+def update_lock():
+    """One update of this checkout at a time (held until this process exits)."""
+    path = os.path.join(git("rev-parse", "--absolute-git-dir"), "metacomputer-update.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise Refused("another update of this checkout is running; try again when it's done")
+    return fd
+
+
 def cmd_update(a):
+    _lock = update_lock()                  # noqa: F841  (kept open: the lock lasts as long as the update)
     st = checkout()
     if st["dirty"]:
         raise Refused(f"{LAB} has local changes, so it's yours to update (commit or stash them, then run this again)")
@@ -518,7 +561,8 @@ def runinfo_json(argv):
     except (ValueError, IndexError, OSError, subprocess.TimeoutExpired, Refused):
         pass                                        # unknown: the bind reminder stays, worded as conditional
     values = {k: os.environ.get("MCOMP_G_" + k, "") for k in GUEST_KEYS}
-    print(json.dumps({"vm": vm, "state": state, "run_dir": run_dir, "netgw_bin": netgw, "gateway": proc(gw),
+    cfg = os.environ.get("MCOMP_G_CONFIG_FILE") or ""
+    print(json.dumps({"vm": vm, "config_sha": sha_file(cfg) if cfg else None, "state": state, "run_dir": run_dir, "netgw_bin": netgw, "gateway": proc(gw),
                       "gateway_started": gs, "hub": hub, "watcher": proc(watcher), "vault_dir": vault_dir, "kind": kind,
                       "vms": vms, "vault_exists": vault_exists, "guest_digest": guest_digest(values),
                       "build": read_json(os.path.join(run_dir, "vm-build.json")) if run_dir else None,

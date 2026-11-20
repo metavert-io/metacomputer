@@ -276,6 +276,7 @@ do_start() { # [--no-volumes]
   # The VM's lock (held already by reset, restore and baseline, which start it): never during a build, a delete
   # (`vm delete` holds it through its prompt) or another change of it.
   vm_lock_or_die "metacomputer start"
+  expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
@@ -448,6 +449,7 @@ do_runinfo() { # for lib/update.py: this VM's processes and the programs they ru
   MCOMP_G_VIRTUAL_AUDIO="${VIRTUAL_AUDIO:-off}" MCOMP_G_GUEST_USER="$GUEST_USER" \
   MCOMP_G_SECRETS_PROXY_PORT="${SECRETS_PROXY_PORT:-18765}" MCOMP_G_EXISTS="$exists" \
   MCOMP_G_ADMIN_USER="${ADMIN_USER:-}" MCOMP_G_NET_GATEWAY_IP="${NET_GATEWAY_IP:-}" \
+  MCOMP_G_CONFIG_FILE="${LOCAL_CONFIG:-}" \
   "$PY" "$LAB_ROOT/lib/update.py" _runinfo-json "$VM_NAME" "$state" "$RUN_DIR" "$NETGW_BIN" "$gw" "$RUN_DIR/hub/hub.pid" "$watcher" \
     "${VAULT_DIR:-}" "${MC_SETTINGS_KIND:-}"
 }
@@ -465,6 +467,7 @@ do_hub() { # [status [--json|--brief] | start | stop | env --json]
 do_stop() { # [--force] (immediate power-off) [--override] (even if another session is using it)
   parse_flags "$@"
   local force=""; for a in ${REST[@]+"${REST[@]}"}; do [ "$a" = --force ] && force=--force; done
+  expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   if vm_running "$VM_NAME"; then
     owners_check
@@ -812,7 +815,7 @@ expect_guard() {
     sha="$(shasum -a 256 < "$LOCAL_CONFIG" 2>/dev/null | cut -d' ' -f1)"
     [ "$sha" = "$MCOMP_EXPECT_CONFIG_SHA" ] || why="the settings file $LOCAL_CONFIG changed since it was confirmed (sha256 ${sha:0:12}, confirmed ${MCOMP_EXPECT_CONFIG_SHA:0:12})"
   fi
-  [ -z "$why" ] || die "refusing to replace the VM: $why"
+  [ -z "$why" ] || die "refusing to change the VM: $why"
 }
 
 restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a copy of SOURCE_VM, then start it

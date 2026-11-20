@@ -47,7 +47,9 @@ echo "$*" >> "$STUB_LOG"
 vm=main; [ "$1" = --vm ] && { vm="$2"; shift 2; }
 case "$1" in
   _runinfo) cat "$STUB_RUNINFO/$vm.json" ;;
-  stop|start|hub|events) [ -z "${STUB_FAIL_STOP:-}" ] || [ "$1" != stop ] || { echo "the VM is in use by another controller"; exit 1; } ;;
+  hub) [ "$2" = status ] && { echo "{\"clients\": ${STUB_HUB_CLIENTS:-[]}}"; exit 0; } ;;
+  stop|start|events) [ -z "${STUB_FAIL_STOP:-}" ] || [ "$1" != stop ] || { echo "the VM is in use by another controller"; exit 1; }
+     [ "$1" = events ] || echo "expect=${MCOMP_EXPECT_VM:-}:${MCOMP_EXPECT_CONFIG_SHA:-}" >> "$STUB_LOG" ;;
 esac
 exit 0
 '''
@@ -192,18 +194,19 @@ def old_stamp():
 
 
 old_stamp()
-runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=NETGW,
+runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=NETGW, config_sha="cfgmain",
         gateway={"pid": 1, "started": long_ago, "command": "/old/vendor/bin/cua-netgw -config /x/gw.json"},
         gateway_started={}, hub={"pid": 2, "started": long_ago, "command": "python3 mcp_hub.py", "code": "older"},
         watcher={"pid": 3, "started": long_ago, "command": "python3 events.py watch"})
-runinfo("b", state="running", netgw_bin=NETGW, vault_exists=False,
+runinfo("b", state="running", netgw_bin=NETGW, vault_exists=False, config_sha="cfgb",
         gateway={"pid": 4, "started": time.time(), "command": NETGW + " -config /y/gw.json"},
-        gateway_started={"bin": NETGW, "sha256": GW_SHA}, hub={"pid": 5, "started": time.time(), "command": "x", "code": CODE},
+        gateway_started={"bin": NETGW, "sha256": GW_SHA}, hub={"pid": 5, "started": time.time(), "command": "x", "code": "older"},
         build={"guest": "g1", "version": "v0.3.0"})
 out, calls, res = after(co, "no")
-check("the hub and the watcher on older code: hub stopped, watcher stopped and started; the current VM b left alone",
-      "hub stop" in calls and "events watcher stop" in calls and "events watcher start" in calls
-      and not any(c.startswith("--vm b hub") for c in calls), calls)
+check("an idle hub on older code, on a VM whose gateway is current (b): stopped; the watcher on older code: restarted",
+      "--vm b hub stop" in calls and "events watcher stop" in calls and "events watcher start" in calls, calls)
+check("…but main's hub, whose VM needs a restart anyway, is left to that restart (it stops the hub after its own "
+      "owners check)", "hub stop" not in calls, calls)
 check("a VM on an earlier gateway, restarts not allowed: not stopped, and told how", "stop" not in calls
       and any("restart the VM to run the new gateway" in t for t in res.get("todo", [])), (calls, res))
 check("the gateway changed and a vault exists: told to bind it again", any("secrets bind" in t for t in res.get("todo", [])), res)
@@ -217,6 +220,19 @@ old_stamp()
 out, calls, res = after(co, "yes")
 check("restarts allowed (update --restart): the VM is stopped and started", "stop" in calls and "start" in calls
       and any("restarted on the new gateway" in t for t in res.get("done", [])), (calls, res))
+check("…pinned to the VM and settings file it inspected (stop and start refuse any other: expect_guard)",
+      calls.count("expect=main:cfgmain") == 2, calls)
+os.environ["STUB_HUB_CLIENTS"] = '[{"kind": "session"}]'
+out, calls, res = (None, None, None)
+os.remove(LOG) if os.path.exists(LOG) else None
+r = subprocess.run([sys.executable, "-c", DRIVER, co, "no"], capture_output=True, text=True, timeout=120,
+                   env=dict(GENV, STUB_LOG=LOG, STUB_RUNINFO=RUNINFO, STUB_HUB_CLIENTS='[{"kind": "session"}]'),
+                   stdin=subprocess.DEVNULL)
+res = json.loads(r.stdout.split("RESULT ", 1)[1])
+calls = open(LOG).read().splitlines()
+check("a hub on older code that a session is using: not stopped, and said so", "--vm b hub stop" not in calls
+      and any("a session is using it" in t for t in res.get("todo", [])), (calls, res))
+del os.environ["STUB_HUB_CLIENTS"]
 runinfo("main", state="running", vms=["b"], vault_exists=True, netgw_bin=NETGW,
         gateway={"pid": 1, "started": time.time(), "command": NETGW + " -config /x/gw.json"},
         gateway_started={"bin": NETGW, "sha256": GW_SHA}, hub={"pid": 2, "started": time.time(), "command": "x", "code": CODE})
@@ -239,6 +255,13 @@ runinfo("main", state="running", vms=[], vault_exists=False, netgw_bin=NETGW,
 r = subprocess.run([sys.executable, "-c", DRIVER, co, "yes"], capture_output=True, text=True, timeout=120,
                    env=dict(GENV, STUB_LOG=LOG, STUB_RUNINFO=RUNINFO, STUB_FAIL_STOP="1"), stdin=subprocess.DEVNULL)
 res = json.loads(r.stdout.split("RESULT ", 1)[1])
+import fcntl  # noqa: E402
+lk = os.open(os.path.join(fresh_lock_co := fresh("0.1.0"), ".git", "metacomputer-update.lock"), os.O_RDWR | os.O_CREAT)
+fcntl.flock(lk, fcntl.LOCK_EX)
+rc2, out2, calls2 = upd(fresh_lock_co, "update")
+os.close(lk)
+check("two updates of one checkout at once: the second is refused (nothing moved)", rc2 == 3 and "another update" in out2
+      and git("rev-parse", "HEAD", cwd=fresh_lock_co) == tags["0.1.0"], out2)
 check("a VM another session is using (stop refuses): not restarted, and that's reported, with what to run later",
       any("not restarted" in t and "stop && metacomputer start" in t for t in res.get("todo", [])), res)
 
