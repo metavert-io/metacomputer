@@ -144,7 +144,11 @@ for line in sys.stdin:
               "window_bounds": b}
         if shot:
             sc.update(screenshot_width=b.get("width"), screenshot_height=b.get("height"), screenshot_frame_valid=True)
-        ok(mid, f"snapshot_id={sid} session={sess}", sc, images=1 if shot else 0)
+        if w.get("tree"):                     # a window whose tree the test set (bot checks)
+            sc["tree_markdown"] = w["tree"]
+            sc["window_title"] = w.get("title")
+        ok(mid, f"snapshot_id={sid} session={sess}" + ("\n" + w["tree"] if w.get("tree") else ""), sc,
+           images=1 if shot else 0)
     elif name == "get_desktop_state":
         ok(mid, "desktop", {"windows": ranked(windows()), "screen_width": 1920, "screen_height": 1080,
                             "screenshot_width": 1920, "screenshot_height": 1080}, images=1)
@@ -1926,6 +1930,77 @@ def named_target_checks():
     set_windows(BASE_WINDOWS)
 
 
+def bot_check_checks():
+    """A window read that shows a human check: a note telling Claude to hand it over, and (BOT_CHECK=on) acting calls
+    aimed at that window refused until a whole read no longer shows it. A page that only talks about CAPTCHAs isn't
+    marked. BOT_CHECK=note notes without refusing."""
+    print("human checks on screen (BOT_CHECK)")
+    clear_claims()
+    robot = win(W, 50, "Mousepad", 100, 100, 800, 600, "Sign in")
+    robot["tree"] = '- [0] document "Sign in" [actions=[]]\n  - [3] check box "I\'m not a robot" [actions=[press]]'
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), robot, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    r = Running(MCOMP_BROWSER_PACING="fast")
+    h = client(r, "call", session="bot")
+    res = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    check("a read showing reCAPTCHA's checkbox gets the hub's note: hand it to the user", "bot check" in res.text
+          and "metacomputer handoff --why captcha" in res.text
+          and "bot check" in json.dumps(res.structured.get("metacomputer_note") or ""), res.text[:200])
+    n0 = len(calls())
+    res = h.call("click", {"pid": 50, "window_id": W, "element_token": "x"})
+    check("an acting call aimed at that window is refused (bot_check), nothing sent", res.is_error
+          and res.structured.get("code") == "bot_check" and not sent_args("click", n0), res.text[:200])
+    for label, call in (("by pid", ("type_text", {"pid": 50, "text": "abc"})),
+                        ("by app name", ("press_key", {"app": "mousepad", "key": "Return"})),
+                        ("in a batch step", ("run_steps", {"steps": [{"click": {"pid": 50, "window_id": W,
+                                                                                "x": 5, "y": 5}}]}))):
+        n0 = len(calls())
+        res = h.call(call[0], call[1])
+        check(f"…and aimed at it {label}", res.is_error and res.structured.get("code") == "bot_check"
+              and not sent_args(call[0], n0), res.text[:160])
+    res = h.call("click", {"pid": 10, "window_id": 1, "x": 5, "y": 5, "delivery_mode": "foreground"})
+    check("another window isn't affected", not (res.structured or {}).get("code") == "bot_check", res.text[:160])
+    h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False, "query": "robot"})
+    robot["tree"] = '- [0] document "Inbox" [actions=[]]'
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), robot, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False, "query": "inbox"})
+    n0 = len(calls())
+    res = h.call("press_key", {"pid": 50, "window_id": W, "key": "Return"})
+    check("a read with a query that no longer shows it doesn't lift the mark (it could have been left out)",
+          res.is_error and res.structured.get("code") == "bot_check", res.text[:160])
+    h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    n0 = len(calls())
+    res = h.call("press_key", {"pid": 50, "window_id": W, "key": "Return"})
+    check("a whole read without it lifts the mark: the call goes through", not res.is_error
+          and sent_args("press_key", n0), res.text[:160])
+    about = win(W, 50, "Mousepad", 100, 100, 800, 600, "How CAPTCHAs work")
+    about["tree"] = ('- [0] heading "How reCAPTCHA and hCaptcha work" [actions=[]]\n'
+                     '  - [1] text "A CAPTCHA asks whether you are a robot. Cloudflare Turnstile is another." [actions=[]]')
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), about, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    res = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    check("a page that only talks about CAPTCHAs isn't marked", "bot check" not in res.text, res.text[:200])
+    cf = win(W, 50, "Mousepad", 100, 100, 800, 600, "Just a moment...")
+    cf["tree"] = '- [0] document "Just a moment..." [actions=[]]'
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), cf, win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    res = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    check("Cloudflare's \"Just a moment...\" title is recognised", "Cloudflare" in res.text and "bot check" in res.text,
+          res.text[:200])
+    h.close()
+    r.stop()
+    set_windows([win(1, 10, "Xfdesktop", 0, 0, 1920, 1080), robot | {"tree": '- [3] check box "I\'m not a robot" []'},
+                 win(2, 11, "Xfce4-panel", 0, 0, 1920, 27)])
+    r = Running(MCOMP_BROWSER_PACING="fast", MCOMP_BOT_CHECK="note")
+    h = client(r, "call", session="bot2")
+    res = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    n0 = len(calls())
+    res2 = h.call("press_key", {"pid": 50, "window_id": W, "key": "Return"})
+    check("BOT_CHECK=note: the note, but no refusal", "bot check" in res.text and "refuses acting calls" not in res.text
+          and not res2.is_error and sent_args("press_key", n0), (res.text[:160], res2.text[:120]))
+    h.close()
+    clear_claims()
+    r.stop()
+    set_windows(BASE_WINDOWS)
+
+
 def bounded_checks():
     print("bounded mode")
     r = Running(MCOMP_DRIVER_MODE="bounded")
@@ -3442,6 +3517,7 @@ def main():
         inheritance_checks()
         coord_model_checks()
         named_target_checks()
+        bot_check_checks()
         bounded_checks()
         actionlog_checks()
         coord_checks()

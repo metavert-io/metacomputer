@@ -704,6 +704,10 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+- `python3 tests/test_botcheck.py`: `lib/botcheck.py`: each common human check (reCAPTCHA, hCaptcha, Cloudflare's
+  widget, wording and "Just a moment..." title, press-and-hold, DataDome, Arkose, Google's "unusual traffic" page)
+  is recognised from a window read, pages that only talk about CAPTCHAs aren't, a huge tree is read only so far, and
+  the event carries the kind only. The hub's note and refusal are in `test_hub.py` ("human checks on screen").
 - `python3 tests/test_netpolicy.py`: network allowlists (`lib/netpolicy.py`, `metacomputer net`) against a
   temporary run folder: names (subdomains, `--exact`, wildcards; addresses and malformed names refused), starting
   and narrowing a list without a terminal, widening it and lifting it early refused without one and accepted at a

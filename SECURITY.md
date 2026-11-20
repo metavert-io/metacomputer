@@ -841,6 +841,27 @@ are accepted, not oversights:
 - Two settings files that name the same VM with different `RUN_DIR`s don't see
   each other's handoff (the same holds for the one-controller rule).
 
+## Human checks on screen (`BOT_CHECK`)
+
+A CAPTCHA, Cloudflare's "Verify you are human" page or a press-and-hold check is
+yours to do, never Claude's (SKILL.md). The hub helps it keep to that (`BOT_CHECK=on`,
+the default): when a window read shows one of the common checks (the accessible names of
+reCAPTCHA's, hCaptcha's and Turnstile's widgets, Cloudflare's "Just a moment..." title
+and its fixed wording, press-and-hold, DataDome, Arkose, Google's "unusual traffic"
+page), the result gets a note telling Claude to hand it to you with `metacomputer
+handoff --why captcha`, `needs_you.captcha` goes out (once per window in 10 minutes,
+with the kind only, never page text), and acting calls aimed at that window (by window,
+element token, pid, or an app or title that could resolve to it) are refused with
+`bot_check` until a whole read of it (no `query`, no `since`) no longer shows the check,
+or any read does after a handoff opened. Reads still work. A page that only talks
+about CAPTCHAs carries none of the marks it looks for. `BOT_CHECK=note` keeps the note
+and the event without refusing; `off` turns both off.
+
+This is for the agent's sake (no flailing at a check it mustn't pass), not a boundary:
+a page can hide the marks, or fake them to stop Claude in that window, and the hub sees
+only what the accessibility tree and the title say (a check drawn only in pixels isn't
+seen). Page-mode tools addressed by `target_id` aren't matched to the window.
+
 ## Hidden page text
 
 **Hidden page text (`HIDDEN_TEXT=on`, the default).** In a test, a web page in the

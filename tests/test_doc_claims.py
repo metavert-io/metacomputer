@@ -1682,6 +1682,18 @@ CLAIMS = [
      lambda m: all(not re.search(r'"allow"|a\.names|pats|wider\b(?!\))|st\["allow"\](?!\))', c.split("{", 1)[1])
                    for c in re.findall(r'emit\("net_allowlist_\w+".*?\}', raw("lib/netpolicy.py"), re.S))
      and len(re.findall(r'emit\("net_allowlist_\w+"', raw("lib/netpolicy.py"))) >= 6),
+    # Human checks on screen (lib/botcheck.py, the hub's BOT_CHECK)
+    ("config/defaults.env", r"BOT_CHECK=(\w+) # on: a window read that shows a human check",
+     lambda m: m[1] == "on" and D["BOT_CHECK"] == "on" and 'out["bot_check"] = bc if bc in ("on", "note", "off") else "on"' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"acting calls aimed at that window \(by window,\s+element token, pid, or an app or title that could resolve to it\) are refused with\s+`bot_check`",
+     lambda m: "hit = self.bot_target(name, args) if self.bot_mode == \"on\" and self.bot_marks else None" in raw("lib/mcp_hub.py")
+     and "self.resolve_named(spec, every=True)" in raw("lib/mcp_hub.py") and '"code": "bot_check"' in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"until a whole read of it \(no `query`, no `since`\) no longer shows the check,\s+or any read does after a handoff opened",
+     lambda m: 'whole = (args.get("query") in (None, "") and args.get("since") in (None, "")' in raw("lib/mcp_hub.py")
+     and "self.handoff_seen > self.bot_marks[wid][2]" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"with the kind only, never page text",
+     lambda m: 'return (f"Claude is stopped at {LABEL.get(kind, \'a human check\')}: it needs you to complete it",' in raw("lib/botcheck.py")
+     and '{"kind": kind if kind in KINDS else "generic"})' in raw("lib/botcheck.py")),
 ]
 
 

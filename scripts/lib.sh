@@ -827,6 +827,7 @@ export_options() {
   # over the config (the benchmark's switches).
   export MCOMP_MCP_HUB="${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" MCOMP_COORD_GUARD="${MCOMP_COORD_GUARD:-${COORD_GUARD:-on}}" \
          MCOMP_HIDDEN_TEXT="${MCOMP_HIDDEN_TEXT:-${HIDDEN_TEXT:-on}}" MCOMP_HUB_IDLE="${HUB_IDLE:-10m}" \
+         MCOMP_BOT_CHECK="${MCOMP_BOT_CHECK:-${BOT_CHECK:-on}}" \
          MCOMP_BROWSER_PACING="${MCOMP_BROWSER_PACING:-${BROWSER_PACING:-human}}"
   # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
   # lessons switch, an isolated store for tests).
