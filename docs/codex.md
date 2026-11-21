@@ -55,11 +55,12 @@ metacomputer's rules let the commands through:
 
 | Commands | Rule |
 | --- | --- |
-| Everyday ones: `status`, `start`, `web`, `sh`, `call`, `net`, `trace`, `handoff`, `secrets list/fill/token/code`, `notify`, `view --open` ... | `allow`: they run outside the sandbox without asking |
-| Ones that replace, delete or stop the VM, its storage or settings, or take it from another session: `reset`, `restore`, `baseline`, `checkpoint`, `build`, `vm`, `volume`, `refdisk`, `update`, `setup`, `release`, `stop`, `restart`, `security`, `hub stop`, `events sink`, `learn approve/add/edit/remove/reject/reseal`, `browser profiles --delete`, and any command with `--vm NAME` | `prompt`: Codex asks you each time |
+| Everyday ones, by name: `status`, `start`, `who`, `web`, `browser`, `net`, `trace`, `handoff`, `notify`, `events`, `inspect`, `call`, `sh`, `ssh`, `put`, `get`, `shot`, `task`, `record`, `recordings`, `view`, `secrets`, `learn`, `claude`, `hub` ... | `allow`: they run outside the sandbox without asking |
+| Ones that replace, delete or stop the VM, its storage, apps or settings, or take it from another session: `reset`, `restore`, `baseline`, `checkpoint`, `build`, `vm`, `volume`, `refdisk`, `update`, `setup`, `release`, `stop`, `restart`, `desktop-restart`, `test`, `security`, `each` (it runs commands on other VMs), `hub stop`, `events sink`, `learn approve/add/edit/remove/reject/reseal/bench`, `browser profiles --delete`, and any command with `--vm NAME` | `prompt`: Codex asks you each time |
 | The ones only you run: `secrets init/set/policy/bind/unlock/rekey/recover/approve/rule/give/import-passwords/import-session/audit-sink`, `volume keys`, `view --remember/--forget`, `handoff done` | `forbidden` |
 
-The rules are a convenience, not the protection: metacomputer's own checks apply whoever runs a command, and a
+A command no rule names (a new one, say) stays in the sandbox: it stops with exit 77 and Codex asks you before running
+it outside. The rules are a convenience, not the protection: metacomputer's own checks apply whoever runs a command, and a
 command written another way (`MCOMP_VM=x metacomputer reset`, say) may not match a rule. Without the rules, approve
 `metacomputer` commands when Codex asks to run them outside the sandbox. A Codex setup of your own that gives the
 sandbox everything above can set `MCOMP_CODEX_SANDBOX=allow`.
@@ -69,8 +70,8 @@ sandbox everything above can set `MCOMP_CODEX_SANDBOX=allow`.
 Some commands are yours alone: setting up and unlocking the vault, widening the network allowlist, approving a lesson
 with your own text, saving the live-view password, saying you're done with a handoff. They need your own terminal.
 Codex's command tool can give a command a terminal of its own, so a terminal isn't enough: these commands also refuse
-when an agent session, Claude Code or Codex, is above them in the process tree. Run them in Terminal, iTerm or an SSH
-session, not through an agent. Like every check against your own account, this stops an agent from passing by
+when an agent session, Claude Code or Codex, is above them in the process tree, or when the process tree can't be
+read all the way up. Run them in Terminal, iTerm or an SSH session, not through an agent. Like every check against your own account, this stops an agent from passing by
 accident, not a program set on it (SECURITY.md).
 
 ## Where Codex differs
@@ -79,7 +80,9 @@ accident, not a program set on it (SECURITY.md).
   Codex IDE extension and the desktop app run all of their conversations in one process (`codex app-server`), so two
   conversations there count as one session and don't wait for each other.
 - **The vault** recognizes Codex sessions as it does Claude Code's: "for this session" answers, unattended rules for
-  a project folder, and tokens tied to the session that asked for them.
+  a project folder, and tokens tied to the session that asked for them. Requests from under Codex's app server (the
+  IDE extension and the desktop app) get none of these: its conversations share one process, so nothing tells one
+  conversation from another, and each use asks.
 - **`metacomputer learn`** reads Codex's sessions (`$CODEX_HOME/sessions`) as well as Claude Code's, with the same
   rules: only classes, counts, tool names and app names from a fixed list, never text. Approved lessons reach Codex
   in the MCP server's instructions. `--draft-with-claude`, `learn bench` and the benchmark run Claude Code

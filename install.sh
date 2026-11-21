@@ -229,20 +229,50 @@ ALIAS_LINK="$HOME/.local/bin/mcomp"   # short alias for typing
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_RULES="$CODEX_DIR/rules/metacomputer.rules"
 CODEX_MARK="# metacomputer's rules for Codex. install.sh writes this file from config/codex/metacomputer.rules.in, and rewrites or"
+CODEX_OWNER="# metacomputer checkout: "     # the rules file's 4th line names the checkout that wrote it
 AGENT_SKILLS="$HOME/.agents/skills"
 CODEX_TOOL_TIMEOUT=600     # seconds: Codex's default (60) is shorter than a long run_steps or a slowly typed text
 # Codex asks before every MCP tool not marked read-only (in `codex exec`, it refuses them). metacomputer's tools act only
 # on the isolated VM, through the hub's guards, so its server's tools are approved (docs/codex.md).
 CODEX_APPROVAL=approve
+CPY=""                     # Python 3.11 or later (tomllib) for the Codex step: codex_python
 has_codex() { command -v codex >/dev/null 2>&1; }
-codex_server_cmd() { # the command of Codex's MCP server named metacomputer, or nothing
-  codex mcp get metacomputer --json 2>/dev/null | python3 -c 'import json,sys
-try:
-    print((json.load(sys.stdin).get("transport") or {}).get("command") or "")
-except Exception:
-    pass' 2>/dev/null || true
+codex_python() { # found as install.sh's py311_ok finds it (Homebrew's, then python3 on PATH; never Apple's 3.9)
+  local p
+  [ -z "$CPY" ] || return 0
+  for p in "${MCOMP_BREW_PYTHON:-/opt/homebrew/bin/python3}" "$(command -v python3 2>/dev/null)"; do
+    [ -n "$p" ] && [ -x "$p" ] && [ "$p" != /usr/bin/python3 ] || continue
+    "$p" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null && { CPY="$p"; return 0; }
+  done
+  return 1
 }
-codex_rules_ours() { [ -f "$CODEX_RULES" ] && [ "$(head -1 "$CODEX_RULES" 2>/dev/null)" = "$CODEX_MARK" ]; }
+codex_server() { # Codex's MCP server named metacomputer: "absent", "stdio<TAB>COMMAND", "other" (not a local
+  # command, e.g. a URL) or "error" (the lookup failed: never read as absent)
+  local out rc=0 err
+  codex_python || { echo error; return 0; }
+  err="$(mktemp)" || { echo error; return 0; }
+  out="$(codex mcp get metacomputer --json 2>"$err")" || rc=$?
+  if [ "$rc" != 0 ]; then
+    if grep -q "No MCP server named 'metacomputer'" "$err" 2>/dev/null; then echo absent; else echo error; fi
+    rm -f "${err:?}"; return 0
+  fi
+  rm -f "${err:?}"
+  printf '%s' "$out" | "$CPY" -c 'import json, sys
+try:
+    t = json.load(sys.stdin).get("transport") or {}
+except Exception:
+    print("error"); sys.exit(0)
+cmd = t.get("command")
+print("stdio\t" + cmd if t.get("type") == "stdio" and isinstance(cmd, str) and cmd and "\n" not in cmd else "other")' \
+    2>/dev/null || echo error
+}
+codex_server_cmd() { local s; s="$(codex_server)"; case "$s" in stdio"$TAB"*) printf '%s\n' "${s#*"$TAB"}" ;; esac; }
+codex_rules_ours() { # rules this checkout wrote (or a moved checkout that's gone)
+  [ -f "$CODEX_RULES" ] && [ "$(head -1 "$CODEX_RULES" 2>/dev/null)" = "$CODEX_MARK" ] || return 1
+  local owner; owner="$(sed -n '4p' "$CODEX_RULES" 2>/dev/null)"
+  case "$owner" in "$CODEX_OWNER"*) owner="${owner#"$CODEX_OWNER"}" ;; *) return 1 ;; esac
+  [ "$owner" = "$ROOT" ] || { [ -n "$owner" ] && old_target "$owner/bin/metacomputer"; }
+}
 codex_set_up() { # anything of this checkout's in Codex already (a later run refreshes it)
   local c; c="$(codex_server_cmd)"
   { [ -n "$c" ] && old_target "$c"; } || codex_rules_ours \
@@ -254,12 +284,13 @@ codex_wanted() { # --codex, or Codex installed and either a first install or one
   [ -f "$HOME/.local/share/metacomputer/installed.json" ] || return 0
   codex_set_up
 }
-codex_server_settings() { # the timeout and approval mode for the server `codex mcp add` wrote; yours stay as you set them
+codex_config_edit() { # MODE: "settings" adds the timeout and approval mode where they're missing; "command" points
+  # an existing registration at this checkout. Only metacomputer's own table changes; everything you set stays.
   local cfg="$CODEX_DIR/config.toml" out rc=0
-  [ -f "$cfg" ] || return 0
-  out="$(python3 - "$cfg" "$CODEX_TOOL_TIMEOUT" "$CODEX_APPROVAL" <<'PY'
-import os, sys, tempfile, tomllib
-path, want_t, want_a = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+  [ -f "$cfg" ] || { echo missing; return 0; }
+  out="$("$CPY" - "$cfg" "$1" "$CODEX_TOOL_TIMEOUT" "$CODEX_APPROVAL" "$ROOT/bin/metacomputer" <<'PY'
+import json, os, sys, tempfile, tomllib
+path, mode, want_t, want_a, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 text = open(path, encoding="utf-8").read()
 try:
     srv = tomllib.loads(text).get("mcp_servers", {}).get("metacomputer")
@@ -267,37 +298,52 @@ except tomllib.TOMLDecodeError:
     sys.exit(2)
 if not isinstance(srv, dict):
     sys.exit(2)
-add, notes = [], []
-if "tool_timeout_sec" not in srv:
-    add.append(f"tool_timeout_sec = {want_t}")
-elif srv["tool_timeout_sec"] < want_t:
-    notes.append("timeout-short")
-if "default_tools_approval_mode" not in srv:
-    add.append(f'default_tools_approval_mode = "{want_a}"')
-elif srv["default_tools_approval_mode"] != want_a:
-    notes.append("approval-yours")
-if add:
-    lines = text.split("\n")
-    heads = [i for i, l in enumerate(lines) if l.strip() == "[mcp_servers.metacomputer]"]
-    if len(heads) != 1:
+lines = text.split("\n")
+heads = [i for i, l in enumerate(lines) if l.strip() == "[mcp_servers.metacomputer]"]
+if len(heads) != 1:
+    sys.exit(2)
+start = heads[0] + 1
+end = next((i for i in range(start, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+notes = []
+if mode == "command":
+    cmds = [i for i in range(start, end) if lines[i].split("=", 1)[0].strip() == "command"]
+    if len(cmds) != 1:
         sys.exit(2)
-    lines[heads[0] + 1:heads[0] + 1] = add
-    new = "\n".join(lines)
-    got = tomllib.loads(new)["mcp_servers"]["metacomputer"]
-    if ("tool_timeout_sec" not in got) or ("default_tools_approval_mode" not in got):
-        sys.exit(2)
+    lines[cmds[0]] = "command = " + json.dumps(cmd, ensure_ascii=False)
+else:
+    add = []
+    if "tool_timeout_sec" not in srv:
+        add.append(f"tool_timeout_sec = {want_t}")
+    elif not isinstance(srv["tool_timeout_sec"], (int, float)) or srv["tool_timeout_sec"] < want_t:
+        notes.append("timeout-short")
+    if "default_tools_approval_mode" not in srv:
+        add.append(f'default_tools_approval_mode = "{want_a}"')
+    elif srv["default_tools_approval_mode"] != want_a:
+        notes.append("approval-yours")
+    lines[start:start] = add
+new = "\n".join(lines)
+if new != text:
+    got = tomllib.loads(new).get("mcp_servers", {}).get("metacomputer") or {}
+    keep = {k: v for k, v in srv.items() if k != "command"}
+    if any(got.get(k) != v for k, v in keep.items()) or (mode == "command" and got.get("command") != cmd):
+        sys.exit(2)                       # only what was meant to change changed, or nothing is written
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.toml.")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(new)
     os.chmod(tmp, os.stat(path).st_mode & 0o777)
     os.replace(tmp, path)
-print(" ".join(notes))
+print(" ".join(notes) or "ok")
 PY
 )" || rc=$?
-  if [ "$rc" != 0 ]; then
-    warn "couldn't set tool_timeout_sec = $CODEX_TOOL_TIMEOUT and default_tools_approval_mode = \"$CODEX_APPROVAL\" for metacomputer in $cfg (add them under [mcp_servers.metacomputer]: docs/codex.md)"
-    return 0
-  fi
+  [ "$rc" = 0 ] && printf '%s\n' "$out" || echo failed
+}
+codex_server_settings() {
+  local out; out="$(codex_config_edit settings)"
+  case "$out" in
+    failed|missing)
+      warn "couldn't set tool_timeout_sec = $CODEX_TOOL_TIMEOUT and default_tools_approval_mode = \"$CODEX_APPROVAL\" for metacomputer in $CODEX_DIR/config.toml (add them under [mcp_servers.metacomputer]: docs/codex.md)"
+      return 0 ;;
+  esac
   case " $out " in *" timeout-short "*) warn "your tool_timeout_sec for metacomputer is shorter than $CODEX_TOOL_TIMEOUT s; left as you set it (long steps may time out)" ;;
     *) ok "tool calls of the metacomputer server may take up to $CODEX_TOOL_TIMEOUT s" ;; esac
   case " $out " in *" approval-yours "*) ok "its tools' approval: left as you set it (default_tools_approval_mode)" ;;
@@ -305,14 +351,15 @@ PY
 }
 codex_rules_write() { # metacomputer.rules from the template, naming every way the command is spelled
   local cmds tmp
-  cmds="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' metacomputer mcomp "$CMD_LINK" "$ALIAS_LINK" "$ROOT/bin/metacomputer")"
+  case "$ROOT" in *$'\n'*) return 1 ;; esac
+  cmds="$("$CPY" -c 'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' metacomputer mcomp "$CMD_LINK" "$ALIAS_LINK" "$ROOT/bin/metacomputer")" || return 1
   mkdir -p "$CODEX_DIR/rules"
   tmp="$(mktemp "$CODEX_DIR/rules/.metacomputer.rules.XXXXXX")" || return 1
-  if ! python3 - "$ROOT/config/codex/metacomputer.rules.in" "$cmds" > "$tmp" <<'PY'
+  if ! "$CPY" - "$ROOT/config/codex/metacomputer.rules.in" "$cmds" "$ROOT" > "$tmp" <<'PY'
 import sys
 t = open(sys.argv[1], encoding="utf-8").read()
-assert t.count("@COMMANDS@") == 1
-sys.stdout.write(t.replace("@COMMANDS@", sys.argv[2]))
+assert t.count("@COMMANDS@") == 1 and t.count("@CHECKOUT@") == 1
+sys.stdout.write(t.replace("@COMMANDS@", sys.argv[2]).replace("@CHECKOUT@", sys.argv[3]))
 PY
   then
     rm -f "${tmp:?}"; return 1
@@ -332,21 +379,41 @@ codex_step() {
     warn "Codex's 'codex' command isn't installed; after installing it, run: ./install.sh --only-codex"
     return 0
   fi
-  local cmd name target link
-  cmd="$(codex_server_cmd)"
-  if [ "$cmd" = "$ROOT/bin/metacomputer" ]; then
-    ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
-  elif [ -n "$cmd" ] && ! old_target "$cmd"; then
-    warn "Codex already has an MCP server named metacomputer that runs $cmd; left alone (codex mcp remove metacomputer, then ./install.sh --only-codex)"
-  else
-    [ -z "$cmd" ] || codex mcp remove metacomputer >/dev/null 2>&1 || true
-    if codex mcp add metacomputer -- "$ROOT/bin/metacomputer" mcp-lazy >/dev/null 2>&1; then
-      ok "MCP server metacomputer for every Codex session (tools: mcp__metacomputer__*, there even while the VM is off)"
-    else
-      warn "could not add the MCP server to Codex; run: codex mcp add metacomputer -- $ROOT/bin/metacomputer mcp-lazy"
-    fi
+  if ! codex_python; then
+    warn "the Codex step needs Python 3.11 or later (brew install python), so Codex was left alone; then: ./install.sh --only-codex"
+    return 0
   fi
-  [ "$(codex_server_cmd)" != "$ROOT/bin/metacomputer" ] || codex_server_settings
+  local srv cmd name target link
+  srv="$(codex_server)"
+  case "$srv" in
+    error)
+      warn "couldn't read Codex's MCP servers (codex mcp get metacomputer failed), so they were left alone; try ./install.sh --only-codex again" ;;
+    other)
+      warn "Codex already has an MCP server named metacomputer that isn't a local command (a URL?); left alone (codex mcp remove metacomputer, then ./install.sh --only-codex)" ;;
+    absent)
+      if codex mcp add metacomputer -- "$ROOT/bin/metacomputer" mcp-lazy >/dev/null 2>&1; then
+        ok "MCP server metacomputer for every Codex session (tools: mcp__metacomputer__*, there even while the VM is off)"
+        codex_server_settings
+      else
+        warn "could not add the MCP server to Codex; run: codex mcp add metacomputer -- $ROOT/bin/metacomputer mcp-lazy"
+      fi ;;
+    *)
+      cmd="${srv#*"$TAB"}"
+      if [ "$cmd" = "$ROOT/bin/metacomputer" ]; then
+        ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
+        codex_server_settings
+      elif old_target "$cmd"; then
+        # an earlier (moved) checkout's: only its command changes; anything you set on it stays
+        if [ "$(codex_config_edit command)" != failed ] && [ "$(codex_server_cmd)" = "$ROOT/bin/metacomputer" ]; then
+          ok "MCP server metacomputer now runs this checkout (your settings for it kept)"
+          codex_server_settings
+        else
+          warn "couldn't point Codex's MCP server metacomputer at this checkout; run: codex mcp remove metacomputer, then ./install.sh --only-codex"
+        fi
+      else
+        warn "Codex already has an MCP server named metacomputer that runs $cmd; left alone (codex mcp remove metacomputer, then ./install.sh --only-codex)"
+      fi ;;
+  esac
   mkdir -p "$AGENT_SKILLS"
   for name in metacomputer cua-driver; do
     target="$(codex_skill_target "$name")"
@@ -360,7 +427,7 @@ codex_step() {
     ln -s "$target" "$link" && ok "skill $name (~/.agents/skills, read by Codex)"
   done
   if [ -e "$CODEX_RULES" ] && ! codex_rules_ours; then
-    warn "$CODEX_RULES is there and isn't metacomputer's; left alone (docs/codex.md says what it should hold)"
+    warn "$CODEX_RULES is there and isn't this checkout's; left alone (docs/codex.md says what it should hold)"
   elif codex_rules_write; then
     ok "rules: everyday metacomputer commands run outside Codex's sandbox; changes to the VM ask you; user-only ones are refused"
   else
@@ -369,6 +436,7 @@ codex_step() {
 }
 codex_remove() { # --uninstall: only what is this checkout's
   has_codex || return 0
+  codex_python || { warn "Codex left alone: the uninstall's Codex step needs Python 3.11 or later"; return 0; }
   local cmd name link
   cmd="$(codex_server_cmd)"
   if [ -n "$cmd" ] && old_target "$cmd"; then

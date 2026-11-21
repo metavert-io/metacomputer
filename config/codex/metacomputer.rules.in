@@ -1,31 +1,31 @@
 # metacomputer's rules for Codex. install.sh writes this file from config/codex/metacomputer.rules.in, and rewrites or
-# removes it later (it's recognized by this first line), so keep your own changes in a rules file of another name.
-# docs/codex.md explains them.
+# removes it later (it's recognized by this first line and the checkout below), so keep your own changes in a rules
+# file of another name. docs/codex.md explains them.
+# metacomputer checkout: @CHECKOUT@
 #
 # Codex runs commands in a sandbox that blocks what metacomputer needs on this Mac: its state folders, the virtual
 # computer's SSH port, the hub's and the vault's sockets. `allow` runs a matching command outside the sandbox without
-# asking; `prompt` asks you each time; `forbidden` refuses it. When several rules match, the strictest one wins. These
-# rules are a convenience, not the protection: metacomputer's own checks apply whatever runs it.
+# asking; `prompt` asks you each time; `forbidden` refuses it. When several rules match, the strictest one wins. A
+# metacomputer command no rule names stays in the sandbox, where it stops at once and says so, and Codex asks you
+# before running it outside. These rules are a convenience, not the protection: metacomputer's own checks apply
+# whatever runs it.
 
 MC = @COMMANDS@
 
 prefix_rule(
-    pattern = [MC],
+    pattern = [MC, ["status", "start", "who", "where", "help", "version", "web", "browser", "net", "trace", "handoff",
+                    "notify", "events", "inspect", "call", "sh", "ssh", "put", "get", "shot", "contact-sheet", "task",
+                    "record", "recordings", "view", "secrets", "learn", "claude", "hub", "input-reset", "rename",
+                    "actions", "logs", "checkpoints"]],
     decision = "allow",
-    justification = "metacomputer commands act on the virtual computer (an isolated VM), not on this Mac; they need to run outside Codex's sandbox to reach it",
+    justification = "these metacomputer commands act on the virtual computer (an isolated VM) or only read; they need to run outside Codex's sandbox to reach it",
 )
 
 prefix_rule(
     pattern = [MC, ["reset", "restore", "baseline", "checkpoint", "build", "vm", "volume", "refdisk", "update", "setup",
-                    "release", "stop", "restart", "security"]],
+                    "release", "stop", "restart", "desktop-restart", "test", "security", "each", "--vm"]],
     decision = "prompt",
-    justification = "this replaces, deletes or stops the virtual computer, its storage or its settings, or takes it from another session: the user decides",
-)
-
-prefix_rule(
-    pattern = [MC, "--vm"],
-    decision = "prompt",
-    justification = "a command for a VM named on the command line: the user decides (these rules can't look past the name)",
+    justification = "this replaces, deletes or stops the virtual computer, its storage, its apps or its settings, runs commands on several VMs, or takes it from another session: the user decides",
 )
 
 prefix_rule(
@@ -41,9 +41,9 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = [MC, "learn", ["approve", "add", "edit", "remove", "reject", "reseal"]],
+    pattern = [MC, "learn", ["approve", "add", "edit", "remove", "reject", "reseal", "bench"]],
     decision = "prompt",
-    justification = "lessons go into every later session's instructions: only when the user names the lesson",
+    justification = "lessons go into every later session's instructions (and learn bench resets a VM): only when the user names it",
 )
 
 prefix_rule(

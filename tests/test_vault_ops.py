@@ -60,6 +60,21 @@ KEY_RE = re.compile(r"signing key[^\n]*\n\s+([A-Za-z0-9+/]{43}=)")
 SPOOL_NAME = re.compile(r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{16}\.json")
 outputs = []
 
+# Stands in for Codex's app server (the IDE extension, the desktop app): a process named "codex" run as `codex
+# app-server`, in a project folder, running a command.
+FAKE_CODEX_SERVER_C = r"""
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc < 4 || strcmp(argv[1], "app-server") != 0 || chdir(argv[2]) != 0) return 111;
+    pid_t p = fork();
+    if (p == 0) { execv(argv[3], argv + 3); _exit(127); }
+    int st = 0;
+    waitpid(p, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+}
+"""
 FAKE_CLAUDE_C = r"""
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -439,6 +454,17 @@ def run(td, procs):
         script = "; ".join(f"{shlex.join([BIN, *c])} >{shlex.quote(o)} 2>&1; echo $? >{shlex.quote(o + '.rc')}"
                            for c, o in zip(commands, outs))
         p = subprocess.Popen([fake, project, "/bin/sh", "-c", script], env=env, stdin=subprocess.DEVNULL)
+        procs.append(p)
+        return p, outs
+
+    def as_agent(argv0, project, *commands):
+        """as_claude, under another stand-in: argv0 is the program and its leading arguments ([codex], or [codex,
+        "app-server"]), then the project folder."""
+        counter[0] += 1
+        outs = [os.path.join(td, f"ag{counter[0]}-{i}.out") for i in range(len(commands))]
+        script = "; ".join(f"{shlex.join([BIN, *c])} >{shlex.quote(o)} 2>&1; echo $? >{shlex.quote(o + '.rc')}"
+                           for c, o in zip(commands, outs))
+        p = subprocess.Popen([*argv0, project, "/bin/sh", "-c", script], env=env, stdin=subprocess.DEVNULL)
         procs.append(p)
         return p, outs
 
@@ -1126,6 +1152,36 @@ def run(td, procs):
     u.send("web-each session\n")
     rc, out = detached_wait(h)
     check("a request that isn't from Claude Code says so, and 'session' then allows only this use", rc == 0, out)
+    # Codex: a session of its own, like Claude Code's; its app server (one process for every conversation) is none
+    fcodex, fserver = os.path.join(td, "fakecodex", "codex"), os.path.join(td, "fakeserver", "codex")
+    for path, src in ((fcodex, FAKE_CLAUDE_C), (fserver, FAKE_CODEX_SERVER_C)):
+        os.makedirs(os.path.dirname(path))
+        open(path + ".c", "w").write(src)
+        subprocess.run(["cc", "-o", path, path + ".c"], capture_output=True, text=True)
+    p, outs = as_agent([fcodex], proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
+                       ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
+    u.expect(f"Asked by Codex in {proj1} (pid {p.pid})")
+    u.expect("Type web-each to allow")
+    n0 = u.text().count("Type web-each to allow")
+    u.send("web-each session\n")
+    res = claude_results(p, outs)
+    recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"]
+    check("a Codex session is a session: named in the question, and 'NAME session' covers its next use",
+          [x[0] for x in res] == [0, 0] and u.text().count("Type web-each to allow") == n0
+          and recs[-1].get("approval") == "grant:session" and recs[-1].get("requester", {}).get("agent") == "Codex", (res, recs[-1:]))
+    p, outs = as_agent([fserver, "app-server"], proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
+                       ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
+    u.expect("under Codex's app server")
+    u.expect("Type web-each to allow")
+    u.send("web-each session\n")
+    u.expect("under Codex's app server")
+    u.expect("Type web-each to allow")
+    u.send("web-each\n")
+    res = claude_results(p, outs)
+    recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"]
+    check("Codex's app server is no session (its conversations share the process): 'session' allows only that use, "
+          "the next asks again", [x[0] for x in res] == [0, 0] and not recs[-1].get("requester", {}).get("claude_pid")
+          and recs[-1].get("requester", {}).get("agent") == "Codex app server", (res, recs[-2:]))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")
     u.send("web-each unlock\n")
@@ -1145,6 +1201,12 @@ def run(td, procs):
     p, outs = as_claude(os.path.join(proj1, "sub"), ["fill", "scoped", "--vm", "opsvm", "--field", "password"])
     res = claude_results(p, outs)
     check("--project: a Claude Code session in that project (or below it) may use it", res[0][0] == 0, res)
+    p, outs = as_agent([fcodex], os.path.join(proj1, "sub"), ["fill", "scoped", "--vm", "opsvm", "--field", "password"])
+    res = claude_results(p, outs)
+    check("--project: so may a Codex session there", res[0][0] == 0, res)
+    p, outs = as_agent([fserver, "app-server"], proj1, ["fill", "scoped", "--vm", "opsvm", "--field", "password"])
+    res = claude_results(p, outs)
+    check("--project: Codex's app server, even started there, may not (it names no session or project)", res[0][0] == 2, res)
     r = client("list")
     check("list: ages (created, rotated / never rotated) and projects", "rotated" in r.stdout and "never rotated" in r.stdout
           and "only in " + proj1 in r.stdout, r.stdout)

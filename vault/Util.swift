@@ -661,6 +661,12 @@ struct Requester {
             guard p > 1, let e = procEntry(p) else { break }
             // Claude Code from the native installer runs as its version file (.../claude/versions/2.1.325).
             if p != pid, let kind = agentKind(p, e) {
+                if kind == "Codex" && procArgs(p).dropFirst().contains("app-server") {
+                    // Codex's IDE extension and desktop app run every conversation in this one process: it names no
+                    // single session, so it gets none of a session's answers, project rules or tokens (each use asks).
+                    return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil,
+                                     agent: "Codex app server")
+                }
                 let cwd = procCwd(p).map { realPath($0) ?? $0 }
                 return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd, agent: kind)
             }
@@ -708,6 +714,10 @@ struct Requester {
         let claim = claimedClaudePID.map { ", for an agent session in \(tildePath(claimedProject ?? "?")) (pid \($0)) as it says (unverified)" } ?? ""
         if let p = claudePID {
             return clean("\(agent ?? "Claude Code") in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
+        }
+        if agent == "Codex app server" {
+            return clean("\(clientExe) (pid \(clientPID)) under Codex's app server, whose conversations share one process"
+                         + " (no session's answers apply)" + claim, max: 300)
         }
         return clean("\(clientExe) (pid \(clientPID)), not from Claude Code or Codex" + claim, max: 300)
     }

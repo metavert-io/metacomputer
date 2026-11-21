@@ -89,8 +89,13 @@ def cli():
     return own
 
 
-def ps_table():
-    out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True).stdout
+def ps_table(strict=False):
+    """{pid: (ppid, comm)} for every process. strict: OSError when ps fails or lists nothing, instead of a table
+    that would look like one without agents."""
+    r = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
+    out = r.stdout
+    if strict and (r.returncode != 0 or not out.strip()):
+        raise OSError(f"ps failed (exit {r.returncode})")
     table = {}
     for line in out.splitlines():
         parts = line.split(None, 2)
@@ -174,9 +179,22 @@ def at_user_terminal(fds=(0,)):
     except (OSError, ValueError):
         return False
     try:
-        return claude_of(os.getpid(), ps_table()) is None
+        table = ps_table(strict=True)
+        return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None
     except Exception:
         return False
+
+
+def ancestry_complete(pid, table):
+    """True when every process from pid up to launchd (pid 1) is in the table: a walk that stops early (a process
+    ps didn't list, a loop) can't say there's no agent above, so it counts as unknown."""
+    seen = set()
+    while pid > 1:
+        if pid not in table or pid in seen:
+            return False
+        seen.add(pid)
+        pid = table[pid][0]
+    return pid == 1
 
 
 AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through Claude Code, Codex, a "

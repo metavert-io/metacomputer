@@ -610,9 +610,12 @@ def cmd_end(a, to):
         return EXIT_ERROR
     claude = owners.claude_of(os.getpid(), owners.ps_table())
     own_session = bool(claude) and claude == rec.get("claude_pid")
-    if to == "done" and own_session and not interactive:
-        err(f"this {rec.get('agent') if rec.get('agent') in ('Claude Code', 'Codex') else 'Claude Code'} session asked "
-            "for the handoff, so it can't say the user is done. The user runs "
+    if to == "done" and claude and not interactive:
+        # Any agent session, not only the one that asked: another Claude Code or Codex session (or one started from
+        # the session that asked) saying "done" would be an agent saying the user is done.
+        who = ("this " + (rec.get("agent") if rec.get("agent") in ("Claude Code", "Codex") else "Claude Code")
+               + " session asked for the handoff, so it" if own_session else "an agent session (Claude Code or Codex)")
+        err(f"{who} can't say the user is done. The user runs "
             "`metacomputer handoff done` in their own terminal (or presses Enter where `metacomputer handoff` "
             "waits at a terminal). Ask them; if they've changed their mind, `metacomputer handoff cancel` calls it off.")
         return EXIT_REFUSED

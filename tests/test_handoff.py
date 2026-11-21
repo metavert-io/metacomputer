@@ -171,6 +171,9 @@ def basic_checks():
     r = run("done", claude=SESSION_A)
     check("the session that asked can't say done for the user (no terminal): exit 3, still open",
           r.returncode == 3 and "can't say the user is done" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
+    r = run("done", claude=SESSION_A + 1)
+    check("...nor can another agent session (another Claude Code or Codex, or one started from the first)",
+          r.returncode == 3 and "an agent session" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
     note = "solved it\x1b[31m, ‮all good"
     r = run("done", "--note", note, claude=None)
     rc, o, e = finish(p)

@@ -1732,9 +1732,12 @@ def test_codex_step():
                 (CLI, "reset"): "prompt", ("metacomputer", "--vm", "demo", "reset"): "prompt",
                 ("metacomputer", "vm", "delete", "x"): "prompt", ("metacomputer", "learn", "approve", "x"): "prompt",
                 ("metacomputer", "secrets", "unlock"): "forbidden", ("metacomputer", "handoff", "done"): "forbidden",
-                ("metacomputer", "view", "--remember"): "forbidden", ("metacomputer", "secrets", "fill", "gh"): "allow"}
+                ("metacomputer", "view", "--remember"): "forbidden", ("metacomputer", "secrets", "fill", "gh"): "allow",
+                ("metacomputer", "each", "main", "--", "reset", "--yes"): "prompt", ("metacomputer", "test"): "prompt",
+                ("metacomputer", "some-new-command"): None}
         got = {k: decision(*k) for k in want}
-        check("...the rules: everyday commands allowed, VM changes ask, the user's own commands refused (Codex's checker)",
+        check("...the rules: everyday commands allowed, VM changes and `each` ask, the user's own commands refused, a "
+              "command no rule names stays in the sandbox (Codex's checker)",
               got == want, {k: v for k, v in got.items() if want[k] != v})
         p2 = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
                             stdin=subprocess.DEVNULL)

@@ -28,7 +28,21 @@ func atUserTerminal() -> Bool {
     // The test suites run under whatever agent runs them; a test build may leave the agent check out.
     if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_IGNORE_AGENT"] == "1" { return true }
     #endif
-    return Requester.of(getpid()).claudePID == nil
+    return agentAbove(getpid()) == false
+}
+
+/// Is an agent session (Claude Code, or Codex, its app server included) above pid? nil when the walk can't reach
+/// launchd (a process it can't read, more than 256 steps): unknown, which never counts as the user's terminal.
+func agentAbove(_ pid: pid_t) -> Bool? {
+    var p = pid
+    var steps = 0
+    while p > 1 {
+        guard steps < 256, let e = procEntry(p) else { return nil }
+        if p != pid && agentKind(p, e) != nil { return true }
+        p = e.ppid
+        steps += 1
+    }
+    return false
 }
 
 func requireTTY(_ what: String) throws {

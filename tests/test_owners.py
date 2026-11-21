@@ -203,6 +203,21 @@ def main():
     check("the nearest agent session counts: Codex run from Claude Code is a session of its own",
           owners.claude_of(400, table) == 300, owners.claude_of(400, table))
 
+    check("an ancestry that doesn't reach launchd is unknown, never the user's (a process ps didn't list, a loop)",
+          owners.ancestry_complete(300, {300: (250, "zsh"), 250: (1, "zsh")})
+          and not owners.ancestry_complete(300, {300: (250, "zsh")})
+          and not owners.ancestry_complete(300, {300: (250, "zsh"), 250: (300, "zsh")}))
+    real_ps = owners.ps_table
+    try:
+        owners.ps_table = lambda strict=False: (_ for _ in ()).throw(OSError("ps failed")) if strict else {}
+        tty_r, tty_w = os.openpty()
+        fails_closed = not owners.at_user_terminal((tty_w,))
+        os.close(tty_r)
+        os.close(tty_w)
+    finally:
+        owners.ps_table = real_ps
+    check("...and at_user_terminal fails closed when ps fails", fails_closed)
+
     # The user's own terminal, end to end with real processes: a terminal with no agent session above it. The runs
     # below are detached from whatever runs this test (re-parented to launchd), so an agent running the suite isn't
     # above them; a small program named `codex` (built here: copies of Apple's binaries don't run) stands in for
