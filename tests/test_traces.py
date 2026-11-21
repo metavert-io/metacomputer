@@ -189,6 +189,13 @@ code = traces.Exporter(part).run("part")
 check("…but from a read that listed only part of the window (a query, a diff), no .nth: a comment says to add one",
       "}).nth(" not in code and "listed only part of the window" in code
       and 'getByRole("link", { name: "Download invoice" }).click()' in code, code)
+txt = [{"kind": "read", "snapshot": "s0000000d", "title": "x \u2014 Mozilla Firefox", "whole": True,
+        "rows": {"1": ["document web", "x"], "2": ["paragraph", "A"], "3": ["section", "A"], "4": ["paragraph", "A"]}},
+       {"kind": "call", "tool": "click", "app": "firefox", "args": {"element_token": "s0000000d:4"}}]
+code = traces.Exporter(txt).run("txt")
+check("a text locator (getByText matches any element with that text) never gets .nth from a count by role: a comment",
+      "}).nth(" not in code and ").nth(" not in code.split("test(")[1].split("\n", 2)[2].split("//")[0]
+      and "More than one element has this text" in code and 'page.getByText("A").click()' in code, code)
 rec = traces.Recorder(TD)
 cli("start", "whole")
 res = {"structuredContent": {"snapshot_id": "s0000000b", "window_title": "x \u2014 Mozilla Firefox",
@@ -196,10 +203,15 @@ res = {"structuredContent": {"snapshot_id": "s0000000b", "window_title": "x \u20
 rec.result("get_window_state", res, "s1", {"pid": 5, "window_id": 6, "include_screenshot": False})
 rec.result("get_window_state", dict(res, structuredContent=dict(res["structuredContent"], snapshot_id="s0000000c")),
            "s1", {"pid": 5, "window_id": 6, "query": "A"})
+rec.result("get_window_state", dict(res, structuredContent=dict(res["structuredContent"], snapshot_id="s0000000e",
+                                                                truncated=True)), "s1", {"pid": 5, "window_id": 6})
+rec.result("get_window_state", dict(res, structuredContent=dict(res["structuredContent"], snapshot_id="s0000000f")),
+           "s1", {"pid": 5, "window_id": 6, "include_accessibility_tree": True})
 cli("stop")
 reads = [json.loads(l) for l in open(os.path.join(TD, "traces", "whole.jsonl")) if '"read"' in l]
-check("the recorder marks a read as whole only without the driver's filters (a query read isn't)",
-      [r.get("whole") for r in reads] == [True, False], reads)
+check("the recorder marks a read as whole only without the driver's filters (a query read isn't) and when the "
+      "driver didn't cut it short (truncated); asking for the tree explicitly is still whole",
+      [r.get("whole") for r in reads] == [True, False, False, True], reads)
 hub = open(os.path.join(LAB, "lib", "mcp_hub.py")).read()
 disp = hub[hub.index("def on_tools_call("):hub.index("def session_for(")]
 check("the hub records a call after every guard and pacing, as it goes to the driver",

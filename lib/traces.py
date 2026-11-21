@@ -34,8 +34,8 @@ MAX_BYTES = 20 << 20
 MAX_ROWS = 4000                 # element rows kept per read
 # A read lists the whole window only with none of the driver's filters (a query, a diff since a snapshot, a subtree):
 # the arguments of a get_window_state that may be counted on to list every element.
-WHOLE_READ_ARGS = {"pid", "window_id", "include_screenshot", "session", "target", "app", "window", "max_image_dimension",
-                   "screenshot_scale", "delivery_mode"}
+WHOLE_READ_ARGS = {"pid", "window_id", "include_screenshot", "include_accessibility_tree", "session", "target", "app",
+                   "window", "max_image_dimension", "screenshot_scale", "delivery_mode"}
 MAX_AGE_S = 24 * 3600
 BROWSER_APP_RE = re.compile(r"firefox|chrome|chromium|epiphany", re.I)
 # A browser window's title ends with the browser's name (traces from hubs before 0.4.2 recorded no app for a call made
@@ -145,7 +145,8 @@ class Recorder:
                         if len(rows) >= MAX_ROWS:
                             break
                 whole = (isinstance(args, dict) and set(args) <= WHOLE_READ_ARGS
-                         and args.get("include_accessibility_tree") is not False and len(rows) < MAX_ROWS)
+                         and args.get("include_accessibility_tree") is not False and len(rows) < MAX_ROWS
+                         and sc.get("truncated") is not True and sc.get("elements_complete") is not False)
                 self.write({"t": round(time.time(), 3), "kind": "read", "session": session, "snapshot": sid,
                             "title": str(sc.get("window_title") or "")[:300], "whole": whole, "rows": rows})
         elif res.get("isError"):
@@ -253,8 +254,10 @@ class Exporter:
             if nth and name:              # an exact name, so Playwright counts the same elements the read did
                 return f"page.getByRole({js(aria)}, {{ name: {js(name[:400])}, exact: true }})" + nth
             return f"page.getByRole({js(aria)}, {{ name: {js(name[:400])} }})" if name else f"page.getByRole({js(aria)})"
-        if name:
-            return f"page.getByText({js(name[:400])}, {{ exact: true }})" + nth if nth else f"page.getByText({js(name[:400])})"
+        if name:                          # getByText matches any element with that text: no .nth from a count by role
+            if nth:
+                self.note_next = "More than one element has this text: add .nth() or a narrower locator."
+            return f"page.getByText({js(name[:400])})"
         return None
 
     def nth(self, snap, idx, row):
