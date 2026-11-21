@@ -1734,7 +1734,9 @@ def test_codex_step():
                 ("metacomputer", "secrets", "unlock"): "forbidden", ("metacomputer", "handoff", "done"): "forbidden",
                 ("metacomputer", "view", "--remember"): "forbidden", ("metacomputer", "secrets", "fill", "gh"): "allow",
                 ("metacomputer", "each", "main", "--", "reset", "--yes"): "prompt", ("metacomputer", "test"): "prompt",
-                ("metacomputer", "some-new-command"): None}
+                ("metacomputer", "some-new-command"): None, ("metacomputer", "stop"): "allow",
+                ("metacomputer", "stop", "--override", "--force"): "prompt", ("metacomputer", "stop", "--force"): "prompt",
+                ("metacomputer", "sh", "--override", "-c", "x"): "prompt"}
         got = {k: decision(*k) for k in want}
         check("...the rules: everyday commands allowed, VM changes and `each` ask, the user's own commands refused, a "
               "command no rule names stays in the sandbox (Codex's checker)",

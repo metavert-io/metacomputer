@@ -59,7 +59,10 @@ metacomputer's rules let the commands through:
 | Ones that replace, delete or stop the VM, its storage, apps or settings, or take it from another session: `reset`, `restore`, `baseline`, `checkpoint`, `build`, `vm`, `volume`, `refdisk`, `update`, `setup`, `release`, `restart`, `desktop-restart`, `test`, `security`, `each` (it runs commands on other VMs), `hub stop`, `events sink`, `learn approve/add/edit/remove/reject/reseal/bench`, `browser profiles --delete`, and any command with `--vm NAME` | `prompt`: Codex asks you each time |
 | The ones only you run: `secrets init/set/policy/bind/unlock/rekey/recover/approve/rule/give/import-passwords/import-session/audit-sink`, `volume keys`, `view --remember/--forget`, `handoff done` | `forbidden` |
 
-A command no rule names (a new one, say) stays in the sandbox: it stops with exit 77 and Codex asks you before running
+Rules match the words in order, so they see a flag like `--override` only right after the command (`metacomputer
+stop --override` asks; `metacomputer sh -c '...' --override` doesn't): as in Claude Code, the skill has the agent ask you
+before taking the computer over, and metacomputer's own checks still apply. A command no rule names (a new one, say)
+stays in the sandbox: it stops with exit 77 and Codex asks you before running
 it outside. The rules are a convenience, not the protection: metacomputer's own checks apply whoever runs a command, and a
 command written another way (`MCOMP_VM=x metacomputer reset`, say) may not match a rule. Without the rules, approve
 `metacomputer` commands when Codex asks to run them outside the sandbox. A Codex setup of your own that gives the

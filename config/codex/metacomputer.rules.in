@@ -29,6 +29,12 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = [MC, ["stop", "sh", "handoff"], ["--override", "--force"]],
+    decision = "prompt",
+    justification = "--override takes the computer from another session (or ends a step the user has), and stop --force powers it off at once: the user decides. (Rules see flags only where they're written first; the agent asks before --override anywhere.)",
+)
+
+prefix_rule(
     pattern = [MC, "events", ["sink", "sinks"]],
     decision = "prompt",
     justification = "event sinks decide what leaves this Mac: only when the user asks",
