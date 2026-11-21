@@ -196,6 +196,20 @@ code = traces.Exporter(txt).run("txt")
 check("a text locator (getByText matches any element with that text) never gets .nth from a count by role: a comment",
       "}).nth(" not in code and ").nth(" not in code.split("test(")[1].split("\n", 2)[2].split("//")[0]
       and "More than one element has this text" in code and 'page.getByText("A").click()' in code, code)
+nav = [{"kind": "call", "tool": "press_key", "app": "firefox", "args": {"key": "l", "modifiers": ["ctrl"]}},
+       {"kind": "call", "tool": "type_text", "app": "firefox", "args": {"text": "localhost:8000/admin/"}},
+       {"kind": "call", "tool": "press_key", "app": "firefox", "args": {"key": "enter"}},
+       {"kind": "call", "tool": "press_key", "app": "firefox", "args": {"key": "a", "modifiers": ["ctrl", "shift"]}},
+       {"kind": "call", "tool": "press_key", "app": "firefox", "args": {"key": "a", "modifiers": ["hyper"]}}]
+code = traces.Exporter(nav).run("nav")
+check("press_key's modifiers field counts: ctrl+L, an address, Enter is a page.goto (not a press of \"l\" and typing); "
+      "ctrl+shift+a is Control+Shift+a; an unknown modifier is left out, never pressed without it",
+      'page.goto("http://localhost:8000/admin/")' in code and 'press("l")' not in code and 'press("Control+Shift+a")' in code
+      and 'press("a")' not in code, code)
+code = traces.Exporter([dict(nav[0]), {"kind": "call", "tool": "type_text", "app": "firefox", "args": {"text": "example.com/a"}},
+                        dict(nav[2])]).run("bare")
+check("an address typed without a scheme: https:// for another host, with a comment to check it",
+      'page.goto("https://example.com/a")' in code and "the browser chose the scheme" in code, code)
 rec = traces.Recorder(TD)
 cli("start", "whole")
 res = {"structuredContent": {"snapshot_id": "s0000000b", "window_title": "x \u2014 Mozilla Firefox",
