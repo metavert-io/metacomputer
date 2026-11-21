@@ -210,6 +210,15 @@ code = traces.Exporter([dict(nav[0]), {"kind": "call", "tool": "type_text", "app
                         dict(nav[2])]).run("bare")
 check("an address typed without a scheme: https:// for another host, with a comment to check it",
       'page.goto("https://example.com/a")' in code and "the browser chose the scheme" in code, code)
+code = traces.Exporter([{"kind": "call", "tool": "press_key", "app": "firefox",
+                         "args": {"key": "a", "modifiers": ["ctrl", "ctrl", "ctrl", "ctrl", "shift"]}}]).run("many")
+check("every modifier counts, however many (repeats once): ctrl x4 + shift is Control+Shift+a",
+      'press("Control+Shift+a")' in code, code)
+check("addresses are checked, not only their shape: 999.999.999.999, [abc] and a port over 65535 aren't navigations",
+      [traces.bare_address(t) for t in ("999.999.999.999", "[abc]", "localhost:70000", "example.com:0")] == [None] * 4
+      and traces.bare_address("10.0.0.5:8080/x") == ("https://10.0.0.5:8080/x", False)
+      and traces.bare_address("127.0.0.1:8000") == ("http://127.0.0.1:8000", True)
+      and traces.bare_address("[::1]:9000/") == ("http://[::1]:9000/", True), [traces.bare_address(t) for t in ("10.0.0.5:8080/x",)])
 rec = traces.Recorder(TD)
 cli("start", "whole")
 res = {"structuredContent": {"snapshot_id": "s0000000b", "window_title": "x \u2014 Mozilla Firefox",

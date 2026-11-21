@@ -19,6 +19,7 @@ names read from pages. Page text is untrusted: in the exported code it appears o
 literals, never in comments or code, so a page can't put code into the test.
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -43,9 +44,31 @@ BROWSER_APP_RE = re.compile(r"firefox|chrome|chromium|epiphany", re.I)
 BROWSER_TITLE_RE = re.compile(r"\s[\u2014-]\s(?:Mozilla Firefox|Google Chrome|Chromium)\s*$|^Web$")
 URL_TEXT_RE = re.compile(r"^https?://[^\s\"'`\\<>]{1,2000}$")
 # An address typed without a scheme (the browser picks one): a host name or address, a port, a path.
-BARE_URL_RE = re.compile(r"^(?:localhost|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9a-fA-F:]+\]|(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})"
-                         r"(?::[0-9]{1,5})?(?:[/?#][^\s\"'`\\<>]{0,2000})?$")
-LOCAL_HOST_RE = re.compile(r"^(?:localhost|127\.[0-9.]+|\[::1\])(?:[:/?#]|$)")
+BARE_URL_RE = re.compile(r"^(?P<host>localhost|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9a-fA-F:.]+\]|"
+                         r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63})"
+                         r"(?::(?P<port>[0-9]{1,5}))?(?:[/?#][^\s\"'`\\<>]{0,2000})?$")
+
+
+def bare_address(text):
+    """(URL, local) for an address typed without a scheme (the browser adds one: http for this machine, else most
+    likely https), or None when the text isn't one: IP addresses and ports are checked, not only their shape."""
+    m = BARE_URL_RE.match(text)
+    if not m:
+        return None
+    host, port = m.group("host"), m.group("port")
+    if port is not None and not 1 <= int(port) <= 65535:
+        return None
+    try:
+        if host.startswith("["):
+            ip = ipaddress.IPv6Address(host[1:-1])
+        elif re.fullmatch(r"[0-9.]+", host):
+            ip = ipaddress.IPv4Address(host)
+        else:
+            ip = None
+    except ValueError:
+        return None
+    local = host == "localhost" or bool(ip and ip.is_loopback)
+    return ("http://" if local else "https://") + text, local
 ARIA = {"push button": "button", "toggle button": "button", "button": "button", "link": "link", "entry": "textbox",
         "text": None, "password text": "textbox", "text box": "textbox", "textbox": "textbox", "combo box": "combobox",
         "check box": "checkbox", "radio button": "radio", "menu item": "menuitem", "page tab": "tab",
@@ -325,10 +348,9 @@ class Exporter:
             if self.pending_url and URL_TEXT_RE.match(text.strip()):
                 self.pending_url = text.strip()
                 return
-            if self.pending_url and BARE_URL_RE.match(text.strip()):
-                bare = text.strip()            # the browser adds the scheme: http for this machine, else most likely https
-                local = LOCAL_HOST_RE.match(bare)
-                self.pending_url = ("http://" if local else "https://") + bare
+            addr = bare_address(text.strip()) if self.pending_url else None
+            if addr:
+                self.pending_url, local = addr
                 if not local:
                     self.note_next = "Typed without http(s)://; the browser chose the scheme: check it."
                 return
@@ -349,7 +371,9 @@ class Exporter:
             raw = a.get("key") if tool == "press_key" else "+".join(str(k) for k in (a.get("keys") or [])) or a.get("key")
             mods = a.get("modifiers") if isinstance(a.get("modifiers"), list) else []
             if mods and isinstance(raw, str) and raw:  # press_key's modifiers field (ctrl+L is key "l", modifiers ["ctrl"])
-                raw = "+".join([str(m) for m in mods[:4]] + [raw])
+                names = [MODS.get(str(m).strip().lower()) for m in mods[:16]]
+                # every one known, or the step is left out (never pressed without a modifier it had)
+                raw = None if None in names or len(mods) > 16 else "+".join(list(dict.fromkeys(names)) + [raw])
             k = key_of(raw)
             if k in ("Control+l", "Control+L", "F6", "Alt+d", "Alt+D"):
                 self.pending_url = True       # the address bar: the next text, then Enter, is a navigation
