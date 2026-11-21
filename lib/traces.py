@@ -32,8 +32,15 @@ TOKEN_RE = re.compile(r"^(s[0-9a-f]{8}):(\d{1,9})$")
 ROW_RE = re.compile(r'^\s*[-+~] \[(\d{1,9})\] ([a-z][a-z ]{0,40}?)(?: "((?:[^"\\]|\\.){0,400})"|(?= \[|\s*$| value=))')
 MAX_BYTES = 20 << 20
 MAX_ROWS = 4000                 # element rows kept per read
+# A read lists the whole window only with none of the driver's filters (a query, a diff since a snapshot, a subtree):
+# the arguments of a get_window_state that may be counted on to list every element.
+WHOLE_READ_ARGS = {"pid", "window_id", "include_screenshot", "include_accessibility_tree", "session", "target", "app",
+                   "window", "max_image_dimension", "screenshot_scale", "delivery_mode"}
 MAX_AGE_S = 24 * 3600
 BROWSER_APP_RE = re.compile(r"firefox|chrome|chromium|epiphany", re.I)
+# A browser window's title ends with the browser's name (traces from hubs before 0.4.2 recorded no app for a call made
+# by element token alone; the read the token came from has the window's title).
+BROWSER_TITLE_RE = re.compile(r"\s[\u2014-]\s(?:Mozilla Firefox|Google Chrome|Chromium)\s*$|^Web$")
 URL_TEXT_RE = re.compile(r"^https?://[^\s\"'`\\<>]{1,2000}$")
 ARIA = {"push button": "button", "toggle button": "button", "button": "button", "link": "link", "entry": "textbox",
         "text": None, "password text": "textbox", "text box": "textbox", "textbox": "textbox", "combo box": "combobox",
@@ -118,8 +125,8 @@ class Recorder:
             self.write({"t": round(time.time(), 3), "kind": "call", "tool": str(tool)[:60], "session": session,
                         "app": (app or "")[:80], "args": args})
 
-    def result(self, tool, res, session):
-        """A read's element rows (for tokens), and whether an acting call failed."""
+    def result(self, tool, res, session, args=None):
+        """A read's element rows (for tokens), whether it lists the whole window, and whether an acting call failed."""
         if not self.wants(session) or not isinstance(res, dict):
             return
         sc = res.get("structuredContent") if isinstance(res.get("structuredContent"), dict) else {}
@@ -137,8 +144,11 @@ class Recorder:
                         rows[m.group(1)] = [m.group(2).strip(), _unq(m.group(3) or "")]
                         if len(rows) >= MAX_ROWS:
                             break
+                whole = (isinstance(args, dict) and set(args) <= WHOLE_READ_ARGS
+                         and args.get("include_accessibility_tree") is not False and len(rows) < MAX_ROWS
+                         and sc.get("truncated") is not True and sc.get("elements_complete") is not False)
                 self.write({"t": round(time.time(), 3), "kind": "read", "session": session, "snapshot": sid,
-                            "title": str(sc.get("window_title") or "")[:300], "rows": rows})
+                            "title": str(sc.get("window_title") or "")[:300], "whole": whole, "rows": rows})
         elif res.get("isError"):
             self.write({"t": round(time.time(), 3), "kind": "error", "tool": str(tool)[:60], "session": session})
 
@@ -216,6 +226,9 @@ class Exporter:
     def __init__(self, recs, url=None):
         self.recs, self.url = recs, url
         self.rows = {}                    # snapshot id -> {index: [role, name]}
+        self.titles = {}                  # snapshot id -> the window's title at that read
+        self.whole = {}                   # snapshot id -> True when that read listed the whole window
+        self.note_next = None             # a comment for the next emitted step
         self.lines, self.skipped, self.pixels, self.steps = [], 0, 0, 0
         self.pending_url = None           # ctrl+L typed: the next text is an address
         self.last_field = None            # (line index, locator) of a click on a text field: typing next is a fill
@@ -224,11 +237,13 @@ class Exporter:
         """page.getBy... for an element named by role/name or by a token from a read; None when it can't be told."""
         role, name = a.get("role"), a.get("name")
         tok = a.get("element_token")
+        nth = ""
         if isinstance(tok, str):
             m = TOKEN_RE.match(tok)
             row = self.rows.get(m.group(1), {}).get(m.group(2)) if m else None
             if row:
                 role, name = row
+                nth = self.nth(m.group(1), m.group(2), row)
         if not isinstance(role, str):
             if isinstance(a.get("text"), str) and a.get("text"):
                 return f"page.getByText({js(a['text'][:400])})"
@@ -236,12 +251,37 @@ class Exporter:
         aria = ARIA.get(role.strip().lower(), "")
         name = name if isinstance(name, str) else ""
         if aria:
-            return (f"page.getByRole({js(aria)}, {{ name: {js(name[:400])} }})" if name else f"page.getByRole({js(aria)})")
-        if name:
+            if nth and name:              # an exact name, so Playwright counts the same elements the read did
+                return f"page.getByRole({js(aria)}, {{ name: {js(name[:400])}, exact: true }})" + nth
+            return f"page.getByRole({js(aria)}, {{ name: {js(name[:400])} }})" if name else f"page.getByRole({js(aria)})"
+        if name:                          # getByText matches any element with that text: no .nth from a count by role
+            if nth:
+                self.note_next = "More than one element has this text: add .nth() or a narrower locator."
             return f"page.getByText({js(name[:400])})"
         return None
 
+    def nth(self, snap, idx, row):
+        """`.nth(k)` when the page has several elements with this role and exact name (five "Download invoice" links):
+        only from a read that listed the whole window (a query or a diff lists part of it, and a count from part of the
+        page could pick the wrong one), counted within the page (after its document row), roles compared as Playwright
+        sees them. "" when it's the only one; a partial read that shows several leaves a comment instead."""
+        rows = self.rows.get(snap, {})
+        num = {int(i): v for i, v in rows.items() if str(i).isdigit()}
+        doc = min((i for i, v in num.items() if str(v[0]).strip().lower() == "document web"), default=-1)
+        key = lambda v: (ARIA.get(str(v[0]).strip().lower()) or str(v[0]).strip().lower(), v[1])
+        same = sorted(i for i, v in num.items() if i > doc and key(v) == key(row))
+        if len(same) < 2 or int(idx) not in same:
+            return ""
+        if not self.whole.get(snap):
+            self.note_next = ("More than one element has this role and name, and the read before it listed only part "
+                              "of the window: add .nth() or a narrower locator.")
+            return ""
+        return f".nth({same.index(int(idx))})"
+
     def emit(self, line):
+        if self.note_next:
+            self.lines.append("  // " + self.note_next)
+            self.note_next = None
         self.lines.append("  " + line)
         self.steps += 1
 
@@ -325,9 +365,14 @@ class Exporter:
                 rows = r.get("rows") if isinstance(r.get("rows"), dict) else {}
                 self.rows[str(r.get("snapshot"))] = {str(i): v for i, v in rows.items()
                                                      if isinstance(v, list) and len(v) == 2}
+                self.titles[str(r.get("snapshot"))] = str(r.get("title") or "")
+                self.whole[str(r.get("snapshot"))] = r.get("whole") is True
             elif k == "call":
                 tool, a = r.get("tool"), r.get("args") if isinstance(r.get("args"), dict) else {}
                 browser = bool(BROWSER_APP_RE.search(str(r.get("app") or "")))
+                tok = a.get("element_token")
+                if not browser and not r.get("app") and isinstance(tok, str) and TOKEN_RE.match(tok):
+                    browser = bool(BROWSER_TITLE_RE.search(self.titles.get(TOKEN_RE.match(tok).group(1), "")))
                 if tool == "run_steps":
                     for st in a.get("steps") or []:
                         t, sa = step_parts(st)

@@ -149,6 +149,69 @@ check("trace list names them", rc == 0 and "e2" in out and "shop" in out, out)
 rc, out = cli("delete", "e2")
 check("trace delete", rc == 0 and not os.path.exists(os.path.join(TD, "traces", "e2.jsonl")), out)
 
+# A click by element token alone (no pid): the hub records the app of the read the token came from.
+import types  # noqa: E402
+import mcp_hub  # noqa: E402
+got = []
+fake = types.SimpleNamespace(tracer=types.SimpleNamespace(wants=lambda s: True, call=lambda n, a, s, app: got.append(app)),
+                             snapshots={"s0000000e": (77, 5, "firefox")}, app_of={77: "firefox"}, window_pid={},
+                             note=lambda *a, **k: None)
+mcp_hub.Hub.trace_call(fake, "click", {"element_token": "s0000000e:41"}, "s1")
+mcp_hub.Hub.trace_call(fake, "click", {"element_token": "s0000000f:2"}, "s1")
+check("a call by element token alone is recorded with its window's app (from the read the token came from); an "
+      "unknown snapshot stays without one", got == ["firefox", ""], got)
+# …and a trace recorded before that (no app on such calls) still exports, from the read's window title.
+old = [{"kind": "read", "snapshot": "s00000006", "title": "Larkspur Supply \u2014 Mozilla Firefox",
+        "rows": {"41": ["link", "Account"]}},
+       {"kind": "call", "tool": "click", "app": "", "args": {"element_token": "s00000006:41"}},
+       {"kind": "read", "snapshot": "s00000007", "title": "notes.txt - Mousepad", "rows": {"3": ["push button", "Save"]}},
+       {"kind": "call", "tool": "click", "app": "", "args": {"element_token": "s00000007:3"}}]
+ex = traces.Exporter(old)
+code = ex.run("old")
+check("an older trace's token-only click in a browser window is exported (from the window title); one in another "
+      "app is still left out", 'getByRole("link", { name: "Account" })' in code and "Save" not in code
+      and ex.skipped == 1, code)
+rep = [{"kind": "read", "snapshot": "s00000009", "title": "Invoices \u2014 Mozilla Firefox", "whole": True,
+        "rows": {"20": ["link", "Download invoice"], "37": ["document web", "Invoices"],
+                 "50": ["link", "Download invoice summary"], "55": ["link", "Download invoice"],
+                 "61": ["link", "Download invoice"], "67": ["link", "Download invoice"], "70": ["link", "Help"]}},
+       {"kind": "call", "tool": "click", "app": "firefox", "args": {"element_token": "s00000009:61"}},
+       {"kind": "call", "tool": "click", "app": "firefox", "args": {"element_token": "s00000009:70"}}]
+code = traces.Exporter(rep).run("rep")
+check("several elements with the same role and exact name, in a read of the whole window: the one clicked is picked "
+      "by its place on the page (.nth with exact: true, counted from the page's document, not the browser's own "
+      "controls, and not counting a longer name that contains it); a unique one has neither",
+      'getByRole("link", { name: "Download invoice", exact: true }).nth(1).click()' in code
+      and 'getByRole("link", { name: "Help" }).click()' in code, code)
+part = [dict(rep[0], whole=False, snapshot="s0000000a"), {"kind": "call", "tool": "click", "app": "firefox",
+                                                           "args": {"element_token": "s0000000a:61"}}]
+code = traces.Exporter(part).run("part")
+check("…but from a read that listed only part of the window (a query, a diff), no .nth: a comment says to add one",
+      "}).nth(" not in code and "listed only part of the window" in code
+      and 'getByRole("link", { name: "Download invoice" }).click()' in code, code)
+txt = [{"kind": "read", "snapshot": "s0000000d", "title": "x \u2014 Mozilla Firefox", "whole": True,
+        "rows": {"1": ["document web", "x"], "2": ["paragraph", "A"], "3": ["section", "A"], "4": ["paragraph", "A"]}},
+       {"kind": "call", "tool": "click", "app": "firefox", "args": {"element_token": "s0000000d:4"}}]
+code = traces.Exporter(txt).run("txt")
+check("a text locator (getByText matches any element with that text) never gets .nth from a count by role: a comment",
+      "}).nth(" not in code and ").nth(" not in code.split("test(")[1].split("\n", 2)[2].split("//")[0]
+      and "More than one element has this text" in code and 'page.getByText("A").click()' in code, code)
+rec = traces.Recorder(TD)
+cli("start", "whole")
+res = {"structuredContent": {"snapshot_id": "s0000000b", "window_title": "x \u2014 Mozilla Firefox",
+                             "tree_markdown": '- [3] link "A" [actions=[jump]]'}}
+rec.result("get_window_state", res, "s1", {"pid": 5, "window_id": 6, "include_screenshot": False})
+rec.result("get_window_state", dict(res, structuredContent=dict(res["structuredContent"], snapshot_id="s0000000c")),
+           "s1", {"pid": 5, "window_id": 6, "query": "A"})
+rec.result("get_window_state", dict(res, structuredContent=dict(res["structuredContent"], snapshot_id="s0000000e",
+                                                                truncated=True)), "s1", {"pid": 5, "window_id": 6})
+rec.result("get_window_state", dict(res, structuredContent=dict(res["structuredContent"], snapshot_id="s0000000f")),
+           "s1", {"pid": 5, "window_id": 6, "include_accessibility_tree": True})
+cli("stop")
+reads = [json.loads(l) for l in open(os.path.join(TD, "traces", "whole.jsonl")) if '"read"' in l]
+check("the recorder marks a read as whole only without the driver's filters (a query read isn't) and when the "
+      "driver didn't cut it short (truncated); asking for the tree explicitly is still whole",
+      [r.get("whole") for r in reads] == [True, False, False, True], reads)
 hub = open(os.path.join(LAB, "lib", "mcp_hub.py")).read()
 disp = hub[hub.index("def on_tools_call("):hub.index("def session_for(")]
 check("the hub records a call after every guard and pacing, as it goes to the driver",
