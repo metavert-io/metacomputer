@@ -9,6 +9,11 @@ All notable changes to metacomputer are recorded here. The format follows
 ### Fixed
 
 - **`trace export`** dropped `press_key`'s modifiers (Ctrl+L became a press of "l"), so an address typed in the address bar wasn't turned into `page.goto`; an address typed without `http://` now is too (http for this machine, else https, with a comment to check it).
+
+## [0.4.2] - 2026-11-20
+
+### Fixed
+
 - **`metacomputer trace export`** kept no step for a click made by element token alone (the way the skill teaches), so a typical browser session exported an empty test: the hub now records such a call with the app of the read the token came from, and the exporter tells a browser window from its title for traces recorded before. When a page has several elements with the same role and name, the export picks the one clicked with `.nth(k)` and an exact name, but only when the read before it listed the whole window (a query or a diff lists part of it, so the count could be wrong); otherwise it leaves a comment to add one.
 
 ## [0.4.1] - 2026-11-20
