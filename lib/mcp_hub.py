@@ -2771,7 +2771,7 @@ class Hub:
         if self.bot_mode != "off" and tool == "get_window_state" and not pend.get("orphan"):
             self.mark_bot_check(pend, res, args, sc)
         if not pend.get("orphan"):
-            self.trace_result(tool, res, sess)
+            self.trace_result(tool, res, sess, args)
         note = pend.get("note")
         if note:
             hub_notes.add(res, note, front=True)
@@ -2796,10 +2796,10 @@ class Hub:
         except Exception as e:
             self.note(f"trace skipped a call: {type(e).__name__}", kind="trace failed")
 
-    def trace_result(self, tool, res, sess):
+    def trace_result(self, tool, res, sess, args=None):
         try:
             if self.tracer.wants(sess):
-                self.tracer.result(tool, res, sess)
+                self.tracer.result(tool, res, sess, args)
         except Exception as e:
             self.note(f"trace skipped a result: {type(e).__name__}", kind="trace failed")
 
