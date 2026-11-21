@@ -1689,6 +1689,68 @@ def test_vnc_real_keychain():
         shutil.rmtree(t, ignore_errors=True)
 
 
+def test_codex_step():
+    """install.sh --only-codex with the real codex command, in a throwaway HOME and CODEX_HOME: the MCP server with its
+    tool timeout, the skill links, the rules (checked by Codex's own checker), a second run changing nothing, and
+    --uninstall removing exactly those."""
+    codex = shutil.which("codex")
+    if not codex:
+        print("SKIP the Codex step's checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-codex-")
+    try:
+        home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
+        os.makedirs(ch)
+        write(os.path.join(ch, "config.toml"), '[tui]\n\n[mcp_servers.other]\ncommand = "/bin/echo"\n')
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        for k in ("MCOMP_CONFIG", "MCOMP_VM"):
+            env.pop(k, None)
+        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        cfg = open(os.path.join(ch, "config.toml")).read()
+        import tomllib
+        srv = tomllib.loads(cfg)["mcp_servers"]
+        check("--only-codex: the MCP server metacomputer runs this checkout's mcp-lazy, with a 600 s tool timeout and its "
+              "tools approved, and the other server stays", p.returncode == 0 and srv["metacomputer"]["command"] == CLI
+              and srv["metacomputer"]["args"] == ["mcp-lazy"] and srv["metacomputer"]["tool_timeout_sec"] == 600
+              and srv["metacomputer"]["default_tools_approval_mode"] == "approve"
+              and srv["other"]["command"] == "/bin/echo", (p.returncode, p.stdout[-400:], p.stderr[-300:], cfg))
+        sk = os.path.join(home, ".agents", "skills")
+        check("...the skills metacomputer and cua-driver link into the checkout (~/.agents/skills)",
+              os.readlink(os.path.join(sk, "metacomputer")) == os.path.join(LAB, "skills", "metacomputer")
+              and os.readlink(os.path.join(sk, "cua-driver")) == os.path.join(LAB, ".claude", "skills", "cua-driver"))
+        rules = os.path.join(ch, "rules", "metacomputer.rules")
+
+        def decision(*cmd):
+            r = subprocess.run([codex, "execpolicy", "check", "-r", rules, *cmd], capture_output=True, text=True, timeout=60)
+            try:
+                return json.loads(r.stdout).get("decision")
+            except ValueError:
+                return r.stdout + r.stderr
+        want = {("metacomputer", "status"): "allow", ("mcomp", "web", "debug", "x"): "allow",
+                (os.path.join(home, ".local", "bin", "metacomputer"), "sh", "-c", "ls"): "allow",
+                (CLI, "reset"): "prompt", ("metacomputer", "--vm", "demo", "reset"): "prompt",
+                ("metacomputer", "vm", "delete", "x"): "prompt", ("metacomputer", "learn", "approve", "x"): "prompt",
+                ("metacomputer", "secrets", "unlock"): "forbidden", ("metacomputer", "handoff", "done"): "forbidden",
+                ("metacomputer", "view", "--remember"): "forbidden", ("metacomputer", "secrets", "fill", "gh"): "allow"}
+        got = {k: decision(*k) for k in want}
+        check("...the rules: everyday commands allowed, VM changes ask, the user's own commands refused (Codex's checker)",
+              got == want, {k: v for k, v in got.items() if want[k] != v})
+        p2 = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+        check("...a second run changes nothing", p2.returncode == 0 and open(os.path.join(ch, "config.toml")).read() == cfg
+              and "already registered" in p2.stdout, (p2.returncode, p2.stdout[-300:]))
+        write(os.path.join(ch, "rules", "mine.rules"), "# the user's own\n")
+        p3 = subprocess.run([INSTALL, "--uninstall"], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+        left = tomllib.loads(open(os.path.join(ch, "config.toml")).read()).get("mcp_servers", {})
+        check("--uninstall removes the server, the skill links and the rules, and nothing of the user's",
+              p3.returncode == 0 and "metacomputer" not in left and "other" in left and not os.listdir(sk)
+              and os.listdir(os.path.join(ch, "rules")) == ["mine.rules"], (p3.returncode, left, os.listdir(sk)))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def test_setup_in_checkout():
     t = tempfile.mkdtemp(prefix="mcomp-install-")
     try:
@@ -1904,6 +1966,7 @@ test_vm_dir()
 test_vnc_password()
 test_vnc_real_keychain()
 test_setup_in_checkout()
+test_codex_step()
 test_build_vault_quiet()
 test_quiet_builds()
 test_vm_build_footer()

@@ -855,12 +855,19 @@ emit_event() { # FAMILY TYPE SEVERITY MESSAGE ACTION [KEY=VALUE ...] (ACTION may
     "$PY" "$LAB_ROOT/lib/events.py" emit "$fam" "$typ" --severity "$sev" --message "$msg" \
       ${act:+--action "$act"} ${f[@]+"${f[@]}"} --quiet ) >/dev/null 2>&1 || true
 }
+# The user's own terminal: standard input is a terminal and no agent session (Claude Code or Codex) is above this
+# process (lib/owners.py at_user_terminal). Codex can give its commands a pseudo-terminal, so `[ -t 0 ]` alone can't
+# tell the user from the agent. For checks that only the user may pass.
+user_tty() {
+  [ -t 0 ] || return 1
+  "$PY" "$LAB_ROOT/lib/owners.py" at-terminal
+}
 # EVENTS HOOK (secrets): `metacomputer secrets` exits 3 when the vault isn't unlocked (or
 # doesn't exist yet). bin/metacomputer calls this from an EXIT trap for that command (see
 # there). Quiet when you ran it yourself at a terminal, and at most once in 5 minutes.
 events_hook_secrets_exit() { # RC
   [ "${1:-0}" = 3 ] || return 0
-  [ -t 0 ] && return 0
+  user_tty && return 0
   ( export_options
     "$PY" "$LAB_ROOT/lib/events.py" emit needs_you vault_locked --severity warn --debounce 300 --quiet \
       --message "The secrets vault isn't unlocked (or doesn't exist yet), so Claude can't fill a login" \

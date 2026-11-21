@@ -403,9 +403,11 @@ def remember_setting(env=None):
 
 
 def consent_refusal(what, from_view):
-    """None when stdin is a terminal (a person typing), or the caller is bin/metacomputer view (--from-view), which
-    checked first. A guard against mistakes, not a barrier (the docstring above)."""
-    if from_view or sys.stdin.isatty():
+    """None when stdin is the user's own terminal (a terminal with no agent session above it: Codex can give its
+    commands a pseudo-terminal), or the caller is bin/metacomputer view (--from-view), which checked first. A guard
+    against mistakes, not a barrier (the docstring above)."""
+    import owners
+    if from_view or owners.at_user_terminal((0,)):
         return None
     return (f"{what} changes your login keychain, so it needs your yes: run `metacomputer view --remember` (or "
             "--forget) in your own terminal")

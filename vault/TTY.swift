@@ -18,9 +18,25 @@ nonisolated(unsafe) var waitHook: (() -> Void)? = nil
 nonisolated(unsafe) var savedTermios = termios()
 nonisolated(unsafe) var termiosSaved: Int32 = 0
 
+/// The user's own terminal: stdin is a terminal and no agent session (Claude Code or Codex) is above this process.
+/// Codex's command tool can give a command a pseudo-terminal of its own, so a terminal alone doesn't tell the user from
+/// an agent. Like the terminal check itself, this keeps an agent from passing by accident; a program running as you
+/// can still start a command outside the agent's process tree.
+func atUserTerminal() -> Bool {
+    guard isatty(0) == 1 else { return false }
+    #if MCOMP_VAULT_TESTING
+    // The test suites run under whatever agent runs them; a test build may leave the agent check out.
+    if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_IGNORE_AGENT"] == "1" { return true }
+    #endif
+    return Requester.of(getpid()).claudePID == nil
+}
+
 func requireTTY(_ what: String) throws {
     guard isatty(0) == 1 else {
-        throw VaultError("\(what) needs your own terminal: run it yourself in Terminal (not through Claude, a script or a pipe)")
+        throw VaultError("\(what) needs your own terminal: run it yourself in Terminal (not through Claude Code, Codex, a script or a pipe)")
+    }
+    guard atUserTerminal() else {
+        throw VaultError("\(what) needs your own terminal: run it yourself in Terminal, not from inside Claude Code or Codex (even with a terminal of its own)")
     }
 }
 

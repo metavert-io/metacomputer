@@ -264,6 +264,9 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--no-claude` | Don't touch Claude Code |
 | `--no-plugin` | Claude Code without the plugin: a skill link and a user-scope MCP server (tools `mcp__metacomputer__*`) |
 | `--only-claude` | Only the Claude Code step |
+| `--codex` | Set metacomputer up for Codex too (a first install does when Codex is installed; later runs refresh it once it's there): [codex.md](codex.md) |
+| `--no-codex` | Don't touch Codex |
+| `--only-codex` | Only the Codex step: its MCP server, the skills in `~/.agents/skills` and metacomputer's rules for its sandbox |
 | `--uninstall` | Remove the command, the plugin and the vault program (the VM stays) |
 
 `MCOMP_CONFIG=FILE ./install.sh` writes and reads that settings file instead of

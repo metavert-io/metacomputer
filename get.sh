@@ -49,6 +49,7 @@ Options:
   --no-chrome   Firefox only in the VM (by default Google Chrome is added too, which means
                 accepting Google's terms: https://www.google.com/chrome/terms/)
   --no-build    set everything up but don't build the VM yet (later: metacomputer build)
+  --no-codex    leave Codex alone (by default, when Codex is installed, a first install sets it up too: docs/codex.md)
   --replace-vm  delete the VM and its clean snapshot and build them again (for a build that didn't
                 finish, or a VM without its snapshot); never implied by --yes
   --confirm     explain what it will do and ask before changing anything
@@ -557,6 +558,7 @@ install() {
   [ "$CONFIRM" = 0 ] || args+=(--fresh-sources)   # from the plugin: the host tools and mcomp-vm from new clones
   [ "$NO_CHROME" = 1 ] && args+=(--no-chrome)
   [ "$NO_BUILD" = 1 ] && args+=(--no-build)
+  [ "$NO_CODEX" = 1 ] && args+=(--no-codex)
   [ "$REPLACE_VM" = 1 ] && args+=(--replace-vm)
   if [ "$NO_CHROME" = 0 ]; then
     note "the VM gets Google Chrome next to Firefox, which means accepting Google's terms"
@@ -677,7 +679,7 @@ EOF
 }
 
 main() {
-  DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; REPLACE_VM=0
+  DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; NO_CODEX=0; REPLACE_VM=0
   DRY=0; YES=0; CONFIRM=0; HEALTH=""; VM_NEW=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -689,6 +691,7 @@ main() {
       --repo=*) REPO="${1#--repo=}" ;;
       --no-chrome) NO_CHROME=1 ;;
       --no-build) NO_BUILD=1 ;;
+      --no-codex) NO_CODEX=1 ;;
       --replace-vm) REPLACE_VM=1 ;;
       --confirm) CONFIRM=1 ;;
       -y|--yes) YES=1 ;;

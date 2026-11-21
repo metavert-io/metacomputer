@@ -1096,7 +1096,7 @@ extension UnlockServer {
 func readCodeValue(prompt: String) throws -> ([UInt8], Bool) {
     if isatty(0) == 1 {
         installPromptSignalHandlers()
-        return (try readHidden(prompt), isatty(2) == 1)
+        return (try readHidden(prompt), isatty(2) == 1 && atUserTerminal())
     }
     var line = [UInt8]()
     var c: UInt8 = 0

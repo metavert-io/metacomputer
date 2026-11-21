@@ -456,6 +456,7 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
     roots = []
     if projects:
         roots.append((transcripts.claude_projects_dir(env), "project"))
+        roots.append((transcripts.codex_sessions_dir(env), "project"))     # Codex's sessions (rollout-*.jsonl)
     roots += [(os.path.abspath(os.path.expanduser(d)), "stream") for d in extra_dirs]
     for root, source in roots:
         if not os.path.isdir(root):
@@ -544,7 +545,7 @@ def _mine_one(path, source, cutoff, project):
         shift = end - (tr.last or 0.0)
         tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
     else:
-        src = "headless" if tr.kind == "stream" else "claude-code"
+        src = "headless" if tr.kind == "stream" else "codex" if tr.kind == "codex" else "claude-code"
     if project and src != "bench" and not _under(tr.cwd, project):
         return None
     if tr.last is not None and tr.last < cutoff:
@@ -679,7 +680,8 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
         "project": project,
         "window": {"from": time.strftime("%Y-%m-%d", time.localtime(min(starts))) if starts else None,
                    "to": time.strftime("%Y-%m-%d", time.localtime(max(ends))) if ends else None},
-        "sources": {"claude_code_sessions": src["claude-code"], "headless_transcripts": src["headless"],
+        "sources": {"claude_code_sessions": src["claude-code"], "codex_sessions": src["codex"],
+                    "headless_transcripts": src["headless"],
                     "benchmark_sessions": src["bench"], **stats},
         "sessions": n, "driver_calls": driver, "failed_calls": failed,
         "failed_share": round(failed / driver, 4) if driver else 0,

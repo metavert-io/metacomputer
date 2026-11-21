@@ -795,7 +795,7 @@ allows metacomputer to show dialogs on this Mac that wait for you; off, nothing
 pops up on your screen by itself, since Claude may run commands while you're
 away, and a handoff tells you through its notice, its output and the events.
 With it on, a handoff Claude opens also shows a dialog on the Mac's screen:
-"Claude needs you: " and the `--say` text (cleaned like an event, at most 240
+"Claude needs you: " ("Codex needs you: " for a handoff a Codex session opened) and the `--say` text (cleaned like an event, at most 240
 characters), with **Open live view** (it runs `metacomputer view --open`) and
 **Later**. The text reaches osascript as an argument of a fixed AppleScript,
 never as part of one, so nothing in it runs. A detached helper shows it, so
@@ -3047,8 +3047,10 @@ something waits for you:
     - an agent that reads the key out of the VM's disk image can still pose as the VM,
       so this only raises the bar.
 
-  The terminal requirement keeps values off pipes and command lines. It isn't a
-  barrier against your own account, since a program can open a pseudo-terminal.
+  The terminal requirement keeps values off pipes and command lines. A terminal inside an agent session doesn't
+  count: commands only you run also refuse when Claude Code or Codex is above them in the process tree, since
+  Codex's command tool can give a command a terminal of its own. It isn't a barrier against your own account,
+  since a program can open a pseudo-terminal outside an agent's process tree.
 - **One-time codes from inside the VM are only as trustworthy as the page they're read from.** A relay reads a
   mailbox signed in inside the VM, and anything signed in there is reachable by a misbehaving agent with a shell (it
   can read the mail itself, and ask for codes). Use a dedicated automation mailbox that only receives sign-in mail.

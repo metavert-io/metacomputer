@@ -6,6 +6,22 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Codex support** (docs/codex.md). A first install sets Codex up too when it's installed (`./install.sh --only-codex` on a Mac that already has metacomputer; `--no-codex` leaves it alone): the MCP server `metacomputer` with a 600 s tool timeout and its tools approved (they act only on the VM, through the hub's guards; Codex otherwise asks before every click), the `metacomputer` and `cua-driver` skills in `~/.agents/skills`, and `$CODEX_HOME/rules/metacomputer.rules`, which lets everyday `metacomputer` commands run outside Codex's sandbox, asks you before ones that replace, delete or stop the VM or its storage, and refuses the commands only you run. `--uninstall` removes them; `install.sh` and `metacomputer update` refresh them once they're there and never add them to a Codex that doesn't have them.
+- **Codex sessions are agent sessions** wherever Claude Code's are: one controller at a time (a Codex session no longer blocks itself when it mixes MCP tools and `metacomputer` commands), the handoff (a session can't say the user is done), the hub's status and events (which agent is acting), and the vault ("for this session" answers, unattended rules for a project, tokens tied to the session that asked).
+- **`metacomputer learn` reads Codex sessions** (`$CODEX_HOME/sessions`) with the same rules as Claude Code's: only classes, counts, tool names and app names from a fixed list.
+- **Inside Codex's sandbox, `metacomputer` commands stop at once** (exit 77) and say how to run outside it, instead of reporting a running VM as not ready. The skill tells Codex the same.
+
+### Changed
+
+- **Commands only you run also refuse a terminal inside an agent session** (Claude Code or Codex above them in the process tree): widening the network allowlist or lifting it, `handoff done` and pressing Enter at a waiting handoff, approving or writing lessons with free text, `volume keys`, `view --remember`/`--forget`, and the vault's own terminal commands (`init`, `set`, `unlock` ...). Codex's command tool can give a command a pseudo-terminal, so a terminal alone no longer counts as you; run them in your own terminal, as before.
+- **The handoff names the agent that asked** ("Codex needs you: ..." for a Codex session), and refusals, events and `metacomputer who` say Claude Code or Codex.
+
+### Fixed
+
+- **`metacomputer net` printed a Python traceback** when its state folder couldn't be used; it now says which and that nothing changed.
+
 ## [0.4.2] - 2026-11-20
 
 ### Fixed

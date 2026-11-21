@@ -16,6 +16,8 @@ timeout, with no file left open, and free again once the holder leaves.
 """
 import json
 import os
+import pty
+import select
 import subprocess
 import sys
 import tempfile
@@ -41,6 +43,50 @@ def py(code, env, new_session=False):
     r = subprocess.run([sys.executable, "-c", PRELUDE + code], env=env, capture_output=True, text=True,
                        start_new_session=new_session, timeout=60)
     return r
+
+
+def detached_pty(argv, timeout=30):
+    """Run argv on a new pseudo-terminal in a process whose parent is launchd (pid 1): detached from whatever runs
+    this test, so no agent session that started the suite is above it. Returns its exit code (None if it didn't
+    report within the timeout)."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(r)
+            if os.fork() != 0:
+                os._exit(0)                       # the middle process exits: its child goes to launchd
+            for _ in range(500):
+                if os.getppid() == 1:
+                    break
+                time.sleep(0.01)
+            cpid, fd = pty.fork()
+            if cpid == 0:
+                os.execv(argv[0], argv)
+            while True:                           # drain the terminal until the command closes it
+                try:
+                    if not os.read(fd, 4096):
+                        break
+                except OSError:
+                    break
+            _, st = os.waitpid(cpid, 0)
+            os.write(w, str(os.waitstatus_to_exitcode(st)).encode())
+        finally:
+            os._exit(0)
+    os.close(w)
+    os.waitpid(pid, 0)
+    data, end = b"", time.time() + timeout
+    while time.time() < end:
+        if select.select([r], [], [], 1)[0]:
+            chunk = os.read(r, 64)
+            if not chunk:
+                break
+            data += chunk
+    os.close(r)
+    try:
+        return int(data)
+    except ValueError:
+        return None
 
 
 def main():
@@ -75,7 +121,7 @@ def main():
     check("...a run from another session sees another, active controller (refused unless --override)", len(oth) == 1
           and oth[0].get("active") and oth[0].get("kind") == "session" and oth[0].get("claim") == "shell", (r.stdout, r.stderr[-300:]))
     r = py("print(owners.describe(owners.others()[0]))", env, new_session=True)
-    check("...described as a shell outside Claude Code", "metacomputer sh outside Claude Code" in r.stdout, r.stdout)
+    check("...described as a shell outside an agent session", "metacomputer sh outside an agent session" in r.stdout, r.stdout)
 
     # A Claude Code session's claim and a bridge's claim still go with their process.
     dead = holder
@@ -139,6 +185,38 @@ def main():
     table = {300: (200, "/bin/bash"), 200: (100, native), 100: (1, "/bin/zsh")}
     check("claude_of finds a natively installed Claude Code above a tool's shell (its claim goes with that session)",
           owners.claude_of(300, table) == 200, owners.claude_of(300, table))
+
+    # Codex: its native binary, however it's installed (npm/Homebrew start it from a node launcher; the IDE extension and
+    # the desktop app run `codex app-server`)
+    codex_native = "/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex"
+    check("Codex is an agent session however it's installed (npm/Homebrew native binary, IDE extension, desktop app)",
+          all(owners.agent_kind(c) == "Codex" for c in ("codex", codex_native,
+              "/Users/someone/.vscode/extensions/openai.chatgpt-26.1106.51428-darwin-arm64/bin/macos-aarch64/codex",
+              "/Applications/Codex.app/Contents/Resources/codex")))
+    check("...and its launcher and look-alikes aren't", not any(owners.agent_kind(c) for c in (
+        "node", "/opt/homebrew/bin/node", "/x/bin/codex.js", "codex-helper", "/x/codexify", "/x/codex/notes")))
+    check("...and Claude Code is still Claude Code", owners.agent_kind(native) == "Claude Code")
+    table = {300: (250, "/bin/zsh"), 250: (200, codex_native), 200: (150, "/opt/homebrew/bin/node"), 150: (1, "/bin/zsh")}
+    check("claude_of finds Codex above a command's shell, below its node launcher (its claims go with that session)",
+          owners.claude_of(300, table) == 250, owners.claude_of(300, table))
+    table = {400: (300, "/bin/zsh"), 300: (250, codex_native), 250: (200, "/bin/zsh"), 200: (1, native)}
+    check("the nearest agent session counts: Codex run from Claude Code is a session of its own",
+          owners.claude_of(400, table) == 300, owners.claude_of(400, table))
+
+    # The user's own terminal, end to end with real processes: a terminal with no agent session above it. The runs
+    # below are detached from whatever runs this test (re-parented to launchd), so an agent running the suite isn't
+    # above them; a small program named `codex` (built here: copies of Apple's binaries don't run) stands in for
+    # Codex giving a command a terminal of its own, running it as its child.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import userterm
+    fake = userterm.fake_agent("codex")
+    at = [sys.executable, os.path.join(LAB, "lib", "owners.py"), "at-terminal"]
+    rc_plain = detached_pty(at)
+    rc_codex = detached_pty([fake, *at]) if fake else "no C compiler to build the stand-in"
+    check("at-terminal: a terminal with no agent session above it is the user's (exit 0)", rc_plain == 0, rc_plain)
+    check("...a terminal Codex gave its command isn't (exit 1)", rc_codex == 1, rc_codex)
+    r = subprocess.run(at, stdin=subprocess.DEVNULL, capture_output=True)
+    check("...nor is no terminal at all", r.returncode == 1, r.returncode)
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0

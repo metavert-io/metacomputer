@@ -253,6 +253,9 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   elsewhere; a `get.sh` that's a link, or one in `bin/`, is refused. With a checkout,
   `setup` hands over like any command. The real get.sh, with no terminal, explains
   and exits 3.
+- `install.sh --only-codex` (test_install, with the real `codex` command in a throwaway HOME and CODEX_HOME): the MCP
+  server with its timeout and approval mode, the skill links, the rules as Codex's own checker reads them, a second
+  run changing nothing, and `--uninstall` removing exactly those.
 - `install.sh --only-claude`: a fresh install adds the checkout as the marketplace
   and installs the plugin at user scope; a second run changes nothing; an earlier
   install's skill link and user-scope server are removed when they're this
@@ -849,12 +852,20 @@ Each of these needs no VM and takes seconds.
   the asking session can't say done; then the user's done at a pseudo-terminal ends it, the waiting command
   returns 0 with the note, the same acting call goes through, and the events are there without the note.
   Events go to a temporary folder, never your sinks.
-- `python3 tests/test_owners.py` (14 checks): a `metacomputer sh` claim made outside
+- `python3 tests/test_owners.py` (22 checks): a `metacomputer sh` claim made outside
   Claude Code outlives its short-lived shell for the activity window, counts as the same
   controller from the same terminal session and as another one from a different
   session, then expires; Claude Code and bridge claims still go with their process;
   the owners lock times out with `TimeoutError` while another process holds it, leaves
-  no file open, and is free again once the holder leaves.
+  no file open, and is free again once the holder leaves. Claude Code and Codex are agent
+  sessions however they're installed (Codex's node launcher and look-alikes aren't), the
+  nearest one counts, and `at-terminal` end to end with real processes: a terminal with no
+  agent above it is the user's, one under a process named `codex` isn't, nor is no terminal.
+- Tests of commands only the user runs type at a pty in a process launchd has adopted
+  (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
+  builds a small program named `codex` to stand for one. The vault suites use the TEST
+  build's `MCOMP_VAULT_TEST_IGNORE_AGENT=1` for that, and test_secrets checks the refusal
+  with it unset.
 - `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run.

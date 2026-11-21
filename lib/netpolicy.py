@@ -319,7 +319,10 @@ def until(ts):
 
 
 def at_terminal():
-    return sys.stdin.isatty() and sys.stderr.isatty()
+    """The user's own terminal: stdin and stderr are terminals and no agent session (Claude Code or Codex) is above
+    this process. Codex can give its commands a pseudo-terminal, so a terminal alone isn't the user."""
+    import owners
+    return owners.at_user_terminal((0, 2))
 
 
 def describe(st):
@@ -547,6 +550,11 @@ def main(argv):
     except Refused as e:
         print(f"metacomputer net: {e}", file=sys.stderr)
         return 3
+    except OSError as e:
+        # its folder or lock can't be used (a sandbox, permissions): say so, never a traceback; nothing was changed
+        print(f"metacomputer net: can't use {e.filename or 'its state folder'} ({e.strerror or e}); nothing changed",
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

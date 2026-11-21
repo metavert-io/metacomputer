@@ -682,6 +682,21 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code or Codex is above them in the process tree",
+     lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
+     and "return claude_of(os.getpid(), ps_table()) is None" in raw("lib/owners.py")
+     and 'return "Claude Code" if is_claude(comm) else "Codex" if is_codex(comm) else None' in raw("lib/owners.py")
+     and "owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py") and "owners.at_user_terminal((0,))" in raw("lib/learn.py")
+     and "return owners.at_user_terminal((0,))" in raw("lib/handoff.py")
+     and "owners.at_user_terminal((0,))" in raw("lib/storage.py") and "owners.at_user_terminal((0,))" in raw("lib/liveview.py")
+     and "user_tty || die" in raw("bin/metacomputer")
+     and "guard atUserTerminal() else {" in raw("vault/TTY.swift")
+     and "return Requester.of(getpid()).claudePID == nil" in raw("vault/TTY.swift")
+     and 'if e.name == "codex" { return "Codex" }' in raw("vault/Util.swift")),
+    ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
+     lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
+     and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
+    ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
     ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
      lambda m: "def resolve_named(self, spec, every=False):" in raw("lib/mcp_hub.py") and "every=strict)" in raw("lib/mcp_hub.py")
      and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")
@@ -1310,8 +1325,10 @@ CLAIMS = [
     ("SECURITY.md", r"\*\*A dialog on the Mac \(`INTERACTIVE_PROMPTS`, `(\w+)` by default\)\.\*\* That setting allows "
                     r"metacomputer to show dialogs on this Mac that wait for you",
      lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
-    ("SECURITY.md", r"\"Claude needs you: \" and the `--say` text \(cleaned like an event, at most (\d+) characters\)",
-     lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and '"Claude needs you: " & msg' in handoff.DIALOG_SCRIPT
+    ("SECURITY.md", r"\"Claude needs you: \" \(\"Codex needs you: \" for a handoff a Codex session opened\) and the "
+                    r"`--say` text \(cleaned like an event, at most (\d+) characters\)",
+     lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and 'who & " needs you: " & msg' in handoff.DIALOG_SCRIPT
+     and 'return "Codex" if isinstance(rec, dict) and rec.get("agent") == "Codex" else "Claude"' in raw("lib/handoff.py")
      and "t = clean_text(say)" in raw("lib/handoff.py")),
     ("SECURITY.md", r"The text reaches osascript as an argument of a fixed AppleScript, never as part of one",
      lambda m: dialog_text_is_data()),
@@ -1672,7 +1689,7 @@ CLAIMS = [
     ("SECURITY.md", r"Adding names or time to a\s+list in force, and `net clear`, run only at a\s+terminal",
      lambda m: raw("lib/netpolicy.py").count("if not at_terminal():") == 1
      and "if st is not None and not at_terminal():" in raw("lib/netpolicy.py")
-     and "return sys.stdin.isatty() and sys.stderr.isatty()" in raw("lib/netpolicy.py")),
+     and "return owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py")),
     ("SECURITY.md", r"\(1 minute to 24 hours,\s+2 hours by default\)",
      lambda m: (__import__("netpolicy").MIN_FOR_S, __import__("netpolicy").MAX_FOR_S, __import__("netpolicy").DEFAULT_FOR_S)
      == (60, 86400, 7200)),
@@ -1780,11 +1797,12 @@ def remember_flag_gated():
     """An explicit --remember: a terminal, and never while VIEW_REMEMBER=off, before anything is looked up or
     written; --forget needs a terminal too."""
     b = raw("bin/metacomputer")
-    return ('  if [ "$flag" = remember ]; then\n    [ -t 0 ] || die "view --remember saves the live-view password in '
-            'your login keychain, so it\'s yours to run: in your own terminal"\n    [ "$setting" = off ] && die '
-            '"$(view_off_note)"\n    VIEW_SAVE=create' in b
-            and '[ -t 0 ] || die "view --forget changes your login keychain, so it\'s yours to run: in your own '
-            'terminal"' in b
+    return ('  if [ "$flag" = remember ]; then\n    user_tty || die "view --remember saves the live-view password in '
+            'your login keychain, so it\'s yours to run: in your own terminal (not through Claude Code or Codex)"\n'
+            '    [ "$setting" = off ] && die "$(view_off_note)"\n    VIEW_SAVE=create' in b
+            and 'user_tty || die "view --forget changes your login keychain, so it\'s yours to run: in your own '
+            'terminal (not through Claude Code or Codex)"' in b
+            and 'user_tty() {\n  [ -t 0 ] || return 1\n  "$PY" "$LAB_ROOT/lib/owners.py" at-terminal\n}' in raw("scripts/lib.sh")
             and 'view_save create || die "the live-view password wasn\'t saved for Screen Sharing (the reason is above)"'
             in b)
 
@@ -1794,7 +1812,7 @@ def helper_gated():
     refresh never while VIEW_REMEMBER is off (the settings file's value, made stricter, never looser, by the
     environment; an unknown value there is off); refresh never makes an item."""
     lv = raw("lib/liveview.py")
-    return ('if from_view or sys.stdin.isatty():\n        return None' in lv
+    return ('if from_view or owners.at_user_terminal((0,)):\n        return None' in lv
             and 'if op == "save":\n        why = consent_refusal(' in lv
             and 'why = consent_refusal("removing Screen Sharing\'s saved live-view password", from_view)' in lv
             and 'if remember_setting() == "off":' in lv
@@ -1835,7 +1853,7 @@ def dialog_default_off():
 def dialog_text_is_data():
     """The dialog's AppleScript is a constant; the --say text is one of its arguments."""
     h = raw("lib/handoff.py")
-    return ('["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs]' in h
+    return ('["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs, agent_word(rec)]' in h
             and h.count("DIALOG_SCRIPT") == 2 and "on run argv" in handoff.DIALOG_SCRIPT
             and "item 2 of argv" in handoff.DIALOG_SCRIPT and "do shell script" not in handoff.DIALOG_SCRIPT)
 

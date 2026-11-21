@@ -57,11 +57,20 @@ def net(run, *args, **extra):
     return r.returncode, r.stdout + r.stderr
 
 
+# netpolicy.py in a fresh Python, its view of the agent session above it set by FAKE_AGENT (a pid: an agent session such
+# as Codex, which can give a command a terminal of its own; unset: none, as at the user's own terminal, even when an
+# agent runs this test). tests/test_owners.py checks the process-table side end to end.
+NP_AS = ("import os, runpy, sys; sys.path.insert(0, %r); import owners; "
+         "_a = os.environ.get('FAKE_AGENT'); owners.claude_of = (lambda *a: int(_a)) if _a else (lambda *a: None); "
+         "sys.argv = [%r] + sys.argv[1:]; runpy.run_path(%r, run_name='__main__')") % (os.path.join(LAB, "lib"), NP, NP)
+
+
 def net_tty(run, *args, **extra):
-    """Run with stdin and stderr on a terminal (a pty), as at the user's own terminal."""
+    """Run with stdin and stderr on a terminal (a pty), as at the user's own terminal (FAKE_AGENT="pid": a terminal an
+    agent session gave the command)."""
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(sys.executable, [sys.executable, NP, *args], env(run, **extra))
+        os.execve(sys.executable, [sys.executable, "-c", NP_AS, *args], env(run, **extra))
     out, deadline = b"", time.time() + 60
     while time.time() < deadline:
         r, _, _ = select.select([fd], [], [], 0.5)
@@ -154,6 +163,11 @@ def allow_checks():
     check("removing a name works without a terminal (it narrows the list)", rc == 0
           and sorted(st2["allow"]) == ["*.example.com", "example.com"] and st2["expires"] == st["expires"], (rc, out))
     check("…and the gateway's rules follow", sorted(rules(run)["domains"]["allow"]) == ["*.example.com", "example.com"])
+    rc, out = net_tty(run, "allow", "github.com", FAKE_AGENT="4242")
+    check("a terminal under an agent session (Codex can give its commands one) doesn't widen the list",
+          rc == 3 and "github.com" not in state(run)["allow"] and "at your own terminal" in out, (rc, out))
+    rc, out = net_tty(run, "clear", FAKE_AGENT="4242")
+    check("...or lift it", rc == 3 and os.path.exists(os.path.join(run, "net-allow.json")), (rc, out))
     rc, out = net_tty(run, "allow", "github.com")
     check("at a terminal, a name can be added", rc == 0 and "github.com" in state(run)["allow"]
           and "github.com" in rules(run)["domains"]["allow"], (rc, out))

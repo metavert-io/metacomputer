@@ -18,7 +18,12 @@
 #   ./install.sh --no-plugin   Claude Code without the plugin: a skill link and a user-scope MCP
 #                              server, as before the plugin (tools: mcp__metacomputer__*)
 #   ./install.sh --only-claude only the Claude Code step (no tools, Lume, settings, vault or VM)
-#   ./install.sh --uninstall   remove the Claude Code hooks this installed (the VM stays)
+#   ./install.sh --codex       also set metacomputer up for Codex (docs/codex.md): done anyway on a first install when
+#                              Codex is installed, and refreshed by later runs once it's set up
+#   ./install.sh --no-codex    don't touch Codex
+#   ./install.sh --only-codex  only the Codex step: its MCP server, the skills in ~/.agents/skills and metacomputer's
+#                              rules for its sandbox (no tools, Lume, settings, vault or VM)
+#   ./install.sh --uninstall   remove the Claude Code and Codex hooks this installed (the VM stays)
 #   ./install.sh --switch      the metacomputer command runs another checkout: move it (and the Claude Code
 #                              plugin) to this one. Without a terminal, or with --yes, that's refused otherwise
 #   ./install.sh --allow-downgrade   install this checkout though it's older than what's installed
@@ -37,18 +42,21 @@
 #   5. links the `metacomputer` command and adds this checkout to Claude Code as the
 #      `metacomputer` plugin (its skills and MCP server, for every project; tools:
 #      mcp__plugin_metacomputer_metacomputer__*). Without `claude plugin`, or with
-#      --no-plugin: the `metacomputer` skill link and a user-scope MCP server instead
+#      --no-plugin: the `metacomputer` skill link and a user-scope MCP server instead.
+#      With Codex (see --codex): its MCP server metacomputer (tools mcp__metacomputer__*), the
+#      skills in ~/.agents/skills and $CODEX_HOME/rules/metacomputer.rules
 #   6. builds the secrets vault, mcomp-vault (`metacomputer secrets`), with swiftc
 #   7. builds the VM: about 1.5 GB of downloads, then a few minutes unattended
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 YES=0; CHROME=""; BUILD=""; CLAUDE=1; PLUGIN=1; ONLY_CLAUDE=0; UNINSTALL=0; LUME_CHOICE=""; REPLACE_VM=0; FRESH_SOURCES=0
-SWITCH=0; ALLOW_DOWNGRADE=0
+SWITCH=0; ALLOW_DOWNGRADE=0; CODEX=auto; ONLY_CODEX=0
 for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;; --no-chrome) CHROME=no ;; --no-build) BUILD=no ;; --replace-vm) REPLACE_VM=1 ;; --fresh-sources) FRESH_SOURCES=1 ;;
     --no-claude) CLAUDE=0 ;; --no-plugin) PLUGIN=0 ;; --only-claude) ONLY_CLAUDE=1 ;; --uninstall) UNINSTALL=1 ;;
     --switch) SWITCH=1 ;; --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+    --codex) CODEX=yes ;; --no-codex) CODEX=no ;; --only-codex) ONLY_CODEX=1 ;;
     --lume=mcomp-vm|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
     --lume=secure) LUME_CHOICE=mcomp-vm ;;   # mcomp-vm's former name, lume-secure
     -h|--help) sed -n '2,/^set -Eeuo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -56,6 +64,8 @@ for a in "$@"; do
   esac
 done
 [ "$ONLY_CLAUDE" = 0 ] || [ "$CLAUDE" = 1 ] || { echo "--only-claude and --no-claude together leave nothing to do" >&2; exit 2; }
+[ "$ONLY_CODEX" = 0 ] || [ "$CODEX" != no ] || { echo "--only-codex and --no-codex together leave nothing to do" >&2; exit 2; }
+[ "$ONLY_CODEX" = 0 ] || [ "$ONLY_CLAUDE" = 0 ] || { echo "--only-codex and --only-claude: run them one at a time" >&2; exit 2; }
 
 b=$'\033[1m'; d=$'\033[2m'; g=$'\033[32m'; y=$'\033[33m'; r=$'\033[31m'; o=$'\033[0m'
 [ -t 1 ] || { b=; d=; g=; y=; r=; o=; }
@@ -215,9 +225,168 @@ SKILL_LINK="$HOME/.claude/skills/metacomputer"
 CMD_LINK="$HOME/.local/bin/metacomputer"
 ALIAS_LINK="$HOME/.local/bin/mcomp"   # short alias for typing
 
+# --- Codex (docs/codex.md): its MCP server, the skills in ~/.agents/skills, and rules for its sandbox -------------
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_RULES="$CODEX_DIR/rules/metacomputer.rules"
+CODEX_MARK="# metacomputer's rules for Codex. install.sh writes this file from config/codex/metacomputer.rules.in, and rewrites or"
+AGENT_SKILLS="$HOME/.agents/skills"
+CODEX_TOOL_TIMEOUT=600     # seconds: Codex's default (60) is shorter than a long run_steps or a slowly typed text
+# Codex asks before every MCP tool not marked read-only (in `codex exec`, it refuses them). metacomputer's tools act only
+# on the isolated VM, through the hub's guards, so its server's tools are approved (docs/codex.md).
+CODEX_APPROVAL=approve
+has_codex() { command -v codex >/dev/null 2>&1; }
+codex_server_cmd() { # the command of Codex's MCP server named metacomputer, or nothing
+  codex mcp get metacomputer --json 2>/dev/null | python3 -c 'import json,sys
+try:
+    print((json.load(sys.stdin).get("transport") or {}).get("command") or "")
+except Exception:
+    pass' 2>/dev/null || true
+}
+codex_rules_ours() { [ -f "$CODEX_RULES" ] && [ "$(head -1 "$CODEX_RULES" 2>/dev/null)" = "$CODEX_MARK" ]; }
+codex_set_up() { # anything of this checkout's in Codex already (a later run refreshes it)
+  local c; c="$(codex_server_cmd)"
+  { [ -n "$c" ] && old_target "$c"; } || codex_rules_ours \
+    || link_points_here "$AGENT_SKILLS/metacomputer" "$ROOT/skills/metacomputer"
+}
+codex_wanted() { # --codex, or Codex installed and either a first install or one that has set Codex up before
+  case "$CODEX" in yes) return 0 ;; no) return 1 ;; esac
+  has_codex || return 1
+  [ -f "$HOME/.local/share/metacomputer/installed.json" ] || return 0
+  codex_set_up
+}
+codex_server_settings() { # the timeout and approval mode for the server `codex mcp add` wrote; yours stay as you set them
+  local cfg="$CODEX_DIR/config.toml" out rc=0
+  [ -f "$cfg" ] || return 0
+  out="$(python3 - "$cfg" "$CODEX_TOOL_TIMEOUT" "$CODEX_APPROVAL" <<'PY'
+import os, sys, tempfile, tomllib
+path, want_t, want_a = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+text = open(path, encoding="utf-8").read()
+try:
+    srv = tomllib.loads(text).get("mcp_servers", {}).get("metacomputer")
+except tomllib.TOMLDecodeError:
+    sys.exit(2)
+if not isinstance(srv, dict):
+    sys.exit(2)
+add, notes = [], []
+if "tool_timeout_sec" not in srv:
+    add.append(f"tool_timeout_sec = {want_t}")
+elif srv["tool_timeout_sec"] < want_t:
+    notes.append("timeout-short")
+if "default_tools_approval_mode" not in srv:
+    add.append(f'default_tools_approval_mode = "{want_a}"')
+elif srv["default_tools_approval_mode"] != want_a:
+    notes.append("approval-yours")
+if add:
+    lines = text.split("\n")
+    heads = [i for i, l in enumerate(lines) if l.strip() == "[mcp_servers.metacomputer]"]
+    if len(heads) != 1:
+        sys.exit(2)
+    lines[heads[0] + 1:heads[0] + 1] = add
+    new = "\n".join(lines)
+    got = tomllib.loads(new)["mcp_servers"]["metacomputer"]
+    if ("tool_timeout_sec" not in got) or ("default_tools_approval_mode" not in got):
+        sys.exit(2)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.toml.")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(new)
+    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+    os.replace(tmp, path)
+print(" ".join(notes))
+PY
+)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    warn "couldn't set tool_timeout_sec = $CODEX_TOOL_TIMEOUT and default_tools_approval_mode = \"$CODEX_APPROVAL\" for metacomputer in $cfg (add them under [mcp_servers.metacomputer]: docs/codex.md)"
+    return 0
+  fi
+  case " $out " in *" timeout-short "*) warn "your tool_timeout_sec for metacomputer is shorter than $CODEX_TOOL_TIMEOUT s; left as you set it (long steps may time out)" ;;
+    *) ok "tool calls of the metacomputer server may take up to $CODEX_TOOL_TIMEOUT s" ;; esac
+  case " $out " in *" approval-yours "*) ok "its tools' approval: left as you set it (default_tools_approval_mode)" ;;
+    *) ok "its tools run without asking each time (they act only on the virtual computer, through the hub's guards)" ;; esac
+}
+codex_rules_write() { # metacomputer.rules from the template, naming every way the command is spelled
+  local cmds tmp
+  cmds="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' metacomputer mcomp "$CMD_LINK" "$ALIAS_LINK" "$ROOT/bin/metacomputer")"
+  mkdir -p "$CODEX_DIR/rules"
+  tmp="$(mktemp "$CODEX_DIR/rules/.metacomputer.rules.XXXXXX")" || return 1
+  if ! python3 - "$ROOT/config/codex/metacomputer.rules.in" "$cmds" > "$tmp" <<'PY'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+assert t.count("@COMMANDS@") == 1
+sys.stdout.write(t.replace("@COMMANDS@", sys.argv[2]))
+PY
+  then
+    rm -f "${tmp:?}"; return 1
+  fi
+  # Codex's own checker must read it and allow a plain command; a file it can't use would break every rule it loads.
+  if ! codex execpolicy check -r "$tmp" metacomputer status 2>/dev/null | grep -q '"decision": *"allow"'; then
+    rm -f "${tmp:?}"; return 1
+  fi
+  chmod 644 "$tmp" && mv "$tmp" "$CODEX_RULES"
+}
+codex_skill_target() { # NAME: what ~/.agents/skills/NAME links to
+  if [ "$1" = metacomputer ]; then printf '%s\n' "$ROOT/skills/metacomputer"; else printf '%s\n' "$ROOT/.claude/skills/cua-driver"; fi
+}
+codex_step() {
+  printf '%s\n' "  Codex:"
+  if ! has_codex; then
+    warn "Codex's 'codex' command isn't installed; after installing it, run: ./install.sh --only-codex"
+    return 0
+  fi
+  local cmd name target link
+  cmd="$(codex_server_cmd)"
+  if [ "$cmd" = "$ROOT/bin/metacomputer" ]; then
+    ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
+  elif [ -n "$cmd" ] && ! old_target "$cmd"; then
+    warn "Codex already has an MCP server named metacomputer that runs $cmd; left alone (codex mcp remove metacomputer, then ./install.sh --only-codex)"
+  else
+    [ -z "$cmd" ] || codex mcp remove metacomputer >/dev/null 2>&1 || true
+    if codex mcp add metacomputer -- "$ROOT/bin/metacomputer" mcp-lazy >/dev/null 2>&1; then
+      ok "MCP server metacomputer for every Codex session (tools: mcp__metacomputer__*, there even while the VM is off)"
+    else
+      warn "could not add the MCP server to Codex; run: codex mcp add metacomputer -- $ROOT/bin/metacomputer mcp-lazy"
+    fi
+  fi
+  [ "$(codex_server_cmd)" != "$ROOT/bin/metacomputer" ] || codex_server_settings
+  mkdir -p "$AGENT_SKILLS"
+  for name in metacomputer cua-driver; do
+    target="$(codex_skill_target "$name")"
+    link="$AGENT_SKILLS/$name"
+    if link_points_here "$link" "$target"; then ok "skill $name (~/.agents/skills)"; continue; fi
+    if [ -L "$link" ] && old_target "$(readlink "$link")"; then
+      rm -f "${link:?}"
+    elif [ -e "$link" ] || [ -L "$link" ]; then
+      warn "$link is already there and isn't metacomputer's; left alone (Codex won't get the $name skill)"; continue
+    fi
+    ln -s "$target" "$link" && ok "skill $name (~/.agents/skills, read by Codex)"
+  done
+  if [ -e "$CODEX_RULES" ] && ! codex_rules_ours; then
+    warn "$CODEX_RULES is there and isn't metacomputer's; left alone (docs/codex.md says what it should hold)"
+  elif codex_rules_write; then
+    ok "rules: everyday metacomputer commands run outside Codex's sandbox; changes to the VM ask you; user-only ones are refused"
+  else
+    warn "couldn't write $CODEX_RULES (Codex's checker didn't accept it); approve metacomputer commands when Codex asks instead"
+  fi
+}
+codex_remove() { # --uninstall: only what is this checkout's
+  has_codex || return 0
+  local cmd name link
+  cmd="$(codex_server_cmd)"
+  if [ -n "$cmd" ] && old_target "$cmd"; then
+    codex mcp remove metacomputer >/dev/null 2>&1 && ok "removed Codex's metacomputer MCP server"
+  fi
+  for name in metacomputer cua-driver; do
+    link="$AGENT_SKILLS/$name"
+    if link_points_here "$link" "$(codex_skill_target "$name")"; then
+      rm -f "${link:?}" && ok "removed the $name skill link for Codex"
+    fi
+  done
+  if codex_rules_ours; then rm -f "${CODEX_RULES:?}" && ok "removed metacomputer's rules for Codex"; fi
+  return 0
+}
+
 # --- uninstall ---------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
-  step "Removing the Claude Code hooks for $ROOT"
+  step "Removing the Claude Code and Codex hooks for $ROOT"
   for l in "$CMD_LINK" "$ALIAS_LINK"; do link_points_here "$l" "$ROOT/bin/metacomputer" && rm "$l" && ok "removed $l"; done
   link_points_here "$SKILL_LINK" "$ROOT/skills/metacomputer" && rm "$SKILL_LINK" && ok "removed the metacomputer skill"
   [ -f "$HOME/.local/share/metacomputer/bin/mcomp-vault" ] && rm "$HOME/.local/share/metacomputer/bin/mcomp-vault" \
@@ -231,6 +400,7 @@ if [ "$UNINSTALL" = 1 ]; then
   # The plugin: from this checkout's marketplace, or from GitHub (its copy runs this checkout
   # through ~/.local/bin/metacomputer, removed above, so it can't work without it).
   if has_plugin_cli && plugin_is_ours; then remove_plugin; fi
+  codex_remove
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$CONF" ] && . "$CONF"
   # The runner this checkout uses (LUME in config/local.env; mcomp-vm by default), found as
@@ -406,6 +576,12 @@ if [ "$ONLY_CLAUDE" = 1 ]; then
   existing_checks claude
   claude_step
   printf '\n%s\n' "Restart open Claude Code sessions (or run /reload-plugins in them) to pick this up."
+  exit 0
+fi
+if [ "$ONLY_CODEX" = 1 ]; then
+  step "Codex"
+  codex_step
+  printf '\n%s\n' "Start a new Codex session to pick this up."
   exit 0
 fi
 
@@ -677,6 +853,9 @@ else todo+=("download Cua's standard Lume, the VM runner (it always shares your 
 if [ -f "$CONF" ]; then done_+=("settings")
 else todo+=("write this Mac's settings to $(tildify "$CONF"): Firefox$([ "$chrome_in" = 1 ] && echo " and Google Chrome") in the VM$([ "$chrome_in" = 1 ] && echo " (Chrome means accepting Google's terms: https://www.google.com/chrome/terms/; --no-chrome leaves it out)")"); fi
 [ "$CLAUDE" = 1 ] && todo+=("link the metacomputer command and add the Claude Code plugin (skills and tools in every project)")
+if codex_wanted; then
+  todo+=("add metacomputer to Codex: its MCP server, the skills in ~/.agents/skills, and rules that let metacomputer commands run outside Codex's sandbox (--no-codex leaves Codex alone)")
+fi
 [ "$vault_ok" = 1 ] && todo+=("build the secrets vault (metacomputer secrets)  ${d}(about 1 minute; skipped if it's up to date)${o}")
 case "$vm_state:$build_vm:$vm_replace" in
   built:0:*) done_+=("the VM $VM_NAME") ;;
@@ -792,8 +971,14 @@ fi
 # shellcheck source=/dev/null
 . "$CONF"
 
-# --- 5. Claude Code ----------------------------------------------------------------
+# --- 5. Claude Code (and Codex) ----------------------------------------------------
 [ "$CLAUDE" = 0 ] || claude_step
+if codex_wanted; then
+  [ "$CLAUDE" = 1 ] || step "Codex"
+  codex_step
+elif [ "$CODEX" = auto ] && has_codex; then
+  printf '%s\n' "  Codex is installed too; to use metacomputer from it: ./install.sh --only-codex (docs/codex.md)"
+fi
 
 # --- 6. the secrets vault -------------------------------------------------------------
 step "Secrets vault (metacomputer secrets)" "$([ "$vault_ok" = 1 ] && echo "about 1 minute, unless it's up to date" || echo "skipped")"
