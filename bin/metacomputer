@@ -108,6 +108,9 @@
 #           | fill --request ID | rule add code|relay ...   one-time codes and sign-in links (SECURITY.md)
 #                                  use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
+#   agents [--json] | agents check [--json]
+#                                  the coding agents metacomputer is set up for (Claude Code, Codex), and a check of
+#                                  what it relies on in this Mac's Codex (docs/codex.md)
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
 #                                  mine your own sessions for repeated mistakes; approved lessons reach
 #                                  every new session's instructions as advice (docs/learn.md)
@@ -133,8 +136,8 @@ if mc_in_plugins "$mc_self"; then
     while [ $# -gt 0 ]; do
       case "$1" in
         --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }; mc_args+=(--dir "$2"); shift ;;
-        --no-chrome|--no-build|--no-codex|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
-        *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-codex, --yes, --dry-run)" >&2; exit 2 ;;
+        --no-chrome|--no-build|--no-codex|--no-claude|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
+        *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --yes, --dry-run)" >&2; exit 2 ;;
       esac
       shift
     done
@@ -207,7 +210,7 @@ unset mc_hint
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
-case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions|version) ;; *) vm_target_check ;; esac
+case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions|version|agents) ;; *) vm_target_check ;; esac
 case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
@@ -2315,6 +2318,7 @@ case "$cmd" in
   security)   do_security "$@" ;;
   secrets)    do_secrets "$@"; exit $? ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
+  agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
               [ "$MC_SETTINGS_KIND" != vm ] || die "setup sets up this checkout's main VM (config/local.env); for $VM_NAME: metacomputer --vm $VM_NAME build"

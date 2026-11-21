@@ -861,6 +861,11 @@ Each of these needs no VM and takes seconds.
   sessions however they're installed (Codex's node launcher and look-alikes aren't), the
   nearest one counts, and `at-terminal` end to end with real processes: a terminal with no
   agent above it is the user's, one under a process named `codex` isn't, nor is no terminal.
+- `python3 tests/test_agents.py`: `metacomputer agents` reports each agent (not installed, set up, or left alone
+  by a remembered `--no-codex`); `agents check` passes against this Mac's codex (when installed) without touching its
+  Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
+  `codex mcp` behave differently. test_install's `test_agent_choices` runs `--only-agents` with the real codex: set
+  up, `--no-codex` remembered across runs, `--codex` again, and neither agent on PATH.
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST

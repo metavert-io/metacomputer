@@ -10,15 +10,16 @@ canvas, an unlabeled tile, link navigation) passed 6/6 through `codex exec`
 
 ## Set it up
 
-On a first install, `install.sh` (and the `curl ... | bash` line) sets Codex up too when the `codex` command is
-installed. On a Mac where metacomputer is already installed:
+Every run of `install.sh` (the `curl ... | bash` line, `metacomputer update`, the install line again) sets
+metacomputer up for each coding agent installed on the Mac, Claude Code and Codex, and for one installed since the last
+run. Installed Codex after metacomputer? `metacomputer update`, or right away:
 
 ```bash
-cd ~/metacomputer && ./install.sh --only-codex     # or the folder `metacomputer where` shows
+cd ~/metacomputer && ./install.sh --only-agents    # or the folder `metacomputer where` shows
 ```
 
-Later runs of `install.sh` and `metacomputer update` refresh it once it's there, and never add it to a Codex that
-doesn't have it yet. `--no-codex` leaves Codex alone; `--uninstall` removes what it added. Start a new Codex session
+`--no-codex` leaves Codex alone, and later runs remember it until `--codex` (it doesn't remove what an earlier run
+added: `--uninstall` does). `metacomputer agents` shows what's set up for each agent. Start a new Codex session
 afterwards.
 
 What it adds:
@@ -45,6 +46,13 @@ command (`["metacomputer", "mcomp", "/Users/you/.local/bin/metacomputer"]`).
 
 A `default_tools_approval_mode` or `tool_timeout_sec` you set yourself stays as you set it; `"writes"` (or
 `"prompt"`) makes Codex ask you before the tools that act.
+
+## When Codex changes
+
+metacomputer relies on parts of Codex that aren't a fixed interface: its rules and their checker, the variable its
+sandbox sets, `codex mcp` and two of its settings, and the format of its session files. `metacomputer agents check`
+checks each of them against the Codex on the Mac, without a model and without touching your Codex settings, and
+install.sh runs it after setting Codex up, so `metacomputer update` reports a Codex update that changed one of them.
 
 ## Codex's sandbox
 

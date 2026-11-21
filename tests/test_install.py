@@ -1802,6 +1802,62 @@ def test_codex_config_edits():
         shutil.rmtree(t, ignore_errors=True)
 
 
+def test_agent_choices():
+    """Each run sets up the agents installed on this Mac (Claude Code, Codex), and remembers --no-claude / --no-codex
+    until --claude / --codex; with neither installed, the command is still linked and it says how to add one later."""
+    codex, claude = shutil.which("codex"), shutil.which("claude")
+    if not codex:
+        print("SKIP the agent choice checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-agents-")
+    try:
+        home = os.path.join(t, "home")
+        os.makedirs(os.path.join(home, ".codex"))
+        env = dict(os.environ, HOME=home, CODEX_HOME=os.path.join(home, ".codex"))
+        for k in ("MCOMP_CONFIG", "MCOMP_VM", "CLAUDE_CONFIG_DIR", "CLAUDECODE"):
+            env.pop(k, None)
+
+        def go(*args, path=None):
+            e = dict(env, PATH=path) if path else env
+            return subprocess.run([INSTALL, "--only-agents", *args], env=e, capture_output=True, text=True, timeout=300,
+                                  stdin=subprocess.DEVNULL)
+
+        def codex_set_up():
+            import tomllib
+            try:
+                cfg = tomllib.loads(open(os.path.join(home, ".codex", "config.toml")).read())
+            except OSError:
+                return False
+            return "metacomputer" in cfg.get("mcp_servers", {})
+
+        def choice():
+            try:
+                return json.load(open(os.path.join(home, ".local", "share", "metacomputer", "agents.json")))
+            except (OSError, ValueError):
+                return {}
+        p = go("--no-claude")
+        check("--only-agents sets up the agents installed here: Codex (Claude Code left alone with --no-claude)",
+              p.returncode == 0 and codex_set_up() and "Claude Code: left alone (--no-claude;" in p.stdout
+              and os.path.islink(os.path.join(home, ".local", "bin", "metacomputer")), (p.returncode, p.stdout[-500:]))
+        os.remove(os.path.join(home, ".codex", "config.toml"))
+        p = go("--no-codex")
+        check("--no-codex leaves Codex alone and is remembered", p.returncode == 0 and not codex_set_up()
+              and "Codex: left alone (--no-codex;" in p.stdout and choice().get("codex") == "off"
+              and choice().get("claude") == "off", (p.stdout[-400:], choice()))
+        p = go()
+        check("...so a later run (an update) doesn't add it either, and says why", p.returncode == 0 and not codex_set_up()
+              and "--no-codex in an earlier run" in p.stdout and "--no-claude in an earlier run" in p.stdout, p.stdout[-400:])
+        p = go("--codex")
+        check("--codex sets it up again and remembers that", p.returncode == 0 and codex_set_up()
+              and choice().get("codex") == "on", (p.stdout[-400:], choice()))
+        p = go(path="/usr/bin:/bin")
+        check("with neither agent on PATH: the command is linked, and it says how to add one later",
+              p.returncode == 0 and "neither Claude Code nor Codex is installed" in p.stdout
+              and os.path.islink(os.path.join(home, ".local", "bin", "metacomputer")), p.stdout[-400:])
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def test_setup_in_checkout():
     t = tempfile.mkdtemp(prefix="mcomp-install-")
     try:
@@ -2019,6 +2075,7 @@ test_vnc_real_keychain()
 test_setup_in_checkout()
 test_codex_step()
 test_codex_config_edits()
+test_agent_choices()
 test_build_vault_quiet()
 test_quiet_builds()
 test_vm_build_footer()

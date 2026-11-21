@@ -49,7 +49,8 @@ Options:
   --no-chrome   Firefox only in the VM (by default Google Chrome is added too, which means
                 accepting Google's terms: https://www.google.com/chrome/terms/)
   --no-build    set everything up but don't build the VM yet (later: metacomputer build)
-  --no-codex    leave Codex alone (by default, when Codex is installed, a first install sets it up too: docs/codex.md)
+  --no-claude   leave Claude Code alone; --no-codex  leave Codex alone (by default metacomputer is set up for
+                whichever of the two is installed; remembered for later updates: docs/codex.md)
   --replace-vm  delete the VM and its clean snapshot and build them again (for a build that didn't
                 finish, or a VM without its snapshot); never implied by --yes
   --confirm     explain what it will do and ask before changing anything
@@ -559,6 +560,7 @@ install() {
   [ "$NO_CHROME" = 1 ] && args+=(--no-chrome)
   [ "$NO_BUILD" = 1 ] && args+=(--no-build)
   [ "$NO_CODEX" = 1 ] && args+=(--no-codex)
+  [ "$NO_CLAUDE" = 1 ] && args+=(--no-claude)
   [ "$REPLACE_VM" = 1 ] && args+=(--replace-vm)
   if [ "$NO_CHROME" = 0 ]; then
     note "the VM gets Google Chrome next to Firefox, which means accepting Google's terms"
@@ -640,13 +642,13 @@ metacomputer is in $DIR, and its command is ~/.local/bin/metacomputer (alias mco
 EOF
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *)
     say "~/.local/bin isn't on your PATH: add it (echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zprofile),"
-    say "or type ~/.local/bin/metacomputer. Claude Code always uses the full path." ;;
+    say "or type ~/.local/bin/metacomputer. Claude Code and Codex always use the full path." ;;
   esac
   if [ "$NO_BUILD" = 0 ] && [ "${HEALTH:-}" != failed ]; then
     cat <<EOF
 The VM is running (metacomputer stop to stop it; Claude starts it again when it needs it).
 
-Open Claude Code (restart any session that was open, or run /reload-plugins in it) and try:
+Open Claude Code or Codex (start a new session, or run /reload-plugins in an open Claude Code one) and try:
   "Get yourself a virtual computer and tell me what's on its screen."
   "On your virtual computer, open news.ycombinator.com in Firefox and summarize the top three stories."
   "Is this link safe? Open it on your virtual computer and tell me what it does: <a link you're unsure of>"
@@ -657,6 +659,17 @@ EOF
 }
 
 # --- the plan, for --confirm and --dry-run ----------------------------------------------------------
+agents_found() { # what the plan says about the coding agents on this Mac
+  local c=0 x=0
+  [ "$NO_CLAUDE" = 0 ] && command -v claude >/dev/null 2>&1 && c=1
+  [ "$NO_CODEX" = 0 ] && command -v codex >/dev/null 2>&1 && x=1
+  case "$c$x" in
+    11) printf '%s' "metacomputer for Claude Code and Codex (both found here)" ;;
+    10) printf '%s' "the Claude Code plugin (Claude Code found here)" ;;
+    01) printf '%s' "metacomputer for Codex (found here)" ;;
+    *) printf '%s' "the metacomputer command (no coding agent found: install Claude Code or Codex, then ./install.sh --only-agents)" ;;
+  esac
+}
 plan() {
   pick_dir
   cat <<EOF
@@ -667,11 +680,12 @@ ${b}metacomputer setup${o} will:
   3. download metacomputer into $DIR (git clone, about 3 MB), or update a clean checkout of
      github.com/$MC_SLUG there (any other checkout, or one with changes, is refused);
   4. run its ./install.sh: Go, GnuPG and ffmpeg from Homebrew if missing, mcomp-vm (the VM runner)
-     and the secrets vault built from source, this Mac's settings, the Claude Code plugin, and
+     and the secrets vault built from source, this Mac's settings, $(agents_found), and
      $([ "$NO_BUILD" = 1 ] && echo "NOT the VM (--no-build)" || echo "the VM: an Ubuntu desktop with Firefox$([ "$NO_CHROME" = 1 ] || echo " and Google Chrome"), about 1.5 GB of downloads");
   5. check it: a VM it built gets started and a quick self-test; a VM you already had gets only
      read-only checks (started only if it's stopped), so nothing open in it is touched.
-Nothing outside $DIR, ~/.local, ~/.ssh/metacomputer and Claude Code's plugin settings changes,
+Nothing outside $DIR, ~/.local, ~/.ssh/metacomputer and the agents' settings (Claude Code's plugins; Codex's
+~/.codex and ~/.agents/skills) changes,
 apart from Homebrew packages and the VM itself (Lume keeps it in ~/.lume). Expect a minute or two
 of your time; about 5 minutes in all on a fast connection with the prerequisites in place, 15-30 on a
 new Mac. If it's interrupted, run it again: it carries on.
@@ -679,7 +693,7 @@ EOF
 }
 
 main() {
-  DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; NO_CODEX=0; REPLACE_VM=0
+  DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; NO_CODEX=0; NO_CLAUDE=0; REPLACE_VM=0
   DRY=0; YES=0; CONFIRM=0; HEALTH=""; VM_NEW=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -692,6 +706,7 @@ main() {
       --no-chrome) NO_CHROME=1 ;;
       --no-build) NO_BUILD=1 ;;
       --no-codex) NO_CODEX=1 ;;
+      --no-claude) NO_CLAUDE=1 ;;
       --replace-vm) REPLACE_VM=1 ;;
       --confirm) CONFIRM=1 ;;
       -y|--yes) YES=1 ;;

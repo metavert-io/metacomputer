@@ -16,7 +16,7 @@ prefix_rule(
     pattern = [MC, ["status", "start", "stop", "who", "where", "help", "version", "web", "browser", "net", "trace", "handoff",
                     "notify", "events", "inspect", "call", "sh", "ssh", "put", "get", "shot", "contact-sheet", "task",
                     "record", "recordings", "view", "secrets", "learn", "claude", "hub", "input-reset", "rename",
-                    "actions", "logs", "checkpoints"]],
+                    "actions", "logs", "checkpoints", "agents"]],
     decision = "allow",
     justification = "these metacomputer commands act on the virtual computer (an isolated VM) or only read; they need to run outside Codex's sandbox to reach it",
 )
