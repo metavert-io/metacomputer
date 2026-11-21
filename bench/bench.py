@@ -498,6 +498,8 @@ def switches_from(a):
             or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off") or sw["agent"] not in ("claude", "codex"):
         sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off, "
                  "agent claude|codex)")
+    if sw["agent"] == "codex" and not sw["model"].startswith(("gpt", "o")):
+        sw["model"] = "codex-default"          # Codex runs its own default model unless --model names a GPT one
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
     for k in ("budget", "cap"):

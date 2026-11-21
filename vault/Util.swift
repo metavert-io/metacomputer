@@ -661,9 +661,11 @@ struct Requester {
             guard p > 1, let e = procEntry(p) else { break }
             // Claude Code from the native installer runs as its version file (.../claude/versions/2.1.325).
             if p != pid, let kind = agentKind(p, e) {
-                if kind == "Codex" && procArgs(p).dropFirst().contains("app-server") {
+                let args = kind == "Codex" ? procArgs(p) : []
+                if kind == "Codex" && (args.isEmpty || args.dropFirst().contains("app-server")) {
                     // Codex's IDE extension and desktop app run every conversation in this one process: it names no
                     // single session, so it gets none of a session's answers, project rules or tokens (each use asks).
+                    // Arguments that can't be read count the same way: unknown never names a session.
                     return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil,
                                      agent: "Codex app server")
                 }

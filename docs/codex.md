@@ -55,8 +55,8 @@ metacomputer's rules let the commands through:
 
 | Commands | Rule |
 | --- | --- |
-| Everyday ones, by name: `status`, `start`, `who`, `web`, `browser`, `net`, `trace`, `handoff`, `notify`, `events`, `inspect`, `call`, `sh`, `ssh`, `put`, `get`, `shot`, `task`, `record`, `recordings`, `view`, `secrets`, `learn`, `claude`, `hub` ... | `allow`: they run outside the sandbox without asking |
-| Ones that replace, delete or stop the VM, its storage, apps or settings, or take it from another session: `reset`, `restore`, `baseline`, `checkpoint`, `build`, `vm`, `volume`, `refdisk`, `update`, `setup`, `release`, `stop`, `restart`, `desktop-restart`, `test`, `security`, `each` (it runs commands on other VMs), `hub stop`, `events sink`, `learn approve/add/edit/remove/reject/reseal/bench`, `browser profiles --delete`, and any command with `--vm NAME` | `prompt`: Codex asks you each time |
+| Everyday ones, by name: `status`, `start`, `stop` (it refuses while another session uses the VM), `who`, `web`, `browser`, `net`, `trace`, `handoff`, `notify`, `events`, `inspect`, `call`, `sh`, `ssh`, `put`, `get`, `shot`, `task`, `record`, `recordings`, `view`, `secrets`, `learn`, `claude`, `hub` ... | `allow`: they run outside the sandbox without asking |
+| Ones that replace, delete or stop the VM, its storage, apps or settings, or take it from another session: `reset`, `restore`, `baseline`, `checkpoint`, `build`, `vm`, `volume`, `refdisk`, `update`, `setup`, `release`, `restart`, `desktop-restart`, `test`, `security`, `each` (it runs commands on other VMs), `hub stop`, `events sink`, `learn approve/add/edit/remove/reject/reseal/bench`, `browser profiles --delete`, and any command with `--vm NAME` | `prompt`: Codex asks you each time |
 | The ones only you run: `secrets init/set/policy/bind/unlock/rekey/recover/approve/rule/give/import-passwords/import-session/audit-sink`, `volume keys`, `view --remember/--forget`, `handoff done` | `forbidden` |
 
 A command no rule names (a new one, say) stays in the sandbox: it stops with exit 77 and Codex asks you before running

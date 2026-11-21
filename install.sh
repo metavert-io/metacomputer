@@ -248,14 +248,15 @@ codex_python() { # found as install.sh's py311_ok finds it (Homebrew's, then pyt
 }
 codex_server() { # Codex's MCP server named metacomputer: "absent", "stdio<TAB>COMMAND", "other" (not a local
   # command, e.g. a URL) or "error" (the lookup failed: never read as absent)
-  local out rc=0 err
+  local out err
   codex_python || { echo error; return 0; }
   err="$(mktemp)" || { echo error; return 0; }
-  out="$(codex mcp get metacomputer --json 2>"$err")" || rc=$?
-  if [ "$rc" != 0 ]; then
+  # failures are caught inside the substitution (install.sh's ERR trap would end the install otherwise)
+  out="$(codex mcp get metacomputer --json 2>"$err" || echo "__failed__")"
+  case "$out" in *__failed__)
     if grep -q "No MCP server named 'metacomputer'" "$err" 2>/dev/null; then echo absent; else echo error; fi
-    rm -f "${err:?}"; return 0
-  fi
+    rm -f "${err:?}"; return 0 ;;
+  esac
   rm -f "${err:?}"
   printf '%s' "$out" | "$CPY" -c 'import json, sys
 try:
@@ -270,6 +271,8 @@ codex_server_cmd() { local s; s="$(codex_server)"; case "$s" in stdio"$TAB"*) pr
 codex_rules_ours() { # rules this checkout wrote (or a moved checkout that's gone)
   [ -f "$CODEX_RULES" ] && [ "$(head -1 "$CODEX_RULES" 2>/dev/null)" = "$CODEX_MARK" ] || return 1
   local owner; owner="$(sed -n '4p' "$CODEX_RULES" 2>/dev/null)"
+  # The first format (never released) had no checkout line: metacomputer's own, rewritten with the current rules.
+  [ "$owner" = "#" ] && return 0
   case "$owner" in "$CODEX_OWNER"*) owner="${owner#"$CODEX_OWNER"}" ;; *) return 1 ;; esac
   [ "$owner" = "$ROOT" ] || { [ -n "$owner" ] && old_target "$owner/bin/metacomputer"; }
 }
@@ -284,31 +287,43 @@ codex_wanted() { # --codex, or Codex installed and either a first install or one
   [ -f "$HOME/.local/share/metacomputer/installed.json" ] || return 0
   codex_set_up
 }
-codex_config_edit() { # MODE: "settings" adds the timeout and approval mode where they're missing; "command" points
-  # an existing registration at this checkout. Only metacomputer's own table changes; everything you set stays.
-  local cfg="$CODEX_DIR/config.toml" out rc=0
+codex_config_edit() { # MODE [OLD_COMMAND]: "settings" adds the timeout and approval mode where they're missing;
+  # "command" points the registration that runs OLD_COMMAND at this checkout. Only metacomputer's own table changes,
+  # and only as asked: the whole file is parsed again and compared, or nothing is written. Everything you set stays.
+  local cfg="$CODEX_DIR/config.toml" out
   [ -f "$cfg" ] || { echo missing; return 0; }
-  out="$("$CPY" - "$cfg" "$1" "$CODEX_TOOL_TIMEOUT" "$CODEX_APPROVAL" "$ROOT/bin/metacomputer" <<'PY'
-import json, os, sys, tempfile, tomllib
-path, mode, want_t, want_a, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+  # It prints ok, the notes, or failed, and exits 0: a failure inside the substitution would trip install.sh's ERR trap.
+  out="$("$CPY" - "$cfg" "$1" "$CODEX_TOOL_TIMEOUT" "$CODEX_APPROVAL" "$ROOT/bin/metacomputer" "${2:-}" 2>/dev/null <<'PY' || echo failed
+import copy, json, os, sys, tempfile, tomllib
+
+
+def fail():
+    print("failed")
+    sys.exit(0)
+
+
+path, mode, want_t, want_a, cmd, old = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6]
 text = open(path, encoding="utf-8").read()
 try:
-    srv = tomllib.loads(text).get("mcp_servers", {}).get("metacomputer")
+    before = tomllib.loads(text)
 except tomllib.TOMLDecodeError:
-    sys.exit(2)
+    fail()
+srv = before.get("mcp_servers", {}).get("metacomputer")
 if not isinstance(srv, dict):
-    sys.exit(2)
+    fail()
+if mode == "command" and srv.get("command") != old:
+    fail()                           # someone changed it since it was looked at: not ours to repoint
 lines = text.split("\n")
 heads = [i for i, l in enumerate(lines) if l.strip() == "[mcp_servers.metacomputer]"]
 if len(heads) != 1:
-    sys.exit(2)
+    fail()
 start = heads[0] + 1
 end = next((i for i in range(start, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
 notes = []
 if mode == "command":
     cmds = [i for i in range(start, end) if lines[i].split("=", 1)[0].strip() == "command"]
     if len(cmds) != 1:
-        sys.exit(2)
+        fail()
     lines[cmds[0]] = "command = " + json.dumps(cmd, ensure_ascii=False)
 else:
     add = []
@@ -323,10 +338,20 @@ else:
     lines[start:start] = add
 new = "\n".join(lines)
 if new != text:
-    got = tomllib.loads(new).get("mcp_servers", {}).get("metacomputer") or {}
-    keep = {k: v for k, v in srv.items() if k != "command"}
-    if any(got.get(k) != v for k, v in keep.items()) or (mode == "command" and got.get("command") != cmd):
-        sys.exit(2)                       # only what was meant to change changed, or nothing is written
+    expected = copy.deepcopy(before)
+    m = expected["mcp_servers"]["metacomputer"]
+    if mode == "command":
+        m["command"] = cmd
+    else:
+        for line in add:
+            k, v = line.split(" = ", 1)
+            m[k] = tomllib.loads(f"x = {v}")["x"]
+    try:
+        after = tomllib.loads(new)
+    except tomllib.TOMLDecodeError:
+        fail()
+    if after != expected:
+        fail()                       # anything else changed (a header inside a string, say): nothing is written
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.toml.")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(new)
@@ -334,8 +359,8 @@ if new != text:
     os.replace(tmp, path)
 print(" ".join(notes) or "ok")
 PY
-)" || rc=$?
-  [ "$rc" = 0 ] && printf '%s\n' "$out" || echo failed
+)"
+  case "$out" in *failed*|"") echo failed ;; *) printf '%s\n' "$out" ;; esac
 }
 codex_server_settings() {
   local out; out="$(codex_config_edit settings)"
@@ -404,7 +429,7 @@ codex_step() {
         codex_server_settings
       elif old_target "$cmd"; then
         # an earlier (moved) checkout's: only its command changes; anything you set on it stays
-        if [ "$(codex_config_edit command)" != failed ] && [ "$(codex_server_cmd)" = "$ROOT/bin/metacomputer" ]; then
+        if [ "$(codex_config_edit command "$cmd")" != failed ] && [ "$(codex_server_cmd)" = "$ROOT/bin/metacomputer" ]; then
           ok "MCP server metacomputer now runs this checkout (your settings for it kept)"
           codex_server_settings
         else

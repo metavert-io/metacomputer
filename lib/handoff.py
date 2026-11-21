@@ -608,8 +608,17 @@ def cmd_end(a, to):
     if rec.get("unreadable") and to == "done":
         err(owners.handoff_describe(rec) + "; nothing to hand back")
         return EXIT_ERROR
-    claude = owners.claude_of(os.getpid(), owners.ps_table())
+    try:
+        table = owners.ps_table(strict=True)
+        known = owners.ancestry_complete(os.getpid(), table)
+    except OSError:
+        table, known = {}, False
+    claude = owners.claude_of(os.getpid(), table) if table else None
     own_session = bool(claude) and claude == rec.get("claude_pid")
+    if to == "done" and not interactive and not known:
+        err("couldn't tell whether this runs inside an agent session (the process list couldn't be read all the way "
+            "up), so it can't say the user is done. The user runs `metacomputer handoff done` in their own terminal.")
+        return EXIT_REFUSED
     if to == "done" and claude and not interactive:
         # Any agent session, not only the one that asked: another Claude Code or Codex session (or one started from
         # the session that asked) saying "done" would be an agent saying the user is done.

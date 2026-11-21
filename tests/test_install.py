@@ -1743,6 +1743,15 @@ def test_codex_step():
                             stdin=subprocess.DEVNULL)
         check("...a second run changes nothing", p2.returncode == 0 and open(os.path.join(ch, "config.toml")).read() == cfg
               and "already registered" in p2.stdout, (p2.returncode, p2.stdout[-300:]))
+        # the first format of the rules (never released: no checkout line) is metacomputer's own, and is rewritten
+        rules_text = open(rules).read().split("\n")
+        legacy = "\n".join(rules_text[:3] + ["#"] + rules_text[4:]).replace('"each", ', "")
+        write(rules, legacy)
+        p4 = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+        check("...rules in the first format (no checkout line) are rewritten with the current ones",
+              p4.returncode == 0 and decision("metacomputer", "each", "main", "--", "reset") == "prompt"
+              and open(rules).read().split("\n")[3] == "# metacomputer checkout: " + LAB, p4.stdout[-300:])
         write(os.path.join(ch, "rules", "mine.rules"), "# the user's own\n")
         p3 = subprocess.run([INSTALL, "--uninstall"], env=env, capture_output=True, text=True, timeout=120,
                             stdin=subprocess.DEVNULL)
@@ -1750,6 +1759,43 @@ def test_codex_step():
         check("--uninstall removes the server, the skill links and the rules, and nothing of the user's",
               p3.returncode == 0 and "metacomputer" not in left and "other" in left and not os.listdir(sk)
               and os.listdir(os.path.join(ch, "rules")) == ["mine.rules"], (p3.returncode, left, os.listdir(sk)))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def test_codex_config_edits():
+    """The Codex step never writes a config.toml it can't edit exactly: a header that only appears inside a string, with
+    the real server under a quoted name, is left alone (and the install goes on); a moved checkout's registration keeps
+    everything you set on it."""
+    if not shutil.which("codex"):
+        print("SKIP the Codex config checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-codex-")
+    try:
+        import tomllib
+        home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
+        os.makedirs(ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        for k in ("MCOMP_CONFIG", "MCOMP_VM"):
+            env.pop(k, None)
+        tricky = ('developer_instructions = """\nAn example:\n[mcp_servers.metacomputer]\ncommand = "x"\n"""\n\n'
+                  '[mcp_servers."metacomputer"]\ncommand = "/gone/old/bin/metacomputer"\nargs = ["mcp-lazy"]\n')
+        write(os.path.join(ch, "config.toml"), tricky)
+        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        check("Codex: a server table it can't edit exactly (its header only inside a string) is left as it was, and "
+              "the install goes on", p.returncode == 0 and open(os.path.join(ch, "config.toml")).read() == tricky
+              and "couldn't point" in p.stdout and "rules:" in p.stdout, (p.returncode, p.stdout[-400:], p.stderr[-300:]))
+        mine = ('[mcp_servers.metacomputer]\ncommand = "/gone/old/bin/metacomputer"\nargs = ["mcp-lazy"]\n'
+                'default_tools_approval_mode = "writes"\ndisabled_tools = ["kill_app"]\nenv = { A = "1" }\n')
+        write(os.path.join(ch, "config.toml"), mine)
+        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        srv = tomllib.loads(open(os.path.join(ch, "config.toml")).read())["mcp_servers"]["metacomputer"]
+        check("Codex: a moved checkout's registration now runs this one, and keeps what you set on it",
+              p.returncode == 0 and srv["command"] == CLI and srv["default_tools_approval_mode"] == "writes"
+              and srv["disabled_tools"] == ["kill_app"] and srv["env"] == {"A": "1"} and srv["tool_timeout_sec"] == 600,
+              (srv, p.stdout[-300:]))
     finally:
         shutil.rmtree(t, ignore_errors=True)
 
@@ -1970,6 +2016,7 @@ test_vnc_password()
 test_vnc_real_keychain()
 test_setup_in_checkout()
 test_codex_step()
+test_codex_config_edits()
 test_build_vault_quiet()
 test_quiet_builds()
 test_vm_build_footer()

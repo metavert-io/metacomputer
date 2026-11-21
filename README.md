@@ -10,6 +10,9 @@ way a programmer would, with a shell, Python, LibreOffice, ImageMagick and
 ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what Claude does there can be logged, limited and approved.
 
+It works with OpenAI's Codex too: the same tools, skill and protections
+([docs/codex.md](docs/codex.md)).
+
 https://github.com/user-attachments/assets/9465c66c-88fd-4e58-845e-a430c61ddf1a
 
 ## The 5-minute install
@@ -22,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.s
 ```
 
 That's the whole install. There's no VM for you to set up: the script builds
-it, installs the Claude Code plugin, and checks that everything works. On a Mac
+it, installs the Claude Code plugin (and sets up Codex, if you have it), and checks that everything works. On a Mac
 that already has Homebrew and Apple's Command Line Tools it takes about 5 minutes
 and asks you nothing; on a new Mac it offers to install those first.
 
@@ -629,7 +632,8 @@ detail.
 - Homebrew and Apple's Command Line Tools; the install offers both when they're missing.
 - Python 3.11 or later on the Mac. Apple's own `python3` is 3.9, so where that's the only one, the install
   adds Homebrew's.
-- [Claude Code](https://claude.com/claude-code), for the plugin.
+- [Claude Code](https://claude.com/claude-code), for the plugin, or [Codex](https://github.com/openai/codex)
+  ([docs/codex.md](docs/codex.md)).
 - Optional: Google Chrome in the VM, which means accepting
   [Google's terms](https://www.google.com/chrome/terms/).
 
@@ -707,6 +711,7 @@ unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 | --- | --- |
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the logs; `metacomputer restart` stops the VM and starts it again. |
 | A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `plugin:metacomputer:metacomputer`, or restart Claude Code. `./install.sh --only-claude` sets it up again. |
+| A Codex session has no metacomputer tools, or a `metacomputer` command exits 77 | `./install.sh --only-codex`, then a new Codex session ([docs/codex.md](docs/codex.md#if-something-doesnt-work)). |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
 | "Paused: the user has the computer" | Claude handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
 | Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` brings the one Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard instead (paste with Cmd+V). |
@@ -755,6 +760,7 @@ sinks and volumes stay until you delete them
 - [docs/shell.md](docs/shell.md): `metacomputer sh` and how it treats the VM.
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
 - [docs/learn.md](docs/learn.md): lessons from your own sessions.
+- [docs/codex.md](docs/codex.md): using it from Codex: setup, its sandbox and the rules, and where it differs.
 - [docs/moving-from-spaces.md](docs/moving-from-spaces.md): coming from Cua Spaces' Keyvault.
 - [bench/README.md](bench/README.md): the benchmark, with each cited run's records in [bench/runs/](bench/runs/).
 - [TESTING.md](TESTING.md): every test and how to run it.

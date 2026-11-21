@@ -56,6 +56,9 @@ os.chmod(os.path.join(ENV["MCOMP_SSH_DIR"], "vnc-pass"), 0o600)
 # whatever runs this test), with a 1-second minimum time limit so the limit can be tested quickly.
 PRELUDE = ("import os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import owners; "
            "_c = os.environ.get('FAKE_CLAUDE'); owners.claude_of = (lambda *a: int(_c)) if _c else (lambda *a: None); "
+           "_real_ps = owners.ps_table; "
+           "owners.ps_table = ((lambda strict=False: (_ for _ in ()).throw(OSError('ps failed')) if strict else {}) "
+           "if os.environ.get('FAKE_PS_FAIL') else _real_ps); "
            "import handoff; handoff.MIN_TIMEOUT_S = 1; "
            "handoff.OPEN_WAIT_S = float(os.environ.get('TEST_OPEN_WAIT', '40')); "
            "sys.exit(handoff.main(sys.argv[1:]))") % LAB
@@ -174,6 +177,9 @@ def basic_checks():
     r = run("done", claude=SESSION_A + 1)
     check("...nor can another agent session (another Claude Code or Codex, or one started from the first)",
           r.returncode == 3 and "an agent session" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
+    r = run("done", claude=None, FAKE_PS_FAIL="1")
+    check("...nor anything when the process list can't be read (unknown is never the user)",
+          r.returncode == 3 and "couldn't tell whether" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
     note = "solved it\x1b[31m, ‮all good"
     r = run("done", "--note", note, claude=None)
     rc, o, e = finish(p)

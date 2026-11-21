@@ -13,7 +13,7 @@
 MC = @COMMANDS@
 
 prefix_rule(
-    pattern = [MC, ["status", "start", "who", "where", "help", "version", "web", "browser", "net", "trace", "handoff",
+    pattern = [MC, ["status", "start", "stop", "who", "where", "help", "version", "web", "browser", "net", "trace", "handoff",
                     "notify", "events", "inspect", "call", "sh", "ssh", "put", "get", "shot", "contact-sheet", "task",
                     "record", "recordings", "view", "secrets", "learn", "claude", "hub", "input-reset", "rename",
                     "actions", "logs", "checkpoints"]],
@@ -23,7 +23,7 @@ prefix_rule(
 
 prefix_rule(
     pattern = [MC, ["reset", "restore", "baseline", "checkpoint", "build", "vm", "volume", "refdisk", "update", "setup",
-                    "release", "stop", "restart", "desktop-restart", "test", "security", "each", "--vm"]],
+                    "release", "restart", "desktop-restart", "test", "security", "each", "--vm"]],
     decision = "prompt",
     justification = "this replaces, deletes or stops the virtual computer, its storage, its apps or its settings, runs commands on several VMs, or takes it from another session: the user decides",
 )

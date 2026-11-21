@@ -267,7 +267,7 @@ def public_summary(rdir):
     t = totals(rows)
     seen, _ = pattern_totals(rows)
     return {
-        "run_id": meta.get("run_id"), "date": str(meta.get("started") or "")[:10], "model": sw.get("model"),
+        "run_id": meta.get("run_id"), "date": str(meta.get("started") or "")[:10], "agent": sw.get("agent") or "claude", "model": sw.get("model"),
         "cua_driver": (env.get("driver_version") or "").replace("cua-driver ", "") or None,
         "metacomputer": {"commit": g.get("sha"), "uncommitted_changes": bool(g.get("dirty"))},
         "task_set": ", ".join(meta.get("task_sets") or ["standard"]),
