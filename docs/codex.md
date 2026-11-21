@@ -4,7 +4,9 @@ metacomputer works with OpenAI's Codex as well as Claude Code. Codex drives the 
 MCP tools, the same hub and the same guards; the vault, the network allowlist, handoffs, recordings and lessons work
 the same way. This page covers what's set up for Codex, what its sandbox changes, and where the two differ.
 
-Checked with Codex CLI 0.167.0.
+Checked with Codex CLI 0.167.0: the benchmark's six browser tasks (Firefox and Chrome forms, reading a table, a
+canvas, an unlabeled tile, link navigation) passed 6/6 through `codex exec`
+([bench/runs/codex-browser-2026-11-21.json](../bench/runs/codex-browser-2026-11-21.json); `bench/bench.py run --agent codex`).
 
 ## Set it up
 

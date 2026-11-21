@@ -152,6 +152,7 @@ version and the model.
 | `--cap USD` | `BENCH_CAP` | `60` | The whole run's cap: a task doesn't start if its budget could take the total over |
 | `--reset each\|none` | `BENCH_RESET` | `each` | Reset the VM to its baseline before every task |
 | `--lessons on\|off` | `BENCH_LESSONS` | `off` | `on`: the sessions' MCP instructions carry the lessons approved with `metacomputer learn` (from `MCOMP_LESSONS_DIR`, else the default store), passed as `MCOMP_LESSONS`; `run.json` records how many and a hash of the exact text (`lessons_count`, `lessons_hash`). `metacomputer learn bench` runs off, then on, and compares them (docs/learn.md) |
+| `--agent claude\|codex` | `BENCH_AGENT` | `claude` | `codex`: each task runs in `codex exec` with the work folder's project config (the skill in `.agents/skills`, metacomputer's rules in `.codex/rules`), the MCP server set up as an install sets it up, Codex's default sandbox, and its default model unless `--model` names a GPT model. `--budget` and `--effort` don't apply and Codex reports no cost, so each task counts its whole budget against `--cap`. Codex reads your own `~/.codex/AGENTS.md` too. [runs/codex-browser-2026-11-21.json](runs/codex-browser-2026-11-21.json): the six browser tasks, 6/6 |
 
 On screen size: the VM's display device offers many modes (from 1280x800 up to
 4096x2160), and `xrandr` switches between them while the VM runs. The desktop
