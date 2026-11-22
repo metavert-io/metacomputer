@@ -32,7 +32,8 @@ os.environ.update(CLAUDE_CONFIG_DIR=CONF, CODEX_HOME=os.path.join(TD, "codex"), 
                   MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
                   MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_RUN_DIR=os.path.join(TD, "run"),
                   BENCH_RESULTS=os.path.join(TD, "bench"), MCOMP_VM_NAME="learntest",
-                  MCOMP_LOCK_DIR=os.path.join(TD, "locks"))   # VM locks (reset): never the real per-user folder
+                  MCOMP_LOCK_DIR=os.path.join(TD, "locks"),   # VM locks (reset): never the real per-user folder
+                  MCOMP_SESSIONS_DIR=os.path.join(TD, "sessions"))   # lib/sessionvm.py's records: nor that folder
 for k in ("MCOMP_CONFIG", "CLAUDECODE"):
     os.environ.pop(k, None)
 CONFIG = os.path.join(TD, "test.env")

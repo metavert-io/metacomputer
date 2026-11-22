@@ -1580,6 +1580,51 @@ CLAIMS = [
      lambda m: 'on_resolve() {' in raw("bin/metacomputer") and '|| exit 1' in fn_src("bin/metacomputer", "on_resolve")
      and raw("bin/metacomputer").index("*) on_resolve ;;") < raw("bin/metacomputer").index("*) vm_target_check ;; esac")
      and "PROVIDERS = cloud.providers()" in raw("lib/placement.py")),
+    # An agent session's computer (lib/sessionvm.py, bin/metacomputer session_guard, lib/mcp_lazy.py)
+    ("docs/commands.md", r"a command that names no computer and would act on another computer than\s+the one the session holds refuses before it does anything",
+     lambda m: "3) exit 1 ;;" in fn_src("bin/metacomputer", "session_guard")
+     and raw("bin/metacomputer").index("*) vm_target_check ;; esac") < raw("bin/metacomputer").index('*) session_guard "$@" ;;')
+     < raw("bin/metacomputer").index("test) vm_notice ;;") < raw("bin/metacomputer").index("  start)      do_start")
+     and "return REFUSED" in py_top_fn("lib/sessionvm.py", "guard")),
+    ("docs/commands.md", r"\*\*Not checked:\*\* a command that names its computer \(`--vm NAME`, `MCOMP_VM`, `MCOMP_CONFIG`, or a caller that pinned\s+it\)",
+     lambda m: '[ -z "$MC_VM_SAID$MC_ENV_SAID${MCOMP_EXPECT_VM:-}" ] || return 0' in fn_src("bin/metacomputer", "session_guard")
+     and 'MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"' in raw("bin/metacomputer")),
+    ("docs/commands.md", r"Each names the session's process and the one that holds the computer\s+\(the MCP server, or the claim's holder\) by process id and start time, and counts only while those same processes are\s+there",
+     lambda m: 'proc_start(h) != rec["holder_start"]' in py_top_fn("lib/sessionvm.py", "_stands")
+     and "agent in owners.ancestors(h, table)" in py_top_fn("lib/sessionvm.py", "_stands")
+     and 'rec.get("claude_pid") == agent and rec.get("bridge_pid") == holder' in py_top_fn("lib/sessionvm.py", "_session_claim")
+     and 'if rec["agent_start"] == me and _stands(rec, agent, table):' in py_top_fn("lib/sessionvm.py", "held")
+     and "kp_proc.p_starttime" in py_top_fn("lib/sessionvm.py", "proc_start")),
+    ("docs/commands.md", r"A claim keeps the session's start time from when its holder took it \(a hub's lease for calls a session left\s+running keeps it through every refresh\), so a later process that reuses the pid isn't tied to it; a\s+claim without one \(written before they were kept\) can't be shown to be any session's, so it doesn't\s+count, and nothing gives it one later",
+     lambda m: "_session_start" not in py_top_fn("lib/owners.py", "write_claim") and "proc_start(" not in py_top_fn("lib/owners.py", "write_claim")
+     and '"claude_start": who[2] if len(who) > 2 else None' in py_top_fn("lib/owners.py", "claim_for_shell")
+     and '"claude_start": client.claude_start, "agent": client.agent,' in raw("lib/mcp_hub.py")
+     and '"claude_start": lease.get("claude_start"),' in raw("lib/mcp_hub.py")
+     and '"claude_start": c.get("claude_start")' in raw("lib/vm_claude.py") and '"claude_start": start})' in raw("lib/vm_claude.py")
+     and "a_start, h_start = agent_start, proc_start(holder_pid)" in py_top_fn("lib/sessionvm.py", "note_claim")
+     and 'rec.get("claude_start") == agent_start' in py_top_fn("lib/sessionvm.py", "_session_claim")),
+    ("docs/commands.md", r"checked again for every write, which goes through the\s+folder opened as the one checked",
+     lambda m: "dfd = _open_store(d)" in py_top_fn("lib/sessionvm.py", "_write")
+     and "(now.st_dev, now.st_ino) == (st.st_dev, st.st_ino)" in py_top_fn("lib/sessionvm.py", "_open_store")
+     and "dir_fd=dfd)" in py_top_fn("lib/sessionvm.py", "_write")),
+    ("docs/commands.md", r"The folder must be this account's and writable by no one else \(permissions are never changed to make it so",
+     lambda m: "chmod" not in raw("lib/sessionvm.py")
+     and "st.st_uid != os.getuid() or st.st_mode & 0o022" in py_top_fn("lib/sessionvm.py", "folder")
+     and "safedelete.check(d, safedelete.protected())" in py_top_fn("lib/sessionvm.py", "store_ok")
+     and "_STORE_CHECKED" not in raw("lib/sessionvm.py") and "store_ok(d)" in py_top_fn("lib/sessionvm.py", "_open_store")
+     and "dfd = _open_store(d)" in py_top_fn("lib/sessionvm.py", "_write")
+     and "src_dir_fd=dfd, dst_dir_fd=dfd" in py_top_fn("lib/sessionvm.py", "_write")),
+    ("docs/commands.md", r"Only files that are records written here are ever\s+removed \(those of sessions that have ended, or that no longer stand\), through `lib/safedelete.py`",
+     lambda m: "safedelete.remove_records(d, names, FILE_RE)" in py_top_fn("lib/sessionvm.py", "_prune")
+     and "os.remove(" not in raw("lib/sessionvm.py") and raw("lib/sessionvm.py").count("os.unlink(") == 1
+     and "os.unlink(tmp, dir_fd=dfd)" in py_top_fn("lib/sessionvm.py", "_write")
+     and "continue                                # not a record of this module's" in py_top_fn("lib/sessionvm.py", "held")),
+    ("docs/commands.md", r"in whatever order they come \(`security --json apply`\s+applies, so it's checked as acting\)",
+     lambda m: 'all(x == "--json" for x in a)' in py_top_fn("lib/sessionvm.py", "_security")
+     and 'apply) apply=1 ;;' in fn_src("bin/metacomputer", "do_security")),
+    ("docs/commands.md", r"When the process table can't be read, the command goes on and says so",
+     lambda m: "owners.ps_table(strict=True)" in py_top_fn("lib/sessionvm.py", "guard")
+     and "going on" in py_top_fn("lib/sessionvm.py", "guard") and "0|2) ;;" in fn_src("bin/metacomputer", "session_guard")),
     ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
      lambda m: 'BASELINE_NAME must be $VM_NAME-baseline' in raw("scripts/lib.sh") and "def check_identity" in raw("lib/vms.py")
      and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),

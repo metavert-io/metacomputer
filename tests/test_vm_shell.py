@@ -233,7 +233,8 @@ def env_for(td, **extra):
     env.update(MCOMP_RUN_DIR=os.path.join(td, "run"), MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions"),
                MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys", "action-log"), MCOMP_VM_NAME="testvm",
                MCOMP_GUEST_USER="cua", XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
-               MCOMP_SSH_PORT="1")   # a port no VM uses: real driver connections on this Mac aren't this "VM"'s
+               MCOMP_SSH_PORT="1",   # a port no VM uses: real driver connections on this Mac aren't this "VM"'s
+               MCOMP_SESSIONS_DIR=os.path.join(td, "sessions"))   # lib/sessionvm.py's records: never the account's
     env.pop("DISPLAY", None)
     env.update({k: str(v) for k, v in extra.items()})
     return env

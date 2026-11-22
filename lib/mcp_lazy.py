@@ -17,6 +17,9 @@ session without a restart:
 - while the VM is off, a call returns a clear "start it, then retry" error;
 - a dropped connection (the VM or the hub stopped) is reopened on the next call.
 
+The computer its tools act on is recorded for the agent session above (lib/sessionvm.py), so the session's
+commands that name no computer stay on it (bin/metacomputer's session guard).
+
 With MCP_HUB=off the same guards run in this process instead, on a connection of
 its own (the hub's core, lib/mcp_hub.py, with this session as its only client).
 
@@ -33,6 +36,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mcp_hub  # noqa: E402
 import mcomp_sdk  # noqa: E402
+import owners  # noqa: E402
+import sessionvm  # noqa: E402
 import wirelimits  # noqa: E402
 
 LAB = mcp_hub.LAB
@@ -56,6 +61,7 @@ class Front:
         self.served = None             # names-hash of the tools this session was given from the cache
         self.pid = os.getpid()
         self.stopping = False
+        self.agent = self.agent_name = None   # the agent session above this bridge (register)
 
     # --- output ------------------------------------------------------------------------
     def send(self, msg):
@@ -165,8 +171,28 @@ class Front:
                 return
             self.forward(msg)
 
+    # --- which computer -------------------------------------------------------------------------------------
+    def computer(self):
+        return sessionvm.computer_of(self.env)
+
+    def register(self):
+        """The agent session above this bridge (Claude Code or Codex), and a record that this session's tools act on
+        this bridge's computer (lib/sessionvm.py). Nothing without an agent session above it. Never fails."""
+        try:
+            table = owners.ps_table()
+            self.agent = owners.claude_of(self.pid, table)
+            self.agent_name = owners.agent_kind(table.get(self.agent, (0, ""))[1]) if self.agent else None
+        except Exception:
+            self.agent = None
+        self.note_computer()
+
+    def note_computer(self):
+        if self.agent:
+            sessionvm.note_bridge(self.agent, self.pid, self.computer(), agent=self.agent_name)
+
     def shutdown(self, *_):
         self.stopping = True
+        sessionvm.drop_bridge(self.agent, self.pid)
         c = self.conn
         if c is not None:
             # The hub drops this session's claim and ends its driver session; with MCP_HUB=off, while the user has the
@@ -184,6 +210,7 @@ class Front:
     def serve(self, stdin=None):
         signal.signal(signal.SIGTERM, self.shutdown)
         signal.signal(signal.SIGHUP, self.shutdown)
+        self.register()
         threading.Thread(target=self.watch_parent, daemon=True).start()
         for line in (stdin or sys.stdin):
             line = line.strip()

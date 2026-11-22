@@ -213,7 +213,8 @@ def install_cases(td):
             os.remove(calls)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("MCOMP_", "LUME"))}
         env.update(HOME=home, PATH=fakebin + ":/usr/bin:/bin:/usr/sbin:/sbin", FAKE_HEAD=head, FAKE_RUNNER=runner,
-                   MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # install.sh's lock: never the real per-user folder
+                   MCOMP_LOCK_DIR=os.path.join(home, ".locks"),   # install.sh's lock: never the real per-user folder
+                   MCOMP_SESSIONS_DIR=os.path.join(home, ".sessions"))   # lib/sessionvm.py's records: nor its folder
         env.update(extra_env or {})
         r = subprocess.run([os.path.join(root, "install.sh")] + args, env=env, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=60)

@@ -520,6 +520,7 @@ class Client:
         self.kind, self.cwd, self.session, self.auto_session = "unknown", None, None, None
         self.claude, self.mine, self.holder, self.sid = None, set(), peer_pid, None
         self.agent = None           # "Claude Code" or "Codex": the agent session process self.claude is
+        self.claude_start = None    # that process's start time when it connected (lib/sessionvm.py proc_start)
         self.hello = False
         self.has_claim = False
         self.expired = False            # attached when a bounded session ended: reconnect to start a new one
@@ -929,6 +930,8 @@ class Hub:
             client.mine = set(owners.ancestors(client.peer_pid, table)) if client.peer_pid else set()
             client.claude = owners.claude_of(client.peer_pid, table) if client.peer_pid else None
             client.agent = owners.agent_kind(table.get(client.claude, (None, ""))[1]) if client.claude else None
+            # Which process that session is, from now on: its claims and a lease after it's gone keep this start time.
+            client.claude_start = owners._session_start(client.claude) if client.claude else None
             client.sid = owners.sid_of(client.peer_pid) if client.peer_pid else None
             parent = table.get(client.peer_pid, (None, ""))[0]
         except Exception:
@@ -1089,7 +1092,8 @@ class Hub:
                         keys.add(key)
                 if keys:
                     tools = sorted({str(t) for k, t in running if k in keys and t})
-                    lease = {"keys": keys, "tool": ", ".join(tools)[:60] or "a call", "claude": client.claude, "agent": client.agent,
+                    lease = {"keys": keys, "tool": ", ".join(tools)[:60] or "a call", "claude": client.claude,
+                             "claude_start": client.claude_start, "agent": client.agent,
                              "cwd": client.cwd, "client_pid": client.peer_pid, "kind": client.kind,
                              "t0": time.monotonic(), "written": False, "refreshed": 0.0,
                              "drop_pid": client.peer_pid if drop_own and client.peer_pid != self.pid else None}
@@ -1120,6 +1124,7 @@ class Hub:
         try:
             owners.write_claim(self.pid, lease["claude"], lease["cwd"] or os.getcwd(), lease["tool"], time.time(),
                                kind="lease", extra={"client_pid": lease["client_pid"], "via": lease["kind"],
+                                                    "claude_start": lease.get("claude_start"),
                                                     **({"agent": lease["agent"]} if lease.get("agent") else {})})
             lease["written"], lease["refreshed"] = True, time.monotonic()
         except OSError as e:
@@ -2117,7 +2122,8 @@ class Hub:
                                sid=client.sid)
         else:
             owners.write_claim(client.holder, client.claude, client.cwd or os.getcwd(), tool, started,
-                               extra={"agent": client.agent} if client.agent else None)
+                               extra={"claude_start": client.claude_start,
+                                      **({"agent": client.agent} if client.agent else {})})
         client.has_claim = True
         if not existed:
             self.event(client, "lifecycle", "controller_connected",

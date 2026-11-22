@@ -946,9 +946,10 @@ def start_keeper(transport, o, rec):
         return None
     try:
         claude = owners.claude_of(os.getpid(), owners.ps_table())
+        start = owners._session_start(claude) if claude else None   # the session above this command, now
         with owners.lock():
             owners.write_claim(p.pid, claude, os.getcwd(), KEEP_TOOL, time.time(), kind="inner", sid=owners.my_sid(),
-                               extra={"session": o["session"], "vm": rec.get("vm", "")})
+                               extra={"session": o["session"], "vm": rec.get("vm", ""), "claude_start": start})
     except (OSError, TimeoutError):
         p.terminate()
         return None
@@ -1049,7 +1050,9 @@ def run_keeper(o):
                     except (OSError, ValueError):
                         return 0              # released (or dropped by stop): gone for good
                     owners.write_claim(me, c.get("claude_pid"), c.get("cwd"), KEEP_TOOL, c.get("started"),
-                                       kind="inner", sid=c.get("sid"), extra={"session": session, "vm": c.get("vm", "")})
+                                       kind="inner", sid=c.get("sid"),
+                                       extra={"session": session, "vm": c.get("vm", ""),
+                                              "claude_start": c.get("claude_start")})   # the session that started it
                     last = fields.get("hash")
             except owners.HandoffOpen:
                 pass                          # paused: nothing renewed while the handoff is open

@@ -190,6 +190,14 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   install.sh's build) leaves it out too. Places and providers: `lib/placement.py` (`--on`, `list`) and `lib/cloud/` (the adapter interface,
   manifests, `PERSIST`, the feature map; `local-lume` hands actions to the existing commands, never reroutes
   them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
+  An agent session's computer (`lib/sessionvm.py`; docs/commands.md "An agent session's computer"): the MCP bridge and
+  every claim in an agent session's name leave a record in a private per-account folder (`MCOMP_SESSIONS_DIR` in
+  tests, always), and `session_guard` in bin/metacomputer refuses a command that names no VM when it would act on
+  another VM than the session's (its bridges', else its claims'); reads get a note. Each record names its processes by
+  pid and start time and is checked against what it stands for (it guards against accidents, not a program set on it);
+  only records written there are removed, through `lib/safedelete.py`; the folder's permissions are never changed.
+  Every command in the dispatch is sorted in `sessionvm.py`, from its arguments as it parses them, in any order
+  (`tests/test_session_guard.py` fails on a new one).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
@@ -305,7 +313,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

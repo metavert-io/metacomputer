@@ -218,6 +218,30 @@ fi
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
 case "$cmd" in help|-h|--help|where|setup|vm|list|default|events|notify|learn|actions|version|agents) ;; *) vm_target_check ;; esac
+# The session guard (lib/sessionvm.py): run from an agent session (Claude Code, Codex) that holds a computer, through
+# its MCP tools or a claim, a command that names no computer and would act on another one refuses, saying which and how
+# to go on; one that only reads goes ahead with a note. A computer named with --vm, MCOMP_VM or MCOMP_CONFIG, or pinned
+# by the caller (MCOMP_EXPECT_VM), is the one meant. What passed is passed on (MCOMP_GUARD_VM), so what this command
+# starts for the same VM isn't asked again; `each` passes on its main VM, which it names.
+session_guard() {
+  [ -z "$MC_VM_SAID$MC_ENV_SAID${MCOMP_EXPECT_VM:-}" ] || return 0
+  [ "${MCOMP_GUARD_VM:-}" != "$VM_NAME:$SSH_PORT" ] || return 0
+  local rc=0 chosen=main
+  [ "${MC_FROM_DEFAULT:-0}" != 1 ] || chosen=default
+  "$PY" "$LAB_ROOT/lib/sessionvm.py" guard --vm "$VM_NAME" --ssh-port "$SSH_PORT" --chosen "$chosen" \
+    --settings "${MC_SETTINGS_LABEL:-}" -- "$cmd" "$@" || rc=$?
+  case "$rc" in
+    0|2) ;;                     # 2: it couldn't tell, and said so
+    3) exit 1 ;;                # refused: it said why
+    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
+  esac
+  export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
+}
+case "$cmd" in
+  help|-h|--help|where|setup|update|version|vm|list|default|events|notify|learn|actions|agents|each|mcp|mcp-lazy) ;;
+  volume|refdisk|contact-sheet|checkpoints|_*) ;;
+  *) session_guard "$@" ;;
+esac
 case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
@@ -2287,7 +2311,10 @@ case "$cmd" in
   trace)      export_options; exec "$PY" "$LAB_ROOT/lib/traces.py" "$@" ;;
   version|update) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/update.py" "$cmd" "$@" ;;
   _runinfo)   do_runinfo ;;
-  each)       exec "$PY" "$LAB_ROOT/lib/each.py" "$@" ;;
+  each)       # `main` is named here: its command acts on the main VM, not on whatever this session holds (session_guard)
+              mc_main="$(mc_main_identity)"
+              export MCOMP_GUARD_VM="$(printf '%s\n' "$mc_main" | sed -n 1p):$(printf '%s\n' "$mc_main" | sed -n 4p)"
+              exec "$PY" "$LAB_ROOT/lib/each.py" "$@" ;;
   release)    "$PY" "$LAB_ROOT/lib/owners.py" release ;;
   put)        do_put "$@" ;;
   get)        do_get "$@" ;;

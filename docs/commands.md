@@ -218,6 +218,57 @@ Refused rather than guessed (nothing runs):
   name the VM it started with (its file gone, or another VM, port or host key): a hub
   serves only that VM (`hub stop` ends it).
 
+### An agent session's computer
+
+An agent session (Claude Code or Codex) reaches a computer two ways: through the metacomputer MCP tools, and through
+the commands it runs in a shell. The tools act on the computer the session's MCP server started on (your default
+computer at that moment). Each command picks its own: `--vm`, `MCOMP_VM`, `MCOMP_CONFIG`, else the default computer as
+it is now. The two can differ: the default changed after the session started, or a login shell put another
+`metacomputer` first on PATH ([codex.md](codex.md#login-shells-and-path)).
+
+**The guard.** Run from an agent session, a command that names no computer and would act on another computer than
+the one the session holds refuses before it does anything, saying which and how to go on:
+
+```
+metacomputer: this Codex session's MCP tools act on demo, but this command would act on metacomputer (config/local.env's VM, as the command names none). Nothing was done.
+- To act on metacomputer anyway, name it: ~/.local/bin/metacomputer --vm metacomputer sh ...
+- To act on demo, this session's computer: ~/.local/bin/metacomputer --vm demo sh ...
+- Or start a new agent session: its MCP tools start on the computer a command that names none acts on (metacomputer).
+```
+
+- **What the session holds:** the computer its MCP tools act on, from the start of the session; a session without
+  metacomputer's MCP server holds the computers it has a claim on (`metacomputer sh`, `call`, `claude` and scripts
+  claim the computer they act on).
+- **Not checked:** a command that names its computer (`--vm NAME`, `MCOMP_VM`, `MCOMP_CONFIG`, or a caller that pinned
+  it); commands that act on no one computer or name their own (`list`, `vm`, `default`, `each`, `volume`, `refdisk`,
+  `events`, `notify`, `learn`, `actions`, `agents`, `setup`, `update`, `version`, `where`, `help`); forms that only
+  read files and settings on the Mac (`checkpoints`, `recordings` without `--sync`, `record moments`, `browser` and
+  `browser --json`, `hub env`, `net` and `net status`, `trace list|show|export`, and the vault's `secrets` (status),
+  `secrets list|status|audit|tokens|requests|selftest|settle|version`, `secrets rule list` and `secrets audit-sink
+  list|show`); what a command
+  that passed starts for the same computer; anything run outside an agent session.
+- **Forms that only read the VM, or who controls it** (`who`, `status`, `inspect`, `logs`, `get`, `shot`, `view`, `hub`
+  and `hub status`, `claude read|wait|status`, `handoff status|wait`, `security` without `apply`, `record` and `record
+  status`, `browser profiles`, `input-reset --check`) go ahead, with a note on stderr naming both computers. A form is
+  read from the arguments as the command itself parses them, in whatever order they come (`security --json apply`
+  applies, so it's checked as acting); one that isn't a read form acts.
+- **Records.** The MCP server and each claim leave a small record of the session's computer in a private folder of this
+  account's (`metacomputer-sessions` in the account's own temporary folder; `MCOMP_SESSIONS_DIR` moves it), so a command
+  from another checkout sees them too. Each names the session's process and the one that holds the computer (the MCP
+  server, or the claim's holder) by process id and start time, and counts only while those same processes are there: the
+  MCP server still in that session, the claim still in that computer's owners folder in the session's name. A claim
+  keeps the session's start time from when its holder took it (a hub's lease for calls a session left running keeps it
+  through every refresh), so a later process that reuses the pid isn't tied to it; a claim without one (written before
+  they were kept) can't be shown to be any session's, so it doesn't count, and nothing gives it one later. The folder
+  must be this account's and writable by no one else (permissions are never changed to make it so: one that isn't is
+  left as it is and not used, and a command says so); one `MCOMP_SESSIONS_DIR` names gets no records when it is or holds
+  a VM's folder, the home folder or the checkout, checked again for every write, which goes through the folder opened as
+  the one checked (a folder or link replaced after the check gets nothing). Only files that are records written here are
+  ever removed (those of sessions that have ended, or that no longer stand), through `lib/safedelete.py`. When the
+  process table can't be read, the command goes on and says so. Any program running as you can write a record, so, like
+  the other checks against your own account, this stops a session acting on the wrong computer by accident, not a
+  program set on it (`lib/sessionvm.py`).
+
 **The VM** (all but the names take effect on the next build):
 
 | Key | Default | |

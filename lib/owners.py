@@ -295,6 +295,10 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None,
            "last_call": time.time(), "last_tool": tool}
     if claude_pid and not (extra or {}).get("agent"):
         rec["agent"] = agent_name(claude_pid) or "Claude Code"
+    # Which process the session is: its pid and its start time (claude_start, lib/sessionvm.py proc_start), which the
+    # caller passes in extra: taken when the session took the claim (a live ancestor's, the hub's client at its hello),
+    # and kept through every refresh (a lease, the inner Claude's keeper). It's never looked up here: the process that
+    # has the pid now may be another one. A claim without it can't be shown to be any session's (lib/sessionvm.py).
     if kind:
         # "shell": metacomputer sh outside an agent session (kept by its time, see claims()); "lease": the hub holding
         # the computer for acting calls a client left running when it disconnected (mcp_hub.Hub.hand_over_claim)
@@ -315,6 +319,22 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None,
         except OSError:
             pass
         raise
+    if claude_pid:
+        # The agent session holds this computer now: a record of where, so its commands that name no VM stay on it
+        # (lib/sessionvm.py, the session guard). Best effort; written once per session and computer.
+        try:
+            import sessionvm
+            sessionvm.note_claim(claude_pid, bridge_pid, os.path.dirname(OWNERS_DIR), rec.get("claude_start"))
+        except Exception:
+            pass
+
+
+def _session_start(pid):
+    try:
+        import sessionvm
+        return sessionvm.proc_start(pid)
+    except Exception:
+        return None
 
 
 def my_sid():
@@ -339,20 +359,21 @@ def claim_for_shell(tool, who=None):
     a script, another agent's tool runner): such a claim lasts the activity window
     (ACTIVE_S, ten minutes) from its last run whether or not that shell is still
     alive, and later runs from the same terminal session (its sid) count as the
-    same controller. Returns who holds it, (holder pid, claude pid); passing that
-    back (a refresh during a run) skips looking at the process table."""
+    same controller. Returns who holds it, (holder pid, claude pid, the agent session's
+    start time, taken now while it's this process's ancestor); passing that back (a
+    refresh during a run) skips looking at the process table, and keeps that start."""
     if who is None:
         table = ps_table()
         claude = claude_of(os.getpid(), table)
-        who = (claude or os.getppid(), claude)
-    holder, claude = who
+        who = (claude or os.getppid(), claude, _session_start(claude) if claude else None)
+    holder, claude = who[0], who[1]
     started = time.time()
     try:
         started = json.load(open(claim_path(holder))).get("started", started)
     except (OSError, ValueError):
         pass
     if claude:
-        write_claim(holder, claude, os.getcwd(), tool, started)
+        write_claim(holder, claude, os.getcwd(), tool, started, extra={"claude_start": who[2] if len(who) > 2 else None})
     else:
         write_claim(holder, None, os.getcwd(), tool, started, kind="shell", sid=my_sid())
     return who

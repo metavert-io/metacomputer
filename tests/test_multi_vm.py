@@ -143,7 +143,8 @@ class Box:
                  FAKE_STATE=self.state, FAKE_LOG=self.log, FAKE_STORAGE=self.storage, MCOMP_VMS_APP_DIR=self.app,
                  MCOMP_LOCK_DIR=os.path.join(self.root, "locks"), MCOMP_EVENTS_DIR=os.path.join(self.root, "events"),
                  MCOMP_VAULT_BIN=self.vault, MCOMP_LESSONS_DIR=os.path.join(self.root, "lessons"),
-                 MCOMP_STORAGE_HOME=os.path.join(self.root, "storage"))
+                 MCOMP_STORAGE_HOME=os.path.join(self.root, "storage"),
+                 MCOMP_SESSIONS_DIR=os.path.join(self.root, "sessions"))   # lib/sessionvm.py: never the account's
         e.update({k: v for k, v in extra.items() if v is not None})
         for k, v in extra.items():
             if v is None:

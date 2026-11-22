@@ -34,7 +34,7 @@ TD = tempfile.mkdtemp(prefix="mcomp-handoff-")
 ENV = {"MCOMP_RUN_DIR": os.path.join(TD, "run"), "MCOMP_LOG_DIR": os.path.join(TD, "logs"),
        "MCOMP_EVENTS_DIR": os.path.join(TD, "events"), "MCOMP_EVENTS_SPOOL": os.path.join(TD, "spool"),
        "MCOMP_VM_NAME": "hotest", "MCOMP_SSH_PORT": "1", "MCOMP_SSH_DIR": os.path.join(TD, "ssh"),
-       "MCOMP_ACTIVE_S": "600"}
+       "MCOMP_ACTIVE_S": "600", "MCOMP_SESSIONS_DIR": os.path.join(TD, "sessions")}
 os.environ.update(ENV)
 for k in ("MCOMP_CONFIG", "MCOMP_VM_STATE"):
     os.environ.pop(k, None)

@@ -92,7 +92,8 @@ def detached_pty(argv, timeout=30):
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-owners-")
     # MCOMP_SSH_PORT=1: no real connection to any VM (a running hub, a test, `web`) counts as a controller here.
-    env = dict(os.environ, MCOMP_RUN_DIR=td, MCOMP_ACTIVE_S="3", MCOMP_SSH_PORT="1")
+    env = dict(os.environ, MCOMP_RUN_DIR=td, MCOMP_ACTIVE_S="3", MCOMP_SSH_PORT="1",
+               MCOMP_SESSIONS_DIR=os.path.join(td, "sessions"))   # lib/sessionvm.py's records: never the account's
     odir = os.path.join(td, "owners")
 
     # A run of metacomputer sh from a short-lived shell (bash -c), as another agent's tool runner does.

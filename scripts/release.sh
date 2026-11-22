@@ -29,7 +29,7 @@ NO_VM_SUITES=(test_actionlog test_recording test_vm_shell test_vm_claude test_ss
   test_build_refusals test_owners test_bench_workdir test_bench_checks test_vm_runner test_vm_stop test_reset_sync
   test_plugin test_learn test_storage test_install test_events test_doc_claims test_release test_handoff
   test_hidden_text test_multi_vm test_vault_codes test_guest_profiles test_netpolicy test_botcheck
-  test_traces test_page_guest test_update test_agents test_cloud_adapters)
+  test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard)
 REMOTE=origin
 MAIN=main
 CANONICAL_SLUG="metavert-io/metacomputer"   # get.sh's own repository: its dry run needs no --repo for it
@@ -225,8 +225,9 @@ else
   for s in ${NO_VM_SUITES[@]+"${NO_VM_SUITES[@]}"}; do
     t0=$SECONDS
     if [ ! -f "tests/$s.py" ]; then failed+=("$s (missing)"); printf '  %s %s: missing\n' "${r}✗${o}" "$s"; continue; fi
-    # standalone, each gated on its own exit status; its output goes to a file, not through a pipe
-    if env -u MCOMP_CONFIG -u CLAUDECODE python3 "tests/$s.py" > "$TMP/tests/$s.log" 2>&1 < /dev/null; then
+    # standalone, each gated on its own exit status; its output goes to a file, not through a pipe. Session records
+    # (lib/sessionvm.py) of the bridges and claims a suite makes go to a folder of the run's own, never the account's.
+    if env -u MCOMP_CONFIG -u CLAUDECODE MCOMP_SESSIONS_DIR="$TMP/sessions" python3 "tests/$s.py" > "$TMP/tests/$s.log" 2>&1 < /dev/null; then
       printf '  %s %s (%ss)\n' "${g}✓${o}" "$s" "$((SECONDS - t0))"
     else
       printf '  %s %s (%ss): failed\n' "${r}✗${o}" "$s" "$((SECONDS - t0))"

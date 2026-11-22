@@ -894,6 +894,17 @@ is the group of providers' places, and has none.
   --on PLACE` matches places only (with `--vm` too, the VM must be at that place), and
   `vm create` refuses places' names for VMs. `metacomputer list` (= `vm list`, `lib/vms.py`) shows each
   computer's place and marks the default.
+- **A session's computer** (`lib/sessionvm.py`). An agent session's MCP tools act on the computer its bridge
+  (`lib/mcp_lazy.py`) started on, the default computer then. The bridge leaves a record of the session's computer from
+  its start, and so does every claim made in an agent session's name (`owners.write_claim`), in a private per-account
+  folder that every checkout reads (the account's own temporary folder, or `MCOMP_SESSIONS_DIR`). Before a command that
+  names no computer (no `--vm`, `MCOMP_VM`, `MCOMP_CONFIG` or pin), `bin/metacomputer`'s `session_guard` runs
+  `sessionvm.py guard`: the session above it (`owners.claude_of`), its records that stand (each names its processes by
+  pid and start time: a bridge still running under it; a claim of its in that computer's owners folder, in that holder's
+  name), and the computer they make the session's (its bridges', else its claims'). Another computer refuses an acting
+  command, naming both and the ways on (`--vm`, or a new session); a read gets a note. A command that passed passes on
+  `MCOMP_GUARD_VM`, so what it starts for the same VM isn't asked again. Any program running as the user can write a
+  record: it guards against accidents, not a program set on getting past it.
 - **Providers** (`lib/cloud/`). `adapter.py` is the interface every provider adapter
   implements: lifecycle (create, wake, sleep, delete, status, list), transport (an SSH
   proxy command, port forwards), snapshots, egress, connection (setup, doctor) and cost

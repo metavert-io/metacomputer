@@ -117,7 +117,9 @@ accident, not a program set on it (SECURITY.md).
   app-server`), so two conversations there count as one session and don't wait for each other. For the terminal app
   that's its shared background server (checked with Codex 0.167: `codex` starts it on first use, as
   `codex app-server --managed-daemon`, and the commands of every conversation run under it); `codex --no-daemon`
-  starts the terminal app without it. `codex exec` runs as a process of its own.
+  starts the terminal app without it. `codex exec` runs as a process of its own. For the same reason, when two of the
+  app server's conversations have their tools on different computers, a command from either that names no computer
+  refuses: name it with `--vm` ([commands.md](commands.md#an-agent-sessions-computer)).
 - **The vault** recognizes Codex sessions as it does Claude Code's: "for this session" answers, unattended rules for
   a project folder, and tokens tied to the session that asked for them. Requests from under Codex's app server (the
   IDE extension, the desktop app and the terminal app's shared background server) get none of these: its
@@ -128,6 +130,24 @@ accident, not a program set on it (SECURITY.md).
   (`claude -p`).
 - **`metacomputer claude`** starts Claude Code inside the virtual computer; it works the same when Codex asked for it.
 - **Slash commands:** the plugin's `/learn` command is Claude Code's; in Codex, run `metacomputer learn report`.
+
+## Login shells and PATH
+
+Codex runs shell commands through your login shell (`zsh -lc` on a Mac): its shell tool has a `login` option, and its
+`allow_login_shell` setting turns that off (checked with Codex CLI 0.167.0). A login shell builds PATH again from your
+profile. On macOS, `/etc/zprofile` runs `path_helper`, which puts the folders listed in `/etc/paths` and
+`/etc/paths.d` (`/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, Homebrew's) in front of the PATH the shell
+was given, and a profile that adds `~/.local/bin` puts that in front of them all. So a folder put first on PATH before
+Codex started (a wrapper `metacomputer` for a test VM, another checkout's `bin/`) comes after `~/.local/bin/metacomputer`
+in Codex's commands. Variables such as `MCOMP_CONFIG` and `MCOMP_VM` pass through a login shell unchanged; only PATH is
+rebuilt.
+
+In metacomputer's own setup that doesn't change which checkout runs: the skill runs `~/.local/bin/metacomputer` by its
+absolute path, and Codex's MCP server is the same checkout's `bin/metacomputer`. What can still differ is the computer:
+the MCP server keeps the computer it started on, while each command takes the default computer as it is when it runs.
+A command that names no computer and would act on another computer than the session's refuses
+([commands.md](commands.md#an-agent-sessions-computer)). For a harness of your own: run commands by absolute path, name the VM (`--vm NAME`, or `MCOMP_CONFIG` in the
+environment, which a login shell keeps), and give the run a throwaway `HOME`.
 
 ## If something doesn't work
 
