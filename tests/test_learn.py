@@ -696,6 +696,20 @@ def lessons_set_checks():
           "Lessons the with-run's sessions got: no-frame, check-text; tasks whose targets they answer: ff-seat-map" in out, out)
     s = report.write_summary(a)
     check("a run's summary lists the failure patterns", "Failure patterns" in open(s).read() and "ff-seat-map" in open(s).read())
+    cx = a + "-codex"                      # the same run as Codex made it: tokens, never a cost
+    shutil.copytree(a, cx)
+    m = json.load(open(os.path.join(cx, "run.json")))
+    m["switches"]["agent"] = "codex"
+    m["agent_version"] = "codex-cli 0.167.0"
+    m["claude_code"] = "2.1.325 (Claude Code)"     # what runs before the fix recorded: never shown for Codex
+    json.dump(m, open(os.path.join(cx, "run.json"), "w"))
+    md = open(report.write_summary(cx)).read()
+    check("a Codex run's summary: its own version, cost n/a (not 0.00), and no budget, cap or dollars spent",
+          "codex-cli 0.167.0" in md and "Claude Code" not in md and "Codex reports tokens, not a cost" in md
+          and "spent $" not in md and "cost n/a" in md and "| 0.00 |" not in md, md[:900])
+    md = open(report.write_compare(a, cx)).read()
+    check("…and compared with a Claude run, Codex's cost cells read n/a with no difference taken",
+          re.search(r"\| total cost \$ \| [0-9.]+ \| n/a \| - \|", md) and " / n/a |" in md, md[-1500:])
     pub = report.public_summary(b)
     blob = json.dumps(pub)
     check("the public summary (bench/runs/) has the patterns and targets but no costs or paths",
@@ -968,6 +982,9 @@ def budget_checks():
     check("charge(): no cost reported after a session ran = its budget; a reported cost = that cost; no session = 0",
           bench.charge(ran) == 3.0 and bench.charge({"session": {"budget_usd": 3}, "metrics": {"cost_usd": 0.42}}) == 0.42
           and bench.charge({"session": {}, "metrics": {}}) == 0.0)
+    check("…a Codex task (no dollar budget: it reports tokens) counts nothing against the cap",
+          bench.charge({"agent": "codex", "budget_usd": 0.0, "session": {"wall_s": 90, "budget_usd": None},
+                        "metrics": {"cost_usd": None}}) == 0.0)
     recs = [dict(ran, task="a", started="2026-11-18T10:00:00", reservation="r-a")]
     meta = {"reservations": [{"id": "r-a", "task": "a", "usd": 3.0, "at": "2026-11-18T10:00:00"},
                              {"id": "r-b", "task": "b", "usd": 2.0, "at": "2026-11-18T10:05:00"}]}

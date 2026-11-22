@@ -30,8 +30,9 @@ baseline before every task). Switches (flag or environment variable):
   --agent / BENCH_AGENT            claude | codex (default claude). codex: `codex exec` with the work folder's
                                    project config (the skill in .agents/skills, metacomputer's rules in
                                    .codex/rules), Codex's default sandbox and model unless --model names a GPT
-                                   model; --budget and --effort don't apply, and its cost isn't reported (each
-                                   task counts its whole budget against --cap)
+                                   model; --budget, --cap and --effort don't apply: Codex reports tokens, not a
+                                   cost, so a Codex run counts nothing against the cap (each task still has its
+                                   timeout)
 """
 import argparse
 import datetime
@@ -313,7 +314,7 @@ def codex_session_args(t, sw, cfg):
     if sw["model"].startswith(("gpt", "o")):
         args += ["-m", sw["model"]]
     args.append(PREFIX + t["prompt"].strip() + (SHELL_FORBID if sw["shell"] == "forbid" else ""))
-    return args, float(t.get("budget_usd") or sw["budget"])
+    return args, None          # no dollar budget: Codex has none to set and reports tokens, not a cost
 
 
 def codex_events(ev, state):
@@ -639,9 +640,12 @@ def cmd_run(a):
     run_id = a.run_id or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     rdir = os.path.join(RESULTS, run_id)
     os.makedirs(rdir, exist_ok=True)
-    claude_v = subprocess.run([trusted_claude(), "--version"], capture_output=True, text=True).stdout.strip()
+    codex = sw["agent"] == "codex"
+    agent_v = subprocess.run([trusted_claude(None, "codex" if codex else "claude"), "--version"],
+                             capture_output=True, text=True).stdout.strip()
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
-            "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
+            "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "agent_version": agent_v,
+            **({} if codex else {"claude_code": agent_v}),
             "switches": dict(sw, skill_hash=skill_hash(sw["skill"]), **lessons_record(sw),
                              coord_guard_in_bridge=os.path.exists(os.path.join(LAB, "lib", "mcp_hub.py"))
                              and "MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_hub.py")).read()),
@@ -670,7 +674,7 @@ def cmd_run(a):
             if t["id"] in done:
                 log(f"[{i}/{len(tasks)}] {t['id']}: already in this run, skipped")
                 continue
-            budget = float(t.get("budget_usd") or sw["budget"])
+            budget = 0.0 if codex else float(t.get("budget_usd") or sw["budget"])   # Codex: no dollars to count
             if spent + budget > cap:
                 log(f"stopping: ${spent:.2f} spent, the next task could take ${budget:.2f}, cap ${cap:.2f}")
                 meta["stopped"] = f"cap: ${spent:.2f} spent before {t['id']}"
@@ -690,7 +694,8 @@ def cmd_run(a):
             rec = run_task(t, sw, rdir, work, cfg, shim)
             rec["budget_usd"] = budget
             rec["reservation"] = res["id"]
-            if rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
+            rec["agent"] = sw["agent"]
+            if not codex and rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
                 rec["cost_unknown"] = True       # no cost reported: counted at its budget
             spent += charge(rec)
             with open(os.path.join(rdir, "results.jsonl"), "a") as f:
@@ -701,8 +706,11 @@ def cmd_run(a):
             write_meta(rdir, meta)
             mm = rec["metrics"]
             log(f"  {'PASS' if rec['check'].get('pass') else 'fail'} score={rec['check'].get('score')} "
-                f"cost=${mm.get('cost_usd') or 0:.2f} turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
-                f"shots={mm.get('screenshots')} tree={mm.get('tree_reads')} shell={mm.get('shell_calls')}  (run total ${spent:.2f})")
+                + (f"tokens={mm.get('input_tokens') or 0:,} in/{mm.get('output_tokens') or 0:,} out " if codex
+                   else f"cost=${mm.get('cost_usd') or 0:.2f} ")
+                + f"turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
+                f"shots={mm.get('screenshots')} tree={mm.get('tree_reads')} shell={mm.get('shell_calls')}"
+                + ("" if codex else f"  (run total ${spent:.2f})"))
             why = infra_reason(rec)
             if why and why.startswith("api"):
                 # A usage or rate limit fails every later task in a second; stop, and retry

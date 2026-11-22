@@ -4,9 +4,18 @@ metacomputer works with OpenAI's Codex as well as Claude Code. Codex drives the 
 MCP tools, the same hub and the same guards; the vault, the network allowlist, handoffs, recordings and lessons work
 the same way. This page covers what's set up for Codex, what its sandbox changes, and where the two differ.
 
-Checked with Codex CLI 0.167.0: the benchmark's six browser tasks (Firefox and Chrome forms, reading a table, a
-canvas, an unlabeled tile, link navigation) passed 6/6 through `codex exec`
-([bench/runs/codex-browser-2026-11-21.json](../bench/runs/codex-browser-2026-11-21.json); `bench/bench.py run --agent codex`).
+Checked with Codex CLI 0.167.0 through `codex exec` (`bench/bench.py run --agent codex`), on the same Cua Driver
+(0.53.0) and settings (coordinate guard off, the hub on) as the Claude Code runs beside it:
+
+| Task set | Codex | Claude Code |
+| --- | --- | --- |
+| Standard: 20 desktop tasks in Calc, Writer, Mousepad, Thunar, Firefox and Chrome | 20/20 ([record](../bench/runs/codex-std-2026-11-21.json)) | 19/20 ([record](../bench/runs/learn-2026-11-18-without.json)) |
+| Lessons: 8 tasks built to bring out known mistakes | 8/8; 1.5 min a task; 1 failed driver call ([record](../bench/runs/codex-lessons-2026-11-21.json)) | 8/8; 1.1 min a task; 7 failed driver calls ([record](../bench/runs/learn-lessons-2026-11-18-without.json)) |
+
+The six browser tasks of the standard set, run again on their own, passed 6/6 too
+([record](../bench/runs/codex-browser-2026-11-21.json)). These are single runs, days apart, each agent with its default
+model, so read them as "Codex works as well here", not as a ranking. Turn counts don't compare: the benchmark counts
+each of Codex's tool calls as a turn.
 
 ## Set it up
 

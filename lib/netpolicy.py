@@ -84,12 +84,18 @@ class Lock:
         os.close(self.fd)
 
 
+LOCAL_NAMES = ("localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0")
+
+
 def normalize(name, exact=False):
     """The gateway patterns for one name, or Refused. Lowercase letters, digits and hyphens, at least two labels;
     `*.x.y` for only the subdomains. A plain name covers itself and its subdomains unless exact."""
     if not isinstance(name, str):
         raise Refused("a name must be text")
     n = name.strip().lower().rstrip(".")
+    if n in LOCAL_NAMES or n.endswith(".localhost"):
+        raise Refused(f"{name[:80]!r} is the virtual computer itself: its own pages never go through the gateway, so they "
+                      "need no allowlist (the list is for sites on the internet)")
     wild = n.startswith("*.")
     core = n[2:] if wild else n
     labels = core.split(".")

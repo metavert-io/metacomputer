@@ -14,6 +14,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - **Codex sessions are agent sessions** wherever Claude Code's are: one controller at a time (a Codex session no longer blocks itself when it mixes MCP tools and `metacomputer` commands), the handoff (a session can't say the user is done), the hub's status and events (which agent is acting), and the vault ("for this session" answers, unattended rules for a project, tokens tied to the session that asked; requests from under Codex's app server, whose conversations share one process, get none of these and ask each time). `handoff done` is refused from any agent session, not only the one that asked.
 - **`metacomputer learn` reads Codex sessions** (`$CODEX_HOME/sessions`) with the same rules as Claude Code's: only classes, counts, tool names and app names from a fixed list.
 - **Inside Codex's sandbox, `metacomputer` commands stop at once** (exit 77) and say how to run outside it, instead of reporting a running VM as not ready. The skill tells Codex the same.
+- **The benchmark runs Codex** (`bench/bench.py run --agent codex`). With Codex CLI 0.167.0: the standard set 20/20 and the lessons set 8/8, on the same driver and settings as Claude Code's 19/20 and 8/8 (docs/codex.md; records in `bench/runs/`).
 
 ### Changed
 
@@ -23,6 +24,8 @@ All notable changes to metacomputer are recorded here. The format follows
 ### Fixed
 
 - **`metacomputer net` printed a Python traceback** when its state folder couldn't be used; it now says which and that nothing changed.
+- **`metacomputer net allow localhost`** is refused with the reason: the VM's own pages never go through the gateway, so they need no allowlist (the list is for sites on the internet). It used to say only that `localhost` wasn't a host name, and agents testing a page the VM served tried it repeatedly. The skill says the same.
+- **Benchmark reports for Codex runs** show Codex's version and its cost as n/a (Codex reports tokens), and a Codex run no longer counts each task's budget against `--cap`, which stopped a run after 20 tasks with nothing spent.
 
 ## [0.4.2] - 2026-11-20
 

@@ -183,6 +183,10 @@ def allow_checks():
           out)
     rc, out = net(run, "allow", "1.1.1.1")
     check("an address is refused (names only)", rc == 3 and "addresses aren't accepted" in out, out)
+    for local in ("localhost", "127.0.0.1", "app.localhost"):
+        rc, out = net(run, "allow", local)
+        check(f"{local}: refused with why (the VM's own pages never go through the gateway)", rc == 3
+              and "the virtual computer itself" in out and not os.path.exists(os.path.join(run, "net-allow.json")), out)
 
 
 def failure_checks():
