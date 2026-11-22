@@ -1767,7 +1767,7 @@ CLAIMS = [
      lambda m: 'claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy' in raw("install.sh")
      and 'CMD_LINK="$HOME/.local/bin/metacomputer"' in raw("install.sh")),
     ("docs/commands.md", r"anything else: never removed or changed, at a terminal or not, with `--yes` or without",
-     lambda m: re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+return 1 ;;\n", sh_function("install.sh", "register_server")) is not None
+     lambda m: re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+REG_LEFT=other; return 1 ;;\n", sh_function("install.sh", "register_server")) is not None
      and len(re.findall(r'\|\| ask "Claude Code.*" N; then :$', raw("install.sh"), re.M)) == 1
      and re.search(r"\n    checkout\)\n      if \[ \"\$SWITCH\" = 1 \] \\\n\s+\|\| ask ", raw("install.sh")) is not None
      and "add-json" not in raw("install.sh")),
@@ -1816,18 +1816,37 @@ CLAIMS = [
      lambda m: 'encoding="utf-8-sig"' in raw("lib/claude_mcp.py") and "again, why = read_servers(env)" in raw("lib/claude_mcp.py")
      and "if not stat.S_ISREG(ls.st_mode) or (ls.st_size == 0 and not ls.st_mode & 0o222):" in raw("lib/claude_mcp.py")),
     ("docs/commands.md", r"right after that step \(`--only-claude` and `--only-agents` too; a run that finishes it clears that, and a run that doesn't set Claude Code up leaves it\)",
-     lambda m: re.search(r"\n  fi\n  claude_record\n}\n", sh_function("install.sh", "claude_step")) is not None
+     lambda m: re.search(r'\n  fi\n  agent_record claude "\$CLAUDE_TRIED" "\$CLAUDE_FAILED"\n}\n', sh_function("install.sh", "claude_step")) is not None
+     and re.search(r'\n  esac\n  agent_record codex "\$CODEX_TRIED" "\$CODEX_FAILED"\n}\n', sh_function("install.sh", "codex_step")) is not None
      and "if has_claude; then CLAUDE_TRIED=1; fi" in sh_function("install.sh", "claude_step")
-     and '[ "$CLAUDE_TRIED" = 1 ] || return 0' in sh_function("install.sh", "claude_record")
+     and '[ "$2" = 1 ] || return 0' in sh_function("install.sh", "agent_record")
      and 'now = [x for x in was if x != name] + ([name] if how == "failed" else [])' in raw("install.sh")
      and '{ [ "$CLAUDE_TRIED" = 0 ] && stamp_incomplete claude; }' in sh_function("install.sh", "install_incomplete")
+     and '{ [ "$CODEX_TRIED" = 0 ] && stamp_incomplete codex; }' in sh_function("install.sh", "install_incomplete")
      and 'incomplete="$(install_incomplete)"' in raw("install.sh")
-     and len(re.findall(r"^\s*claude_record\s*$", raw("install.sh"), re.M)) == 1),
-    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command when the server stays",
+     and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 2),
+    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, Claude Code's or Codex's, metacomputer's or not, runs it",
      lambda m: raw("install.sh").index('if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then')
-     < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
-     and raw("install.sh").count("UNINSTALL_FAILED=1; KEEP_CMD=1") == 2
-     and 'elif [ "$KEEP_CMD" = 1 ]; then warn "kept $l:' in raw("install.sh")),
+     < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
+     and raw("install.sh").count('UNINSTALL_FAILED=1; keep_cmd_for "Claude Code\'s"') == 2
+     and '[ "$srv_linked" != link ] || { keep_cmd_for "Claude Code\'s"; }' in raw("install.sh")
+     and '[ "$lnk" != link ] || { keep_cmd_for "Codex\'s"; }' in raw("install.sh")
+     and 'elif [ "$KEEP_CMD" = 1 ]; then warn "kept $l:' in raw("install.sh")
+     and "def linked(res, link):" in raw("lib/claude_mcp.py")),
+    ("docs/commands.md", r"When the registration doesn't work and the plugin brings no server of its own \(the checkout it loads from no longer declares one\), the install says plainly that new Claude Code sessions have no metacomputer tools until that's fixed, gives the line that fixes it, and says that `metacomputer update` tries again",
+     lambda m: raw("install.sh").count("tools_missing_note") == 5
+     and "metacomputer's tools are missing in new Claude Code sessions until this is fixed" in sh_function("install.sh", "tools_missing_note")
+     and "(metacomputer update tries this step again)" in sh_function("install.sh", "tools_missing_note")
+     and '[ "$plug" != present ] || return 0' in sh_function("install.sh", "tools_missing_note")),
+    ("docs/codex.md", r"The install changes Codex's MCP server `metacomputer` only when it's metacomputer's own, by the rule it uses for Claude Code's",
+     lambda m: (lambda f: 'if kind == "stdio" and args == claude_mcp.MCP_ARGS:' in f
+                and 'if cmd in (os.path.join(root, "bin", "metacomputer"), link):' in f
+                and "for n in claude_mcp.LEGACY_NAMES}" in f and "claude_mcp.digest(d)" in f)(function_src("lib/agents.py", "codex_entry"))
+     and "old_target \"$cmd\"" not in raw("install.sh")
+     and 'if ! codex_unchanged "$sum"; then' in sh_function("install.sh", "codex_step")
+     and 'if ! codex_unchanged "$sum"; then' in sh_function("install.sh", "codex_server_remove")
+     and 'if srv.get("command") != old or srv.get("args") != ["mcp-lazy"]:' in raw("install.sh")
+     and re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+CODEX_FAILED=1 ;;\n", sh_function("install.sh", "codex_step")) is not None),
     ("docs/commands.md", r"so the next `metacomputer update` runs the install again even when the\s+checkout is already at the release",
      lambda m: 'installed_here = (stamp.get("commit") == tcommit and not stamp.get("incomplete") and' in raw("lib/update.py")
      and 'MCOMP_INSTALL_INCOMPLETE="$incomplete" "$PY311" "$ROOT/lib/update.py" _after-install' in raw("install.sh")),
@@ -1837,7 +1856,7 @@ CLAIMS = [
      and re.search(r"^CLAUDE_MCP=user ", raw("install.sh"), re.M) is not None),
     ("plugin/README.md", r"A server of that name that isn't metacomputer's is never changed, and the installer says how to remove it yourself",
      lambda m: "To use metacomputer's instead: claude mcp remove metacomputer -s user, then ./install.sh --only-claude" in raw("install.sh")
-     and re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+return 1 ;;\n", sh_function("install.sh", "register_server")) is not None),
+     and re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+REG_LEFT=other; return 1 ;;\n", sh_function("install.sh", "register_server")) is not None),
     ("docs/commands.md", r"A plugin you turned off stays off, and the install leaves the rest of Claude Code's setup as it is: it adds no MCP server then",
      lambda m: re.search(r"\n +2\) # turned off: left so, and so is everything else of Claude Code's\n[^\n]*\n[^\n]*;;\n",
                          raw("install.sh")) is not None),

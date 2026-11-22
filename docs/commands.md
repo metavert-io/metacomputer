@@ -370,8 +370,13 @@ run, and it ends with exit status 1; it also records the Claude Code step as
 unfinished, right after that step (`--only-claude` and `--only-agents` too; a run
 that finishes it clears that, and a run that doesn't set Claude Code up leaves it),
 so the next `metacomputer update` runs the install again even when the checkout is
-already at the release. `--uninstall` removes metacomputer's server before the
-command it runs, and keeps the command when the server stays.
+already at the release. When the registration doesn't work and the plugin brings no
+server of its own (the checkout it loads from no longer declares one), the install
+says plainly that new Claude Code sessions have no metacomputer tools until that's
+fixed, gives the line that fixes it, and says that `metacomputer update` tries again.
+`--uninstall` removes metacomputer's server before the command it runs, and keeps the
+command (`~/.local/bin/metacomputer` and `mcomp`) while any MCP server that stays,
+Claude Code's or Codex's, metacomputer's or not, runs it.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:

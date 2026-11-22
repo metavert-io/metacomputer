@@ -1766,9 +1766,12 @@ def test_codex_step():
 
 
 def test_codex_config_edits():
-    """The Codex step never writes a config.toml it can't edit exactly: a header that only appears inside a string, with
-    the real server under a quoted name, is left alone (and the install goes on); a moved checkout's registration keeps
-    everything you set on it."""
+    """The Codex step changes only metacomputer's own registration (F10: its command exactly this checkout's launcher, a
+    path earlier versions registered under it, or ~/.local/bin/metacomputer; exactly ["mcp-lazy"]), read again whole
+    right before the change, and never writes a config.toml it can't edit exactly. Anything else (a program under the
+    checkout, a moved checkout's launcher) is left byte for byte, said without its arguments, with the command to
+    remove it yourself, and the step counts as unfinished (exit 1). --uninstall removes only metacomputer's own, and
+    keeps the command links while an entry that stays runs them (F11)."""
     if not shutil.which("codex"):
         print("SKIP the Codex config checks: no codex command on this Mac")
         return
@@ -1780,24 +1783,76 @@ def test_codex_config_edits():
         env = dict(os.environ, HOME=home, CODEX_HOME=ch)
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
+        cfg_path = os.path.join(ch, "config.toml")
+
+        def go(*args, **extra):
+            return subprocess.run([INSTALL, *args], env=dict(env, **extra), capture_output=True, text=True, timeout=180,
+                                  stdin=subprocess.DEVNULL)
+        legacy = os.path.join(LAB, "bin", "vc")          # a path earlier versions registered under this checkout
         tricky = ('developer_instructions = """\nAn example:\n[mcp_servers.metacomputer]\ncommand = "x"\n"""\n\n'
-                  '[mcp_servers."metacomputer"]\ncommand = "/gone/old/bin/metacomputer"\nargs = ["mcp-lazy"]\n')
-        write(os.path.join(ch, "config.toml"), tricky)
-        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
-                           stdin=subprocess.DEVNULL)
-        check("Codex: a server table it can't edit exactly (its header only inside a string) is left as it was, and "
-              "the install goes on", p.returncode == 0 and open(os.path.join(ch, "config.toml")).read() == tricky
-              and "couldn't point" in p.stdout and "rules:" in p.stdout, (p.returncode, p.stdout[-400:], p.stderr[-300:]))
-        mine = ('[mcp_servers.metacomputer]\ncommand = "/gone/old/bin/metacomputer"\nargs = ["mcp-lazy"]\n'
+                  f'[mcp_servers."metacomputer"]\ncommand = "{legacy}"\nargs = ["mcp-lazy"]\n')
+        write(cfg_path, tricky)
+        p = go("--only-codex")
+        check("Codex: metacomputer's own table it can't edit exactly (its header only inside a string) is left as it was, "
+              "the install goes on, and the step counts as unfinished", p.returncode == 1
+              and open(cfg_path).read() == tricky and "couldn't point" in p.stdout and "rules:" in p.stdout
+              and "didn't finish" in p.stderr, (p.returncode, p.stdout[-400:], p.stderr[-300:]))
+        mine = (f'[mcp_servers.metacomputer]\ncommand = "{legacy}"\nargs = ["mcp-lazy"]\n'
                 'default_tools_approval_mode = "writes"\ndisabled_tools = ["kill_app"]\nenv = { A = "1" }\n')
-        write(os.path.join(ch, "config.toml"), mine)
-        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
-                           stdin=subprocess.DEVNULL)
-        srv = tomllib.loads(open(os.path.join(ch, "config.toml")).read())["mcp_servers"]["metacomputer"]
-        check("Codex: a moved checkout's registration now runs this one, and keeps what you set on it",
-              p.returncode == 0 and srv["command"] == CLI and srv["default_tools_approval_mode"] == "writes"
+        write(cfg_path, mine)
+        p = go("--only-codex")
+        srv = tomllib.loads(open(cfg_path).read())["mcp_servers"]["metacomputer"]
+        check("Codex: a path earlier versions registered under this checkout now runs bin/metacomputer, and keeps what "
+              "you set on it", p.returncode == 0 and srv["command"] == CLI and srv["default_tools_approval_mode"] == "writes"
               and srv["disabled_tools"] == ["kill_app"] and srv["env"] == {"A": "1"} and srv["tool_timeout_sec"] == 600,
               (srv, p.stdout[-300:]))
+        # F10: foreign, whatever its path looks like: never rewritten or removed.
+        token = "SYNTHETIC-TOKEN-4f9c2e71d0"
+        for why, cmd, args in (("a program under the checkout that isn't its launcher", os.path.join(LAB, "tools", "unrelated-server"), ["mcp-lazy"]),
+                               ("a moved checkout's launcher (gone)", "/gone/old/bin/metacomputer", ["mcp-lazy"]),
+                               ("this checkout's launcher with other arguments", CLI, ["--token", token])):
+            foreign = f'[mcp_servers.metacomputer]\ncommand = "{cmd}"\nargs = {json.dumps(args)}\n'
+            write(cfg_path, foreign)
+            p = go("--only-codex")
+            out = p.stdout + p.stderr
+            check(f"Codex: {why}: left byte for byte, said by its program's name only, with the command to remove it "
+                  "yourself; unfinished (exit 1)", p.returncode == 1 and open(cfg_path).read() == foreign
+                  and "isn't metacomputer's" in out and "codex mcp remove metacomputer, then ./install.sh --only-codex" in out
+                  and f"with {len(args)} argument" in out and token not in out and "/gone/old" not in out
+                  and os.path.join(LAB, "tools") not in out, (p.returncode, out[-500:]))
+            p = go("--uninstall")
+            check(f"…and --uninstall leaves it: {why}", open(cfg_path).read() == foreign and token not in p.stdout + p.stderr,
+                  (p.returncode, p.stdout[-300:]))
+        # The whole entry is read again right before the change: one that changes in between is left as it is.
+        count = os.path.join(t, "count")
+        shim = os.path.join(t, "python3-shim")
+        write(shim, "#!/bin/sh\n"
+                    'case " $* " in *" codex-entry "*)\n'
+                    f'  n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"\n'
+                    f'  [ "$n" != 2 ] || printf \'\\n[mcp_servers.metacomputer.env]\\nADDED_ELSEWHERE = "1"\\n\' >> "{cfg_path}" ;;\n'
+                    f'esac\nexec "{sys.executable}" "$@"\n', 0o755)
+        plain = f'[mcp_servers.metacomputer]\ncommand = "{legacy}"\nargs = ["mcp-lazy"]\n'
+        write(cfg_path, plain)
+        p = go("--only-codex", MCOMP_BREW_PYTHON=shim)
+        srv = tomllib.loads(open(cfg_path).read())["mcp_servers"]["metacomputer"]
+        check("Codex: metacomputer's own entry that changes right before its command is changed: left as it is (the "
+              "change kept), said, exit 1", p.returncode == 1 and "changed since it was read" in p.stdout
+              and srv["command"] == legacy and srv.get("env") == {"ADDED_ELSEWHERE": "1"}, (p.stdout[-400:], srv))
+        # F11: a Codex entry of yours that runs ~/.local/bin/metacomputer --vm other mcp-lazy: --uninstall keeps it and the
+        # command links it runs.
+        os.remove(cfg_path)
+        p = go("--only-codex")
+        link = os.path.join(home, ".local", "bin", "metacomputer")
+        custom = f'[mcp_servers.metacomputer]\ncommand = "{link}"\nargs = ["--vm", "other", "mcp-lazy"]\n'
+        write(cfg_path, custom)
+        p = go("--uninstall")
+        check("--uninstall with a Codex entry of yours running ~/.local/bin/metacomputer --vm other mcp-lazy: the entry "
+              "stays, and so do the command links it runs (said)", open(cfg_path).read() == custom
+              and os.readlink(link) == CLI and os.readlink(os.path.join(home, ".local", "bin", "mcomp")) == CLI
+              and "kept" in p.stdout, (p.returncode, p.stdout[-500:]))
+        os.remove(cfg_path)
+        p = go("--uninstall")
+        check("…and without it, the links go", not os.path.lexists(link), p.stdout[-300:])
     finally:
         shutil.rmtree(t, ignore_errors=True)
 

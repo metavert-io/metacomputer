@@ -5,7 +5,7 @@
     python3 lib/claude_mcp.py user-get NAME --root CHECKOUT --link ~/.local/bin/metacomputer
     python3 lib/claude_mcp.py user-recheck NAME < DIGEST
 
-user-get prints one line of four fields split by \\x1f: OWNER, KIND, WORDS, DIGEST.
+user-get prints one line of five fields split by \\x1f: OWNER, KIND, WORDS, DIGEST, LINKED.
   OWNER  what the user-scope server NAME is to CHECKOUT (owner() below): ok, ours, checkout, foreign, absent or error
   KIND   stdio, another transport (http, sse, ...), absent or error
   WORDS  what it is, in words, for messages. metacomputer's own (ok, ours, checkout): its command and arguments. Anything
@@ -13,6 +13,8 @@ user-get prints one line of four fields split by \\x1f: OWNER, KIND, WORDS, DIGE
          arguments (`npx mcp-remote https://...?token=...` carries a credential in one), the values of its variables,
          a URL, headers or the entry; for an error, why
   DIGEST a digest of the whole entry (its variables included), for user-recheck
+  LINKED "link" when it's a local command that runs the command link itself (LINK, or the alias mcomp beside it),
+         whoever's it is, else empty: --uninstall keeps those links while an entry that stays runs them
 install.sh removes or rewrites only metacomputer's own entries (ok, ours, checkout), never anyone else's. user-recheck
 reads the entry again, from the configuration file alone (quick: no `claude mcp get`), right before install.sh removes
 one, and prints "same" when it's still exactly the entry whose DIGEST it reads on stdin, "changed" when it isn't (or
@@ -257,6 +259,15 @@ def digest(entry):
                           .encode("utf-8")).hexdigest()
 
 
+def linked(res, link):
+    """Does the entry run the command link itself (LINK, or the alias mcomp beside it), whoever's entry it is?"""
+    e = res["entry"]
+    if res["kind"] != "stdio" or not isinstance(e, dict) or not isinstance(e.get("command"), str):
+        return False
+    links = {os.path.normpath(link), os.path.normpath(os.path.join(os.path.dirname(link), "mcomp"))}
+    return os.path.normpath(e["command"]) in links
+
+
 def line(prog, name, root, link, env=None):
     env = dict(os.environ if env is None else env)
     if not prog:
@@ -265,7 +276,7 @@ def line(prog, name, root, link, env=None):
         res = user_entry(prog, name, env)
     own = owner(res, root, link)
     e = res["entry"]
-    fields = [own, res["kind"], words(res, env, own), digest(e) if e else ""]
+    fields = [own, res["kind"], words(res, env, own), digest(e) if e else "", "link" if linked(res, link) else ""]
     return US.join(f.replace(US, " ").replace("\n", " ") for f in fields)
 
 

@@ -1237,12 +1237,32 @@ def test_update_from_plugin_server(real=False):
         # The update: the checkout moves to this version, then install.sh's agents step runs (update runs install.sh).
         shutil.copy2(os.path.join(LAB, "plugin", ".claude-plugin", "plugin.json"),
                      os.path.join(co, "plugin", ".claude-plugin", "plugin.json"))
+        stamp = os.path.join(b.home, ".local", "share", "metacomputer", "installed.json")
+        write(stamp, json.dumps({"version": "v0.4.4", "tag": "v0.4.4", "commit": "0" * 40, "checkout": co}))
+        if not real:
+            # F9: the registration fails (the update moved the checkout first, so the plugin's declaration is gone):
+            # said plainly, with the line that fixes it and that update tries again; unfinished; nothing else removed.
+            p, calls = b.install("--only-agents", "--no-codex", script=os.path.join(co, "install.sh"), STUB_FAIL_MCP_ADD="1")
+            out = p.stdout + p.stderr
+            check("the update whose registration fails: it says plainly that new Claude Code sessions have no "
+                  "metacomputer tools until it's fixed, the exact line that fixes it, and that `metacomputer update` tries "
+                  "again; recorded as unfinished (exit 1)", p.returncode == 1
+                  and "metacomputer's tools are missing in new Claude Code sessions until this is fixed" in out
+                  and "claude mcp add -s user metacomputer ~/.local/bin/metacomputer mcp-lazy" in out
+                  and "metacomputer update tries this step again" in out
+                  and json.load(open(stamp)).get("incomplete") == ["claude"], (out[-700:], json.load(open(stamp))))
+            check("…and nothing else was removed: the marketplace, the plugin and the command stay; the add was the only "
+                  "change tried", b.mkts() == {"metacomputer": co} and "metacomputer@metacomputer" in b.plugins()
+                  and os.path.islink(b.cmd) and b.entry() is None
+                  and all(c[:2] == ["mcp", "add"] for c in mutations(calls)) and ran(calls, "mcp", "add"),
+                  (mutations(calls), b.mkts(), b.plugins()))
         p, _ = b.install("--only-agents", "--no-codex", script=os.path.join(co, "install.sh"))
         check(tag + "after: the plugin still installed, declaring no server; the user-scope server is "
               "~/.local/bin/metacomputer mcp-lazy: exactly one", p.returncode == 0 and "metacomputer@metacomputer" in b.plugins()
               and b.sources() == ["user"], (p.stdout[-600:], p.stderr[-300:], b.sources(), b.entry()))
-        check(tag + "after: it says to restart Claude Code (or /mcp) to load the tools",
-              "/mcp" in p.stdout and "added in this run" in p.stdout, p.stdout[-300:])
+        check(tag + "after: it says to restart Claude Code (or /mcp) to load the tools, and the record is cleared",
+              "/mcp" in p.stdout and "added in this run" in p.stdout and "incomplete" not in json.load(open(stamp)),
+              p.stdout[-300:])
         p, _ = b.install("--only-agents", "--no-codex", script=os.path.join(co, "install.sh"))
         check(tag + "a second run: already registered, still one server", p.returncode == 0
               and "already registered" in p.stdout and b.sources() == ["user"], p.stdout[-400:])
@@ -1536,14 +1556,17 @@ def test_incomplete_marker():
             return src[i:src.index("\n}\n", i) + 3]
         script = ("set -Eeuo pipefail\ntrap 'echo ERR-TRAP >&2' ERR\n" + fn("stamp_incomplete") + fn("install_incomplete")
                   + 'printf "[%s]" "$(install_incomplete)"\n')
-        for recorded, failed, tried, want in ((["claude"], 0, 0, "claude"), (["claude"], 0, 1, ""), ([], 1, 1, "claude"),
-                                              ([], 0, 0, ""), (["codex"], 0, 0, "")):
+        # (CLAUDE_FAILED, CLAUDE_TRIED, CODEX_FAILED, CODEX_TRIED): each agent by the same rule
+        for recorded, state, want in ((["claude"], (0, 0, 0, 1), "claude"), (["claude"], (0, 1, 0, 1), ""),
+                                      ([], (1, 1, 0, 1), "claude"), ([], (0, 0, 0, 0), ""), (["codex"], (0, 1, 0, 0), "codex"),
+                                      (["codex"], (0, 1, 0, 1), ""), ([], (1, 1, 1, 1), "claude,codex"),
+                                      (["claude", "codex"], (0, 0, 0, 0), "claude,codex")):
             write(stamp, json.dumps(dict(base, incomplete=recorded)))
             r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=60,
-                               env={"HOME": b.home, "PATH": noclaude["PATH"], "CLAUDE_FAILED": str(failed),
-                                    "CLAUDE_TRIED": str(tried)})
-            check(f"full install's record: earlier {recorded}, this run {'failed' if failed else 'finished' if tried else 'skipped'}"
-                  f" -> {want or 'nothing'}", r.stdout == f"[{want}]" and "ERR-TRAP" not in r.stderr, (r.stdout, r.stderr))
+                               env=dict({"HOME": b.home, "PATH": noclaude["PATH"]},
+                                        **dict(zip(("CLAUDE_FAILED", "CLAUDE_TRIED", "CODEX_FAILED", "CODEX_TRIED"), map(str, state)))))
+            check(f"full install's record: earlier {recorded}, this run {state} -> {want or 'nothing'}",
+                  r.stdout == f"[{want}]" and "ERR-TRAP" not in r.stderr, (r.stdout, r.stderr))
         check("…and the full install records what install_incomplete says", 'incomplete="$(install_incomplete)"' in src
               and 'MCOMP_INSTALL_INCOMPLETE="$incomplete"' in src)
     finally:
@@ -1633,9 +1656,10 @@ def changing_python(b):
 
 
 def test_uninstall_server_first():
-    """F6: --uninstall removes metacomputer's own server, read again and checked, before the command it runs. When the
-    entry changed since it was read, or its removal can't be confirmed, the server stays and so does the command
-    (~/.local/bin/metacomputer and mcomp), so it never runs a program that's gone; exit 1."""
+    """F6 and F11: --uninstall removes metacomputer's own server, read again and checked, before the command it runs.
+    When the entry changed since it was read, or its removal can't be confirmed, the server stays and so does the
+    command (~/.local/bin/metacomputer and mcomp), so it never runs a program that's gone; exit 1. A registration that
+    stays because it isn't metacomputer's keeps the command too when it runs it."""
     b = Box()
     try:
         b.install("--only-claude")
@@ -1655,6 +1679,17 @@ def test_uninstall_server_first():
         p, calls = b.install("--uninstall")
         check("…and when it can be removed: the server, then the command", p.returncode == 0 and not b.user_cfg()
               and b.link(".local/bin/metacomputer") is None and b.link(".local/bin/mcomp") is None, p.stdout[-400:])
+        # F11: an entry that stays because it isn't metacomputer's own, and runs the command link: the links stay too.
+        b.install("--only-claude")
+        custom = {"type": "stdio", "command": b.cmd, "args": ["--vm", "other", "mcp-lazy"], "env": {}}
+        b.claude("mcp", "remove", "metacomputer", "-s", "user")
+        b.add_user(custom)
+        p, calls = b.install("--uninstall")
+        check("--uninstall with a registration of yours that runs ~/.local/bin/metacomputer --vm other mcp-lazy: it stays, "
+              "and so do the command links it runs (said); exit 0", p.returncode == 0
+              and b.user_cfg()["metacomputer"] == custom and b.link(".local/bin/metacomputer") == CLI
+              and b.link(".local/bin/mcomp") == CLI and "kept" in p.stdout and not ran(calls, "mcp", "remove"),
+              (calls, p.stdout[-500:]))
     finally:
         b.close()
 

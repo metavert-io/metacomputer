@@ -205,6 +205,48 @@ def codex_status():
     return st
 
 
+def codex_entry(prog, root, link):
+    """Codex's MCP server metacomputer, read whole (`codex mcp get --json`), for install.sh: [owner, words, digest,
+    command, linked], by the rule install.sh uses for Claude Code's (lib/claude_mcp.py):
+      ok       a local command, exactly ROOT/bin/metacomputer or LINK (~/.local/bin/metacomputer), with exactly
+               ["mcp-lazy"] (whatever else you set on it is kept)
+      ours     the same with a path earlier versions registered under ROOT/bin (its command is pointed at
+               ROOT/bin/metacomputer, the rest kept)
+      foreign  anything else, a path that only starts with the checkout's included: never changed or removed
+      absent, error (never read as absent)
+    The words name metacomputer's own by its command, anything else by its program and how many arguments it has, or
+    its transport (never an argument, a variable or a URL); the digest stands for the whole entry (read again right
+    before a change); the command is given only for ok and ours; linked is "link" when it runs LINK or the alias mcomp
+    beside it, whoever's it is."""
+    import claude_mcp
+    rc, out, err = run([prog, "mcp", "get", "metacomputer", "--json"])
+    if rc != 0:
+        if "No MCP server named 'metacomputer'" in err:
+            return ["absent", "nothing", "", "", ""]
+        return ["error", f"codex mcp get metacomputer failed (exit {rc})", "", "", ""]
+    try:
+        d = json.loads(out)
+    except ValueError:
+        d = None
+    t = d.get("transport") if isinstance(d, dict) else None
+    if not isinstance(t, dict) or not isinstance(t.get("type"), str):
+        return ["error", "codex mcp get metacomputer answered in a shape this doesn't know", "", "", ""]
+    kind, cmd, args, envs = t["type"], t.get("command"), t.get("args") or [], t.get("env") or {}
+    if kind == "stdio" and (not isinstance(cmd, str) or not cmd or not isinstance(args, list)
+                            or not all(isinstance(a, str) for a in args) or not isinstance(envs, dict)):
+        return ["error", "its entry has an unexpected shape", "", "", ""]
+    res = {"kind": kind, "entry": {"command": cmd, "args": args, "env": envs} if kind == "stdio" else t}
+    own = "foreign"
+    if kind == "stdio" and args == claude_mcp.MCP_ARGS:
+        if cmd in (os.path.join(root, "bin", "metacomputer"), link):
+            own = "ok"
+        elif cmd in {os.path.join(r, "bin", n) for r in (root, os.path.realpath(root)) for n in claude_mcp.LEGACY_NAMES}:
+            own = "ours"
+    env = dict(os.environ)
+    return [own, claude_mcp.words(res, env, own), claude_mcp.digest(d), cmd if own in ("ok", "ours") else "",
+            "link" if claude_mcp.linked(res, link) else ""]
+
+
 def render_rules(path):
     t = open(os.path.join(LAB, "config", "codex", "metacomputer.rules.in"), encoding="utf-8").read()
     with open(path, "w", encoding="utf-8") as f:
@@ -354,6 +396,15 @@ def session_check(limit=20):
 
 
 def main(argv):
+    if argv[:1] == ["codex-entry"]:            # for install.sh (see codex_entry)
+        if len(argv) != 5 or argv[1] != "--root" or argv[3] != "--link":
+            print("usage: agents.py codex-entry --root CHECKOUT --link ~/.local/bin/metacomputer", file=sys.stderr)
+            return 2
+        prog, why = trusted("codex")
+        fields = (codex_entry(prog, argv[2], argv[4]) if prog else
+                  ["error", why or "Codex's codex command isn't on PATH", "", "", ""])
+        print("\x1f".join(str(f).replace("\x1f", " ").replace("\n", " ") for f in fields))
+        return 0
     ap = argparse.ArgumentParser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
     ap.add_argument("what", nargs="?", default="status", choices=("status", "check"))
     ap.add_argument("--json", action="store_true")
