@@ -9,6 +9,8 @@ LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   --vm NAME (bin/metacomputer) or MCOMP_VM=NAME   config/vms/NAME.env; config/local.env when that names NAME;
 #                                                   the defaults alone for the default name with no local.env
 #   MCOMP_CONFIG=FILE                               that file (as before); with a name too, both must be the same file
+#   neither, and config/default-vm                  the VM it names, exactly as --vm NAME (the default computer:
+#                                                   `metacomputer default`); MCOMP_NO_DEFAULT_VM=1 leaves it out
 #   neither                                         config/local.env (this checkout's main VM), else the defaults
 # A file in config/vms/ is one VM's own: its VM_NAME is its file name, it sets its own ports, and the rest of its
 # identity (baseline, keys, runtime and log folders, vault folder, event spool) is its own too, never the main VM's.
@@ -16,6 +18,7 @@ LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # refused, never guessed. Nothing here writes anything.
 MC_VMS_DIR="$LAB_ROOT/config/vms"
 MC_MAIN_CONFIG="$LAB_ROOT/config/local.env"
+MC_DEFAULT_FILE="$LAB_ROOT/config/default-vm"
 # The account's home folder as the system has it (the vault and Lume use it, whatever $HOME says).
 mc_sys_home() {
   local u h=""; u="$(id -un 2>/dev/null)"
@@ -29,6 +32,24 @@ MC_SYS_HOME="$(mc_sys_home)"
 MC_VMS_APP_DIR="${MCOMP_VMS_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer-vms}"
 MC_SHARED_VAULT="$MC_SYS_HOME/Library/Application Support/metacomputer"
 mc_valid_vm_name() { case "$1" in ''|[-.]*|*[!A-Za-z0-9._-]*) return 1 ;; esac; [ ${#1} -le 64 ]; }
+# config/default-vm (the default computer's name), read by lib/defaultvm.py, the one reader lib/labconfig.py uses too:
+# opened once without following a link or waiting on a FIFO, checked through that descriptor to be a regular file,
+# and exactly the bytes read are checked (one VM name on one line, a newline at its end or not, nothing else).
+# MC_DEFAULT_PTR: that name, or "" when there's no file; status 1 with the reason in MC_REFUSAL for anything else
+# (and when it can't be read at all). It only names a VM: its settings are the ones --vm NAME would load.
+# The reader is asked every time, with no test here first: a shell test can't tell "no file" from a lookup that
+# failed (no permission, an I/O error), and only "no file" (ENOENT, from the reader's own open) means no pointer.
+mc_read_default() {
+  local out rc=0
+  MC_DEFAULT_PTR=""
+  out="$("${MC_PY:-python3}" -I -B "$LAB_ROOT/lib/defaultvm.py" read "$MC_DEFAULT_FILE" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    case "$out" in "config/default-vm "*) MC_REFUSAL="$out" ;; *) MC_REFUSAL="config/default-vm (your default computer) couldn't be read" ;; esac
+    return 1
+  fi
+  [ -z "$out" ] || mc_valid_vm_name "$out" || { MC_REFUSAL="config/default-vm (your default computer) couldn't be read"; return 1; }
+  MC_DEFAULT_PTR="$out"
+}
 mc_realpath() { # PATH -> absolute, with its folder's links resolved (the file itself as named)
   local d; d="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || return 1
   printf '%s/%s' "$d" "$(basename "$1")"
@@ -388,15 +409,48 @@ mc_vault_dir() { printf '%s' "${VAULT_DIR:-$MC_SYS_HOME/Library/Application Supp
 [ -z "${MC_LIB_DEFS_ONLY:-}" ] || return 0
 
 mc_sel_name="${MCOMP_VM_ARG:-${MCOMP_VM:-}}"
-mc_load_settings "$mc_sel_name" "${MCOMP_CONFIG:-}" || { printf '%s\n' "metacomputer: $MC_REFUSAL" >&2; exit 1; }
+# The default computer (config/default-vm, written by `metacomputer default NAME`): with no VM named (--vm, MCOMP_VM,
+# MCOMP_CONFIG), the VM it names is chosen exactly as --vm NAME would choose it, so every --vm refusal applies, and a
+# pointer that doesn't resolve refuses: it never falls back to another VM. MCOMP_NO_DEFAULT_VM=1 leaves it out
+# (config/local.env's VM, as `each`'s main, `update` and install.sh mean). bin/metacomputer sets MC_DEFAULT_MODE for
+# the commands that work whatever it says: off (`default`, `help`: they read it themselves) and soft (the listings:
+# a pointer that doesn't resolve is reported there, with the main VM's settings loaded and nothing marked chosen).
+# In both, what this command starts is told to leave it out too (MCOMP_NO_DEFAULT_VM), so it loads the same settings.
+MC_FROM_DEFAULT=0; MC_DEFAULT_PROBLEM=""
+if [ -z "$mc_sel_name" ] && [ -z "${MCOMP_CONFIG:-}" ] && [ -z "${MCOMP_NO_DEFAULT_VM:-}" ]; then
+  if [ "${MC_DEFAULT_MODE:-}" = off ]; then
+    export MCOMP_NO_DEFAULT_VM=1
+  elif mc_read_default; then
+    [ -z "$MC_DEFAULT_PTR" ] || { mc_sel_name="$MC_DEFAULT_PTR"; MC_FROM_DEFAULT=1; }
+  else
+    MC_DEFAULT_PROBLEM="$MC_REFUSAL"
+  fi
+fi
+if [ -z "$MC_DEFAULT_PROBLEM" ] && ! mc_load_settings "$mc_sel_name" "${MCOMP_CONFIG:-}"; then
+  [ "$MC_FROM_DEFAULT" = 1 ] || { printf '%s\n' "metacomputer: $MC_REFUSAL" >&2; exit 1; }
+  MC_DEFAULT_PROBLEM="config/default-vm makes $mc_sel_name your default computer, but: $MC_REFUSAL"
+fi
+if [ -n "$MC_DEFAULT_PROBLEM" ]; then
+  if [ "${MC_DEFAULT_MODE:-}" != soft ]; then
+    printf '%s\n' "metacomputer: $MC_DEFAULT_PROBLEM." "It never falls back to another VM, so nothing was done. Choose your default: metacomputer default NAME (metacomputer list shows the VMs; metacomputer default $(mc_main_identity | head -1) goes back to $([ -f "$MC_MAIN_CONFIG" ] && echo "config/local.env's VM" || echo "the main VM")), or name one: metacomputer --vm NAME ..." >&2
+    exit 1
+  fi
+  mc_sel_name=""; MC_FROM_DEFAULT=0
+  export MCOMP_NO_DEFAULT_VM=1
+  mc_load_settings "" "${MCOMP_CONFIG:-}" || { printf '%s\n' "metacomputer: $MC_REFUSAL" >&2; exit 1; }
+fi
 # Everything this command starts (scripts, the hub, the Python helpers, metacomputer itself) gets the same settings:
-# a VM chosen by name is passed on as its settings file.
+# a VM chosen by name (or as the default computer) is passed on as its settings file; the main VM, chosen because
+# no VM was named and there's no default computer, as MCOMP_NO_DEFAULT_VM, so a config/default-vm written meanwhile
+# can't send what it starts to another VM.
 if [ -n "$mc_sel_name" ]; then
   if [ "$LOCAL_CONFIG" = "$MC_MAIN_CONFIG" ] && [ ! -f "$MC_MAIN_CONFIG" ]; then
     export MCOMP_VM="$VM_NAME"; unset MCOMP_CONFIG
   else
     export MCOMP_CONFIG="$(mc_realpath "$LOCAL_CONFIG")"; unset MCOMP_VM
   fi
+elif [ -z "${MCOMP_CONFIG:-}" ]; then
+  export MCOMP_NO_DEFAULT_VM=1
 fi
 unset MCOMP_VM_ARG mc_sel_name
 GUEST_RUN_DIR="/home/$GUEST_USER/metacomputer-runs"
@@ -491,10 +545,11 @@ mc_cmd() { if [ "${MC_SETTINGS_KIND:-}" = vm ]; then printf 'metacomputer --vm %
 vm_notice() { # [vault]
   [ -z "${MCOMP_VM_NOTICE:-}" ] || return 0
   export MCOMP_VM_NOTICE=1
+  local why=""; [ "${MC_FROM_DEFAULT:-0}" != 1 ] || why="; your default computer, config/default-vm"
   if [ "${1:-}" = vault ]; then
-    printf '%s\n' "metacomputer: VM $VM_NAME ($MC_SETTINGS_LABEL), vault $(mc_tilde "$(mc_vault_dir)")" >&2
+    printf '%s\n' "metacomputer: VM $VM_NAME ($MC_SETTINGS_LABEL$why), vault $(mc_tilde "$(mc_vault_dir)")" >&2
   else
-    printf '%s\n' "metacomputer: VM $VM_NAME ($MC_SETTINGS_LABEL)" >&2
+    printf '%s\n' "metacomputer: VM $VM_NAME ($MC_SETTINGS_LABEL$why)" >&2
   fi
 }
 

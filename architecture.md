@@ -859,6 +859,58 @@ With an event sink configured (or a sink-change announcement still waiting),
 `start` also starts the event watcher (a detached process, like the gateway) and
 `stop` stops it; see below.
 
+## Placement and providers
+
+Every computer has a name and a place. Every one is on this Mac (`mac`); `cloud`
+is the group of providers' places, and has none.
+
+- **The default computer.** `config/default-vm` (not committed; written by
+  `metacomputer default NAME`) names the VM a command acts on when it names none: with
+  no `--vm`, `MCOMP_VM` or `MCOMP_CONFIG`, `scripts/lib.sh` chooses it exactly as `--vm
+  NAME` would, and passes it on to what the command starts as its settings file (the main
+  VM, chosen for want of a pointer, as `MCOMP_NO_DEFAULT_VM=1`), so a pointer written
+  meanwhile never moves what a command started. One reader, `lib/defaultvm.py`, reads it
+  for both sides: opened once without following a link or waiting on a FIFO, checked
+  through that descriptor to be a regular file, exactly the bytes read checked (one name on
+  one line). `lib/labconfig.py` resolves it with `scripts/lib.sh`'s own `mc_load_settings`,
+  in a bash that reads no startup file and imports no function, which hands the loaded
+  settings back as values in one strict record on a pipe of its own; Python uses them as they
+  are, never reading the file again. That pipe is a named one in a private folder, opened only
+  by the step that writes the record (nothing the resolution started holds it), and the bash
+  runs in a session of its own, killed with its whole process group on a timeout or an oversized record.
+  A pointer that doesn't resolve refuses, never another
+  VM, and never the defaults; `vm delete` refuses (without `--force`) while it can't be read,
+  and a lookup of it that fails (no permission, an I/O error) counts as that: only the reader's
+  "no such file" means there's no pointer. `default NAME` holds NAME's
+  lock (as `vm delete` does) from the check to the write. Without a pointer, the main VM
+  (`config/local.env`) is the default, as before. `MCOMP_NO_DEFAULT_VM=1` leaves it
+  out; `setup`, `update`, `version`, `each`'s `main` and `install.sh`'s build leave it out
+  too, so they always mean the main VM.
+- **Which computer.** `lib/placement.py` resolves what was said: a computer's name;
+  else a provider's name (its one computer, or the default if it's among several there);
+  else a place (`mac`, `cloud`: the default if it's there, else the one computer
+  there); else the default. More than one candidate, or none, refuses with a list or a
+  reason; so does a word that is both a computer's name and a place's. `bin/metacomputer
+  --on PLACE` matches places only (with `--vm` too, the VM must be at that place), and
+  `vm create` refuses places' names for VMs. `metacomputer list` (= `vm list`, `lib/vms.py`) shows each
+  computer's place and marks the default.
+- **Providers** (`lib/cloud/`). `adapter.py` is the interface every provider adapter
+  implements: lifecycle (create, wake, sleep, delete, status, list), transport (an SSH
+  proxy command, port forwards), snapshots, egress, connection (setup, doctor) and cost
+  (rates, estimate). A method for something the provider lacks raises `NotSupported`
+  with the reason. `capabilities.py` has the capability manifest each adapter carries
+  (the storage capabilities apart: `root_disk`, `volumes`, `snapshots`, `backup`,
+  `bucket_mount`; then sleep and wake, the egress model, port forwards, sizes,
+  regions), `PERSIST=auto|disk|volume|backup|none` (`auto`: the first the manifest
+  offers, in that order; another mode must be one it offers) and the feature map
+  (each feature, the capabilities it needs, and the reason when one is missing).
+  Two adapters are registered: `local-lume`, which describes this Mac (a persistent
+  disk, volumes and Mac folders, checkpoints, the gateway's allowlist, no cost) and
+  hands every action to the existing command (`HandledByCLI`: the lifecycle code in
+  `bin/metacomputer` and `scripts/` is what runs, unchanged), and `fake`, an in-memory
+  stand-in for the tests that never counts as a provider. `tests/test_cloud_adapters.py`
+  runs the same contract against each registered adapter.
+
 ## Event stream (optional)
 
 `lib/events.py` ([docs/events.md](docs/events.md)) sends events to sinks the

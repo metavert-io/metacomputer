@@ -1685,7 +1685,8 @@ FAIL_HINT=("The VM build stopped; its log is the newest build-*.log in ${LOG_DIR
 # offered; its own message says why it stopped.
 vm_build() {
   local rc=0
-  "$ROOT/bin/metacomputer" build "$@" || rc=$?
+  # config/local.env's VM, whichever computer config/default-vm makes the default for other commands.
+  MCOMP_NO_DEFAULT_VM=1 "$ROOT/bin/metacomputer" build "$@" || rc=$?
   [ "$rc" != 0 ] || return 0
   [ -e "${RUN_DIR:-$ROOT/.run}/build-unfinished-$VM_NAME" ] \
     || FAIL_HINT=("The VM build stopped before it began, so no VM was made or deleted; the reason is above (and in the newest build-*.log in ${LOG_DIR:-$ROOT/logs}).")

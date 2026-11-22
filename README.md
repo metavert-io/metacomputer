@@ -656,7 +656,8 @@ they're here for when you want to yourself.
 | `trace start NAME \| stop \| export NAME --out t.spec.ts` | Record browser steps; write them as a Playwright test |
 | `record start NAME`, `record stop` | Record the whole desktop |
 | `checkpoint NAME`, `restore NAME`, `reset` | Save the stopped VM, go back to a save or to the clean baseline |
-| `vm list`, `vm create NAME`, `vm delete NAME`, `--vm NAME` | Your VMs; another one beside the first; delete one; act on one |
+| `list`, `vm create NAME`, `vm delete NAME`, `--vm NAME` | Your VMs (where each is, and which is the default); another one beside the first; delete one; act on one |
+| `default [NAME]` | The VM a command acts on when it names none; make another one it |
 | `volume create\|list`, `refdisk create\|list` | Storage that outlives the VM |
 | `secrets unlock`, `secrets list` | Unlock the vault, in your own terminal; what it holds, never values |
 | `claude --token NAME`, `claude send\|read\|stop` | Claude Code inside the VM, signed in through the vault's proxy |
@@ -692,14 +693,16 @@ terminal. [docs/commands.md](docs/commands.md#configuration) lists every setting
 metacomputer vm create demo          # config/vms/demo.env, then the build (asks first)
 metacomputer --vm demo start         # or: export MCOMP_VM=demo
 metacomputer --vm demo secrets init  # demo's own vault (in your own terminal)
-metacomputer vm list                 # every VM: state, disk, ports, baseline
+metacomputer list                    # every VM: where, state, disk, ports, baseline (= vm list)
+metacomputer default demo            # a bare metacomputer now means demo (metacomputer default shows it)
 metacomputer vm delete demo          # the VM, its baseline and its settings, after you type its name
 ```
 
 Each extra VM has one settings file, `config/vms/NAME.env`, with its own names and
 ports; its SSH keys, runtime folders, vault folder and event spool are fixed by its
-name, beside the main VM's, so `--vm NAME` needs nothing else. A bare `metacomputer` still means `config/local.env`'s VM,
-and `MCOMP_CONFIG=FILE` still works; since v0.3.1 a file for another VM must set its own
+name, beside the main VM's, so `--vm NAME` needs nothing else. A bare `metacomputer` means your default computer:
+`config/local.env`'s VM unless `metacomputer default NAME` chose another (a default that doesn't resolve refuses,
+never another VM), and `MCOMP_CONFIG=FILE` still works; since v0.3.1 a file for another VM must set its own
 `SSH_DIR`, `RUN_DIR` and `LOG_DIR`, or building, resetting or deleting that VM is refused. Commands that change a VM say which one first,
 and anything unclear is refused rather than guessed: a checkout with no settings of
 its own, with other VMs in the runner, makes you say which with `--vm`. `vm delete`

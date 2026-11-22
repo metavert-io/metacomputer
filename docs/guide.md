@@ -989,6 +989,19 @@ since v0.3.1 a file for another VM must set its own `SSH_DIR`, `RUN_DIR` and
 `LOG_DIR` (as `config/local.env.example` shows), or `build`, `reset`, `restore`,
 `checkpoint`, `baseline` and `vm delete` refuse it.
 
+To make the second VM the one a bare `metacomputer` means (and the MCP server of
+Claude Code sessions started afterwards), make it your default computer:
+
+```bash
+metacomputer default staging       # config/default-vm; changes no VM
+metacomputer default               # which it is, and where its settings are
+metacomputer list                  # every VM, where it is (this Mac), * on the one commands act on
+metacomputer default metacomputer  # back to config/local.env's VM
+```
+
+A default whose settings are gone, or refused, makes commands that name no VM refuse
+until you choose another; it never falls back to another VM.
+
 Deleting one:
 
 ```bash

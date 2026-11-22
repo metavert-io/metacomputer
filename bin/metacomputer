@@ -2,11 +2,19 @@
 # metacomputer: lifecycle for a disposable Ubuntu 24.04 ARM64 XFCE desktop (Lume VM)
 # that Claude Code operates through Cua Driver's MCP server.
 #
-# Usage: metacomputer [--vm NAME] COMMAND [ARGS]     (short alias: mcomp)
+# Usage: metacomputer [--vm NAME | --on PLACE] COMMAND [ARGS]     (short alias: mcomp)
 #
 #   --vm NAME                      act on the VM NAME (its settings: config/vms/NAME.env); MCOMP_VM=NAME does the
-#                                  same. Without it: config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
-#   vm list [--json]               this checkout's VMs (settings files and the runner): state, disk, ports, baseline
+#                                  same. Without it: your default computer (metacomputer default), else
+#                                  config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
+#   --on PLACE                     act on the computer at PLACE: mac (this Mac; your default computer when it's
+#                                  there), or cloud. Every computer is on this Mac: cloud says there are none and
+#                                  does nothing. With --vm, both must agree
+#   list [--on PLACE] [--json]     every computer: where it is (WHERE), state, disk, ports, baseline; * marks the
+#                                  one these settings act on (without --vm: your default computer)
+#   default [NAME] [--json]        your default computer, the one a command acts on when none is named, and its
+#                                  settings; with NAME, make NAME it (only config/default-vm changes; no VM does)
+#   vm list [--on PLACE] [--json]  the same as list: this checkout's VMs (settings files and the runner)
 #   vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]
 #                                  a VM of its own: writes config/vms/NAME.env (ports, keys, folders, vault) and builds it
 #   vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
@@ -132,16 +140,31 @@ if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
 fi
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
-# --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same).
-MCOMP_VM_ARG=""
+# --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
+# --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
+MCOMP_VM_ARG=""; MC_ON_ARG=""; MC_ON_GIVEN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --vm) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --vm needs a VM name (metacomputer vm list)" >&2; exit 2; }
           MCOMP_VM_ARG="$2"; shift 2 ;;
     --vm=*) MCOMP_VM_ARG="${1#--vm=}"; [ -n "$MCOMP_VM_ARG" ] || { echo "metacomputer: --vm needs a VM name" >&2; exit 2; }; shift ;;
+    --on) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --on needs a place: mac (this Mac) or cloud" >&2; exit 2; }
+          MC_ON_ARG="$2"; MC_ON_GIVEN=1; shift 2 ;;
+    --on=*) MC_ON_ARG="${1#--on=}"; MC_ON_GIVEN=1; [ -n "$MC_ON_ARG" ] || { echo "metacomputer: --on needs a place: mac (this Mac) or cloud" >&2; exit 2; }; shift ;;
     *) break ;;
   esac
 done
+MC_VM_SAID="$MCOMP_VM_ARG"; MC_ENV_VM="${MCOMP_VM:-}"; MC_ENV_CONFIG="${MCOMP_CONFIG:-}"; MC_ENV_NODEF="${MCOMP_NO_DEFAULT_VM:-}"
+MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"
+# The default computer (config/default-vm) is read by scripts/lib.sh as the VM a command acts on when none is named.
+# `default` and `help` read or change it themselves, whatever it says, and `setup`, `update` and `version` are about
+# this checkout and its main VM (config/local.env); the listings report a default that doesn't resolve.
+MC_DEFAULT_MODE=""
+case "${1:-help}" in
+  default|help|-h|--help|setup|update|version) MC_DEFAULT_MODE=off ;;
+  list) MC_DEFAULT_MODE=soft ;;
+  vm) case "${2:-list}" in list|help|-h|--help) MC_DEFAULT_MODE=soft ;; esac ;;
+esac
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
 # A caller that confirmed a VM (learn bench, the benchmark) names it in MCOMP_EXPECT_VM, and the hub pins the VM it
@@ -168,9 +191,33 @@ fi
 unset mc_hint
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
+# --on PLACE: lib/placement.py resolves it against this checkout's computers (every one is on this Mac) and the
+# default computer; a VM chosen as well (--vm, MCOMP_VM, MCOMP_CONFIG) must be at PLACE. A place with no computer
+# there, or an unclear one, refuses before anything runs.
+on_resolve() {
+  local args=(--on "$MC_ON_ARG") n r main
+  main="$(mc_main_identity | head -1)"
+  [ -z "$main" ] || args+=(--computer "$main=mac")
+  for n in $(mc_vm_files); do args+=(--computer "$n=mac"); done
+  args+=(--computer "$VM_NAME=mac")
+  if [ -n "$MC_VM_SAID$MC_ENV_SAID" ]; then
+    args+=(--vm "$VM_NAME")
+  elif [ "${MC_IMPLICIT:-0}" != 1 ] && [ -z "${MC_DEFAULT_PROBLEM:-}" ]; then
+    args+=(--default "$VM_NAME")
+  fi
+  r="$("$PY" "$LAB_ROOT/lib/placement.py" resolve "${args[@]}")" || exit 1
+  [ "$r" = "$VM_NAME" ] || die "--on $MC_ON_ARG means the computer $r, but these settings are $VM_NAME's; say which: metacomputer --vm $r ...; nothing was done"
+}
+if [ "$MC_ON_GIVEN" = 1 ]; then
+  case "$cmd" in
+    help|-h|--help) ;;
+    default) die "metacomputer default takes the computer's name, without --on or --vm: metacomputer default NAME" ;;
+    *) on_resolve ;;
+  esac
+fi
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
-case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions|version|agents) ;; *) vm_target_check ;; esac
+case "$cmd" in help|-h|--help|where|setup|vm|list|default|events|notify|learn|actions|version|agents) ;; *) vm_target_check ;; esac
 case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
@@ -2250,6 +2297,9 @@ case "$cmd" in
   checkpoint) do_checkpoint "$@" ;;
   checkpoints) do_checkpoints ;;
   vm)         . "$LAB_ROOT/scripts/vm-commands.sh"; do_vm "$@" ;;
+  list)       . "$LAB_ROOT/scripts/vm-commands.sh"; vm_list "$@" ;;
+  default)    [ -z "$MC_VM_SAID" ] || die "metacomputer default takes the computer's name, without --on or --vm: metacomputer default NAME"
+              . "$LAB_ROOT/scripts/vm-commands.sh"; vm_default "$@" ;;
   volume|refdisk) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/storage.py" "$cmd" "$@" ;;
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;

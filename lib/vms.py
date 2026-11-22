@@ -3,7 +3,10 @@
 bin/metacomputer (scripts/vm-commands.sh) gathers this checkout's settings files, each resolved the way every
 command resolves them (scripts/lib.sh), and the runner's list (`lume ls --format json`); this merges the two.
 
-    vms.py list --settings ROWS.jsonl (--runner LIST.json | --runner-failed) [--selected NAME] [--json]
+    vms.py list --settings ROWS.jsonl (--runner LIST.json | --runner-failed) [--selected NAME] [--default NAME]
+               [--default-problem TEXT] [--overridden-by TEXT] [--on PLACE] [--json]
+                                               `metacomputer list` / `vm list`: every computer, where it is (all on
+                                               this Mac: lib/placement.py), the one these settings act on, the default
     vms.py facts NAME BASELINE < LIST.json      KEY=VALUE lines: the VM, its baseline, its previous one, checkpoints
     vms.py identity --home HOME [--no-ports] < RECORDS
                                                the identity rule: one VM's names, ports and folders against every
@@ -332,8 +335,12 @@ def facts(runner, name, baseline):
     return f
 
 
-def build(rows, runner, selected=None):
-    """The listing: this checkout's VMs (one per settings file), the runner's other VMs, and problems."""
+def build(rows, runner, selected=None, default=None, on=None, default_problem=None, overridden_by=None):
+    """The listing: this checkout's VMs (one per settings file), the runner's other VMs, and problems. Each VM has a
+    place (every one here is on this Mac) and says whether it's the default computer (`default`, a name); `on`
+    keeps only the computers at that place (lib/placement.py), and one with none there says so in `note`."""
+    # Imported here, not above: lib/safedelete.py imports this module for the identity rule, under any python3.
+    import placement
     idx = runner_index(runner)
     claimed = set()
     vms, problems = [], []
@@ -341,7 +348,9 @@ def build(rows, runner, selected=None):
     for r in rows:
         name = r.get("vm") or ""
         item = {"name": name or None, "settings": r.get("file"), "kind": r.get("kind"), "error": r.get("error"),
-                "selected": bool(r.get("ok") and selected and name == selected)}
+                "selected": bool(r.get("ok") and selected and name == selected),
+                "place": placement.MAC, "where": placement.label(placement.MAC),
+                "default": bool(r.get("ok") and default and name == default)}
         if r.get("ok"):
             base = r.get("baseline") or ""
             prev = base + "-prev"
@@ -384,33 +393,81 @@ def build(rows, runner, selected=None):
         for n in rest:
             if n in copies:
                 continue
-            o = {"name": n, "state": idx[n]["state"], "disk_bytes": idx[n]["bytes"], "copies": []}
+            o = {"name": n, "state": idx[n]["state"], "disk_bytes": idx[n]["bytes"], "copies": [],
+                 "place": placement.MAC, "where": placement.label(placement.MAC)}
             for c in sorted(owners.get(n, [])):
                 o["copies"].append({"name": c, "disk_bytes": idx[c]["bytes"]})
             other.append(o)
-    return {"vms": vms, "other": other, "selected": selected or None, "runner_ok": runner is not None,
-            "problems": problems}
+    # A VM named like a place (made by hand: vm create refuses those names) is never what --on means.
+    for v in vms:
+        if v.get("name") and placement.place_name(v["name"]):
+            problems.append(f"the VM {v['name']} has a place's name: --on {v['name'].lower()} means the place, never "
+                            f"this VM; name it with --vm {v['name']}")
+    # The default computer (config/default-vm's, or the main VM's) must be one of these, with settings that load.
+    broken = bool(default_problem)
+    if default and not any(v["default"] for v in vms):
+        broken = True
+        if default_problem:
+            pass                                     # why, as scripts/lib.sh found it (below)
+        elif any(v.get("error") and v.get("name") == default for v in vms):
+            problems.append(f"your default computer, {default} (config/default-vm), has settings that are refused "
+                            "(above), so a command that names no VM refuses: metacomputer default NAME chooses another")
+        else:
+            problems.append(f"config/default-vm makes {default} your default computer, but this checkout has no "
+                            f"settings for it, so a command that names no VM refuses: metacomputer default NAME "
+                            "chooses another")
+    if default_problem:
+        problems.append(default_problem)
+    note = None
+    if on:
+        where = on.strip().lower()
+        vms = [v for v in vms if placement.is_place(where) and placement.at(v["place"], where)]
+        other = [o for o in other if placement.is_place(where) and placement.at(o["place"], where)]
+        if not vms and not other:
+            note = placement.nothing_at(on)
+    return {"vms": vms, "other": other, "selected": selected or None, "default": default or None,
+            "default_broken": broken, "overridden_by": overridden_by or None, "on": on or None, "note": note,
+            "runner_ok": runner is not None, "problems": problems}
 
 
 def render(listing):
     lines = []
-    head = ("", "VM", "STATE", "DISK", "BASELINE", "SSH", "VNC", "SETTINGS")
+    head = ("", "VM", "WHERE", "STATE", "DISK", "BASELINE", "SSH", "VNC", "SETTINGS")
     rows = []
     for v in listing["vms"]:
         if v.get("error"):
-            rows.append(("", esc(v.get("name") or "?"), "settings refused", "", "", "", "", esc(v.get("settings") or "")))
+            rows.append(("", esc(v.get("name") or "?"), esc(v["where"]), "settings refused", "", "", "", "",
+                         esc(v.get("settings") or "")))
             continue
         b = v["baseline"]
         base = human(b["disk_bytes"]) if b["present"] else "none"
         if v["checkpoints"]:
             base += f" +{len(v['checkpoints'])} ckpt"
-        rows.append(("*" if v["selected"] else "", esc(v["name"]), esc(v["state"]), human(v["disk_bytes"]), base,
-                     esc(str(v["ssh_port"])), esc(str(v["vnc_port"])), esc(v["settings"] or "")))
+        rows.append(("*" if v["selected"] else "", esc(v["name"]), esc(v["where"]), esc(v["state"]),
+                     human(v["disk_bytes"]), base, esc(str(v["ssh_port"])), esc(str(v["vnc_port"])),
+                     esc(v["settings"] or "")))
+    if listing.get("note"):
+        lines.append(esc(listing["note"]))
+        for p in listing["problems"]:
+            lines.append(f"! {esc(p)}")
+        return "\n".join(lines)
     widths = [max(len(r[i]) for r in [head, *rows]) for i in range(len(head))]
     for r in [head, *rows]:
         lines.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
-    if listing["selected"]:
-        lines.append(f"* the VM these settings act on ({esc(listing['selected'])}); another: metacomputer --vm NAME ...")
+    sel, dflt = listing["selected"], listing.get("default")
+    if sel and sel == dflt:
+        lines.append(f"* your default computer ({esc(sel)}): what a command acts on when no VM is named; another: "
+                     "metacomputer --vm NAME ..., or metacomputer default NAME to change it")
+    elif sel:
+        by = f", chosen by {esc(listing['overridden_by'])}" if listing.get("overridden_by") else ""
+        about = ""
+        if dflt and listing.get("default_broken"):
+            about = f" Your default computer, {esc(dflt)}, doesn't resolve (below)."
+        elif dflt:
+            about = f" Your default computer is {esc(dflt)} (metacomputer default)."
+        lines.append(f"* the VM these settings act on ({esc(sel)}{by}); another: metacomputer --vm NAME ...{about}")
+    elif listing.get("default_broken"):
+        lines.append("no VM is chosen here without --vm NAME: your default computer doesn't resolve (below)")
     else:
         lines.append("no VM is chosen here without --vm NAME (this checkout has no config/local.env, and there's more "
                      "than one to choose from)")
@@ -443,6 +500,10 @@ def main(argv=None):
     g.add_argument("--runner")
     g.add_argument("--runner-failed", action="store_true")
     p.add_argument("--selected", default="")
+    p.add_argument("--default", default="")
+    p.add_argument("--default-problem", default="")
+    p.add_argument("--overridden-by", default="")
+    p.add_argument("--on", default="")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("facts")
     p.add_argument("name")
@@ -509,7 +570,8 @@ def main(argv=None):
                 runner = None
         except (OSError, ValueError):
             runner = None
-    listing = build(rows, runner, a.selected or None)
+    listing = build(rows, runner, a.selected or None, a.default or None, a.on or None, a.default_problem or None,
+                    a.overridden_by or None)
     print(json.dumps(listing, indent=2) if a.json else render(listing))
     return 0 if listing["runner_ok"] else 1
 

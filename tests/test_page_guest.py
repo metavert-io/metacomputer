@@ -259,6 +259,8 @@ check("…at the same time (4 VMs of 1 s each in well under 4 s)", took < 2.5, t
 os.environ["MCOMP_VM"], os.environ["MCOMP_CONFIG"] = "other", "/tmp/other.env"
 check("each's children don't inherit a VM picked by the caller (MCOMP_VM, MCOMP_CONFIG)",
       "MCOMP_VM" not in each.child_env() and "MCOMP_CONFIG" not in each.child_env())
+check("...and main is config/local.env's VM whatever the default computer is (MCOMP_NO_DEFAULT_VM)",
+      each.child_env().get("MCOMP_NO_DEFAULT_VM") == "1")
 del os.environ["MCOMP_VM"], os.environ["MCOMP_CONFIG"]
 kstub = os.path.join(TD, "each-kill")
 with open(kstub, "w") as f:

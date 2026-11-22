@@ -63,8 +63,10 @@ def git_env():
 
 
 def clean_env(**extra):
-    """The environment for this checkout's own commands: no VM picked by the caller, none of its GIT_*."""
+    """The environment for this checkout's own commands: no VM picked by the caller, none of its GIT_*, and the
+    default computer (config/default-vm) left out, so a command without --vm is the main VM's (config/local.env)."""
     env = {k: v for k, v in os.environ.items() if k not in SELECTION and not k.startswith("GIT_")}
+    env["MCOMP_NO_DEFAULT_VM"] = "1"
     env.update(extra)
     return env
 

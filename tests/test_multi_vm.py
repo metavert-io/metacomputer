@@ -107,8 +107,8 @@ class Box:
         os.makedirs(os.path.join(self.co, "config"))
         for f in os.listdir(os.path.join(LAB, "config")):
             src = os.path.join(LAB, "config", f)
-            if f in ("local.env", "vms") or f.endswith(".local.env"):
-                continue                        # never this Mac's own settings
+            if f in ("local.env", "vms", "default-vm") or f.endswith(".local.env") or f.startswith(".default-vm."):
+                continue                        # never this Mac's own settings (nor its default computer)
             (shutil.copytree if os.path.isdir(src) else shutil.copy)(src, os.path.join(self.co, "config", f))
         self.home = os.path.join(self.root, "home")
         write(os.path.join(self.home, ".local", "bin", "mcomp-vm"), FAKE_RUNNER.replace("/usr/bin/env python3", PY), 0o755)
@@ -164,7 +164,8 @@ class Box:
                   'printf "%s\\n" "VM_NAME=$VM_NAME" "BASELINE_NAME=$BASELINE_NAME" "SSH_DIR=$SSH_DIR" '
                   '"SSH_PORT=$SSH_PORT" "VNC_PORT=$VNC_PORT" "RUN_DIR=$RUN_DIR" "LOG_DIR=$LOG_DIR" '
                   '"VAULT=$(mc_vault_dir)" "VAULT_DIR=$VAULT_DIR" "EVENTS_SPOOL=$EVENTS_SPOOL" "LOCAL_CONFIG=$LOCAL_CONFIG" '
-                  '"KIND=$MC_SETTINGS_KIND" "IMPLICIT=$MC_IMPLICIT" "X_CONFIG=${MCOMP_CONFIG:-}" "X_VM=${MCOMP_VM:-}"')
+                  '"KIND=$MC_SETTINGS_KIND" "IMPLICIT=$MC_IMPLICIT" "X_CONFIG=${MCOMP_CONFIG:-}" "X_VM=${MCOMP_VM:-}" '
+                  '"FROM_DEFAULT=${MC_FROM_DEFAULT:-}" "X_NODEF=${MCOMP_NO_DEFAULT_VM:-}"')
         r = subprocess.run(["/bin/bash", "-c", script, "_", vm_arg, self.co], env=self.env(**env),
                            capture_output=True, text=True, timeout=60)
         out = dict(ln.split("=", 1) for ln in r.stdout.splitlines() if "=" in ln)
@@ -412,6 +413,1034 @@ def listing(td):
         check("a runner list that fails: the settings still shown, exit 1", r.returncode == 1 and "demo" in r.stdout
               and "couldn't list the VMs" in r.stdout, r.stdout)
     finally:
+        b.close()
+
+# lib/labconfig.py as a standalone helper loads it: "OK FILE VM_NAME", or "REFUSED why".
+PY_CHOICE = r"""
+import os, sys
+sys.path.insert(0, sys.argv[1])
+try:
+    import labconfig
+except ValueError as e:
+    print("REFUSED " + str(e))
+    sys.exit()
+print("OK " + os.path.realpath(labconfig.settings_path()) + " " + labconfig.CONFIG.get("VM_NAME", ""))
+"""
+
+
+def json_of(r):
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def default_computer(td):
+    """The default computer: config/default-vm, read strictly and resolved exactly as --vm NAME (bash and Python
+    agree), `metacomputer default [NAME]`, `list` (WHERE, the default), `--on PLACE`, and the commands that mean
+    config/local.env's VM whatever the default is (each's main, MCOMP_NO_DEFAULT_VM)."""
+    b = Box(td, "default")
+    try:
+        co = b.co
+        ptr = os.path.join(co, "config", "default-vm")
+        b.settings("config/local.env", "VM_NAME=mainvm\nBASELINE_NAME=mainvm-baseline\n")
+        demo = b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.set_vms([vm("mainvm", "running", 12), vm("mainvm-baseline", gb=4), vm("demo", gb=6)])
+        main_cfg = os.path.join(co, "config", "local.env")
+
+        def put(data):
+            if os.path.islink(ptr) or os.path.isfile(ptr):
+                os.remove(ptr)
+            elif os.path.isdir(ptr):
+                os.rmdir(ptr)
+            if data is not None:
+                with open(ptr, "wb") as f:
+                    f.write(data)
+
+        rc, s, err = b.resolve()
+        check("no config/default-vm: config/local.env's VM, as before", rc == 0 and s.get("VM_NAME") == "mainvm"
+              and s.get("KIND") == "local" and s.get("FROM_DEFAULT") == "0" and s.get("X_CONFIG") == "", (rc, s, err))
+        for data, how in ((b"demo\n", "with a newline"), (b"demo", "without one")):
+            put(data)
+            rc, s, err = b.resolve()
+            check(f"config/default-vm naming demo ({how}): demo, exactly as --vm demo", rc == 0
+                  and s.get("VM_NAME") == "demo" and s.get("KIND") == "vm" and s.get("FROM_DEFAULT") == "1"
+                  and {k: v for k, v in s.items() if k != "FROM_DEFAULT"}
+                  == {k: v for k, v in b.resolve("demo")[1].items() if k != "FROM_DEFAULT"}, (rc, s, err))
+        check("...passed on to what it starts as its settings file (MCOMP_CONFIG)",
+              os.path.realpath(s.get("X_CONFIG", "")) == os.path.realpath(demo), s)
+        for args, env, want, what in ((("mainvm",), {}, "mainvm", "--vm"), ((), {"MCOMP_VM": "mainvm"}, "mainvm", "MCOMP_VM"),
+                                      ((), {"MCOMP_CONFIG": main_cfg}, "mainvm", "MCOMP_CONFIG"),
+                                      ((), {"MCOMP_NO_DEFAULT_VM": "1"}, "mainvm", "MCOMP_NO_DEFAULT_VM=1")):
+            rc, s, err = b.resolve(*args, **env)
+            check(f"...{what} wins over it", rc == 0 and s.get("VM_NAME") == want and s.get("FROM_DEFAULT") == "0", (rc, s, err))
+        put(b"mainvm\n")
+        rc, s, err = b.resolve()
+        check("config/default-vm naming the main VM: config/local.env", rc == 0 and s.get("KIND") == "local"
+              and s.get("VM_NAME") == "mainvm", (rc, s, err))
+        put(b"nosuch\n")
+        rc, s, err = b.resolve()
+        check("config/default-vm naming a VM with no settings: refused, never another VM", rc == 1 and not s
+              and "config/default-vm makes nosuch your default computer" in err and "never falls back" in err
+              and "metacomputer default NAME" in err, err)
+        b.settings("config/vms/clash.env", "SSH_PORT=2277\nVNC_PORT=6111\n")
+        put(b"clash\n")
+        rc, s, err = b.resolve()
+        check("...or one whose settings are refused (--vm's refusals apply): refused, with the reason", rc == 1
+              and "port 2277" in err and "config/default-vm makes clash" in err, err)
+        os.remove(os.path.join(co, "config/vms/clash.env"))
+        shapes = [(b"demo\n\n", "two newlines"), (b"demo \n", "a space"), (b" demo\n", "a leading space"),
+                  (b"demo\r\n", "a carriage return"), (b"de\0mo\n", "a NUL"), (b"", "empty"), (b"\n", "only a newline"),
+                  (b"demo\nmainvm\n", "two lines"), (b"-x\n", "a name starting with '-'"), (b".x\n", "a name starting with '.'"),
+                  (b"x" * 65 + b"\n", "65 characters"), (b"d\xc3\xa9mo\n", "a non-ASCII letter"), (b"demo\nx", "text after the line")]
+        for data, how in shapes:
+            put(data)
+            rc, s, err = b.resolve()
+            check(f"config/default-vm with {how}: refused", rc == 1 and not s and "one VM name on one line" in err, (rc, err))
+        put(None)
+        os.symlink(demo, ptr)
+        rc, s, err = b.resolve()
+        check("config/default-vm as a link: refused", rc == 1 and "isn't a plain file" in err, err)
+        os.remove(ptr)
+        os.mkdir(ptr)
+        rc, s, err = b.resolve()
+        check("...as a folder: refused", rc == 1 and "isn't a plain file" in err, err)
+        os.rmdir(ptr)
+        put(b"x" * 64 + b"\n")
+        rc, s, err = b.resolve()
+        check("...a 64-character name is read (and refused for having no settings)", rc == 1 and "x" * 64 in err, err)
+
+        # The Python side picks the same file, or refuses where bash does: lib/labconfig.py in a process of its own,
+        # with the box's environment (its runner, its HOME), as a standalone Python helper would run.
+        def py_choice(**env):
+            r = subprocess.run([PY, "-B", "-c", PY_CHOICE, os.path.join(co, "lib")], env=b.env(**env),
+                               capture_output=True, text=True, timeout=120)
+            return r.stdout.strip()
+
+        def sh_choice(**env):
+            rc, s, err = b.resolve(**env)
+            return f"OK {os.path.realpath(s.get('LOCAL_CONFIG', ''))} {s.get('VM_NAME')}" if rc == 0 else "REFUSED"
+
+        def agree_on(cases):
+            bad = []
+            for data, env in cases:
+                put(data)
+                sh, py = sh_choice(**env), py_choice(**env)
+                if (py.split(" ", 1)[0] if py.startswith("REFUSED") else py) != sh:
+                    bad.append((data, env, sh, py[-300:]))
+            return bad
+        cases = [(b"demo\n", {}), (b"demo", {}), (b"mainvm\n", {}), (b"nosuch\n", {}), (b"demo\n", {"MCOMP_VM": "mainvm"}),
+                 (b"demo\n", {"MCOMP_NO_DEFAULT_VM": "1"}), (None, {})] + [(d, {}) for d, _ in shapes]
+        bad = agree_on(cases)
+        check("lib/labconfig.py chooses the same settings as scripts/lib.sh for every pointer (or refuses where it does)",
+              not bad, bad)
+        # Targets bash refuses for what's in them: Python must refuse them too, never load them as they are.
+        targets = {"idm": "VM_NAME=mainvm\nSSH_PORT=2461\nVNC_PORT=6161\n", "portc": "SSH_PORT=2277\nVNC_PORT=6162\n",
+                   "setsdir": "SSH_PORT=2464\nVNC_PORT=6164\nSSH_DIR=/tmp/mc-x\n", "noports": "VM_HOSTNAME=x\n",
+                   "shadow": "SSH_PORT=2401\nVNC_PORT=6165\n", "badbase": "SSH_PORT=2466\nVNC_PORT=6166\nBASELINE_NAME=mainvm-baseline\n"}
+        for n, text in targets.items():
+            b.settings(f"config/vms/{n}.env", text)
+            bad = agree_on([(f"{n}\n".encode(), {})])
+            check(f"...a pointer to config/vms/{n}.env, which bash refuses ({text.splitlines()[0]}...): Python refuses too",
+                  not bad and py_choice().startswith("REFUSED") and "config/default-vm makes " + n in py_choice(), (bad, py_choice()))
+            os.remove(os.path.join(co, f"config/vms/{n}.env"))
+        b.settings("config/vms/badparse.env", "SSH_PORT=2467\nVNC_PORT=6167\nif [\n")
+        bad = agree_on([(b"demo\n", {}), (b"badparse\n", {})])
+        check("...a pointer to demo while another VM's settings can't be read (bash refuses demo then): Python refuses too",
+              not bad and py_choice().startswith("REFUSED"), (bad, py_choice()))
+        os.remove(os.path.join(co, "config/vms/badparse.env"))
+        put(b"demo\n")
+        out = py_choice()
+        check("...and with a pointer that resolves, its settings are demo's", out.endswith(" demo") and "demo.env" in out, out)
+        put(b"nosuch\n")
+        out = py_choice()
+        check("...with one that doesn't, loading the settings is refused (never another VM's)",
+              out.startswith("REFUSED") and "config/default-vm makes nosuch" in out, out)
+        put(None)
+
+        # metacomputer default
+        r = b.run("default")
+        check("default, with no config/default-vm: the main VM and its settings", r.returncode == 0
+              and "mainvm (this Mac, config/local.env) is your default computer" in r.stdout, r.stdout + r.stderr)
+        d = json_of(b.run("default", "--json"))
+        check("...--json", d.get("default") == "mainvm" and d.get("pointer") is None and d.get("settings") == "config/local.env"
+              and d.get("place") == "mac" and d.get("ok") is True, d)
+        open(b.log, "w").close()
+        r = b.run("default", "demo")
+        check("default demo: written, saying so", r.returncode == 0 and "demo (this Mac, config/vms/demo.env) is now your default computer"
+              in r.stdout and open(ptr, "rb").read() == b"demo\n" and os.path.isfile(ptr) and not os.path.islink(ptr),
+              r.stdout + r.stderr)
+        check("...in one step (no temporary file left in config/)", sorted(os.listdir(os.path.join(co, "config"))) ==
+              sorted(f for f in os.listdir(os.path.join(co, "config")) if not f.startswith(".default-vm")))
+        check("...and no VM was started, stopped or changed", not any(ln.split()[0] in ("run", "stop", "delete", "create")
+                                                                   for ln in open(b.log).read().splitlines() if ln), open(b.log).read())
+        d = json_of(b.run("default", "--json"))
+        check("default --json: demo, config/vms/demo.env, config/default-vm", d.get("default") == "demo"
+              and d.get("settings") == "config/vms/demo.env" and d.get("pointer") == "config/default-vm", d)
+        before = os.stat(ptr).st_mtime_ns
+        r = b.run("default", "demo")
+        check("default demo again: already, and nothing written", r.returncode == 0 and "already" in r.stdout
+              and os.stat(ptr).st_mtime_ns == before, r.stdout)
+        for name, words in (("nosuch", "no settings for a VM named nosuch"), ("../x", "isn't a VM name")):
+            r = b.run("default", name)
+            check(f"default {name}: refused, config/default-vm left as it was", r.returncode == 1 and words in r.stderr
+                  and open(ptr, "rb").read() == b"demo\n", r.stderr)
+        b.settings("config/vms/wrong.env", "VM_NAME=mainvm\nSSH_PORT=2402\nVNC_PORT=6102\n")
+        r = b.run("default", "wrong")
+        check("default NAME whose settings are refused: refused with the reason", r.returncode == 1
+              and "names the VM 'mainvm'" in r.stderr and open(ptr, "rb").read() == b"demo\n", r.stderr)
+        os.remove(os.path.join(co, "config/vms/wrong.env"))
+        for args in (("--vm", "demo", "default"), ("--on", "mac", "default"), ("default", "demo", "mainvm"), ("default", "--x")):
+            r = b.run(*args)
+            check(f"{' '.join(args)}: refused", r.returncode != 0 and open(ptr, "rb").read() == b"demo\n", r.stderr)
+
+        # With the default set, every command acts on it.
+        r = b.run("secrets", "status")
+        check("with demo the default: secrets reaches demo's vault, and the notice says it's the default",
+              f"dir={b.app}/demo " in r.stdout and "VM demo (config/vms/demo.env; your default computer, config/default-vm)"
+              in r.stderr, r.stdout + r.stderr)
+        he = json_of(b.run("hub", "env"))
+        check("...the Python helpers get demo's settings", he.get("MCOMP_VM_NAME") == "demo" and he.get("MCOMP_SSH_PORT") == "2401", he)
+        he = json_of(b.run("hub", "env", env=b.env(MCOMP_VM="mainvm")))
+        check("...MCOMP_VM=mainvm still picks the main VM", he.get("MCOMP_VM_NAME") == "mainvm", he)
+        r = b.run("each", "main,demo", "--", "hub", "env")
+        check("each main,demo: main is still config/local.env's VM", r.returncode == 0 and '"MCOMP_VM_NAME": "mainvm"' in r.stdout
+              and '"MCOMP_VM_NAME": "demo"' in r.stdout, r.stdout[-600:] + r.stderr)
+
+        # list / vm list
+        r1, r2 = b.run("list"), b.run("vm", "list")
+        check("list is vm list", r1.returncode == 0 and r1.stdout == r2.stdout, (r1.stdout, r2.stdout))
+        lines = r1.stdout.splitlines()
+        check("...with a WHERE column, this Mac for each", lines[0].split()[:3] == ["VM", "WHERE", "STATE"]
+              and all("this Mac" in ln for ln in lines[1:3]), r1.stdout)
+        check("...the default marked *, and said", any(ln.startswith("*") and " demo " in ln for ln in lines)
+              and "your default computer (demo)" in r1.stdout, r1.stdout)
+        d = json_of(b.run("list", "--json"))
+        by = {v["name"]: v for v in d.get("vms", [])}
+        check("list --json: place, where and default, and the fields it had", d.get("default") == "demo"
+              and by.get("demo", {}).get("default") is True and by.get("mainvm", {}).get("default") is False
+              and all(v.get("place") == "mac" and v.get("where") == "this Mac" for v in by.values())
+              and all(k in by.get("demo", {}) for k in ("name", "settings", "kind", "error", "selected", "state", "disk_bytes",
+                                                         "baseline", "checkpoints", "ssh_port", "vnc_port", "vault", "spool", "volumes"))
+              and by["demo"]["selected"] is True, d)
+        r = b.run("--vm", "mainvm", "list")
+        check("--vm mainvm list: * marks mainvm, and says demo is the default", r.returncode == 0
+              and any(ln.startswith("*") and " mainvm " in ln for ln in r.stdout.splitlines())
+              and "Your default computer is demo" in r.stdout, r.stdout)
+        check("list --on mac: the same computers", json_of(b.run("list", "--on", "mac", "--json")).get("vms") == d.get("vms"))
+        for place in ("cloud", "fly", "cloudflare"):
+            r = b.run("list", "--on", place)
+            dj = json_of(b.run("list", "--on", place, "--json"))
+            check(f"list --on {place}: none, saying this metacomputer has no cloud computers set up", r.returncode == 0
+                  and "has no cloud computers set up" in r.stdout and dj.get("vms") == [] and dj.get("other") == []
+                  and "no cloud computers" in (dj.get("note") or ""), (r.stdout, dj))
+
+        # --on PLACE
+        open(b.log, "w").close()
+        for place in ("cloud", "fly", "cloudflare", "Cloud"):
+            r = b.run("--on", place, "status")
+            check(f"--on {place} status: refused, this metacomputer has no cloud computers set up, nothing run",
+                  r.returncode == 1 and "has no cloud computers set up" in r.stderr and "nothing was done" in r.stderr
+                  and r.stdout == "", r.stdout + r.stderr)
+        check("...and the runner only read its settings (loading demo's, as for --vm demo): no VM was listed or touched",
+              set(open(b.log).read().splitlines()) <= {"config get"}, open(b.log).read())
+        he = json_of(b.run("--on", "mac", "hub", "env"))
+        check("--on mac: the default computer (demo)", he.get("MCOMP_VM_NAME") == "demo", he)
+        he = json_of(b.run("--vm", "mainvm", "--on", "mac", "hub", "env"))
+        check("--vm mainvm --on mac: they agree, mainvm", he.get("MCOMP_VM_NAME") == "mainvm", he)
+        r = b.run("--vm", "mainvm", "--on", "cloud", "hub", "env")
+        check("--vm mainvm --on cloud: refused, they disagree", r.returncode == 1 and "disagree" in r.stderr
+              and "mainvm is on this Mac" in r.stderr and r.stdout == "", r.stderr)
+        r = b.run("--on", "demo", "hub", "env")
+        check("--on with a computer's name: refused, pointing at --vm", r.returncode == 1 and "--vm demo" in r.stderr, r.stderr)
+        r = b.run("--on", "", "hub", "env")
+        check("--on with nothing: a usage error", r.returncode == 2, r.stderr)
+
+        # A pointer that doesn't resolve: commands refuse; the listings, default and help still work.
+        put(b"nosuch\n")
+        r = b.run("checkpoints")
+        check("a default with no settings: a command refuses, saying how to fix it", r.returncode == 1
+              and "config/default-vm makes nosuch" in r.stderr and "metacomputer default mainvm" in r.stderr, r.stderr)
+        r = b.run("list")
+        check("...list still works, marks nothing chosen, and says why", r.returncode == 0
+              and not any(ln.startswith("*") for ln in r.stdout.splitlines()) and "doesn't resolve" in r.stdout
+              and "config/default-vm makes nosuch" in r.stdout, r.stdout + r.stderr)
+        d = json_of(b.run("list", "--json"))
+        check("...list --json: the default it names, marked broken, nothing selected, the problem listed", d.get("selected") is None
+              and d.get("default") == "nosuch" and d.get("default_broken") is True
+              and any("nosuch" in p for p in d.get("problems", [])), d)
+        r = b.run("default")
+        check("...default says what's wrong (exit 1)", r.returncode == 1 and "config/default-vm makes nosuch" in r.stderr, r.stderr)
+        check("...help works", b.run("help").returncode == 0)
+        r = b.run("default", "mainvm")
+        check("...default mainvm fixes it: config/default-vm removed", r.returncode == 0 and "removed" in r.stdout
+              and not os.path.lexists(ptr), r.stdout + r.stderr)
+        r = b.run("default", "mainvm")
+        check("...and again: already the default, nothing to remove", r.returncode == 0 and "already" in r.stdout, r.stdout)
+        put(b"demo\r\n")
+        r = b.run("--vm", "demo", "list")
+        check("a malformed pointer is shown by list even with --vm", r.returncode == 0 and "one VM name on one line" in r.stdout, r.stdout)
+        put(b"demo\n")
+        r = b.run("vm", "delete", "demo", "--confirm", "demo")
+        check("vm delete of the default computer: refused without --force", r.returncode == 1
+              and "your default computer" in r.stderr and b.deletes() == [], r.stderr)
+        put(None)
+
+        put(b"demo\n")
+        r = b.run("setup")
+        check("setup with demo the default: still the main VM's (it asks for a terminal, not for --vm)",
+              r.returncode == 3 and "no terminal here to ask on" in r.stderr, r.stderr)
+        put(b"nosuch\n")
+        r = b.run("setup")
+        check("...and with a default that doesn't resolve, setup still runs", r.returncode == 3, r.stderr)
+        put(None)
+        r = b.run("default", env=b.env(MCOMP_VM="demo"))
+        check("default in a shell with MCOMP_VM set: the default, and that MCOMP_VM chooses instead here",
+              r.returncode == 0 and "mainvm (this Mac, config/local.env) is your default computer" in r.stdout
+              and "MCOMP_VM=demo chooses the VM instead" in r.stdout, r.stdout + r.stderr)
+
+        # A checkout with no config/local.env and two VMs: no default, and --on mac can't tell which.
+        os.remove(main_cfg)
+        r = b.run("--on", "mac", "checkpoints")
+        check("no config/local.env, two VMs, --on mac: unclear, listing them", r.returncode == 1
+              and "more than one computer is on this Mac" in r.stderr and "demo" in r.stderr, r.stderr)
+        r = b.run("default")
+        check("...default: there's none (exit 1), as a command that names no VM refuses there", r.returncode == 1
+              and "no default computer here" in r.stderr, r.stdout + r.stderr)
+        r = b.run("default", "demo")
+        check("...default demo: one now", r.returncode == 0 and open(ptr, "rb").read() == b"demo\n"
+              and b.run("checkpoints").returncode == 0, r.stdout + r.stderr)
+        r = b.run("default", "metacomputer")
+        check("...default with the main VM's name: config/default-vm removed, and it says commands refuse again",
+              r.returncode == 0 and not os.path.lexists(ptr) and "they refuse" in r.stdout, r.stdout + r.stderr)
+    finally:
+        b.close()
+
+
+def put_pointer(ptr, data):
+    """config/default-vm holding data (bytes), or none at all (None); whatever was there removed first."""
+    if os.path.islink(ptr) or os.path.isfile(ptr) or (os.path.exists(ptr) and not os.path.isdir(ptr)):
+        os.remove(ptr)
+    elif os.path.isdir(ptr):
+        os.rmdir(ptr)
+    if data is not None:
+        with open(ptr, "wb") as f:
+            f.write(data)
+
+
+def default_computer_audit(td):
+    """The default computer against what changes meanwhile, and names that look like places: a VM named like a place
+    is never what --on means; what a command chose is passed on, so a default set meanwhile doesn't move what it
+    starts; the pointer is read once (a FIFO, links, a file swapped while it's read); `default NAME` and `vm delete
+    NAME` are ordered by NAME's lock; and the listing's default is the stored one, apart from what overrode it."""
+    b = Box(td, "default2")
+    try:
+        co = b.co
+        ptr = os.path.join(co, "config", "default-vm")
+        b.settings("config/local.env", "VM_NAME=mainvm\nBASELINE_NAME=mainvm-baseline\n")
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.set_vms([vm("mainvm"), vm("mainvm-baseline"), vm("demo"), vm("demo-baseline")])
+
+        # A VM named like a place (only by hand: vm create refuses the names).
+        b.settings("config/vms/cloud.env", "SSH_PORT=2451\nVNC_PORT=6151\n")
+        b.settings("config/vms/mac.env", "SSH_PORT=2452\nVNC_PORT=6152\n")
+        r = b.run("default", "cloud")
+        check("a hand-made VM named cloud can still be the default (by its name)", r.returncode == 0, r.stdout + r.stderr)
+        r = b.run("--on", "cloud", "hub", "env")
+        check("--on cloud with the default a local VM named cloud: refused, no cloud computers (never that VM)",
+              r.returncode == 1 and "no cloud computers set up" in r.stderr and r.stdout == "", r.stdout + r.stderr)
+        r = b.run("--on", "cloud", "reset", "--yes")
+        check("...the same for reset --yes, before anything runs", r.returncode == 1 and "no cloud computers set up" in r.stderr
+              and not any(ln.split()[0] in ("delete", "stop", "clone", "run") for ln in open(b.log).read().splitlines() if ln),
+              r.stderr + open(b.log).read())
+        check("--on mac: that VM, which is on this Mac", json_of(b.run("--on", "mac", "hub", "env")).get("MCOMP_VM_NAME") == "cloud")
+        r = b.run("--vm", "cloud", "--on", "cloud", "hub", "env")
+        check("--vm cloud --on cloud: refused, they disagree", r.returncode == 1 and "disagree" in r.stderr, r.stderr)
+        d = json_of(b.run("list", "--json"))
+        check("list says both VMs have a place's name", sum("has a place's name" in p for p in d.get("problems", [])) == 2,
+              d.get("problems"))
+        put_pointer(ptr, None)
+        check("with the main VM the default, a VM named mac doesn't take over --on mac",
+              json_of(b.run("--on", "mac", "hub", "env")).get("MCOMP_VM_NAME") == "mainvm")
+        for n in ("cloud", "mac"):
+            os.remove(os.path.join(co, f"config/vms/{n}.env"))
+            r = b.run("vm", "create", n, "--no-build")
+            check(f"vm create {n}: refused, a place's name", r.returncode == 1 and "a place's name" in r.stderr
+                  and not os.path.exists(os.path.join(co, f"config/vms/{n}.env")), r.stderr)
+
+        # What a command chose is passed on: a default set (or removed) while it runs doesn't move what it starts.
+        rc, s, err = b.resolve()
+        check("no default computer: the main VM, passed on as MCOMP_NO_DEFAULT_VM=1", rc == 0 and s.get("VM_NAME") == "mainvm"
+              and s.get("X_NODEF") == "1" and s.get("X_CONFIG") == "" and s.get("X_VM") == "", (rc, s, err))
+        build = os.path.join(co, "scripts", "build-vm.sh")
+        original = open(build).read()
+        try:
+            write(build, '#!/bin/bash\nprintf "demo\\n" > "$(dirname "$0")/../config/default-vm"\n'
+                         '. "$(dirname "$0")/lib.sh"\necho "BUILD VM_NAME=$VM_NAME"\n', 0o755)
+            r = b.run("build")
+            check("build of the main VM, with demo made the default while it runs: what it starts still builds mainvm",
+                  r.returncode == 0 and "BUILD VM_NAME=mainvm" in r.stdout and open(ptr).read() == "demo\n", r.stdout + r.stderr)
+            write(build, '#!/bin/bash\nrm -f "$(dirname "$0")/../config/default-vm"\n'
+                         '. "$(dirname "$0")/lib.sh"\necho "BUILD VM_NAME=$VM_NAME"\n', 0o755)
+            r = b.run("build")
+            check("build of demo (the default), with the default removed while it runs: what it starts still builds demo",
+                  r.returncode == 0 and "BUILD VM_NAME=demo" in r.stdout and not os.path.lexists(ptr), r.stdout + r.stderr)
+        finally:
+            write(build, original, 0o755)
+
+        # The pointer is read once: no FIFO hangs it, no link is followed, and a file swapped meanwhile is never mixed.
+        sys.path.insert(0, os.path.join(co, "lib"))
+        import importlib
+        import defaultvm
+        importlib.reload(defaultvm)
+        sys.path.pop(0)
+
+        def reads(path):
+            try:
+                return defaultvm.read(path)
+            except defaultvm.Refused as e:
+                return "refused: " + str(e)
+        put_pointer(ptr, None)
+        os.mkfifo(ptr)
+        t0 = time.time()
+        rc, s, err = b.resolve()
+        check("config/default-vm as a FIFO: refused at once (not a plain file), nothing waits on it",
+              rc == 1 and "isn't a plain file" in err and time.time() - t0 < 30, (rc, err, time.time() - t0))
+        check("...the reader itself, the same", reads(ptr).startswith("refused") and "plain file" in reads(ptr))
+        os.remove(ptr)
+        target = os.path.join(b.root, "pointer-target")
+        write(target, "demo\n")
+        os.symlink(target, ptr)
+        check("a link to a good file: refused by the reader (never followed)", reads(ptr).startswith("refused"))
+        os.remove(ptr)
+        os.symlink(os.path.join(b.root, "nothing-here"), ptr)
+        check("...a dangling link: refused, not taken for no pointer", reads(ptr).startswith("refused"))
+        os.remove(ptr)
+        check("no file: no pointer", reads(ptr) is None)
+        b.settings("config/vms/production.env", "SSH_PORT=2471\nVNC_PORT=6171\n")
+        good, mixed = os.path.join(co, "config", ".swap-good"), os.path.join(co, "config", ".swap-bad")
+        import threading
+        stop = threading.Event()
+
+        def swap():
+            i = 0
+            while not stop.is_set():
+                src = good if i % 2 else mixed
+                tmp = ptr + f".t{i % 2}"
+                with open(src, "rb") as f, open(tmp, "wb") as g:
+                    g.write(f.read())
+                os.replace(tmp, ptr)
+                i += 1
+        write(good, "demo\n")
+        write(mixed, "pro\nduction\n")
+        put_pointer(ptr, b"demo\n")                           # there from the start: every read sees one of the two
+        th = threading.Thread(target=swap, daemon=True)
+        th.start()
+        try:
+            seen = {reads(ptr) for _ in range(3000)}
+            names = set()
+            for _ in range(10):
+                rc, s, err = b.resolve()
+                names.add(s.get("VM_NAME") if rc == 0 else "refused")
+        finally:
+            stop.set()
+            th.join()
+        check("a pointer swapped between demo and a two-line file while it's read: demo or refused, never 'production'",
+              "production" not in seen and seen <= {"demo", "refused: " + defaultvm.SHAPE} and "demo" in seen, seen)
+        check("...and every command that read it chose demo or refused (never production)",
+              names <= {"demo", "refused"} and "production" not in names, names)
+        for f in (good, mixed, ptr + ".t0", ptr + ".t1"):
+            if os.path.lexists(f):
+                os.remove(f)
+        put_pointer(ptr, None)
+        os.remove(os.path.join(co, "config/vms/production.env"))
+
+        # default NAME and vm delete NAME take NAME's lock: never a default on a VM being deleted.
+        locks = os.path.join(b.root, "locks")
+        holder = hold_lock(os.path.join(locks, "vm-demo.lock"))     # a build or delete of demo under way
+        r = b.run("default", "demo", env=b.env(MCOMP_LOCK_WAIT="1"))
+        release(holder)
+        check("default demo while demo's lock is held (a build or delete): refused, config/default-vm as it was",
+              r.returncode == 1 and "being built, deleted or changed" in r.stderr and not os.path.lexists(ptr), r.stderr)
+        holder = hold_lock(os.path.join(locks, "vm-demo.lock"))     # a default demo checking and writing
+        r = b.run("vm", "delete", "demo", "--confirm", "demo", env=b.env(MCOMP_LOCK_WAIT="1"))
+        release(holder)
+        check("vm delete demo while demo's lock is held: refused, nothing deleted", r.returncode == 1
+              and "another build or change of the VM demo" in r.stderr and b.deletes() == [], r.stderr)
+        p = Pty([b.mc, "vm", "delete", "demo"], b.env())
+        at_prompt = p.expect("Type the name of the VM")
+        r = b.run("default", "demo", env=b.env(MCOMP_LOCK_WAIT="1"))
+        p.send("not-demo\n")
+        code = p.wait()
+        check("a real vm delete demo at its prompt (holding the lock): default demo refused meanwhile", at_prompt
+              and r.returncode == 1 and "being built, deleted or changed" in r.stderr and not os.path.lexists(ptr), r.stderr)
+        check("...and the delete, told another name, deleted nothing", code not in (0, None) and b.deletes() == [], code)
+        r = b.run("default", "demo")
+        check("once the delete is over, default demo goes ahead", r.returncode == 0 and open(ptr).read() == "demo\n", r.stderr)
+        r = b.run("vm", "delete", "demo", "--confirm", "demo")
+        check("...and now vm delete demo refuses it (your default computer)", r.returncode == 1
+              and "your default computer" in r.stderr and b.deletes() == [], r.stderr)
+
+        # The listing's default is the stored one; what overrode the selection is listed apart.
+        esc_env = b.env(MCOMP_NO_DEFAULT_VM="1")
+        d, dd = json_of(b.run("list", "--json", env=esc_env)), json_of(b.run("default", "--json", env=esc_env))
+        by = {v["name"]: v for v in d.get("vms", [])}
+        check("MCOMP_NO_DEFAULT_VM=1 list --json: selected mainvm, default still demo, the override named",
+              d.get("selected") == "mainvm" and d.get("default") == "demo" and d.get("overridden_by") == "MCOMP_NO_DEFAULT_VM=1"
+              and by.get("demo", {}).get("default") is True and by.get("mainvm", {}).get("default") is False
+              and by.get("mainvm", {}).get("selected") is True, d)
+        check("...and default --json agrees", dd.get("default") == d.get("default") and dd.get("overridden_by") == d.get("overridden_by"),
+              (dd, d.get("default"), d.get("overridden_by")))
+        r = b.run("list", env=esc_env)
+        check("...the table says what chose mainvm, and that demo is the default", "chosen by MCOMP_NO_DEFAULT_VM=1" in r.stdout
+              and "Your default computer is demo" in r.stdout, r.stdout)
+        d = json_of(b.run("list", "--json", env=b.env(MCOMP_VM="mainvm")))
+        check("MCOMP_VM=mainvm list --json: default demo, overridden by MCOMP_VM=mainvm", d.get("default") == "demo"
+              and d.get("overridden_by") == "MCOMP_VM=mainvm" and d.get("selected") == "mainvm", d)
+        d = json_of(b.run("list", "--json"))
+        check("list --json with nothing overriding: overridden_by is null", d.get("overridden_by") is None and d.get("selected") == "demo", d)
+        put_pointer(ptr, b"nosuch\n")
+        d, r = json_of(b.run("list", "--json", env=esc_env)), b.run("default", "--json", env=esc_env)
+        dd = json_of(r)
+        check("a pointer with no settings, under MCOMP_NO_DEFAULT_VM=1: list shows the default it names, broken, the "
+              "problem once, mainvm selected", d.get("default") == "nosuch" and d.get("default_broken") is True
+              and d.get("selected") == "mainvm" and not any(v.get("default") for v in d.get("vms", []))
+              and sum("nosuch" in p for p in d.get("problems", [])) == 1, d)
+        d2 = json_of(b.run("list", "--json"))
+        check("...the same default and problem without it (where nothing is selected)", d2.get("default") == "nosuch"
+              and d2.get("default_broken") is True and d2.get("selected") is None
+              and sum("nosuch" in p for p in d2.get("problems", [])) == 1, d2)
+        check("...and default --json says it doesn't resolve (exit 1)", r.returncode == 1 and dd.get("ok") is False
+              and dd.get("default") == d.get("default")
+              and "nosuch" in (dd.get("error") or "") and dd.get("overridden_by") == "MCOMP_NO_DEFAULT_VM=1", dd)
+        put_pointer(ptr, b"demo\r\n")
+        d = json_of(b.run("list", "--json", env=esc_env))
+        check("...a malformed one too", d.get("default") is None and any("one VM name on one line" in p for p in d.get("problems", [])), d)
+        put_pointer(ptr, None)
+    finally:
+        b.close()
+
+
+# lib/labconfig.py's settings when the file is replaced right after scripts/lib.sh checked it: argv[1] the lib folder,
+# argv[2] the settings file to rewrite, argv[3] what to write. Prints "VM_NAME BASELINE_NAME SSH_PORT", or "REFUSED why".
+PY_SWAP = r"""
+import os, sys
+os.environ["MCOMP_NO_DEFAULT_VM"] = "1"          # importing loads nothing pointer-chosen
+sys.path.insert(0, sys.argv[1])
+import labconfig
+real = labconfig.resolve_default
+def swapped(name, env=None):
+    out = real(name, env)
+    with open(sys.argv[2], "w") as f:              # an editor replaces it now, after the check
+        f.write(sys.argv[3])
+    return out
+labconfig.resolve_default = swapped
+env = {k: v for k, v in os.environ.items() if k != "MCOMP_NO_DEFAULT_VM"}
+try:
+    c = labconfig.load(env)
+except ValueError as e:
+    print("REFUSED " + str(e))
+    sys.exit()
+print(c.get("VM_NAME"), c.get("BASELINE_NAME"), c.get("SSH_PORT"))
+"""
+
+
+def default_computer_recheck(td):
+    """The Python side gets exactly what scripts/lib.sh checked: a bash with no startup file or imported function,
+    one strict record, the values used as they are (never the file read again, never the defaults); and vm delete
+    refuses while config/default-vm can't be read (it may name that VM)."""
+    b = Box(td, "default3")
+    try:
+        co = b.co
+        ptr = os.path.join(co, "config", "default-vm")
+        demo = b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.settings("config/local.env", "VM_NAME=mainvm\nBASELINE_NAME=mainvm-baseline\n")
+        b.set_vms([vm("mainvm"), vm("mainvm-baseline"), vm("demo"), vm("demo-baseline")])
+
+        def py_choice(**env):
+            r = subprocess.run([PY, "-B", "-c", PY_CHOICE, os.path.join(co, "lib")], env=b.env(**env),
+                               capture_output=True, text=True, timeout=120)
+            return r.stdout.strip()
+        put_pointer(ptr, b"demo\n")
+        want = f"OK {os.path.realpath(demo)} demo"
+        check("the default demo, from Python: demo's file and name", py_choice() == want, py_choice())
+        banner = os.path.join(b.root, "bashenv.sh")
+        write(banner, f'echo "startup banner"\necho "{os.path.realpath(os.path.join(co, "config", "local.env"))}"\n'
+                      'VM_NAME=mainvm; printf() { builtin printf "%s\\0" MCOMP-SETTINGS/1 FILE /etc/hosts VM_NAME mainvm END >&"$fd"; }\n')
+        check("with a BASH_ENV that prints a banner, a path and defines printf: still demo (no startup file is read)",
+              py_choice(BASH_ENV=banner) == want, py_choice(BASH_ENV=banner))
+        check("...the same with ENV", py_choice(ENV=banner) == want, py_choice(ENV=banner))
+        fake_fn = '() { builtin printf "%s\\0" MCOMP-SETTINGS/1 FILE /etc/hosts VM_NAME mainvm END >&"$fd"; }'
+        check("...and with exported functions named printf and sed: still demo (none is imported)",
+              py_choice(**{"BASH_FUNC_printf%%": fake_fn, "BASH_FUNC_sed%%": "() { echo VM_NAME; }"}) == want,
+              py_choice(**{"BASH_FUNC_printf%%": fake_fn}))
+        # The record is checked exactly; anything else refuses (never the defaults).
+        sys.path.insert(0, os.path.join(co, "lib"))
+        import importlib
+        old = os.environ.get("MCOMP_NO_DEFAULT_VM")
+        os.environ["MCOMP_NO_DEFAULT_VM"] = "1"
+        try:
+            import labconfig
+            importlib.reload(labconfig)
+        finally:
+            if old is None:
+                os.environ.pop("MCOMP_NO_DEFAULT_VM", None)
+            else:
+                os.environ["MCOMP_NO_DEFAULT_VM"] = old
+        sys.path.pop(0)
+        good = b"\0".join([b"MCOMP-SETTINGS/1", b"FILE", demo.encode(), b"VM_NAME", b"demo", b"SSH_PORT", b"2401", b"END"]) + b"\0"
+
+        def decoded(data, rc=0):
+            try:
+                return labconfig.decode_record(data, rc)
+            except labconfig.Refused as e:
+                return "refused: " + str(e)
+        check("a well-formed record: its file and values", decoded(good) == (demo, {"VM_NAME": "demo", "SSH_PORT": "2401"}),
+              decoded(good))
+        bad = {"a banner before it": b"startup banner\n" + good, "text after it": good + b"x",
+               "no END": good[:-4], "no header": good[len(b"MCOMP-SETTINGS/1\0"):], "an odd field": good[:-4] + b"X\0END\0",
+               "a key twice": good[:-4] + b"VM_NAME\0mainvm\0END\0", "a key that isn't one": good[:-4] + b"vm name\0x\0END\0",
+               "no VM_NAME": b"MCOMP-SETTINGS/1\0FILE\0/x.env\0END\0", "a relative file": good.replace(demo.encode(), b"x.env"),
+               "empty": b"", "bytes that aren't UTF-8": good[:-4] + b"K\0\xff\0END\0"}
+        for what, data in bad.items():
+            check(f"a record with {what}: refused", str(decoded(data)).startswith("refused"), decoded(data))
+        check("a good record from a bash that failed: refused", str(decoded(good, 3)).startswith("refused"))
+        refusal = b"MCOMP-SETTINGS/1\0REFUSED\0no settings for a VM named x\0END\0"
+        check("a refusal: refused with bash's reason", decoded(refusal, 1) == "refused: no settings for a VM named x")
+        check("...but not from a bash that exited 0", decoded(refusal, 0) == "refused: the check of its settings didn't answer as it should")
+
+        # The values bash checked are the ones used: the file isn't read again.
+        r = subprocess.run([PY, "-B", "-c", PY_SWAP, os.path.join(co, "lib"), demo, "VM_NAME=mainvm\nSSH_PORT=2277\nVNC_PORT=5977\n"],
+                           env=b.env(), capture_output=True, text=True, timeout=120)
+        check("demo.env replaced (another VM's name and ports) right after it was checked: Python still has demo's",
+              r.stdout.strip() == "demo demo-baseline 2401", r.stdout + r.stderr[-300:])
+        write(demo, "SSH_PORT=2401\nVNC_PORT=6101\nif false; then\n  VM_NAME=mainvm\nfi\n")
+        check("a name bash never sets (inside 'if false'): Python's VM_NAME is bash's, demo", py_choice() == want, py_choice())
+        write(demo, "SSH_PORT=2401\nVNC_PORT=6101\nGUEST_USER=\"$(printf alice)\"\n")
+        r = subprocess.run([PY, "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import labconfig; "
+                            "print(labconfig.CONFIG.get('GUEST_USER'), labconfig.CONFIG.get('VNC_PORT'))", os.path.join(co, "lib")],
+                           env=b.env(), capture_output=True, text=True, timeout=120)
+        check("...and a value as bash made it (a command substitution), with the defaults' keys too", r.stdout.split()
+              == ["alice", "6101"], r.stdout + r.stderr[-300:])
+        write(demo, "SSH_PORT=2401\nVNC_PORT=6101\n")
+
+        # vm delete refuses while the pointer can't be read: it may be naming that VM.
+        os.chmod(ptr, 0)
+        try:
+            r = b.run("--vm", "demo", "vm", "delete", "demo", "--confirm", "demo")
+        finally:
+            os.chmod(ptr, 0o644)
+        check("vm delete demo while config/default-vm can't be read (no permission): refused, saying why, nothing deleted",
+              r.returncode == 1 and "can't be told" in r.stderr and "isn't a plain file" in r.stderr and b.deletes() == [],
+              r.stderr)
+        put_pointer(ptr, None)
+        os.mkfifo(ptr)
+        r = b.run("--vm", "demo", "vm", "delete", "demo", "--confirm", "demo")
+        os.remove(ptr)
+        check("...as a FIFO: the same", r.returncode == 1 and "can't be told" in r.stderr and b.deletes() == [], r.stderr)
+        put_pointer(ptr, b"mainvm\n")
+        r = b.run("vm", "delete", "demo", "--confirm", "demo")
+        check("...and with a readable pointer naming another VM, the delete of demo goes ahead", r.returncode == 0
+              and "demo" in b.deletes(), r.stdout + r.stderr)
+    finally:
+        b.close()
+
+
+
+# A BASH_ENV for every bash a command starts: the shell's own lookups of config/default-vm ([ -e ], [ -L ] and the
+# like) fail, as stat() and lstat() do when the lookup gets an I/O error.
+EIO_BASH_ENV = r"""[() {
+  case "$1|$2|$3" in
+    -[eLfrsdh]"|"*/config/default-vm"|]") return 1 ;;
+    "!|"-[eLfrsdh]"|"*/config/default-vm) return 0 ;;
+  esac
+  builtin [ "$@"
+}
+"""
+# A PY whose run of lib/defaultvm.py gets that I/O error from its open of config/default-vm; anything else is the
+# real Python (REAL_PY).
+EIO_PY = r"""#!/bin/bash
+case " $* " in
+  *"/lib/defaultvm.py read "*)
+    exec "REAL_PY" -I -B -c 'import errno, os, runpy, sys
+real = os.open
+def failing(path, *a, **k):
+    if os.fsdecode(path).endswith("/config/default-vm"):
+        raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+    return real(path, *a, **k)
+os.open = failing
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")' "${@:3}" ;;
+esac
+exec "REAL_PY" "$@"
+"""
+# lib/labconfig.py's resolution of the default computer argv[2], from the lib folder argv[1], with a deadline of argv[3]
+# seconds; with argv[4] "no-waitid", as a Python without os.waitid runs it (macOS's before 3.13: its kqueue watch).
+# Prints "OK VM_NAME SECONDS" or "REFUSED SECONDS why".
+PY_RESOLVE = r"""
+import os, sys, time
+if sys.argv[4:5] == ["no-waitid"] and hasattr(os, "waitid"):
+    del os.waitid
+sys.path.insert(0, sys.argv[1])
+import labconfig
+labconfig._DEADLINE = float(sys.argv[3])
+t = time.monotonic()
+try:
+    s = labconfig.resolve_default(sys.argv[2])[1]
+    print("OK", s.get("VM_NAME"), round(time.monotonic() - t, 1))
+except labconfig.Refused as e:
+    print("REFUSED", round(time.monotonic() - t, 1), e)
+"""
+
+
+def helpers(token):
+    """The pids of the test's helper processes (named token with exec -a) still running."""
+    r = subprocess.run(["pgrep", "-f", token], capture_output=True, text=True)
+    return r.stdout.split()
+
+
+def helpers_gone(token, wait=5.0):
+    end = time.monotonic() + wait
+    while helpers(token) and time.monotonic() < end:
+        time.sleep(0.1)
+    return not helpers(token)
+
+
+def default_computer_recheck2(td):
+    """A lookup of config/default-vm that fails isn't "no pointer": the reader is always asked, and vm delete refuses
+    (no permission on its folder, an I/O error). The Python side's resolution: a helper the settings leave running
+    never holds up the answer (only the record's own step opens its pipe), and one that hangs or says too much is
+    killed with everything it started."""
+    b = Box(td, "default4")
+    tokens = []
+    try:
+        co = b.co
+        ptr = os.path.join(co, "config", "default-vm")
+        demo = b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.settings("config/local.env", "VM_NAME=mainvm\nBASELINE_NAME=mainvm-baseline\n")
+        b.set_vms([vm("mainvm"), vm("mainvm-baseline"), vm("demo"), vm("demo-baseline")])
+
+        # The shell's reader, mc_read_default, on a pointer whose lookup fails for real (a folder it can't search).
+        script = ('MC_LIB_DEFS_ONLY=1 . "$1/scripts/lib.sh" || exit 9; MC_DEFAULT_FILE="$2"; '
+                  'if mc_read_default; then printf "ok:%s" "$MC_DEFAULT_PTR"; else printf "refused:%s" "$MC_REFUSAL"; fi')
+
+        def read_ptr(path, **env):
+            r = subprocess.run(["/bin/bash", "-c", script, "_", co, path], env=b.env(**env), capture_output=True,
+                               text=True, timeout=60)
+            return r.stdout
+        locked = os.path.join(b.root, "locked")
+        write(os.path.join(locked, "default-vm"), "demo\n")
+        if os.geteuid() != 0:
+            os.chmod(locked, 0o600)                 # readable, not searchable: a lookup inside it fails (EACCES)
+            try:
+                out = read_ptr(os.path.join(locked, "default-vm"))
+            finally:
+                os.chmod(locked, 0o700)
+            check("mc_read_default, config/default-vm in a folder it can't search (the lookup fails): refused, not "
+                  "'no pointer'", out.startswith("refused:") and "isn't a plain file" in out, out)
+        check("...the same file, readable: its name", read_ptr(os.path.join(locked, "default-vm")) == "ok:demo")
+        check("...no file at all: no pointer (from the reader)", read_ptr(os.path.join(locked, "nothing")) == "ok:")
+        check("...a folder on the way that doesn't exist: no pointer", read_ptr(os.path.join(b.root, "gone", "default-vm"))
+              == "ok:")
+        # vm delete with explicit --vm (the pointer isn't read at startup) while its lookups get an I/O error: the
+        # shell's tests say there's nothing and the reader's open fails. Refused, as a pointer that may name demo.
+        envfile = os.path.join(b.root, "eio-bash-env.sh")
+        write(envfile, EIO_BASH_ENV)
+        eio_py = os.path.join(b.root, "eio-python")
+        write(eio_py, EIO_PY.replace("REAL_PY", PY), 0o755)
+        eio = b.env(BASH_ENV=envfile, PY=eio_py)
+        put_pointer(ptr, b"demo\n")
+        out = read_ptr(ptr, BASH_ENV=envfile, PY=eio_py)
+        check("mc_read_default while config/default-vm's lookups get an I/O error: refused", out.startswith("refused:")
+              and "isn't a plain file" in out, out)
+        r = b.run("--vm", "demo", "vm", "delete", "demo", "--confirm", "demo", env=eio)
+        check("vm delete demo while config/default-vm's lookups get an I/O error: refused without --force, saying why, "
+              "nothing deleted", r.returncode == 1 and "can't be told" in r.stderr and b.deletes() == [], r.stderr[-600:])
+        r = b.run("--vm", "demo", "vm", "delete", "demo", "--confirm", "demo", env=b.env(BASH_ENV=envfile))
+        check("...and when only the shell's own tests fail (the reader opens it): refused as your default computer (the "
+              "shell's tests never decide)", r.returncode == 1 and "it's your default computer" in r.stderr
+              and b.deletes() == [], r.stderr[-600:])
+        put_pointer(ptr, None)
+
+        # The Python side: a settings file that leaves a helper running in the background (its streams redirected,
+        # every other descriptor it was given kept). The answer comes when bash exits, not when the helper does.
+        def resolve(deadline):
+            r = subprocess.run([PY, "-B", "-c", PY_RESOLVE, os.path.join(co, "lib"), "demo", str(deadline)],
+                               env=b.env(MCOMP_NO_DEFAULT_VM="1"), capture_output=True, text=True, timeout=180)
+            return r.stdout.split(None, 3) or [r.stderr[-300:]]
+        stamp = f"{os.getpid()}-{int(time.time() * 1000)}"
+        bg = f"mcomp-test-bg-{stamp}"
+        tokens.append(bg)
+        write(demo, f"SSH_PORT=2401\nVNC_PORT=6101\n( exec -a {bg} sleep 300 ) </dev/null >/dev/null 2>&1 &\n")
+        out = resolve(60)
+        check("a settings file that leaves a helper running: Python gets demo when bash exits (never waits for the helper)",
+              out[:2] == ["OK", "demo"] and float(out[2]) < 30, out)
+        check("...and the helper is still running then (it was there, and a check doesn't stop what the settings start)",
+              len(helpers(bg)) >= 1, helpers(bg))
+        subprocess.run(["pkill", "-9", "-f", bg], capture_output=True)
+        # One that hangs: refused at the deadline, with everything it started gone (the hung one and its helper).
+        hung = f"mcomp-test-hung-{stamp}"
+        tokens.append(hung)
+        write(demo, f"SSH_PORT=2401\nVNC_PORT=6101\n( exec -a {hung} sleep 300 ) </dev/null >/dev/null 2>&1 &\n"
+                    f"( exec -a {hung} sleep 300 ) </dev/null >/dev/null 2>&1\n")
+        out = resolve(3)
+        check("a settings file that hangs: refused at the deadline", out[:1] == ["REFUSED"] and "took too long" in out[-1]
+              and 2.5 <= float(out[1]) < 30, out)
+        check("...and everything the resolution started is gone (the hung helper and the one in the background)",
+              helpers_gone(hung), helpers(hung))
+        # One that says too much (a value over the record's limit): refused, with its helper gone too.
+        big = f"mcomp-test-big-{stamp}"
+        tokens.append(big)
+        write(demo, f"SSH_PORT=2401\nVNC_PORT=6101\n( exec -a {big} sleep 300 ) </dev/null >/dev/null 2>&1 &\n"
+                    "BIG=\"$(head -c 1200000 /dev/zero | tr '\\0' a)\"\n")
+        out = resolve(60)
+        check("a settings file whose record is over the limit: refused", out[:1] == ["REFUSED"] and "said too much" in out[-1],
+              out)
+        check("...and its helper is gone with it", helpers_gone(big), helpers(big))
+        write(demo, "SSH_PORT=2401\nVNC_PORT=6101\n")
+        out = resolve(60)
+        check("...and with the settings file as it was, demo again", out[:2] == ["OK", "demo"], out)
+    finally:
+        for t in tokens:                            # only this test's own helpers: each named with its own stamp
+            subprocess.run(["pkill", "-9", "-f", t], capture_output=True)
+        b.close()
+
+
+
+# The record going over its limit only in what's left once the resolver has exited: a resolver (in place of lib.sh's)
+# that leaves a helper named argv[2] running, writes 4 KiB under the limit, waits, writes 8 KiB more and exits. Once
+# 4 KiB under has been read, the collector's select() first sleeps a second and says nothing is there (as when the
+# bash writes its last bytes and exits between that select() and the check of its exit), so the rest is only read
+# after the exit. argv[1] the lib folder; argv[3] "no-waitid" as in PY_RESOLVE. Prints "OK", or "REFUSED SECONDS why".
+PY_DRAIN = r"""
+import os, sys, time
+import select as real_select
+if sys.argv[3:4] == ["no-waitid"] and hasattr(os, "waitid"):
+    del os.waitid
+sys.path.insert(0, sys.argv[1])
+import labconfig
+under = labconfig._MAX_RECORD - 4096
+labconfig._RESOLVE = ('( exec -a "%s" sleep 300 ) </dev/null >/dev/null 2>&1 &\n'
+                      'exec 9>"$3"\nhead -c %d /dev/zero >&9\nsleep 0.3\nhead -c 8192 /dev/zero >&9\nexit 0\n'
+                      % (sys.argv[2], under))
+got = [0]
+real_read = labconfig._read
+def counting(fd, n=65536):
+    b = real_read(fd, n)
+    got[0] += len(b)
+    return b
+class Late:
+    def __getattr__(self, k):
+        return getattr(real_select, k)
+    def select(self, r, w, x, t=None):
+        if got[0] >= under:
+            time.sleep(1.0)
+            return [], [], []
+        return real_select.select(r, w, x, t)
+labconfig._read, labconfig.select, labconfig._DEADLINE = counting, Late(), 60
+t = time.monotonic()
+try:
+    labconfig.resolve_default("demo")
+    print("OK")
+except labconfig.Refused as e:
+    print("REFUSED", round(time.monotonic() - t, 1), e)
+"""
+
+
+def default_computer_recheck3(td):
+    """The resolver is never reaped before its record is whole and its size checked, so a refusal can still kill its
+    whole group: a record that goes over the limit only after the bash has exited is refused with the helper it left
+    gone. And the same with a Python that has no os.waitid (its kqueue watch), which also resolves demo as before."""
+    b = Box(td, "default5")
+    tokens = []
+    try:
+        co = b.co
+        b.settings("config/vms/demo.env", "SSH_PORT=2401\nVNC_PORT=6101\n")
+        b.settings("config/local.env", "VM_NAME=mainvm\nBASELINE_NAME=mainvm-baseline\n")
+        b.set_vms([vm("mainvm"), vm("mainvm-baseline"), vm("demo"), vm("demo-baseline")])
+        stamp = f"{os.getpid()}-{int(time.time() * 1000)}"
+        for how in ("", "no-waitid"):
+            token = f"mcomp-test-drain-{how or 'waitid'}-{stamp}"
+            tokens.append(token)
+            r = subprocess.run([PY, "-B", "-c", PY_DRAIN, os.path.join(co, "lib"), token] + ([how] if how else []),
+                               env=b.env(MCOMP_NO_DEFAULT_VM="1"), capture_output=True, text=True, timeout=180)
+            out = r.stdout.strip().split(None, 2) or [r.stderr[-300:]]
+            label = " (a Python without os.waitid: its kqueue watch)" if how else ""
+            check(f"a record over the limit only once the bash has exited{label}: refused, as said too much, in what was "
+                  "left after it exited", out[:1] == ["REFUSED"] and out[-1].endswith("the check of its settings said too much")
+                  and "took too long" not in out[-1], out)
+            check("...and the helper it left running is gone (its group killed before the bash was reaped)",
+                  helpers_gone(token), helpers(token))
+        r = subprocess.run([PY, "-B", "-c", PY_RESOLVE, os.path.join(co, "lib"), "demo", "60", "no-waitid"],
+                           env=b.env(MCOMP_NO_DEFAULT_VM="1"), capture_output=True, text=True, timeout=180)
+        out = r.stdout.split(None, 3) or [r.stderr[-300:]]
+        check("a Python without os.waitid resolves demo as before", out[:2] == ["OK", "demo"], out)
+        hung = f"mcomp-test-hung-kq-{stamp}"
+        tokens.append(hung)
+        b.settings("config/vms/demo.env", f"SSH_PORT=2401\nVNC_PORT=6101\n( exec -a {hung} sleep 300 ) </dev/null "
+                                          f">/dev/null 2>&1 &\n( exec -a {hung} sleep 300 ) </dev/null >/dev/null 2>&1\n")
+        r = subprocess.run([PY, "-B", "-c", PY_RESOLVE, os.path.join(co, "lib"), "demo", "3", "no-waitid"],
+                           env=b.env(MCOMP_NO_DEFAULT_VM="1"), capture_output=True, text=True, timeout=180)
+        out = r.stdout.split(None, 3) or [r.stderr[-300:]]
+        check("...and one that hangs is refused at the deadline with everything it started gone",
+              out[:1] == ["REFUSED"] and "took too long" in out[-1] and helpers_gone(hung), (out, helpers(hung)))
+    finally:
+        for t in tokens:                            # only this test's own helpers: each named with its own stamp
+            subprocess.run(["pkill", "-9", "-f", t], capture_output=True)
+        b.close()
+
+
+
+# Who reaps the resolver, and when (lib/labconfig.py _collect), in a process of its own: argv[1] the lib folder, argv[2]
+# the case, argv[3] "no-waitid" for the kqueue watch. The resolver (in place of lib.sh's) writes a good record and
+# exits 7 (0 in exit-before-start), leaving a helper named argv[4]; os.killpg and os.kill with SIGKILL are recorded, and only sent in
+# "sigint-close". Cases: early-reap (something else reaps it before the watch begins), lost-status (something else reaps
+# it once its exit was seen), sigint-close (a SIGINT as the watch is closed after a good record), early-reap-sigint
+# (reaped before the watch, and a SIGINT as the watch is first closed: by the kqueue watch's start, which found it gone),
+# kq-error (the kqueue registration fails with ENOMEM), exit-before-start and exit7-before-start (it has exited, exit 0
+# or 7, unreaped, before the watch starts: macOS's kqueue says no such process for it). Prints one JSON line: result
+# ("OK VM_NAME", "REFUSED why" or "INTERRUPTED"), signals, whether it ended reaped, kqueues left open.
+PY_OWN = r"""
+import errno, json, os, select as real_select, signal, sys, time
+signal.signal(signal.SIGINT, signal.default_int_handler)
+real_waitid = getattr(os, "waitid", None)       # the test's own way to wait for its exit without reaping it
+if sys.argv[3] == "no-waitid" and hasattr(os, "waitid"):
+    del os.waitid
+sys.path.insert(0, sys.argv[1])
+import labconfig
+case, token = sys.argv[2], sys.argv[4]
+labconfig._RESOLVE = ('( exec -a "%s" sleep 300 ) </dev/null >/dev/null 2>&1 &\n'
+                      "printf '%%s\\0' MCOMP-SETTINGS/1 FILE /x/demo.env VM_NAME demo END >\"$3\"\nexit %d\n"
+                      % (token, 0 if case == "exit-before-start" else 7))
+labconfig._DEADLINE = 60
+sent, pids, kqs, held = [], [], [], []
+real_killpg, real_kill = os.killpg, os.kill
+def killpg(pg, sig):
+    sent.append("killpg")
+    if case == "sigint-close":
+        real_killpg(pg, sig)
+def kill(pid, sig):
+    if pids and pid == pids[0] and sig == signal.SIGKILL:
+        sent.append("kill")
+        if case != "sigint-close":
+            return
+    real_kill(pid, sig)
+os.killpg, os.kill = killpg, kill
+Watch = labconfig._ExitWatch
+class Probe(Watch):
+    def __init__(self, p):
+        pids.append(p.pid)
+        held.append(p)                      # kept, so Popen's own cleanup never reaps it behind the check's back
+        if case in ("early-reap", "early-reap-sigint"):
+            os.waitpid(p.pid, 0)            # something else in this process reaps it first
+        if case in ("exit-before-start", "exit7-before-start"):
+            end = time.monotonic() + 20     # it has exited (a zombie, not reaped) before the watch starts
+            while time.monotonic() < end and not (real_waitid and real_waitid(
+                    os.P_PID, p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)):
+                time.sleep(0.05 if real_waitid else 1.0)
+        Watch.__init__(self, p)
+    def exited(self):
+        done = Watch.exited(self)
+        if done and case == "lost-status" and not getattr(self, "_reaped", False):
+            self._reaped = True
+            try:
+                os.waitpid(self.p.pid, 0)   # ...and here, once its exit was seen
+            except ChildProcessError:
+                pass
+        return done
+    def close(self):
+        if case in ("sigint-close", "early-reap-sigint") and not getattr(self, "_sent", False):
+            self._sent = True
+            real_kill(os.getpid(), signal.SIGINT)
+        Watch.close(self)
+labconfig._ExitWatch = Probe
+if case == "kq-error":
+    class KQ:
+        def __init__(self):
+            self.real = real_select.kqueue()
+            kqs.append(self.real)
+        def control(self, changes, n, t=None):
+            if changes:
+                raise OSError(errno.ENOMEM, "injected")
+            return self.real.control(changes, n, t)
+        def close(self):
+            self.real.close()
+    class Sel:
+        def __getattr__(self, k):
+            return getattr(real_select, k)
+        kqueue = KQ
+    labconfig.select = Sel()
+kept = None
+try:
+    result = "OK " + labconfig.resolve_default("demo")[1].get("VM_NAME", "")
+except labconfig.Refused as e:
+    result, kept = "REFUSED " + str(e), e       # kept: the exception (and its traceback) still held
+except KeyboardInterrupt:
+    result = "INTERRUPTED"
+try:
+    reaped = os.waitpid(pids[0], os.WNOHANG) == (0, 0) and "running"
+except ChildProcessError:
+    reaped = True
+print(json.dumps({"result": result, "sent": sent, "reaped": reaped, "kq_open": [k for k in kqs if not k.closed] != []}))
+"""
+
+
+def default_computer_recheck4(td):
+    """Who reaps the resolver: when something else in the process reaped it (before the watch, or once its exit was
+    seen) the check refuses and sends nothing; its exit status is never Popen's stand-in 0; a SIGINT as it finishes
+    still kills its group and reaps it; a failed kqueue registration keeps no kqueue open; one that exited before the
+    watch started is told by its own status. On both watches."""
+    b = Box(td, "default6")
+    tokens = []
+    try:
+        lib = os.path.join(b.co, "lib")
+        stamp = f"{os.getpid()}-{int(time.time() * 1000)}"
+        for backend in ("waitid", "no-waitid"):
+            label = "waitid" if backend == "waitid" else "kqueue"
+            for case in ("early-reap", "lost-status", "sigint-close", "early-reap-sigint", "kq-error",
+                         "exit-before-start", "exit7-before-start"):
+                if case == "kq-error" and backend == "waitid":
+                    continue                    # only the kqueue watch registers anything
+                token = f"mcomp-test-own-{case}-{label}-{stamp}"
+                tokens.append(token)
+                r = subprocess.run([PY, "-B", "-c", PY_OWN, lib, case, backend, token], env=b.env(MCOMP_NO_DEFAULT_VM="1"),
+                                   capture_output=True, text=True, timeout=120)
+                try:
+                    d = json.loads(r.stdout.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    d = {"result": "no answer: " + r.stderr[-300:]}
+                res = d.get("result", "")
+                if case == "early-reap":
+                    check(f"[{label}] reaped by something else before the watch began: refused, nothing sent",
+                          res.startswith("REFUSED") and "was lost" in res and d.get("sent") == [], d)
+                elif case == "lost-status":
+                    check(f"[{label}] reaped by something else once its exit was seen (a good record, exit 7): refused, "
+                          "never Popen's 0, nothing sent", res.startswith("REFUSED") and "was lost" in res
+                          and d.get("sent") == [], d)
+                elif case == "early-reap-sigint":
+                    check(f"[{label}] reaped by something else before the watch, and a SIGINT as the watch is first "
+                          "closed: the interruption goes on, nothing sent", res == "INTERRUPTED" and d.get("sent") == []
+                          and d.get("reaped") is True, d)
+                elif case == "exit-before-start":
+                    check(f"[{label}] a resolver that has exited (exit 0, not reaped) before the watch starts: demo, by "
+                          "its own status, nothing sent", res == "OK demo" and d.get("sent") == []
+                          and d.get("reaped") is True, d)
+                elif case == "exit7-before-start":
+                    check(f"[{label}] ...one that exited 7 before the watch starts: refused by its status, not as lost, "
+                          "nothing sent", res.startswith("REFUSED") and "didn't answer as it should" in res
+                          and "was lost" not in res and d.get("sent") == [] and d.get("reaped") is True, d)
+                elif case == "sigint-close":
+                    check(f"[{label}] a SIGINT as the watch is closed: the interruption goes on, its group was killed "
+                          "and it was reaped", res == "INTERRUPTED" and "killpg" in d.get("sent", [])
+                          and d.get("reaped") is True and helpers_gone(token), (d, helpers(token)))
+                else:
+                    check(f"[{label}] a kqueue registration that fails: refused, its group killed, reaped, and no "
+                          "kqueue left open while the refusal is kept", res.startswith("REFUSED") and "injected" in res
+                          and "killpg" in d.get("sent", []) and d.get("reaped") is True and d.get("kq_open") is False, d)
+                subprocess.run(["pkill", "-9", "-f", token], capture_output=True)
+    finally:
+        for t in tokens:                            # only this test's own helpers: each named with its own stamp
+            subprocess.run(["pkill", "-9", "-f", t], capture_output=True)
         b.close()
 
 
@@ -1972,6 +3001,141 @@ def change_calls(node):
     return out
 
 
+
+# What would reap children another part of the process started (lib/labconfig.py's _ExitWatch relies on there being
+# none). Python is read as code (ast), with its imports and their aliases resolved: os.wait, wait3 and wait4 (any use);
+# waitpid and waitid called with a first argument that isn't a plain variable or attribute (a literal like -1 or 0, a
+# negative group) or with P_ALL or P_PGID, or used without being called (an alias can't be checked); any use of SIGCHLD
+# or SIGCLD (a handler, ignoring it); asyncio's Safe and Fast child watchers. Other files (shell) by text: a trap on
+# CHLD (an exec'd Python inherits an ignored SIGCHLD), and the same calls in embedded Python, line by line.
+REAP_MODULES = {"os": "os", "posix": "os", "signal": "signal", "asyncio": "asyncio", "asyncio.unix_events": "asyncio"}
+REAP_TEXT = (r"waitpid\(\s*(-1|0)\s*,|\bos\.wait\(|\bwait3\(|\bwait4\(|\bP_ALL\b|\bP_PGID\b|\bSIGCHLD\b|\bSIGCLD\b|"
+             r"\btrap\b.*\bCHLD\b|SafeChildWatcher|FastChildWatcher")
+
+
+def reap_findings_py(src):
+    """(line, what) for every way a Python source could reap children it didn't start; a source that doesn't parse
+    is one finding (it can't be checked)."""
+    import ast
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        return [(e.lineno or 0, "doesn't parse, so it can't be checked")]
+    mods, names = {}, {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in REAP_MODULES:
+                    mods[a.asname or a.name.split(".")[0]] = REAP_MODULES[a.name] if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module in REAP_MODULES:
+            for a in node.names:
+                names[a.asname or a.name] = REAP_MODULES[node.module] + "." + a.name
+
+    def qual(e):
+        if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name) and e.value.id in mods:
+            return REAP_MODULES.get(mods[e.value.id], mods[e.value.id]) + "." + e.attr
+        if isinstance(e, ast.Name):
+            return names.get(e.id)
+        return None
+
+    def tail(e):
+        return e.attr if isinstance(e, ast.Attribute) else e.id if isinstance(e, ast.Name) else None
+    out = []
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in REAP_MODULES:
+            for a in node.names:
+                if a.name in ("wait", "wait3", "wait4", "SIGCHLD", "SIGCLD", "SafeChildWatcher", "FastChildWatcher", "*"):
+                    out.append((node.lineno, f"imports {node.module}.{a.name}"))
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            t = tail(node)
+            if t in ("SIGCHLD", "SIGCLD", "SafeChildWatcher", "FastChildWatcher"):
+                out.append((node.lineno, t))
+            q = qual(node)
+            if q in ("os.wait", "os.wait3", "os.wait4"):
+                out.append((node.lineno, q))
+            elif q in ("os.waitpid", "os.waitid") and id(node) not in called:
+                out.append((node.lineno, q + " used without being called"))
+        if isinstance(node, ast.Constant) and node.value in ("SIGCHLD", "SIGCLD"):
+            out.append((node.lineno, repr(node.value)))
+        if isinstance(node, ast.Call) and qual(node.func) in ("os.waitpid", "os.waitid"):
+            first = node.args[0] if node.args else None
+            if first is None or not isinstance(first, (ast.Name, ast.Attribute)) \
+                    or tail(first) in ("P_ALL", "P_PGID"):
+                out.append((node.lineno, f"{qual(node.func)} for any child or a group"))
+    return sorted(set(out))
+
+
+def reap_findings_text(text):
+    """(line, text) for the shell's forms (and embedded Python's, by line); comment lines don't count."""
+    pat = re.compile(REAP_TEXT)
+    return [(i, ln.strip()[:120]) for i, ln in enumerate(text.splitlines(), 1)
+            if not ln.lstrip().startswith("#") and pat.search(ln)]
+
+
+REAP_FORBIDDEN = {
+    "a multi-line waitpid(-1, ...)": "import os\nos.waitpid(\n    -1, os.WNOHANG\n)\n",
+    "waitid(P_ALL, ...)": "import os\nos.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG)\n",
+    "from os import wait; wait()": "from os import wait\nwait()\n",
+    "waitpid(-1, 0)": "import os\nos.waitpid(-1, 0)\n",
+    "waitpid(0, ...)": "import os\nos.waitpid(0, os.WNOHANG)\n",
+    "waitpid(-group, ...)": "import os\nos.waitpid(-pgid, 0)\n",
+    "os.wait() through an alias of os": "import os as o\no.wait()\n",
+    "posix.wait3": "import posix\nposix.wait3(0)\n",
+    "wait4 imported under another name": "from os import wait4 as w4\nw4(pid, 0)\n",
+    "waitid(P_PGID, ...)": "import os\nos.waitid(os.P_PGID, 0, os.WEXITED)\n",
+    "waitid with P_ALL imported": "from os import waitid, P_ALL\nwaitid(P_ALL, 0, 4)\n",
+    "waitid with a literal idtype": "import os\nos.waitid(0, 0, os.WEXITED)\n",
+    "waitpid kept under another name": "import os\nreap = os.waitpid\nreap(-1, 0)\n",
+    "SIGCHLD ignored": "import signal\nsignal.signal(signal.SIGCHLD, signal.SIG_IGN)\n",
+    "a SIGCHLD handler, names imported": "from signal import signal as sig, SIGCHLD\nsig(SIGCHLD, lambda *a: None)\n",
+    "SIGCLD": "import signal\nsignal.signal(signal.SIGCLD, h)\n",
+    "SIGCHLD by name": "import signal\nsignal.signal(getattr(signal, 'SIGCHLD'), h)\n",
+    "a Safe child watcher": "import asyncio\nasyncio.set_child_watcher(asyncio.SafeChildWatcher())\n",
+    "a Fast child watcher, imported": "from asyncio import FastChildWatcher\nFastChildWatcher()\n",
+    "a star import of os": "from os import *\n",
+}
+REAP_ALLOWED = {
+    "waitpid on its own child": "import os\nos.waitpid(pid, 0)\n",
+    "waitpid on p.pid, its status": "import os\nstatus = os.waitpid(p.pid, 0)[1]\n",
+    "waitid on its own child": "import os\nos.waitid(os.P_PID, self.p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n",
+    "SIGTERM ignored": "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n",
+    "a Popen's own wait": "import subprocess\nsubprocess.Popen(['x']).wait()\np.wait(timeout=1)\n",
+    "the names in a comment": "import os\n# os.wait(), waitpid(-1, 0), SIGCHLD, SafeChildWatcher\nx = 1\n",
+}
+
+
+def reap_inventory(td):
+    """No code in bin/, scripts/, lib/ or install.sh reaps children it didn't start (lib/labconfig.py signals the
+    resolver's group only while it's unreaped, and relies on that). Python is read as code; comments don't count:
+    labconfig's says what it relies on."""
+    files = ["install.sh"] + sorted(os.path.relpath(os.path.join(d, f), LAB) for top in ("bin", "scripts", "lib")
+                                    for d, _, fs in os.walk(os.path.join(LAB, top)) if "__pycache__" not in d for f in fs)
+    hits, pys = [], 0
+    for rel in files:
+        try:
+            text = open(os.path.join(LAB, rel)).read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if rel.endswith(".py") or (text.startswith("#!") and "python" in text.split("\n", 1)[0]):
+            pys += 1
+            hits += [f"{rel}:{n}: {what}" for n, what in reap_findings_py(text)]
+        else:
+            hits += [f"{rel}:{n}: {what}" for n, what in reap_findings_text(text)]
+    check(f"nothing in bin/, scripts/, lib/ or install.sh reaps children it didn't start ({pys} Python files read as "
+          "code, the rest as text)", not hits and pys > 20, "\n".join(hits) or pys)
+    missed = [k for k, src in REAP_FORBIDDEN.items() if not reap_findings_py(src)]
+    check(f"...the scanner finds each of {len(REAP_FORBIDDEN)} forbidden forms (a multi-line waitpid(-1, ...), "
+          "waitid(P_ALL, ...), from os import wait, aliases, SIGCHLD, the watchers, ...)", not missed, missed)
+    wrong = {k: reap_findings_py(src) for k, src in REAP_ALLOWED.items() if reap_findings_py(src)}
+    check("...and none in what's allowed (waitpid/waitid on its own child, SIGTERM ignored, a Popen's wait, comments)",
+          not wrong, wrong)
+    check("...in shell: a trap on CHLD, but not on INT", reap_findings_text("trap '' CHLD\n")
+          and not reap_findings_text("trap 'cleanup' INT\n# trap '' CHLD\n"))
+    check("...and labconfig's comment says what it relies on", "no waitpid(-1) or os.wait()" in open(
+        os.path.join(LAB, "lib", "labconfig.py")).read())
+
+
 def delete_inventory(td):
     """No bare recursive delete: every rm -r, rmtree and removedirs in bin/, scripts/, lib/ and install.sh goes
     through lib/safedelete.py (scripts/safe-rmtree.sh), except those in DELETE_EXCEPTIONS (the runner's own deletes,
@@ -2237,6 +3401,12 @@ def main():
         resolution(td)
         ambiguity(td)
         listing(td)
+        default_computer(td)
+        default_computer_audit(td)
+        default_computer_recheck(td)
+        default_computer_recheck2(td)
+        default_computer_recheck3(td)
+        default_computer_recheck4(td)
         creating(td)
         deleting(td)
         audit_fixes(td)
@@ -2250,6 +3420,7 @@ def main():
         final6_fixes(td)
         final7_fixes(td)
         delete_inventory(td)
+        reap_inventory(td)
         claude_flow(td)
         hub_pin(td)
     finally:
