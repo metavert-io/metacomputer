@@ -224,17 +224,20 @@ runner's does.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (145 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (177 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. The stub keeps MCP servers in
-three scopes as Claude Code does (user, and local and project ones keyed by the
-folder), shows the one that takes precedence in `mcp get` (not found on stderr, as
-the real one), and fails on demand: `mcp get`, `mcp add` (or only for one command),
-`mcp remove`, `plugin update`, and `plugin list` (an exit status, text that isn't
-JSON, another shape; from the start or only after an update). Any run whose stderr
-shows install.sh's ERR-trap message fails. `--real-claude` repeats the install and
-update checks with the real `claude` CLI (23 more), with a temporary `HOME` and
-`CLAUDE_CONFIG_DIR`; it needs no network.
+three scopes as Claude Code does (user-scope ones in the temporary home's
+`.claude.json`, where install.sh reads the exact entry; local and project ones keyed
+by the folder), shows the one that takes precedence in `mcp get` with the arguments
+joined by spaces (not found on stderr, as the real one), takes `mcp add-json`, and
+fails on demand: `mcp get`, a `mcp get` that disagrees with the configuration, `mcp
+add`/`add-json` (or only for one command), `mcp remove`, `plugin update`, `plugin
+uninstall`, and `plugin list` (an exit status, text that isn't JSON, another shape, a
+record without its id or scope, a record with load errors; from the start or only
+after an update). Any run whose stderr shows install.sh's ERR-trap message fails.
+`--real-claude` repeats the install and update checks with the real `claude` CLI (29
+more), with a temporary `HOME` and `CLAUDE_CONFIG_DIR`; it needs no network.
 - The marketplace lists the plugin at `./plugin`, which holds no links: its copies of
   `skills/metacomputer`, `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and
   `THIRD_PARTY_NOTICES.md` are the repository's files (`scripts/sync-plugin.py --check`),
@@ -274,28 +277,42 @@ update checks with the real `claude` CLI (23 more), with a temporary `HOME` and
 - `install.sh --only-claude`: a fresh install adds the checkout as the marketplace,
   installs the plugin at user scope and registers the user-scope MCP server
   `metacomputer` (`claude mcp add -s user metacomputer ~/.local/bin/metacomputer
-  mcp-lazy`; checked as type, command and arguments), names the `mcp__metacomputer__*`
-  tools and ends by saying a restart (or `/mcp`) loads them; a second run changes
-  nothing and says nothing about `/mcp`. `~/.local/bin/metacomputer` with other
-  arguments or none is repaired, and this checkout's `bin/metacomputer` or a moved
-  checkout's is replaced, naming what it ran. An earlier install's skill link is
-  removed when it's this checkout's (or a moved checkout's, dangling) and left alone
-  when another existing checkout's.
+  mcp-lazy`; checked as the exact entry), names the `mcp__metacomputer__*` tools and
+  ends by saying a restart (or `/mcp`) loads them; a second run changes nothing and
+  says nothing about `/mcp`. `~/.local/bin/metacomputer` with `status`, no arguments,
+  `" mcp-lazy"` or `"mcp-lazy "` isn't taken as registered and is left (exit 1) unless
+  `--replace-mcp` (with the real `claude` too); this checkout's `bin/metacomputer` is
+  replaced, naming what it ran. An earlier install's skill link is removed when it's
+  this checkout's (or a moved checkout's, dangling) and left alone when another
+  existing checkout's.
 - Ownership: a registration that isn't metacomputer's (a program that isn't a
   checkout) is left alone without a terminal and with `--yes`, with the plugin still
-  installed and exit status 1, and replaced with `--replace-mcp`; another checkout's
-  is left alone the same way and moved with `--switch` (with other arguments, it's a
-  configuration of yours, left even then); an HTTP server and one with variables of
-  its own and other arguments stay even with `--replace-mcp`; metacomputer's own with
-  variables you set is already registered, the variables kept; a failed `mcp get`
-  changes nothing and runs no plugin update.
+  installed and exit status 1, and replaced with `--replace-mcp`. Left the same way
+  (`--yes`): another file inside the checkout, an interpreter, a path that starts with
+  the checkout's and climbs out of it, a launcher that doesn't exist, this checkout's
+  launcher with other arguments. Repaired without asking: this checkout's launcher by
+  a path with `..` in it, and a legacy path earlier versions registered (gone since).
+  Another checkout's is left alone and moved with `--switch` (with other arguments,
+  it's a configuration of yours, left even then); an HTTP server and one with
+  variables of its own and other arguments stay even with `--replace-mcp`, and their
+  URL and values are never printed; metacomputer's own with variables you set is
+  already registered, the variables kept; a failed `mcp get`, a `mcp get` that
+  disagrees with the configuration, and a configuration that isn't JSON change
+  nothing and run no plugin update.
 - Failures in order: with an older GitHub plugin copy bringing the only server, a
   failed add runs no plugin update and leaves that server (one source of tools); a
-  failed add while replacing an earlier registration puts that one back, or says
-  what it ran and how to add it when it can't; a failed remove changes nothing; a
-  failed plugin update leaves two (said, exit 1); a successful one leaves one. A
-  `plugin list` that fails, isn't JSON or has another shape, before or after the
-  update, is never taken for "no server": no "no longer brings" message, exit 1.
+  failed add while replacing an earlier registration puts that one back exactly
+  (`add-json`; one argument with spaces stays one), or says what it ran and the
+  `add-json` command when it can't; a failed remove changes nothing; a failed plugin
+  update leaves two (said, exit 1); a successful one, run after the server is read
+  back, leaves one. `--no-plugin` whose add fails keeps the plugin (no uninstall);
+  when it works, the plugin is uninstalled after the server is added; a failed
+  uninstall is said and fails the run, at install and at `--uninstall`. An old server
+  name of this checkout's is kept while the add fails and removed after it works; one
+  that isn't this checkout's stays. A `plugin list` that fails, isn't JSON, has
+  another shape, a record without its id or scope, or load errors for the plugin,
+  before or after the update, is never taken for "no server": no "no longer brings"
+  message, exit 1.
 - Scopes: local and project servers with the same command in the folder the install
   runs in don't count as registered; the user-scope one is added (every `mcp add` and
   `mcp remove` names `-s user`) and the others are reported and unchanged. `--uninstall`
@@ -775,6 +792,9 @@ Each of these needs no VM and takes seconds.
   another branch and going back are refused; services on older code are restarted, a VM on an earlier gateway only
   when allowed (and not when another session holds it), a vault is asked to be bound again, a VM built from other
   guest files gets a rebuild note, what's installed is recorded, and status's update line comes from a daily check.
+  An install whose Claude Code step didn't finish (`MCOMP_INSTALL_INCOMPLETE=claude` from install.sh) is recorded as
+  `incomplete`; `update` then runs install.sh again at the same release (and doesn't when the record is complete),
+  and `version` says so.
 - `python3 tests/test_traces.py`: the trace recorder (on only while a trace is active, one session or all, capped,
   0600) and the Playwright export: tokens resolve through the rows of reads, clicks/fills/keys/checks/navigations
   translate, other apps are left out, and page text written to break out of the code (quotes, newlines,
@@ -926,9 +946,10 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_agents.py`: `metacomputer agents` reports each agent (not installed, set up, or left alone
   by a remembered `--no-codex`), and for Claude Code (a stand-in `claude`) where the skills and the tools come from:
   the plugin and the user-scope server, a skill link and the server, the plugin with no server (no tools, and this
-  checkout's command that adds it), a user-scope server that runs something else or other arguments (not counted),
-  a lookup that fails (said, not taken for none), and an older plugin copy that brings its own server, alone or
-  beside the user-scope one (listed twice);
+  checkout's command that adds it), a user-scope server that runs something else, or `status`, no arguments,
+  `" mcp-lazy"` or `"mcp-lazy "` (exact arguments, from `~/.claude.json`: not counted), a configuration that
+  disagrees with `mcp get` and a lookup that fails (said, not taken for none), and an older plugin copy that brings
+  its own server, alone or beside the user-scope one (listed twice);
   `agents check` passes against this Mac's codex (when installed) without touching its Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
   `codex mcp` behave differently, and against one whose answers look right but whose exit status fails, whose sandbox
   marker is only inherited, and whose strict config rejects the settings; a `codex` writable by others, or found

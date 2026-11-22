@@ -320,27 +320,41 @@ shared by every VM, and each event names its VM.
   restart, or `/mcp` in an open session; the install says so when it added one.
 
 **An MCP server already named `metacomputer`.** The installer reads Claude Code's
-user-scope server as such (`claude mcp get` from an empty folder, so a project or
-local server can't stand in for it) and checks its type, command and arguments.
-- metacomputer's own, `~/.local/bin/metacomputer mcp-lazy`: kept as it is, variables
-  you set on it included.
-- metacomputer's own with other arguments or none, this checkout's
-  `bin/metacomputer` (as earlier installs registered it), or a metacomputer path that
-  no longer exists (a checkout that moved): repaired, and the install says what it ran.
-- another metacomputer checkout's `bin/metacomputer mcp-lazy`: moved to this one only
-  with `--switch` (or a yes at a terminal).
-- anything else (another program, other arguments with variables of their own, a
-  server that isn't a local command): left as it is. A local command without
-  variables is replaced with `--replace-mcp` (or a yes at a terminal); for the rest,
-  the install says how to remove it yourself.
+user-scope entry exactly (`lib/claude_mcp.py`): from the file Claude Code keeps it in
+(`~/.claude.json`, or `.claude.json` in `CLAUDE_CONFIG_DIR`), checked against what
+`claude mcp get` shows from an empty folder, where no project or local server can
+stand in for it. When the two disagree or either can't be read, nothing is changed.
+It then goes by the entry's type, its command (every link followed) and its exact
+argument list:
+- `~/.local/bin/metacomputer` with exactly `mcp-lazy`: kept as it is, variables you
+  set on it included.
+- this checkout's own launcher (a path that resolves to its `bin/metacomputer`), or a
+  path earlier versions registered for this checkout (`bin/metacomputer` and the
+  names before it), with exactly `mcp-lazy` and no variables: repaired, and the
+  install says what it ran.
+- another metacomputer checkout's launcher with exactly `mcp-lazy`: moved to this one
+  only with `--switch` (or a yes at a terminal).
+- anything else: left as it is. That includes `~/.local/bin/metacomputer` with other
+  arguments (a space more or less too), an interpreter or another file inside the
+  checkout, a path that only starts with the checkout's, and a launcher that doesn't
+  exist (nothing shows whose it was). A local command without variables of its own is
+  replaced with `--replace-mcp` (or a yes at a terminal); for one that sets variables,
+  or isn't a local command, the install says how to remove it yourself (its values
+  and URL are never printed).
 
 `--yes`, and runs without a terminal (`metacomputer update`), never replace a
 registration that isn't metacomputer's own. The old registration is removed only
-right before the new one is added and read back, and put back if that fails. A
-project or local server named `metacomputer` in the folder you run the install in
-takes precedence there: it's reported, never changed. When a lookup fails, the
-server can't be registered, or an older plugin copy can't be updated (below), the
-rest of the install still runs, it says what to run, and it ends with exit status 1.
+right before the new one is added and read back, and when the add fails it's put
+back exactly as it was (`claude mcp add-json`, read back again). What served the
+tools before is retired only once the new server is registered and read back: an
+older plugin copy's own server, the plugin itself with `--no-plugin`, and the server
+names earlier versions used; each removal is checked. A project or local server
+named `metacomputer` in the folder you run the install in takes precedence there:
+it's reported, never changed. When a lookup fails, the server can't be registered,
+or something can't be retired, the rest of the install still runs, it says what to
+run, and it ends with exit status 1; it also records the Claude Code step as
+unfinished, so the next `metacomputer update` runs the install again even when the
+checkout is already at the release.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:

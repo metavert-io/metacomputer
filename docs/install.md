@@ -266,7 +266,7 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--no-claude` | Leave Claude Code alone, in this run and later ones (`--claude` undoes it) |
 | `--claude` | Set Claude Code up even after an earlier `--no-claude` |
 | `--no-plugin` | Claude Code without the plugin: a skill link instead, and the same user-scope MCP server (tools `mcp__metacomputer__*`) |
-| `--replace-mcp` | Replace a user-scope MCP server named `metacomputer` that isn't metacomputer's (a local command without variables of its own). Without it the install leaves one and says so; `--yes` never replaces it ([commands.md](commands.md#the-claude-code-plugin)) |
+| `--replace-mcp` | Replace a user-scope MCP server named `metacomputer` that isn't metacomputer's own (a local command without variables of its own; `~/.local/bin/metacomputer` with other arguments counts as not its own). Without it the install leaves one and says so; `--yes` never replaces it ([commands.md](commands.md#the-claude-code-plugin)) |
 | `--only-claude` | Only the Claude Code step |
 | `--codex` | Set Codex up even after an earlier `--no-codex`: [codex.md](codex.md) |
 | `--no-codex` | Leave Codex alone, in this run and later ones (`--codex` undoes it) |
@@ -346,7 +346,8 @@ the checkout kept an installer from v0.4.4 or earlier, leaves Claude Code withou
 tools: `metacomputer update` brings the installer that adds them (the plugin's
 `metacomputer status` says so too). When Claude Code's step can't finish (a server
 named `metacomputer` that isn't metacomputer's, a lookup or registration that fails),
-the rest of the update still runs, and it says what to run and ends with exit status 1.
+the rest of the update still runs, and it says what to run and ends with exit status 1; the next
+`metacomputer update` runs the install again, even when the checkout is already at the release.
 
 ## Uninstalling
 
