@@ -1,9 +1,11 @@
-# Privacy
+# Privacy: what metacomputer keeps and sends
 
-Last updated: 21 November 2026.
+Last updated: 22 November 2026.
 
-This covers metacomputer, made by Metavert LLC: this repository, its Claude Code plugin and the setup it adds to
-Codex. metacomputer runs on your Mac. **Metavert runs no server for it and receives nothing from it**: there is no
+metacomputer is made by Metavert LLC, and [Metavert's privacy policy](https://www.metavert.io/privacy-policy) applies
+to it: its "Self-hosted software" section covers software you install and run yourself, like this. This page is the
+product documentation that section refers to. It covers this repository, its Claude Code plugin and the setup it adds
+to Codex. metacomputer runs on your Mac. **Metavert runs no server for it and receives nothing from it**: there is no
 account, no telemetry, no analytics and no crash reporting. What leaves your Mac goes where you, your coding agent
 or the tasks you give it send it, as described below.
 
@@ -70,10 +72,11 @@ metacomputer is a tool for developers and isn't directed to children under 18.
 
 ## Changes
 
-Changes to this policy are made in this file, so its history on GitHub shows every version, and the
+Changes to this page are made in this file, so its history on GitHub shows every version, and the
 [CHANGELOG](CHANGELOG.md) notes them.
 
 ## Contact
 
-Open an issue at [github.com/metavert-io/metacomputer/issues](https://github.com/metavert-io/metacomputer/issues),
-or, for anything security-related, use the private report described in [SECURITY.md](SECURITY.md#reporting-a-vulnerability).
+Email [privacy@metavert.io](mailto:privacy@metavert.io) or open an issue at
+[github.com/metavert-io/metacomputer/issues](https://github.com/metavert-io/metacomputer/issues). For anything
+security-related, use the private report described in [SECURITY.md](SECURITY.md#reporting-a-vulnerability).

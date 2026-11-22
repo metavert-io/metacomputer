@@ -6,6 +6,10 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The plugin's privacy-policy link is Metavert's privacy policy** (metavert.io/privacy-policy, whose "Self-hosted software" section covers metacomputer). PRIVACY.md is now the product's page on what it keeps and sends, and gives privacy@metavert.io as a contact.
+
 ## [0.4.4] - 2026-11-22
 
 ### Added

@@ -67,7 +67,9 @@ metacomputer has no server, account, telemetry or analytics; Metavert receives n
 Passwords, one-time codes and API keys stay in the vault on your Mac, which you unlock in your own terminal. Claude
 asks the vault to type a sign-in into a page in the VM and never sees the value.
 
-The full privacy policy: [PRIVACY.md](https://github.com/metavert-io/metacomputer/blob/main/PRIVACY.md).
+Privacy policy: [Metavert's](https://www.metavert.io/privacy-policy), whose "Self-hosted software" section covers
+metacomputer. [PRIVACY.md](https://github.com/metavert-io/metacomputer/blob/main/PRIVACY.md) lists what stays on your
+Mac and every connection metacomputer makes.
 
 ## Safety
 
