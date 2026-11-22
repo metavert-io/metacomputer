@@ -6,6 +6,10 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`trace export`** dropped `press_key`'s modifiers (Ctrl+L became a press of "l"), so an address typed in the address bar wasn't turned into `page.goto`; an address typed without `http://` now is too (http for this machine, else https, with a comment to check it).
+
 ## [0.4.2] - 2026-11-20
 
 ### Fixed
