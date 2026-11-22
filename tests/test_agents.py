@@ -62,13 +62,17 @@ esac
 """
 
 
-# A claude that answers `plugin list --json` with $FAKE_PLUGINS and `mcp get metacomputer` with $FAKE_MCP's command.
+# A claude that answers `plugin list --json` with $FAKE_PLUGINS and `mcp get metacomputer` with a user-scope server
+# running $FAKE_MCP $FAKE_ARGS (default mcp-lazy); "No MCP server" on stderr without one, as the real one; FAKE_MCP_FAIL:
+# the lookup fails.
 FAKE_CLAUDE = """#!/bin/sh
 case "$1 $2" in
   "--version ") echo "2.1.999 (Claude Code)" ;;
   "plugin list") printf '%s\\n' "${FAKE_PLUGINS:-[]}" ;;
-  "mcp get") [ -n "${FAKE_MCP:-}" ] || { echo "No MCP server named \\"metacomputer\\"."; exit 1; }
-             printf 'metacomputer:\\n  Scope: User config\\n  Type: stdio\\n  Command: %s\\n  Args: mcp-lazy\\n' "$FAKE_MCP" ;;
+  "mcp get") [ -z "${FAKE_MCP_FAIL:-}" ] || { echo "config unreadable" >&2; exit 2; }
+             [ -n "${FAKE_MCP:-}" ] || { echo "No MCP server named \\"metacomputer\\"." >&2; exit 1; }
+             printf 'metacomputer:\\n  Scope: User config (available in all your projects)\\n  Type: stdio\\n  Command: %s\\n  Args: %s\\n' \\
+               "$FAKE_MCP" "${FAKE_ARGS-mcp-lazy}" ;;
   *) exit 2 ;;
 esac
 """
@@ -85,9 +89,10 @@ def claude_cases(t, base):
     old = dict(plug, mcpServers={"metacomputer": {"command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer"}})
     link = os.path.join(base["HOME"], ".claude", "skills", "metacomputer")
 
-    def agents(plugins, mcp, *args):
-        env = dict(base, PATH=fake + ":/usr/bin:/bin", FAKE_PLUGINS=json.dumps(plugins), FAKE_MCP=mcp)
+    def agents(plugins, mcp, *args, **extra):
+        env = dict(base, PATH=fake + ":/usr/bin:/bin", FAKE_PLUGINS=json.dumps(plugins), FAKE_MCP=mcp, **extra)
         return run(list(args), env)
+    fix = os.path.join(LAB, "install.sh") + " --only-claude"
 
     r = agents([plug], cmd, "--json")
     st = json.loads(r.stdout or "{}").get("claude_code", {})
@@ -98,12 +103,21 @@ def claude_cases(t, base):
     check("...said as the plugin's skills and the MCP server metacomputer",
           "set up (the plugin's skills and the MCP server metacomputer)" in r.stdout, r.stdout)
     r = agents([plug], "")
-    check("the plugin without the server: not set up (no tools), and how to add it",
-          "no MCP server metacomputer (no tools)" in r.stdout and "./install.sh --only-claude" in r.stdout
+    check("the plugin without the server: not set up (no tools), and this checkout's command that adds it",
+          "no MCP server metacomputer (no tools)" in r.stdout and fix in r.stdout
           and json.loads(agents([plug], "", "--json").stdout)["claude_code"]["set_up"] is False, r.stdout)
+    r = agents([plug], "/opt/other/bin/thing")
+    check("a user-scope server that runs something else: no metacomputer tools, and what it runs",
+          "runs /opt/other/bin/thing mcp-lazy, not ~/.local/bin/metacomputer mcp-lazy" in r.stdout and fix in r.stdout, r.stdout)
+    r = agents([plug], cmd, FAKE_ARGS="status")
+    check("metacomputer's command with other arguments: not counted as set up",
+          f"runs {cmd} status" in r.stdout and json.loads(agents([plug], cmd, "--json", FAKE_ARGS="status").stdout)
+          ["claude_code"]["set_up"] is False, r.stdout)
+    r = agents([plug], cmd, FAKE_MCP_FAIL="1")
+    check("a lookup that fails is said, not taken for no server", "couldn't be read" in r.stdout, r.stdout)
     r = agents([old], "")
     check("an older plugin copy that brings its own server: its tools counted, and how to move them to the user-scope server",
-          "an older copy of the plugin" in r.stdout and "./install.sh --only-claude" in r.stdout, r.stdout)
+          "an older copy of the plugin" in r.stdout and fix in r.stdout, r.stdout)
     r = agents([old], cmd)
     check("an older plugin copy beside the user-scope server: says the tools are listed twice, and how to update it",
           "listed twice" in r.stdout and "claude plugin update metacomputer@metacomputer" in r.stdout, r.stdout)

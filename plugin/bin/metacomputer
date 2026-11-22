@@ -14,7 +14,18 @@ mc_in_plugins() { case "$1" in "$(readlink -f "$mc_plugins" 2>/dev/null || echo 
 mc_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/metacomputer"; do
   mc_to="$(readlink -f "$mc_to" 2>/dev/null)" || continue
-  [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" && exec "$mc_to" "$@"
+  [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" || continue
+  # A checkout whose install.sh predates the user-scope MCP server (no CLAUDE_MCP=user line) relied on the plugin for
+  # the tools, which this plugin no longer brings: its checks and help say so (other commands just run).
+  mc_co="$(dirname "$(dirname "$mc_to")")"
+  case "${1:-}" in ""|status|agents|where|help|version)
+    if [ -f "$mc_co/install.sh" ] && ! grep -q '^CLAUDE_MCP=user' "$mc_co/install.sh" 2>/dev/null; then
+      printf '%s\n' "metacomputer: this plugin no longer brings metacomputer's MCP tools (mcp__metacomputer__*): the installer adds" \
+        "them, and the metacomputer installed in $mc_co is older than that. Run \`metacomputer update\`, then" \
+        "restart Claude Code." >&2
+    fi ;;
+  esac
+  exec "$mc_to" "$@"
 done
 mc_root="$(dirname "$(dirname "$mc_self")")"
 if ! mc_in_plugins "$mc_self"; then   # loaded in place (a local marketplace) from a checkout that isn't set up

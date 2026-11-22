@@ -31,15 +31,21 @@ Mac's own Claude Code setup is never touched.
   variable), always with --confirm, passing only --dir/--no-chrome/--no-build/--yes/--dry-run/--help;
   with a checkout it hands over like any command. The real get.sh with no terminal explains and exits 3.
 - install.sh: by default the plugin (marketplace + plugin at user scope) and the user-scope MCP server
-  metacomputer, ~/.local/bin/metacomputer mcp-lazy (an earlier install's skill link removed only when it is this
-  checkout's; a registration that runs anything else replaced, saying what it ran), idempotent; --no-plugin: the
-  skill link + the same server, this checkout's plugin removed; no `claude plugin` falls back to the skill link +
-  server; the project's own GitHub marketplace is kept, one named metacomputer from any other source is refused
-  (its plugin isn't installed); another checkout's marketplace is replaced; a plugin turned off is left so, and
-  no server is added for it; --no-claude changes nothing of Claude Code's; --uninstall removes the plugin, the
-  skill link and the server. An update from the layout where the plugin brought the server (plugin.json's mcpServers
+  metacomputer, ~/.local/bin/metacomputer mcp-lazy, read back as type, command and arguments (an earlier install's
+  skill link removed only when it is this checkout's), idempotent. Only metacomputer's own registration is repaired
+  or replaced; another checkout's moves with --switch, another program's with --replace-mcp, never with --yes or
+  without a terminal, and an HTTP one or one with variables of its own never; a failed lookup changes nothing; a
+  failed add puts the old registration back; a failed remove changes nothing; local and project servers are
+  reported, never changed; any of these ends with exit status 1. --no-plugin: the skill link + the same server,
+  this checkout's plugin removed; no `claude plugin` falls back to the skill link + server; the project's own
+  GitHub marketplace is kept, one named metacomputer from any other source is refused (its plugin isn't
+  installed); another checkout's marketplace is replaced; a plugin turned off is left so, and no server is added
+  for it; --no-claude changes nothing of Claude Code's; --uninstall reads the user-scope server before it removes
+  anything, then removes the plugin, the skill link and the server. An update from the layout where the plugin brought the server (plugin.json's mcpServers
   and no user-scope server, as v0.4.4 and earlier installed it) ends with the user-scope server alone; an older plugin copy from
-  GitHub that still brings one is updated (and, if that fails, the install says the tools are listed twice).
+  GitHub that still brings one is updated, only after the new server is read back (and, if that fails, or the
+  plugin list can't be read, the install says so and fails). The plugin updated on its own over an older checkout:
+  its launcher and the skill say to run `metacomputer update`.
 - The skill and the driver pack name both prefixes; bench and the skill-test analyzer count both.
 """
 import json
@@ -373,16 +379,25 @@ def test_setup():
 
 # --- install.sh with a stub claude --------------------------------------------------------------
 STUB = r'''#!/usr/bin/env python3
-"""A stand-in for the claude CLI's plugin and mcp commands: state in $STUB_STATE, argv logged to $STUB_LOG."""
+"""A stand-in for the claude CLI's plugin and mcp commands: state in $STUB_STATE, argv logged to $STUB_LOG.
+MCP servers live in three scopes as Claude Code keeps them: user, and local and project ones keyed by the folder the
+command runs in; `mcp get` shows the one that takes precedence there (local, project, user), as the real one does.
+Failures on demand: STUB_FAIL_MCP_GET, STUB_FAIL_MCP_ADD (or STUB_FAIL_ADD_CMD=PATH: only that command),
+STUB_FAIL_MCP_REMOVE, STUB_FAIL_UPDATE, STUB_PLUGIN_LIST=exit|json|shape (STUB_PLUGIN_LIST_WHEN=after-update: only
+once a plugin update has run)."""
 import json, os, sys
 a = sys.argv[1:]
 st_path = os.environ["STUB_STATE"]
-st = json.load(open(st_path)) if os.path.exists(st_path) else {"mkts": {}, "plugins": {}, "mcp": {}}
+st = json.load(open(st_path)) if os.path.exists(st_path) else {}
+st.setdefault("mkts", {}); st.setdefault("plugins", {})
+st.setdefault("mcp", {}); [st["mcp"].setdefault(k, {}) for k in ("user", "local", "project")]
 open(os.environ["STUB_LOG"], "a").write(json.dumps(a) + "\n")
+cwd = os.path.realpath(os.getcwd())
 def save(): json.dump(st, open(st_path, "w"))
 def out(x): print(json.dumps(x))
+def err(m, rc=1): print(m, file=sys.stderr); sys.exit(rc)
 if a[:1] == ["plugin"] and os.environ.get("STUB_NO_PLUGIN"):
-    print("error: unknown command 'plugin'", file=sys.stderr); sys.exit(1)
+    err("error: unknown command 'plugin'")
 if a[:2] == ["plugin", "--help"]:
     print("Usage: claude plugin"); sys.exit(0)
 if a[:3] == ["plugin", "marketplace", "list"]:
@@ -391,13 +406,19 @@ if a[:3] == ["plugin", "marketplace", "add"]:
     path = a[3]; name = json.load(open(os.path.join(path, ".claude-plugin", "marketplace.json")))["name"]
     if os.environ.get("STUB_FAIL_ADD"): sys.exit(1)
     if name in st["mkts"] and st["mkts"][name].get("path") != path:
-        print("already exists with another source", file=sys.stderr); sys.exit(1)
+        err("already exists with another source")
     st["mkts"][name] = {"source": "directory", "path": path, "installLocation": path}; save(); sys.exit(0)
 if a[:3] == ["plugin", "marketplace", "remove"]:
     if a[3] not in st["mkts"]: sys.exit(1)
     del st["mkts"][a[3]]
     st["plugins"] = {k: v for k, v in st["plugins"].items() if not k.endswith("@" + a[3])}; save(); sys.exit(0)
+if a[:3] == ["plugin", "marketplace", "update"]:
+    sys.exit(0 if a[3] in st["mkts"] else 1)
 if a[:2] == ["plugin", "list"]:
+    bad = os.environ.get("STUB_PLUGIN_LIST")
+    if bad and (os.environ.get("STUB_PLUGIN_LIST_WHEN") != "after-update" or st.get("updated")):
+        if bad == "exit": err("stub: plugin list failed", 3)
+        print("[{not json" if bad == "json" else '{"plugins": []}'); sys.exit(0)
     # As the real one: a plugin from a directory marketplace is read in place, so its mcpServers are that folder's
     # plugin.json's; one from anywhere else is the copy installed (its mcpServers kept in the state).
     rows = []
@@ -414,28 +435,53 @@ if a[:2] == ["plugin", "list"]:
                 row["mcpServers"] = srv
         rows.append(row)
     out(rows); sys.exit(0)
-if a[:3] == ["plugin", "marketplace", "update"]:
-    sys.exit(0 if a[3] in st["mkts"] else 1)
-if a[:2] == ["plugin", "update"]:
-    if a[2] not in st["plugins"] or os.environ.get("STUB_FAIL_UPDATE"): sys.exit(1)
-    st["plugins"][a[2]].pop("mcpServers", None); save(); sys.exit(0)
 if a[:2] == ["plugin", "install"]:
     pid = a[2]
     if pid.split("@")[1] not in st["mkts"]: sys.exit(1)
     st["plugins"][pid] = {"scope": "user", "enabled": True}; save(); sys.exit(0)
+if a[:2] == ["plugin", "update"]:
+    st["updated"] = True; save()
+    if a[2] not in st["plugins"] or os.environ.get("STUB_FAIL_UPDATE"): sys.exit(1)
+    st["plugins"][a[2]].pop("mcpServers", None); save(); sys.exit(0)
 if a[:2] == ["plugin", "uninstall"]:
     if a[2] not in st["plugins"]: sys.exit(1)
     del st["plugins"][a[2]]; save(); sys.exit(0)
+SCOPE_WORDS = {"local": "Local config (private to you in this project)", "project": "Project config (shared via .mcp.json)",
+               "user": "User config (available in all your projects)"}
+def table(scope):
+    return st["mcp"]["user"] if scope == "user" else st["mcp"][scope].setdefault(cwd, {})
 if a[:2] == ["mcp", "get"]:
-    if a[2] not in st["mcp"]: print(f'No MCP server named "{a[2]}".'); sys.exit(1)
-    print(f"{a[2]}:\n  Scope: User config\n  Type: stdio\n  Command: {st['mcp'][a[2]][0]}\n  Args: {' '.join(st['mcp'][a[2]][1:])}"); sys.exit(0)
+    if os.environ.get("STUB_FAIL_MCP_GET"): err("stub: couldn't read the configuration", 2)
+    for scope in ("local", "project", "user"):
+        e = table(scope).get(a[2])
+        if e:
+            lines = [f"{a[2]}:", f"  Scope: {SCOPE_WORDS[scope]}", "  Status: x Failed to connect", f"  Type: {e['type']}"]
+            if e["type"] == "stdio":
+                lines += [f"  Command: {e['command']}", "  Args: " + " ".join(e.get("args", [])), "  Environment:"]
+                lines += [f"    {k}={v}" for k, v in (e.get("env") or {}).items()]
+            else:
+                lines += [f"  URL: {e['url']}"]
+            print("\n".join(lines + ["", f"To remove this server, run: claude mcp remove {a[2]} -s {scope}"])); sys.exit(0)
+    err(f'No MCP server named "{a[2]}". Configured servers: none')
 if a[:2] == ["mcp", "add"]:
-    i = a.index("-s") + 2 if "-s" in a else 2
-    st["mcp"][a[i]] = a[i + 1:]; save(); sys.exit(0)
+    rest, scope, env = a[2:], "local", {}
+    while rest and rest[0].startswith("-") and rest[0] != "--":
+        if rest[0] in ("-s", "--scope"): scope = rest[1]; rest = rest[2:]
+        elif rest[0] in ("-e", "--env"): k, _, v = rest[1].partition("="); env[k] = v; rest = rest[2:]
+        else: err("stub: unknown option " + rest[0], 2)
+    name, rest = rest[0], rest[1:]
+    if rest[:1] == ["--"]: rest = rest[1:]
+    if os.environ.get("STUB_FAIL_MCP_ADD") or os.environ.get("STUB_FAIL_ADD_CMD") == rest[0]: err("stub: couldn't write the configuration")
+    if name in table(scope): err(f"MCP server {name} already exists in {scope} config")
+    table(scope)[name] = {"type": "stdio", "command": rest[0], "args": rest[1:], "env": env}; save(); sys.exit(0)
 if a[:2] == ["mcp", "remove"]:
-    if a[2] not in st["mcp"]: sys.exit(1)
-    del st["mcp"][a[2]]; save(); sys.exit(0)
-print("stub: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
+    if os.environ.get("STUB_FAIL_MCP_REMOVE"): err("stub: couldn't write the configuration")
+    scopes = [a[a.index("-s") + 1]] if "-s" in a else ["local", "project", "user"]
+    for scope in scopes:
+        if a[2] in table(scope):
+            del table(scope)[a[2]]; save(); sys.exit(0)
+    err(f'No MCP server named "{a[2]}" in {scopes[0]} scope')
+err("stub: unhandled " + " ".join(a), 2)
 '''
 
 
@@ -446,8 +492,10 @@ class Box:
         self.t = tempfile.mkdtemp(prefix="mcomp-plugin-")
         self.home = os.path.join(self.t, "home")
         self.bin = os.path.join(self.t, "bin")
-        os.makedirs(self.home)
-        os.makedirs(self.bin)
+        self.work = os.path.join(self.t, "work")          # where install.sh runs unless a test says otherwise
+        self.neutral = os.path.join(self.t, "neutral")    # an empty folder: no project or local server applies there
+        for d in (self.home, self.bin, self.work, self.neutral):
+            os.makedirs(d)
         self.state = os.path.join(self.t, "state.json")
         self.log = os.path.join(self.t, "claude.log")
         self.real = real
@@ -461,16 +509,20 @@ class Box:
         if real:
             self.env["CLAUDE_CONFIG_DIR"] = os.path.join(self.home, ".claude")
 
-    def install(self, *args, **env):
+    def install(self, *args, cwd=None, script=None, **env):
         e = dict(self.env, **env)
         if os.path.exists(self.log):
             os.remove(self.log)
-        p = subprocess.run([os.path.join(LAB, "install.sh"), *args], env=e, capture_output=True, text=True, timeout=300)
+        p = subprocess.run([script or os.path.join(LAB, "install.sh"), *args], env=e, capture_output=True, text=True,
+                           timeout=300, cwd=cwd or self.work, stdin=subprocess.DEVNULL)
         calls = [json.loads(x) for x in open(self.log)] if os.path.exists(self.log) else []
+        if "install: stopped" in p.stderr:   # install.sh's ERR trap: a failure it meant to catch escaped somewhere
+            check(f"install.sh {' '.join(args)}: no ERR-trap message", False, p.stderr[-600:])
         return p, calls
 
-    def claude(self, *args):
-        return subprocess.run(["claude", *args], env=self.env, capture_output=True, text=True, timeout=120)
+    def claude(self, *args, cwd=None):
+        return subprocess.run(["claude", *args], env=self.env, capture_output=True, text=True, timeout=120,
+                              cwd=cwd or self.neutral, stdin=subprocess.DEVNULL)
 
     def mkts(self):
         return {m["name"]: m.get("path") or m.get("repo") for m in json.loads(self.claude("plugin", "marketplace", "list", "--json").stdout or "[]")}
@@ -478,22 +530,60 @@ class Box:
     def plugins(self):
         return {p["id"]: p for p in json.loads(self.claude("plugin", "list", "--json").stdout or "[]") if p.get("scope") == "user"}
 
+    def entry(self, cwd=None):
+        """The server named metacomputer that Claude Code uses in CWD (default: an empty folder, so the user-scope one),
+        as `claude mcp get` shows it: {"scope", "type", "command", "args", "env"}, or None."""
+        p = self.claude("mcp", "get", "metacomputer", cwd=cwd)
+        if p.returncode != 0:
+            return None
+        f, env = {}, []
+        for ln in p.stdout.splitlines():
+            if ln.startswith("    ") and "=" in ln:
+                env.append(ln.strip())
+            elif ln.startswith("  ") and ":" in ln:
+                k, _, v = ln.strip().partition(":")
+                f.setdefault(k.lower(), v.strip())
+        return {"scope": f.get("scope", "").split(" ")[0].lower(), "type": f.get("type"), "command": f.get("command"),
+                "args": f.get("args", ""), "env": env}
+
     def server(self):
-        out = self.claude("mcp", "get", "metacomputer").stdout
-        return next((x.split("Command:", 1)[1].strip() for x in out.splitlines() if "Command:" in x), None)
+        """The user-scope server's command, or None."""
+        e = self.entry()
+        return e and e["scope"] == "user" and e["command"] or None
+
+    def registered(self):
+        """Is the user-scope server exactly metacomputer's: stdio, ~/.local/bin/metacomputer mcp-lazy?"""
+        e = self.entry()
+        return bool(e and e["scope"] == "user" and e["type"] == "stdio" and e["command"] == self.cmd and e["args"] == "mcp-lazy")
 
     def plugin_servers(self):
         """The MCP servers the installed plugin declares (none, from this checkout)."""
         return (self.plugins().get("metacomputer@metacomputer") or {}).get("mcpServers") or {}
 
+    def sources(self):
+        """Where Claude Code gets metacomputer's tools: "user" (the user-scope server, as it should be), "plugin" (an
+        older plugin copy's own server). Two means the tools are listed twice; none, that there are none."""
+        return (["user"] if self.registered() else []) + (["plugin"] if self.plugin_servers() else [])
+
     @property
     def cmd(self):
         return os.path.join(self.home, ".local", "bin", "metacomputer")
 
-    def seed(self, mkts=None, plugins=None, mcp=None):
+    def seed(self, mkts=None, plugins=None, mcp=None, local=None, project=None):
+        """Stub state. mcp: user-scope servers, NAME -> [COMMAND, ARGS...] (stdio) or an entry dict; local and
+        project: FOLDER -> {NAME: entry}."""
         if self.real:
             raise RuntimeError("seed is for the stub")
-        json.dump({"mkts": mkts or {}, "plugins": plugins or {}, "mcp": mcp or {}}, open(self.state, "w"))
+
+        def ent(v):
+            return v if isinstance(v, dict) else {"type": "stdio", "command": v[0], "args": v[1:], "env": {}}
+        scoped = {s: {os.path.realpath(d): {n: ent(v) for n, v in names.items()} for d, names in (m or {}).items()}
+                  for s, m in (("local", local), ("project", project))}
+        json.dump({"mkts": mkts or {}, "plugins": plugins or {},
+                   "mcp": dict(user={n: ent(v) for n, v in (mcp or {}).items()}, **scoped)}, open(self.state, "w"))
+
+    def stub_state(self):
+        return json.load(open(self.state))
 
     def link(self, name):
         p = os.path.join(self.home, name)
@@ -501,6 +591,15 @@ class Box:
 
     def close(self):
         shutil.rmtree(self.t, ignore_errors=True)
+
+
+def ran(calls, *prefix):
+    return [c for c in calls if c[:len(prefix)] == list(prefix)]
+
+
+def mutations(calls):
+    return [c for c in calls if c[:2] in (["mcp", "add"], ["mcp", "remove"], ["plugin", "update"], ["plugin", "uninstall"])
+            or c[:3] in (["plugin", "marketplace", "update"], ["plugin", "marketplace", "remove"])]
 
 
 def test_install(real=False):
@@ -517,10 +616,10 @@ def test_install(real=False):
             check(tag + "fresh: it loads in place from plugin/", pl and pl.get("readFromFolder") == os.path.join(LAB, "plugin"), pl)
         check(tag + "fresh: the command links point at bin/metacomputer",
               b.link(".local/bin/metacomputer") == CLI and b.link(".local/bin/mcomp") == CLI)
-        check(tag + "fresh: the user-scope MCP server metacomputer runs ~/.local/bin/metacomputer; no skill link",
-              b.server() == b.cmd and b.link(skill_link) is None, (b.server(), b.link(skill_link)))
-        check(tag + "fresh: the plugin declares no MCP server, so the tools are listed once", not b.plugin_servers(),
-              b.plugin_servers())
+        check(tag + "fresh: the user-scope MCP server is stdio ~/.local/bin/metacomputer mcp-lazy; no skill link",
+              b.registered() and b.link(skill_link) is None, (b.entry(), b.link(skill_link)))
+        check(tag + "fresh: the plugin declares no MCP server, so the tools come from one place", b.sources() == ["user"],
+              b.sources())
         check(tag + "fresh: it says what it did, with the tool names and how to load them",
               "marketplace metacomputer: this checkout" in p.stdout and "plugin metacomputer@metacomputer installed" in p.stdout
               and "MCP server metacomputer registered for every project" in p.stdout and PREFIX + "*" in p.stdout
@@ -536,10 +635,17 @@ def test_install(real=False):
         check(tag + "again: nothing was added, so no /mcp note", "/mcp" not in p.stdout, p.stdout[-300:])
         if not real:
             check("again: changes nothing (no add, install, update or remove)",
-                  not [c for c in calls if c[:2] in (["plugin", "install"], ["plugin", "uninstall"], ["plugin", "update"])
-                       or c[:3] in (["plugin", "marketplace", "add"], ["plugin", "marketplace", "remove"],
-                                    ["plugin", "marketplace", "update"])
-                       or c[:2] in (["mcp", "add"], ["mcp", "remove"])], calls)
+                  not mutations(calls) and not ran(calls, "plugin", "install")
+                  and not ran(calls, "plugin", "marketplace", "add"), calls)
+
+        # A registration of metacomputer's own with the wrong arguments, or none, is repaired (item 6).
+        for args in (["status"], []):
+            b.claude("mcp", "remove", "metacomputer", "-s", "user")
+            b.claude("mcp", "add", "-s", "user", "metacomputer", "--", b.cmd, *args)
+            p, _ = b.install("--only-claude")
+            check(tag + f"~/.local/bin/metacomputer with arguments {args}: repaired to mcp-lazy, and it says what it ran",
+                  p.returncode == 0 and b.registered() and "it replaces the registration that ran" in p.stdout,
+                  (b.entry(), p.stdout[-400:]))
 
         # An earlier install without the plugin: the skill link and a user-scope server running this checkout's
         # bin/metacomputer; the plugin not there yet.
@@ -551,15 +657,15 @@ def test_install(real=False):
         b.claude("mcp", "add", "-s", "user", "metacomputer", CLI, "mcp-lazy")
         p, _ = b.install("--only-claude")
         check(tag + "upgrade: plugin installed, this checkout's skill link removed, the server now ~/.local/bin's",
-              "metacomputer@metacomputer" in b.plugins() and b.link(skill_link) is None and b.server() == b.cmd,
-              (b.plugins(), b.link(skill_link), b.server()))
+              "metacomputer@metacomputer" in b.plugins() and b.link(skill_link) is None and b.registered(),
+              (b.plugins(), b.link(skill_link), b.entry()))
         check(tag + "upgrade: it says so, and what the server ran before", "removed the skill link" in p.stdout
               and "it replaces the registration that ran" in p.stdout, p.stdout)
 
         p, _ = b.install("--only-claude", "--no-plugin")
         check(tag + "--no-plugin: skill link + the same user-scope server, this checkout's plugin and marketplace removed",
-              b.link(skill_link) == os.path.join(LAB, "skills", "metacomputer") and b.server() == b.cmd
-              and not b.plugins() and "metacomputer" not in b.mkts(), (b.link(skill_link), b.server(), b.plugins(), b.mkts()))
+              b.link(skill_link) == os.path.join(LAB, "skills", "metacomputer") and b.registered()
+              and not b.plugins() and "metacomputer" not in b.mkts(), (b.link(skill_link), b.entry(), b.plugins(), b.mkts()))
         check(tag + "--no-plugin: names the mcp__metacomputer__ tools", "mcp__metacomputer__*" in p.stdout, p.stdout)
         p, _ = b.install("--only-claude", "--no-plugin")
         check(tag + "--no-plugin again: already registered", p.returncode == 0 and "already registered" in p.stdout, p.stdout)
@@ -567,12 +673,12 @@ def test_install(real=False):
         b.install("--only-claude")
         p, _ = b.install("--uninstall")
         check(tag + "--uninstall: plugin, marketplace, MCP server and command links removed",
-              p.returncode == 0 and not b.plugins() and "metacomputer" not in b.mkts() and b.server() is None
+              p.returncode == 0 and not b.plugins() and "metacomputer" not in b.mkts() and b.entry() is None
               and b.link(".local/bin/metacomputer") is None and b.link(".local/bin/mcomp") is None,
               p.stdout + p.stderr)
         b.install("--only-claude", "--no-plugin")
         p, _ = b.install("--uninstall")
-        check(tag + "--uninstall: skill link and server removed too", b.link(skill_link) is None and b.server() is None,
+        check(tag + "--uninstall: skill link and server removed too", b.link(skill_link) is None and b.entry() is None,
               p.stdout + p.stderr)
     finally:
         b.close()
@@ -585,49 +691,20 @@ def test_install(real=False):
     try:
         p, calls = b.install("--only-agents", "--no-claude", "--no-codex")
         check("--no-claude: no plugin, no marketplace, no MCP server, no claude command run",
-              p.returncode == 0 and not b.plugins() and not b.mkts() and b.server() is None and not calls
+              p.returncode == 0 and not b.plugins() and not b.mkts() and b.entry() is None and not calls
               and "Claude Code: left alone (--no-claude" in p.stdout, (calls, p.stdout[-400:]))
         b.install("--only-claude")
         p, calls = b.install("--only-agents", "--no-claude", "--no-codex")
         check("--no-claude after a setup: the plugin and the server stay as they are",
-              p.returncode == 0 and "metacomputer@metacomputer" in b.plugins() and b.server() == b.cmd
-              and not [c for c in calls if c[:2] in (["mcp", "add"], ["mcp", "remove"], ["plugin", "uninstall"])],
+              p.returncode == 0 and "metacomputer@metacomputer" in b.plugins() and b.registered() and not mutations(calls),
               (calls, p.stdout[-300:]))
     finally:
         b.close()
 
-    # Someone else's skill link and server (another checkout that exists): the skill link stays; the server is the
-    # install's, so it's pointed at ~/.local/bin/metacomputer, and the install says what it ran.
-    b = Box()
-    try:
-        elsewhere = os.path.join(b.t, "elsewhere")
-        os.makedirs(os.path.join(elsewhere, "skills", "metacomputer"))
-        write(os.path.join(elsewhere, "bin", "metacomputer"), "#!/bin/sh\n", 0o755)
-        os.makedirs(os.path.join(b.home, ".claude", "skills"))
-        os.symlink(os.path.join(elsewhere, "skills", "metacomputer"), os.path.join(b.home, skill_link))
-        b.seed(mcp={"metacomputer": [os.path.join(elsewhere, "bin", "metacomputer"), "mcp-lazy"]})
-        p, _ = b.install("--only-claude")
-        check("another checkout's skill link is left alone; the user-scope server now runs ~/.local/bin/metacomputer, "
-              "and the install names what it ran",
-              b.link(skill_link) == os.path.join(elsewhere, "skills", "metacomputer") and b.server() == b.cmd
-              and os.path.join(elsewhere, "bin", "metacomputer") in p.stdout, p.stdout)
-        # A moved checkout's (dangling) ones are this install's to clean up.
-        os.remove(os.path.join(b.home, skill_link))
-        os.symlink(os.path.join(b.t, "gone", "skills", "metacomputer"), os.path.join(b.home, skill_link))
-        b.seed(mkts={"metacomputer": {"source": "directory", "path": LAB}},
-               plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}},
-               mcp={"metacomputer": [os.path.join(b.t, "gone", "bin", "metacomputer"), "mcp-lazy"]})
-        b.install("--only-claude")
-        check("a moved checkout's dangling skill link is removed and its server replaced", b.link(skill_link) is None
-              and b.server() == b.cmd)
-        # --uninstall from a checkout the command no longer runs leaves the server, which serves that other one.
-        os.remove(os.path.join(b.home, ".local", "bin", "metacomputer"))
-        os.symlink(os.path.join(elsewhere, "bin", "metacomputer"), os.path.join(b.home, ".local", "bin", "metacomputer"))
-        p, _ = b.install("--uninstall")
-        check("--uninstall here, while the command runs another checkout: the server (through that link) stays",
-              b.server() == b.cmd, p.stdout)
-    finally:
-        b.close()
+    test_ownership()
+    test_registration_failures()
+    test_plugin_list_failures()
+    test_scopes()
 
     # The GitHub marketplace is kept; its plugin runs this checkout through ~/.local/bin.
     b = Box()
@@ -637,10 +714,10 @@ def test_install(real=False):
         check("GitHub marketplace: kept, plugin installed from it, the user-scope server registered",
               ["plugin", "marketplace", "add", LAB] not in calls and b.mkts() == {"metacomputer": "metavert-io/metacomputer"}
               and "metacomputer@metacomputer" in b.plugins() and "github metavert-io/metacomputer" in p.stdout
-              and b.server() == b.cmd, p.stdout)
+              and b.registered(), p.stdout)
         p, calls = b.install("--uninstall")
         check("GitHub marketplace: --uninstall removes the plugin and the server, keeps the marketplace and says how to "
-              "remove it", not b.plugins() and b.server() is None and "metacomputer" in b.mkts()
+              "remove it", not b.plugins() and b.entry() is None and "metacomputer" in b.mkts()
               and "claude plugin marketplace remove metacomputer" in p.stdout, p.stdout)
     finally:
         b.close()
@@ -673,7 +750,7 @@ def test_install(real=False):
                   and not [c for c in calls if c[:2] in (["plugin", "install"], ["plugin", "update"])]
                   and "NOT installed" in out and "claude plugin marketplace remove metacomputer" in out
                   and b.link(".claude/skills/metacomputer") == os.path.join(LAB, "skills", "metacomputer")
-                  and b.server() == b.cmd and "metacomputer" in b.mkts(), out)
+                  and b.registered() and "metacomputer" in b.mkts(), out)
             b.seed(mkts={"metacomputer": dict(src)}, plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}})
             p, _ = b.install("--uninstall")
             check("…and --uninstall leaves that marketplace's plugin alone", "metacomputer@metacomputer" in b.plugins(),
@@ -710,13 +787,12 @@ def test_install(real=False):
         check("plugin turned off: left off, skill link and server kept, says how to turn it on",
               p.returncode == 0 and not b.plugins()["metacomputer@metacomputer"]["enabled"]
               and b.link(skill_link) and b.server() == CLI and "claude plugin enable metacomputer@metacomputer" in p.stdout + p.stderr
-              and not [c for c in calls if c[:2] in (["mcp", "add"], ["mcp", "remove"])],
-              p.stdout + p.stderr)
+              and not mutations(calls), p.stdout + p.stderr)
         b.seed(mkts={"metacomputer": {"source": "directory", "path": LAB}},
                plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": False}})
         p, _ = b.install("--only-claude")
         check("plugin turned off and no server: none is added, and it says what to run after turning it on",
-              p.returncode == 0 and b.server() is None and "isn't added either" in p.stdout
+              p.returncode == 0 and b.entry() is None and "isn't added either" in p.stdout
               and "./install.sh --only-claude" in p.stdout, p.stdout)
     finally:
         b.close()
@@ -728,7 +804,7 @@ def test_install(real=False):
             p, _ = b.install("--only-claude", **env)
             check(f"{why}: falls back to the skill link and the user-scope server, exit 0",
                   p.returncode == 0 and b.link(skill_link) == os.path.join(LAB, "skills", "metacomputer")
-                  and b.server() == b.cmd, p.stdout + p.stderr)
+                  and b.registered(), p.stdout + p.stderr)
         finally:
             b.close()
 
@@ -745,28 +821,221 @@ def test_install(real=False):
     finally:
         b.close()
 
-    # An older copy of the plugin from GitHub that still brings its own server: install.sh updates it from the
-    # project's repository, so the tools aren't listed twice; if that fails, it says so and how to update it.
-    old_srv = {"metacomputer": {"type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer", "args": ["mcp-lazy"]}}
-    for fail in (False, True):
-        b = Box()
-        try:
-            b.seed(mkts={"metacomputer": {"source": "github", "repo": "metavert-io/metacomputer"}},
-                   plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True, "mcpServers": old_srv}})
+
+OLD_SRV = {"metacomputer": {"type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer", "args": ["mcp-lazy"]}}
+GITHUB = {"metacomputer": {"source": "github", "repo": "metavert-io/metacomputer"}}
+
+
+def other_checkout(t, name="other"):
+    """Another metacomputer checkout, as install.sh tells one (install.sh and bin/metacomputer)."""
+    d = os.path.join(t, name)
+    write(os.path.join(d, "install.sh"), "#!/bin/sh\n", 0o755)
+    write(os.path.join(d, "bin", "metacomputer"), "#!/bin/sh\n", 0o755)
+    return d
+
+
+def test_ownership():
+    """Item 1: only metacomputer's own user-scope registration is replaced. Another program's, an HTTP server and a
+    custom one stay (with how to replace them); another checkout's moves only with --switch; --yes and runs without a
+    terminal never replace one; a failed lookup changes nothing."""
+    skill_link = ".claude/skills/metacomputer"
+    b = Box()
+    try:
+        # A program that isn't a metacomputer checkout (a bin/metacomputer and a skill, no install.sh).
+        elsewhere = os.path.join(b.t, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, "skills", "metacomputer"))
+        write(os.path.join(elsewhere, "bin", "metacomputer"), "#!/bin/sh\n", 0o755)
+        os.makedirs(os.path.join(b.home, ".claude", "skills"))
+        os.symlink(os.path.join(elsewhere, "skills", "metacomputer"), os.path.join(b.home, skill_link))
+        theirs = os.path.join(elsewhere, "bin", "metacomputer")
+        for extra in ((), ("--yes",)):
+            b.seed(mcp={"metacomputer": [theirs, "mcp-lazy"]})
+            p, calls = b.install("--only-claude", *extra)
+            check(f"a registration that isn't metacomputer's ({' '.join(extra) or 'no terminal'}): left alone, says how to "
+                  "replace it, exit 1; the plugin is installed and the other skill link stays",
+                  p.returncode == 1 and b.server() == theirs and "isn't metacomputer's" in p.stdout
+                  and "--replace-mcp" in p.stdout and "didn't finish" in p.stderr
+                  and not ran(calls, "mcp", "add") and not ran(calls, "mcp", "remove")
+                  and "metacomputer@metacomputer" in b.plugins()
+                  and b.link(skill_link) == os.path.join(elsewhere, "skills", "metacomputer"), (p.stdout[-600:], calls))
+        p, _ = b.install("--only-claude", "--replace-mcp")
+        check("…and with --replace-mcp it's replaced, and the install names what it ran",
+              p.returncode == 0 and b.registered() and theirs in p.stdout, p.stdout[-500:])
+
+        # Another metacomputer checkout's registration: moved here only with --switch.
+        other = other_checkout(b.t)
+        for extra in ((), ("--yes",)):
+            b.seed(mcp={"metacomputer": [os.path.join(other, "bin", "metacomputer"), "mcp-lazy"]})
+            p, calls = b.install("--only-claude", *extra)
+            check(f"another checkout's registration ({' '.join(extra) or 'no terminal'}): left alone, says --switch, exit 1",
+                  p.returncode == 1 and b.server() == os.path.join(other, "bin", "metacomputer")
+                  and "runs another checkout" in p.stdout and "--switch" in p.stdout and not ran(calls, "mcp", "add"),
+                  p.stdout[-500:])
+        p, _ = b.install("--only-claude", "--switch")
+        check("…and --switch points it at this one", p.returncode == 0 and b.registered(), p.stdout[-400:])
+        b.seed(mcp={"metacomputer": [os.path.join(other, "bin", "metacomputer"), "serve"]})
+        p, _ = b.install("--only-claude", "--switch")
+        check("another checkout's bin/metacomputer with other arguments is a configuration of yours: --switch leaves it",
+              p.returncode == 1 and b.server() == os.path.join(other, "bin", "metacomputer") and "--replace-mcp" in p.stdout,
+              p.stdout[-400:])
+
+        # Not a local command (HTTP), or one that sets variables: never replaced, not even with --replace-mcp.
+        b.seed(mcp={"metacomputer": {"type": "http", "url": "http://127.0.0.1:9/mcp"}})
+        for extra in ((), ("--replace-mcp",)):
+            p, calls = b.install("--only-claude", *extra)
+            e = b.entry()
+            check(f"an HTTP server named metacomputer ({' '.join(extra) or 'as is'}): left alone, says to remove it "
+                  "yourself, exit 1", p.returncode == 1 and e and e["type"] == "http" and "not a local command" in p.stdout
+                  and "claude mcp remove metacomputer -s user" in p.stdout and not ran(calls, "mcp", "remove"),
+                  (e, p.stdout[-500:]))
+        b.seed(mcp={"metacomputer": {"type": "stdio", "command": CLI, "args": ["status"], "env": {"X": "1"}}})
+        p, calls = b.install("--only-claude", "--replace-mcp")
+        check("a registration with variables of its own and other arguments: left alone, even with --replace-mcp",
+              p.returncode == 1 and b.server() == CLI and "variables of its own" in p.stdout and not ran(calls, "mcp", "remove"),
+              p.stdout[-400:])
+        b.seed(mcp={"metacomputer": {"type": "stdio", "command": b.cmd, "args": ["mcp-lazy"], "env": {"MCOMP_VM": "x"}}})
+        p, calls = b.install("--only-claude")
+        check("metacomputer's own registration with variables you set: already registered, the variables kept",
+              p.returncode == 0 and "already registered" in p.stdout and "your variables on it are kept" in p.stdout
+              and b.entry()["env"] == ["MCOMP_VM=x"] and not ran(calls, "mcp", "add"), p.stdout[-400:])
+
+        # A lookup that fails changes nothing and runs no plugin update.
+        b.seed(mkts=GITHUB, plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True, "mcpServers": OLD_SRV}},
+               mcp={"metacomputer": [CLI, "mcp-lazy"]})
+        p, calls = b.install("--only-claude", STUB_FAIL_MCP_GET="1")
+        check("a failed lookup (claude mcp get): nothing removed or added, no plugin update, says so, exit 1",
+              p.returncode == 1 and "couldn't read Claude Code's user-scope MCP server" in p.stdout and not mutations(calls)
+              and b.server() == CLI and b.plugin_servers(), (calls, p.stdout[-500:]))
+
+        # A moved checkout's (dangling) ones are this install's to clean up.
+        os.remove(os.path.join(b.home, skill_link))
+        os.symlink(os.path.join(b.t, "gone", "skills", "metacomputer"), os.path.join(b.home, skill_link))
+        b.seed(mkts={"metacomputer": {"source": "directory", "path": LAB}},
+               plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}},
+               mcp={"metacomputer": [os.path.join(b.t, "gone", "bin", "metacomputer"), "mcp-lazy"]})
+        p, _ = b.install("--only-claude")
+        check("a moved checkout's dangling skill link is removed and its server replaced",
+              p.returncode == 0 and b.link(skill_link) is None and b.registered(), p.stdout[-400:])
+        # --uninstall from a checkout the command no longer runs leaves the server, which serves that other one.
+        os.remove(b.cmd)
+        os.symlink(os.path.join(other, "bin", "metacomputer"), b.cmd)
+        p, _ = b.install("--uninstall")
+        check("--uninstall here, while the command runs another checkout: the server (through that link) stays",
+              b.registered(), p.stdout)
+    finally:
+        b.close()
+
+
+def test_registration_failures():
+    """Item 2: the plugin's own server (an older GitHub copy) is moved over only once the user-scope one is registered
+    and read back; a failed add puts the old registration back; a failed remove changes nothing; every one of these
+    ends with exit status 1, and the count of servers is what it says."""
+    old_plugin = {"metacomputer@metacomputer": {"scope": "user", "enabled": True, "mcpServers": OLD_SRV}}
+    b = Box()
+    try:
+        b.seed(mkts=GITHUB, plugins=old_plugin)
+        p, calls = b.install("--only-claude", STUB_FAIL_MCP_ADD="1")
+        check("add fails, the plugin's own server is the only one: no plugin update, it stays, exit 1, and it says so",
+              p.returncode == 1 and b.sources() == ["plugin"] and not ran(calls, "plugin", "update")
+              and not ran(calls, "plugin", "marketplace", "update") and "could not register" in p.stdout
+              and "tools are still there" in p.stdout, (b.sources(), calls, p.stdout[-500:]))
+        b.seed(mkts=GITHUB, plugins=old_plugin, mcp={"metacomputer": [CLI, "mcp-lazy"]})
+        p, calls = b.install("--only-claude", STUB_FAIL_ADD_CMD=b.cmd)
+        check("add fails while replacing an earlier registration: that one is put back, no plugin update, exit 1",
+              p.returncode == 1 and b.server() == CLI and b.entry()["args"] == "mcp-lazy" and "is back" in p.stdout
+              and not ran(calls, "plugin", "update"), (b.entry(), p.stdout[-500:]))
+        b.seed(mkts=GITHUB, plugins=old_plugin, mcp={"metacomputer": [CLI, "mcp-lazy"]})
+        p, calls = b.install("--only-claude", STUB_FAIL_MCP_ADD="1")
+        check("…and when it can't be put back either: says what it ran and the command that adds it, exit 1",
+              p.returncode == 1 and b.entry() is None and "couldn't be put back" in p.stdout
+              and f"claude mcp add -s user metacomputer -- {CLI} mcp-lazy" in p.stdout and b.sources() == ["plugin"],
+              p.stdout[-500:])
+        b.seed(mkts=GITHUB, plugins=old_plugin, mcp={"metacomputer": [CLI, "mcp-lazy"]})
+        p, calls = b.install("--only-claude", STUB_FAIL_MCP_REMOVE="1")
+        check("remove fails: nothing changed (no add, no plugin update), exit 1",
+              p.returncode == 1 and b.server() == CLI and not ran(calls, "mcp", "add") and not ran(calls, "plugin", "update"),
+              (calls, p.stdout[-400:]))
+        for fail in (False, True):
+            b.seed(mkts=GITHUB, plugins=old_plugin)
             p, calls = b.install("--only-claude", **({"STUB_FAIL_UPDATE": "1"} if fail else {}))
             updated = (["plugin", "marketplace", "update", "metacomputer"] in calls
                        and ["plugin", "update", "metacomputer@metacomputer", "--scope", "user"] in calls)
             if not fail:
-                check("an older GitHub copy of the plugin with its own server: updated, so the user-scope server is the "
-                      "only one", p.returncode == 0 and updated and not b.plugin_servers() and b.server() == b.cmd
-                      and "no longer brings an MCP server" in p.stdout, (calls, p.stdout[-500:]))
+                check("an older GitHub copy with its own server: updated once the user-scope server is checked; one server, "
+                      "exit 0", p.returncode == 0 and updated and b.sources() == ["user"]
+                      and "updated): it no longer brings" not in p.stdout and "updated: it no longer brings" in p.stdout,
+                      (calls, p.stdout[-500:]))
             else:
-                check("…and when that update fails: the server is registered and it says the tools are listed twice "
-                      "until `claude plugin update`", p.returncode == 0 and updated and b.server() == b.cmd
+                check("…and when that update fails: both servers, it says the tools are listed twice and how to fix it, "
+                      "exit 1", p.returncode == 1 and updated and b.sources() == ["user", "plugin"]
                       and "lists the tools twice" in p.stdout and "claude plugin update metacomputer@metacomputer" in p.stdout,
                       p.stdout[-500:])
-        finally:
-            b.close()
+    finally:
+        b.close()
+
+
+def test_plugin_list_failures():
+    """Item 5: `claude plugin list --json` that fails, isn't JSON or has another shape is never read as "no server":
+    before the update (nothing updated, exit 1) or after it (no claim that it worked, exit 1)."""
+    old_plugin = {"metacomputer@metacomputer": {"scope": "user", "enabled": True, "mcpServers": OLD_SRV}}
+    b = Box()
+    try:
+        for bad in ("exit", "json", "shape"):
+            b.seed(mkts=GITHUB, plugins=old_plugin)
+            p, calls = b.install("--only-claude", STUB_PLUGIN_LIST=bad)
+            check(f"plugin list {bad} before the update: no update, no claim the plugin brings no server, exit 1",
+                  p.returncode == 1 and not ran(calls, "plugin", "update") and "no longer brings" not in p.stdout
+                  and "couldn't read the installed plugins" in p.stdout, (calls, p.stdout[-400:]))
+            for upd in ({}, {"STUB_FAIL_UPDATE": "1"}):
+                b.seed(mkts=GITHUB, plugins=old_plugin)
+                p, calls = b.install("--only-claude", STUB_PLUGIN_LIST=bad, STUB_PLUGIN_LIST_WHEN="after-update", **upd)
+                check(f"plugin list {bad} after the update{' (which failed)' if upd else ''}: never reported as done, "
+                      "exit 1", p.returncode == 1 and ran(calls, "plugin", "update") and "no longer brings" not in p.stdout
+                      and "after updating" in p.stdout, p.stdout[-400:])
+    finally:
+        b.close()
+
+
+def test_scopes():
+    """Item 4: the user-scope server is read and changed as such. A local or project server named metacomputer in the
+    folder install.sh runs in doesn't count as registered; it is reported and never changed, at install and uninstall."""
+    b = Box()
+    try:
+        proj = os.path.join(b.t, "proj")
+        os.makedirs(proj)
+        mine = {"type": "stdio", "command": b.cmd, "args": ["mcp-lazy"], "env": {}}
+        b.seed(local={proj: {"metacomputer": dict(mine)}}, project={proj: {"metacomputer": dict(mine)}})
+        p, calls = b.install("--only-claude", cwd=proj)
+        st = b.stub_state()["mcp"]
+        rp = os.path.realpath(proj)
+        check("a local and a project server with the same command don't count: the user-scope one is registered, "
+              "the others are reported and left as they are",
+              p.returncode == 0 and b.registered() and "already registered" not in p.stdout
+              and "from its Local config" in p.stdout and st["local"][rp]["metacomputer"] == mine
+              and st["project"][rp]["metacomputer"] == mine
+              and all(c[:5] == ["mcp", "add", "-s", "user", "metacomputer"] for c in ran(calls, "mcp", "add"))
+              and all("-s" in c and c[c.index("-s") + 1] == "user" for c in ran(calls, "mcp", "remove")),
+              (p.stdout[-500:], st, calls))
+        theirs = {"type": "stdio", "command": "/opt/elsewhere/bin/thing", "args": [], "env": {}}
+        b.seed(mkts={"metacomputer": {"source": "directory", "path": LAB}},
+               plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}},
+               mcp={"metacomputer": [b.cmd, "mcp-lazy"]}, project={proj: {"metacomputer": dict(theirs)}})
+        os.makedirs(os.path.dirname(b.cmd), exist_ok=True)
+        if not os.path.islink(b.cmd):
+            os.symlink(CLI, b.cmd)
+        p, calls = b.install("--uninstall", cwd=proj)
+        st = b.stub_state()["mcp"]
+        check("uninstall where a project server shadows it: the user-scope one is removed, the project one stays and is "
+              "reported", p.returncode == 0 and "metacomputer" not in st["user"]
+              and st["project"][rp]["metacomputer"] == theirs and "from its Project config" in p.stdout
+              and ["mcp", "remove", "metacomputer", "-s", "user"] in calls, (p.stdout[-500:], st))
+        b.install("--only-claude")
+        p, calls = b.install("--uninstall", STUB_FAIL_MCP_GET="1")
+        check("uninstall whose lookup fails: stops before removing anything (links, plugin, server), exit 1",
+              p.returncode == 1 and b.link(".local/bin/metacomputer") == CLI and "metacomputer@metacomputer" in b.plugins()
+              and not mutations(calls) and "nothing was removed" in p.stdout + p.stderr, (p.stdout[-300:], p.stderr[-300:]))
+    finally:
+        b.close()
 
 
 def old_layout_checkout(t):
@@ -781,8 +1050,7 @@ def old_layout_checkout(t):
     shutil.copytree(os.path.join(LAB, "plugin"), os.path.join(co, "plugin"))
     pj = os.path.join(co, "plugin", ".claude-plugin", "plugin.json")
     d = json.load(open(pj))
-    d["mcpServers"] = {"metacomputer": {"type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer",
-                                        "args": ["mcp-lazy"]}}
+    d["mcpServers"] = OLD_SRV
     json.dump(d, open(pj, "w"), indent=2)
     return co
 
@@ -802,24 +1070,62 @@ def test_update_from_plugin_server(real=False):
                    plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}})
         os.makedirs(os.path.join(b.home, ".local", "bin"))
         os.symlink(os.path.join(co, "bin", "metacomputer"), b.cmd)
-        check(tag + "before the update: the plugin's MCP server, no user-scope one",
-              "metacomputer" in b.plugin_servers() and b.server() is None, (b.plugin_servers(), b.server()))
+        check(tag + "before the update: the plugin's MCP server, no user-scope one", b.sources() == ["plugin"]
+              and b.entry() is None, (b.plugin_servers(), b.entry()))
         # The update: the checkout moves to this version, then install.sh's agents step runs (update runs install.sh).
         shutil.copy2(os.path.join(LAB, "plugin", ".claude-plugin", "plugin.json"),
                      os.path.join(co, "plugin", ".claude-plugin", "plugin.json"))
-        e = dict(b.env)
-        p = subprocess.run([os.path.join(co, "install.sh"), "--only-agents", "--no-codex"], env=e, capture_output=True,
-                           text=True, timeout=300)
-        check(tag + "after: the plugin still installed, declaring no server; the user-scope server runs "
-              "~/.local/bin/metacomputer: exactly one",
-              p.returncode == 0 and "metacomputer@metacomputer" in b.plugins() and not b.plugin_servers()
-              and b.server() == b.cmd, (p.stdout[-600:], p.stderr[-300:], b.plugin_servers(), b.server()))
+        p, _ = b.install("--only-agents", "--no-codex", script=os.path.join(co, "install.sh"))
+        check(tag + "after: the plugin still installed, declaring no server; the user-scope server is "
+              "~/.local/bin/metacomputer mcp-lazy: exactly one", p.returncode == 0 and "metacomputer@metacomputer" in b.plugins()
+              and b.sources() == ["user"], (p.stdout[-600:], p.stderr[-300:], b.sources(), b.entry()))
         check(tag + "after: it says to restart Claude Code (or /mcp) to load the tools",
               "/mcp" in p.stdout and "added in this run" in p.stdout, p.stdout[-300:])
-        p = subprocess.run([os.path.join(co, "install.sh"), "--only-agents", "--no-codex"], env=e, capture_output=True,
-                           text=True, timeout=300)
+        p, _ = b.install("--only-agents", "--no-codex", script=os.path.join(co, "install.sh"))
         check(tag + "a second run: already registered, still one server", p.returncode == 0
-              and "already registered" in p.stdout and not b.plugin_servers() and b.server() == b.cmd, p.stdout[-400:])
+              and "already registered" in p.stdout and b.sources() == ["user"], p.stdout[-400:])
+    finally:
+        b.close()
+
+
+def test_plugin_only_update():
+    """Item 3: an install from v0.4.4 or earlier whose plugin was updated on its own (from GitHub) while the checkout
+    kept its old installer, which relied on the plugin for the MCP server: no tools anywhere. The plugin's launcher
+    says so and names `metacomputer update`, never the old checkout's install.sh; the skill says the same; and the
+    install step of the update (the checkout's new install.sh) brings the tools back."""
+    b = Box()
+    try:
+        co = old_layout_checkout(b.t)
+        legacy = '#!/bin/bash\n# metacomputer install.sh from v0.4.4: the plugin brings the MCP server\necho "OLD INSTALL $*"\n'
+        write(os.path.join(co, "install.sh"), legacy, 0o755)
+        write(os.path.join(co, "bin", "metacomputer"), '#!/bin/sh\necho "CHECKOUT $*"\n', 0o755)
+        os.makedirs(os.path.join(b.home, ".local", "bin"))
+        os.symlink(os.path.join(co, "bin", "metacomputer"), b.cmd)
+        # The plugin updated from GitHub: this version's copy, no mcpServers; no user-scope server.
+        b.seed(mkts=GITHUB, plugins={"metacomputer@metacomputer": {"scope": "user", "enabled": True}})
+        cache = os.path.join(b.home, ".claude", "plugins", "cache", "metacomputer", "metacomputer", "new")
+        shutil.copytree(os.path.join(LAB, "plugin"), cache)
+        launcher = os.path.join(cache, "bin", "metacomputer")
+        check("plugin-only update: no tools anywhere (no plugin server, no user-scope one)", b.sources() == [], b.sources())
+        for cmd in (["status"], ["agents"], []):
+            p = run([launcher, *cmd], base_env(b.home))
+            check(f"…the launcher's `metacomputer {' '.join(cmd)}` runs the checkout and says to run `metacomputer update`",
+                  p.stdout.startswith("CHECKOUT") and "metacomputer update" in p.stderr and "install.sh" not in p.stderr
+                  and "restart Claude Code" in p.stderr, p.stderr)
+        p = run([launcher, "call", "list_windows", "{}"], base_env(b.home))
+        check("…other commands just run, without the notice", p.stdout.strip() == "CHECKOUT call list_windows {}"
+              and not p.stderr, p.stderr)
+        skill = open(os.path.join(LAB, "skills", "metacomputer", "SKILL.md")).read()
+        para = next((ln for ln in skill.splitlines() if "**No `mcp__metacomputer__*` tools?**" in ln), "")
+        check("…the skill's no-tools step names `metacomputer update` for an older metacomputer, and no install.sh",
+              "`metacomputer update`" in para and "install.sh" not in para and "metacomputer agents" in para, para)
+        # The update moves the checkout to this version and runs its install.sh, which registers the server.
+        shutil.copy2(os.path.join(LAB, "install.sh"), os.path.join(co, "install.sh"))
+        p, _ = b.install("--yes", "--only-agents", "--no-codex", script=os.path.join(co, "install.sh"))
+        check("…and the update's install step brings the tools back: the user-scope server, once",
+              p.returncode == 0 and b.sources() == ["user"], (p.stdout[-500:], b.sources()))
+        p = run([launcher, "status"], base_env(b.home))
+        check("…after which the launcher says nothing more", p.stdout.startswith("CHECKOUT") and not p.stderr, p.stderr)
     finally:
         b.close()
 
@@ -868,6 +1174,7 @@ test_validate()
 test_handoff()
 test_setup()
 test_install()
+test_plugin_only_update()
 if REAL:
     if shutil.which("claude"):
         test_install(real=True)
