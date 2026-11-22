@@ -267,10 +267,14 @@ def session_check(limit=20):
     if not ok:
         return ("session files", False, "the newest one doesn't read as a Codex session: metacomputer learn may miss "
                                         "Codex sessions")
-    calling = 0
+    calling = 0                  # newest first: sessions with tool calls but none of the items, before any that has them
     for p in files:
         called, items = session_evidence(p)
-        calling += called
+        if called and not items:
+            calling += 1
+            if calling >= 3:     # an older session in the old format must not hide newer ones in a new format
+                break
+            continue
         if items:
             try:
                 n = len(transcripts.parse(p, slim=True).calls)
@@ -280,8 +284,8 @@ def session_check(limit=20):
                     if n else "a session with MCP calls or commands yields none: Codex changed its session format, "
                               "and metacomputer learn would miss what happened")
     if calling >= 3:
-        return ("session files", False, f"{calling} recent sessions show the model calling tools, but none records the "
-                                        "MCP calls or commands learn reads: Codex changed its session format")
+        return ("session files", False, f"the {calling} newest sessions with tool calls record none of the MCP calls or "
+                                        "commands learn reads: Codex changed its session format")
     return ("session files", True, f"the newest reads as a Codex session; none of the newest {len(files)} has MCP calls "
                                    "or commands, so their format couldn't be checked further")
 

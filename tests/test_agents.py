@@ -107,11 +107,10 @@ def sessions_cases(t, base):
     for i, name in enumerate("cde"):
         session_file(os.path.join(sess, f"rollout-{name}.jsonl"), f"s-{name}", now - 1 + i * 0.1,
                      calls=["custom_tool_call"], items=["McpToolCallV2", "AgentMessage"])
-    os.remove(os.path.join(sess, "rollout-a.jsonl"))
     res, r = session_result(base, fake_bin)
-    check("three recent sessions where the model called tools but the items learn reads are renamed: the check fails "
-          "and says Codex changed its format", res.get("ok") is False and "changed its session format" in res.get("detail", ""),
-          res)
+    check("three newest sessions where the model called tools but the items learn reads are renamed: the check fails "
+          "and says Codex changed its format, though an older session still has the old items",
+          res.get("ok") is False and "changed its session format" in res.get("detail", ""), res)
     shutil.rmtree(os.path.join(base["CODEX_HOME"], "sessions"))
 
 
