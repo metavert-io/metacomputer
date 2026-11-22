@@ -210,51 +210,80 @@ def codex_checks(prog):
     return ver, out
 
 
-def model_called_tools(path):
-    """Whether the model made tool calls in a session file (its own records of them, which learn doesn't read)."""
+MODEL_TOOL_CALLS = ("custom_tool_call", "function_call", "local_shell_call")   # not web_search_call and the like
+TOOL_ITEMS = ("McpToolCall", "CommandExecution")                              # what learn reads
+
+
+def session_evidence(path, max_events=50_000):
+    """(the model called tools, the file has the tool items learn reads) for one session file, read with
+    transcripts' bounded reader (regular files only, no links or FIFOs, size and line limits; lines that aren't
+    JSON objects skipped). Nothing of it is kept."""
+    import transcripts
+    called = items = False
     try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                if '"response_item"' in line and '_call"' in line:
-                    try:
-                        p = json.loads(line).get("payload") or {}
-                    except ValueError:
-                        continue
-                    if str(p.get("type", "")).endswith("_call"):
-                        return True
-    except OSError:
+        for n, ev in enumerate(transcripts.read_events(path)):
+            if n >= max_events or (called and items):
+                break
+            p = ev.get("payload")
+            if not isinstance(p, dict):
+                continue
+            if ev.get("type") == "response_item" and p.get("type") in MODEL_TOOL_CALLS:
+                called = True
+            elif ev.get("type") == "event_msg" and p.get("type") == "item_completed":
+                it = p.get("item")
+                if isinstance(it, dict) and it.get("type") in TOOL_ITEMS:
+                    items = True
+    except (OSError, ValueError, EOFError):
         pass
-    return False
+    return called, items
 
 
 def session_check(limit=20):
-    """5. Codex's session files still read for `metacomputer learn`: the newest is a Codex session, and in the newest
-    one where the model called tools, learn finds the calls (a format that keeps the header but renames the tool
-    events would otherwise pass while learn saw nothing). Nothing of the files is kept or printed."""
+    """5. Codex's session files still read for `metacomputer learn`: the newest is a Codex session; in the newest one
+    with the tool items learn reads (MCP calls, commands), learn finds calls; and if several recent sessions show the
+    model calling tools but none has those items, Codex has changed how it records them. Regular files only (no links,
+    FIFOs or devices), each read with transcripts' limits. Nothing of the files is kept or printed."""
+    import stat as st_
     import transcripts
     files = []
     for d, _dirs, names in os.walk(os.path.join(codex_home(), "sessions")):
         for f in names:
             if f.startswith("rollout-") and f.endswith(".jsonl"):
+                p = os.path.join(d, f)
                 try:
-                    files.append((os.path.getmtime(os.path.join(d, f)), os.path.join(d, f)))
+                    s = os.lstat(p)
                 except OSError:
-                    pass
+                    continue
+                if st_.S_ISREG(s.st_mode):
+                    files.append((s.st_mtime, p))
     if not files:
         return ("session files", True, "no Codex session yet (nothing to check)")
     files = [p for _, p in sorted(files, reverse=True)[:limit]]
-    tr = transcripts.parse(files[0], slim=True)
-    if not (tr.kind == "codex" and tr.session_id):
+    try:
+        tr = transcripts.parse(files[0], slim=True)
+        ok = tr.kind == "codex" and bool(tr.session_id)
+    except (OSError, ValueError, EOFError):
+        ok = False
+    if not ok:
         return ("session files", False, "the newest one doesn't read as a Codex session: metacomputer learn may miss "
                                         "Codex sessions")
+    calling = 0
     for p in files:
-        if model_called_tools(p):
-            n = len(transcripts.parse(p, slim=True).calls)
+        called, items = session_evidence(p)
+        calling += called
+        if items:
+            try:
+                n = len(transcripts.parse(p, slim=True).calls)
+            except (OSError, ValueError, EOFError):
+                n = 0
             return ("session files", n > 0, "they read as Codex sessions, tool calls included (for metacomputer learn)"
-                    if n else "a session where the model called tools yields no calls: Codex changed its session "
-                              "format, and metacomputer learn would miss what happened")
-    return ("session files", True, f"the newest reads as a Codex session; none of the newest {len(files)} has tool "
-                                   "calls, so their format couldn't be checked further")
+                    if n else "a session with MCP calls or commands yields none: Codex changed its session format, "
+                              "and metacomputer learn would miss what happened")
+    if calling >= 3:
+        return ("session files", False, f"{calling} recent sessions show the model calling tools, but none records the "
+                                        "MCP calls or commands learn reads: Codex changed its session format")
+    return ("session files", True, f"the newest reads as a Codex session; none of the newest {len(files)} has MCP calls "
+                                   "or commands, so their format couldn't be checked further")
 
 
 def main(argv):

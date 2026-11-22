@@ -866,7 +866,7 @@ Each of these needs no VM and takes seconds.
   Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
   `codex mcp` behave differently, and against one whose answers look right but whose exit status fails, whose sandbox
   marker is only inherited, and whose strict config rejects the settings; a `codex` writable by others, or found
-  only through a relative PATH entry, isn't run. test_install's `test_agent_choices` runs `--only-agents` with the
+  only through a relative PATH entry, isn't run; the session check reads only regular files with limits (a FIFO doesn't block it, malformed lines don't crash it), a web search alone isn't taken for a missing tool call, and renamed tool items in three recent sessions fail it. test_install's `test_agent_choices` runs `--only-agents` with the
   real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
   skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
   neither agent on PATH.

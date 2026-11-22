@@ -59,6 +59,62 @@ esac
 """
 
 
+def session_file(path, sid, mtime, *, calls=(), items=(), extra_lines=()):
+    """A Codex rollout file: session_meta, the model's calls (response_item types), the recorded items
+    (item_completed item types), any raw extra lines; its mtime set so the newest is known."""
+    lines = [{"type": "session_meta", "payload": {"id": sid, "cwd": "/tmp/x", "cli_version": "0.167.0"}}]
+    lines += [{"type": "response_item", "payload": {"type": c, "name": "exec", "call_id": f"c{i}"}} for i, c in enumerate(calls)]
+    for i, kind in enumerate(items):
+        item = ({"type": "McpToolCall", "id": f"m{i}", "server": "metacomputer", "tool": "list_windows", "arguments": {},
+                 "status": "completed", "result": {"content": [{"type": "text", "text": "ok"}], "isError": False}}
+                if kind == "McpToolCall" else {"type": kind, "id": f"i{i}"})
+        lines.append({"type": "event_msg", "payload": {"type": "item_completed", "started_at_ms": 1000 + i,
+                                                       "completed_at_ms": 1001 + i, "item": item}})
+    with open(path, "w") as f:
+        for ln in lines:
+            f.write(json.dumps(ln) + "\n")
+        for raw in extra_lines:
+            f.write(raw + "\n")
+    os.utime(path, (mtime, mtime))
+
+
+def session_result(home_env, fake_bin):
+    r = run(["check", "--json"], dict(home_env, PATH=fake_bin + ":/usr/bin:/bin"))
+    d = {c["name"]: c for c in json.loads(r.stdout or "{}").get("checks", [])}
+    return d.get("session files") or {}, r
+
+
+def sessions_cases(t, base):
+    """The session check reads only regular files with limits, counts only the calls learn reads, and fails when
+    sessions show the model calling tools but the items it records have changed. Runs against the stand-in codex
+    (its other checks fail; only the session item is looked at)."""
+    import time
+    fake_bin = os.path.join(t, "fakebin")
+    sess = os.path.join(base["CODEX_HOME"], "sessions", "2026", "11", "21")
+    os.makedirs(sess, exist_ok=True)
+    now = time.time()
+    session_file(os.path.join(sess, "rollout-a.jsonl"), "s-a", now - 50, calls=["custom_tool_call"],
+                 items=["McpToolCall"])
+    session_file(os.path.join(sess, "rollout-b.jsonl"), "s-b", now - 10, calls=["web_search_call"],
+                 extra_lines=['["response_item","function_call"]', '{"type": "event_msg", "payload": "x"}', "not json"])
+    os.mkfifo(os.path.join(sess, "rollout-fifo.jsonl"))
+    os.utime(os.path.join(sess, "rollout-fifo.jsonl"), (now - 5, now - 5))
+    t0 = time.time()
+    res, r = session_result(base, fake_bin)
+    check("a session with only a web search, malformed lines and a FIFO among them: no false alarm, no crash, no "
+          "wait (an older session's MCP calls are found and read)", res.get("ok") is True
+          and "tool calls included" in res.get("detail", "") and time.time() - t0 < 60, (res, r.stderr[-300:]))
+    for i, name in enumerate("cde"):
+        session_file(os.path.join(sess, f"rollout-{name}.jsonl"), f"s-{name}", now - 1 + i * 0.1,
+                     calls=["custom_tool_call"], items=["McpToolCallV2", "AgentMessage"])
+    os.remove(os.path.join(sess, "rollout-a.jsonl"))
+    res, r = session_result(base, fake_bin)
+    check("three recent sessions where the model called tools but the items learn reads are renamed: the check fails "
+          "and says Codex changed its format", res.get("ok") is False and "changed its session format" in res.get("detail", ""),
+          res)
+    shutil.rmtree(os.path.join(base["CODEX_HOME"], "sessions"))
+
+
 def main():
     t = tempfile.mkdtemp(prefix="mcomp-agents-")
     try:
@@ -116,6 +172,8 @@ def main():
                            stdin=subprocess.DEVNULL, cwd=fake2, env=dict(base, PATH=".:/usr/bin:/bin"))
         check("a codex found only through a relative PATH entry (a downloaded folder's own) isn't run",
               r.returncode == 0 and json.loads(r.stdout).get("codex") is None, r.stdout)
+        print("session files (for learn)")
+        sessions_cases(t, base)
         codex = shutil.which("codex")
         if codex:
             env = dict(base, PATH=os.path.dirname(codex) + ":/usr/bin:/bin")
