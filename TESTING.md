@@ -231,13 +231,18 @@ three scopes as Claude Code does (user-scope ones in the temporary home's
 `.claude.json`, where install.sh reads the exact entry; local and project ones keyed
 by the folder), shows the one that takes precedence in `mcp get` with the arguments
 joined by spaces (not found on stderr, as the real one), takes `mcp add-json`, and
-fails on demand: `mcp get`, a `mcp get` that disagrees with the configuration, `mcp
-add`/`add-json` (or only for one command), `mcp remove`, `plugin update`, `plugin
-uninstall`, and `plugin list` (an exit status, text that isn't JSON, another shape, a
-record without its id or scope, a record with load errors; from the start or only
-after an update). Any run whose stderr shows install.sh's ERR-trap message fails.
-`--real-claude` repeats the install and update checks with the real `claude` CLI (29
-more), with a temporary `HOME` and `CLAUDE_CONFIG_DIR`; it needs no network.
+fails on demand: `mcp get` (for every name or one; or after a removal, once or every
+time), a `mcp get` that disagrees with the configuration or during which another
+Claude Code adds a variable, `mcp add`/`add-json` (or only for one command), `mcp
+remove`, `plugin update`, `plugin uninstall`, `plugin list` (an exit status, text that
+isn't JSON, another shape, a record without its id or scope, a record with load errors
+or without a true/false `enabled`; from the start or only after an update or an
+uninstall) and `plugin marketplace list` (from the start or after a removal). Any run
+whose stderr shows install.sh's ERR-trap message fails. `--real-claude` repeats the
+install and update checks with the real `claude` CLI, and checks that Claude Code and
+`lib/claude_mcp.py` read the same configuration file (an empty legacy `.config.json`,
+a folder there, both files populated, a byte-order mark), with a temporary `HOME` and
+`CLAUDE_CONFIG_DIR`; it needs no network.
 - The marketplace lists the plugin at `./plugin`, which holds no links: its copies of
   `skills/metacomputer`, `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and
   `THIRD_PARTY_NOTICES.md` are the repository's files (`scripts/sync-plugin.py --check`),
@@ -280,39 +285,58 @@ more), with a temporary `HOME` and `CLAUDE_CONFIG_DIR`; it needs no network.
   mcp-lazy`; checked as the exact entry), names the `mcp__metacomputer__*` tools and
   ends by saying a restart (or `/mcp`) loads them; a second run changes nothing and
   says nothing about `/mcp`. `~/.local/bin/metacomputer` with `status`, no arguments,
-  `" mcp-lazy"` or `"mcp-lazy "` isn't taken as registered and is left (exit 1) unless
-  `--replace-mcp` (with the real `claude` too); this checkout's `bin/metacomputer` is
-  replaced, naming what it ran. An earlier install's skill link is removed when it's
+  `" mcp-lazy"` or `"mcp-lazy "` isn't taken as registered and is left exactly as it is
+  (exit 1, with the command to remove it yourself; registered once that's done; with the
+  real `claude` too); this checkout's `bin/metacomputer` is replaced, naming what it ran. An earlier install's skill link is removed when it's
   this checkout's (or a moved checkout's, dangling) and left alone when another
   existing checkout's.
 - Ownership: a registration that isn't metacomputer's (a program that isn't a
   checkout) is left alone without a terminal and with `--yes`, with the plugin still
-  installed and exit status 1, and replaced with `--replace-mcp`. Left the same way
-  (`--yes`): another file inside the checkout, an interpreter, a path that starts with
+  installed, the command to remove it yourself and exit status 1; it's never replaced.
+  Left the same way (`--yes`): another file inside the checkout, an interpreter, a path that starts with
   the checkout's and climbs out of it, a launcher that doesn't exist, this checkout's
   launcher with other arguments. Repaired without asking: this checkout's launcher by
   a path with `..` in it, and a legacy path earlier versions registered (gone since).
   Another checkout's is left alone and moved with `--switch` (with other arguments,
   it's a configuration of yours, left even then); an HTTP server and one with
-  variables of its own and other arguments stay even with `--replace-mcp`, and their
-  URL and values are never printed; metacomputer's own with variables you set is
+  variables of its own and other arguments stay too, and their URL and values are
+  never printed (nor the arguments of any registration that isn't metacomputer's: a
+  synthetic token in `npx mcp-remote …?token=…`, in a variable and in a project server
+  never reaches the output, and the configuration file stays byte for byte the same); metacomputer's own with variables you set is
   already registered, the variables kept; a failed `mcp get`, a `mcp get` that
   disagrees with the configuration, and a configuration that isn't JSON change
   nothing and run no plugin update.
 - Failures in order: with an older GitHub plugin copy bringing the only server, a
-  failed add runs no plugin update and leaves that server (one source of tools); a
-  failed add while replacing an earlier registration puts that one back exactly
-  (`add-json`; one argument with spaces stays one), or says what it ran and the
-  `add-json` command when it can't; a failed remove changes nothing; a failed plugin
+  failed add runs no plugin update and leaves that server (one source of tools); once
+  metacomputer's own earlier registration is removed the add always runs, also when the
+  lookup after the removal fails, and a failed add or read-back says the server is
+  missing (or that it can't tell) with the exact `claude mcp add` command; a failed
+  remove changes nothing; a failed plugin
   update leaves two (said, exit 1); a successful one, run after the server is read
   back, leaves one. `--no-plugin` whose add fails keeps the plugin (no uninstall);
   when it works, the plugin is uninstalled after the server is added; a failed
   uninstall is said and fails the run, at install and at `--uninstall`. An old server
   name of this checkout's is kept while the add fails and removed after it works; one
   that isn't this checkout's stays. A `plugin list` that fails, isn't JSON, has
-  another shape, a record without its id or scope, or load errors for the plugin,
-  before or after the update, is never taken for "no server": no "no longer brings"
-  message, exit 1.
+  another shape, a record without its id or scope, or load errors for the plugin, or an
+  `enabled` that isn't true or false, before or after the update, is never taken for "no
+  server", nor for on or off (nothing installed or registered): no "no longer brings"
+  message, exit 1. Another checkout's marketplace is read before it's switched: its
+  plugin turned off stays off (no server registered over it), and one that can't be
+  read stops the switch; with the old plugin bringing the only server, the switch waits
+  for the user-scope server and doesn't happen when that fails. No message names a
+  foreign marketplace's folder or location (a credential in a `repo` or URL, whatever
+  its source label, never reaches the output). A plugin list or marketplace list that
+  can't be read, before or after an uninstall, leaves the plugin and marketplace (exit
+  1), and an old server name whose lookup fails is kept and counts as not done.
+- The unfinished step: `--only-claude` and `--only-agents` record it in installed.json
+  (the rest kept) and a finished run clears it; it's recorded before Codex's step (a
+  Codex step that stops the run leaves it recorded); a run with no `claude` on PATH or
+  `--no-claude` leaves it; a full install's last step (`install_incomplete`) goes by the
+  same rule. `--uninstall` removes the server before the command it runs: when the entry
+  changes right before (a `python3` stand-in plays another Claude Code) or its removal
+  doesn't take, the server and the command both stay (exit 1). An entry that changes
+  while it's read, or while a yes is being typed at a terminal, is left as it is.
 - Scopes: local and project servers with the same command in the folder the install
   runs in don't count as registered; the user-scope one is added (every `mcp add` and
   `mcp remove` names `-s user`) and the others are reported and unchanged. `--uninstall`

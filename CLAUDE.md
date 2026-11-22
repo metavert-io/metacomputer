@@ -227,17 +227,23 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `metacomputer agents` uses too: the entry from the configuration file Claude Code itself picks (`config_path()`),
   read before and after `claude mcp get` from an empty folder and checked against it; never display text alone, never
   a scope-blind lookup) and changes only metacomputer's own (`owner()`: canonical command, exact `["mcp-lazy"]`; never
-  a path prefix or a missing file); another checkout's needs `--switch`, anything else `--replace-mcp` (never `--yes`
-  or no terminal); a failed lookup changes nothing. Messages and `agents` name a registration that isn't
-  metacomputer's by its program and argument count, or its transport (`words()`): never its arguments, variables, URL
-  or entry, which can carry credentials. The old entry is read again right before it's removed (`entry_unchanged`:
-  left as it is when it changed), removed only right before the add, and put back exactly (`add-json`) if that fails,
-  or else saved to a private file, never printed; whatever served the tools before (an older GitHub copy's server,
-  another checkout's marketplace, the plugin with `--no-plugin`, old server names) is retired only after the new one is
-  read back, each lookup present/absent/error (error is never absent) and each removal checked; a step that didn't
-  finish ends the run with exit 1 and is recorded as incomplete in installed.json (`claude_record`, `--only-claude` and
-  `--only-agents` too), so `metacomputer update` runs the install again. `--no-plugin` keeps the server and swaps the plugin for a skill link;
-  `--uninstall` reads the entry before removing the command link. The plugin's launcher tells a checkout whose
+  a path prefix or a missing file); another checkout's needs `--switch` (or a yes at a terminal); anything else is never
+  removed or changed (the run says how to remove it yourself, and the step counts as unfinished); a failed lookup
+  changes nothing. Messages and `agents` name a registration that isn't metacomputer's by its program and argument
+  count, or its transport (`words()`), and a marketplace that isn't this checkout or the project's repository only as
+  another checkout's or another source's: never arguments, variables, URLs, folders or entries, which can carry
+  credentials. metacomputer's own entry is read again right before it's removed (`entry_unchanged`: left as it is
+  when it changed); once removed, the add always runs and is read back, and when that fails the run says the server
+  is missing and gives the exact `claude mcp add` command (nothing is put back or saved: it's metacomputer's own, made
+  again by that command). Whatever served the tools before (an older GitHub copy's server, another checkout's
+  marketplace, read first: turned off stays off, unreadable stops the switch; the plugin with `--no-plugin`; old server
+  names) is retired only after the new one is read back, each lookup present/absent/error (error is never absent; a
+  plugin record with load errors or a non-boolean `enabled` is an error) and each removal checked. A step that didn't
+  finish ends the run with exit 1 and is recorded as incomplete in installed.json by `claude_record`, at the end of
+  `claude_step` (before Codex's step), only when the step ran (`CLAUDE_TRIED`: a run without `claude` or with
+  `--no-claude` keeps an earlier marker; a full install's `install_incomplete` likewise), so `metacomputer update` runs
+  the install again. `--no-plugin` keeps the server and swaps the plugin for a skill link;
+  `--uninstall` reads and removes metacomputer's server before the command link, and keeps the link when the server stays. The plugin's launcher tells a checkout whose
   install.sh lacks the `CLAUDE_MCP=user` line (it left the server to the plugin) to run `metacomputer update`. Keep
   `mcpServers` and `hooks` out of plugin.json (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
   `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the
