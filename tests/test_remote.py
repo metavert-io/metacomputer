@@ -279,7 +279,7 @@ class FakeOCI:
 
     def action(self, iid, what):
         self.actions.append(what)
-        self.inst[iid]["state"] = {"START": "RUNNING", "SOFTSTOP": "STOPPED"}[what]
+        self.inst[iid]["state"] = {"START": "RUNNING", "SOFTSTOP": "STOPPED", "STOP": "STOPPED"}[what]
 
     def wait_state(self, iid, want, timeout=600):
         return want
@@ -323,6 +323,18 @@ def oci_driver():
           and s.status("box")["state"] == "stopped")
     s.wake("box")
     check("wake: started, awake again", api.actions[-1] == "START" and s.status("box")["state"] == "awake")
+    # A guest that powered itself off (its idle stop): OCI still says RUNNING, and bills it, until the API stops it.
+    api.actions.clear()
+    s.wake("box", guest_up=False)
+    check("wake of a guest that powered itself off (OCI still RUNNING): a stop through the API, then a start",
+          api.actions == ["STOP", "START"] and s.status("box")["state"] == "awake", api.actions)
+    api.actions.clear()
+    s.wake("box", guest_up=True)
+    check("...one that answers: nothing to do", api.actions == [], api.actions)
+    s.sleep("box", guest_up=False)
+    check("sleep when the guest is already off: a plain stop (a soft one would wait for a shutdown that happened)",
+          api.actions == ["STOP"] and s.status("box")["state"] == "stopped", api.actions)
+    s.wake("box")
     check("list: metacomputer's instances (tagged)", [i["name"] for i in s.list()] == ["box"])
     s.delete("box")
     check("delete: terminated (its boot volume with it), status absent", s.status("box")["state"] == "absent")

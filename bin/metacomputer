@@ -348,7 +348,7 @@ do_start_remote() {
       MC_REMOTE_STATUS=""; MC_T_USER=""      # its address may be new
       ok "running ($(remote_where))"
     elif ! vm_running "$VM_NAME"; then
-      die "$VM_NAME doesn't answer: it's stopped (it stops itself after IDLE_STOP minutes unused) or unreachable, and starting it needs $(remote_where)'s credentials in this command's environment (docs/remote.md)"
+      die "$VM_NAME doesn't answer: it's stopped, powered itself off (after IDLE_STOP minutes unused) or is unreachable, and starting it needs $(remote_where)'s credentials in this command's environment (docs/remote.md)"
     fi
   fi
   wait_ssh ops 300 || die "SSH to $VM_NAME didn't answer (metacomputer status)"
@@ -375,7 +375,7 @@ do_stop_remote() {
     say "finishing the desktop recording first"
     ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
   fi
-  remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md); or leave it: it stops itself after ${IDLE_STOP:-15} minutes unused"
+  remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md). Left alone, it powers itself off after ${IDLE_STOP:-15} minutes unused, but $(remote_where) counts it as running (and bills a billed size) until it's stopped there"
   say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept)"
   remote_py sleep --vm "$VM_NAME" >/dev/null || die "couldn't stop it (above)"
   emit_event lifecycle stopped info "The computer $VM_NAME stopped" "" "forced=no"

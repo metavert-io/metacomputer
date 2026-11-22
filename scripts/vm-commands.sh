@@ -423,7 +423,7 @@ print(" ".join(out))') "
   if [ "$rprov" = oci ]; then
     # Something billed: the rate and what it keeps, before anything is made (lib/cloud/oci.py rates).
     a="$(MCOMP_VM="$name" remote_py rates --vm "$name" 2>/dev/null || true)"
-    printf '%s\n' "Oracle Cloud: ${a:-rates unknown}" "PERSIST=disk: its disk keeps everything while it's stopped; it stops itself after ${idle:-15} minutes unused (IDLE_STOP)." >&2
+    printf '%s\n' "Oracle Cloud: ${a:-rates unknown}" "PERSIST=disk: its disk keeps everything while it's stopped. It powers itself off after ${idle:-15} minutes unused (IDLE_STOP), but Oracle bills a billed size until it's stopped there: metacomputer --vm $name stop." >&2
   fi
   if [ "${ASSUME_YES:-0}" != 1 ]; then
     if [ -n "$rprov" ]; then
@@ -607,9 +607,11 @@ vm_delete_remote() {
   events_watcher_stop
   hub_stop
   if remote_made; then
-    say "deleting $VM_NAME's instance on $(remote_where)"
-    remote_py delete --vm "$VM_NAME" --network-too || die "the instance wasn't deleted (above); its settings stay, so you can try again"
-    gone+=("its instance on $(remote_where)")
+    local had=0
+    "$PY" -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("instance") else 1)' "$RUN_DIR/remote.json" 2>/dev/null && had=1
+    say "deleting what $(remote_where) has for $VM_NAME"
+    remote_py delete --vm "$VM_NAME" --network-too || die "it wasn't deleted at $(remote_where) (above); its settings stay, so you can try again"
+    [ "$had" = 0 ] || gone+=("its instance on $(remote_where)")
   fi
   rm -f "$settings_file" && gone+=("config/vms/$VM_NAME.env")
   if [ "$run" = 1 ]; then a="$(vm_rmtree "$lab_p" ".run-vms/$VM_NAME")" || warn "kept its runtime folder: $a"; fi

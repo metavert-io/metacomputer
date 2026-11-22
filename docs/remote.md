@@ -10,7 +10,7 @@ instead of the Mac's gateway).
 | | Your own server (`--on server`) | Oracle Cloud (`--on oci`) |
 |---|---|---|
 | Who makes it | you | metacomputer, in your OCI compartment |
-| Who powers it on and off | you (metacomputer never does) | `start` / `stop`, and it stops itself after `IDLE_STOP` minutes unused |
+| Who powers it on and off | you (metacomputer never does) | `start` / `stop`; the guest powers itself off after `IDLE_STOP` minutes unused (OCI bills a billed size until `stop`) |
 | Architecture | arm64 or x86_64 (found out) | from `--size` |
 | What it costs | between you and its host | `vm create` says the rate first; Arm within the Always Free allowance costs nothing |
 | What's kept | its disk | its disk (`PERSIST=disk`), also while stopped |
@@ -95,7 +95,11 @@ is made until you agree (`vm create` shows the rate and what's kept first; `--ye
 **Lifecycle**: `start` starts a stopped instance and waits for the desktop; `stop` shuts the guest down, then OCI
 stops the instance (its disk stays; OCI bills a stopped standard instance for its disk only). With nothing using it
 for `IDLE_STOP` minutes (15 by default: no SSH connection, which includes the hub's, a recording or the live view's
-tunnel, and no inner Claude session), the guest powers itself off. `vm delete NAME` terminates the instance with its
+tunnel, and no inner Claude session), the guest powers itself off. **OCI doesn't notice that**: an instance whose
+guest powered itself off still counts as running, and a billed size is still billed, until it's stopped through the
+API. `metacomputer stop` does that (a plain stop, since the guest is already off), and `start` does it before
+starting the instance again; `status` says when it runs at OCI but doesn't answer. Within the Always Free allowance
+this costs nothing either way; for a billed size, stop it when you're done rather than rely on the idle stop. `vm delete NAME` terminates the instance with its
 boot volume, and the network once no computer of yours uses it. **A monthly limit**: OCI's budgets (with an alert to
 your email) are set by the tenancy's administrator in the console; metacomputer's API user can't set or enforce one,
 so keep a budget alert there.

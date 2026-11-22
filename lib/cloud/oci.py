@@ -99,9 +99,12 @@ class SDK:
         self.oci = oci
         oci.config.validate_config(cfg)
         self.cfg = cfg
-        self.compute = oci.core.ComputeClient(cfg)
-        self.net = oci.core.VirtualNetworkClient(cfg)
-        self.identity = oci.identity.IdentityClient(cfg)
+        # Oracle's own retry strategy: it waits and tries again on throttling (429, as after a stop and a start in a
+        # row) and on the service's passing errors, with backoff, then gives up.
+        retry = oci.retry.DEFAULT_RETRY_STRATEGY
+        self.compute = oci.core.ComputeClient(cfg, retry_strategy=retry)
+        self.net = oci.core.VirtualNetworkClient(cfg, retry_strategy=retry)
+        self.identity = oci.identity.IdentityClient(cfg, retry_strategy=retry)
 
     def _all(self, fn, *a, **k):
         return self.oci.pagination.list_call_get_all_results(fn, *a, **k).data
@@ -219,23 +222,34 @@ class SDK:
                  "icmp": (r.icmp_options.type, r.icmp_options.code) if r.icmp_options else None}
                 for r in sl.ingress_security_rules]
 
+    def _gone(self, get, rid, timeout=600):
+        """Wait until a deleted resource is TERMINATED or not found (it can be gone before the first look)."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            try:
+                if get(rid).data.lifecycle_state == "TERMINATED":
+                    return
+            except self.oci.exceptions.ServiceError as e:
+                if e.status == 404:
+                    return
+                raise
+            time.sleep(3)
+        raise AdapterError("a network resource wasn't deleted in time; metacomputer cloud status oci shows what's left")
+
     def delete_network(self):
         n = self.network()
         if not n:
             return False
-        wait, m = self.oci.wait_until, self.oci.core.models
+        m = self.oci.core.models
         if n["subnet"]:
             self.net.delete_subnet(n["subnet"])
-            wait(self.net, self.net.get_subnet(n["subnet"]), "lifecycle_state", "TERMINATED", max_wait_seconds=600,
-                 succeed_on_not_found=True)
+            self._gone(self.net.get_subnet, n["subnet"])
         self.net.update_route_table(n["route_table"], m.UpdateRouteTableDetails(route_rules=[]))
         if n["igw"]:
             self.net.delete_internet_gateway(n["igw"])
-            wait(self.net, self.net.get_internet_gateway(n["igw"]), "lifecycle_state", "TERMINATED",
-                 max_wait_seconds=600, succeed_on_not_found=True)
+            self._gone(self.net.get_internet_gateway, n["igw"])
         self.net.delete_vcn(n["vcn"])
-        wait(self.net, self.net.get_vcn(n["vcn"]), "lifecycle_state", "TERMINATED", max_wait_seconds=600,
-             succeed_on_not_found=True)
+        self._gone(self.net.get_vcn, n["vcn"])
         return True
 
     # instances
@@ -283,7 +297,7 @@ class SDK:
         """Boot volumes in the compartment that are metacomputer's (made with one of its instances) and still there."""
         out = []
         for ad in self.availability_domains():
-            bs = self.oci.core.BlockstorageClient(self.cfg)
+            bs = self.oci.core.BlockstorageClient(self.cfg, retry_strategy=self.oci.retry.DEFAULT_RETRY_STRATEGY)
             for v in self._all(bs.list_boot_volumes, availability_domain=ad, compartment_id=self.compartment):
                 if v.lifecycle_state != "TERMINATED" and (v.display_name or "").startswith("metacomputer-"):
                     out.append({"id": v.id, "name": v.display_name, "state": v.lifecycle_state})
@@ -350,11 +364,17 @@ class OCI(RemoteVM):
                     "ocpus": ocpus, "memory_gb": mem}
         raise Capacity("; ".join(tried) + ". Every availability domain was tried once; try again later, or another size")
 
-    def wake(self, name):
+    def wake(self, name, guest_up=None):
+        """Start it. guest_up=False (its SSH doesn't answer though OCI says RUNNING): the guest powered itself off
+        (its idle stop), which OCI doesn't notice, so it's stopped through the API first, then started."""
         st = self._state(name)
         cur = self.api.instance(st["instance"])
         if cur is None:
             raise AdapterError(f"{name}'s instance is gone from Oracle Cloud")
+        if cur["state"] == "RUNNING" and guest_up is False:
+            self.api.action(st["instance"], "STOP")
+            self.api.wait_state(st["instance"], "STOPPED")
+            cur = self.api.instance(st["instance"]) or cur
         if cur["state"] != "RUNNING":
             if cur["state"] == "STOPPING":
                 self.api.wait_state(st["instance"], "STOPPED")
@@ -362,11 +382,14 @@ class OCI(RemoteVM):
             self.api.wait_state(st["instance"], "RUNNING")
         return self.status(name)
 
-    def sleep(self, name):
+    def sleep(self, name, guest_up=True):
+        """Stop it: a soft stop (the guest shuts down, then OCI stops it) while the guest runs; a plain stop when it
+        already powered itself off (OCI would wait 15 minutes for a shutdown that already happened). Only a stop
+        through the API stops OCI's billing: a guest that powered itself off still counts as running."""
         st = self._state(name)
         cur = self.api.instance(st["instance"])
         if cur and cur["state"] not in ("STOPPED", "STOPPING"):
-            self.api.action(st["instance"], "SOFTSTOP")     # the guest shuts down cleanly, then OCI stops it
+            self.api.action(st["instance"], "SOFTSTOP" if guest_up else "STOP")
         if cur:
             self.api.wait_state(st["instance"], "STOPPED")
         return self.status(name)

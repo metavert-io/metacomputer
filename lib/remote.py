@@ -170,11 +170,42 @@ def cmd_create(s, args):
     return 0
 
 
+def guest_up(s, st, tries=3, wait=5.0):
+    """Whether the computer's SSH answers (a few tries: a busy guest can be slow); None when it can't be told
+    (a provider's tunnel)."""
+    ep = transport.endpoint(s, {"host": st.get("host")} if st.get("host") else None)
+    if ep["proxy"] is not None:
+        return None
+    for i in range(tries):
+        if probe_once(ep["host"], ep["port"], 4.0):
+            return True
+        if i + 1 < tries:
+            time.sleep(wait)
+    return False
+
+
+def probe_once(host, port, timeout):
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as c:
+            c.settimeout(timeout)
+            return c.recv(4).startswith(b"SSH-")
+    except OSError:
+        return False
+
+
 def cmd_wake(s, args):
     rd = run_dir(s)
     st = read_state(rd)
     a = adapter_for(s, st)
-    out = a.wake(s["VM_NAME"])
+    up = None
+    if a.name == "oci" and a.status(s["VM_NAME"]).get("provider_state") == "RUNNING":
+        up = guest_up(s, st)
+        if up is False:
+            print(f"metacomputer: {s['VM_NAME']} runs at {a.manifest['label']} but doesn't answer (it powered itself "
+                  "off when unused, which the provider doesn't notice): stopping it there, then starting it",
+                  file=sys.stderr)
+    out = a.wake(s["VM_NAME"], guest_up=up) if a.name == "oci" else a.wake(s["VM_NAME"])
     if out.get("host") and out["host"] != st.get("host"):
         st["host"] = out["host"]
         write_state(rd, st)
@@ -186,7 +217,8 @@ def cmd_wake(s, args):
 
 def cmd_sleep(s, args):
     st = read_state(run_dir(s))
-    out = adapter_for(s, st).sleep(s["VM_NAME"])
+    a = adapter_for(s, st)
+    out = a.sleep(s["VM_NAME"], guest_up=guest_up(s, st, tries=2) is not False) if a.name == "oci" else a.sleep(s["VM_NAME"])
     print(out.get("state", "?"))
     return 0
 
@@ -229,6 +261,9 @@ def cmd_status(s, args):
             st["host"] = out["host"]
             write_state(rd, st)
         out["host"] = out.get("host") or st.get("host")
+        if out.get("provider_state") == "RUNNING" and guest_up(s, st, tries=1) is False:
+            out["note"] = ("it doesn't answer: if it powered itself off (unused for IDLE_STOP minutes), the provider still "
+                           "counts it as running, and bills a billed size, until metacomputer stop or start")
     out.update(provider=a.name, where=a.manifest["label"], size=s.get("SIZE") or st.get("size"),
                arch=st.get("arch") or s.get("GUEST_ARCH"), egress=s.get("EGRESS") or "internet",
                idle_stop=s.get("IDLE_STOP") or ("off" if a.manifest["sleep_wake"]["kind"] == "none" else "15"))
@@ -421,6 +456,12 @@ def main(argv=None):
         return 1
     except ValueError as e:
         print(f"metacomputer: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:      # noqa: BLE001  (the provider's SDK: said in one line, without its request details)
+        if type(e).__name__ != "ServiceError":
+            raise
+        print(f"metacomputer: the provider refused: {getattr(e, 'status', '?')} {getattr(e, 'code', '')}: "
+              f"{str(getattr(e, 'message', '') or '')[:300]}", file=sys.stderr)
         return 1
 
 
