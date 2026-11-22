@@ -8,7 +8,8 @@ that were refused or rejected for malformed arguments.
 import json
 import re
 
-# The metacomputer tools: from a user-scope or --mcp-config server named metacomputer, or from the plugin.
+# The metacomputer tools: from a user-scope or --mcp-config server named metacomputer, or from an older copy of the
+# plugin, which brought its own server.
 MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
 TREE_READS = {"get_window_state", "get_accessibility_tree", "get_browser_state", "verify_state"}
 OTHER_READS = {"list_windows", "list_apps", "get_screen_size", "get_cursor_position", "get_recording_state",

@@ -40,7 +40,7 @@ NOTES = "../../../skills/metacomputer/DESKTOP.md"   # relative to DEST
 DESCRIPTION = (
     "description: Detailed Cua Driver {ver} guidance for operating the virtual computer (the metacomputer project, an Ubuntu "
     "24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*, or mcp__plugin_metacomputer_metacomputer__* "
-    "from the plugin), i.e. Cua Driver running inside the "
+    "from an older copy of the plugin), i.e. Cua Driver running inside the "
     "VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch "
     "known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the "
     "metacomputer skill decides when the VM is the right tool. Never install or run cua-driver on the "
@@ -50,7 +50,7 @@ LAB_NOTE = """> **metacomputer's copy of the official Cua Driver {ver} skill pac
 > file, README.md and RUNTIME.md are edited, the other guides are unchanged; Cua's license is
 > in [LICENSE](LICENSE)). Here the driver runs **inside the lab
 > VM** and is reached only through the `metacomputer` MCP tools (`mcp__metacomputer__*`, or
-> `mcp__plugin_metacomputer_metacomputer__*` from the plugin);
+> `mcp__plugin_metacomputer_metacomputer__*` from an older copy of the plugin);
 > `cua-driver` CLI examples apply inside the guest only. Read the lab's desktop
 > notes first: [DESKTOP.md]({notes}) (`skills/metacomputer/DESKTOP.md` in the project folder).
 > They take precedence over this pack where the VM differs: Firefox page fields
