@@ -224,14 +224,19 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   follow (variables other than `${CLAUDE_PLUGIN_ROOT}`, command substitution, another file), and the launcher is
   such a script. `install.sh` registers the MCP server itself (`register_server`: user scope,
   `~/.local/bin/metacomputer mcp-lazy`). It reads the user-scope entry exactly (`lib/claude_mcp.py`, which
-  `metacomputer agents` uses too: the entry from Claude Code's configuration, checked against `claude mcp get` from an
-  empty folder; never display text alone, never a scope-blind lookup) and changes only metacomputer's own (`owner()`:
-  canonical command, exact `["mcp-lazy"]`; never a path prefix or a missing file); another checkout's needs `--switch`,
-  anything else `--replace-mcp` (never `--yes` or no terminal); a failed lookup changes nothing; the old entry is
-  removed only right before the add and put back exactly (`add-json`) if it fails; whatever served the tools before (an
-  older GitHub copy's server, the plugin with `--no-plugin`, old server names) is retired only after the new one is
-  read back, each removal checked; a step that didn't finish ends the run with exit 1 and is recorded as incomplete in
-  installed.json, so `metacomputer update` runs the install again. `--no-plugin` keeps the server and swaps the plugin for a skill link;
+  `metacomputer agents` uses too: the entry from the configuration file Claude Code itself picks (`config_path()`),
+  read before and after `claude mcp get` from an empty folder and checked against it; never display text alone, never
+  a scope-blind lookup) and changes only metacomputer's own (`owner()`: canonical command, exact `["mcp-lazy"]`; never
+  a path prefix or a missing file); another checkout's needs `--switch`, anything else `--replace-mcp` (never `--yes`
+  or no terminal); a failed lookup changes nothing. Messages and `agents` name a registration that isn't
+  metacomputer's by its program and argument count, or its transport (`words()`): never its arguments, variables, URL
+  or entry, which can carry credentials. The old entry is read again right before it's removed (`entry_unchanged`:
+  left as it is when it changed), removed only right before the add, and put back exactly (`add-json`) if that fails,
+  or else saved to a private file, never printed; whatever served the tools before (an older GitHub copy's server,
+  another checkout's marketplace, the plugin with `--no-plugin`, old server names) is retired only after the new one is
+  read back, each lookup present/absent/error (error is never absent) and each removal checked; a step that didn't
+  finish ends the run with exit 1 and is recorded as incomplete in installed.json (`claude_record`, `--only-claude` and
+  `--only-agents` too), so `metacomputer update` runs the install again. `--no-plugin` keeps the server and swaps the plugin for a skill link;
   `--uninstall` reads the entry before removing the command link. The plugin's launcher tells a checkout whose
   install.sh lacks the `CLAUDE_MCP=user` line (it left the server to the plugin) to run `metacomputer update`. Keep
   `mcpServers` and `hooks` out of plugin.json (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
