@@ -27,6 +27,7 @@ All notable changes to metacomputer are recorded here. The format follows
 - **`metacomputer net allow localhost`** is refused with the reason: the VM's own pages never go through the gateway, so they need no allowlist (the list is for sites on the internet). It used to say only that `localhost` wasn't a host name, and agents testing a page the VM served tried it repeatedly. The skill says the same.
 - **The benchmark no longer leaves Codex trust entries in your `~/.codex/config.toml`**: Codex saves a session's folder trust (the benchmark's `-c projects.<folder>.trust_level` override) into the file when the session starts; the benchmark now puts the file back exactly as it was when that's the only change, and leaves any other change alone.
 - **Benchmark reports for Codex runs** show Codex's version and its cost as n/a (Codex reports tokens), and a Codex run no longer counts each task's budget against `--cap`, which stopped a run after 20 tasks with nothing spent.
+- **`trace export`** dropped `press_key`'s modifiers (Ctrl+L became a press of "l"), so an address typed in the address bar wasn't turned into `page.goto`; an address typed without `http://` now is too (http for this machine, else https, with a comment to check it).
 
 ## [0.4.2] - 2026-11-20
 
