@@ -96,7 +96,7 @@ computer ([More than one VM](#more-than-one-vm)).
 | `ssh [ops\|admin] [CMD...]` | A raw SSH shell in the VM (`ops` is the desktop user); prefer `sh` |
 | `logs [N]` | The last lines of the Lume, gateway and VM logs |
 | `where` | Project, config, skill, docs and results folders; VM names |
-| `mcp-lazy` / `mcp` | The MCP bridge Claude Code uses, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise) |
+| `mcp-lazy` / `mcp` | The MCP bridge Claude Code and Codex use, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise). Besides the driver's tools it has two of its own, `list_computers` and `select_computer` ([An agent session's computer](#an-agent-sessions-computer)) |
 | `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop [--if-idle]]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time; `stop --if-idle` stops it only when no client is connected, no call or recording is running and no handoff is open (exit 3 otherwise) |
 
 `stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart`, `sh` and
@@ -222,9 +222,17 @@ Refused rather than guessed (nothing runs):
 
 An agent session (Claude Code or Codex) reaches a computer two ways: through the metacomputer MCP tools, and through
 the commands it runs in a shell. The tools act on the computer the session's MCP server started on (your default
-computer at that moment). Each command picks its own: `--vm`, `MCOMP_VM`, `MCOMP_CONFIG`, else the default computer as
-it is now. The two can differ: the default changed after the session started, or a login shell put another
-`metacomputer` first on PATH ([codex.md](codex.md#login-shells-and-path)).
+computer at that moment), or on the one the session chose with `select_computer`. Each command picks its own: `--vm`,
+`MCOMP_VM`, `MCOMP_CONFIG`, else the default computer as it is now. The two can differ: the default changed after the
+session started, or a login shell put another `metacomputer` first on PATH ([codex.md](codex.md#login-shells-and-path)).
+
+**The MCP tools.** Besides Cua Driver's tools, the MCP server has two of its own, answered on the Mac (they work while
+every computer is off):
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `list_computers` | none | Every computer, as `metacomputer list --json` has them: `name`, `place`, `where`, `state`, `default`, `settings`, and `this_session` (the one this session's tools act on); `default`, `this_session`, `selected`, `problems` and a `message` for the whole list. Changes nothing |
+| `select_computer` | `name` (required): a computer's name | This session's tools act on that computer from then on, through its own hub (one hub per computer), until the session ends or it selects another. The computer before lets go of the session (its claim, its driver session), as when the session ends: only what that connection holds, so a claim a later connection in the same name wrote stays, and the MCP server waits for it before it exits. Starts and stops nothing. The result says whether a command that names no computer reaches this same one (its name, SSH port and folder), and the command to use for it in the shell: bare when it does, else one that names it (`metacomputer --vm NAME`, or its own `MCOMP_CONFIG` file when its settings are outside this checkout). Refused while a call is still running, for a name this checkout has no settings for, and for a computer with `MCP_HUB=off` other than the one the session started on. Refused too when the hub of the computer it would leave is from an earlier metacomputer (its hello doesn't say `conn_claims`, so it can't tell this session's connections apart): nothing changes (this session's connection to that hub stays as it is, so the hub sees no disconnect it could mishandle), every switch away from that computer stays refused while that same hub process runs, and replacing it is the user's call: `metacomputer hub stop` once nothing else needs it (that disconnects this session too, and its next call starts a current hub); then select again. It never stops or restarts a hub itself. A signal only asks the MCP server to end: it ends from its own main loop, once any switch or close under way is done, waiting for the computer it left; from then on it opens no connection and answers new calls with an error |
 
 **The guard.** Run from an agent session, a command that names no computer and would act on another computer than
 the one the session holds refuses before it does anything, saying which and how to go on:
@@ -233,12 +241,12 @@ the one the session holds refuses before it does anything, saying which and how 
 metacomputer: this Codex session's MCP tools act on demo, but this command would act on metacomputer (config/local.env's VM, as the command names none). Nothing was done.
 - To act on metacomputer anyway, name it: ~/.local/bin/metacomputer --vm metacomputer sh ...
 - To act on demo, this session's computer: ~/.local/bin/metacomputer --vm demo sh ...
-- Or start a new agent session: its MCP tools start on the computer a command that names none acts on (metacomputer).
+- Or move this session to metacomputer: the metacomputer MCP tool select_computer with name metacomputer; then commands that name no computer act on it.
 ```
 
-- **What the session holds:** the computer its MCP tools act on, from the start of the session; a session without
-  metacomputer's MCP server holds the computers it has a claim on (`metacomputer sh`, `call`, `claude` and scripts
-  claim the computer they act on).
+- **What the session holds:** the computer its MCP tools act on, from the start of the session (the one selected,
+  after `select_computer`); a session without metacomputer's MCP server holds the computers it has a claim on
+  (`metacomputer sh`, `call`, `claude` and scripts claim the computer they act on).
 - **Not checked:** a command that names its computer (`--vm NAME`, `MCOMP_VM`, `MCOMP_CONFIG`, or a caller that pinned
   it); commands that act on no one computer or name their own (`list`, `vm`, `default`, `each`, `volume`, `refdisk`,
   `events`, `notify`, `learn`, `actions`, `agents`, `setup`, `update`, `version`, `where`, `help`); forms that only

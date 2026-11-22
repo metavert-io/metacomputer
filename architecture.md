@@ -895,14 +895,33 @@ is the group of providers' places, and has none.
   `vm create` refuses places' names for VMs. `metacomputer list` (= `vm list`, `lib/vms.py`) shows each
   computer's place and marks the default.
 - **A session's computer** (`lib/sessionvm.py`). An agent session's MCP tools act on the computer its bridge
-  (`lib/mcp_lazy.py`) started on, the default computer then. The bridge leaves a record of the session's computer from
-  its start, and so does every claim made in an agent session's name (`owners.write_claim`), in a private per-account
-  folder that every checkout reads (the account's own temporary folder, or `MCOMP_SESSIONS_DIR`). Before a command that
-  names no computer (no `--vm`, `MCOMP_VM`, `MCOMP_CONFIG` or pin), `bin/metacomputer`'s `session_guard` runs
-  `sessionvm.py guard`: the session above it (`owners.claude_of`), its records that stand (each names its processes by
-  pid and start time: a bridge still running under it; a claim of its in that computer's owners folder, in that holder's
-  name), and the computer they make the session's (its bridges', else its claims'). Another computer refuses an acting
-  command, naming both and the ways on (`--vm`, or a new session); a read gets a note. A command that passed passes on
+  (`lib/mcp_lazy.py`) started on, the default computer then, until `select_computer` chooses another. The bridge answers
+  its two tools itself: `list_computers` runs `metacomputer list --json` and marks the session's computer;
+  `select_computer` resolves the name with `metacomputer --vm NAME hub env --json` from the environment the bridge
+  started with (bin/metacomputer names its MCOMP_ variables in `MCOMP_BRIDGE_KEYS`; any computer's settings and choice
+  left out), then connects to that computer's own hub, one hub per computer, and closes the connection to the one before
+  (whose hub lets go of the session as when it ends; the bridge's exit waits for that). Each claim a hub writes carries
+  the client connection that wrote it (`conn`: the hub's pid and the client's number), and a client that goes drops only
+  a claim it wrote (`owners.drop_claim(pid, conn)`), never one a later connection in the same name wrote. The shell
+  command the result gives is bare only when `metacomputer hub env --json` with no computer chosen reaches the same
+  computer (name, SSH port and folder), else `sessionvm.naming`'s (`--vm`, or its own `MCOMP_CONFIG` file). A hub says
+  so in its hello (`features: ["conn_claims"]`), and the bridge switches away from a computer only through a hub that
+  does: through an earlier one it refuses and changes nothing (its connection stays, so that hub sees no disconnect),
+  remembers that hub (pid and start time) so every later switch away from its computer is refused while it runs, and
+  says replacing it is the user's call (`hub stop`). Messages are handled on a thread of their own; a signal handler
+  only sets a flag, the agent going away and the end of input set the same one, and the main loop makes the shutdown
+  (`finish`) once no switch or close is under way (`begin_switch`/`end_switch` around each), so every connection being
+  let go of is one the shutdown waits for; from then on `connect` opens nothing (it looks at `stopping` under the lock
+  the shutdown takes the current connection with) and the message thread answers new requests with an error. A computer
+  with `MCP_HUB=off` other than the start one is refused: an in-process core keeps its claims where the process's owners
+  module looks. The bridge leaves a record of the session's computer (from its start, and at each selection), and so
+  does every claim made in an agent session's name (`owners.write_claim`), in a private per-account folder that every
+  checkout reads (the account's own temporary folder, or `MCOMP_SESSIONS_DIR`). Before a command that names no computer
+  (no `--vm`, `MCOMP_VM`, `MCOMP_CONFIG` or pin), `bin/metacomputer`'s `session_guard` runs `sessionvm.py guard`: the
+  session above it (`owners.claude_of`), its records that stand (each names its processes by pid and start time: a
+  bridge still running under it; a claim of its in that computer's owners folder, in that holder's name), and the
+  computer they make the session's (its bridges', else its claims'). Another computer refuses an acting command, naming
+  both and the ways on (`--vm`, or `select_computer`); a read gets a note. A command that passed passes on
   `MCOMP_GUARD_VM`, so what it starts for the same VM isn't asked again. Any program running as the user can write a
   record: it guards against accidents, not a program set on getting past it.
 - **Providers** (`lib/cloud/`). `adapter.py` is the interface every provider adapter

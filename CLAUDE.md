@@ -197,7 +197,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   pid and start time and is checked against what it stands for (it guards against accidents, not a program set on it);
   only records written there are removed, through `lib/safedelete.py`; the folder's permissions are never changed.
   Every command in the dispatch is sorted in `sessionvm.py`, from its arguments as it parses them, in any order
-  (`tests/test_session_guard.py` fails on a new one).
+  (`tests/test_session_guard.py` fails on a new one). The bridge's own tools, `list_computers` and `select_computer`
+  (lib/mcp_lazy.py), move the session's tools to another computer's own hub: one hub per computer. A hub's claims carry
+  the client connection that wrote them, and a connection that goes drops only its own (`owners.drop_claim(pid, conn)`).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file

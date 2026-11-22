@@ -2,8 +2,8 @@
 """The computer an agent session holds, and the guard that keeps the session's commands on it.
 
 An agent session (Claude Code or Codex: lib/owners.py claude_of) reaches a computer two ways: through its MCP tools,
-which act on the computer its bridge (`metacomputer mcp-lazy`, lib/mcp_lazy.py) started on; and through the
-commands it runs in a shell. Each command picks its computer for itself: `--vm
+which act on the computer its bridge (`metacomputer mcp-lazy`, lib/mcp_lazy.py) started on, or the one it chose with
+`select_computer`; and through the commands it runs in a shell. Each command picks its computer for itself: `--vm
 NAME`, MCOMP_VM, MCOMP_CONFIG, else the default computer (config/default-vm), else config/local.env's VM. So a session
 can look at one computer through its tools and act on another from the shell: a login shell that reorders PATH runs
 another checkout's command (or the main install's instead of a wrapper's), and a default changed since the session
@@ -11,7 +11,8 @@ started points elsewhere.
 
 What ties a session to a computer leaves a record in a private folder of this account's (MCOMP_SESSIONS_DIR, else
 `metacomputer-sessions` in the account's own temporary folder), one small file each:
-  <agent pid>-mcp-<bridge pid>.json   the session's MCP bridge and the computer its tools act on
+  <agent pid>-mcp-<bridge pid>.json   the session's MCP bridge and the computer its tools act on ("selected": chosen
+                                       with select_computer)
   <agent pid>-claim-<key>.json        a claim the session holds on a computer (lib/owners.py write_claim): where it is
 Each names the session's process and the one holding the computer (the bridge, or the claim's holder) by pid and
 start time (proc_start), and counts only while what it stands for is there: those same processes, the bridge still
@@ -388,7 +389,7 @@ def claim_name(agent_pid, holder_pid, run_dir):
 
 
 def note_bridge(agent_pid, bridge_pid, computer, selected=False, agent=None):
-    """An agent session's MCP bridge acts on computer (selected: the session chose it). The record names both
+    """An agent session's MCP bridge acts on computer (selected: chosen with select_computer). The record names both
     processes by pid and start time (proc_start). Best effort."""
     if not agent_pid or not bridge_pid or not computer:
         return False
@@ -554,6 +555,8 @@ def holding(recs, agent_name):
     """"this Codex session's MCP tools act on demo" and the like."""
     who = f"this {agent_name or 'agent'} session"
     if recs and recs[0]["kind"] == "mcp":
+        if all(r["selected"] for r in recs):
+            return f"{who} selected {_names(recs)} for its MCP tools (select_computer)"
         return f"{who}'s MCP tools act on {_names(recs)}"
     tools = sorted({r.get("last_tool") for r in recs if r.get("last_tool")})
     return f"{who} holds {_names(recs)}" + (f" (it acted there: {', '.join(tools)})" if tools else "")
@@ -573,8 +576,8 @@ def refusal(recs, target, cmd, chosen, settings, agent_name):
              f"- To act on {tv} anyway, name it: {cli_of(LAB)} --vm {tv} {cmd} ..."]
     for r in mine:
         lines.append(f"- To act on {r['computer']['vm']}, this session's computer: {naming(r['computer'])} {cmd} ...")
-    lines.append(f"- Or start a new agent session: its MCP tools start on the computer a command that names none acts "
-                 f"on ({tv}).")
+    lines.append(f"- Or move this session to {tv}: the metacomputer MCP tool select_computer with name {tv}; then "
+                 f"commands that name no computer act on it.")
     return "\n".join(lines)
 
 

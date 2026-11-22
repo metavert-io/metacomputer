@@ -379,9 +379,21 @@ def claim_for_shell(tool, who=None):
     return who
 
 
-def drop_claim(bridge_pid):
+def drop_claim(bridge_pid, conn=None):
+    """Remove the claim held in bridge_pid's name. With conn (the hub's id of one client connection), only a claim that
+    connection wrote: one written since by another connection in the same name (a bridge that reconnected) stays.
+    Callers that act on others' claims hold the owners lock."""
+    p = claim_path(bridge_pid)
+    if conn is not None:
+        try:
+            with open(p) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(rec, dict) or rec.get("conn") != conn:
+            return
     try:
-        os.remove(claim_path(bridge_pid))
+        os.remove(p)
     except FileNotFoundError:
         pass
 

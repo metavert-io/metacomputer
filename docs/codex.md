@@ -146,7 +146,8 @@ In metacomputer's own setup that doesn't change which checkout runs: the skill r
 absolute path, and Codex's MCP server is the same checkout's `bin/metacomputer`. What can still differ is the computer:
 the MCP server keeps the computer it started on, while each command takes the default computer as it is when it runs.
 A command that names no computer and would act on another computer than the session's refuses
-([commands.md](commands.md#an-agent-sessions-computer)). For a harness of your own: run commands by absolute path, name the VM (`--vm NAME`, or `MCOMP_CONFIG` in the
+([commands.md](commands.md#an-agent-sessions-computer)), and `select_computer` moves the session's tools to another
+computer. For a harness of your own: run commands by absolute path, name the VM (`--vm NAME`, or `MCOMP_CONFIG` in the
 environment, which a login shell keeps), and give the run a throwaway `HOME`.
 
 ## If something doesn't work

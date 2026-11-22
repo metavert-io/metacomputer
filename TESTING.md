@@ -312,10 +312,11 @@ runner's does.
 
 ## An agent session's computer: `tests/test_session_guard.py`
 
-`python3 tests/test_session_guard.py` (65 checks, under ten seconds) needs no VM. A copy of the checkout with two VMs'
+`python3 tests/test_session_guard.py` (93 checks, under ten seconds) needs no VM. A copy of the checkout with two VMs'
 settings (`mainvm` in `config/local.env`, `demo` in `config/vms/`) and `test_multi_vm.py`'s fake runner; a small program
 named `codex`, built with `cc` (`tests/userterm.py`), stands in for the agent session, so everything it starts has a
-real agent session above it; session records in a private folder (`MCOMP_SESSIONS_DIR`).
+real agent session above it; session records in a private folder (`MCOMP_SESSIONS_DIR`); the hubs it starts serve the
+copy's VMs (off) and are stopped at the end.
 - Which commands it looks at: a table of every command in bin/metacomputer's dispatch with its forms that act, only
   read the VM, or only read the Mac (or name their own computers), as the command parses them; every form that acts
   acts in every order of its arguments (`security --json apply`), and commands that take their arguments in any order
@@ -335,11 +336,29 @@ real agent session above it; session records in a private folder (`MCOMP_SESSION
   protected list) gets no record. The session's bridges decide, else its claims; two bridges on two computers, or claims
   on two, refuse a command that names neither; one VM from two checkouts is one computer. The refusal's and the note's
   words; a process table that can't be read lets the command go on, saying so; no records means no process table read.
+- In this process: a hub's claim written by a newer connection in the same name (a bridge that left and came back)
+  stays when the older connection's departure arrives late, and each connection still takes its own; the bridge's
+  shutdown waits until the computer it left with `select_computer` has let go (a handoff's wait on it included); the
+  command `select_computer` gives is the one that reaches that computer: its own `MCOMP_CONFIG` file for settings
+  outside this checkout, `--vm NAME` for this checkout's, the bare command only when a command that names none
+  reaches the same computer (name, SSH port and folder), not one of the same name elsewhere. A SIGTERM while
+  `select_computer` is switching ends the bridge only after the switch, waiting for the computer it left; a hub says
+  `conn_claims` in its hello, and switching away through one that doesn't is refused with nothing changed (the same
+  connection, not closed), refused again when retried, a driver call after it uses that same connection (nothing
+  reconnects), and it stays refused until that hub process is gone. A driver call that arrives while the shutdown
+  waits gets an error and opens nothing, and the exit leaves no connection open.
+  The signal handler only asks (it returns at once, closing and joining nothing); a real SIGTERM while a switch's
+  close starts its thread, with an earlier close still running, ends the bridge once that close is done (a
+  subprocess, bounded at 20 s).
 - End to end ("MCP on A, CLI defaulting to B"): the session's bridge started through a wrapper that names `demo`; a login
   shell (`zsh -lc`, with a profile that puts `~/.local/bin` first, as `path_helper` and many profiles do) finds the main
   install ahead of the wrapper, and its `metacomputer stop` (`mainvm`) is refused before it acts, naming both and each
   way on; the wrapper's own command, `--vm mainvm`, `MCOMP_VM=mainvm` and `each main` go on; `who` gets a note, `list`
-  none. A default changed after the session started (`metacomputer default demo`) refuses the command that now means
+  none. `tools/list` carries `list_computers` and `select_computer`; `list_computers` gives every computer, the default
+  and the session's; `select_computer mainvm` moves the session (its record says selected; the login shell's command now
+  goes on; a driver call reaches `mainvm`'s own hub, not `demo`'s); `select_computer demo` gives `--vm demo` for the
+  shell and the bare command refuses again; an unknown name or a non-name is refused with the tools left where they
+  were. A default changed after the session started (`metacomputer default demo`) refuses the command that now means
   `demo`. Without a bridge, a claim on `demo` (as `metacomputer sh` leaves) decides until it's gone.
 
 ## The Claude Code plugin: `tests/test_plugin.py`

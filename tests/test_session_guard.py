@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The agent-session computer guard (lib/sessionvm.py, bin/metacomputer's session_guard).
+"""The agent-session computer guard (lib/sessionvm.py, bin/metacomputer's session_guard) and the MCP tools
+list_computers / select_computer (lib/mcp_lazy.py).
 
 A session whose MCP tools act on computer A must not act on computer B from the shell because a command named no
 computer: a login shell that reorders PATH can run the main install instead of a wrapper, and a default changed since
@@ -27,7 +28,9 @@ TESTS = os.path.dirname(os.path.abspath(__file__))
 TD = tempfile.mkdtemp(prefix="mcsg-", dir="/tmp")          # short: the copy's hub sockets live under it
 SESSIONS = os.path.join(TD, "sessions")
 RUN = os.path.join(TD, "run")
-os.environ.update(MCOMP_SESSIONS_DIR=SESSIONS, MCOMP_RUN_DIR=RUN, MCOMP_VM_NAME="unitvm", MCOMP_SSH_PORT="2999")
+os.environ.update(MCOMP_SESSIONS_DIR=SESSIONS, MCOMP_RUN_DIR=RUN, MCOMP_VM_NAME="unitvm", MCOMP_SSH_PORT="2999",
+                  MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
+                  MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"))
 for _k in ("MCOMP_CONFIG", "MCOMP_VM", "MCOMP_NO_DEFAULT_VM", "MCOMP_GUARD_VM", "MCOMP_EXPECT_VM"):
     os.environ.pop(_k, None)
 sys.path.insert(0, os.path.join(LAB, "lib"))
@@ -512,10 +515,11 @@ def record_words_checks():
     check("a refusal names both computers, why it chose the other, and each way on",
           "this Codex session's MCP tools act on alpha" in text and "would act on beta" in text
           and "your default computer, config/default-vm" in text and REFUSED_WORDS in text
-          and "--vm beta stop ..." in text and "--vm alpha stop ..." in text and "start a new agent session" in text, text)
-    sel = sessionvm.refusal([rb], comp("beta", 2402), "sh", "main", "config/local.env", "Claude Code")
-    check("...and says when the other is just the main VM",
-          "beta (config/local.env's VM, as the command names none)" in sel, sel)
+          and "--vm beta stop ..." in text and "--vm alpha stop ..." in text and "select_computer" in text, text)
+    sel = sessionvm.refusal([{**rb, "selected": True}], comp("beta", 2402), "sh", "main", "config/local.env", "Claude Code")
+    check("...says when the session selected its computer, and when the other is just the main VM",
+          "selected alpha for its MCP tools (select_computer)" in sel
+          and "beta (config/local.env's VM, as the command names none)" in sel, sel)
     held_text = sessionvm.refusal([rc], comp("alpha", 2401), "put", "main", "config/local.env", "Codex")
     check("...and what the session did there when it holds a computer by a claim",
           "this Codex session holds beta (it acted there: sh)" in held_text, held_text)
@@ -550,6 +554,357 @@ def record_words_checks():
     finally:
         owners.ps_table = real
         clear_records()
+
+
+# --- the bridge's computer, in this process: a hub's claims, its shutdown, the command it gives ------------------
+def hub_claim_checks():
+    """A connection that's gone releases only its own claim: a bridge that left a computer (select_computer) and came
+    back has a new connection in the same name, whose claim the old one's late departure must not take."""
+    print("a hub's claims: a departing connection takes only its own")
+    import socket
+    import mcp_hub
+    hub = mcp_hub.Hub(env=dict(os.environ), inject_sessions=False, local=True)
+    socks = [socket.socketpair() for _ in range(2)]
+    first, second = (mcp_hub.Client(hub, a, os.getpid()) for a, _b in socks)
+    for c in (first, second):
+        c.hello, c.kind, c.cwd = True, "claude-code", "/proj"
+    path = owners.claim_path(os.getpid())
+    try:
+        hub.claim(first, "click")
+        hub.claim(second, "click")                     # the same bridge, connected again: the claim is now its
+        hub.hand_over_claim(first, [], drop_own=True)  # the old connection's departure, arriving late
+        kept = os.path.exists(path)
+        hub.hand_over_claim(second, [], drop_own=True)
+        check("a connection's late departure leaves the claim a newer connection in the same name wrote; that one's "
+              "own departure takes it", kept and not os.path.exists(path), (kept, os.path.exists(path)))
+        hub.claim(first, "click")
+        hub.hand_over_claim(first, [], drop_own=True)
+        check("...and a connection still takes its own claim when it goes", not os.path.exists(path))
+    finally:
+        for a, b in socks:
+            a.close()
+            b.close()
+        if os.path.exists(path):
+            os.remove(path)
+
+
+class SlowConnection:
+    """The connection to the computer before a select_computer, still letting go (a handoff's wait, say)."""
+
+    def __init__(self, features=("conn_claims",)):
+        self.alive, self.release, self.closed = True, __import__("threading").Event(), []
+        self.info = {"hub_pid": 4242, "features": list(features)}   # what the hub said in its hello
+        self.sent = []
+
+    def close(self, keep_for_handoff=False):
+        self.release.wait(20)
+        self.closed.append(time.monotonic())
+
+    def send(self, msg):
+        self.sent.append(msg)
+        return True
+
+
+SIGTERM_AT_START = r"""
+import io, json, os, signal, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+import mcp_lazy
+alpha, beta, main = (json.loads(a) for a in sys.argv[2:5])
+
+
+class Conn:
+    def __init__(self, features, release=None):
+        self.alive, self.release = True, release
+        self.info = {"hub_pid": os.getpid(), "features": list(features)}
+
+    def close(self, keep_for_handoff=False):
+        if self.release is not None:
+            self.release.wait(30)
+
+    def send(self, msg):
+        return True
+
+
+f = mcp_lazy.Front(env=dict(os.environ, **alpha), out=io.StringIO())
+envs = {"beta": beta, "mainvm": main}
+f.run_cli = lambda args, env: ((0, json.dumps(envs[args[1]]), "") if args[:1] == ["--vm"] and args[1] in envs
+                               else (0, json.dumps(main), "") if args == ["hub", "env", "--json"]
+                               else (0, json.dumps({"default": "mainvm"}), "") if args == ["default", "--json"]
+                               else (1, "", "no settings"))
+earlier = threading.Event()
+f.conn = Conn(("conn_claims",), earlier)
+f.select_computer({"id": 1}, {"name": "beta"})            # alpha's connection is still letting go (a handoff's wait)
+threading.Timer(1.5, earlier.set).start()
+signal.signal(signal.SIGTERM, getattr(f, "on_signal", None) or f.request_shutdown)   # as serve() installs it
+
+
+class Armed:
+    # threading's own lock, which Thread.start holds while it lists the new thread: SIGTERM lands right there.
+    def __init__(self, real):
+        self.real, self.armed = real, True
+
+    def __enter__(self):
+        self.real.acquire()
+        if self.armed and threading.current_thread() is threading.main_thread():
+            self.armed = False
+            os.kill(os.getpid(), signal.SIGTERM)
+            for _ in range(2000):
+                pass                                      # the handler runs here, with the lock held
+        return self
+
+    def __exit__(self, *a):
+        self.real.release()
+
+    def acquire(self, *a, **k):
+        return self.real.acquire(*a, **k)
+
+    def release(self):
+        self.real.release()
+
+    def locked(self):
+        return self.real.locked()
+
+
+f.conn = Conn(("conn_claims",))                            # beta's connection, let go of by the next switch
+threading._active_limbo_lock = Armed(threading._active_limbo_lock)
+f.select_computer({"id": 2}, {"name": "mainvm"})
+print("signalled", flush=True)
+if getattr(f, "stop_requested", False):
+    f.finish()                                             # the main loop's shutdown: waits for the earlier close
+os._exit(0)
+"""
+
+
+def fake_front(start, others, bare):
+    """A bridge in this process, started on `start` (an environment), whose metacomputer commands are answered from
+    `others` ({name: environment}) and `bare` (what a command that names none resolves to)."""
+    import io
+    import mcp_lazy
+    f = mcp_lazy.Front(env=dict(os.environ, **start), out=io.StringIO())
+
+    def run_cli(args, env):
+        if args[:1] == ["--vm"] and args[1] in others and args[2:] == ["hub", "env", "--json"]:
+            return 0, json.dumps(others[args[1]]), ""
+        if args == ["hub", "env", "--json"]:
+            return 0, json.dumps(bare), ""
+        if args == ["default", "--json"]:
+            return 0, json.dumps({"default": bare.get("MCOMP_VM_NAME")}), ""
+        return 1, "", f"this checkout has no settings for a VM named {args[1] if len(args) > 1 else '?'}"
+    f.run_cli = run_cli
+    return f
+
+
+def vm_env(name, port, config=""):
+    e = {"MCOMP_VM_NAME": name, "MCOMP_SSH_PORT": str(port), "MCOMP_RUN_DIR": os.path.join(TD, "r-" + name),
+         "MCOMP_MCP_HUB": "on"}
+    if config:
+        e["MCOMP_CONFIG"] = config
+    return e
+
+
+def picked(f, name):
+    out = f.out.getvalue().strip().splitlines()
+    f.select_computer({"jsonrpc": "2.0", "id": 1, "method": "tools/call"}, {"name": name})
+    reply = json.loads(f.out.getvalue().strip().splitlines()[len(out)])
+    return reply.get("result") or {}
+
+
+def bridge_unit_checks():
+    print("select_computer in this process: its shutdown, and the command it gives")
+    import mcp_lazy
+    ext = os.path.join(TD, "elsewhere", "alpha.env")       # a settings file outside this checkout (MCOMP_CONFIG)
+    main_env = vm_env("mainvm", 2277)
+    beta_env = vm_env("beta", 2402, os.path.join(LAB, "config", "vms", "beta.env"))
+    alpha_env = vm_env("alpha", 2501, ext)
+
+    # Shutdown waits for the computer before a select_computer to let go (F3).
+    f = fake_front(alpha_env, {"beta": beta_env, "mainvm": main_env}, main_env)
+    old = SlowConnection()
+    f.conn = old
+    picked(f, "beta")
+    exits = []
+    real_exit = os._exit
+    os._exit = lambda code: exits.append(time.monotonic())
+    try:
+        t = __import__("threading").Thread(target=f.shutdown, daemon=True)
+        t.start()
+        time.sleep(0.5)
+        early = list(exits)
+        old.release.set()
+        t.join(10)
+    finally:
+        os._exit = real_exit
+    check("the bridge's shutdown waits until the computer it left with select_computer has let go (a handoff's wait "
+          "on it included), and exits after", not early and exits and old.closed and exits[0] >= old.closed[0],
+          (early, exits, old.closed))
+
+    # A signal while select_computer is switching: the shutdown waits until the switch is done, so the computer it's
+    # leaving is one it waits for (N2).
+    import threading
+    f = fake_front(alpha_env, {"beta": beta_env, "mainvm": main_env}, main_env)
+    old = SlowConnection()
+    f.conn = old
+    handler = getattr(f, "on_signal", None) or f.request_shutdown        # what SIGTERM runs
+    real_load = mcp_lazy.mcp_hub.load_cache
+    exits = []
+    real_exit = os._exit
+    os._exit = lambda code: exits.append((time.monotonic(), list(old.closed)))
+    mcp_lazy.mcp_hub.load_cache = lambda path: handler()        # the signal lands while the switch reads the cache
+    threading.Timer(0.5, old.release.set).start()
+    try:
+        picked(f, "beta")
+        if getattr(f, "stop_requested", False):
+            f.finish()                                          # what the main loop does next
+    finally:
+        mcp_lazy.mcp_hub.load_cache = real_load
+        os._exit = real_exit
+    check("a SIGTERM while select_computer is switching ends the bridge only after the switch, waiting for the "
+          "computer it left (a handoff's wait on it included)", exits and exits[0][1], exits)
+
+    # The handler only asks: no close, no join, whatever is still letting go (P2).
+    f = fake_front(alpha_env, {"beta": beta_env, "mainvm": main_env}, main_env)
+    old = SlowConnection()
+    f.conn = old
+    picked(f, "beta")                                           # the computer before is still letting go
+    handler = getattr(f, "on_signal", None) or f.request_shutdown
+    exits = []
+    os._exit = lambda code: exits.append(time.monotonic())
+    threading.Timer(1.0, old.release.set).start()
+    try:
+        t0 = time.monotonic()
+        handler(15, None)
+        took = time.monotonic() - t0
+        early = list(exits)
+        if getattr(f, "stop_requested", False):
+            f.finish()
+    finally:
+        os._exit = real_exit
+    check("the signal handler only asks for the shutdown: it returns at once, closes and joins nothing, and the main "
+          "loop then ends the bridge once the computer it left has let go", took < 0.3 and not early and exits
+          and old.closed and exits[0] >= old.closed[0], (took, early, exits, old.closed))
+
+    # Codex's case, for real: SIGTERM lands while a close starts its thread (Thread.start holding threading's own lock),
+    # with an earlier close still running. The process must end once that close has, not hang (bounded).
+    script = os.path.join(TD, "sigterm_at_start.py")
+    write(script, SIGTERM_AT_START)
+    try:
+        r = subprocess.run([PY, script, os.path.join(LAB, "lib"), json.dumps(alpha_env), json.dumps(beta_env),
+                            json.dumps(main_env)], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        outcome = (r.returncode, r.stdout[-300:], r.stderr[-500:])
+    except subprocess.TimeoutExpired:
+        outcome = "hung: still running after 20 s"
+    check("a SIGTERM while a switch's close is starting its thread (an earlier close still running) ends the bridge "
+          "once that close is done; it never hangs", isinstance(outcome, tuple) and outcome[0] == 0
+          and "signalled" in outcome[1], outcome)
+
+    # A hub from an earlier metacomputer drops claims by process: switching away through it is refused (N1).
+    import socket
+    import mcp_hub
+    hub = mcp_hub.Hub(env=dict(os.environ), inject_sessions=False, local=True)
+    sa, sb = socket.socketpair()
+    c = mcp_hub.Client(hub, sa, os.getpid())
+    hub.on_hello(c, {"jsonrpc": "2.0", "id": "h", "method": "metacomputer/hello",
+                     "params": {"protocol": mcp_hub.PROTOCOL, "kind": "sdk", "settings": None}})
+    hello = json.loads(c.q[0]) if c.q else {}
+    sa.close()
+    sb.close()
+    check("a hub says in its hello that its claims are the connection's own (conn_claims)",
+          "conn_claims" in ((hello.get("result") or {}).get("features") or []), hello)
+    older = subprocess.Popen(["/bin/sleep", "60"])             # stands in for the earlier hub's process
+    opened = []
+    real_open = mcp_lazy.mcomp_sdk.open_connection
+    mcp_lazy.mcomp_sdk.open_connection = lambda *a, **k: (opened.append(a), (_ for _ in ()).throw(OSError("opened")))[1]
+    try:
+        f = fake_front(alpha_env, {"beta": beta_env}, main_env)
+        old = SlowConnection(features=())
+        old.info["hub_pid"] = older.pid
+        old.release.set()
+        f.conn = old
+        r = picked(f, "beta")
+        text = "".join(x.get("text", "") for x in r.get("content") or [])
+        check("switching away through a hub that doesn't say so is refused, and nothing changes: this session's "
+              "connection to it stays as it was (the hub sees no disconnect), with how to go on",
+              r.get("isError") and "hub stop" in text and "Nothing was switched" in text
+              and (f.computer() or {}).get("vm") == "alpha" and f.conn is old and not getattr(old, "retired", False)
+              and not old.closed, (r, f.computer(), f.conn is old, old.closed))
+        retry = picked(f, "beta")
+        again = picked(f, "beta")
+        f.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "get_screen_size", "arguments": {}}})
+        check("...refused again when retried, and a driver call after it goes through that same connection: nothing "
+              "reconnects, so no late disconnect can take a later claim", retry.get("isError") and again.get("isError")
+              and f.conn is old and not old.closed and not opened and any(m.get("id") == 9 for m in old.sent),
+              (retry, opened, old.sent))
+        f.from_hub({"jsonrpc": "2.0", "id": 9, "result": {"content": []}})    # the hub answers that call
+        f.conn = None                                          # that connection ends some other way (its hub stopped)
+        check("...and with no connection left to look at, that hub is still remembered while it runs",
+              picked(f, "beta").get("isError") and (f.computer() or {}).get("vm") == "alpha")
+        older.kill()
+        older.wait(10)
+        moved = picked(f, "beta")
+        check("...until that hub is gone (restarted): then the switch goes through",
+              not moved.get("isError") and (f.computer() or {}).get("vm") == "beta", moved)
+    finally:
+        mcp_lazy.mcomp_sdk.open_connection = real_open
+        if older.poll() is None:
+            older.kill()
+
+    # Once the shutdown has begun, the message worker opens nothing and dispatches nothing: a driver call arriving while
+    # it waits for a computer the session left gets an error, and the exit leaves no connection open.
+    import io
+    f = fake_front(alpha_env, {"beta": beta_env}, main_env)
+    old = SlowConnection()
+    f.conn = old
+    picked(f, "beta")                                           # alpha's connection still letting go (a handoff's wait)
+    made = []
+
+    def open_connection(*a, **k):
+        c = SlowConnection()
+        c.release.set()
+        c.start = lambda: None
+        made.append(c)
+        return c
+    mcp_lazy.mcomp_sdk.open_connection = open_connection
+    exits = []
+    os._exit = lambda code: exits.append([c.closed[:] for c in made])
+    try:
+        t = threading.Thread(target=f.finish, daemon=True)
+        t.start()
+        time.sleep(0.3)                                         # the shutdown is waiting for alpha's connection
+        before = len(f.out.getvalue().splitlines())
+        f.read_stdin(io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                                             "params": {"name": "get_screen_size", "arguments": {}}}) + "\n"))
+        reply = [json.loads(x) for x in f.out.getvalue().splitlines()[before:]]
+        old.release.set()
+        t.join(10)
+    finally:
+        mcp_lazy.mcomp_sdk.open_connection = real_open
+        os._exit = real_exit
+    check("a driver call that arrives while the shutdown waits gets an error, and no connection is opened for it",
+          not made and reply and reply[0].get("id") == 21 and (reply[0].get("result") or {}).get("isError"),
+          (made, reply))
+    check("...and the bridge exits with every connection closed (none left open behind it)",
+          exits and all(closed for closed in exits[0]), (exits, made))
+
+    # The command select_computer gives is the one that reaches that computer (F7).
+    f = fake_front(alpha_env, {"beta": beta_env, "mainvm": main_env}, main_env)
+    a = sessionvm.naming(sessionvm.computer_of(alpha_env, lab=mcp_lazy.LAB))
+    r = picked(f, "alpha").get("structuredContent") or {}
+    check("on a computer whose settings are outside this checkout (MCOMP_CONFIG), select_computer gives the command "
+          "with that file, not --vm", r.get("cli") == a and a.startswith("MCOMP_CONFIG=") and r.get("is_default") is False,
+          (r.get("cli"), a))
+    r = picked(f, "beta").get("structuredContent") or {}
+    check("...for one of this checkout's, --vm NAME", r.get("cli") == f"{sessionvm.cli_of(mcp_lazy.LAB)} --vm beta"
+          and r.get("is_default") is False, r.get("cli"))
+    r = picked(f, "alpha").get("structuredContent") or {}
+    check("...and back on the first, its settings file again", r.get("cli") == a, r.get("cli"))
+    r = picked(f, "mainvm").get("structuredContent") or {}
+    check("...and for the computer a command that names none reaches, the bare command",
+          r.get("cli") == mcp_lazy.CLI and r.get("is_default") is True, r)
+    twin = vm_env("alpha", 2277)
+    f = fake_front(alpha_env, {}, twin)
+    r = picked(f, "alpha").get("structuredContent") or {}
+    check("a bare command reaching another computer of the same name (another port and folder) doesn't count as "
+          "reaching it", r.get("is_default") is False and r.get("cli") == a, r)
 
 
 # --- end to end: a stand-in agent session over the checkout's copy ------------------------------------------------
@@ -640,6 +995,16 @@ class Session:
     def start_bridge(self, name, argv):
         return self.ask(op="start", name=name, argv=argv, env=self.env)
 
+    def tool(self, name, tool, args=None, wait=60):
+        self.mid += 1
+        return self.ask(op="mcp", name=name, wait=wait, msg={"jsonrpc": "2.0", "id": self.mid, "method": "tools/call",
+                                                             "params": {"name": tool, "arguments": args or {}}})
+
+    def rpc(self, name, method, params=None):
+        self.mid += 1
+        return self.ask(op="mcp", name=name, msg={"jsonrpc": "2.0", "id": self.mid, "method": method,
+                                                  "params": params or {}})
+
     def close(self):
         try:
             self.p.stdin.close()
@@ -666,6 +1031,14 @@ def wait_for(fn, timeout=15):
             return v
         time.sleep(0.05)
     return fn()
+
+
+def structured(res):
+    return ((res or {}).get("result") or {}).get("structuredContent") or {}
+
+
+def text_of(res):
+    return "".join(c.get("text", "") for c in ((res or {}).get("result") or {}).get("content") or [])
 
 
 def end_to_end(fake):
@@ -710,9 +1083,9 @@ def end_to_end(fake):
         check("MCP on demo, a login shell's `metacomputer stop` defaulting to mainvm: refused before it acts",
               r.get("rc") == 1 and REFUSED_WORDS in err and "MCP tools act on demo" in err and "would act on mainvm" in err
               and "no VM 'mainvm'" not in err, r)
-        check("...naming the fixes: --vm mainvm, --vm demo, or a new session",
+        check("...naming the fixes: --vm mainvm, --vm demo, or select_computer",
               "~/.local/bin/metacomputer --vm mainvm stop ..." in err and "--vm demo stop ..." in err
-              and "start a new agent session" in err, err)
+              and "select_computer" in err, err)
         r = s.run(["/bin/bash", "-c", 'metacomputer "$@"', "bash", "stop"])
         check("the same command through the wrapper (MCOMP_CONFIG names demo) goes on, to demo",
               REFUSED_WORDS not in r.get("err", "") and "no VM 'demo'" in r.get("err", ""), r)
@@ -731,6 +1104,53 @@ def end_to_end(fake):
         check("`each main -- stop` names the main VM: it goes on there",
               REFUSED_WORDS not in r.get("out", "") + r.get("err", "") and "no VM 'mainvm'" in r.get("out", "") + r.get("err", ""), r)
 
+        # The MCP tools: list_computers, select_computer.
+        init = s.rpc("b", "initialize", {"protocolVersion": "2025-06-18"})
+        tl = s.rpc("b", "tools/list")
+        names = [t.get("name") for t in ((tl or {}).get("result") or {}).get("tools") or []]
+        check("tools/list carries list_computers and select_computer beside the driver's tools",
+              init.get("result") and "list_computers" in names and "select_computer" in names and len(names) > 50,
+              (len(names), names[-3:]))
+        res = s.tool("b", "list_computers")
+        sc = structured(res)
+        rows = {c["name"]: c for c in sc.get("computers") or []}
+        check("list_computers: every computer, the default, and which one this session's tools act on",
+              set(rows) == {"mainvm", "demo"} and rows["mainvm"]["default"] and not rows["demo"]["default"]
+              and rows["demo"]["this_session"] and not rows["mainvm"]["this_session"] and sc.get("this_session") == "demo"
+              and rows["demo"]["where"] == "this Mac" and "demo" in text_of(res) and not res["result"].get("isError"), res)
+        res = s.tool("b", "select_computer", {"name": "mainvm"})
+        sc = structured(res)
+        check("select_computer mainvm: the session's tools act on it; it's the default, so commands need no --vm",
+              sc.get("computer") == "mainvm" and sc.get("previous") == "demo" and sc.get("is_default") is True
+              and sc.get("cli") == "~/.local/bin/metacomputer" and not res["result"].get("isError"), res)
+        rec = records_of(s.pid, "mcp")
+        check("...and the session's record says so (selected)", rec and rec[0]["computer"]["vm"] == "mainvm"
+              and rec[0]["selected"] is True, rec)
+        r = zl(s, "stop")
+        check("now the login shell's `metacomputer stop` (mainvm) is the session's computer: it goes on",
+              REFUSED_WORDS not in r.get("err", "") and "no VM 'mainvm'" in r.get("err", ""), r)
+        res = s.tool("b", "get_screen_size", wait=90)
+        st_main = json.loads(b.run("--vm", "mainvm", "hub", "status", "--json").stdout or "{}")
+        st_demo = json.loads(b.run("--vm", "demo", "hub", "status", "--json").stdout or "{}")
+        clients = [c.get("pid") for c in (st_main.get("hub") or {}).get("clients") or []]
+        check("a driver call after the switch goes to mainvm's own hub (one hub per computer), not demo's",
+              res.get("result") is not None and st_main.get("running") and st.get("pid") in clients
+              and not st_demo.get("running"), (res, st_main, st_demo))
+        res = s.tool("b", "select_computer", {"name": "demo"})
+        sc = structured(res)
+        check("select_computer demo (where the session started): not the default, so commands name it",
+              sc.get("computer") == "demo" and sc.get("is_default") is False
+              and sc.get("cli") == "~/.local/bin/metacomputer --vm demo" and "--vm demo" in text_of(res)
+              and "--vm demo" in sc.get("message", ""), res)
+        r = zl(s, "stop")
+        check("...and a command that names no computer refuses again, saying the session selected demo",
+              r.get("rc") == 1 and "selected demo for its MCP tools (select_computer)" in r.get("err", ""), r)
+        res = s.tool("b", "select_computer", {"name": "nosuch"})
+        check("select_computer of a computer with no settings: refused, the session's tools stay where they were",
+              res["result"].get("isError") and "nosuch can't be selected" in text_of(res)
+              and "still act on demo" in text_of(res) and records_of(s.pid, "mcp")[0]["computer"]["vm"] == "demo", res)
+        res = s.tool("b", "select_computer", {"name": "../x"})
+        check("...and a name that isn't one", res["result"].get("isError") and "needs a computer's name" in text_of(res), res)
         s.ask(op="stop", name="b")
         check("the bridge's record goes when it ends", not records_of(s.pid, "mcp"))
         r = zl(s, "stop")
@@ -786,6 +1206,8 @@ def main():
     try:
         classification_checks()
         record_checks()
+        hub_claim_checks()
+        bridge_unit_checks()
         fake = userterm.fake_agent("codex")
         if fake:
             end_to_end(fake)

@@ -164,6 +164,12 @@ case "${1:-help}" in
   default|help|-h|--help|setup|update|version) MC_DEFAULT_MODE=off ;;
   list) MC_DEFAULT_MODE=soft ;;
   vm) case "${2:-list}" in list|help|-h|--help) MC_DEFAULT_MODE=soft ;; esac ;;
+  mcp|mcp-lazy)
+    # The MCP bridge keeps the names of the MCOMP_ variables it was started with, before the settings below add
+    # theirs, so its select_computer resolves another computer from where this command started (lib/mcp_lazy.py).
+    MCOMP_BRIDGE_KEYS=""
+    for mc_v in $(compgen -e); do case "$mc_v" in MCOMP_*) MCOMP_BRIDGE_KEYS="$MCOMP_BRIDGE_KEYS $mc_v" ;; esac; done
+    export MCOMP_BRIDGE_KEYS="${MCOMP_BRIDGE_KEYS# }"; unset mc_v ;;
 esac
 # shellcheck source=../scripts/lib.sh
 . "$LIB"
