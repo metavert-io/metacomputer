@@ -238,12 +238,17 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   again by that command). Whatever served the tools before (an older GitHub copy's server, another checkout's
   marketplace, read first: turned off stays off, unreadable stops the switch; the plugin with `--no-plugin`; old server
   names) is retired only after the new one is read back, each lookup present/absent/error (error is never absent; a
-  plugin record with load errors or a non-boolean `enabled` is an error) and each removal checked. A step that didn't
-  finish ends the run with exit 1 and is recorded as incomplete in installed.json by `claude_record`, at the end of
-  `claude_step` (before Codex's step), only when the step ran (`CLAUDE_TRIED`: a run without `claude` or with
-  `--no-claude` keeps an earlier marker; a full install's `install_incomplete` likewise), so `metacomputer update` runs
-  the install again. `--no-plugin` keeps the server and swaps the plugin for a skill link;
-  `--uninstall` reads and removes metacomputer's server before the command link, and keeps the link when the server stays. The plugin's launcher tells a checkout whose
+  plugin record with load errors or a non-boolean `enabled` is an error) and each removal checked. When registration
+  fails and the plugin brings no server, the run says the tools are missing in new sessions, with the add line
+  (`tools_missing_note`). A step that didn't finish (Claude Code's or Codex's) ends the run with exit 1 and is recorded
+  as incomplete in installed.json by `agent_record`, at the end of each step (Claude Code's before Codex's runs), only
+  when the step ran (`CLAUDE_TRIED`, `CODEX_TRIED`: a run that skipped it keeps an earlier marker; a full install's
+  `install_incomplete` likewise), so `metacomputer update` runs the install again. Codex's MCP server follows the same
+  ownership rule (`lib/agents.py codex_entry`: exactly the checkout's launcher, a legacy path under its `bin/`, or
+  `~/.local/bin/metacomputer`, with exactly `mcp-lazy`; the whole entry read again before a change; never a path prefix);
+  anything else is left, said value-free, and the Codex step is unfinished. `--no-plugin` keeps the server and swaps the
+  plugin for a skill link; `--uninstall` reads and removes metacomputer's servers before the command links, and keeps
+  the links while any entry that stays (Claude Code's or Codex's, owned or not) runs them. The plugin's launcher tells a checkout whose
   install.sh lacks the `CLAUDE_MCP=user` line (it left the server to the plugin) to run `metacomputer update`. Keep
   `mcpServers` and `hooks` out of plugin.json (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
   `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the

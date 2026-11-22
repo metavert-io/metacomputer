@@ -278,7 +278,13 @@ a folder there, both files populated, a byte-order mark), with a temporary `HOME
   and exits 3.
 - `install.sh --only-codex` (test_install, with the real `codex` command in a throwaway HOME and CODEX_HOME): the MCP
   server with its timeout and approval mode, the skill links, the rules as Codex's own checker reads them, a second
-  run changing nothing, and `--uninstall` removing exactly those.
+  run changing nothing, and `--uninstall` removing exactly those. Only metacomputer's own registration changes: a path
+  earlier versions registered under the checkout is pointed at `bin/metacomputer` with your settings kept (one that
+  changes right before, through a `python3` stand-in, is left as it is), and one it can't edit exactly is left as it was
+  (unfinished); a program elsewhere in the checkout, a moved checkout's launcher and the launcher with other arguments
+  are left byte for byte, named without their arguments (a synthetic token never printed), with the command to remove
+  them yourself and exit 1, and `--uninstall` leaves them; a Codex entry of yours that runs
+  `~/.local/bin/metacomputer --vm other mcp-lazy` keeps that link and `mcomp` at `--uninstall`.
 - `install.sh --only-claude`: a fresh install adds the checkout as the marketplace,
   installs the plugin at user scope and registers the user-scope MCP server
   `metacomputer` (`claude mcp add -s user metacomputer ~/.local/bin/metacomputer
@@ -335,8 +341,13 @@ a folder there, both files populated, a byte-order mark), with a temporary `HOME
   `--no-claude` leaves it; a full install's last step (`install_incomplete`) goes by the
   same rule. `--uninstall` removes the server before the command it runs: when the entry
   changes right before (a `python3` stand-in plays another Claude Code) or its removal
-  doesn't take, the server and the command both stay (exit 1). An entry that changes
-  while it's read, or while a yes is being typed at a terminal, is left as it is.
+  doesn't take, the server and the command both stay (exit 1), and a registration of
+  yours that stays and runs `~/.local/bin/metacomputer --vm other mcp-lazy` keeps them
+  too. An entry that changes while it's read, or while a yes is being typed at a
+  terminal, is left as it is. The update from the layout where the plugin brought the
+  server, when the registration fails: it says plainly that new sessions have no tools
+  until it's fixed, with the `claude mcp add` line and that `metacomputer update` tries
+  again; unfinished; nothing else removed.
 - Scopes: local and project servers with the same command in the folder the install
   runs in don't count as registered; the user-scope one is added (every `mcp add` and
   `mcp remove` names `-s user`) and the others are reported and unchanged. `--uninstall`
