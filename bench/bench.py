@@ -44,6 +44,7 @@ import math
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -414,8 +415,50 @@ def lessons_record(sw):
             "lessons_problem": s["problem"]}
 
 
+def codex_config_path(env=None):
+    env = os.environ if env is None else env
+    return os.path.join(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "config.toml")
+
+
+def read_or_none(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def undo_codex_trust(before, work, path=None):
+    """Codex saves the work folder's trust (a `-c projects.<work>.trust_level` override) into your own config.toml when
+    a session starts. Put the file back exactly as it was when that table is the only change; anything else changed
+    in it is left alone, with a note. Returns what was done: "unchanged", "restored" or "left"."""
+    import re
+    path = path or codex_config_path()
+    after = read_or_none(path)
+    if after == before or after is None or before is None:
+        return "unchanged"
+    stripped = after
+    for name in {work, os.path.realpath(work)}:
+        stripped = re.sub(r"\n*\[projects\." + re.escape(json.dumps(name)) + r"\]\ntrust_level = \"trusted\"\n",
+                          "\n", stripped)
+    squeeze = lambda s: re.sub(r"\n\s*\n", "\n", s).strip()      # noqa: E731  (blank lines don't count)
+    if squeeze(stripped) != squeeze(before):
+        log(f"  note: Codex changed {path} during the run in other ways too; left as it is")
+        return "left"
+    if read_or_none(path) != after:            # changed again meanwhile: leave it
+        return "left"
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    tmp = path + ".mcomp-bench.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(before)
+    os.replace(tmp, path)
+    return "restored"
+
+
 def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     codex = sw.get("agent") == "codex"
+    codex_before = read_or_none(codex_config_path()) if codex else None
     args, budget = codex_session_args(t, sw, cfg) if codex else session_args(t, sw, cfg)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     claude = claude or trusted_claude(env.get("PATH", ""), "codex" if codex else "claude")   # before the shim goes first
@@ -468,6 +511,8 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     th.join(timeout=10)
     tr.close()
     err.close()
+    if codex:
+        undo_codex_trust(codex_before, os.path.dirname(cfg))
     return events, times, {"exit": proc.returncode, "timed_out": timed_out, "wall_s": round(time.time() - t0, 1),
                            "timeout_s": timeout, "budget_usd": budget, "max_turns": int(t.get("max_turns", 60))}
 

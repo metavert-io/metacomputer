@@ -131,8 +131,9 @@ def is_claude(comm):
 
 def is_codex(comm):
     """True when a process table command is Codex: its native `codex` binary. npm and Homebrew install a node
-    launcher (bin/codex.js) that starts it; the IDE extensions and the desktop app run `codex app-server`, one
-    process for all of their conversations, which therefore count as one session here."""
+    launcher (bin/codex.js) that starts it; the IDE extensions, the desktop app and the terminal app's shared
+    background server (`codex app-server --managed-daemon`, which `codex` starts on first use) run `codex
+    app-server`, one process for all of their conversations, which therefore count as one session here."""
     return os.path.basename(comm or "") == "codex"
 
 

@@ -39,7 +39,41 @@ def fake_claude(path, marker):
     os.chmod(path, 0o755)
 
 
+def test_codex_trust_undo():
+    """Codex saves the bench's per-run trust override into your own config.toml when a session starts: the bench puts
+    the file back exactly as it was when that table is the only change, and leaves any other change alone."""
+    td = tempfile.mkdtemp(prefix="mcomp-trust-")
+    try:
+        cfg = os.path.join(td, "config.toml")
+        work = os.path.join(td, "work")
+        os.makedirs(work)
+        before = 'model = "x"\n\n[tui]\nscreen_reader_detection_done = true\n'
+        added = f'\n[projects."{os.path.realpath(work)}"]\ntrust_level = "trusted"\n'
+        with open(cfg, "w") as f:
+            f.write(before + added)
+        os.chmod(cfg, 0o600)
+        r = bench.undo_codex_trust(before, work, cfg)
+        check("the run's own trust table is the only change: the file is put back exactly, its mode kept",
+              r == "restored" and open(cfg).read() == before and stat.S_IMODE(os.stat(cfg).st_mode) == 0o600, r)
+        with open(cfg, "w") as f:
+            f.write(before + added + 'personality = "friendly"\n')
+        r = bench.undo_codex_trust(before, work, cfg)
+        check("...any other change too: the file is left as it is", r == "left" and "personality" in open(cfg).read(), r)
+        other = f'\n[projects."{td}/someone-else"]\ntrust_level = "trusted"\n'
+        with open(cfg, "w") as f:
+            f.write(before + other)
+        r = bench.undo_codex_trust(before, work, cfg)
+        check("...another folder's trust (not this run's) is left too", r == "left" and "someone-else" in open(cfg).read(), r)
+        with open(cfg, "w") as f:
+            f.write(before)
+        check("...and an unchanged file isn't touched", bench.undo_codex_trust(before, work, cfg) == "unchanged")
+        check("no temporary file is left behind", sorted(os.listdir(td)) == ["config.toml", "work"], os.listdir(td))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
+    test_codex_trust_undo()
     td = tempfile.mkdtemp(prefix="mcomp-bench-test-")
     run_id = "test-" + os.path.basename(td)
     shared = os.path.join("/tmp", "mcomp-bench", run_id)

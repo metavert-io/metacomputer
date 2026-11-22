@@ -875,9 +875,10 @@ Each of these needs no VM and takes seconds.
   builds a small program named `codex` to stand for one. The vault suites use the TEST
   build's `MCOMP_VAULT_TEST_IGNORE_AGENT=1` for that, and test_secrets checks the refusal
   with it unset.
-- `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
+- `python3 tests/test_bench_workdir.py` (12 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
-  relative PATH entry is never run.
+  relative PATH entry is never run; after a Codex session, the trust table Codex saved for the
+  run's folder is undone (the file put back exactly, its mode kept) only when it's the only change.
 - `python3 tests/test_bench_checks.py` (96 checks, a few seconds): the benchmark's check
   readers on made-up ODF and OOXML files (what shows in bold, sheets by name, a chart
   frame's size from LibreOffice's inches, a chart object that doesn't parse, `.xlsx`

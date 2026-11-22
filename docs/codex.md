@@ -103,12 +103,15 @@ accident, not a program set on it (SECURITY.md).
 ## Where Codex differs
 
 - **One controller at a time** counts each Codex process as one session, as it counts each Claude Code process. The
-  Codex IDE extension and the desktop app run all of their conversations in one process (`codex app-server`), so two
-  conversations there count as one session and don't wait for each other.
+  Codex IDE extension, the desktop app and the terminal app run all of their conversations in one process (`codex
+  app-server`), so two conversations there count as one session and don't wait for each other. For the terminal app
+  that's its shared background server (checked with Codex 0.167: `codex` starts it on first use, as
+  `codex app-server --managed-daemon`, and the commands of every conversation run under it); `codex --no-daemon`
+  starts the terminal app without it. `codex exec` runs as a process of its own.
 - **The vault** recognizes Codex sessions as it does Claude Code's: "for this session" answers, unattended rules for
   a project folder, and tokens tied to the session that asked for them. Requests from under Codex's app server (the
-  IDE extension and the desktop app) get none of these: its conversations share one process, so nothing tells one
-  conversation from another, and each use asks.
+  IDE extension, the desktop app and the terminal app's shared background server) get none of these: its
+  conversations share one process, so nothing tells one conversation from another, and each use asks.
 - **`metacomputer learn`** reads Codex's sessions (`$CODEX_HOME/sessions`) as well as Claude Code's, with the same
   rules: only classes, counts, tool names and app names from a fixed list, never text. Approved lessons reach Codex
   in the MCP server's instructions. `--draft-with-claude`, `learn bench` and the benchmark run Claude Code
