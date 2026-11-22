@@ -4,12 +4,12 @@
     "name": "Metavert",
     "url": "https://github.com/metavert-io"
   },
-  "description": "metacomputer: Claude's own disposable Ubuntu desktop on your Mac.",
+  "description": "metacomputer: a disposable Ubuntu desktop on your Mac for Claude to use as its own computer.",
   "plugins": [
     {
       "name": "metacomputer",
       "source": "./plugin",
-      "description": "Claude's own disposable computer: an isolated Ubuntu 24.04 desktop VM on your Mac, driven through Cua Driver's MCP tools. Build the VM with the repository's ./install.sh."
+      "description": "Gives Claude a disposable computer of its own: an isolated Ubuntu 24.04 desktop VM on your Mac, operated through Cua Driver's MCP tools. Build the VM with the repository's ./install.sh."
     }
   ]
 }
