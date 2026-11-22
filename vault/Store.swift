@@ -56,7 +56,31 @@ struct VMBinding: Codable {
     var gateway_path: String?       // the program that must serve ssh_port (mcomp-netgw)
     var gateway_sha256: String?     // ...and its contents when bound
     var bound: String
+    // A computer reached over SSH elsewhere (docs/remote.md): its address (nil: 127.0.0.1, through the gateway above),
+    // with ssh_port its SSH port there, and the name its host key is pinned under (mcomp-NAME, never the address).
+    // Such a binding has no gateway: the pinned host key is what's checked.
+    var ssh_host: String? = nil
+    var host_key_alias: String? = nil
 }
+
+extension VMBinding {
+    /// Where ssh connects: the computer's own address, or this Mac's loopback (the gateway's forward).
+    var sshDestination: String { ssh_host ?? "127.0.0.1" }
+    var isRemote: Bool { ssh_host != nil }
+}
+
+/// A computer's address for a binding: an IPv4 or IPv6 address or a DNS name, nothing that could be an option or a
+/// user@ (it goes on ssh's command line after `user@`).
+func validHost(_ s: String) -> Bool {
+    guard !s.hasPrefix("-"), s.count <= 253 else { return false }
+    if matches(s, "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$") { return true }
+    if matches(s, "^[0-9A-Fa-f:]{2,39}$") && s.contains(":") { return true }
+    return matches(s, "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+        && !matches(s, "^[0-9.]+$")
+}
+
+/// The name a remote computer's host key is pinned under (scripts/lib.sh mc_hostkey_name).
+func validHostKeyAlias(_ s: String) -> Bool { matches(s, "^mcomp-[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$") }
 
 struct SessionMeta: Codable {
     var vm: String

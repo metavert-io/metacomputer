@@ -337,13 +337,13 @@ final class ProxyHub: @unchecked Sendable {
         guard mkdir(dir, 0o700) == 0 else { throw VaultError("cannot make a temporary folder", code: Exit.error) }
         let errPath = dir + "/ssh.err"
         // The pinned host key goes to ssh as KnownHostsCommand arguments, never through a file.
-        guard let pin = pinnedHostKeyOptions(port: t.binding.ssh_port, hostKeyLine: t.binding.host_key_line) else {
+        guard let pin = pinnedHostKeyOptions(binding: t.binding) else {
             rmdir(dir)
             throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
         }
-        let args = sshBaseOptions(key: keyPath, port: t.binding.ssh_port) + pin
+        let args = sshBaseOptions(key: keyPath, port: t.binding.ssh_port, remote: t.binding.isRemote) + pin
             + ["-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-               "-o", "LogLevel=DEBUG1", "-R", "127.0.0.1:\(guestPort):127.0.0.1:\(macPort)", "\(user)@127.0.0.1"]
+               "-o", "LogLevel=DEBUG1", "-R", "127.0.0.1:\(guestPort):127.0.0.1:\(macPort)", "\(user)@\(t.binding.sshDestination)"]
         let errFD = open(errPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
         let nullFD = open("/dev/null", O_RDWR | O_CLOEXEC)
         guard errFD >= 0, nullFD >= 0 else { throw VaultError("cannot start the tunnel", code: Exit.error) }

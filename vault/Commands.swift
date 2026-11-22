@@ -444,12 +444,22 @@ func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
 }
 
 func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] --gateway PATH"
+    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] (--gateway PATH | --host ADDRESS --host-key-alias mcomp-VM)"
     let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user",
-                                         "proxy-port", "gateway"])
+                                         "proxy-port", "gateway", "host", "host-key-alias"])
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
-    guard let ps = a.last("port"), let port = Int(ps), port >= 1, port <= 65535 else { throw usageError("--port: the VM's SSH port on 127.0.0.1") }
+    // A computer reached over SSH elsewhere (docs/remote.md): its address and the name its host key is pinned under,
+    // instead of a gateway on this Mac.
+    var host: String?, alias: String?
+    if let h = a.last("host") {
+        guard validHost(h) else { throw usageError("--host: the computer's address (an IP address or a DNS name)") }
+        guard let al = a.last("host-key-alias"), validHostKeyAlias(al) else { throw usageError("--host-key-alias: mcomp-VM, the name its host key is pinned under") }
+        guard a.last("gateway") == nil else { throw usageError("--gateway is for a VM on this Mac; a computer at --host has none") }
+        host = h
+        alias = al
+    }
+    guard let ps = a.last("port"), let port = Int(ps), port >= 1, port <= 65535 else { throw usageError("--port: the VM's SSH port (on 127.0.0.1, or at --host)") }
     guard let hkl = a.last("host-key-line"), let hostKey = normalizeHostKey(hkl) else {
         throw usageError("--host-key-line: the VM's public host key ('ssh-ed25519 AAAA...', or its known_hosts line)")
     }
@@ -465,13 +475,18 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         proxyUser = pu
         proxyPort = pp
     }
-    guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (mcomp-netgw)") }
-    try checkPrintablePath(absolutePath(g), "gateway")
-    let gateway = URL(fileURLWithPath: absolutePath(g)).resolvingSymlinksInPath().path
-    try checkPrintablePath(gateway, "gateway")
-    guard access(gateway, X_OK) == 0 else { throw VaultError("no gateway program at \(gateway)") }
-    guard let gwSHA = fileSHA256(gateway) else { throw VaultError("cannot read the gateway program at \(gateway)") }
-    let gwHash = String(gwSHA.prefix(16))
+    var gateway: String?, gwSHA: String?
+    if host == nil {
+        guard let g = a.last("gateway"), !g.isEmpty else { throw usageError("--gateway: the gateway program that serves the port (mcomp-netgw)") }
+        try checkPrintablePath(absolutePath(g), "gateway")
+        let gw = URL(fileURLWithPath: absolutePath(g)).resolvingSymlinksInPath().path
+        try checkPrintablePath(gw, "gateway")
+        guard access(gw, X_OK) == 0 else { throw VaultError("no gateway program at \(gw)") }
+        guard let sha = fileSHA256(gw) else { throw VaultError("cannot read the gateway program at \(gw)") }
+        gateway = gw
+        gwSHA = sha
+    }
+    let gwHash = String((gwSHA ?? "").prefix(16))
     try requireTTY("bind")
     installPromptSignalHandlers()
 
@@ -480,13 +495,13 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let fp = hostKeyFingerprint(hostKey)
     oprint("""
     About to pin VM \(vm):
-      SSH port      127.0.0.1:\(port)
+      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")
       host key      \(fp) (\(hostKey.split(separator: " ").first ?? ""))
       fills         as \(fillUser), key \(fillKey)
       sessions      as \(opsUser), key \(opsKey)
     """ + (proxyUser.map { "\n  api tokens    as \($0), key \(proxyKey!), proxy at 127.0.0.1:\(proxyPort!) in the VM" } ?? "\n  api tokens    (none: this VM has no proxy account)") + """
 
-      gateway       \(gateway) (sha256 \(gwHash)...)
+      gateway       \(gateway.map { "\($0) (sha256 \(gwHash)...)" } ?? "none: no gateway on this Mac; the pinned host key is the check")
     Check the host key on the VM itself before you agree: in the live view (metacomputer view),
     open a terminal in the VM and run
       ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
@@ -497,11 +512,12 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let (key, _) = try unlockKey(paths)
     let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
                       fill_key_path: fillKey, fill_user: fillUser, proxy_key_path: proxyKey, proxy_user: proxyUser, proxy_port: proxyPort,
-                      gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime())
+                      gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime(), ssh_host: host, host_key_alias: alias)
     try updateVault(paths, key) { p in p.vms[vm] = b }
-    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway, "proxy": proxyUser != nil], macKey: vaultAuditKey(paths, key))
-    oprint("Bound VM \(vm): 127.0.0.1:\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser)"
-           + (proxyUser.map { ", api tokens as \($0)" } ?? "") + ", gateway \(gateway)")
+    audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway ?? "none",
+                  "remote": host != nil, "proxy": proxyUser != nil], macKey: vaultAuditKey(paths, key))
+    oprint("Bound VM \(vm): \(host ?? "127.0.0.1"):\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser)"
+           + (proxyUser.map { ", api tokens as \($0)" } ?? "") + (gateway.map { ", gateway \($0)" } ?? ", no gateway (reached over SSH)"))
     return Exit.ok
 }
 
@@ -1004,7 +1020,7 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let vms = res["vms"] as? [[String: Any]] ?? []
     if !vms.isEmpty { oprint("VMs:") }
     for v in vms {
-        oprint(clean("  \(v["name"] ?? "")  127.0.0.1:\(v["ssh_port"] ?? "")  host key \(v["host_key"] ?? "")  fills as \(v["fill_user"] ?? "-")"
+        oprint(clean("  \(v["name"] ?? "")  \(v["ssh_host"] ?? "127.0.0.1"):\(v["ssh_port"] ?? "")  host key \(v["host_key"] ?? "")  fills as \(v["fill_user"] ?? "-")"
                      + "  sessions as \(v["user"] ?? "")" + ((v["proxy_user"] as? String).map { "  api tokens as \($0)" } ?? "")
                      + (v["needs_bind"] != nil ? "  (bound by an earlier version: bind again)" : ""), max: 400))
     }
@@ -1195,6 +1211,15 @@ func selftest() -> Int32 {
     let b64 = Data(blob).base64EncodedString()
     check("host key from known_hosts line", normalizeHostKey("[127.0.0.1]:2277 ssh-ed25519 \(b64)") == "ssh-ed25519 \(b64)")
     check("host key with the wrong type refused", normalizeHostKey("ssh-rsa \(b64)") == nil)
+    check("host key from an alias line", normalizeHostKey("mcomp-box ssh-ed25519 \(b64)") == "ssh-ed25519 \(b64)")
+    check("hosts", validHost("203.0.113.5") && validHost("vm.example.com") && validHost("2001:db8::5")
+          && !validHost("-oProxyCommand=x") && !validHost("a@b") && !validHost("a b") && !validHost("1.2.3") && !validHost(""))
+    check("host key aliases", validHostKeyAlias("mcomp-box") && !validHostKeyAlias("box") && !validHostKeyAlias("mcomp-")
+          && !validHostKeyAlias("mcomp-a b"))
+    let remotePin = pinnedHostKeyOptions(port: 22, hostKeyLine: "ssh-ed25519 \(b64)", alias: "mcomp-box") ?? []
+    check("a remote pin is under its alias", remotePin.contains("HostKeyAlias=mcomp-box")
+          && remotePin.contains("KnownHostsCommand=/bin/echo mcomp-box ssh-ed25519 \(b64)") && !remotePin.joined().contains("127.0.0.1"))
+    check("a bad alias pins nothing", pinnedHostKeyOptions(port: 22, hostKeyLine: "ssh-ed25519 \(b64)", alias: "box") == nil)
     check("names", validName("x-login.1") && !validName("a/b") && !validName("..") && !validName(""))
     check("names can't start with '-'", !validName("-x") && !validName("--profile") && validName("x-"))
     // Text from the VM or a client can't drive the terminal.

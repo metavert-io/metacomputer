@@ -215,7 +215,15 @@ final class GuestRunner {
     }
 
     func listenerProblem(_ t: GuestTarget) -> (reason: String, denied: Bool)? {
-        checkListener(port: t.binding.ssh_port, gatewayPath: t.binding.gateway_path, gatewaySHA256: t.binding.gateway_sha256,
+        // A computer reached over SSH elsewhere has no gateway on this Mac: ssh's check of its pinned host key is the
+        // check (and a binding without a valid alias for it is refused before any connection).
+        if t.binding.isRemote {
+            guard let a = t.binding.host_key_alias, validHostKeyAlias(a), validHost(t.binding.sshDestination) else {
+                return ("the binding of VM \(t.vm) names an address without its host key's name: bind it again", true)
+            }
+            return nil
+        }
+        return checkListener(port: t.binding.ssh_port, gatewayPath: t.binding.gateway_path, gatewaySHA256: t.binding.gateway_sha256,
                       allowedNames: listenerNames)
     }
 
@@ -223,11 +231,11 @@ final class GuestRunner {
     func ssh(_ t: GuestTarget, user: String, key: String, remote: String, input: [UInt8], timeout: TimeInterval,
              maxStdout: Int = 1 << 20) throws -> ProcResult {
         let b = t.binding
-        guard let pin = pinnedHostKeyOptions(port: b.ssh_port, hostKeyLine: b.host_key_line) else {
+        guard let pin = pinnedHostKeyOptions(binding: b) else {
             throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
         }
-        let args = sshBaseOptions(key: key, port: b.ssh_port) + pin + ["-T", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR",
-                                                                       "\(user)@127.0.0.1", remote]
+        let args = sshBaseOptions(key: key, port: b.ssh_port, remote: b.isRemote) + pin
+            + ["-T", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR", "\(user)@\(b.sshDestination)", remote]
         return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout)
     }
 
@@ -440,20 +448,38 @@ func containsString(_ v: Any, _ needle: String) -> Bool {
 
 /// ssh options every vault connection uses: no config file (not ~/.ssh/config, not the system's),
 /// no agent, only the given key, no password prompts.
-func sshBaseOptions(key: String, port: Int) -> [String] {
+func sshBaseOptions(key: String, port: Int, remote: Bool = false) -> [String] {
     ["-F", "none", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(key)", "-o", "IdentityAgent=none",
      "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
-     "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=5",
+     "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=\(remote ? 15 : 5)",
      "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "PermitLocalCommand=no", "-p", "\(port)"]
 }
 
 /// The pinned host key, given to ssh without any file a process of this user could change in
 /// between: no known_hosts files at all, and KnownHostsCommand running /bin/echo (on the
 /// sealed system volume) with the pinned line as its arguments. nil when the line isn't a key.
-func pinnedHostKeyOptions(port: Int, hostKeyLine: String) -> [String]? {
+func pinnedHostKeyOptions(port: Int, hostKeyLine: String, alias: String? = nil) -> [String]? {
     let parts = hostKeyLine.split(separator: " ").map(String.init)
     guard parts.count == 2, matches(parts[0], "^[a-z0-9-]{3,40}$"), matches(parts[1], "^[A-Za-z0-9+/=]{20,2000}$") else { return nil }
-    return ["-o", "UserKnownHostsFile=/dev/null", "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "KnownHostsCommand=/bin/echo [127.0.0.1]:\(port) \(parts[0]) \(parts[1])",
+    // On this Mac the key is the one for the VM's loopback port; a computer elsewhere is looked up under its alias
+    // (HostKeyAlias), never under its address.
+    var name = "[127.0.0.1]:\(port)"
+    var extra: [String] = []
+    if let a = alias {
+        guard validHostKeyAlias(a) else { return nil }
+        name = a
+        extra = ["-o", "HostKeyAlias=\(a)"]
+    }
+    return extra + ["-o", "UserKnownHostsFile=/dev/null", "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "KnownHostsCommand=/bin/echo \(name) \(parts[0]) \(parts[1])",
             "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "CheckHostIP=no", "-o", "HashKnownHosts=no"]
+}
+
+/// The pinned host key options for a binding: under its alias when it's a computer elsewhere.
+func pinnedHostKeyOptions(binding b: VMBinding) -> [String]? {
+    if b.isRemote {
+        guard let a = b.host_key_alias, validHost(b.sshDestination) else { return nil }
+        return pinnedHostKeyOptions(port: b.ssh_port, hostKeyLine: b.host_key_line, alias: a)
+    }
+    return pinnedHostKeyOptions(port: b.ssh_port, hostKeyLine: b.host_key_line)
 }

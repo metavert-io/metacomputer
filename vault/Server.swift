@@ -1260,7 +1260,9 @@ final class UnlockServer {
             if let u = b.proxy_user { d["proxy_user"] = u }
             if let pp = b.proxy_port { d["proxy_port"] = pp }
             if let g = b.gateway_path { d["gateway"] = g }
-            if b.fill_user == nil || b.gateway_path == nil || b.gateway_sha256 == nil { d["needs_bind"] = true }
+            if let h = b.ssh_host { d["ssh_host"] = h }
+            if b.fill_user == nil || (!b.isRemote && (b.gateway_path == nil || b.gateway_sha256 == nil))
+                || (b.isRemote && b.host_key_alias == nil) { d["needs_bind"] = true }
             return d
         }
         let sessions: [[String: Any]] = p.sessions.keys.sorted().map { n in
