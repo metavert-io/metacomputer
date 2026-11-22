@@ -141,9 +141,11 @@ def test_directory_rules(plug):
     urls = {k: plug.get(k) for k in ("documentationUrl", "supportUrl", "privacyPolicyUrl")}
     check("plugin.json listing URLs: documentation, support and privacy policy, all https",
           all(isinstance(v, str) and v.startswith("https://") for v in urls.values()), urls)
-    check("the privacy policy it names is PRIVACY.md in this repository",
-          urls["privacyPolicyUrl"] == "https://github.com/metavert-io/metacomputer/blob/main/PRIVACY.md"
-          and os.path.isfile(os.path.join(LAB, "PRIVACY.md")))
+    privacy = os.path.join(LAB, "PRIVACY.md")
+    check("the privacy policy it names is Metavert's, and PRIVACY.md (what it keeps and sends) links to it",
+          urls["privacyPolicyUrl"] == "https://www.metavert.io/privacy-policy"
+          and os.path.isfile(privacy)
+          and urls["privacyPolicyUrl"] in open(privacy, encoding="utf-8").read())
     files, big, odd, system = [], [], [], []
     for d, dirs, names in os.walk(root):
         for n in names:
