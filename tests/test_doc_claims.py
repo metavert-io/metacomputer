@@ -1759,9 +1759,26 @@ CLAIMS = [
     ("plugin/README.md", r"metacomputer's MCP server for every project \(user scope, named `metacomputer`, running `~/\.local/bin/metacomputer mcp-lazy`",
      lambda m: 'claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy' in raw("install.sh")
      and 'CMD_LINK="$HOME/.local/bin/metacomputer"' in raw("install.sh")),
-    ("docs/commands.md", r"A registration under that name that runs anything else \(an earlier install's `bin/metacomputer` path, a checkout that moved or another one\) is replaced, and the install says what it ran",
-     lambda m: 'if [ "$cmd" = "$CMD_LINK" ]; then' in raw("install.sh")
-     and "it replaces the registration that ran" in raw("install.sh")),
+    ("docs/commands.md", r"`--yes`, and runs without a terminal \(`metacomputer update`\), never replace a registration that isn't metacomputer's own",
+     lambda m: 'if [ "$YES" = 1 ] || [ ! -t 0 ]; then [ "$2" = Y ]; return; fi' in raw("install.sh")
+     and len(re.findall(r'\|\| ask "Claude Code.*" N; then :$', raw("install.sh"), re.M)) == 2
+     and re.search(r"\n    checkout\)\n      if \[ \"\$SWITCH\" = 1 \] \|\| \[ \"\$REPLACE_MCP\" = 1 \]", raw("install.sh")) is not None),
+    ("docs/commands.md", r"The old registration is removed only right before the new one is added and read back, and put back if that fails",
+     lambda m: '[ "$(server_owner "$now")" = ok ]' in raw("install.sh") and '[ "$own" = absent ] || restore_server "$srv"' in raw("install.sh")
+     and raw("install.sh").index('claude mcp remove metacomputer -s user >/dev/null 2>&1; then\n    warn "couldn\'t remove the MCP server')
+     < raw("install.sh").index('if claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy')),
+    ("docs/commands.md", r"A project or local server named `metacomputer` in the folder you run the install in takes precedence there: it's reported, never changed",
+     lambda m: (lambda calls: len(calls) >= 5 and all("-s user" in ln for ln in calls))(
+         [ln for ln in raw("install.sh").splitlines() if re.search(r"claude mcp (add|remove)", ln) and ">/dev/null" in ln])
+     and 'out="$(cd "$d" 2>/dev/null && { claude mcp get "$1"' in raw("install.sh")
+     and 'if not scope.startswith("User config")' in raw("install.sh")),
+    ("docs/commands.md", r"The plugin's `metacomputer status` \(and `agents`, `where`, `help`, `version`\) says so",
+     lambda m: "case \"${1:-}\" in \"\"|status|agents|where|help|version)" in raw("plugin/bin/metacomputer")
+     and "grep -q '^CLAUDE_MCP=user' \"$mc_co/install.sh\"" in raw("plugin/bin/metacomputer")
+     and re.search(r"^CLAUDE_MCP=user ", raw("install.sh"), re.M) is not None),
+    ("plugin/README.md", r"A server of that name that isn't metacomputer's is left as it is, and the installer says how to replace it",
+     lambda m: "left as it is (to replace it: ./install.sh --only-claude --replace-mcp)" in raw("install.sh")
+     and "left as it is (to use metacomputer's: claude mcp remove metacomputer -s user" in raw("install.sh")),
     ("docs/commands.md", r"A plugin you turned off stays off, and the install leaves the rest of Claude Code's setup as it is: it adds no MCP server then",
      lambda m: re.search(r"\n +2\) # turned off: left so, and so is everything else of Claude Code's\n[^\n]*\n[^\n]*;;\n",
                          raw("install.sh")) is not None),

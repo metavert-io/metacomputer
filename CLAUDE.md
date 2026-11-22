@@ -223,10 +223,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   hooks: the directory holds a version for a reviewer when a hook or MCP server command runs a script it can't
   follow (variables other than `${CLAUDE_PLUGIN_ROOT}`, command substitution, another file), and the launcher is
   such a script. `install.sh` registers the MCP server itself (`register_server`: user scope,
-  `~/.local/bin/metacomputer mcp-lazy`, replacing a registration that runs anything else; `--no-plugin` keeps the
-  server and swaps the plugin for a skill link; `--uninstall` removes both; an older GitHub copy that still brings
-  its own server is updated, so the tools aren't listed twice). Keep `mcpServers` and `hooks` out of plugin.json
-  (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
+  `~/.local/bin/metacomputer mcp-lazy`). It reads the user-scope entry as such (`user_server`: `claude mcp get` from
+  an empty folder, never a scope-blind lookup) and changes only metacomputer's own (`server_owner`: type, command
+  and arguments); another checkout's needs `--switch`, anything else `--replace-mcp` (never `--yes` or no terminal);
+  a failed lookup changes nothing; the old entry is removed only right before the add and put back if it fails; the
+  plugin's own server (an older GitHub copy) is updated away only after the new one is read back; a step that didn't
+  finish ends the run with exit 1. `--no-plugin` keeps the server and swaps the plugin for a skill link;
+  `--uninstall` reads the entry before removing the command link. The plugin's launcher tells a checkout whose
+  install.sh lacks the `CLAUDE_MCP=user` line (it left the server to the plugin) to run `metacomputer update`. Keep
+  `mcpServers` and `hooks` out of plugin.json (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
   `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the
   driver pack's `../../../skills/metacomputer/` links resolve in both. Edit the repository's files, then run
   `python3 scripts/sync-plugin.py` (test_plugin fails while a copy differs). Its own files: `README.md` (the directory

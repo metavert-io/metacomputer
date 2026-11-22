@@ -316,11 +316,31 @@ shared by every VM, and each event names its VM.
 - the MCP server `metacomputer`, at user scope (`claude mcp add -s user metacomputer
   ~/.local/bin/metacomputer mcp-lazy`), which lists the tools even while the VM is off
   and reaches the VM through the hub. It runs the checkout the `metacomputer` command
-  runs, so `--switch` moves both. A registration under that name that runs anything
-  else (an earlier install's `bin/metacomputer` path, a checkout that moved or another
-  one) is replaced, and the install says what it ran. Claude Code loads a server it
-  just added after a restart, or `/mcp` in an open session; the install says so when
-  it added one.
+  runs, so `--switch` moves both. Claude Code loads a server it just added after a
+  restart, or `/mcp` in an open session; the install says so when it added one.
+
+**An MCP server already named `metacomputer`.** The installer reads Claude Code's
+user-scope server as such (`claude mcp get` from an empty folder, so a project or
+local server can't stand in for it) and checks its type, command and arguments.
+- metacomputer's own, `~/.local/bin/metacomputer mcp-lazy`: kept as it is, variables
+  you set on it included.
+- metacomputer's own with other arguments or none, this checkout's
+  `bin/metacomputer` (as earlier installs registered it), or a metacomputer path that
+  no longer exists (a checkout that moved): repaired, and the install says what it ran.
+- another metacomputer checkout's `bin/metacomputer mcp-lazy`: moved to this one only
+  with `--switch` (or a yes at a terminal).
+- anything else (another program, other arguments with variables of their own, a
+  server that isn't a local command): left as it is. A local command without
+  variables is replaced with `--replace-mcp` (or a yes at a terminal); for the rest,
+  the install says how to remove it yourself.
+
+`--yes`, and runs without a terminal (`metacomputer update`), never replace a
+registration that isn't metacomputer's own. The old registration is removed only
+right before the new one is added and read back, and put back if that fails. A
+project or local server named `metacomputer` in the folder you run the install in
+takes precedence there: it's reported, never changed. When a lookup fails, the
+server can't be registered, or an older plugin copy can't be updated (below), the
+rest of the install still runs, it says what to run, and it ends with exit status 1.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:
@@ -343,8 +363,17 @@ runs your checkout's, through `~/.local/bin/metacomputer` or the checkout
 `MCOMP_HOME` names; with no checkout yet, it can only run `setup`
 ([install.md](install.md#from-claude-code-first-the-plugin)), whose install registers
 the MCP server. A copy from before that still brings its own server is updated by
-`./install.sh` (`metacomputer update` runs it); when that update fails, the install
-says the tools are listed twice until you run `claude plugin update`.
+`./install.sh` (`metacomputer update` runs it), only once the user-scope server is
+registered and read back; when that update fails, the install says the tools are
+listed twice until you run `claude plugin update`.
+
+**The plugin updated on its own.** Through v0.4.4 the installer left the MCP server
+to the plugin. A plugin from GitHub updated to this version while the checkout keeps
+its old installer has no tools: nothing registered the server. The plugin's
+`metacomputer status` (and `agents`, `where`, `help`, `version`) says so, and so does
+the skill: run `metacomputer update`, which moves the checkout to the release whose
+installer registers it, then restart Claude Code. The old checkout's `./install.sh`
+doesn't add it.
 
 **Whose plugin.** A marketplace named `metacomputer` that's already registered is
 used only when it's this checkout or github.com/metavert-io/metacomputer. From

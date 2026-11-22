@@ -743,7 +743,8 @@ and `metacomputer status` says when a newer release is out. A plugin installed f
 updates with `claude plugin update metacomputer@metacomputer`. Through v0.4.4 the plugin brought the MCP server
 itself; updating from one of those registers the server at user scope instead, so Claude Code's tools are
 `mcp__metacomputer__*` (no longer `mcp__plugin_metacomputer_metacomputer__*`): restart Claude Code afterwards, and
-change permission rules of your own that name the long prefix.
+change permission rules of your own that name the long prefix. Update with `metacomputer update`: a plugin updated
+on its own, over an installer from v0.4.4 or earlier, leaves Claude Code without the tools until you do.
 
 ```bash
 metacomputer stop

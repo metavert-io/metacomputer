@@ -266,6 +266,7 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--no-claude` | Leave Claude Code alone, in this run and later ones (`--claude` undoes it) |
 | `--claude` | Set Claude Code up even after an earlier `--no-claude` |
 | `--no-plugin` | Claude Code without the plugin: a skill link instead, and the same user-scope MCP server (tools `mcp__metacomputer__*`) |
+| `--replace-mcp` | Replace a user-scope MCP server named `metacomputer` that isn't metacomputer's (a local command without variables of its own). Without it the install leaves one and says so; `--yes` never replaces it ([commands.md](commands.md#the-claude-code-plugin)) |
 | `--only-claude` | Only the Claude Code step |
 | `--codex` | Set Codex up even after an earlier `--no-codex`: [codex.md](codex.md) |
 | `--no-codex` | Leave Codex alone, in this run and later ones (`--codex` undoes it) |
@@ -338,8 +339,14 @@ Through v0.4.4 the plugin brought the MCP server itself (tools
 `mcp__plugin_metacomputer_metacomputer__*`). The install step of an update registers it
 at user scope instead (tools `mcp__metacomputer__*`), and the plugin from the updated
 checkout declares none, so there's one server; a plugin copy from GitHub that still
-brings its own is updated too. Restart Claude Code (or run `/mcp`) afterwards, and
-change permission rules of your own that name the long prefix.
+brings its own is updated too, once the new server is registered and read back.
+Restart Claude Code (or run `/mcp`) afterwards, and change permission rules of your
+own that name the long prefix. A plugin from GitHub that was updated on its own, while
+the checkout kept an installer from v0.4.4 or earlier, leaves Claude Code without the
+tools: `metacomputer update` brings the installer that adds them (the plugin's
+`metacomputer status` says so too). When Claude Code's step can't finish (a server
+named `metacomputer` that isn't metacomputer's, a lookup or registration that fails),
+the rest of the update still runs, and it says what to run and ends with exit status 1.
 
 ## Uninstalling
 
@@ -395,7 +402,8 @@ installed (`brew uninstall ffmpeg go gnupg` if nothing else uses them).
 | The VM build stopped | The newest `logs/build-*.log` has the details. `./install.sh --replace-vm` deletes the unfinished VM and builds it again; finished downloads are kept. If provisioning failed inside the VM, it's left running for you to look at: `metacomputer ssh admin`. |
 | `the login Keychain didn't take the live-view password` | The build ran where the Keychain was locked or missing (some SSH sessions). The password is in `~/.ssh/metacomputer/vnc-pass` instead, readable only by you; `metacomputer view` says how to read it. |
 | `metacomputer status` isn't ready after the install | `metacomputer stop`, then `metacomputer start`, then `metacomputer status` again. `metacomputer logs` shows the VM's and the gateway's logs. |
-| Claude Code has no metacomputer tools | Restart Claude Code, or run `/mcp`. `claude mcp get metacomputer` should show `~/.local/bin/metacomputer mcp-lazy`, and `metacomputer agents` says what's set up; `./install.sh --only-claude` sets it up again. |
+| Claude Code has no metacomputer tools | Restart Claude Code, or run `/mcp`. `claude mcp get metacomputer` should show `~/.local/bin/metacomputer mcp-lazy`, and `metacomputer agents` says what's set up and what to run. After the plugin was updated on its own from v0.4.4 or earlier: `metacomputer update`, then restart. |
+| `isn't metacomputer's` or `runs another checkout` (Claude Code step) | A user-scope MCP server named `metacomputer` was there already and was left as it is. `./install.sh --only-claude --replace-mcp` replaces it (`--switch` for another checkout's), or remove it yourself: `claude mcp remove metacomputer -s user`. |
 | `~/.local/bin isn't on your PATH` | Add it: `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`, then open a new Terminal. Claude always uses the full path. |
 
 ### Command Line Tools without the dialog

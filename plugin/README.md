@@ -44,12 +44,17 @@ before doing anything. The installer:
 - links the `metacomputer` command into `~/.local/bin`;
 - sets up Claude Code: this plugin, and metacomputer's MCP server for every project (user scope, named `metacomputer`,
   running `~/.local/bin/metacomputer mcp-lazy`; its tools are `mcp__metacomputer__*`). Claude Code loads the server
-  after a restart, or `/mcp` in an open session;
+  after a restart, or `/mcp` in an open session. A server of that name that isn't metacomputer's is left as it is,
+  and the installer says how to replace it;
 - if you also use OpenAI's Codex, adds metacomputer to Codex: its MCP server, its skills, and rules that let
   metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves Codex alone).
 
 It changes no Claude Code permission settings. `~/metacomputer/install.sh --uninstall` removes the command, the plugin,
 the MCP server and the Codex setup.
+
+Until v0.4.4 this plugin brought the MCP server itself. If you update the plugin while metacomputer on your Mac is
+v0.4.4 or earlier, run `metacomputer update`, then restart Claude Code: the newer installer adds the server, and
+until then there are no tools (`metacomputer status` says so).
 
 ## What it sends and where
 
