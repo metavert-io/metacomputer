@@ -2,7 +2,10 @@
 """The coding agents metacomputer is set up for on this Mac: Claude Code and Codex (docs/codex.md).
 
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
-                                        (install.sh --no-claude / --no-codex, remembered for later runs)
+                                        (install.sh --no-claude / --no-codex, remembered for later runs). For
+                                        Claude Code: the skills (the plugin, or a skill link with --no-plugin) and
+                                        the tools (the user-scope MCP server metacomputer; the plugin declares none,
+                                        and an older copy of it that still brings its own is reported)
   metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
                                         without touching your Codex settings (a throwaway CODEX_HOME): its rules
                                         checker, the sandbox's marker, `codex mcp` and the two settings install.sh
@@ -93,19 +96,37 @@ def claude_status():
         return st
     rc, out, _ = run([prog, "plugin", "list", "--json"])
     plugin = None
+    plugin_server = False      # an older copy of the plugin that still declares its own MCP server
     if rc == 0:
         try:
             for p in json.loads(out):
                 if p.get("id") == "metacomputer@metacomputer" and p.get("scope") == "user":
                     plugin = "on" if p.get("enabled") else "off"
+                    plugin_server = bool(p.get("mcpServers")) and plugin == "on"
         except (ValueError, AttributeError, TypeError):
             pass
     st["plugin"] = plugin
+    st["plugin_mcp_server"] = plugin_server
     rc, out, _ = run([prog, "mcp", "get", "metacomputer"])
-    st["user_mcp_server"] = rc == 0 and "Command:" in out
+    cmd = next((ln.split("Command:", 1)[1].strip() for ln in out.splitlines() if "Command:" in ln), None) if rc == 0 else None
+    st["user_mcp_server"] = bool(cmd)
+    st["mcp_command"] = cmd
     st["skill_link"] = link_target(os.path.expanduser("~/.claude/skills/metacomputer"))
-    st["set_up"] = plugin == "on" or st["user_mcp_server"]
+    st["set_up"] = st["user_mcp_server"] or plugin_server
     return st
+
+
+def claude_way(s):
+    """How Claude Code is set up, in words: where the skills come from and where the tools come from."""
+    skills = ("the plugin's skills" if s.get("plugin") == "on" else
+              "a skill link" if s.get("skill_link") else "no metacomputer skill")
+    if s.get("user_mcp_server") and s.get("plugin_mcp_server"):
+        return (f"{skills} and the MCP server metacomputer; the plugin is an older copy that brings its own too, so the "
+                "tools are listed twice: claude plugin update metacomputer@metacomputer")
+    if s.get("plugin_mcp_server"):
+        return f"{skills}, and the tools from an older copy of the plugin; ./install.sh --only-claude moves them to the " \
+               "MCP server metacomputer"
+    return f"{skills} and the MCP server metacomputer"
 
 
 def codex_status():
@@ -334,11 +355,14 @@ def main(argv):
             how = f"{s['version'] or 'installed'}: left alone (--no-{flag}; --{flag} sets it up)"
         elif s.get("set_up"):
             if label == "Claude Code":
-                way = "the plugin" if s.get("plugin") == "on" else "a user-scope MCP server and skill link"
+                way = claude_way(s)
             else:
                 way = "MCP server" + (", skills" if all(s.get("skills", {}).values()) else ", skills missing") + \
                       (", rules" if s.get("rules") and s.get("rules") != "someone else's" else ", rules missing")
             how = f"{s['version'] or 'installed'}: set up ({way})"
+        elif label == "Claude Code" and s.get("plugin") == "on":
+            how = f"{s['version'] or 'installed'}: the plugin's skills, but no MCP server metacomputer (no tools); " \
+                  "./install.sh --only-claude adds it"
         else:
             how = f"{s['version'] or 'installed'}: not set up; ./install.sh --only-agents sets it up"
         print(f"{label:<12} {how}")
