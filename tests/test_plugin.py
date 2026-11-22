@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Claude Code plugin: its manifests and layout, the plugin copy of bin/metacomputer handing
+"""The Claude Code plugin: its manifests and layout, the plugin's launcher (plugin/bin/metacomputer) handing
 over to the installed checkout, install.sh's plugin mode, and the two tool-name prefixes. No VM;
 install.sh runs against a stub `claude` that records its arguments, in a temporary HOME, so this
 Mac's own Claude Code setup is never touched.
@@ -8,19 +8,21 @@ Mac's own Claude Code setup is never touched.
     python3 tests/test_plugin.py --real-claude   # also the real `claude` CLI, with a temporary
                                                  # HOME and CLAUDE_CONFIG_DIR (no network)
 
-- .claude-plugin/marketplace.json lists the plugin at ./plugin; plugin/ mirrors the repo with
-  relative links (skills/metacomputer, .claude/skills/cua-driver, bin/metacomputer) that stay in
-  the repo, so the driver pack's links to ../../../skills/metacomputer/DESKTOP.md resolve in both.
-  It carries the license notices a copy of it needs (LICENSE, THIRD_PARTY_NOTICES.md, links to the
-  repo's), and the driver pack its own LICENSE, Cua's MIT notice, the same text as in the notices.
-- `claude plugin validate` (when claude is installed): no errors; the only warnings are the
-  missing version (on purpose: users track commits until the first tagged release) and the
-  symlinks in plugin/skills.
-- bin/metacomputer run from Claude Code's plugin folder ($CLAUDE_CODE_PLUGIN_CACHE_DIR, else
-  $CLAUDE_CONFIG_DIR/plugins or ~/.claude/plugins) execs $MCOMP_HOME/bin/metacomputer, else
-  ~/.local/bin/metacomputer, never a copy inside the plugin folder; with neither it prints how
-  to set up and exits 1. Run from the checkout or through plugin/bin, it runs as always.
-- `metacomputer setup` in the plugin copy with no checkout runs only /bin/bash with the get.sh at
+- .claude-plugin/marketplace.json lists the plugin at ./plugin. plugin/ holds regular files only (Anthropic's
+  plugin directory takes no links): copies of skills/metacomputer, .claude/skills/cua-driver, get.sh, LICENSE and
+  THIRD_PARTY_NOTICES.md, the same as the repository's (scripts/sync-plugin.py --check), laid out as in the repo
+  so the driver pack's links to ../../../skills/metacomputer/DESKTOP.md resolve in both; and its own README,
+  icon and launcher. The driver pack carries its own LICENSE, Cua's MIT notice, the same text as in the notices.
+- The directory's file rules: a README of 40+ words outside code blocks, a license, an icon (a PNG in the plugin)
+  and https listing URLs in plugin.json, no file over 256 KiB but images, at most 512 files, only text files and
+  PNG/SVG images, no system files, and no path in plugin.json or the launcher that climbs out with "..".
+- `claude plugin validate` (when claude is installed): no errors; the only warning is the missing version
+  (on purpose: users track commits).
+- plugin/bin/metacomputer (the MCP server command and the `metacomputer` command on Claude Code's PATH)
+  execs $MCOMP_HOME/bin/metacomputer, else ~/.local/bin/metacomputer, never one inside Claude Code's plugin folder
+  ($CLAUDE_CODE_PLUGIN_CACHE_DIR, else $CLAUDE_CONFIG_DIR/plugins or ~/.claude/plugins); with neither it prints how
+  to set up and exits 1 (loaded in place from a checkout: run ./install.sh there).
+- `metacomputer setup` in a plugin copy with no checkout runs only /bin/bash with the get.sh at
   that copy's root (a regular file in the plugin folder, never a link, never one named by a
   variable), always with --confirm, passing only --dir/--no-chrome/--no-build/--yes/--dry-run/--help;
   with a checkout it hands over like any command. The real get.sh with no terminal explains and exits 3.
@@ -41,6 +43,7 @@ import tempfile
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(LAB, "bin", "metacomputer")
+PLUGIN_CLI = os.path.join(LAB, "plugin", "bin", "metacomputer")
 FAILS = []
 REAL = "--real-claude" in sys.argv
 PLUGIN_PREFIX = "mcp__plugin_metacomputer_metacomputer__"
@@ -84,25 +87,19 @@ def test_layout():
     check("plugin.json: skills from skills/ and ./.claude/skills", plug.get("skills") == ["./.claude/skills"])
     check("no .mcp.json at the repo root (it would become a project server for the repo)",
           not os.path.exists(os.path.join(LAB, ".mcp.json")))
-    links = {"plugin/skills/metacomputer": "skills/metacomputer",
-             "plugin/.claude/skills/cua-driver": ".claude/skills/cua-driver",
-             "plugin/bin/metacomputer": "bin/metacomputer",
-             "plugin/get.sh": "get.sh",
-             "plugin/LICENSE": "LICENSE",
-             "plugin/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"}
-    for link, target in links.items():
-        p = os.path.join(LAB, link)
-        ok = os.path.islink(p) and not os.path.isabs(os.readlink(p)) \
-            and os.path.realpath(p) == os.path.realpath(os.path.join(LAB, target))
-        check(f"{link} is a relative link to {target}", ok, os.readlink(p) if os.path.islink(p) else "not a link")
-    extra = []
+    links = []
     for d, dirs, files in os.walk(os.path.join(LAB, "plugin")):
-        for n in dirs + files:
-            rel = os.path.relpath(os.path.join(d, n), LAB)
-            if os.path.islink(os.path.join(d, n)) and rel not in links:
-                extra.append(rel)
-        dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(d, x))]
-    check("plugin/ holds no other links", not extra, extra)
+        links += [os.path.relpath(os.path.join(d, n), LAB) for n in dirs + files if os.path.islink(os.path.join(d, n))]
+    check("plugin/ holds no links (the plugin directory takes regular files only)", not links, links)
+    p = subprocess.run([sys.executable, os.path.join(LAB, "scripts", "sync-plugin.py"), "--check"],
+                       capture_output=True, text=True, timeout=60)
+    check("plugin/'s copies are the repository's files (scripts/sync-plugin.py --check)", p.returncode == 0, p.stdout + p.stderr)
+    launcher = open(PLUGIN_CLI).read()
+    check("plugin/bin/metacomputer is its own small launcher (regular, executable, not bin/metacomputer)",
+          os.path.isfile(PLUGIN_CLI) and os.access(PLUGIN_CLI, os.X_OK) and len(launcher) < 8192
+          and "mc_in_plugins" in launcher and launcher != open(CLI).read())
+    check("bin/metacomputer no longer carries the plugin's hand-over", "mc_in_plugins" not in open(CLI).read())
+    test_directory_rules(plug)
     # The driver pack's links out of its folder resolve from the repo's copy and the plugin's.
     bad = []
     for base in (".claude/skills/cua-driver", "plugin/.claude/skills/cua-driver"):
@@ -127,12 +124,57 @@ def test_layout():
     check("the driver pack names no guide it doesn't include, and no host installer", not dropped, dropped)
 
 
+def test_directory_rules(plug):
+    """What Anthropic's plugin directory checks in the plugin folder (claude.com/docs/plugins/pre-submission-checklist)."""
+    root = os.path.join(LAB, "plugin")
+    readme = open(os.path.join(root, "README.md")).read()
+    prose = readme.split("```")[::2]
+    words = sum(len(part.split()) for part in prose)
+    check("plugin/README.md: 40+ words outside code blocks", words >= 40, words)
+    check("plugin/README.md says what it sends and links the privacy policy",
+          "## What it sends and where" in readme and plug.get("privacyPolicyUrl", "") in readme)
+    check("a license: plugin/LICENSE and license MIT", os.path.isfile(os.path.join(root, "LICENSE")) and plug.get("license") == "MIT")
+    icon = plug.get("icon") or ""
+    icon_path = os.path.normpath(os.path.join(root, icon))
+    check("plugin.json icon: a PNG inside the plugin", icon.startswith("./") and icon_path.startswith(root + os.sep)
+          and os.path.isfile(icon_path) and open(icon_path, "rb").read(8) == b"\x89PNG\r\n\x1a\n", icon)
+    urls = {k: plug.get(k) for k in ("documentationUrl", "supportUrl", "privacyPolicyUrl")}
+    check("plugin.json listing URLs: documentation, support and privacy policy, all https",
+          all(isinstance(v, str) and v.startswith("https://") for v in urls.values()), urls)
+    check("the privacy policy it names is PRIVACY.md in this repository",
+          urls["privacyPolicyUrl"] == "https://github.com/metavert-io/metacomputer/blob/main/PRIVACY.md"
+          and os.path.isfile(os.path.join(LAB, "PRIVACY.md")))
+    files, big, odd, system = [], [], [], []
+    for d, dirs, names in os.walk(root):
+        for n in names:
+            p = os.path.join(d, n)
+            rel = os.path.relpath(p, LAB)
+            files.append(rel)
+            if n in (".DS_Store", "Thumbs.db", "desktop.ini") or "__MACOSX" in p:
+                system.append(rel)
+            data = open(p, "rb").read()
+            image = data[:8] == b"\x89PNG\r\n\x1a\n" or n.endswith(".svg")
+            if not image and len(data) >= 256 * 1024:
+                big.append(rel)
+            if not image:
+                try:
+                    data.decode("utf-8")
+                except UnicodeDecodeError:
+                    odd.append(rel)
+    check("plugin/: at most 512 files", len(files) <= 512, len(files))
+    check("plugin/: no file over 256 KiB but images", not big, big)
+    check("plugin/: only text files and PNG/SVG images", not odd, odd)
+    check("plugin/: no system files", not system, system)
+    climbs = [k for k, v in plug.items() if ".." in json.dumps(v)]
+    check("plugin.json and the launcher name no path with '..'", not climbs and ".." not in open(PLUGIN_CLI).read(), climbs)
+
+
 def test_validate():
     claude = shutil.which("claude")
     if not claude:
         print("SKIP claude plugin validate (claude isn't installed)")
         return
-    allowed = ("No version specified", "symlink")
+    allowed = ("No version specified",)
     for target in (LAB, os.path.join(LAB, "plugin")):
         p = subprocess.run([claude, "plugin", "validate", target, "--json"], capture_output=True, text=True, timeout=120)
         try:
@@ -146,7 +188,7 @@ def test_validate():
         other = [w for w in warns if not any(a in w.get("message", "") for a in allowed)]
         name = os.path.relpath(target, LAB)
         check(f"validate {name}: passes (exit 0) with no errors", p.returncode == 0 and rep.get("success") and not errors, errors)
-        check(f"validate {name}: only the known warnings (no version; plugin/skills links)", not other, other)
+        check(f"validate {name}: only the known warning (no version)", not other, other)
 
 
 # --- the plugin copy hands over ---------------------------------------------------------------
@@ -160,7 +202,7 @@ def test_handoff():
         home = os.path.join(t, "home")
         cached = os.path.join(home, ".claude", "plugins", "cache", "metacomputer", "metacomputer", "abc", "bin", "metacomputer")
         os.makedirs(os.path.dirname(cached))
-        shutil.copy2(CLI, cached)
+        shutil.copy2(PLUGIN_CLI, cached)
         fake = os.path.join(t, "checkout", "bin", "metacomputer")
         write(fake, '#!/bin/bash\necho "CHECKOUT $*"\n', 0o755)
         other = os.path.join(t, "other", "bin", "metacomputer")
@@ -190,19 +232,27 @@ def test_handoff():
         os.symlink(fake, local)
         cfg_copy = os.path.join(t, "cfg", "plugins", "cache", "x", "bin", "metacomputer")
         os.makedirs(os.path.dirname(cfg_copy))
-        shutil.copy2(CLI, cfg_copy)
+        shutil.copy2(PLUGIN_CLI, cfg_copy)
         p = run([cfg_copy, "where"], base_env(home, CLAUDE_CONFIG_DIR=os.path.join(t, "cfg")))
         check("a copy under $CLAUDE_CONFIG_DIR/plugins hands over", p.stdout.strip() == "CHECKOUT where", p.stdout + p.stderr)
         alt_copy = os.path.join(t, "pc", "cache", "x", "bin", "metacomputer")
         os.makedirs(os.path.dirname(alt_copy))
-        shutil.copy2(CLI, alt_copy)
+        shutil.copy2(PLUGIN_CLI, alt_copy)
         p = run([alt_copy, "where"], base_env(home, CLAUDE_CODE_PLUGIN_CACHE_DIR=os.path.join(t, "pc")))
         check("a copy under $CLAUDE_CODE_PLUGIN_CACHE_DIR hands over", p.stdout.strip() == "CHECKOUT where", p.stdout + p.stderr)
-        # The checkout itself and the in-place plugin link run as always (here: help).
-        for exe in (CLI, os.path.join(LAB, "plugin", "bin", "metacomputer")):
-            p = run([exe, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
-            check(f"{os.path.relpath(exe, LAB)} help runs this checkout", p.returncode == 0 and "Usage: metacomputer [--vm NAME] COMMAND" in p.stdout,
-                  p.stdout[-200:] + p.stderr[-200:])
+        # The checkout's command runs as always (here: help).
+        p = run([CLI, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
+        check("bin/metacomputer help runs this checkout", p.returncode == 0 and "Usage: metacomputer [--vm NAME] COMMAND" in p.stdout,
+              p.stdout[-200:] + p.stderr[-200:])
+        # The plugin loaded in place (install.sh's local marketplace) hands over the same way; with nothing set up,
+        # it says to run ./install.sh in that checkout (no setup from a checkout's plugin folder).
+        bare = os.path.join(t, "bare-home")
+        os.makedirs(bare)
+        p = run([PLUGIN_CLI, "setup"], base_env(bare))
+        check("in place, nothing set up: exit 1, says to run ./install.sh there, runs no get.sh",
+              p.returncode == 1 and "./install.sh" in p.stderr and "GET" not in p.stdout, p.stdout + p.stderr)
+        p = run([PLUGIN_CLI, "who"], env)
+        check("in place: hands over to ~/.local/bin/metacomputer", p.stdout.strip() == "CHECKOUT who", p.stdout + p.stderr)
         p = run([CLI, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
         check("help doesn't show the hand-over block", "mc_" not in p.stdout and "plugin folder" not in p.stdout)
     finally:
@@ -220,7 +270,7 @@ def test_setup():
         root = os.path.join(home, ".claude", "plugins", "cache", "metacomputer", "metacomputer", "abc")
         cached = os.path.join(root, "bin", "metacomputer")
         os.makedirs(os.path.dirname(cached))
-        shutil.copy2(CLI, cached)
+        shutil.copy2(PLUGIN_CLI, cached)
         get = os.path.join(root, "get.sh")
         argv_log = os.path.join(t, "get-argv")
         stub = f'#!/bin/bash\nprintf "%s\\n" "$@" > {argv_log}\necho "GET.SH RAN"\n'

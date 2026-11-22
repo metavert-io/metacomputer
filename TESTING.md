@@ -224,30 +224,36 @@ runner's does.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (85 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (94 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. `--real-claude` repeats the
 install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
 `CLAUDE_CONFIG_DIR`; it needs no network.
-- The marketplace lists the plugin at `./plugin`, whose links (`skills/metacomputer`,
-  `.claude/skills/cua-driver`, `bin/metacomputer`, `get.sh`, `LICENSE`,
-  `THIRD_PARTY_NOTICES.md`) are relative and resolve to the repository's files; the
-  driver pack's `../` links resolve from both copies. The driver pack carries its own
+- The marketplace lists the plugin at `./plugin`, which holds no links: its copies of
+  `skills/metacomputer`, `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and
+  `THIRD_PARTY_NOTICES.md` are the repository's files (`scripts/sync-plugin.py --check`),
+  and the driver pack's `../` links resolve from both copies. `plugin/bin/metacomputer` is
+  its own short launcher, and `bin/metacomputer` no longer carries a hand-over. The
+  directory's file rules hold: a README of 40+ words outside code blocks that says what
+  the plugin sends and links the privacy policy, a license, a PNG icon in the plugin,
+  https documentation, support and privacy-policy URLs (the last `PRIVACY.md`), at most
+  512 files, none over 256 KiB but images, only text and PNG/SVG, no system files, and no
+  `..` in `plugin.json` or the launcher. The driver pack carries its own
   `LICENSE`, the same Cua MIT notice as `THIRD_PARTY_NOTICES.md`, and names no guide
   it doesn't include and no host installer.
   `plugin.json` has no `version` and runs `${CLAUDE_PLUGIN_ROOT}/bin/metacomputer
   mcp-lazy`; there is no root `.mcp.json`.
 - `claude plugin validate` on the repository and on `plugin/` (skipped without
-  `claude`): no errors, and no warnings other than the missing version and the links
-  in `plugin/skills` (so `--strict` fails on exactly those two, by design).
-- A copy of `bin/metacomputer` in Claude Code's plugin folder (`~/.claude/plugins`,
-  `$CLAUDE_CONFIG_DIR/plugins`, `$CLAUDE_CODE_PLUGIN_CACHE_DIR`) execs
+  `claude`): no errors, and no warning other than the missing version (so `--strict`
+  fails on exactly that one, by design).
+- The plugin's launcher, copied into Claude Code's plugin folder (`~/.claude/plugins`,
+  `$CLAUDE_CONFIG_DIR/plugins`, `$CLAUDE_CODE_PLUGIN_CACHE_DIR`), execs
   `$MCOMP_HOME/bin/metacomputer` or else `~/.local/bin/metacomputer` with the same
   arguments, never a copy inside the plugin folder; with neither it exits 1 and
-  says how to set up. The checkout and `plugin/bin/metacomputer` run as always.
+  says how to set up. `bin/metacomputer` runs as always. Loaded in place, the launcher
+  hands over the same way, and with nothing set up it says to run `./install.sh` there.
 - `metacomputer setup` in that copy, with no checkout: runs only `/bin/bash` with the
-  `get.sh` at the copy's root (`plugin/get.sh`, a link in the repository, a file in
-  a GitHub install), always with `--confirm`, passing through only `--dir`,
+  `get.sh` at the copy's root (`plugin/get.sh`), always with `--confirm`, passing through only `--dir`,
   `--no-chrome`, `--no-build`, `--yes`, `--dry-run` and `--help` (`--repo`, `--ref`
   and anything else exit 2 with nothing run). `MCOMP_HOME` and `PATH` can't point it
   elsewhere; a `get.sh` that's a link, or one in `bin/`, is refused. With a checkout,

@@ -593,8 +593,8 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 # --- the Claude Code step (4; --only-claude runs it alone) ------------------------------------
-# Plugin mode: this checkout is the marketplace `metacomputer`, and its plugin (plugin/: links to
-# skills/metacomputer, the driver pack and bin/metacomputer) loads in place from here.
+# Plugin mode: this checkout is the marketplace `metacomputer`, and its plugin (plugin/: copies of
+# skills/metacomputer and the driver pack, and a launcher that runs ~/.local/bin/metacomputer) loads in place from here.
 plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so), 1 = failed, 3 = refused
   local mkt; mkt="$(mkt_info)"
   case "$mkt" in

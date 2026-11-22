@@ -117,46 +117,6 @@
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
-# The Claude Code plugin's copy of this file (in Claude Code's plugin folder, when the plugin was
-# installed from GitHub) has no settings, VM keys or tools: it runs the checkout ./install.sh set up,
-# $MCOMP_HOME or else ~/.local/bin/metacomputer. Keep this first, before anything reads config.
-mc_plugins="${CLAUDE_CODE_PLUGIN_CACHE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins}"
-mc_in_plugins() { case "$1" in "$(readlink -f "$mc_plugins" 2>/dev/null || echo "$mc_plugins")"/*|"$HOME/.claude/plugins/"*) return 0 ;; esac; return 1; }
-mc_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-if mc_in_plugins "$mc_self"; then
-  for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/metacomputer"; do
-    mc_to="$(readlink -f "$mc_to" 2>/dev/null)" || continue
-    [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" && exec "$mc_to" "$@"
-  done
-  # No checkout yet. Only `setup` runs anything: /bin/bash with the get.sh that came in this plugin copy
-  # (its root, beside bin/), which explains what it will do and asks first (--confirm). Only the options
-  # below pass through; no setting or variable can point it at another script or repository.
-  if [ "${1:-}" = setup ]; then
-    shift; mc_args=(--confirm)
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }; mc_args+=(--dir "$2"); shift ;;
-        --no-chrome|--no-build|--no-codex|--no-claude|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
-        *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --yes, --dry-run)" >&2; exit 2 ;;
-      esac
-      shift
-    done
-    mc_root="$(dirname "$(dirname "$mc_self")")"
-    mc_get="$(readlink -f "$mc_root/get.sh" 2>/dev/null)"
-    if [ -n "$mc_get" ] && [ "$mc_get" = "$mc_root/get.sh" ] && [ -f "$mc_get" ] && mc_in_plugins "$mc_get"; then
-      exec /bin/bash "$mc_get" "${mc_args[@]}"
-    fi
-    printf '%s\n' "metacomputer setup: this plugin copy has no get.sh of its own (update the plugin: claude plugin update metacomputer@metacomputer)." \
-      "Or set it up in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" >&2
-    exit 1
-  fi
-  printf '%s\n' "metacomputer: this is the Claude Code plugin's copy, and this Mac has no metacomputer set up yet." \
-    "Set it up from here (it says what it will do and asks first; macOS on Apple silicon; it builds the VM):" \
-    "  $mc_self setup" \
-    "or in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" \
-    "or point MCOMP_HOME at an existing checkout." >&2
-  exit 1
-fi
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it

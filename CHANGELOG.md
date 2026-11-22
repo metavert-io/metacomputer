@@ -6,6 +6,16 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **PRIVACY.md**: what stays on your Mac, what your coding agent sends its model provider, and every connection metacomputer makes (installing, the daily update check, the VM, and the sinks, proxy and storage you set up). Metavert runs no server for it and receives nothing from it.
+- **The plugin has a README, an icon, and documentation, support and privacy-policy links** for Anthropic's plugin directory. The README says what the plugin contains, what the installer changes on your Mac (including Codex's setup) and what is sent where.
+
+### Changed
+
+- **The plugin folder holds regular files instead of links** (the directory takes no links): copies of the skill, Cua Driver's skill pack, get.sh and the notices, kept the same as the repository's by `scripts/sync-plugin.py` (the plugin test fails while one differs). Its `bin/metacomputer` is now a short launcher that runs the metacomputer installed on your Mac, whether the plugin is loaded from your checkout or installed from GitHub; `bin/metacomputer` itself no longer carries that hand-over. Nothing changes in how you use it.
+- The plugin and marketplace descriptions no longer call it "Claude's own" computer, which could read as Anthropic's: "gives Claude a disposable computer of its own".
+
 ## [0.4.3] - 2026-11-21
 
 ### Added

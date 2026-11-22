@@ -756,6 +756,7 @@ sinks and volumes stay until you delete them
 - [docs/guide.md](docs/guide.md): what to ask your agent, task by task, with the commands; the prompt gallery; isolation in detail; known limitations; troubleshooting.
 - [docs/commands.md](docs/commands.md): every command and setting, and the plugin.
 - [SECURITY.md](SECURITY.md): every control, what it protects against, where it ends, the vault in full, and how to report a vulnerability.
+- [PRIVACY.md](PRIVACY.md): what stays on your Mac, what your agent sends its provider, and every connection metacomputer makes.
 - [architecture.md](architecture.md): the design, pinned versions, the hub, the network, recording and the event spool.
 - [docs/storage.md](docs/storage.md): volumes, folders, S3 and reference disks.
 - [docs/shell.md](docs/shell.md): `metacomputer sh` and how it treats the VM.

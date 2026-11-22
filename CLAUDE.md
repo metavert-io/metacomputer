@@ -215,18 +215,19 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   version to take a different name, so don't give it a Lume-based name in new text.
   `scripts/lib.sh` falls back to `~/.local/bin/lume-secure` (with a notice) while
   `LUME`'s runner isn't installed; keep that until old installs are gone.
-- The Claude Code plugin is `plugin/`: relative links to `skills/metacomputer`,
-  `.claude/skills/cua-driver`, `bin/metacomputer`, `LICENSE` and `THIRD_PARTY_NOTICES.md`
-  (a GitHub install copies the plugin alone, so it must carry the notices), laid out like the repository so
-  the driver pack's `../../../skills/metacomputer/` links resolve in both. A local
-  marketplace (`install.sh`) loads it in place; a GitHub install copies it, links
-  resolved, and that copy's `bin/metacomputer` hands over to the installed checkout
-  (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`): keep that block first in
-  `bin/metacomputer`, before anything reads config. With no checkout, its only
-  other action is `setup`: `/bin/bash` with the `get.sh` at that copy's root
-  (`plugin/get.sh` links to `get.sh`), with `--confirm` and an allowlist of options;
-  never let a variable or option pick another script or repository (with `--confirm`,
-  get.sh uses an existing checkout only when it's a clean one of the project's repository).
+- The Claude Code plugin is `plugin/`, regular files only (Anthropic's plugin directory takes no links, and a
+  GitHub install copies the plugin folder alone, so it must carry the notices): copies of `skills/metacomputer`,
+  `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the
+  driver pack's `../../../skills/metacomputer/` links resolve in both. Edit the repository's files, then run
+  `python3 scripts/sync-plugin.py` (test_plugin fails while a copy differs). Its own files: `README.md` (the directory
+  listing's text, which must say everything the plugin runs, sends or fetches: keep it and PRIVACY.md current),
+  `icon.png` (rendered from `icon.svg`), `commands/learn.md` and `bin/metacomputer`, a short launcher, not a copy of
+  the command: it hands over to the installed checkout (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`), whether
+  Claude Code loads the plugin in place (`install.sh`'s local marketplace) or from a GitHub install's copy. With no
+  checkout, its only other action, in a copy inside Claude Code's plugin folder, is `setup`: `/bin/bash` with the
+  `get.sh` at that copy's root, with `--confirm` and an allowlist of options; never let a variable or option pick
+  another script or repository (with `--confirm`, get.sh uses an existing checkout only when it's a clean one of the
+  project's repository). Keep `..` out of plugin.json and the launcher (the directory refuses a path that climbs out).
 - Installers never delete a VM on their own: a VM without its baseline is replaced only
   with `install.sh --replace-vm` (never implied by `--yes`); lookups that fail (the VM
   listing, `vm_dir`, release tags, where Lume keeps VMs) stop instead of guessing. One
@@ -241,7 +242,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   (skill, bench, tests, scripts) must accept both prefixes. No `version` in
   `plugin.json` until the first tagged release (users track commits). Checks:
   `claude plugin validate .` and `python3 tests/test_plugin.py` (its only accepted
-  warnings: no version, the links in `plugin/skills`).
+  warning: no version; it also checks the directory's file rules).
 - Before pushing: `scripts/check-public.sh -a` must report 0 findings.
 - Security promises in the docs (SECURITY.md, README, docs/, CHANGELOG) are pinned to the code by
   `tests/test_doc_claims.py`: a table of (doc, phrase, check against the code or `config/defaults.env`), plus

@@ -1,0 +1,79 @@
+# Privacy
+
+Last updated: 21 November 2026.
+
+This covers metacomputer, made by Metavert LLC: this repository, its Claude Code plugin and the setup it adds to
+Codex. metacomputer runs on your Mac. **Metavert runs no server for it and receives nothing from it**: there is no
+account, no telemetry, no analytics and no crash reporting. What leaves your Mac goes where you, your coding agent
+or the tasks you give it send it, as described below.
+
+## What stays on your Mac
+
+- **The virtual computer** and everything in it: files, browser profiles, the sites you sign in to there.
+- **Records metacomputer keeps:** recordings and screenshots, the action log, task folders, the event spool, its
+  settings, and the lessons `metacomputer learn` proposes. `learn` reads your Claude Code and Codex session files
+  on your Mac and keeps only structured fields (classes of mistakes, counts, tool and app names), never their text.
+- **The secrets vault:** the passwords, one-time-code seeds and API keys you add, encrypted on your Mac. The vault
+  types a value into a page in the VM, or uses a key for a request the VM makes through its proxy; it never gives a
+  value to your coding agent, and values never appear in its output or logs.
+
+## What your coding agent sends to its model provider
+
+metacomputer's tools return what your agent asks for: screenshots of the VM, accessibility and page text, command
+output and the contents of files in the VM. Your agent (Claude Code or Codex) sends those to its model provider,
+Anthropic or OpenAI, as part of the conversation, under that provider's terms and privacy policy. So don't put
+anything in the VM that you wouldn't show your agent's provider. A page can show a username or a one-time code in
+plain sight, and then a screenshot or a recording holds it too.
+
+## Network connections metacomputer makes
+
+**To install and build** (from your Mac), each only to fetch software:
+- GitHub: this repository; mcomp-vm's source and the Swift packages it builds with; Cua's source and releases
+  (Cua Driver, and Lume if you choose Cua's own runner).
+- Go's module proxy, for the two small Go tools the build compiles.
+- Homebrew, only if you agree to install it or a package it lacks (Homebrew's own analytics follow your Homebrew
+  settings).
+- Ubuntu's cloud images and keyserver, and, from the VM while it's built, Ubuntu's package archive, Mozilla's
+  package repository for Firefox and, if you choose Chrome, Google's.
+- rclone's downloads, for S3-backed folders.
+
+The programs metacomputer installs are pinned to a version or commit and checked against a checksum or signature.
+Ubuntu, Firefox and Chrome packages come signed from their own repositories, current when the VM is built.
+
+**To check for updates:** `metacomputer status` asks GitHub for this repository's release tags at most once a day
+(`UPDATE_CHECK=off` turns it off), and `metacomputer update` downloads the release from GitHub.
+
+**The VM itself** reaches the public internet through a gateway on your Mac, so it goes wherever your agent's tasks
+take it. The gateway refuses connections to your Mac, your local network, your tailnet, cloud metadata services and
+outbound mail. Telemetry is turned off where the parts have it: Cua Driver's (on by default upstream) in the VM,
+Lume's on your Mac, Firefox's telemetry and studies, and Chrome's usage reports. The browsers otherwise contact
+their makers' services as they normally do, such as safe-browsing checks.
+
+**Only when you set them up:**
+- Event sinks and the vault's audit sinks: events go to the webhook, OpenTelemetry Collector, syslog server or ntfy
+  topic you add. Events never carry typed text, tokens or URL queries ([docs/events.md](docs/events.md)).
+- The vault's API proxy: when a program in the VM uses a token from `metacomputer secrets token`, the proxy on your
+  Mac forwards its requests to the API provider you bound that key to, with your key.
+- Claude Code inside the VM (`metacomputer claude`): the VM downloads Claude Code from Anthropic, and it talks to
+  Anthropic through that proxy, with its nonessential traffic turned off.
+- S3-backed folders: rclone on your Mac keeps a folder in step with the bucket you name.
+
+## What Metavert receives
+
+Nothing, unless you contact us: a GitHub issue, a pull request or a private vulnerability report (see
+[SECURITY.md](SECURITY.md#reporting-a-vulnerability)). Those are handled on GitHub, under
+[GitHub's privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement).
+
+## Children
+
+metacomputer is a tool for developers and isn't directed to children under 18.
+
+## Changes
+
+Changes to this policy are made in this file, so its history on GitHub shows every version, and the
+[CHANGELOG](CHANGELOG.md) notes them.
+
+## Contact
+
+Open an issue at [github.com/metavert-io/metacomputer/issues](https://github.com/metavert-io/metacomputer/issues),
+or, for anything security-related, use the private report described in [SECURITY.md](SECURITY.md#reporting-a-vulnerability).

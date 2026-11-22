@@ -102,10 +102,9 @@ Claude Code sessions use `metacomputer` → `bin/metacomputer mcp-lazy`
 (`lib/mcp_lazy.py`), the MCP server of the `metacomputer` plugin (`plugin/`;
 or, with `install.sh --no-plugin`, a user-scope server), so it exists in every
 project. Its tools are `mcp__plugin_metacomputer_metacomputer__*` from the plugin
-and `mcp__metacomputer__*` otherwise. A plugin installed from GitHub runs a copy of
-`bin/metacomputer` from Claude Code's plugin folder; that copy hands over to the
-checkout `install.sh` set up (`MCOMP_HOME`, else `~/.local/bin/metacomputer`)
-before reading any configuration. It answers `initialize` and `tools/list` from a saved copy of the
+and `mcp__metacomputer__*` otherwise. The plugin's own `bin/metacomputer` is a short
+launcher (`plugin/bin/metacomputer`, in place or in a GitHub install's copy) that hands
+over to the checkout `install.sh` set up (`MCOMP_HOME`, else `~/.local/bin/metacomputer`). It answers `initialize` and `tools/list` from a saved copy of the
 driver's handshake (`config/driver-mcp-cache.json`, refreshed under `.run/` on
 each live connection), so the tools are listed even while the VM is off, and
 it starts instantly. On the first call that needs the driver it connects to this
