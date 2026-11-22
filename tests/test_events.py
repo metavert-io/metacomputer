@@ -1558,10 +1558,13 @@ def main():
                             capture_output=True, text=True, env=dict(os.environ, MCOMP_CONFIG=cfgf), timeout=60,
                             stdin=subprocess.DEVNULL)
         new = [e for e in local_log()[n0:] if e["type"] == "recording_failed"]
+        # The guest's words are looked for everywhere except the event's own random id, sequence and time, which can
+        # contain "555" by chance (a uuid like c26b4358-555d-...).
+        said = json.dumps({k: v for k, v in new[0].items() if k not in ("id", "seq", "time")}) if new else ""
         check("R5 a failed recording: a fixed message and a fixed reason; nothing the VM said, even cleaned",
               new and new[0]["message"] == "Recording 'demo' failed: the VM's recorder didn't hand over a video"
               and new[0]["data"].get("reason") == "other" and "detail" not in new[0]["data"]
-              and "CALL" not in json.dumps(new[0]) and "555" not in json.dumps(new[0]), (rr.stderr, new))
+              and "CALL" not in said and "555" not in said and "evil.example" not in said, (rr.stderr, new))
         n0 = len(local_log())
         subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; die() {{ exit 1; }}; name=demo; mode=guest; '
                         f'state=/nonexistent/x\n{fn}\nrec_fail "the VM\'s recorder didn\'t hand over a video" "x" recorder_answer'],
