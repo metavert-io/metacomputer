@@ -320,10 +320,12 @@ shared by every VM, and each event names its VM.
   restart, or `/mcp` in an open session; the install says so when it added one.
 
 **An MCP server already named `metacomputer`.** The installer reads Claude Code's
-user-scope entry exactly (`lib/claude_mcp.py`): from the file Claude Code keeps it in
-(`~/.claude.json`, or `.claude.json` in `CLAUDE_CONFIG_DIR`), checked against what
-`claude mcp get` shows from an empty folder, where no project or local server can
-stand in for it. When the two disagree or either can't be read, nothing is changed.
+user-scope entry exactly (`lib/claude_mcp.py`): from the file Claude Code itself uses
+(`~/.claude.json`, or `.claude.json` in `CLAUDE_CONFIG_DIR`; its older `.config.json`
+there while Claude Code still uses that one), before and after `claude mcp get`, whose
+output from an empty folder, where no project or local server can stand in for it,
+must match it. When they disagree, either can't be read, or the entry changes while
+it's being read, nothing is changed.
 It then goes by the entry's type, its command (every link followed) and its exact
 argument list:
 - `~/.local/bin/metacomputer` with exactly `mcp-lazy`: kept as it is, variables you
@@ -339,21 +341,31 @@ argument list:
   checkout, a path that only starts with the checkout's, and a launcher that doesn't
   exist (nothing shows whose it was). A local command without variables of its own is
   replaced with `--replace-mcp` (or a yes at a terminal); for one that sets variables,
-  or isn't a local command, the install says how to remove it yourself (its values
-  and URL are never printed).
+  or isn't a local command, the install says how to remove it yourself. The install
+  and `metacomputer agents` name such a registration by its program and how many
+  arguments it has, or its transport: its arguments, variables' values and URL are
+  never printed, since any of them can carry a credential.
 
 `--yes`, and runs without a terminal (`metacomputer update`), never replace a
-registration that isn't metacomputer's own. The old registration is removed only
-right before the new one is added and read back, and when the add fails it's put
-back exactly as it was (`claude mcp add-json`, read back again). What served the
-tools before is retired only once the new server is registered and read back: an
-older plugin copy's own server, the plugin itself with `--no-plugin`, and the server
-names earlier versions used; each removal is checked. A project or local server
+registration that isn't metacomputer's own. The old registration is read again
+right before it's removed and left as it is when it changed since (variables
+included: another Claude Code may change it meanwhile; Claude Code has no lock an
+installer can hold across the removal and the add, so only a change in the moment
+between that read and the removal can go unseen). It's removed only right before the
+new one is added and read back, and when the add fails it's put back exactly as it
+was (`claude mcp add-json`, read back again); if that fails too, its entry is saved
+in a file only you can read (`~/.local/share/metacomputer/claude-mcp-metacomputer.*`),
+never printed. What served the tools before is retired only once the new server is
+registered and read back: an older plugin copy's own server, another checkout's
+marketplace and its plugin, the plugin itself with `--no-plugin`, and the server
+names earlier versions used; each removal is checked, and one whose state can't be
+read is left as it is and counts as not done. A project or local server
 named `metacomputer` in the folder you run the install in takes precedence there:
 it's reported, never changed. When a lookup fails, the server can't be registered,
 or something can't be retired, the rest of the install still runs, it says what to
 run, and it ends with exit status 1; it also records the Claude Code step as
-unfinished, so the next `metacomputer update` runs the install again even when the
+unfinished (`--only-claude` and `--only-agents` too; a run that finishes it clears
+that), so the next `metacomputer update` runs the install again even when the
 checkout is already at the release.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin

@@ -113,13 +113,22 @@ def claude_cases(t, base):
           "no MCP server metacomputer (no tools)" in r.stdout and fix in r.stdout
           and json.loads(agents([plug], "", "--json").stdout)["claude_code"]["set_up"] is False, r.stdout)
     r = agents([plug], "/opt/other/bin/thing")
-    check("a user-scope server that runs something else: no metacomputer tools, and what it runs",
-          "runs /opt/other/bin/thing mcp-lazy, not ~/.local/bin/metacomputer mcp-lazy" in r.stdout and fix in r.stdout, r.stdout)
+    check("a user-scope server that runs something else: no metacomputer tools, and what it is (its program, not its "
+          "path or arguments)", "runs thing with 1 argument (not shown), not ~/.local/bin/metacomputer mcp-lazy" in r.stdout
+          and "/opt/other" not in r.stdout and fix in r.stdout, r.stdout)
     for argv in (["status"], [" mcp-lazy"], ["mcp-lazy "], []):
         r = agents([plug], cmd, argv=argv)
         check(f"metacomputer's command with the arguments {argv}: not counted as set up (exact arguments compared)",
-              "runs ~/.local/bin/metacomputer" in r.stdout and "no metacomputer tools" in r.stdout
+              "runs metacomputer" in r.stdout and "/.local/bin" not in r.stdout.split("not ~/.local")[0]
+              and "no metacomputer tools" in r.stdout
               and json.loads(agents([plug], cmd, "--json", argv=argv).stdout)["claude_code"]["set_up"] is False, r.stdout)
+    token = "SYNTHETIC-TOKEN-4f9c2e71d0"
+    remote = ["-y", "mcp-remote", f"https://mcp.example.invalid/mcp?token={token}"]
+    r, rj = agents([plug], "npx", argv=remote), agents([plug], "npx", "--json", argv=remote)
+    check("a server whose arguments carry a token (npx mcp-remote URL?token=…): named by its program and how many "
+          "arguments it has; the token is in neither the text nor the JSON",
+          "runs npx with 3 arguments (not shown)" in r.stdout and token not in r.stdout + r.stderr + rj.stdout + rj.stderr
+          and json.loads(rj.stdout)["claude_code"]["mcp_server"] == "npx with 3 arguments (not shown)", r.stdout + rj.stdout)
     r = agents([plug], cmd, FAKE_ARGS="other")
     check("the configuration and `claude mcp get` disagree: said as unreadable, not set up", "couldn't be read" in r.stdout,
           r.stdout)
@@ -246,6 +255,13 @@ def main():
               "and settings its strict config rejects all fail", r.returncode == 1 and res.get("rules") is False
               and res.get("sandbox marker") is False and res.get("mcp config") is True and res.get("mcp settings") is False,
               (res, r.stdout[-400:]))
+        with open(os.path.join(base["CODEX_HOME"], "cmd"), "w") as f:
+            f.write("/opt/someone/private-tools/bin/server\n")
+        r = run(["--json"], dict(base, PATH=fake2 + ":/usr/bin:/bin"))
+        srv = (json.loads(r.stdout or "{}").get("codex") or {}).get("mcp_server") or {}
+        check("Codex's server that isn't this checkout's: reported by its program's name, not its path",
+              srv.get("command") == "server" and "/opt/someone" not in r.stdout, r.stdout)
+        os.remove(os.path.join(base["CODEX_HOME"], "cmd"))
         os.chmod(os.path.join(fake2, "codex"), 0o777)
         r = run(["check"], dict(base, PATH=fake2 + ":/usr/bin:/bin"))
         check("a codex other accounts can write isn't run", r.returncode == 1 and "writable by others" in r.stdout, r.stdout)

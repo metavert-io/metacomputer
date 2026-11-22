@@ -124,12 +124,14 @@ def claude_status():
 def user_server(prog):
     """Claude Code's user-scope MCP server metacomputer, read as install.sh reads it (lib/claude_mcp.py: the entry in
     Claude Code's configuration, checked against `claude mcp get` from an empty folder; its exact arguments compared):
-    {"owner", "kind", "words"}. Only the command and arguments are kept for the report, never variables or URLs."""
+    {"owner", "kind", "words"}. The words are claude_mcp's: metacomputer's own command and arguments, or for anything
+    else only its program's name and how many arguments it has, or its transport; never an argument, a variable, a URL
+    or the entry (they can carry credentials)."""
     import claude_mcp
     env = dict(os.environ, PATH=SAFE_PATH)
     res = claude_mcp.user_entry(prog, "metacomputer", env)
-    return {"owner": claude_mcp.owner(res, LAB, os.path.expanduser("~/.local/bin/metacomputer")), "kind": res["kind"],
-            "words": claude_mcp.words(res, env)}
+    own = claude_mcp.owner(res, LAB, os.path.expanduser("~/.local/bin/metacomputer"))
+    return {"owner": own, "kind": res["kind"], "words": claude_mcp.words(res, env, own)}
 
 
 INSTALL_CLAUDE = f"{os.path.join(LAB, 'install.sh')} --only-claude"
@@ -172,11 +174,17 @@ def codex_status():
         return st
     rc, out, err = run([prog, "mcp", "get", "metacomputer", "--json"])
     srv = None
+    set_up = False
     if rc == 0:
         try:
             t = json.loads(out).get("transport") or {}
-            srv = {"type": t.get("type"), "command": t.get("command")}
-        except ValueError:
+            cmd = t.get("command")
+            set_up = bool(cmd)
+            # this checkout's launcher by its path; anything else by its program's name only (never a path or an argument)
+            import claude_mcp
+            srv = {"type": t.get("type"),
+                   "command": cmd if cmd == CLI else (claude_mcp.program_name(cmd) or "a program") if cmd else None}
+        except (ValueError, AttributeError):
             srv = {"error": "unreadable"}
     st["mcp_server"] = srv
     try:
@@ -193,7 +201,7 @@ def codex_status():
         st["rules"] = rules if head[0].startswith("# metacomputer's rules for Codex.") else "someone else's"
     except OSError:
         st["rules"] = None
-    st["set_up"] = bool(srv and srv.get("command"))
+    st["set_up"] = set_up
     return st
 
 
