@@ -161,6 +161,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
 metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--print|--tailnet|--forget] | where
 metacomputer handoff --why captcha|login|2fa|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
 metacomputer --vm NAME COMMAND | vm list | vm create NAME | vm delete NAME   # more than one VM (config/vms/NAME.env)
+metacomputer list [--on PLACE] | default [NAME] | --on mac COMMAND   # where each is, the default computer (config/default-vm)
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
 metacomputer notify "TEXT" --why login --action "…" | events status|tail|sink list   # optional event stream
 metacomputer browser | web compare|responsive|a11y|open-untrusted URL | input-reset | rename P NAME
@@ -180,7 +181,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   (this machine, never committed; `config/local.env.example` documents it).
   Code must read settings from there, never hard-code a machine's names,
   paths or hosts. Other VMs: one file each, `config/vms/NAME.env` (never committed),
-  picked with `--vm NAME` / `MCOMP_VM`; `MCOMP_CONFIG=FILE` still names any file.
+  picked with `--vm NAME` / `MCOMP_VM`; `MCOMP_CONFIG=FILE` still names any file. With none of those,
+  `config/default-vm` (never committed; `metacomputer default NAME`) names the default computer, chosen exactly as
+  `--vm NAME` (read once by `lib/defaultvm.py` for both sides, one name on one line; one that doesn't resolve refuses,
+  never another VM; what a command chose is passed on to its children, the main VM as `MCOMP_NO_DEFAULT_VM=1`;
+  `default NAME` holds NAME's VM lock; `lib/labconfig.py` resolves it with lib.sh's `mc_load_settings`);
+  `MCOMP_NO_DEFAULT_VM=1` leaves it out, and what means the main VM (`setup`, `update`, `version`, `each`'s main,
+  install.sh's build) leaves it out too. Places and providers: `lib/placement.py` (`--on`, `list`) and `lib/cloud/` (the adapter interface,
+  manifests, `PERSIST`, the feature map; `local-lume` hands actions to the existing commands, never reroutes
+  them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
@@ -296,7 +305,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

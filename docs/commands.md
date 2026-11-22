@@ -12,14 +12,18 @@ short overview, and the [guide](guide.md) shows what each is for, task by task.
 
 `metacomputer` (installed at `~/.local/bin/metacomputer`; `mcomp` is a short
 alias). `metacomputer help` prints a summary. `metacomputer --vm NAME COMMAND`
-runs any command on the VM `NAME` ([More than one VM](#more-than-one-vm)).
+runs any command on the VM `NAME`; without `--vm`, a command acts on your default
+computer ([More than one VM](#more-than-one-vm)).
 
 | Command | What it does |
 | --- | --- |
 | `--vm NAME COMMAND` | Any command, on the VM `NAME` (its settings: `config/vms/NAME.env`, or `config/local.env` when that's the VM it names). `MCOMP_VM=NAME` does the same |
-| `vm list [--json]` | This checkout's VMs (from its settings files and the runner): state, disk use, baseline (and checkpoints), ports, settings file; the runner's other VMs; problems such as a port two VMs share. `*` marks the VM these settings act on |
+| `--on PLACE COMMAND` | Any command, on the computer at `PLACE`: `mac` (this Mac: your default computer when it's there, else the one computer there) or `cloud`, matched against places only (a VM named `cloud` or `mac` is never what `--on` means; `vm create` refuses those names and `list` flags one made by hand). Every computer is on this Mac: `--on cloud` (or any other place name) says this metacomputer has no cloud computers set up and runs nothing. With `--vm` too, both must agree (`--vm demo --on cloud` is refused). A computer's name goes with `--vm`, not `--on` (`lib/placement.py`) |
+| `list [--on PLACE] [--json]` | Every computer: the same as `vm list`. `--on` keeps those at `PLACE` (`--on cloud`: none, saying so) |
+| `default [NAME] [--json]` | Your default computer, the one a command acts on when no VM is named, and where its settings are. With `NAME`: makes `NAME` the default after checking it resolves to settings exactly as `--vm NAME` would (`config/vms/NAME.env`, or the main VM's name, which removes `config/default-vm`: `config/local.env`'s VM again). It writes `config/default-vm` in one step (a temporary file renamed over it) and changes nothing else: no VM is started, stopped or changed, and a hub or session already running keeps the VM it started with. It holds `NAME`'s lock (the one a build or `vm delete` of it holds) from the check to the write, so it never makes a VM being deleted the default. `--vm` and `--on` are refused with it |
+| `vm list [--on PLACE] [--json]` | This checkout's VMs (from its settings files and the runner): where each is (`WHERE`: this Mac), state, disk use, baseline (and checkpoints), ports, settings file; the runner's other VMs; problems such as a port two VMs share, or a default that doesn't resolve. `*` marks the VM these settings act on: without `--vm`, your default computer. `--json` adds `place`, `where` and `default` to each VM, and `default` (the stored default's name, whatever chose this command's VM) and `overridden_by` (what chose another: `--vm`, `MCOMP_VM`, `MCOMP_CONFIG` or `MCOMP_NO_DEFAULT_VM`) to the listing |
 | `vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]` | A VM of its own: writes `config/vms/NAME.env` (its names, ports, SSH keys, vault folder and spool, plus this Mac's choices such as `LUME`, `BROWSERS` and the hardening settings) and builds it after asking (`--yes` doesn't ask; `--no-build` only writes the file). Without ports, the first free pair from 2300 (live view = SSH + 3700) |
-| `vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]` | Delete the VM, its baseline (and `-prev`) and `config/vms/NAME.env`, after saying what goes and what stays, once you type its name (no terminal: `--confirm NAME`; `--yes` never counts). Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`; refuses while it has checkpoints, when anything it would delete is another VM's VM, baseline or copy, and, every time (with or without flags, the main VM too), unless every other settings file reads cleanly and the identity rule holds (below: no folder in another VM's or in the runner's VM storage, where the runner's delete reaches). Holds the VM's lock throughout and its owners lock once you confirm, checks everything again then, and only then stops the VM's watcher and hub. A settings file that's refused still protects the names, folders and volumes it says; one whose folders or volumes can't be known stops any recursive deletion and `--delete-volumes`. Deletes folders only along a path with no links, through `lib/safedelete.py` like every other delete: never one that is or holds another VM's folder, the account's own vault or spools, the home folder or the checkout. Keeps volumes and the vault folder unless `--delete-volumes` (each volume asks again) or `--delete-vault` (only the VM's own folder). The typed name guards against a slip; it isn't proof a person typed it (any program with a terminal can) |
+| `vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]` | Delete the VM, its baseline (and `-prev`) and `config/vms/NAME.env`, after saying what goes and what stays, once you type its name (no terminal: `--confirm NAME`; `--yes` never counts). Refuses the VM this checkout uses without `--vm` (the main VM, and your default computer when `config/default-vm` names another), a running VM and one a session holds, unless `--force` (and, as a VM that may be the default, any VM while `config/default-vm` can't be read); refuses while it has checkpoints, when anything it would delete is another VM's VM, baseline or copy, and, every time (with or without flags, the main VM too), unless every other settings file reads cleanly and the identity rule holds (below: no folder in another VM's or in the runner's VM storage, where the runner's delete reaches). Holds the VM's lock throughout and its owners lock once you confirm, checks everything again then, and only then stops the VM's watcher and hub. A settings file that's refused still protects the names, folders and volumes it says; one whose folders or volumes can't be known stops any recursive deletion and `--delete-volumes`. Deletes folders only along a path with no links, through `lib/safedelete.py` like every other delete: never one that is or holds another VM's folder, the account's own vault or spools, the home folder or the checkout. Keeps volumes and the vault folder unless `--delete-volumes` (each volume asks again) or `--delete-vault` (only the VM's own folder). The typed name guards against a slip; it isn't proof a person typed it (any program with a terminal can) |
 | `setup [--no-chrome] [--no-build] [--yes]` | Finish or repair the setup (`./install.sh`; finished steps are skipped). From the Claude Code plugin with no checkout yet, the one-line install shipped in the plugin, which says what it will do and asks first ([install.md](install.md#from-claude-code-first-the-plugin)) |
 | `start [--no-volumes]` / `stop [--force]` / `restart` | Boot (about 12 s), attaching `VOLUMES` and `REFDISKS` (none with `--no-volumes`); shut down from inside the VM, forced after 90 s. `start` takes the VM's lock, so it never runs during a build, reset, restore or `vm delete` of it |
 | `status [--json]` | Every layer: VM, gateway, SSH, desktop, accessibility, driver, live view, host sharing, the vault's accounts, events, MCP handshake. Exit 0 = ready |
@@ -123,7 +127,31 @@ layered:
 | --- | --- |
 | `--vm NAME` (before the command), or `MCOMP_VM=NAME`; `--vm` wins | `config/vms/NAME.env`; `config/local.env` when that is the VM it names; the defaults alone for `--vm metacomputer` in a checkout with no `config/local.env` |
 | `MCOMP_CONFIG=FILE` | that file, as before (with `--vm` too, both must name the same file) |
-| neither | `config/local.env`, this checkout's main VM |
+| neither, with `config/default-vm` (your default computer: `metacomputer default NAME` writes it) | the VM it names, exactly as `--vm NAME` would choose it, so every refusal of `--vm` applies; passed on to what the command starts as its settings file |
+| none of these | `config/local.env`, this checkout's main VM |
+
+`config/default-vm` is never committed. It must be a plain file (not a link) holding one
+VM name on one line and nothing else; anything else is refused, as is a name with no
+settings: it never falls back to another VM. It's read once, by one reader for both sides
+(`lib/defaultvm.py`: opened without following a link or waiting on a FIFO, checked to be a
+regular file through that same descriptor, and exactly the bytes read are checked), so what
+is checked is what is used. `metacomputer list`, `vm list`, `default` and
+`help` still work then, and say what's wrong. `MCOMP_NO_DEFAULT_VM=1` leaves it out (a
+command that names no VM acts on `config/local.env`'s VM); `setup`, `update`, `version`,
+`each`'s `main` and `install.sh`'s build always mean `config/local.env`'s VM, whatever the
+default is. Whatever a command chose is passed on to what it starts (a VM chosen by name or
+as the default as its settings file; the main VM, chosen because there's no default, as
+`MCOMP_NO_DEFAULT_VM=1`), so a default set meanwhile never moves a build, a hub or a script
+it started to another VM. `lib/labconfig.py` makes the same choice for the Python side,
+with the same checks: it reads the pointer with the same reader and resolves it with
+`scripts/lib.sh`'s own `mc_load_settings`, in a bash that reads no startup file and imports
+no function from the environment, which hands back the settings it loaded, as values, in
+one strict record on a pipe of its own. Python uses those values as they are and never
+reads the file again; anything else (a refusal, a record that isn't exactly that) refuses,
+never the defaults. Only the step that writes the record opens that pipe (a named one, in a
+private folder), so a helper the resolution leaves running never holds up the answer; the
+bash runs in a session of its own, and one that takes too long or says too much is killed
+with its whole process group (what it started, unless that left the group).
 
 A file in `config/vms/` is one VM's own (`vm create` writes it; `config/vms/` is
 never committed). Its `VM_NAME` is its file name, and it must set its own
@@ -150,6 +178,9 @@ links resolved.
 Refused rather than guessed (nothing runs):
 - `--vm NAME` with no settings for `NAME`, or with two (`config/local.env` and
   `config/vms/NAME.env`); `--vm` and an `MCOMP_CONFIG` naming different files;
+- a `config/default-vm` that isn't one VM name on one line, or names a VM that has no
+  settings here (or settings that are refused); `--on` with a place that has no computer,
+  or more than one and none of them the default, and `--vm` and `--on` that disagree;
 - a `config/vms/` file that names another VM, has no ports of its own, is named like a
   VM's copy (`-baseline`, `-baseline-prev`, `-ckpt-`), sets another `BASELINE_NAME`, or
   shares a name, a port or a folder with the main VM or any other `config/vms/` VM;
@@ -177,7 +208,7 @@ Refused rather than guessed (nothing runs):
 - in a checkout with no `config/local.env` and no `--vm`: any command that acts on a
   VM while `config/vms/` has files, or the runner has a VM besides the default one,
   or its list can't be read; and an `MCOMP_CONFIG` file that doesn't exist. `help`,
-  `where`, `setup`, `vm`, `events`, `notify`, `learn` and `actions` still work there;
+  `where`, `setup`, `vm`, `list`, `default`, `events`, `notify`, `learn` and `actions` still work there;
 - a settings file that can't be read cleanly (readable, parses, nothing on stderr while it's
   read, including from a file it sources): never taken for the defaults; and a `config/vms/`
   VM, a `vm delete` or a `build` while another VM's settings file can't be read;

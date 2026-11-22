@@ -79,8 +79,8 @@ a fake `git`.
 
 ## More than one VM: `tests/test_multi_vm.py`
 
-`python3 tests/test_multi_vm.py` (261 checks) needs no VM: a copy of the checkout
-in a temporary folder (never this Mac's `config/local.env` or `config/vms/`), a fake
+`python3 tests/test_multi_vm.py` (411 checks) needs no VM: a copy of the checkout
+in a temporary folder (never this Mac's `config/local.env`, `config/vms/` or `config/default-vm`), a fake
 runner in a temporary HOME that logs every delete, a stand-in for the vault, and
 private folders for locks, events and per-VM vaults (`MCOMP_VMS_APP_DIR`). The fake runner keeps its VMs'
 folders in a storage location of its own (`config get`), and deleting a VM deletes its folder, as the
@@ -104,6 +104,70 @@ runner's does.
   `lib/events.py` use the VM's spool; changing commands name the VM once.
 - `vm list --json` and the table: state, disk, ports, baseline, checkpoints, refused
   settings, the runner's other VMs, a shared port, and a runner that fails.
+- The default computer (`config/default-vm`): a pointer chooses its VM exactly as `--vm` would (with or
+  without its newline), and is passed on as `MCOMP_CONFIG`; `--vm`, `MCOMP_VM`, `MCOMP_CONFIG` and
+  `MCOMP_NO_DEFAULT_VM=1` win over it; one naming the main VM is `config/local.env`; refused, never another
+  VM: a name with no settings or refused settings, two newlines, spaces, a carriage return, a NUL, empty, two
+  lines, a leading `-` or `.`, 65 characters, a non-ASCII letter, a link and a folder; `lib/labconfig.py`
+  (in a process of its own, as a standalone helper) picks the same file for every one of these, or refuses
+  where bash does, including targets bash refuses for what's in them: another VM's name, the main VM's port,
+  another VM's port, a folder set in the file, no ports, another baseline, and another VM's file that can't
+  be read. `default`: shows the main VM, then
+  the pointer (`--json` too); `default demo` writes it whole and touches no VM; again: nothing written; a
+  name with no settings, a bad name, refused settings, `--vm`/`--on` with it, two names: refused, the file
+  as it was; `default MAIN` removes it. With demo the default: `secrets`, the hub's environment and `--on
+  mac` act on demo, the notice says so, `MCOMP_VM` still wins, `each main,...` is still the main VM.
+  `list` is `vm list`, with `WHERE` and the default marked (`--json`: `place`, `where`, `default`, the old
+  fields kept), `--vm` marks its VM and names the default; `list --on mac` the same, `--on cloud`, `fly`,
+  `cloudflare`: none, saying there are no cloud computers. `--on cloud` (and any other word, in any case)
+  before a command: refused before anything runs (the runner asked nothing but its settings); `--vm` and
+  `--on` that disagree, `--on` with a computer's name or nothing: refused. A pointer that doesn't resolve:
+  commands refuse saying how to fix it; `list` (nothing marked, the problem shown), `default` (exit 1) and
+  `help` still work; `default MAIN` fixes it. `setup` stays the main VM's, whatever the default (and with one
+  that doesn't resolve); `default` in a shell with `MCOMP_VM` says that chooses instead there. `vm delete` of
+  the default: refused without `--force`. In a checkout with no `config/local.env` and two VMs: `--on mac` is
+  unclear, `default` says there's none, `default demo` makes one, and the main VM's name removes it again,
+  saying commands refuse there.
+- What changes meanwhile, and names like places: hand-made VMs named `cloud` and `mac` (the default named
+  `cloud`): `--on cloud` (with `status`, `reset --yes`) refuses before anything runs, `--on mac` is the
+  default, `--vm cloud --on cloud` disagree, `list` flags both, `vm create cloud|mac` refuses. With no
+  default, the main VM is passed on as `MCOMP_NO_DEFAULT_VM=1`; a build whose script makes demo the default
+  before it loads its settings still builds the main VM, and one whose default is removed meanwhile still
+  builds demo. The pointer as a FIFO (refused at once), a link to a good file, a dangling link, no file; a
+  pointer swapped between `demo` and a two-line file thousands of times while it's read gives demo or a
+  refusal, never the third VM those lines would spell. `default demo` while demo's lock is held, and `vm
+  delete demo` while it's held for a `default`: refused; a real `vm delete demo` at its prompt keeps `default
+  demo` out until it's over, then the default goes ahead and the delete refuses it. Under
+  `MCOMP_NO_DEFAULT_VM=1` and `MCOMP_VM`, `list --json` reports the stored default and what overrode it,
+  as `default --json` does, with a pointer that doesn't resolve and a malformed one too.
+- What Python gets: with the default demo, a `BASH_ENV` that prints a banner and a path and defines `printf`,
+  the same as `ENV`, and exported functions named `printf` and `sed` leave Python's choice demo's (no startup
+  file, no imported function); the record is refused with a banner before it, text after it, no `END`, no
+  header, an odd field, a key twice or not a key, no `VM_NAME`, a relative file, nothing, bytes that aren't
+  UTF-8, or from a bash that failed, and a refusal carries bash's reason. `demo.env` replaced with another
+  VM's name and ports right after bash checked it: Python still has demo's (it never reads the file again); a
+  `VM_NAME` inside `if false` is ignored as bash ignores it; a value is bash's (a command substitution).
+  `vm delete demo` while `config/default-vm` can't be read (no permission, a FIFO): refused, saying why,
+  nothing deleted; with a readable pointer naming another VM it goes ahead.
+- A lookup that fails isn't "no pointer": `mc_read_default` with the file in a folder it can't search, and with an
+  I/O error from the shell's own tests and the reader's open, refuses (no file, or a missing folder on the way, is
+  still none); `vm delete demo --vm demo` refuses then, and also when only the shell's tests fail (the reader is
+  what decides). Python's resolution with a settings file that leaves a helper running in the background: the
+  answer comes when bash exits, the helper still running; one that hangs: refused at a shortened deadline, and
+  one whose record is over the limit: refused; in both, every process the resolution started is gone. A record
+  that goes over the limit only in what's left after the bash exited (the collector held back until then): refused,
+  with the helper it left gone (the bash isn't reaped before that check); the same with a Python that has no
+  `os.waitid` (its kqueue watch), which also resolves demo and refuses one that hangs, as before. On both watches:
+  a resolver something else in the process reaped (before the watch began, or once its exit was seen, with a good
+  record and exit 7) is refused with no signal sent, never taken as exit 0, and so is one reaped before the watch with
+  a SIGINT as the watch is first closed; a SIGINT as the watch is closed after a good record still kills its group and
+  reaps it; a kqueue registration that fails leaves no kqueue open; one that has exited (not reaped) before the watch
+  starts, which macOS's kqueue reports as no such process, is told by its own status: exit 0 resolves demo, exit 7 is
+  refused for that, not as lost, and nothing is sent. And nothing in `bin/`, `scripts/`, `lib/` or
+  `install.sh` reaps children it didn't start: Python read as code (`ast`, imports and aliases resolved: any-child
+  `waitpid`/`waitid`, `os.wait`/`wait3`/`wait4`, SIGCHLD, Safe/Fast child watchers), shell by text (a trap on CHLD);
+  the scanner is checked against 20 forbidden forms (a multi-line `waitpid(-1, ...)`, `waitid(P_ALL, ...)`, `from os
+  import wait; wait()` among them) and the allowed `os.waitpid(pid, 0)`.
 - `vm create`: the file (0600; identity, vault and spool; this Mac's choices copied, never
   `VOLUMES` or a password command), picked ports, and refusals (existing settings or VM,
   the main VM's name, bad names, taken or half-given ports, a build with no terminal
@@ -221,6 +285,30 @@ runner's does.
 - `metacomputer --vm demo claude` (a stand-in for `lib/vm_claude.py`): it runs with demo's settings file
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).
+
+## Places and providers: `tests/test_cloud_adapters.py`
+
+`python3 tests/test_cloud_adapters.py` (194 checks, a second) needs no VM and makes no network call.
+- The contract every registered adapter passes (`local-lume`, the in-memory `fake`, and the stand-in with a
+  bare manifest and a keeping one): a sound manifest under its registered name; every interface method
+  answers, or refuses with a reason (`NotSupported`, or `HandledByCLI` naming a command `bin/metacomputer`
+  dispatches), never a crash; names that aren't names refused first; what the manifest lacks (snapshots,
+  port forwards, sleep, an allowlist) refused; rates and estimates non-negative and growing with use; no
+  socket opened and no program started while it runs, and nothing in `lib/cloud/` imports a network or
+  process module.
+- `PERSIST`: `auto` is the best the manifest offers, every offered mode can be chosen, the others are refused
+  saying which are offered; the stand-in keeps files across sleep with `volume`, starts fresh with `none`,
+  restores snapshots, keeps at most its count. The feature map gives `None` or a reason naming the provider for
+  every feature, recordings never depend on it, and `reset`/`checkpoint`/`restore` follow snapshots.
+- `local-lume`: this Mac, `PERSIST=disk` only, no SSH proxy, no cost, and each action the existing command.
+- The manifest check catches a missing key, an unknown one, a bad root disk, volumes without details and an
+  unknown egress model.
+- `lib/placement.py`: one computer; several with and without a default; a name over the default; `mac`;
+  `cloud` and any other word: this metacomputer has no cloud computers set up; computers named `cloud`, `mac`
+  or a provider's name never taken for the place (`--on`), unclear when said as a word, and `name-ok`; with
+  providers (as data):
+  a provider's one computer, the default among several, unclear otherwise, `cloud` across providers; `--vm`
+  and `--on` agreeing and disagreeing, `--on` with a computer's name, and the CLI's exit status and output.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

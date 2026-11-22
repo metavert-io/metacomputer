@@ -170,6 +170,14 @@ def fill_types():
 VC, VCG = "lib/vm_claude.py", "lib/vm_claude_guest.sh"
 
 
+def py_top_fn(rel, name):
+    """One top-level function of a Python file, as written (to the next top-level def)."""
+    c = raw(rel)
+    i = c.index(f"\ndef {name}(")
+    j = c.find("\ndef ", i + 1)
+    return c[i:j if j > 0 else len(c)]
+
+
 def vc_fn(name):
     """One top-level function of lib/vm_claude.py, as written."""
     c = raw(VC)
@@ -1514,9 +1522,64 @@ CLAIMS = [
     ("docs/commands.md", r"once you type its name \(no terminal: `--confirm NAME`; `--yes` never counts\)",
      lambda m: "ASSUME_YES" not in vm_delete_src() and "confirm \"" not in vm_delete_src()
      and '[ "$v" = "$VM_NAME" ] || die' in vm_delete_src() and 'vm_lock_or_die "metacomputer vm delete' in vm_delete_src()),
-    ("docs/commands.md", r"Refuses the VM this checkout uses without `--vm`, a running VM and one a session holds, unless `--force`",
+    ("docs/commands.md", r"Refuses the VM this checkout uses without `--vm` \(the main VM, and your default computer when `config/default-vm` names another\), a running VM and one a session holds, unless `--force`",
      lambda m: all(s in vm_delete_src() for s in ('[ "$(mc_main_identity | head -1)" != "$VM_NAME" ]', '[ "$DP_STATE" != running ]',
-                                                  'lib/owners.py" check', '[ "$force" != 1 ]'))),
+                                                  'lib/owners.py" check', '[ "$force" != 1 ]',
+                                                  'elif [ "$MC_DEFAULT_PTR" = "$VM_NAME" ]; then'))
+     and "if ! mc_read_default; then\n    why+=(" in vm_delete_src()),
+    # The default computer (scripts/lib.sh, lib/labconfig.py, scripts/vm-commands.sh vm_default)
+    ("docs/commands.md", r"the VM it names, exactly as `--vm NAME` would choose it, so every refusal of `--vm` applies",
+     lambda m: '[ -z "$MC_DEFAULT_PTR" ] || { mc_sel_name="$MC_DEFAULT_PTR"; MC_FROM_DEFAULT=1; }' in raw("scripts/lib.sh")
+     and raw("scripts/lib.sh").index("MC_FROM_DEFAULT=1; }") < raw("scripts/lib.sh").index('! mc_load_settings "$mc_sel_name" "${MCOMP_CONFIG:-}"')),
+    ("docs/commands.md", r"anything else is refused, as is a name with no\s+settings: it never falls back to another VM",
+     lambda m: 'lib/defaultvm.py" read "$MC_DEFAULT_FILE"' in fn_src("scripts/lib.sh", "mc_read_default")
+     and '[ "${MC_DEFAULT_MODE:-}" != soft ]' in raw("scripts/lib.sh") and "never falls back to another VM" in raw("scripts/lib.sh")
+     and "return resolve_default(pointer, env)" in raw("lib/labconfig.py") and "mc_load_settings" in raw("lib/labconfig.py")
+     and "\nCONFIG = load()\n" in raw("lib/labconfig.py")),
+    ("docs/commands.md", r"It's read once, by one reader for both sides\s+\(`lib/defaultvm.py`: opened without following a link or waiting on a FIFO, checked to be a\s+regular file through that same descriptor, and exactly the bytes read are checked\)",
+     lambda m: "os.O_NOFOLLOW" in raw("lib/defaultvm.py") and "os.O_NONBLOCK" in raw("lib/defaultvm.py")
+     and "stat.S_ISREG(os.fstat(fd).st_mode)" in raw("lib/defaultvm.py") and raw("lib/defaultvm.py").count("os.open(") == 1
+     and "return defaultvm.read(" in raw("lib/labconfig.py")
+     and fn_src("scripts/lib.sh", "mc_read_default").count("$MC_DEFAULT_FILE") == 1
+     and not re.search(r"\[ -[eLfr] ", fn_src("scripts/lib.sh", "mc_read_default"))),
+    ("docs/commands.md", r"in a bash that reads no startup file and imports\s+no function from the environment, which hands back the settings it loaded, as values, in\s+one strict record on a pipe of its own\. Python uses those values as they are and never\s+reads the file again",
+     lambda m: '["/bin/bash", "--noprofile", "--norc", "-p", "-c", _RESOLVE' in raw("lib/labconfig.py")
+     and 'k.startswith("BASH_FUNC_")' in raw("lib/labconfig.py") and '"BASH_ENV", "ENV"' in raw("lib/labconfig.py")
+     and "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True" in raw("lib/labconfig.py")
+     and "pass_fds" not in raw("lib/labconfig.py")
+     and "return dict(resolved)" in raw("lib/labconfig.py")
+     and raw("lib/labconfig.py").index("return dict(resolved)") < raw("lib/labconfig.py").index("vals = _parse(os.path.join(LAB")),
+    ("docs/commands.md", r"Only the step that writes the record opens that pipe \(a named one, in a\s+private folder\), so a helper the resolution leaves running never holds up the answer; the\s+bash runs in a session of its own, and one that takes too long or says too much is killed\s+with its whole process group \(what it started, unless that left the group\)",
+     lambda m: "os.mkfifo(fifo, 0o600)" in raw("lib/labconfig.py") and 'tempfile.mkdtemp(prefix="mcomp-settings-")' in raw("lib/labconfig.py")
+     and raw("lib/labconfig.py").count('>"$3"') == 2 and "&\"$fd\"" not in raw("lib/labconfig.py")
+     and "start_new_session=True" in raw("lib/labconfig.py") and "os.killpg(p.pid, signal.SIGKILL)" in py_top_fn("lib/labconfig.py", "_end")
+     and "_end(p, kill=not reaping and watch is not None and watch.ours())" in py_top_fn("lib/labconfig.py", "_collect")
+     and "watch = _ExitWatch(p)\n        watch.start()" in py_top_fn("lib/labconfig.py", "_collect")
+     and 0 < py_top_fn("lib/labconfig.py", "_collect").find('said too much")') < py_top_fn("lib/labconfig.py", "_collect").find("rc = watch.status if watch.reaped else _reap(p)")
+     < py_top_fn("lib/labconfig.py", "_collect").find("except BaseException")
+     and not re.search(r"\bp\.(wait|poll|kill)\(", raw("lib/labconfig.py"))
+     and "os.WEXITED | os.WNOHANG | os.WNOWAIT" in raw("lib/labconfig.py") and "select.KQ_NOTE_EXIT" in raw("lib/labconfig.py")),
+    ("docs/commands.md", r"\(and, as a VM that may be the default, any VM while `config/default-vm` can't be read\)",
+     lambda m: "if ! mc_read_default; then\n    why+=(" in fn_src("scripts/vm-commands.sh", "vm_delete_plan")),
+    ("docs/commands.md", r"the main VM, chosen because there's no default, as\s+`MCOMP_NO_DEFAULT_VM=1`\), so a default set meanwhile never moves a build",
+     lambda m: 'elif [ -z "${MCOMP_CONFIG:-}" ]; then\n  export MCOMP_NO_DEFAULT_VM=1\nfi' in raw("scripts/lib.sh")),
+    ("docs/commands.md", r"It holds `NAME`'s lock \(the one a build or `vm delete` of it holds\) from the check to the write",
+     lambda m: 0 < fn_src("scripts/vm-commands.sh", "vm_default").find('lock_hold "$(vm_lock_name "$name")"')
+     < fn_src("scripts/vm-commands.sh", "vm_default").find('mc_load_settings "$name"')
+     < fn_src("scripts/vm-commands.sh", "vm_default").find('vm_default_write "$name"')
+     and 'elif [ "$MC_DEFAULT_PTR" = "$VM_NAME" ]; then' in fn_src("scripts/vm-commands.sh", "vm_delete_plan")
+     and 'vm_lock_or_die "metacomputer vm delete $VM_NAME"' in fn_src("scripts/vm-commands.sh", "vm_delete")),
+    ("docs/commands.md", r"matched against places only \(a VM named `cloud` or `mac` is never what `--on` means; `vm create` refuses those names",
+     lambda m: "return _pick(sorted(n for n, p in comps.items() if at(p, where)), default, where, providers)" in raw("lib/placement.py")
+     and 'placement.py" name-ok "$name"' in fn_src("scripts/vm-commands.sh", "vm_create")),
+    ("docs/commands.md", r"It writes `config/default-vm` in one step \(a temporary file renamed over it\) and changes nothing else: no VM is started, stopped or changed",
+     lambda m: 'mktemp "$LAB_ROOT/config/.default-vm.XXXXXX"' in fn_src("scripts/vm-commands.sh", "vm_default_write")
+     and "os.replace(sys.argv[1], sys.argv[2])" in fn_src("scripts/vm-commands.sh", "vm_default_write")
+     and not re.search(r"vm_(start|stop)|runner_delete|\$LUME", fn_src("scripts/vm-commands.sh", "vm_default"))),
+    ("docs/commands.md", r"`--on cloud` \(or any other place name\) says this metacomputer has no cloud computers set up and runs nothing",
+     lambda m: 'on_resolve() {' in raw("bin/metacomputer") and '|| exit 1' in fn_src("bin/metacomputer", "on_resolve")
+     and raw("bin/metacomputer").index("*) on_resolve ;;") < raw("bin/metacomputer").index("*) vm_target_check ;; esac")
+     and "PROVIDERS = cloud.providers()" in raw("lib/placement.py")),
     ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
      lambda m: 'BASELINE_NAME must be $VM_NAME-baseline' in raw("scripts/lib.sh") and "def check_identity" in raw("lib/vms.py")
      and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),

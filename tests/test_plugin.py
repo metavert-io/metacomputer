@@ -273,7 +273,7 @@ def test_handoff():
         check("a copy under $CLAUDE_CODE_PLUGIN_CACHE_DIR hands over", p.stdout.strip() == "CHECKOUT where", p.stdout + p.stderr)
         # The checkout's command runs as always (here: help).
         p = run([CLI, "help"], base_env(home, MCOMP_CONFIG=os.path.join(t, "none.env")))
-        check("bin/metacomputer help runs this checkout", p.returncode == 0 and "Usage: metacomputer [--vm NAME] COMMAND" in p.stdout,
+        check("bin/metacomputer help runs this checkout", p.returncode == 0 and "Usage: metacomputer [--vm NAME | --on PLACE] COMMAND" in p.stdout,
               p.stdout[-200:] + p.stderr[-200:])
         # The plugin loaded in place (install.sh's local marketplace) hands over the same way; with nothing set up,
         # it says to run ./install.sh in that checkout (no setup from a checkout's plugin folder).

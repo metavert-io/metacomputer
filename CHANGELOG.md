@@ -6,6 +6,18 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A default computer: `metacomputer default [NAME]`.** With more than one VM, pick the one a command acts on when it names none (a bare `metacomputer`, and the MCP server of sessions started afterwards). It's kept in `config/default-vm` (not committed), chosen exactly as `--vm NAME` would choose it, so every refusal of `--vm` applies; a default with no settings refuses instead of falling back to another VM, and says how to fix it. `default` with no name shows it and where its settings are; `default MAIN` (the main VM's name) goes back to `config/local.env`'s VM. It changes only that file, holding that VM's lock (so a VM being deleted never becomes the default): no VM is started, stopped or changed. The file is read once, by one reader for the shell and Python sides, without following a link or waiting on a FIFO; Python helpers get the settings exactly as the shell checked them (from a bash that runs no startup file); `vm delete` refuses while the file can't be read; and what a command chose is passed on to what it starts, so a default set meanwhile never moves a build or a hub to another VM. `--json` for agents.
+- **`metacomputer list`**, the short form of `vm list`, and **`--on PLACE`**: where a computer is. Every computer is on this Mac, so `--on mac` means your default computer (or the one there), and `--on cloud` says this metacomputer has no cloud computers set up and does nothing. `--vm` and `--on` together must agree. `--on` is matched against places only: a VM named `mac` or `cloud` is never what it means (`vm create` refuses those names, and `list` flags one made by hand). `list --on PLACE` keeps the computers at that place.
+- **The provider layer, `lib/cloud/`**: the interface a provider adapter implements (lifecycle, transport, snapshots, egress, connection, cost), a capability manifest per adapter with the storage capabilities apart (root disk, volumes, snapshots, backup, bucket folders), the `PERSIST=auto|disk|volume|backup|none` choice, and a feature map that gives the reason when a feature can't be had. Its adapters are `local-lume` (this Mac; its actions are the existing commands, unchanged) and an in-memory stand-in for tests, both held to one contract (`tests/test_cloud_adapters.py`). `lib/placement.py` resolves which computer a name, a place or nothing means.
+
+### Changed
+
+- **`vm list` has a `WHERE` column** (this Mac), and its `--json` adds `place`, `where` and `default` to each VM, and `default` (the stored default, whatever chose this command's VM) and `overridden_by` to the listing; the fields it had are unchanged. `*` still marks the VM these settings act on, which without `--vm` is now your default computer. A default that doesn't resolve is listed as a problem, with nothing marked.
+- **`vm delete` refuses your default computer without `--force`**, as it does the main VM; deleting it anyway says that `config/default-vm` still names it, so commands that name no VM refuse until you choose another.
+- **`setup`, `update`, `version`, `each`'s `main` and `install.sh`'s build mean `config/local.env`'s VM** whatever the default computer is (`MCOMP_NO_DEFAULT_VM=1`, which anyone can set to leave the default out).
+
 ## [0.4.5] - 2026-11-22
 
 ### Changed

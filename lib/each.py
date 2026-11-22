@@ -26,8 +26,11 @@ NOT_HERE = {"each", "setup", "build", "mcp", "mcp-lazy", "ssh", "view", "handoff
 
 def child_env():
     """The environment without a VM already picked (MCOMP_VM, MCOMP_CONFIG): each child names its own, and `main` is
-    this checkout's config/local.env, whatever the caller had selected."""
-    return {k: v for k, v in os.environ.items() if k not in ("MCOMP_VM", "MCOMP_CONFIG")}
+    this checkout's config/local.env, whatever the caller had selected and whichever is the default computer
+    (config/default-vm, left out with MCOMP_NO_DEFAULT_VM)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("MCOMP_VM", "MCOMP_CONFIG")}
+    env["MCOMP_NO_DEFAULT_VM"] = "1"
+    return env
 
 
 def run_one(vm, cmd, timeout):

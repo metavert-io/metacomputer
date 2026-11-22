@@ -1,7 +1,8 @@
 #!/bin/bash
-# `metacomputer vm list | create | delete`: metacomputer's VMs on this Mac, a VM of its own in one command, and
-# deleting one safely. Sourced by bin/metacomputer (its functions and the settings scripts/lib.sh loaded are in
-# scope); macOS /bin/bash 3.2. Settings: one file per VM, config/vms/NAME.env (scripts/lib.sh, "which VM").
+# `metacomputer vm list | create | delete`, `list` and `default`: metacomputer's VMs on this Mac, a VM of its own in
+# one command, deleting one safely, and the default computer. Sourced by bin/metacomputer (its functions and the
+# settings scripts/lib.sh loaded are in scope); macOS /bin/bash 3.2. Settings: one file per VM, config/vms/NAME.env,
+# and config/default-vm naming the default (scripts/lib.sh, "which VM").
 
 # Settings that are the Mac's choices rather than one VM's: `vm create` copies the ones these settings set
 # differently from config/defaults.env into the new VM's file (it doesn't read config/local.env later on).
@@ -13,14 +14,14 @@ SHARE_CLIPBOARD SHARE_AUDIO SHARE_ROSETTA STORAGE_DIR ACTION_LOG ACTION_LOG_TEXT
 SSH_CA_KEY DRIVER_MODE DRIVER_PROFILE DRIVER_ORIGINS DRIVER_MANIFEST DRIVER_EXPIRES DRIVER_IDLE VM_SHELL SHELL_LOG
 MCP_HUB COORD_GUARD VIEW_REMEMBER INTERACTIVE_PROMPTS"
 
-do_vm() { # list [--json] | create NAME ... | delete NAME ...
+do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
   local sub="${1:-list}"; [ $# -gt 0 ] && shift
   case "$sub" in
     list)   vm_list "$@" ;;
     create) vm_create "$@" ;;
     delete) vm_delete "$@" ;;
     help|-h|--help) sed -n '/^#   --vm NAME/,/^#   start /p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
-    *) die "usage: metacomputer vm list [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]" ;;
+    *) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]" ;;
   esac
 }
 
@@ -53,20 +54,193 @@ vm_all_settings() {
   if [ "${MC_SETTINGS_KIND:-}" = config ]; then vm_settings_row "" "$LOCAL_CONFIG" "$MC_SETTINGS_LABEL"; fi
 }
 
-vm_list() { # [--json]
-  local json=() a tmp rc=0 sel="$VM_NAME"
-  for a in "$@"; do case "$a" in --json) json=(--json) ;; *) die "usage: metacomputer vm list [--json]" ;; esac; done
+# `metacomputer list` and `vm list` (the same): every VM, where it is (lib/placement.py; every one is on this Mac),
+# the one these settings act on (*), and the default computer.
+vm_list() { # [--on PLACE] [--json]
+  local json=() on=() a tmp rc=0 sel="$VM_NAME" def="" problem="${MC_DEFAULT_PROBLEM:-}"
+  local usage="usage: metacomputer list [--on PLACE] [--json]   (or: metacomputer vm list ...)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=(--json) ;;
+      --on) [ $# -ge 2 ] && [ -n "$2" ] || die "--on needs a place: mac (this Mac) or cloud ($usage)"; on=(--on "$2"); shift ;;
+      --on=*) [ -n "${1#--on=}" ] || die "--on needs a place: mac (this Mac) or cloud ($usage)"; on=(--on "${1#--on=}") ;;
+      *) die "$usage" ;;
+    esac
+    shift
+  done
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/mcomp-vms.XXXXXX")" || die "couldn't make a temporary folder"
   vm_all_settings > "$tmp/settings.jsonl"
   local runner=(--runner-failed)
   if command -v "$LUME" >/dev/null 2>&1 && "$LUME" ls --format json > "$tmp/runner.json" 2>/dev/null; then runner=(--runner "$tmp/runner.json"); fi
-  # With no settings file and no --vm, nothing is chosen when there's more than one VM to choose from.
+  # With no settings file and no --vm, nothing is chosen when there's more than one VM to choose from; nor when the
+  # default computer (config/default-vm) doesn't resolve (scripts/lib.sh loaded the main VM's settings for this
+  # listing only).
   if [ "${MC_IMPLICIT:-0}" = 1 ]; then
     if [ -n "$(mc_vm_files)" ] || [ "${runner[0]}" = --runner-failed ] || [ -n "$(vm_working_names "$VM_NAME" 2>/dev/null)" ]; then sel=""; fi
   fi
-  "$PY" "$LAB_ROOT/lib/vms.py" list --settings "$tmp/settings.jsonl" "${runner[@]}" --selected "$sel" ${json[@]+"${json[@]}"} || rc=$?
+  [ -z "$problem" ] || sel=""
+  # The default computer as stored: the VM config/default-vm names, else the main VM when a command that names no VM
+  # would act on it. Read here whatever chose this command's VM (--vm, MCOMP_VM, MCOMP_CONFIG, MCOMP_NO_DEFAULT_VM
+  # choose the selection, *, not the default); what overrode it is listed too.
+  if [ -n "$problem" ]; then
+    def="${MC_DEFAULT_PTR:-}"      # the name it holds, if it holds one: reported with why it doesn't resolve
+  elif [ "${MC_FROM_DEFAULT:-0}" = 1 ]; then
+    def="$VM_NAME"
+  elif ! mc_read_default; then
+    problem="$MC_REFUSAL"
+  elif [ -n "$MC_DEFAULT_PTR" ]; then
+    def="$MC_DEFAULT_PTR"
+  elif [ -f "$MC_MAIN_CONFIG" ] || { [ -z "$(mc_vm_files)" ] && [ "${runner[0]}" != --runner-failed ] \
+       && [ -z "$(vm_working_names "$MC_DEFAULT_VM" 2>/dev/null)" ]; }; then
+    def="$(mc_main_identity | head -1)"
+  fi
+  [ -z "$problem" ] || problem="$problem; metacomputer default NAME chooses another"
+  local ovr=""
+  if [ -n "${MC_VM_SAID:-}" ]; then ovr="--vm $MC_VM_SAID"
+  elif [ -n "${MC_ENV_VM:-}" ]; then ovr="MCOMP_VM=$MC_ENV_VM"
+  elif [ -n "${MC_ENV_CONFIG:-}" ]; then ovr="MCOMP_CONFIG=$(mc_tilde "$MC_ENV_CONFIG")"
+  elif [ -n "${MC_ENV_NODEF:-}" ] && { [ -n "${MC_DEFAULT_PTR:-}" ] || [ -n "$problem" ]; }; then ovr="MCOMP_NO_DEFAULT_VM=$MC_ENV_NODEF"
+  fi
+  "$PY" "$LAB_ROOT/lib/vms.py" list --settings "$tmp/settings.jsonl" "${runner[@]}" --selected "$sel" --default "$def" \
+    --default-problem "$problem" --overridden-by "$ovr" ${on[@]+"${on[@]}"} ${json[@]+"${json[@]}"} || rc=$?
   "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$tmp"
   return $rc
+}
+
+# `metacomputer default [NAME] [--json]`: the default computer, the one a command acts on when no VM is named
+# (config/default-vm; scripts/lib.sh reads it as --vm NAME). Without NAME: which it is and where its settings are.
+# With NAME: NAME must resolve to settings exactly as --vm NAME would (config/vms/NAME.env, checked like every load;
+# or the main VM's own name, which removes config/default-vm: config/local.env's VM again, as before there was one).
+# The pointer is written in one step: a temporary file in config/, renamed over it. Only that file changes: no VM
+# is started, stopped or changed, and a hub or session already running keeps the VM it started with.
+vm_default() { # [NAME] [--json]
+  local name="" json=0 a info kind label usage="usage: metacomputer default [NAME] [--json]"
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "$usage" ;;
+      *) [ -z "$name" ] || die "one computer, please (got '$name' and '$a'); $usage"; name="$a" ;;
+    esac
+  done
+  if [ -z "$name" ]; then vm_default_show "$json"; return; fi
+  mc_valid_vm_name "$name" || die "'$name' isn't a VM name (letters, digits, '.', '-' and '_'); config/default-vm was left as it was"
+  # NAME's lock, the one a build, vm delete, reset, restore and start of it hold, from the check below to the write:
+  # NAME can't be deleted or replaced in between (vm delete reads config/default-vm under the same lock, so it either
+  # sees NAME as the default and refuses without --force, or has deleted it before this check refuses it).
+  local rc=0
+  lock_hold "$(vm_lock_name "$name")" "${MCOMP_LOCK_WAIT:-10}" "metacomputer default $name" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "the VM $name is being built, deleted or changed ($LOCK_OWNER); config/default-vm was left as it was. Run this again when it's done" ;;
+    *) die "couldn't make the private lock folder (MCOMP_LOCK_DIR, or the per-user temporary folder); config/default-vm was left as it was" ;;
+  esac
+  # The settings NAME resolves to, as every command would load them for --vm NAME (in a subshell: only a check).
+  info="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; }
+          printf '%s\n%s' "$MC_SETTINGS_KIND" "$MC_SETTINGS_LABEL")" \
+    || die "$name can't be your default computer: $info. config/default-vm was left as it was"
+  kind="${info%%$'\n'*}"; label="${info#*$'\n'}"
+  local had="" ok=1
+  mc_read_default 2>/dev/null && had="$MC_DEFAULT_PTR" || ok=0
+  case "$kind" in
+    vm)
+      if [ "$ok" = 1 ] && [ "$had" = "$name" ]; then
+        vm_default_said "$json" "$name" "$label" "already your default computer" unchanged config/default-vm
+        return 0
+      fi
+      vm_default_write "$name"
+      vm_default_said "$json" "$name" "$label" "now your default computer: commands that name no VM act on it" set config/default-vm ;;
+    local|defaults)
+      # The main VM: no pointer at all, so a command that names no VM reads config/local.env as before. Only the
+      # reader's "no file" counts as none (a lookup that failed may hide one): anything else is removed below.
+      if [ "$ok" = 1 ] && [ -z "$had" ]; then
+        vm_default_said "$json" "$name" "$label" "already your default computer (the main VM)" unchanged ""
+        return 0
+      fi
+      [ ! -d "$MC_DEFAULT_FILE" ] || [ -L "$MC_DEFAULT_FILE" ] || die "config/default-vm is a folder, not the file metacomputer writes; nothing was changed (look at it, then remove it yourself)"
+      rm -f "$MC_DEFAULT_FILE" || die "couldn't remove config/default-vm; nothing was changed"
+      if vm_main_is_default; then
+        vm_default_said "$json" "$name" "$label" "now your default computer again (the main VM): config/default-vm removed" removed ""
+      else
+        vm_default_said "$json" "$name" "$label" "the main VM; config/default-vm removed, so commands that name no VM act as before: here, with no config/local.env and more than one VM, they refuse until you name one (--vm NAME) or choose a default" removed ""
+      fi ;;
+    *) die "$name can't be your default computer: its settings are $label, not config/vms/$name.env or the main VM's; config/default-vm was left as it was" ;;
+  esac
+}
+vm_default_write() { # NAME: config/default-vm holds NAME, written whole (a rename over the old one)
+  local tmp
+  [ ! -d "$MC_DEFAULT_FILE" ] || [ -L "$MC_DEFAULT_FILE" ] || die "config/default-vm is a folder, not the file metacomputer writes; nothing was changed (look at it, then remove it yourself)"
+  tmp="$(mktemp "$LAB_ROOT/config/.default-vm.XXXXXX" 2>/dev/null)" || die "couldn't write config/default-vm (no temporary file in config/); it was left as it was"
+  if printf '%s\n' "$1" > "$tmp" && "$PY" -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$tmp" "$MC_DEFAULT_FILE"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  die "couldn't write config/default-vm; it was left as it was"
+}
+vm_default_said() { # JSON NAME LABEL WORDS CHANGE(set|unchanged|removed) POINTER
+  if [ "$1" = 1 ]; then
+    "$PY" -c 'import json, sys
+n, label, change, pointer = sys.argv[1:5]
+print(json.dumps({"default": n, "place": "mac", "where": "this Mac", "settings": label, "pointer": pointer or None,
+                  "change": change, "ok": True}))' "$2" "$3" "$5" "$6"
+  else
+    printf '%s\n' "$2 (this Mac, $3) is $4."
+  fi
+}
+# Whether a command that names no VM acts on the main VM when there's no config/default-vm: always with
+# config/local.env; without it, only where vm_target_check lets it (no config/vms/ files, and no other VM in the
+# runner, or no runner yet).
+vm_main_is_default() {
+  local names
+  [ -f "$MC_MAIN_CONFIG" ] && return 0
+  [ -z "$(mc_vm_files)" ] || return 1
+  command -v "$LUME" >/dev/null 2>&1 || return 0
+  names="$(vm_working_names "$MC_DEFAULT_VM")" || return 1
+  [ -z "$names" ]
+}
+# Which computer is the default, and where its settings are; refused (exit 1) when config/default-vm doesn't resolve,
+# or when there's none (no config/local.env, and more than one VM to choose from).
+vm_default_show() { # JSON
+  local name="" label="" pointer="" err="" env=""
+  if ! mc_read_default; then
+    err="$MC_REFUSAL"
+  elif [ -n "$MC_DEFAULT_PTR" ]; then
+    name="$MC_DEFAULT_PTR"; pointer="config/default-vm"
+    label="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; }; printf '%s' "$MC_SETTINGS_LABEL")" \
+      || { err="config/default-vm makes $name your default computer, but: $label"; label=""; }
+  elif vm_main_is_default; then
+    name="$(mc_main_identity | head -1)"
+    label="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; }; printf '%s' "$MC_SETTINGS_LABEL")" \
+      || { err="the main VM, $name, doesn't resolve: $label"; label=""; }
+  else
+    err="there's no default computer here: this checkout has no config/local.env and more than one VM to choose from"
+  fi
+  # A VM chosen in this shell's environment wins over the default for commands run here: say so.
+  [ -z "${MC_ENV_NODEF:-}" ] || [ -z "$pointer" ] || env="MCOMP_NO_DEFAULT_VM=$MC_ENV_NODEF"
+  [ -z "${MC_ENV_CONFIG:-}" ] || env="MCOMP_CONFIG=$(mc_tilde "$MC_ENV_CONFIG")"
+  [ -z "${MC_ENV_VM:-}" ] || env="MCOMP_VM=$MC_ENV_VM"
+  if [ "$1" = 1 ]; then
+    "$PY" -c 'import json, sys
+n, label, pointer, err, env = sys.argv[1:6]
+print(json.dumps({"default": n or None, "place": "mac" if n and not err else None, "where": "this Mac" if n and not err else None,
+                  "settings": label or None, "pointer": pointer or None, "ok": not err, "error": err or None,
+                  "overridden_by": env or None}))' "$name" "$label" "$pointer" "$err" "$env"
+    [ -z "$err" ]; return
+  fi
+  if [ -n "$err" ]; then
+    printf '%s\n' "metacomputer: $err." "Commands that name no VM refuse until it's fixed (it never falls back to another VM): metacomputer default NAME chooses one (metacomputer list shows them; metacomputer default $(mc_main_identity | head -1) goes back to the main VM)." >&2
+    return 1
+  fi
+  if [ -n "$pointer" ]; then
+    printf '%s\n' "$name (this Mac, $label) is your default computer (config/default-vm): commands that name no VM act on it."
+  else
+    printf '%s\n' "$name (this Mac, $label) is your default computer: the main VM, as there's no config/default-vm."
+  fi
+  case "$env" in
+    '') ;;
+    MCOMP_NO_DEFAULT_VM=*) printf '%s\n' "In this shell, $env leaves it out: commands here act on the main VM (unset it to use the default)." ;;
+    *) printf '%s\n' "In this shell, $env chooses the VM instead (unset it to use the default)." ;;
+  esac
+  return 0
 }
 
 vm_port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
@@ -89,6 +263,8 @@ vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes]
   [ -n "$name" ] || die "usage: metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]"
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,23}$ ]] && [[ ! "$name" =~ (-baseline|-baseline-prev|-prev|-)$|-ckpt- ]] \
     || die "a new VM's name: up to 24 lowercase letters, digits and dashes, starting with a letter or digit, not ending in -baseline, -prev or a dash, and without -ckpt-"
+  # Not a place's name (mac, cloud): --on PLACE and a request for that place must never mean a VM (lib/placement.py).
+  a="$("$PY" "$LAB_ROOT/lib/placement.py" name-ok "$name")" || die "${a:-$name is the name of a place}; choose another name for the new VM"
   # The new VM's lock, from the first look until the build ends (the build inherits it): one change per VM at a time.
   rc=0; lock_hold "$(vm_lock_name "$name")" "${MCOMP_LOCK_WAIT:-10}" "metacomputer vm create $name" || rc=$?
   case "$rc" in
@@ -312,6 +488,11 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   emit_event lifecycle vm_deleted info "The VM $VM_NAME was deleted" "" "name=$VM_NAME" "baseline=$BASELINE_NAME"
   local list=""; for v in ${gone[@]+"${gone[@]}"}; do list="${list:+$list, }$v"; done
   ok "deleted: ${list:-nothing}"
+  if ! mc_read_default; then
+    warn "config/default-vm can't be read ($MC_REFUSAL), so commands that name no VM refuse until you choose a default: metacomputer default NAME"
+  elif [ "$MC_DEFAULT_PTR" = "$VM_NAME" ]; then
+    warn "config/default-vm still makes $VM_NAME your default computer, so commands that name no VM refuse until you choose another: metacomputer default NAME"
+  fi
   for v in $DP_VOLS; do
     say "volume $v:"
     storage_py volume delete "$v" || warn "volume $v was kept (above)"
@@ -400,6 +581,13 @@ for line in sys.stdin:
   fi
   # Never the VM in use without --force: the one this checkout's settings choose, one that runs, or one a session holds.
   [ "$(mc_main_identity | head -1)" != "$VM_NAME" ] || why+=("it's the VM this checkout uses without --vm ($([ -f "$MC_MAIN_CONFIG" ] && echo config/local.env || echo the defaults))")
+  # ...and your default computer: commands that name no VM act on it (config/default-vm, whatever this command read).
+  # A pointer that can't be read could be naming this VM: that counts as in use too, with the reader's reason.
+  if ! mc_read_default; then
+    why+=("which VM is your default computer can't be told, so it may be this one ($MC_REFUSAL; metacomputer default shows it)")
+  elif [ "$MC_DEFAULT_PTR" = "$VM_NAME" ]; then
+    why+=("it's your default computer (config/default-vm; metacomputer default NAME chooses another first)")
+  fi
   [ "$DP_STATE" != running ] || why+=("it's running")
   "$PY" "$LAB_ROOT/lib/owners.py" check >/dev/null 2>&1 || why+=("a session is using it (metacomputer --vm $VM_NAME who)")
   if [ ${#why[@]} -gt 0 ] && [ "$force" != 1 ]; then

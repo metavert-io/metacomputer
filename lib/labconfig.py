@@ -1,29 +1,337 @@
 """Read simple KEY=VALUE settings from config/defaults.env, then the one settings file scripts/lib.sh reads:
-$MCOMP_CONFIG, else config/vms/NAME.env for MCOMP_VM=NAME, else this machine's config/local.env. Only plain values
-are understood (quotes stripped, no expansion), which is all the Python side needs (e.g. GUEST_USER). scripts/lib.sh
-refuses the unclear cases before anything runs, and bin/metacomputer passes a VM chosen by name (--vm) on as
-MCOMP_CONFIG, so this only has to pick the same file."""
+$MCOMP_CONFIG, else config/vms/NAME.env for MCOMP_VM=NAME, else the default computer that config/default-vm names
+(unless MCOMP_NO_DEFAULT_VM is set), else this machine's config/local.env. Only plain values are understood (quotes
+stripped, no expansion), which is all the Python side needs (e.g. GUEST_USER). scripts/lib.sh refuses the unclear
+cases before anything runs, and bin/metacomputer passes the VM it chose on to what it starts (MCOMP_CONFIG, MCOMP_VM
+or MCOMP_NO_DEFAULT_VM), so this only has to pick the same file.
+
+The default computer is read by lib/defaultvm.py, as scripts/lib.sh reads it, and resolved by scripts/lib.sh's own
+mc_load_settings (every check --vm NAME gets: its name, ports, folders and every other VM's), in a bash that reads
+no startup file and imports no function from the environment. That bash hands back the settings it loaded, as
+values, in one strict record on a pipe of its own; they're used as they are, and the file is never read again here,
+so what was checked is what is used. The pipe is a named one in a private folder, opened for writing only by the
+step that writes the record, after the settings are loaded: nothing the resolution started (a helper left running in
+the background) holds it, so the answer comes when that bash exits. The bash runs in a session of its own, and if it
+takes too long or says too much, that whole process group is killed, not only the bash. Anything else (a refusal, a
+record that isn't exactly that, a bash that fails) raises Refused: it never falls back to another VM, nor to the
+defaults."""
 import os
 import re
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import defaultvm  # noqa: E402
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VMS_DIR = os.path.join(LAB, "config", "vms")
+MAIN_CONFIG = os.path.join(LAB, "config", "local.env")
+DEFAULT_VM_FILE = os.path.join(LAB, "config", "default-vm")
 _LINE = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s#]*)")
 _NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
+_KEY = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 # What makes a VM itself: a file in config/vms/ never takes these from the defaults (scripts/lib.sh).
 IDENTITY = ("VM_NAME", "BASELINE_NAME", "SSH_DIR", "SSH_PORT", "VNC_PORT", "RUN_DIR", "LOG_DIR")
+Refused = defaultvm.Refused
+# What a bash would run, or how it would start, if the environment said so: never passed to the resolver.
+_SHELL_ENV = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE", "PS4", "PROMPT_COMMAND",
+              "BASH_XTRACEFD", "IFS")
+_SELECTION = ("MCOMP_VM", "MCOMP_CONFIG", "MCOMP_NO_DEFAULT_VM")
+_MAGIC, _MAX_RECORD = b"MCOMP-SETTINGS/1", 1 << 20
+_DEADLINE = 120         # seconds the resolution may take
+# scripts/lib.sh's resolution of the default computer NAME ($2), as --vm NAME resolves it. Its result goes only to the
+# named pipe $3, which only the step that writes it opens (with "$3", the script's own argument: nothing the settings
+# file sets can move it), NUL-separated: MCOMP-SETTINGS/1, then FILE PATH and KEY VALUE pairs (every name assigned in
+# defaults.env or the file, and what makes a VM itself, with the value the loaded settings give it), or REFUSED
+# REASON; then END. Nothing it or what it runs prints anywhere else is read, and nothing it runs is given the pipe.
+_RESOLVE = r"""
+MC_LIB_DEFS_ONLY=1 . "$1/scripts/lib.sh" >/dev/null 2>&1 || exit 3
+if ! mc_load_settings "$2" "" >/dev/null 2>&1; then
+  printf '%s\0' MCOMP-SETTINGS/1 REFUSED "$MC_REFUSAL" END >"$3"
+  exit 1
+fi
+names="$(sed -n 's/^[[:space:]]*\([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$1/config/defaults.env" "$LOCAL_CONFIG" 2>/dev/null)"
+names="$(printf '%s\n' $names VM_NAME BASELINE_NAME SSH_DIR SSH_PORT VNC_PORT RUN_DIR LOG_DIR VAULT_DIR EVENTS_SPOOL | sort -u)"
+{ printf '%s\0' MCOMP-SETTINGS/1 FILE "$LOCAL_CONFIG"
+  for n in $names; do
+    if [ -n "${!n+x}" ]; then printf '%s\0' "$n" "${!n}"; fi
+  done
+  printf '%s\0' END; } >"$3"
+"""
+
+
+def read_default_vm(path=None):
+    """config/default-vm's name (lib/defaultvm.py, the reader scripts/lib.sh uses), or None; Refused otherwise."""
+    return defaultvm.read(DEFAULT_VM_FILE if path is None else path)
+
+
+def _scrubbed(env):
+    """The resolver's environment: no VM already chosen, nothing that changes how a bash starts, no function."""
+    out = {}
+    for k, v in env.items():
+        if k in _SELECTION or k in _SHELL_ENV or k.startswith("BASH_FUNC_") or "%" in k or v.startswith("()"):
+            continue
+        out[k] = v
+    out.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    return out
+
+
+def decode_record(data, returncode):
+    """The resolver's record -> (settings file, {KEY: VALUE}); Refused for a refusal, and for anything that isn't
+    exactly one well-formed record from a bash that exited 0."""
+    parts = data.split(b"\0")
+    if not data.endswith(b"\0") or len(parts) < 3 or parts[0] != _MAGIC or parts[-2] != b"END":
+        raise Refused("the check of its settings didn't answer as it should")
+    body = parts[1:-2]
+    if body[:1] == [b"REFUSED"]:
+        if len(body) != 2 or returncode != 1:
+            raise Refused("the check of its settings didn't answer as it should")
+        raise Refused(body[1].decode("utf-8", "replace") or "its settings were refused")
+    if returncode != 0 or len(body) < 2 or body[0] != b"FILE" or len(body) % 2:
+        raise Refused("the check of its settings didn't answer as it should")
+    try:
+        path = body[1].decode("utf-8")
+        vals = {}
+        for k, v in zip(body[2::2], body[3::2]):
+            key = k.decode("ascii")
+            if not _KEY.fullmatch(key) or key in vals:
+                raise ValueError(key)
+            vals[key] = v.decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        raise Refused("the check of its settings didn't answer as it should") from None
+    if not path.startswith("/") or not _NAME.fullmatch(vals.get("VM_NAME", "")):
+        raise Refused("the check of its settings didn't answer as it should")
+    return path, vals
+
+
+def _read(fd, n=65536):
+    """Up to n bytes from the record's pipe; b"" when there's nothing there (yet, or any more)."""
+    try:
+        return os.read(fd, n)
+    except BlockingIOError:
+        return b""
+
+
+class _ExitWatch:
+    """Whether the resolver p has exited, told without reaping it. Until it's reaped, its pid can't be given to another
+    process, so no other process group can have its id: killing the group it leads reaches only what it started.
+    os.waitid with WNOWAIT where Python has it; else (macOS's Python before 3.13) a kqueue watch for its exit. lost:
+    whether it's still unreaped can't be told (the system says it has no such child: something else reaped it), so
+    its group's id is no longer certainly its own: nothing may be sent to it, and the check refuses."""
+    # This relies on nothing else in this process reaping children it didn't start: no waitpid(-1) or os.wait(),
+    # wait3 or wait4, no SIGCHLD handler and no SIG_IGN for it, no Safe or Fast child watcher (tests/test_multi_vm.py,
+    # reap_inventory, fails on any of them in lib/, bin/ or scripts/). Between a check here and a signal, a reaper
+    # like that could still free the id; that race is accepted only because nothing here does it.
+
+    def __init__(self, p):
+        """Nothing that can fail here: the caller holds the watch before start() does anything that can. Until the
+        kqueue watch is in place it counts as lost, so a start() that fails or is interrupted never allows a signal
+        unless it's known that the resolver wasn't lost (a registration refused for another reason)."""
+        self.by_waitid = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+        self.p, self.kq, self.done, self.lost = p, None, False, not self.by_waitid
+        self.reaped, self.status = False, None      # reaped here already (start()), with its own exit status
+
+    def start(self):
+        if self.by_waitid:
+            return
+        if not hasattr(select, "kqueue"):
+            self.lost = False           # nothing was seen: it's still its own child
+            raise OSError("this Python can't tell it has exited without reaping it")
+        self.kq = select.kqueue()
+        try:
+            self.kq.control([select.kevent(self.p.pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD, select.KQ_NOTE_EXIT)],
+                            0, 0)
+        except ProcessLookupError:
+            # Gone before the watch began. macOS says so for its own unreaped zombie too, so ask: reaping it is the
+            # only way to tell. Ours (its pid back): it's done and reaped, with its own exit status, and from here on
+            # nothing is sent to its group (its id is no longer certainly its own), so helpers it left are left even
+            # if the check then refuses: the accepted cost of this one ordering. No such child: something else reaped
+            # it; still running can't be: either way it stays lost.
+            self.done = True
+            self.close()
+            try:
+                pid, status = os.waitpid(self.p.pid, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if pid == self.p.pid:
+                self.status = os.waitstatus_to_exitcode(status)
+                self.p.returncode = self.status
+                self.reaped = True
+                self.lost = False
+            return
+        except OSError:                 # refused for another reason: it's still its own (unreaped) child
+            self.lost = False
+            self.close()
+            raise
+        except BaseException:           # interrupted: whether it's lost can't be told; it stays lost
+            self.close()
+            raise
+        self.lost = False
+
+    def exited(self):
+        if not self.done:
+            try:
+                if self.by_waitid:
+                    self.done = os.waitid(os.P_PID, self.p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+                else:
+                    self.done = bool(self.kq.control(None, 1, 0))
+            except ChildProcessError:   # no such child any more: something else reaped it
+                self.done = self.lost = True
+        return self.done
+
+    def ours(self):
+        """Whether it's still certainly unreaped, so its group's id its own: checked again right before a signal, where
+        that can be told without reaping it (waitid); the kqueue watch can only say it was never lost."""
+        if self.reaped:
+            return False
+        if self.by_waitid and not self.lost:
+            try:
+                os.waitid(os.P_PID, self.p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except OSError:             # no such child any more (or it can't be told): nothing is sent
+                self.lost = True
+        return not self.lost
+
+    def close(self):
+        kq, self.kq = self.kq, None
+        if kq is not None:
+            kq.close()
+
+
+def _reap(p):
+    """Reap the resolver: its own exit status, or None when it's lost (something else reaped it): never Popen's
+    stand-in 0. Popen is told it's done, so it never waits for it again."""
+    try:
+        status = os.waitpid(p.pid, 0)[1]
+        rc = os.waitstatus_to_exitcode(status)
+    except ChildProcessError:
+        rc = None
+    p.returncode = -1 if rc is None else rc     # for Popen only (-1 isn't a status anyone reads)
+    return rc
+
+
+def _end(p, kill):
+    """The resolver's whole process group (it leads it: its session's) killed when kill (only while it's certainly
+    unreaped and its own), then the resolver reaped; its exit status, or None when it's lost."""
+    if kill:
+        for send in (lambda: os.killpg(p.pid, signal.SIGKILL), lambda: os.kill(p.pid, signal.SIGKILL)):
+            try:
+                send()
+            except OSError:
+                pass
+    return _reap(p)
+
+
+_LOST = "the check of its settings was lost (something else reaped it, so its exit status can't be known)"
+
+
+def _collect(p, r, why):
+    """(the record the resolver p wrote to the pipe r, its exit status). p isn't reaped until its record is whole and
+    its size checked: on every refusal (it takes too long, it says too much, while it runs or in what's left once it
+    has exited) and on an interruption before the final reap, its whole process group is killed first, then it's
+    reaped. Once its ownership is lost, nothing is sent and the check refuses; so does an exit status that's lost."""
+    data, end, watch, reaping = b"", time.monotonic() + _DEADLINE, None, False
+    try:
+        watch = _ExitWatch(p)
+        watch.start()
+        while not watch.exited():
+            left = end - time.monotonic()
+            if left <= 0 or len(data) > _MAX_RECORD:
+                raise Refused(why + "the check of its settings took too long or said too much")
+            if select.select([r], [], [], min(left, 0.05))[0]:
+                chunk = _read(r)
+                if chunk:
+                    data += chunk
+                    continue
+                time.sleep(min(left, 0.01))     # its end (the record's step closed it): the bash is exiting
+        if watch.lost:
+            raise Refused(why + _LOST)
+        # It has exited, unreaped: what's still in the pipe is the end of its record (at most a pipe's buffer).
+        while len(data) <= _MAX_RECORD:
+            chunk = _read(r)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > _MAX_RECORD:
+            raise Refused(why + "the check of its settings said too much")
+        watch.close()
+        reaping = True                          # from here on, nothing is sent: it may already be reaped
+        rc = watch.status if watch.reaped else _reap(p)     # only now; what outlives it is left as it is
+    except BaseException as e:
+        try:
+            _end(p, kill=not reaping and watch is not None and watch.ours())     # never on a watch never built
+        finally:
+            if watch is not None:
+                watch.close()
+        if isinstance(e, OSError):
+            raise Refused(why + f"its settings couldn't be checked ({e})") from None
+        raise
+    if rc is None:
+        raise Refused(why + _LOST)
+    return data, rc
+
+
+def resolve_default(name, env=None):
+    """(settings file, the settings as scripts/lib.sh loaded them) for the default computer NAME, exactly as --vm
+    NAME resolves it; Refused otherwise."""
+    why = f"config/default-vm makes {name} your default computer, but: "
+    r = folder = fifo = None
+    try:
+        try:
+            folder = tempfile.mkdtemp(prefix="mcomp-settings-")      # 0700, this account's
+            fifo = os.path.join(folder, "record")
+            os.mkfifo(fifo, 0o600)
+            r = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)         # not inherited (PEP 446); no writer yet
+            p = subprocess.Popen(["/bin/bash", "--noprofile", "--norc", "-p", "-c", _RESOLVE, "_", LAB, name, fifo],
+                                 env=_scrubbed(os.environ if env is None else env), stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            raise Refused(why + f"its settings couldn't be checked ({e})") from None
+        data, rc = _collect(p, r, why)
+    finally:
+        if r is not None:
+            os.close(r)
+        for path, remove in ((fifo, os.unlink), (folder, os.rmdir)):
+            try:
+                if path:
+                    remove(path)
+            except OSError:
+                pass
+    try:
+        return decode_record(data, rc)
+    except Refused as e:
+        raise Refused(why + str(e)) from None
+
+
+def default_settings_path(name, env=None):
+    """The settings file the default computer NAME resolves to (resolve_default); Refused otherwise."""
+    return resolve_default(name, env)[0]
+
+
+def _selection(env=None):
+    """(the settings file, the settings scripts/lib.sh resolved for it or None to parse it here)."""
+    env = os.environ if env is None else env
+    if env.get("MCOMP_CONFIG"):
+        return env["MCOMP_CONFIG"], None
+    name = env.get("MCOMP_VM") or ""
+    if name:
+        if _NAME.fullmatch(name):
+            p = os.path.join(VMS_DIR, name + ".env")
+            if os.path.isfile(p):
+                return p, None
+        return MAIN_CONFIG, None
+    if not env.get("MCOMP_NO_DEFAULT_VM"):
+        pointer = read_default_vm()
+        if pointer:
+            return resolve_default(pointer, env)
+    return MAIN_CONFIG, None
 
 
 def settings_path(env=None):
-    env = os.environ if env is None else env
-    if env.get("MCOMP_CONFIG"):
-        return env["MCOMP_CONFIG"]
-    name = env.get("MCOMP_VM") or ""
-    if _NAME.fullmatch(name):
-        p = os.path.join(VMS_DIR, name + ".env")
-        if os.path.isfile(p):
-            return p
-    return os.path.join(LAB, "config", "local.env")
+    return _selection(env)[0]
 
 
 def vm_file_name(path):
@@ -50,8 +358,10 @@ def _parse(path):
 
 
 def load(env=None):
+    path, resolved = _selection(env)
+    if resolved is not None:
+        return dict(resolved)       # the default computer's settings as scripts/lib.sh checked them: never re-read
     vals = _parse(os.path.join(LAB, "config", "defaults.env"))
-    path = settings_path(env)
     vm = vm_file_name(path)
     if vm:
         for k in IDENTITY:
