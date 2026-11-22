@@ -5,20 +5,18 @@
     python3 lib/claude_mcp.py user-get NAME --root CHECKOUT --link ~/.local/bin/metacomputer
     python3 lib/claude_mcp.py user-recheck NAME < DIGEST
 
-user-get prints one line of five fields split by \\x1f: OWNER, KIND, WORDS, ENTRY, DIGEST.
+user-get prints one line of four fields split by \\x1f: OWNER, KIND, WORDS, DIGEST.
   OWNER  what the user-scope server NAME is to CHECKOUT (owner() below): ok, ours, checkout, foreign, absent or error
   KIND   stdio, another transport (http, sse, ...), absent or error
   WORDS  what it is, in words, for messages. metacomputer's own (ok, ours, checkout): its command and arguments. Anything
          else: its program's name and how many arguments it has, or its transport, and nothing more: never its
          arguments (`npx mcp-remote https://...?token=...` carries a credential in one), the values of its variables,
          a URL, headers or the entry; for an error, why
-  ENTRY  the entry's exact JSON, for `claude mcp add-json` to put back after a failed replacement: only for a local
-         command without variables of its own (anything else isn't replaced, so it's never needed). install.sh keeps
-         it to itself: it's never printed
   DIGEST a digest of the whole entry (its variables included), for user-recheck
-user-recheck reads the entry again, from the configuration file alone (quick: no `claude mcp get`), right before
-install.sh removes it, and prints "same" and ENTRY (as above, from this read) split by \\x1f when it's still exactly
-the entry whose DIGEST it reads on stdin, "changed" when it isn't (or is gone), or "error" and why.
+install.sh removes or rewrites only metacomputer's own entries (ok, ours, checkout), never anyone else's. user-recheck
+reads the entry again, from the configuration file alone (quick: no `claude mcp get`), right before install.sh removes
+one, and prints "same" when it's still exactly the entry whose DIGEST it reads on stdin, "changed" when it isn't (or
+is gone), or "error" and why, split by \\x1f.
 
 Claude Code has no structured read of one server: `claude mcp get NAME` prints display text, with the arguments
 joined by spaces (an argument's own spaces are lost). So the entry comes from the file Claude Code keeps user-scope
@@ -253,14 +251,6 @@ def words(res, env, own):
     return what + (f" with {n} argument{'' if n == 1 else 's'} (not shown)" if n else ", without arguments") + extra
 
 
-def restorable(res):
-    """The entry's exact JSON when the installer could put it back as it was: a local command without variables."""
-    e = res["entry"]
-    if res["kind"] != "stdio" or e.get("env"):
-        return ""
-    return json.dumps(e, separators=(",", ":"), sort_keys=True)
-
-
 def digest(entry):
     """The whole entry, variables included, as a digest: what user-recheck compares."""
     return hashlib.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -275,13 +265,13 @@ def line(prog, name, root, link, env=None):
         res = user_entry(prog, name, env)
     own = owner(res, root, link)
     e = res["entry"]
-    fields = [own, res["kind"], words(res, env, own), restorable(res) if e else "", digest(e) if e else ""]
+    fields = [own, res["kind"], words(res, env, own), digest(e) if e else ""]
     return US.join(f.replace(US, " ").replace("\n", " ") for f in fields)
 
 
 def recheck(name, want, env=None):
-    """The entry NAME again, right before it's removed: "same<US>ENTRY" when it's still the one whose digest is WANT,
-    else "changed", or "error<US>why"."""
+    """The entry NAME again, right before it's removed: "same" when it's still the one whose digest is WANT, else
+    "changed", or "error<US>why"."""
     env = dict(os.environ if env is None else env)
     servers, why = read_servers(env)
     if servers is None:
@@ -289,7 +279,7 @@ def recheck(name, want, env=None):
     e = servers.get(name)
     if not isinstance(e, dict) or not want or digest(e) != want:
         return "changed"
-    return "same" + US + restorable({"kind": kind_of(e), "entry": e}).replace("\n", " ")
+    return "same"
 
 
 def main(argv):

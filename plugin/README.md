@@ -44,8 +44,8 @@ before doing anything. The installer:
 - links the `metacomputer` command into `~/.local/bin`;
 - sets up Claude Code: this plugin, and metacomputer's MCP server for every project (user scope, named `metacomputer`,
   running `~/.local/bin/metacomputer mcp-lazy`; its tools are `mcp__metacomputer__*`). Claude Code loads the server
-  after a restart, or `/mcp` in an open session. A server of that name that isn't metacomputer's is left as it is,
-  and the installer says how to replace it;
+  after a restart, or `/mcp` in an open session. A server of that name that isn't metacomputer's is never changed,
+  and the installer says how to remove it yourself;
 - if you also use OpenAI's Codex, adds metacomputer to Codex: its MCP server, its skills, and rules that let
   metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves Codex alone).
 

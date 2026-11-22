@@ -336,37 +336,42 @@ argument list:
   install says what it ran.
 - another metacomputer checkout's launcher with exactly `mcp-lazy`: moved to this one
   only with `--switch` (or a yes at a terminal).
-- anything else: left as it is. That includes `~/.local/bin/metacomputer` with other
-  arguments (a space more or less too), an interpreter or another file inside the
-  checkout, a path that only starts with the checkout's, and a launcher that doesn't
-  exist (nothing shows whose it was). A local command without variables of its own is
-  replaced with `--replace-mcp` (or a yes at a terminal); for one that sets variables,
-  or isn't a local command, the install says how to remove it yourself. The install
-  and `metacomputer agents` name such a registration by its program and how many
-  arguments it has, or its transport: its arguments, variables' values and URL are
-  never printed, since any of them can carry a credential.
+- anything else: never removed or changed, at a terminal or not, with `--yes` or
+  without. That includes `~/.local/bin/metacomputer` with other arguments (a space
+  more or less too), an interpreter or another file inside the checkout, a path that
+  only starts with the checkout's, a launcher that doesn't exist (nothing shows whose
+  it was), one that sets variables of its own, and one that isn't a local command. The
+  install says how to remove it yourself (`claude mcp remove metacomputer -s user`,
+  then `./install.sh --only-claude`), and its Claude Code step counts as unfinished.
+  The install and `metacomputer agents` name such a registration by its program and
+  how many arguments it has, or its transport: its arguments, variables' values and
+  URL are never printed, since any of them can carry a credential.
 
-`--yes`, and runs without a terminal (`metacomputer update`), never replace a
-registration that isn't metacomputer's own. The old registration is read again
-right before it's removed and left as it is when it changed since (variables
-included: another Claude Code may change it meanwhile; Claude Code has no lock an
-installer can hold across the removal and the add, so only a change in the moment
-between that read and the removal can go unseen). It's removed only right before the
-new one is added and read back, and when the add fails it's put back exactly as it
-was (`claude mcp add-json`, read back again); if that fails too, its entry is saved
-in a file only you can read (`~/.local/share/metacomputer/claude-mcp-metacomputer.*`),
-never printed. What served the tools before is retired only once the new server is
-registered and read back: an older plugin copy's own server, another checkout's
-marketplace and its plugin, the plugin itself with `--no-plugin`, and the server
-names earlier versions used; each removal is checked, and one whose state can't be
-read is left as it is and counts as not done. A project or local server
+Only metacomputer's own registration is ever removed, and it's read again right
+before that and left as it is when it changed since (variables included: another
+Claude Code may change it meanwhile; Claude Code has no lock an installer can hold
+across the removal and the add, so only a change in the moment between that read and
+the removal can go unseen). Once it's removed, the new one is always added and read
+back; when that doesn't work, the install says the server is missing (or that it
+can't tell) and the exact command that adds it, `claude mcp add -s user metacomputer
+~/.local/bin/metacomputer mcp-lazy`: nothing of yours is lost, since that command
+makes metacomputer's again. What served the tools before is retired only once the new
+server is registered and read back: an older plugin copy's own server, another
+checkout's marketplace and its plugin (read first: a plugin you turned off stays off,
+and one that can't be read stops the switch), the plugin itself with `--no-plugin`,
+and the server names earlier versions used; each removal is checked, and one whose
+state can't be read is left as it is and counts as not done. A marketplace other
+than your checkout and the project's repository is named only as another checkout's
+or another source's, never by its folder or location. A project or local server
 named `metacomputer` in the folder you run the install in takes precedence there:
 it's reported, never changed. When a lookup fails, the server can't be registered,
 or something can't be retired, the rest of the install still runs, it says what to
 run, and it ends with exit status 1; it also records the Claude Code step as
-unfinished (`--only-claude` and `--only-agents` too; a run that finishes it clears
-that), so the next `metacomputer update` runs the install again even when the
-checkout is already at the release.
+unfinished, right after that step (`--only-claude` and `--only-agents` too; a run
+that finishes it clears that, and a run that doesn't set Claude Code up leaves it),
+so the next `metacomputer update` runs the install again even when the checkout is
+already at the release. `--uninstall` removes metacomputer's server before the
+command it runs, and keeps the command when the server stays.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:
