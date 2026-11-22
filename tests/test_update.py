@@ -154,6 +154,29 @@ check("going back (--ref an older release): refused", rc == 3 and "isn't ahead" 
 rc, out, calls = upd(co6, "update", "--ref", "v0.2.0", "--allow-downgrade")
 check("…and on main it can't be moved back even with --allow-downgrade (main only goes forward)", rc == 3
       and git("rev-parse", "HEAD", cwd=co6) == tags["0.3.0"] and not calls, out)
+# An install whose Claude Code step didn't finish (install.sh hands MCOMP_INSTALL_INCOMPLETE=claude to the after-install
+# step) is recorded as such, and `update` runs install.sh again although the checkout is at the release.
+co7 = fresh("0.3.0")
+stamp7 = os.path.join(HOME, ".local", "share", "metacomputer", "installed.json")
+write(stamp7, json.dumps({"version": "v0.3.0", "tag": "v0.3.0", "commit": tags["0.3.0"], "checkout": co7}))
+rc, out, calls = upd(co7, "update")
+check("up to date and installed from here: install.sh isn't run again", rc == 0
+      and not [c for c in calls if c.startswith("install ")], (out, calls))
+write(stamp7, json.dumps({"version": "v0.3.0", "tag": "v0.3.0", "commit": tags["0.3.0"], "checkout": co7,
+                          "incomplete": ["claude"]}))
+rc, out, calls = upd(co7, "update")
+check("…but when that install left Claude Code's setup unfinished, update runs install.sh again",
+      rc == 0 and "install --yes --no-build restart=ask" in calls, (out, calls))
+rc, out, _ = upd(co7, "version")
+check("…and `metacomputer version` says so", "setup didn't finish: metacomputer update runs the install again" in out, out)
+for env, want in (({"MCOMP_INSTALL_INCOMPLETE": "claude"}, ["claude"]), ({}, None)):
+    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1] + '/lib'); import update; "
+                        "update.tty = lambda: None; update.after_install(restart='no', quiet=True)", co7],
+                       capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, start_new_session=True,
+                       env=dict(GENV, STUB_LOG=LOG, STUB_RUNINFO=RUNINFO, **env))
+    got = json.load(open(stamp7)).get("incomplete")
+    check(f"the after-install step records {'an unfinished' if want else 'a finished'} Claude Code setup "
+          f"({'incomplete: claude' if want else 'no incomplete key'})", got == want, (got, r.stdout[-300:], r.stderr[-300:]))
 
 # --- the after-install step ------------------------------------------------------------------------------------
 DRIVER = r'''

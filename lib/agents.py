@@ -4,9 +4,10 @@
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
                                         (install.sh --no-claude / --no-codex, remembered for later runs). For
                                         Claude Code: the skills (the plugin, or a skill link with --no-plugin) and
-                                        the tools (the user-scope MCP server metacomputer, read as such: its command
-                                        and arguments checked; the plugin declares none, and an older copy of it that
-                                        still brings its own is reported), and this checkout's command that adds them
+                                        the tools (the user-scope MCP server metacomputer, read as install.sh reads
+                                        it, lib/claude_mcp.py: its command and exact arguments checked; the plugin
+                                        declares none, and an older copy of it that still brings its own is
+                                        reported), and this checkout's command that adds them
   metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
                                         without touching your Codex settings (a throwaway CODEX_HOME): its rules
                                         checker, the sandbox's marker, `codex mcp` and the two settings install.sh
@@ -110,34 +111,25 @@ def claude_status():
     st["plugin"] = plugin
     st["plugin_mcp_server"] = plugin_server
     srv = user_server(prog)
-    st["user_mcp_server"] = srv.get("kind") not in ("absent", "error")
-    st["mcp_command"] = srv.get("command")
-    st["mcp_args"] = srv.get("args")
-    st["mcp_ok"] = (srv.get("kind") == "stdio" and srv.get("command") == os.path.expanduser("~/.local/bin/metacomputer")
-                    and srv.get("args") == "mcp-lazy")
-    if srv.get("kind") == "error":
-        st["mcp_error"] = True
+    st["user_mcp_server"] = srv["kind"] not in ("absent", "error")
+    st["mcp_server"] = srv["words"] if st["user_mcp_server"] else None
+    st["mcp_ok"] = srv["owner"] == "ok"
+    if srv["kind"] == "error":
+        st["mcp_error"] = srv["words"]
     st["skill_link"] = link_target(os.path.expanduser("~/.claude/skills/metacomputer"))
     st["set_up"] = st["mcp_ok"] or plugin_server
     return st
 
 
 def user_server(prog):
-    """Claude Code's user-scope MCP server metacomputer, read with `claude mcp get` from an empty folder (so no project
-    or local server stands in for it), as install.sh reads it: {"kind": "absent" | "error" | "stdio" | TYPE, "command",
-    "args"}. Nothing of it is printed but the command and arguments."""
-    with tempfile.TemporaryDirectory(prefix="mcomp-agents-") as td:
-        rc, out, err = run([prog, "mcp", "get", "metacomputer"], cwd=td)
-    if rc != 0:
-        return {"kind": "absent" if 'No MCP server named "metacomputer"' in out + err else "error"}
-    f = {}
-    for ln in out.splitlines():
-        if ln.startswith("  ") and not ln.startswith("   ") and ":" in ln:
-            k, _, v = ln.strip().partition(":")
-            f.setdefault(k, v.strip())
-    if not f.get("Scope", "").startswith("User config") or not f.get("Type"):
-        return {"kind": "error"}
-    return {"kind": f["Type"], "command": f.get("Command"), "args": f.get("Args")}
+    """Claude Code's user-scope MCP server metacomputer, read as install.sh reads it (lib/claude_mcp.py: the entry in
+    Claude Code's configuration, checked against `claude mcp get` from an empty folder; its exact arguments compared):
+    {"owner", "kind", "words"}. Only the command and arguments are kept for the report, never variables or URLs."""
+    import claude_mcp
+    env = dict(os.environ, PATH=SAFE_PATH)
+    res = claude_mcp.user_entry(prog, "metacomputer", env)
+    return {"owner": claude_mcp.owner(res, LAB, os.path.expanduser("~/.local/bin/metacomputer")), "kind": res["kind"],
+            "words": claude_mcp.words(res, env)}
 
 
 INSTALL_CLAUDE = f"{os.path.join(LAB, 'install.sh')} --only-claude"
@@ -164,11 +156,10 @@ def claude_missing(s):
     """Claude Code installed, but without metacomputer's tools: why, and what this checkout runs to add them."""
     skills = claude_skills(s)
     if s.get("mcp_error"):
-        return f"{skills}; the MCP server metacomputer couldn't be read (claude mcp get metacomputer)"
+        return f"{skills}; the MCP server metacomputer couldn't be read ({s['mcp_error']})"
     if s.get("user_mcp_server"):
-        what = " ".join(x for x in (s.get("mcp_command"), s.get("mcp_args")) if x) or "a server that isn't a local command"
-        return (f"{skills}, but the user-scope MCP server metacomputer runs {what}, not ~/.local/bin/metacomputer mcp-lazy "
-                f"(no metacomputer tools); {INSTALL_CLAUDE} says how to replace it")
+        return (f"{skills}, but the user-scope MCP server metacomputer runs {s['mcp_server']}, not "
+                f"~/.local/bin/metacomputer mcp-lazy (no metacomputer tools); {INSTALL_CLAUDE} says how to replace it")
     return f"{skills}, but no MCP server metacomputer (no tools); {INSTALL_CLAUDE} adds it"
 
 

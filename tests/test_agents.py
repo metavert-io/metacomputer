@@ -64,7 +64,8 @@ esac
 
 # A claude that answers `plugin list --json` with $FAKE_PLUGINS and `mcp get metacomputer` with a user-scope server
 # running $FAKE_MCP $FAKE_ARGS (default mcp-lazy); "No MCP server" on stderr without one, as the real one; FAKE_MCP_FAIL:
-# the lookup fails.
+# the lookup fails. The same server is in ~/.claude.json, where Claude Code keeps it (the test writes it), since
+# agents reads the exact entry from there and checks it against `mcp get`.
 FAKE_CLAUDE = """#!/bin/sh
 case "$1 $2" in
   "--version ") echo "2.1.999 (Claude Code)" ;;
@@ -89,8 +90,13 @@ def claude_cases(t, base):
     old = dict(plug, mcpServers={"metacomputer": {"command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer"}})
     link = os.path.join(base["HOME"], ".claude", "skills", "metacomputer")
 
-    def agents(plugins, mcp, *args, **extra):
-        env = dict(base, PATH=fake + ":/usr/bin:/bin", FAKE_PLUGINS=json.dumps(plugins), FAKE_MCP=mcp, **extra)
+    def agents(plugins, mcp, *args, argv=("mcp-lazy",), **extra):
+        with open(os.path.join(base["HOME"], ".claude.json"), "w") as f:
+            json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": mcp, "args": list(argv), "env": {}}}
+                       if mcp else {}}, f)
+        env = dict(base, PATH=fake + ":/usr/bin:/bin", FAKE_PLUGINS=json.dumps(plugins), FAKE_MCP=mcp,
+                   FAKE_ARGS=" ".join(argv))
+        env.update(extra)            # FAKE_ARGS here: what `mcp get` shows, against what the configuration holds
         return run(list(args), env)
     fix = os.path.join(LAB, "install.sh") + " --only-claude"
 
@@ -98,7 +104,7 @@ def claude_cases(t, base):
     st = json.loads(r.stdout or "{}").get("claude_code", {})
     check("Claude Code with the plugin and the user-scope server: set up, the server's command reported, no plugin server",
           st.get("set_up") is True and st.get("plugin") == "on" and st.get("user_mcp_server") is True
-          and st.get("mcp_command") == cmd and st.get("plugin_mcp_server") is False, st)
+          and st.get("mcp_server") == "~/.local/bin/metacomputer mcp-lazy" and st.get("plugin_mcp_server") is False, st)
     r = agents([plug], cmd)
     check("...said as the plugin's skills and the MCP server metacomputer",
           "set up (the plugin's skills and the MCP server metacomputer)" in r.stdout, r.stdout)
@@ -109,10 +115,14 @@ def claude_cases(t, base):
     r = agents([plug], "/opt/other/bin/thing")
     check("a user-scope server that runs something else: no metacomputer tools, and what it runs",
           "runs /opt/other/bin/thing mcp-lazy, not ~/.local/bin/metacomputer mcp-lazy" in r.stdout and fix in r.stdout, r.stdout)
-    r = agents([plug], cmd, FAKE_ARGS="status")
-    check("metacomputer's command with other arguments: not counted as set up",
-          f"runs {cmd} status" in r.stdout and json.loads(agents([plug], cmd, "--json", FAKE_ARGS="status").stdout)
-          ["claude_code"]["set_up"] is False, r.stdout)
+    for argv in (["status"], [" mcp-lazy"], ["mcp-lazy "], []):
+        r = agents([plug], cmd, argv=argv)
+        check(f"metacomputer's command with the arguments {argv}: not counted as set up (exact arguments compared)",
+              "runs ~/.local/bin/metacomputer" in r.stdout and "no metacomputer tools" in r.stdout
+              and json.loads(agents([plug], cmd, "--json", argv=argv).stdout)["claude_code"]["set_up"] is False, r.stdout)
+    r = agents([plug], cmd, FAKE_ARGS="other")
+    check("the configuration and `claude mcp get` disagree: said as unreadable, not set up", "couldn't be read" in r.stdout,
+          r.stdout)
     r = agents([plug], cmd, FAKE_MCP_FAIL="1")
     check("a lookup that fails is said, not taken for no server", "couldn't be read" in r.stdout, r.stdout)
     r = agents([old], "")
