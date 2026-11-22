@@ -3,13 +3,16 @@
 This project is a disposable Ubuntu 24.04 ARM64 XFCE desktop (a Lume VM, named
 by `VM_NAME` in `config/local.env`, default `metacomputer`) that you operate
 through **Cua Driver's MCP server running inside the VM**, exposed as the
-`metacomputer` MCP server of the `metacomputer` Claude Code plugin (`plugin/`,
-listed by `.claude-plugin/marketplace.json`; `install.sh` installs it for every
-project → `bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
-`lib/mcp_hub.py`). Tools appear as `mcp__plugin_metacomputer_metacomputer__<tool>`,
-or `mcp__metacomputer__<tool>` where the server is registered without the plugin
-(`install.sh --no-plugin`, and the MCP configs of the benchmark and tests). The
-plugin's `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
+user-scope MCP server `metacomputer` that `install.sh` registers with Claude Code
+for every project (`claude mcp add -s user metacomputer ~/.local/bin/metacomputer
+mcp-lazy` → `bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
+`lib/mcp_hub.py`). Tools appear as `mcp__metacomputer__<tool>`, as they do in Codex
+and in the MCP configs of the benchmark and tests; `mcp__plugin_metacomputer_metacomputer__<tool>`
+is what an older copy of the plugin named them, when it brought the server itself.
+The `metacomputer` Claude Code plugin (`plugin/`, listed by
+`.claude-plugin/marketplace.json`; `install.sh` installs it for every project too)
+carries the skills, `/metacomputer:learn` and the command, and no MCP server or
+hooks. Its `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
 project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rules.
 
 ## Rules
@@ -216,18 +219,25 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `scripts/lib.sh` falls back to `~/.local/bin/lume-secure` (with a notice) while
   `LUME`'s runner isn't installed; keep that until old installs are gone.
 - The Claude Code plugin is `plugin/`, regular files only (Anthropic's plugin directory takes no links, and a
-  GitHub install copies the plugin folder alone, so it must carry the notices): copies of `skills/metacomputer`,
+  GitHub install copies the plugin folder alone, so it must carry the notices). It declares no MCP server and no
+  hooks: the directory holds a version for a reviewer when a hook or MCP server command runs a script it can't
+  follow (variables other than `${CLAUDE_PLUGIN_ROOT}`, command substitution, another file), and the launcher is
+  such a script. `install.sh` registers the MCP server itself (`register_server`: user scope,
+  `~/.local/bin/metacomputer mcp-lazy`, replacing a registration that runs anything else; `--no-plugin` keeps the
+  server and swaps the plugin for a skill link; `--uninstall` removes both; an older GitHub copy that still brings
+  its own server is updated, so the tools aren't listed twice). Keep `mcpServers` and `hooks` out of plugin.json
+  (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
   `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the
   driver pack's `../../../skills/metacomputer/` links resolve in both. Edit the repository's files, then run
   `python3 scripts/sync-plugin.py` (test_plugin fails while a copy differs). Its own files: `README.md` (the directory
   listing's text, which must say everything the plugin runs, sends or fetches: keep it and PRIVACY.md current),
   `icon.png` (rendered from `icon.svg`), `commands/learn.md` and `bin/metacomputer`, a short launcher, not a copy of
-  the command: it hands over to the installed checkout (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`), whether
-  Claude Code loads the plugin in place (`install.sh`'s local marketplace) or from a GitHub install's copy. With no
-  checkout, its only other action, in a copy inside Claude Code's plugin folder, is `setup`: `/bin/bash` with the
-  `get.sh` at that copy's root, with `--confirm` and an allowlist of options; never let a variable or option pick
-  another script or repository (with `--confirm`, get.sh uses an existing checkout only when it's a clean one of the
-  project's repository). Keep `..` out of plugin.json and the launcher (the directory refuses a path that climbs out).
+  the command (the `metacomputer` command on Claude Code's PATH while the plugin is on): it hands over to the
+  installed checkout (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`), whether Claude Code loads the plugin in place
+  (`install.sh`'s local marketplace) or from a GitHub install's copy. With no checkout, its only other action, in a
+  copy inside Claude Code's plugin folder, is `setup`: `/bin/bash` with the `get.sh` at that copy's root, with
+  `--confirm` and an allowlist of options; never let a variable or option pick another script or repository (with
+  `--confirm`, get.sh uses an existing checkout only when it's a clean one of the project's repository). Keep `..` out of plugin.json and the launcher (the directory refuses a path that climbs out).
 - Installers never delete a VM on their own: a VM without its baseline is replaced only
   with `install.sh --replace-vm` (never implied by `--yes`); lookups that fail (the VM
   listing, `vm_dir`, release tags, where Lume keeps VMs) stop instead of guessing. One

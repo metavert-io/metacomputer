@@ -21,12 +21,15 @@ me what it does".
 
 - **Skills:** `metacomputer`, which tells Claude when a task belongs on the VM and how to drive this desktop, and
   `cua-driver`, the guide to Cua Driver's tools on Linux (from Cua, MIT-licensed).
-- **An MCP server**, `metacomputer`, started by Claude Code as `bin/metacomputer mcp-lazy`. Its tools are Cua
-  Driver's, which run inside the VM; every call goes through metacomputer's hub on your Mac, which applies its
-  guards (one session at a time, real input for Chrome, the limits of bounded mode).
 - **A command**, `/metacomputer:learn`, which reports repeated mistakes in your own metacomputer sessions.
-- **`bin/metacomputer`**, a short launcher: it runs the metacomputer installed on your Mac with the same arguments.
+- **`bin/metacomputer`**, a short launcher that Claude Code puts on its Bash tool's PATH: it runs the metacomputer
+  installed on your Mac with the same arguments.
 - **`get.sh`**, the installer that `metacomputer setup` runs when nothing is installed yet.
+
+The plugin declares no MCP server and no hooks: nothing in it runs unless Claude or you run its command. The tools come
+from metacomputer's MCP server, which the installer adds to Claude Code (below): Cua Driver's tools, which run inside the VM, with every call
+going through metacomputer's hub on your Mac, which applies its guards (one session at a time, real input for Chrome,
+the limits of bounded mode).
 
 ## Setting it up
 
@@ -39,12 +42,14 @@ before doing anything. The installer:
 - downloads metacomputer into `~/metacomputer` and builds its tools and the VM (in that folder, `~/.local/share` and
   Lume's VM folder, normally `~/.lume`; about 15 GB);
 - links the `metacomputer` command into `~/.local/bin`;
-- sets up Claude Code (this plugin) and, if you also use OpenAI's Codex, adds metacomputer to Codex: its MCP server,
-  its skills, and rules that let metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves
-  Codex alone).
+- sets up Claude Code: this plugin, and metacomputer's MCP server for every project (user scope, named `metacomputer`,
+  running `~/.local/bin/metacomputer mcp-lazy`; its tools are `mcp__metacomputer__*`). Claude Code loads the server
+  after a restart, or `/mcp` in an open session;
+- if you also use OpenAI's Codex, adds metacomputer to Codex: its MCP server, its skills, and rules that let
+  metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves Codex alone).
 
-It changes no Claude Code permission settings. `~/metacomputer/install.sh --uninstall` removes the command, the plugin
-and the Codex setup.
+It changes no Claude Code permission settings. `~/metacomputer/install.sh --uninstall` removes the command, the plugin,
+the MCP server and the Codex setup.
 
 ## What it sends and where
 

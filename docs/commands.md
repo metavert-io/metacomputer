@@ -305,24 +305,32 @@ shared by every VM, and each event names its VM.
 
 ## The Claude Code plugin
 
-`./install.sh` installs the plugin `metacomputer@metacomputer` at user scope, from
-the marketplace `metacomputer` (your checkout), so the skills and tools are there
-in every project. It brings:
-- the `metacomputer` skill ([skills/metacomputer/](../skills/metacomputer/)): when a
-  task belongs on the virtual computer, and how to drive this desktop;
-- Cua Driver's own guide, as `metacomputer:cua-driver`;
-- `/metacomputer:learn`, which runs the lessons report in a chat;
-- the MCP server `metacomputer` (`…/bin/metacomputer mcp-lazy`), which lists the
-  tools even while the VM is off and reaches the VM through the hub.
+`./install.sh` sets Claude Code up in two parts, both for every project:
+- the plugin `metacomputer@metacomputer`, at user scope, from the marketplace
+  `metacomputer` (your checkout). It brings the `metacomputer` skill
+  ([skills/metacomputer/](../skills/metacomputer/)), which says when a task belongs on
+  the virtual computer and how to drive this desktop; Cua Driver's own guide, as
+  `metacomputer:cua-driver`; `/metacomputer:learn`, which runs the lessons report in a
+  chat; and its `bin/metacomputer`, the `metacomputer` command on Claude Code's PATH.
+  The plugin declares no MCP server and no hooks.
+- the MCP server `metacomputer`, at user scope (`claude mcp add -s user metacomputer
+  ~/.local/bin/metacomputer mcp-lazy`), which lists the tools even while the VM is off
+  and reaches the VM through the hub. It runs the checkout the `metacomputer` command
+  runs, so `--switch` moves both. A registration under that name that runs anything
+  else (an earlier install's `bin/metacomputer` path, a checkout that moved or another
+  one) is replaced, and the install says what it ran. Claude Code loads a server it
+  just added after a restart, or `/mcp` in an open session; the install says so when
+  it added one.
 
-**Tool names.** `mcp__plugin_metacomputer_metacomputer__*` from the plugin, and
-`mcp__metacomputer__*` without it (`./install.sh --no-plugin`: a skill link at
-`~/.claude/skills/metacomputer` and a user-scope MCP server). The skill works with
-either. Permission rules, scripts and MCP configurations of your own that name
-`mcp__metacomputer__` need the plugin's prefix too, for example
-`"permissions": {"allow": ["mcp__plugin_metacomputer_metacomputer__*"]}`. An earlier
-install's skill link and user-scope server are removed when they point at the same
-checkout, so the tools aren't listed twice.
+**Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
+brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:
+permission rules, scripts and MCP configurations of your own that name the long
+prefix need the short one, for example
+`"permissions": {"allow": ["mcp__metacomputer__*"]}`. The skill, the benchmark and
+`metacomputer learn` accept both. `./install.sh --no-plugin` sets up the same server
+with a skill link at `~/.claude/skills/metacomputer` instead of the plugin; an earlier
+install's skill link is removed when it points at the same checkout and the plugin is
+there, so the skill isn't listed twice.
 
 **Updates.** Installed from the checkout, the plugin loads in place: after a
 `git pull`, new sessions pick up the new skills. Installed from GitHub
@@ -333,10 +341,18 @@ Claude Code keeps a copy that follows the repository's commits: update it with
 `claude plugin update metacomputer@metacomputer`. That copy's `bin/metacomputer`
 runs your checkout's, through `~/.local/bin/metacomputer` or the checkout
 `MCOMP_HOME` names; with no checkout yet, it can only run `setup`
-([install.md](install.md#from-claude-code-first-the-plugin)).
+([install.md](install.md#from-claude-code-first-the-plugin)), whose install registers
+the MCP server. A copy from before that still brings its own server is updated by
+`./install.sh` (`metacomputer update` runs it); when that update fails, the install
+says the tools are listed twice until you run `claude plugin update`.
 
 **Whose plugin.** A marketplace named `metacomputer` that's already registered is
 used only when it's this checkout or github.com/metavert-io/metacomputer. From
 anywhere else, its plugin isn't installed, since it would run that source's code
 on your Mac; the installer says how to remove it and sets up the skill link and
 server instead.
+
+**Turned off.** A plugin you turned off stays off, and the install leaves the rest of
+Claude Code's setup as it is: it adds no MCP server then (after `claude plugin enable
+metacomputer@metacomputer`, `./install.sh --only-claude` adds it). `metacomputer agents`
+says which parts are there.

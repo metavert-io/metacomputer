@@ -82,7 +82,8 @@ type the answers (see "Tampering" below).
   (`logs/actions/`, `logs/events.jsonl`), and of each `--logs DIR`.
 
 Only sessions that called a metacomputer tool are read, under either prefix
-(`mcp__metacomputer__*` or `mcp__plugin_metacomputer_metacomputer__*`). Every
+(`mcp__metacomputer__*`, or `mcp__plugin_metacomputer_metacomputer__*` in sessions from
+when the plugin brought the server itself). Every
 transcript file changed within `--since` is scanned for that tool call's marker,
 and nothing else is kept from files that don't have it. `--since` takes `7d`
 (the default), `12h`, `2w` or a date; `--project PATH` keeps only sessions that

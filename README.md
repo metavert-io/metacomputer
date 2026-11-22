@@ -10,8 +10,8 @@ way a programmer would, with a shell, Python, LibreOffice, ImageMagick and
 ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what the agent does there can be logged, limited and approved.
 
-Both agents get the same tools, skill and protections: Claude Code through its plugin, Codex through its MCP
-server, skills and sandbox rules ([docs/codex.md](docs/codex.md)). Install once and whichever you have is set up.
+Both agents get the same tools, skill and protections: Claude Code through its plugin and MCP server, Codex through
+its MCP server, skills and sandbox rules ([docs/codex.md](docs/codex.md)). Install once and whichever you have is set up.
 
 https://github.com/user-attachments/assets/9465c66c-88fd-4e58-845e-a430c61ddf1a
 
@@ -32,7 +32,7 @@ and asks you nothing; on a new Mac it offers to install those first.
 ## Try it
 
 Start a new Claude Code or Codex session (restart open Claude Code sessions, so
-they load the plugin), then ask:
+they load the plugin and the tools), then ask:
 
 > Get yourself a virtual computer and tell me what's on its screen.
 
@@ -100,11 +100,12 @@ finished steps are skipped, and it never deletes a VM.
 /plugin install metacomputer@metacomputer
 ```
 
-Then ask Claude to set up metacomputer. The plugin brings the skills and tools
-but not the VM. Its skill sees that nothing is set up, says what setup does and
-asks you; on a yes it runs the plugin's own `metacomputer setup --yes`, the same
-get.sh shipped inside the plugin, so nothing is downloaded and run from
-elsewhere. If Homebrew is missing, run that setup command in Terminal instead,
+Then ask Claude to set up metacomputer. The plugin brings the skills but not
+the VM or the tools. Its skill sees that nothing is set up, says what setup does
+and asks you; on a yes it runs the plugin's own `metacomputer setup --yes`, the
+same get.sh shipped inside the plugin, so nothing is downloaded and run from
+elsewhere. Setup adds metacomputer's MCP server to Claude Code; restart it (or
+run `/mcp`) to load the tools. If Homebrew is missing, run that setup command in Terminal instead,
 since Homebrew asks for your password.
 
 Or by hand: `git clone https://github.com/metavert-io/metacomputer.git ~/metacomputer && cd ~/metacomputer && ./install.sh`.
@@ -541,7 +542,7 @@ fifty, from office work and games to research and teaching it a new app.
 ```text
 Your Mac                                                         The VM: Ubuntu 24.04, XFCE
 Claude Code or Codex
- └─ metacomputer's skill + MCP tools (the plugin; for Codex, its config)
+ └─ metacomputer's skill + MCP tools (the plugin and an MCP server; for Codex, its config)
      └─ the hub: one per VM, every guard ───────────── SSH ──▶ Cua Driver ──▶ the desktop's apps
  metacomputer sh ───────────────────────────────────── SSH ──▶ bash, as the desktop user
  the secrets vault, unlocked in your terminal ──────── SSH ──▶ locked fill and proxy accounts
@@ -551,15 +552,15 @@ Claude Code or Codex
 ```
 
 Install gives your agent the `metacomputer` skill (Claude Code's plugin; Codex's skills folder), which says when a task
-belongs on the VM and how to drive this desktop, and an MCP server whose tools
-are Cua Driver's, running inside the VM. Every call goes through the hub, which
+belongs on the VM and how to drive this desktop, and an MCP server (in Claude Code, at user scope, beside the plugin)
+whose tools are Cua Driver's, running inside the VM. Every call goes through the hub, which
 holds the only connection to the driver and applies the same guards to Claude
 Code, Codex, `metacomputer call` and scripts. Files go over the shell channel, and
 sign-ins and API keys through the vault. Each part exists on its own, mostly from
 Cua; metacomputer builds them from pinned, verified sources with one command and
 teaches the agent this particular desktop. [architecture.md](architecture.md) has
 the design, and [docs/commands.md](docs/commands.md#the-claude-code-plugin) the
-plugin's tool names and updates.
+tool names and the plugin's updates.
 
 ## Security in brief
 
@@ -710,7 +711,7 @@ unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 | Symptom | What to do |
 | --- | --- |
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the logs; `metacomputer restart` stops the VM and starts it again. |
-| A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `plugin:metacomputer:metacomputer`, or restart Claude Code. `./install.sh --only-claude` sets it up again. |
+| A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `metacomputer`, or restart Claude Code. `metacomputer agents` says what's set up; `./install.sh --only-claude` sets it up again. |
 | A Codex session has no metacomputer tools, or a `metacomputer` command exits 77 | `./install.sh --only-codex`, then a new Codex session ([docs/codex.md](docs/codex.md#if-something-doesnt-work)). |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
 | "Paused: the user has the computer" | Your agent handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
@@ -739,11 +740,14 @@ a `secrets bind` when the gateway changed, or what a VM rebuild would add
 Before v0.4.1 there's no `update` command: run the install line again, which ends
 the same way. `metacomputer version` shows what's installed and what built each VM,
 and `metacomputer status` says when a newer release is out. A plugin installed from GitHub
-updates with `claude plugin update metacomputer@metacomputer`.
+updates with `claude plugin update metacomputer@metacomputer`. Through v0.4.4 the plugin brought the MCP server
+itself; updating from one of those registers the server at user scope instead, so Claude Code's tools are
+`mcp__metacomputer__*` (no longer `mcp__plugin_metacomputer_metacomputer__*`): restart Claude Code afterwards, and
+change permission rules of your own that name the long prefix.
 
 ```bash
 metacomputer stop
-~/metacomputer/install.sh --uninstall   # the command, the plugin, Codex's setup and the vault program
+~/metacomputer/install.sh --uninstall   # the command, Claude Code's plugin and MCP server, Codex's setup and the vault program
 ```
 
 It then prints the commands that remove the VM and its keys. Your vault, event

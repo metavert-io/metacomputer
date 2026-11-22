@@ -1749,6 +1749,22 @@ CLAIMS = [
      lambda m: m[1] == "on" and D["UPDATE_CHECK"] == "on"),
     ("README.md", r"it never rebuilds on its own",
      lambda m: not re.search(r'mc\(vm, "build"|"build", "--replace"\]', raw("lib/update.py"))),
+    # Claude Code's setup: the plugin declares nothing that runs; install.sh registers the MCP server itself
+    ("plugin/README.md", r"The plugin declares no MCP server and no hooks: nothing in it runs unless Claude or you run its command",
+     lambda m: not ({"mcpServers", "hooks", "lspServers"} & set(json.loads(raw("plugin/.claude-plugin/plugin.json"))))
+     and not os.path.exists(os.path.join(LAB, "plugin", ".mcp.json"))
+     and not os.path.exists(os.path.join(LAB, "plugin", "hooks"))),
+    ("plugin/README.md", r"It changes no Claude Code permission settings",
+     lambda m: not re.search(r"permission|settings\.json|allowedTools", raw("install.sh"), re.I)),
+    ("plugin/README.md", r"metacomputer's MCP server for every project \(user scope, named `metacomputer`, running `~/\.local/bin/metacomputer mcp-lazy`",
+     lambda m: 'claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy' in raw("install.sh")
+     and 'CMD_LINK="$HOME/.local/bin/metacomputer"' in raw("install.sh")),
+    ("docs/commands.md", r"A registration under that name that runs anything else \(an earlier install's `bin/metacomputer` path, a checkout that moved or another one\) is replaced, and the install says what it ran",
+     lambda m: 'if [ "$cmd" = "$CMD_LINK" ]; then' in raw("install.sh")
+     and "it replaces the registration that ran" in raw("install.sh")),
+    ("docs/commands.md", r"A plugin you turned off stays off, and the install leaves the rest of Claude Code's setup as it is: it adds no MCP server then",
+     lambda m: re.search(r"\n +2\) # turned off: left so, and so is everything else of Claude Code's\n[^\n]*\n[^\n]*;;\n",
+                         raw("install.sh")) is not None),
 ]
 
 

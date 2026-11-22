@@ -98,13 +98,17 @@ and `/var/lib/metacomputer/package-versions.txt` (copied to `logs/` at build).
 
 ## Desktop-control transport
 
-Claude Code sessions use `metacomputer` → `bin/metacomputer mcp-lazy`
-(`lib/mcp_lazy.py`), the MCP server of the `metacomputer` plugin (`plugin/`;
-or, with `install.sh --no-plugin`, a user-scope server), so it exists in every
-project. Its tools are `mcp__plugin_metacomputer_metacomputer__*` from the plugin
-and `mcp__metacomputer__*` otherwise. The plugin's own `bin/metacomputer` is a short
-launcher (`plugin/bin/metacomputer`, in place or in a GitHub install's copy) that hands
-over to the checkout `install.sh` set up (`MCOMP_HOME`, else `~/.local/bin/metacomputer`). It answers `initialize` and `tools/list` from a saved copy of the
+Claude Code sessions use `metacomputer` → `~/.local/bin/metacomputer mcp-lazy`
+(`bin/metacomputer`, `lib/mcp_lazy.py`), the user-scope MCP server `install.sh`
+registers (`register_server`), so it exists in every project; its tools are
+`mcp__metacomputer__*`. The `metacomputer` plugin (`plugin/`) brings the skills, not
+the server: it declares no MCP server and no hooks, so Anthropic's plugin directory
+has no hook or server script to follow (an older copy declared the server, and its tools
+were `mcp__plugin_metacomputer_metacomputer__*`). The plugin's own `bin/metacomputer`, the
+`metacomputer` command on Claude Code's PATH, is a short launcher
+(`plugin/bin/metacomputer`, in place or in a GitHub install's copy) that hands over to
+the checkout `install.sh` set up (`MCOMP_HOME`, else `~/.local/bin/metacomputer`). The
+bridge answers `initialize` and `tools/list` from a saved copy of the
 driver's handshake (`config/driver-mcp-cache.json`, refreshed under `.run/` on
 each live connection), so the tools are listed even while the VM is off, and
 it starts instantly. On the first call that needs the driver it connects to this
