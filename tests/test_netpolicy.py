@@ -114,13 +114,17 @@ def names_checks():
     check("--exact: only the name", n("example.com", exact=True) == ["example.com"])
     check("*.name: only the subdomains", n("*.example.com") == ["*.example.com"])
     for bad in ("1.2.3.4", "localhost", "exa mple.com", "-bad.com", "a..com", "*", "*.com.", "x" * 64 + ".com",
-                "ex_ample.com", "例え.jp", "http://example.com", "example.com/path", "example.com:443"):
+                "ex_ample.com", "例え.jp", "http://example.com", "example.com/path", "example.com:443",
+                "0x7f.1", "0x7f.0.0.1", "*.0x7f.0.0.1", "10.0x0.1", "1.0x7f", "2130706433.0"):
         try:
             n(bad)
             ok = False
         except netpolicy.Refused:
             ok = True
         check(f"refused as a name: {bad[:40]!r}", ok)
+    check("names with digits or 0x in them are still names", n("0x7f.example.com", exact=True) == ["0x7f.example.com"]
+          and n("123.example.com", exact=True) == ["123.example.com"] and n("localhost.example.com", exact=True)
+          == ["localhost.example.com"])
     c = netpolicy.covered
     allow = ["example.com", "*.example.com"]
     check("a subdomain of an allowed wildcard is covered (adding it widens nothing)",

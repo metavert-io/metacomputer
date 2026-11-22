@@ -85,6 +85,7 @@ class Lock:
 
 
 LOCAL_NAMES = ("localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0")
+NUMERIC_LABEL = re.compile(r"^(0x[0-9a-f]*|[0-9]+)$")     # no real top-level domain is a number (decimal or hex)
 
 
 def normalize(name, exact=False):
@@ -100,7 +101,7 @@ def normalize(name, exact=False):
     core = n[2:] if wild else n
     labels = core.split(".")
     if (len(core) > 253 or len(labels) < 2 or not all(LABEL_RE.match(lb) for lb in labels)
-            or all(lb.isdigit() for lb in labels)):
+            or NUMERIC_LABEL.match(labels[-1])):        # an address however it's spelled: 10.0.0.1, 0x7f.1, 0x7f.0.0.1
         raise Refused(f"not a host name: {name[:80]!r} (letters, digits and hyphens, like example.com or *.example.com;"
                       " addresses aren't accepted)")
     if wild:

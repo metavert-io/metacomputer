@@ -654,6 +654,10 @@ def cmd_run(a):
             "vm_options": status().get("options")}   # the optional hardening (action log, SSH, driver mode)
     # Resuming: keep the first start time, and count what the run has spent already against the cap.
     old = json.load(open(os.path.join(rdir, "run.json"))) if os.path.exists(os.path.join(rdir, "run.json")) else None
+    old_agent = ((old or {}).get("switches") or {}).get("agent") or "claude"
+    if old and old_agent != sw["agent"]:
+        # one agent per run: its costs (dollars or none), its reports and its comparison all assume it
+        sys.exit(f"run {run_id} was made with {old_agent}; a run holds one agent's results: use another --run-id")
     all_recs = report.load_all(rdir)
     if old:
         meta["started"] = old.get("started", meta["started"])
@@ -675,7 +679,7 @@ def cmd_run(a):
                 log(f"[{i}/{len(tasks)}] {t['id']}: already in this run, skipped")
                 continue
             budget = 0.0 if codex else float(t.get("budget_usd") or sw["budget"])   # Codex: no dollars to count
-            if spent + budget > cap:
+            if not codex and spent + budget > cap:        # Codex runs (older ones charged budgets) aren't capped
                 log(f"stopping: ${spent:.2f} spent, the next task could take ${budget:.2f}, cap ${cap:.2f}")
                 meta["stopped"] = f"cap: ${spent:.2f} spent before {t['id']}"
                 break

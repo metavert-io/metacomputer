@@ -41,6 +41,24 @@ esac
 """
 
 
+# A codex that answers in the right shape but has changed underneath: its rules checker gives the right decisions
+# with a failing exit status, its sandbox sets no marker of its own (one inherited from outside must not count),
+# `codex mcp` works, and its strict config loading rejects the approval setting.
+FAKE_CODEX2 = """#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 98.0.0" ;;
+  execpolicy) shift 3; case "$*" in
+      "metacomputer status") d=allow ;; "metacomputer secrets unlock") d=forbidden ;; *) d=prompt ;; esac
+    echo "{\\"decision\\":\\"$d\\",\\"matchedRules\\":[]}"; exit 1 ;;
+  sandbox) while [ "$1" != "--" ] && [ $# -gt 0 ]; do shift; done; shift; exec "$@" ;;
+  mcp) if [ "$2" = add ]; then printf '[mcp_servers.metacomputer]\\ncommand = "%s"\\n' "$5" > "$CODEX_HOME/config.toml"; echo "$5" > "$CODEX_HOME/cmd"
+       else printf '{"transport":{"type":"stdio","command":"%s"},"tool_timeout_sec":600.0}\\n' "$(cat "$CODEX_HOME/cmd")"; fi ;;
+  --strict-config) echo "Error loading config.toml: unknown configuration field default_tools_approval_mode" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+"""
+
+
 def main():
     t = tempfile.mkdtemp(prefix="mcomp-agents-")
     try:
@@ -79,6 +97,25 @@ def main():
         r = run(["check"], dict(base, PATH=fake_bin + ":/usr/bin:/bin"))
         check("...and says what changed and where to look", "changed something metacomputer relies on" in r.stdout
               and "docs/codex.md" in r.stdout, r.stdout)
+        fake2 = os.path.join(t, "fakebin2")
+        os.makedirs(fake2)
+        with open(os.path.join(fake2, "codex"), "w") as f:
+            f.write(FAKE_CODEX2)
+        os.chmod(os.path.join(fake2, "codex"), 0o755)
+        r = run(["check", "--json"], dict(base, PATH=fake2 + ":/usr/bin:/bin", CODEX_SANDBOX="seatbelt"))
+        res = {c["name"]: c["ok"] for c in json.loads(r.stdout or "{}").get("checks", [])}
+        check("right-looking answers aren't enough: a failing exit status, a sandbox marker only inherited from outside, "
+              "and settings its strict config rejects all fail", r.returncode == 1 and res.get("rules") is False
+              and res.get("sandbox marker") is False and res.get("mcp config") is True and res.get("mcp settings") is False,
+              (res, r.stdout[-400:]))
+        os.chmod(os.path.join(fake2, "codex"), 0o777)
+        r = run(["check"], dict(base, PATH=fake2 + ":/usr/bin:/bin"))
+        check("a codex other accounts can write isn't run", r.returncode == 1 and "writable by others" in r.stdout, r.stdout)
+        os.chmod(os.path.join(fake2, "codex"), 0o755)
+        r = subprocess.run([sys.executable, AG, "check", "--json"], capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL, cwd=fake2, env=dict(base, PATH=".:/usr/bin:/bin"))
+        check("a codex found only through a relative PATH entry (a downloaded folder's own) isn't run",
+              r.returncode == 0 and json.loads(r.stdout).get("codex") is None, r.stdout)
         codex = shutil.which("codex")
         if codex:
             env = dict(base, PATH=os.path.dirname(codex) + ":/usr/bin:/bin")

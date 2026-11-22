@@ -1839,6 +1839,12 @@ def test_agent_choices():
         check("--only-agents sets up the agents installed here: Codex (Claude Code left alone with --no-claude)",
               p.returncode == 0 and codex_set_up() and "Claude Code: left alone (--no-claude;" in p.stdout
               and os.path.islink(os.path.join(home, ".local", "bin", "metacomputer")), (p.returncode, p.stdout[-500:]))
+        old_skill = os.path.join(home, ".claude", "skills", "virtual-computer")
+        os.makedirs(os.path.dirname(old_skill))
+        os.symlink(os.path.join(t, "old-checkout", "skills", "virtual-computer"), old_skill)
+        p = go("--no-claude")
+        check("--no-claude leaves everything of Claude Code's alone, the old skill name's link included",
+              p.returncode == 0 and os.path.islink(old_skill), p.stdout[-300:])
         os.remove(os.path.join(home, ".codex", "config.toml"))
         p = go("--no-codex")
         check("--no-codex leaves Codex alone and is remembered", p.returncode == 0 and not codex_set_up()
@@ -1847,6 +1853,20 @@ def test_agent_choices():
         p = go()
         check("...so a later run (an update) doesn't add it either, and says why", p.returncode == 0 and not codex_set_up()
               and "--no-codex in an earlier run" in p.stdout and "--no-claude in an earlier run" in p.stdout, p.stdout[-400:])
+        other = os.path.join(t, "other")
+        os.makedirs(os.path.join(other, "bin"))
+        for f in ("install.sh", os.path.join("bin", "metacomputer")):
+            with open(os.path.join(other, f), "w") as fh:
+                fh.write("#!/bin/sh\n")
+        link = os.path.join(home, ".local", "bin", "metacomputer")
+        os.remove(link)
+        os.symlink(os.path.join(other, "bin", "metacomputer"), link)
+        p = go()
+        check("with both agents left alone, a run still links the command, so moving it from another checkout is "
+              "refused without --switch (no terminal to ask), the link unchanged",
+              p.returncode != 0 and "runs another checkout" in p.stdout + p.stderr
+              and os.readlink(link) == os.path.join(other, "bin", "metacomputer"), (p.returncode, (p.stdout + p.stderr)[-400:]))
+        os.remove(link)
         p = go("--codex")
         check("--codex sets it up again and remembers that", p.returncode == 0 and codex_set_up()
               and choice().get("codex") == "on", (p.stdout[-400:], choice()))

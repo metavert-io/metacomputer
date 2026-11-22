@@ -142,7 +142,7 @@ number of VMs the same read-only files. Nothing is attached until you list it
 ([docs/storage.md](docs/storage.md)).
 
 **Self-sovereign: no cloud services that you need.** Beyond your coding agent itself,
-which is Anthropic's service, and the install's downloads from GitHub, Ubuntu and
+(Anthropic's or OpenAI's service), and the install's downloads from GitHub, Ubuntu and
 the projects it builds on, it needs nothing else in the cloud: no account, no
 subscription. It's the self-hosted way to run Cua's open-source stack (Lume, Cua
 Driver, the cua-netgw gateway), at pinned versions you can fork. Your keys stay on your Mac,

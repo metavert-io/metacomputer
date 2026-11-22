@@ -864,8 +864,12 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_agents.py`: `metacomputer agents` reports each agent (not installed, set up, or left alone
   by a remembered `--no-codex`); `agents check` passes against this Mac's codex (when installed) without touching its
   Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
-  `codex mcp` behave differently. test_install's `test_agent_choices` runs `--only-agents` with the real codex: set
-  up, `--no-codex` remembered across runs, `--codex` again, and neither agent on PATH.
+  `codex mcp` behave differently, and against one whose answers look right but whose exit status fails, whose sandbox
+  marker is only inherited, and whose strict config rejects the settings; a `codex` writable by others, or found
+  only through a relative PATH entry, isn't run. test_install's `test_agent_choices` runs `--only-agents` with the
+  real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
+  skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
+  neither agent on PATH.
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST

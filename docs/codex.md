@@ -60,8 +60,12 @@ A `default_tools_approval_mode` or `tool_timeout_sec` you set yourself stays as 
 
 metacomputer relies on parts of Codex that aren't a fixed interface: its rules and their checker, the variable its
 sandbox sets, `codex mcp` and two of its settings, and the format of its session files. `metacomputer agents check`
-checks each of them against the Codex on the Mac, without a model and without touching your Codex settings, and
-install.sh runs it after setting Codex up, so `metacomputer update` reports a Codex update that changed one of them.
+checks each of them against the Codex on the Mac, without a model and without touching your Codex settings: the
+rules' decisions and the commands' exit statuses, a marker the sandbox sets itself (not one passed down to it), the two
+settings by Codex's own strict config loading (with a model provider that doesn't exist, so no session starts), and
+that `learn` finds the tool calls in your newest session that has some. It runs only a `codex` found through an
+absolute PATH entry, yours or root's and not writable by others. install.sh runs it after setting Codex up, so
+`metacomputer update` reports a Codex update that changed one of them.
 
 ## Codex's sandbox
 

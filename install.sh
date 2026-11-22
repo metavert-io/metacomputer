@@ -302,11 +302,8 @@ codex_wanted() { # --codex, or Codex installed and not --no-codex before
   case "$CODEX" in yes) return 0 ;; no) return 1 ;; esac
   has_codex && [ "$(agent_choice codex)" != off ]
 }
-link_wanted() { # the metacomputer command: linked whenever an agent step may run (not with --no-claude and no Codex)
-  claude_wanted || codex_wanted
-}
 LINKED=0
-link_command() { # ~/.local/bin/metacomputer and mcomp, and earlier versions' names removed (once per run)
+link_command() { # ~/.local/bin/metacomputer and mcomp (every install, whichever agents), earlier names removed (once per run)
   [ "$LINKED" = 0 ] || return 0
   LINKED=1
   mkdir -p "$HOME/.local/bin"
@@ -316,10 +313,11 @@ link_command() { # ~/.local/bin/metacomputer and mcomp, and earlier versions' na
   else
     ln -sfn "$ROOT/bin/metacomputer" "$ALIAS_LINK" && ok "alias: mcomp"
   fi
-  # Names used by earlier versions (commands vc, cua-lab, virtual-computer, vcomp; the virtual-computer skill).
+  # Command names used by earlier versions (vc, cua-lab, virtual-computer, vcomp). The old Claude Code skill name is
+  # claude_step's: --no-claude leaves everything of Claude Code's alone.
   local old
   for old in "$HOME/.local/bin/vc" "$HOME/.local/bin/cua-lab" "$HOME/.local/bin/virtual-computer" \
-             "$HOME/.local/bin/vcomp" "$HOME/.claude/skills/virtual-computer"; do
+             "$HOME/.local/bin/vcomp"; do
     if [ -L "$old" ] && old_target "$(readlink "$old")"; then
       rm -f "${old:?}" && ok "removed the old name $old"
     fi
@@ -650,8 +648,10 @@ skill_link_and_server() { # without the plugin: the skill link and a user-scope 
 }
 claude_step() {
   link_command
-  # MCP server names used by earlier versions: cua-linux, virtual-computer.
+  # The skill name and MCP server names used by earlier versions: virtual-computer; cua-linux, virtual-computer.
   local old cmd rc=0
+  old="$HOME/.claude/skills/virtual-computer"
+  if [ -L "$old" ] && old_target "$(readlink "$old")"; then rm -f "${old:?}" && ok "removed the old name $old"; fi
   if has_claude; then
     for old in cua-linux virtual-computer; do
       cmd="$(mcp_server_cmd "$old")"
@@ -690,7 +690,7 @@ stamp_field() { sed -n "s/^ *\"$1\": \"\\([^\"]*\\)\".*/\\1/p" "$HOME/.local/sha
 existing_checks() { # main | claude: the plan's lines go into todo only for main
   local here other="" tgt od s_dir s_commit s_tag this_tag head
   here="$(real_dir "$ROOT")"
-  if link_wanted && [ -L "$CMD_LINK" ]; then
+  if [ -L "$CMD_LINK" ]; then      # every run links the command, whichever agents it sets up
     tgt="$(resolve_link "$CMD_LINK")"
     case "$tgt" in */bin/metacomputer)
       od="$(real_dir "$(dirname "$tgt")/..")"
@@ -753,7 +753,7 @@ if [ "$ONLY_AGENTS" = 1 ]; then
 fi
 
 # --- 1. this Mac, what's already done, and the plan --------------------------------------
-STAGES=7; link_wanted || STAGES=6
+STAGES=7
 step "Checking this Mac" "a few seconds"
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die "needs macOS on Apple silicon (this is $(uname -s) $(uname -m))"
 major="$(sw_vers -productVersion | cut -d. -f1)"
@@ -1021,7 +1021,7 @@ if [ -f "$CONF" ]; then done_+=("settings")
 else todo+=("write this Mac's settings to $(tildify "$CONF"): Firefox$([ "$chrome_in" = 1 ] && echo " and Google Chrome") in the VM$([ "$chrome_in" = 1 ] && echo " (Chrome means accepting Google's terms: https://www.google.com/chrome/terms/; --no-chrome leaves it out)")"); fi
 if claude_wanted && { has_claude || [ "$CLAUDE" = yes ]; }; then
   todo+=("link the metacomputer command and add the Claude Code plugin (skills and tools in every project; --no-claude leaves Claude Code alone)")
-elif link_wanted; then
+else
   todo+=("link the metacomputer command")
 fi
 if codex_wanted; then
@@ -1146,13 +1146,8 @@ fi
 . "$CONF"
 
 # --- 5. the agents: Claude Code and Codex -------------------------------------------------
-if link_wanted; then
-  step "Claude Code and Codex"
-  agents_stage
-else
-  [ "$CLAUDE" = no ] && agent_remember claude off
-  [ "$CODEX" = no ] && agent_remember codex off
-fi
+step "Claude Code and Codex"
+agents_stage
 
 # --- 6. the secrets vault -------------------------------------------------------------
 step "Secrets vault (metacomputer secrets)" "$([ "$vault_ok" = 1 ] && echo "about 1 minute, unless it's up to date" || echo "skipped")"

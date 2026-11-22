@@ -5,8 +5,10 @@
                                         (install.sh --no-claude / --no-codex, remembered for later runs)
   metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
                                         without touching your Codex settings (a throwaway CODEX_HOME): its rules
-                                        checker, the sandbox's marker, `codex mcp` and the config keys install.sh
-                                        sets, and the format of your newest session file (for `learn`)
+                                        checker, the sandbox's marker, `codex mcp` and the two settings install.sh
+                                        adds (by Codex's strict config loading), and the format of your session
+                                        files, tool calls included (for `learn`). Only a `codex` from an absolute
+                                        PATH entry, yours or root's and not writable by others, is run
 
 install.sh runs the check after setting Codex up, so an update to Codex that changes one of these is reported
 there, and `metacomputer update` runs install.sh. Exit status of `check`: 0 all passed (or no Codex), 1 a check
@@ -28,8 +30,29 @@ CLI = os.path.join(LAB, "bin", "metacomputer")
 TIMEOUT = 60
 
 
+SAFE_PATH = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(d))
+
+
+def trusted(name):
+    """(absolute path, None) of the `claude` or `codex` command to run, or (None, why not). Only absolute PATH entries
+    are searched (a `.` on PATH would let a downloaded folder's own `codex` run here), and the file must be yours or
+    root's and not writable by other accounts. Everything this runs gets the same PATH."""
+    p = shutil.which(name, path=SAFE_PATH)
+    if not p:
+        return None, None
+    real = os.path.realpath(p)
+    try:
+        st = os.stat(real)
+    except OSError as e:
+        return None, f"{real}: {e}"
+    if st.st_uid not in (0, os.getuid()) or st.st_mode & 0o022:
+        return None, f"{real} is owned by another account or writable by others: not run"
+    return real, None
+
+
 def run(argv, env=None, timeout=TIMEOUT):
-    """(exit status, stdout, stderr); 127 when the program can't be run."""
+    """(exit status, stdout, stderr); 127 when the program can't be run. PATH is SAFE_PATH."""
+    env = dict(env if env is not None else os.environ, PATH=SAFE_PATH)
     try:
         r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout, stdin=subprocess.DEVNULL)
         return r.returncode, r.stdout, r.stderr
@@ -62,8 +85,10 @@ def link_target(path):
 
 
 def claude_status():
-    prog = shutil.which("claude")
-    st = {"installed": bool(prog), "version": version(prog) if prog else None, "choice": choices().get("claude")}
+    prog, why = trusted("claude")
+    st = {"installed": bool(prog or why), "version": version(prog) if prog else None, "choice": choices().get("claude")}
+    if why:
+        st["untrusted"] = why
     if not prog:
         return st
     rc, out, _ = run([prog, "plugin", "list", "--json"])
@@ -84,8 +109,10 @@ def claude_status():
 
 
 def codex_status():
-    prog = shutil.which("codex")
-    st = {"installed": bool(prog), "version": version(prog) if prog else None, "choice": choices().get("codex")}
+    prog, why = trusted("codex")
+    st = {"installed": bool(prog or why), "version": version(prog) if prog else None, "choice": choices().get("codex")}
+    if why:
+        st["untrusted"] = why
     if not prog:
         return st
     rc, out, err = run([prog, "mcp", "get", "metacomputer", "--json"])
@@ -138,14 +165,15 @@ def codex_checks(prog):
         for cmd in want:
             rc, o, e = run([prog, "execpolicy", "check", "-r", rules, *cmd], env=env)
             try:
-                got[cmd] = json.loads(o).get("decision")
+                got[cmd] = json.loads(o).get("decision") if rc == 0 else f"exit {rc}: {(e or o).strip()[:120]}"
             except ValueError:
                 got[cmd] = f"unreadable (exit {rc}): {(e or o).strip()[:120]}"
         bad = {" ".join(k): v for k, v in got.items() if v != want[k]}
         out.append(("rules", not bad, "metacomputer's rules decide as written" if not bad else f"decided otherwise: {bad}"))
         # 2. the sandbox marks the commands it runs (bin/metacomputer's exit 77 depends on it)
-        rc, o, e = run([prog, "sandbox", "-P", ":workspace", "-C", td, "--", "/usr/bin/env"], env=env)
-        marked = rc == 0 and any(l.startswith("CODEX_SANDBOX=") for l in o.splitlines())
+        clean = {k: v for k, v in env.items() if k != "CODEX_SANDBOX"}       # set by the sandbox, not passed down
+        rc, o, e = run([prog, "sandbox", "-P", ":workspace", "-C", td, "--", "/usr/bin/env"], env=clean)
+        marked = rc == 0 and any(l.startswith("CODEX_SANDBOX=") and len(l) > len("CODEX_SANDBOX=") for l in o.splitlines())
         out.append(("sandbox marker", marked, "CODEX_SANDBOX is set inside its sandbox" if marked
                     else f"no CODEX_SANDBOX inside `codex sandbox` (exit {rc}): {(e or o).strip()[:160]}"))
         # 3. codex mcp: add, the JSON install.sh reads, and the two settings it adds
@@ -156,40 +184,77 @@ def codex_checks(prog):
         if ok_add:
             with open(cfg, "a") as f:
                 f.write("tool_timeout_sec = 600\ndefault_tools_approval_mode = \"approve\"\n")
-            rc, o, e = run([prog, "--strict-config", "mcp", "get", "metacomputer", "--json"], env=env)
-            if rc != 0:      # an older Codex without --strict-config for mcp: the same without it
-                rc, o, e = run([prog, "mcp", "get", "metacomputer", "--json"], env=env)
+            rc, o, e = run([prog, "mcp", "get", "metacomputer", "--json"], env=env)
             try:
-                d = json.loads(o)
-                t = d.get("transport") or {}
-                ok_add = (t.get("type") == "stdio" and t.get("command") == CLI and d.get("tool_timeout_sec") == 600)
-                detail = ("`codex mcp get --json` reads the server and its settings" if ok_add
-                          else f"`codex mcp get --json` changed shape: {json.dumps(d)[:200]}")
+                d = json.loads(o) if rc == 0 else None
+                t = (d or {}).get("transport") or {}
+                ok_add = (d is not None and t.get("type") == "stdio" and t.get("command") == CLI
+                          and d.get("tool_timeout_sec") == 600)
+                detail = ("`codex mcp get --json` reads the server and its timeout" if ok_add
+                          else f"`codex mcp get --json` failed or changed shape (exit {rc}): {(e or o).strip()[:200]}")
             except ValueError:
                 ok_add = False
                 detail = f"`codex mcp get --json` isn't JSON (exit {rc}): {(e or o).strip()[:160]}"
         out.append(("mcp config", ok_add, detail))
-    # 4. the newest session file reads as a Codex session (metacomputer learn); nothing of it is kept
-    sess = os.path.join(codex_home(), "sessions")
-    newest = None
-    for d, _dirs, files in os.walk(sess):
-        for f in files:
+        # 4. Codex knows both settings install.sh adds (tool_timeout_sec, default_tools_approval_mode = "approve"):
+        # its strict config loading names an unknown key or value. Only `exec` loads config strictly, so this runs it
+        # with a model provider that doesn't exist: it stops right after loading the config, before any session.
+        if ok_add:
+            rc, o, e = run([prog, "--strict-config", "-c", 'model_provider="mcomp-check-no-provider"', "exec",
+                            "--skip-git-repo-check", "-C", td, "x"], env=env)
+            said = (e + o).strip()
+            ok_keys = "Error loading config" not in said and "provider `mcomp-check-no-provider` not found" in said
+            out.append(("mcp settings", ok_keys, "Codex accepts the timeout and approval settings" if ok_keys
+                        else f"Codex's strict config check didn't accept them: {said[:240]}"))
+    out.append(session_check())
+    return ver, out
+
+
+def model_called_tools(path):
+    """Whether the model made tool calls in a session file (its own records of them, which learn doesn't read)."""
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if '"response_item"' in line and '_call"' in line:
+                    try:
+                        p = json.loads(line).get("payload") or {}
+                    except ValueError:
+                        continue
+                    if str(p.get("type", "")).endswith("_call"):
+                        return True
+    except OSError:
+        pass
+    return False
+
+
+def session_check(limit=20):
+    """5. Codex's session files still read for `metacomputer learn`: the newest is a Codex session, and in the newest
+    one where the model called tools, learn finds the calls (a format that keeps the header but renames the tool
+    events would otherwise pass while learn saw nothing). Nothing of the files is kept or printed."""
+    import transcripts
+    files = []
+    for d, _dirs, names in os.walk(os.path.join(codex_home(), "sessions")):
+        for f in names:
             if f.startswith("rollout-") and f.endswith(".jsonl"):
-                p = os.path.join(d, f)
                 try:
-                    if newest is None or os.path.getmtime(p) > os.path.getmtime(newest):
-                        newest = p
+                    files.append((os.path.getmtime(os.path.join(d, f)), os.path.join(d, f)))
                 except OSError:
                     pass
-    if newest is None:
-        out.append(("session files", True, "no Codex session yet (nothing to check)"))
-    else:
-        import transcripts
-        tr = transcripts.parse(newest, slim=True)
-        ok = tr.kind == "codex" and bool(tr.session_id)
-        out.append(("session files", ok, "the newest one reads as a Codex session (for metacomputer learn)" if ok
-                    else "the newest one doesn't read as a Codex session: metacomputer learn may miss Codex sessions"))
-    return ver, out
+    if not files:
+        return ("session files", True, "no Codex session yet (nothing to check)")
+    files = [p for _, p in sorted(files, reverse=True)[:limit]]
+    tr = transcripts.parse(files[0], slim=True)
+    if not (tr.kind == "codex" and tr.session_id):
+        return ("session files", False, "the newest one doesn't read as a Codex session: metacomputer learn may miss "
+                                        "Codex sessions")
+    for p in files:
+        if model_called_tools(p):
+            n = len(transcripts.parse(p, slim=True).calls)
+            return ("session files", n > 0, "they read as Codex sessions, tool calls included (for metacomputer learn)"
+                    if n else "a session where the model called tools yields no calls: Codex changed its session "
+                              "format, and metacomputer learn would miss what happened")
+    return ("session files", True, f"the newest reads as a Codex session; none of the newest {len(files)} has tool "
+                                   "calls, so their format couldn't be checked further")
 
 
 def main(argv):
@@ -199,7 +264,10 @@ def main(argv):
     ap.add_argument("--quiet", action="store_true", help="check: print only what failed")
     a = ap.parse_args(argv)
     if a.what == "check":
-        prog = shutil.which("codex")
+        prog, why = trusted("codex")
+        if why:
+            print(json.dumps({"codex": None, "refused": why}) if a.json else f"Not checked: {why}")
+            return 1
         if not prog:
             print(json.dumps({"codex": None}) if a.json else "Codex isn't installed: nothing to check.")
             return 0
@@ -222,6 +290,9 @@ def main(argv):
         print(json.dumps(st, indent=2))
         return 0
     for label, s in (("Claude Code", st["claude_code"]), ("Codex", st["codex"])):
+        if s.get("untrusted"):
+            print(f"{label:<12} {s['untrusted']}")
+            continue
         if not s["installed"]:
             how = "isn't installed" + ("; you chose to leave it alone" if s.get("choice") == "off" else
                                        "; once it is: ./install.sh --only-agents (or metacomputer update)")
