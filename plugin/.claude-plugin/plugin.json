@@ -21,14 +21,5 @@
     "cua-driver",
     "sandbox"
   ],
-  "skills": ["./.claude/skills"],
-  "mcpServers": {
-    "metacomputer": {
-      "type": "stdio",
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer",
-      "args": [
-        "mcp-lazy"
-      ]
-    }
-  }
+  "skills": ["./.claude/skills"]
 }
