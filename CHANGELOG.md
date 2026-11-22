@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-21
+
 ### Added
 
 - **Every install and update sets metacomputer up for each coding agent installed on the Mac**, Claude Code and Codex, including one installed since the last run. `--no-claude` / `--no-codex` are remembered until `--claude` / `--codex`; `./install.sh --only-agents` runs just those steps. The `metacomputer` command is linked by every install, whichever agents it sets up (with neither installed, it says how to add one), and moving it from another checkout always asks first. `metacomputer agents` shows what's set up for each.
