@@ -35,7 +35,7 @@ stores your password, and it never runs `sudo` itself.
 | 1. Check this Mac | Apple silicon, macOS version, free disk, memory, network | nothing | seconds |
 | 2. Prerequisites | Homebrew and Apple's Command Line Tools, only if they're missing (see below) | answer one question, then Homebrew asks for your password | none if you have them; 5-15 minutes on a new Mac |
 | 3. Download | `git clone` into `~/metacomputer` (about 3 MB), at the latest release, or `main` before the first release | nothing | seconds |
-| 4. Install | `./install.sh --yes`: Go, GnuPG and ffmpeg from Homebrew if they're missing, the VM runner (mcomp-vm) and the secrets vault built from source, this Mac's settings, the Claude Code plugin, then the VM | nothing | about 5 minutes on a fast connection |
+| 4. Install | `./install.sh --yes`: Go, GnuPG and ffmpeg from Homebrew if they're missing, the VM runner (mcomp-vm) and the secrets vault built from source, this Mac's settings, the Claude Code plugin and MCP server, then the VM | nothing | about 5 minutes on a fast connection |
 | 5. Check | a VM it just built: starts it, runs `metacomputer status` and a short self-test. A VM you already had: only reads (`metacomputer status` and a read-only look at its windows; started only if it's stopped), so nothing open in it is closed or typed into | nothing | under half a minute |
 
 Then it prints three prompts to try in Claude Code. The VM is left running;
@@ -78,7 +78,7 @@ after it) and 5 min 40 s. The stages of the 5 min 5 s run:
 | Download metacomputer (git clone) | about 1 s |
 | Homebrew packages | 0 (already installed) |
 | VM runner: download and build mcomp-vm | about 1 min 40 s |
-| Settings and the Claude Code plugin | about 2 s |
+| Settings, and Claude Code's plugin and MCP server | about 2 s |
 | Secrets vault build | about 15 s |
 | VM build: Go tools, downloads, Ubuntu's image and packages, provisioning, clean snapshot | about 2 min 45 s (provisioning inside the VM: about 2 min 10 s) |
 | Health check: start, status, self-test | about 20 s |
@@ -141,12 +141,14 @@ without leaving Claude Code:
 /plugin install metacomputer@metacomputer
 ```
 
-The plugin brings the skills and the MCP tools, but not the VM. Ask Claude to
-use its virtual computer, or to set up metacomputer. Its skill sees that
-nothing is set up, says what setup does and asks you. When you say yes, it
-runs the plugin's own `metacomputer setup --yes`, which is the same get.sh as
-above, shipped inside the plugin. Nothing is downloaded and run from
-elsewhere. You can also run it yourself in Terminal; the plugin's command
+The plugin brings the skills and the `metacomputer` command, but not the VM or
+the tools: the setup builds the VM and adds metacomputer's MCP server to Claude
+Code. Ask Claude to use its virtual computer, or to set up metacomputer. Its
+skill sees that nothing is set up, says what setup does and asks you. When you
+say yes, it runs the plugin's own `metacomputer setup --yes`, which is the same
+get.sh as above, shipped inside the plugin. Nothing is downloaded and run from
+elsewhere. When it's done, restart Claude Code (or run `/mcp`) to load the
+tools. You can also run it yourself in Terminal; the plugin's command
 prints its full path when it finds nothing set up:
 
 ```bash
@@ -220,7 +222,7 @@ the question.
   This run will:
     - build mcomp-vm, the VM runner, from source  (about 1 minute; --lume=standard: Cua's release instead)
     - write this Mac's settings to ~/metacomputer/config/local.env: Firefox and Google Chrome in the VM (…)
-    - link the metacomputer command and add the Claude Code plugin (skills and tools in every project)
+    - link the metacomputer command and set Claude Code up: the plugin (skills) and metacomputer's MCP server (tools), in every project; --no-claude leaves Claude Code alone
     - build the secrets vault (metacomputer secrets)  (about 1 minute; skipped if it's up to date)
     - build the VM metacomputer: about 1.5 GB of downloads, then a few minutes unattended
   Already done: tools.
@@ -263,13 +265,13 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--fresh-sources` | Build the host tools and mcomp-vm from new temporary clones (the tools even if they're up to date), leaving the checkout's `.cache` alone; what setup from the plugin uses |
 | `--no-claude` | Leave Claude Code alone, in this run and later ones (`--claude` undoes it) |
 | `--claude` | Set Claude Code up even after an earlier `--no-claude` |
-| `--no-plugin` | Claude Code without the plugin: a skill link and a user-scope MCP server (tools `mcp__metacomputer__*`) |
+| `--no-plugin` | Claude Code without the plugin: a skill link instead, and the same user-scope MCP server (tools `mcp__metacomputer__*`) |
 | `--only-claude` | Only the Claude Code step |
 | `--codex` | Set Codex up even after an earlier `--no-codex`: [codex.md](codex.md) |
 | `--no-codex` | Leave Codex alone, in this run and later ones (`--codex` undoes it) |
 | `--only-agents` | Only the Claude Code and Codex steps, for whichever is installed (after installing one) |
 | `--only-codex` | Only the Codex step: its MCP server, the skills in `~/.agents/skills` and metacomputer's rules for its sandbox |
-| `--uninstall` | Remove the command, the plugin and the vault program (the VM stays) |
+| `--uninstall` | Remove the command, Claude Code's plugin and MCP server, Codex's setup and the vault program (the VM stays) |
 
 `MCOMP_CONFIG=FILE ./install.sh` writes and reads that settings file instead of
 `config/local.env`, as every other command does. For a second VM beside the
@@ -293,6 +295,7 @@ above).
 | The live-view (VNC) password | your login Keychain, item `metacomputer-vnc` (account: the VM's name). Read it with `security find-generic-password -s metacomputer-vnc -a metacomputer -w`. It's written with `security -i` fed on stdin, so it's on no command line, and it reaches the VM on ssh's stdin, never through an environment. If the Keychain is locked or missing during the build (some SSH sessions), or doesn't answer within 20 seconds, it goes to `~/.ssh/metacomputer/vnc-pass` (0600, written to a new file and renamed into place, never through a link) instead, and the build says so |
 | The secrets vault program | `~/.local/share/metacomputer/bin/mcomp-vault`; your vault in `~/Library/Application Support/metacomputer` |
 | The Claude Code plugin | Claude Code's plugin settings (marketplace `metacomputer`: the checkout) |
+| Claude Code's MCP server | Claude Code's user-scope MCP servers: `metacomputer`, running `~/.local/bin/metacomputer mcp-lazy` (`claude mcp get metacomputer` shows it) |
 | Go's build cache and modules | `~/go` and `~/Library/Caches/go-build` (Go's own defaults) |
 | Homebrew packages | Homebrew's prefix (`/opt/homebrew`) |
 | The install and build locks | `metacomputer-locks` in your per-user temporary folder (`getconf DARWIN_USER_TEMP_DIR`) |
@@ -331,11 +334,25 @@ clean snapshot). get.sh leaves a checkout
 alone if it has local changes or is on a branch of your own. A plugin installed
 from GitHub updates with `claude plugin update metacomputer@metacomputer`.
 
+Through v0.4.4 the plugin brought the MCP server itself (tools
+`mcp__plugin_metacomputer_metacomputer__*`). The install step of an update registers it
+at user scope instead (tools `mcp__metacomputer__*`), and the plugin from the updated
+checkout declares none, so there's one server; a plugin copy from GitHub that still
+brings its own is updated too, once the new server is registered and read back.
+Restart Claude Code (or run `/mcp`) afterwards, and change permission rules of your
+own that name the long prefix. A plugin from GitHub that was updated on its own, while
+the checkout kept an installer from v0.4.4 or earlier, leaves Claude Code without the
+tools: `metacomputer update` brings the installer that adds them (the plugin's
+`metacomputer status` says so too). When Claude Code's step can't finish (a server
+named `metacomputer` that isn't metacomputer's, a lookup or registration that fails),
+the rest of the update still runs, and it says what to run and ends with exit status 1; the next
+`metacomputer update` runs the install again, even when the checkout is already at the release.
+
 ## Uninstalling
 
 ```bash
 metacomputer stop
-~/metacomputer/install.sh --uninstall   # the command, the alias, the plugin and the vault program
+~/metacomputer/install.sh --uninstall   # the command, the alias, the plugin, the MCP server and the vault program
 ```
 
 `--uninstall` then prints the commands that remove the rest for the runner you
@@ -385,7 +402,8 @@ installed (`brew uninstall ffmpeg go gnupg` if nothing else uses them).
 | The VM build stopped | The newest `logs/build-*.log` has the details. `./install.sh --replace-vm` deletes the unfinished VM and builds it again; finished downloads are kept. If provisioning failed inside the VM, it's left running for you to look at: `metacomputer ssh admin`. |
 | `the login Keychain didn't take the live-view password` | The build ran where the Keychain was locked or missing (some SSH sessions). The password is in `~/.ssh/metacomputer/vnc-pass` instead, readable only by you; `metacomputer view` says how to read it. |
 | `metacomputer status` isn't ready after the install | `metacomputer stop`, then `metacomputer start`, then `metacomputer status` again. `metacomputer logs` shows the VM's and the gateway's logs. |
-| Claude Code has no metacomputer tools | Restart Claude Code, or run `/reload-plugins`. `claude plugin list` should show `metacomputer@metacomputer`; `./install.sh --only-claude` sets it up again. |
+| Claude Code has no metacomputer tools | Restart Claude Code, or run `/mcp`. `claude mcp get metacomputer` should show `~/.local/bin/metacomputer mcp-lazy`, and `metacomputer agents` says what's set up and what to run. After the plugin was updated on its own from v0.4.4 or earlier: `metacomputer update`, then restart. |
+| `isn't metacomputer's` or `runs another checkout` (Claude Code step) | A user-scope MCP server named `metacomputer` was there already and was left as it is. Another checkout's moves here with `./install.sh --only-claude --switch`; one that isn't metacomputer's is never changed by the install: remove it yourself (`claude mcp remove metacomputer -s user`), then run `./install.sh --only-claude`. |
 | `~/.local/bin isn't on your PATH` | Add it: `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`, then open a new Terminal. Claude always uses the full path. |
 
 ### Command Line Tools without the dialog

@@ -368,7 +368,7 @@ def codex_events(ev, state):
 
 
 def session_args(t, sw, cfg):
-    # The session's own --mcp-config server gives mcp__metacomputer__*; the plugin's name is allowed too.
+    # The session's own --mcp-config server gives mcp__metacomputer__*; an older plugin copy's names are allowed too.
     allowed = ["Skill", "Read", "Glob", "Grep", "ToolSearch", "mcp__metacomputer", "mcp__plugin_metacomputer_metacomputer",
                f"Bash({CLI}:*)", "Bash(metacomputer:*)", "Bash(mcomp:*)"]
     denied = []

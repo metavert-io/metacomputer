@@ -30,7 +30,8 @@ from datetime import datetime
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import wirelimits  # noqa: E402  (JSON depth and size limits, shared with the hub and its clients)
-# The metacomputer tools: mcp__metacomputer__* (user-scope or --mcp-config server) or the plugin's.
+# The metacomputer tools: mcp__metacomputer__* (user-scope or --mcp-config server), or the names an older copy of the
+# plugin gave them (it brought its own server), in sessions recorded with it.
 MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
 # A tool_use of a metacomputer tool, as both Claude Code formats write it (compact JSON; a space allowed), or a
 # Codex call of the metacomputer server.

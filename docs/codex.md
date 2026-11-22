@@ -56,6 +56,16 @@ command (`["metacomputer", "mcomp", "/Users/you/.local/bin/metacomputer"]`).
 A `default_tools_approval_mode` or `tool_timeout_sec` you set yourself stays as you set it; `"writes"` (or
 `"prompt"`) makes Codex ask you before the tools that act.
 
+The install changes Codex's MCP server `metacomputer` only when it's metacomputer's own, by the rule it uses for Claude
+Code's: a local command that is exactly the checkout's `bin/metacomputer`, a path earlier versions registered in the
+checkout's `bin/` (pointed at `bin/metacomputer`, everything else you set on it kept) or `~/.local/bin/metacomputer`,
+with exactly the argument `mcp-lazy`. It reads the whole entry again right before a change and leaves it as it is when
+it changed meanwhile. Anything else, a program elsewhere in the checkout or a moved checkout's launcher included, is
+never changed or removed: the install names it by its program and how many arguments it has (never its arguments or
+values), says to run `codex mcp remove metacomputer` and then `./install.sh --only-codex`, and records the Codex step as
+unfinished (exit status 1; `metacomputer update` runs it again). `--uninstall` removes only metacomputer's own, and
+keeps `~/.local/bin/metacomputer` and `mcomp` while an entry that stays runs them.
+
 ## When Codex changes
 
 metacomputer relies on parts of Codex that aren't a fixed interface: its rules and their checker, the variable its

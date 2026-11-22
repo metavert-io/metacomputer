@@ -18,17 +18,19 @@
 #   agent installed on this Mac, Claude Code and Codex, and for one installed since the last run:
 #   ./install.sh --no-claude   leave Claude Code alone (plugin, skill, MCP server), this time and in later runs
 #   ./install.sh --claude      set Claude Code up even if an earlier run had --no-claude
-#   ./install.sh --no-plugin   Claude Code without the plugin: a skill link and a user-scope MCP
-#                              server, as before the plugin (tools: mcp__metacomputer__*)
+#   ./install.sh --no-plugin   Claude Code without the plugin: a skill link instead, and the same user-scope
+#                              MCP server (tools: mcp__metacomputer__*)
 #   ./install.sh --only-claude only the Claude Code step (no tools, Lume, settings, vault or VM)
 #   ./install.sh --no-codex    leave Codex alone, this time and in later runs (docs/codex.md)
 #   ./install.sh --codex       set Codex up even if an earlier run had --no-codex
 #   ./install.sh --only-codex  only the Codex step: its MCP server, the skills in ~/.agents/skills and metacomputer's
 #                              rules for its sandbox (no tools, Lume, settings, vault or VM)
 #   ./install.sh --only-agents only those two steps, for whichever agents are installed (after installing one)
-#   ./install.sh --uninstall   remove the Claude Code and Codex hooks this installed (the VM stays)
-#   ./install.sh --switch      the metacomputer command runs another checkout: move it (and the Claude Code
-#                              plugin) to this one. Without a terminal, or with --yes, that's refused otherwise
+#   ./install.sh --uninstall   remove what this installed for Claude Code and Codex, and the command (the VM stays)
+#   ./install.sh --switch      the metacomputer command runs another checkout: move it (and Claude Code's plugin
+#                              and MCP server) to this one. Without a terminal, or with --yes, that's refused otherwise.
+#                              A user-scope MCP server named metacomputer that isn't metacomputer's (another program,
+#                              or other arguments) is never changed: the run says how to remove it yourself
 #   ./install.sh --allow-downgrade   install this checkout though it's older than what's installed
 #
 # Updating: `metacomputer update` (or the install line again). Run by hand after `git pull`, this ends the
@@ -43,9 +45,10 @@
 #      from the pinned tag, can leave out clipboard/audio/Rosetta sharing) or Cua's release
 #   4. writes this Mac's settings (config/local.env, or the file MCOMP_CONFIG names)
 #   5. links the `metacomputer` command; for each agent installed (Claude Code, Codex): adds this checkout to Claude Code as the
-#      `metacomputer` plugin (its skills and MCP server, for every project; tools:
-#      mcp__plugin_metacomputer_metacomputer__*). Without `claude plugin`, or with
-#      --no-plugin: the `metacomputer` skill link and a user-scope MCP server instead.
+#      `metacomputer` plugin (its skills, /metacomputer:learn and the command, for every project) and registers
+#      the user-scope MCP server `metacomputer`, ~/.local/bin/metacomputer mcp-lazy (tools: mcp__metacomputer__*;
+#      the plugin declares no MCP server or hooks). Without `claude plugin`, or with --no-plugin: the
+#      `metacomputer` skill link instead of the plugin, and the same server.
 #      With Codex (see --codex): its MCP server metacomputer (tools mcp__metacomputer__*), the
 #      skills in ~/.agents/skills and $CODEX_HOME/rules/metacomputer.rules
 #   6. builds the secrets vault, mcomp-vault (`metacomputer secrets`), with swiftc
@@ -97,6 +100,16 @@ ask() { # QUESTION DEFAULT(Y|N): 0 = yes
   case "${a:-$2}" in [Yy]*) return 0 ;; *) return 1 ;; esac
 }
 link_points_here() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
+tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+resolve_link() { # PATH -> where it ends up, following links (relative ones from their own folder), at most 20 of them
+  local p="$1" i=0 t
+  while [ -L "$p" ] && [ $i -lt 20 ]; do
+    t="$(readlink "$p")"; case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac; i=$((i + 1))
+  done
+  printf '%s\n' "$p"
+}
+real_dir() { (cd "$1" 2>/dev/null && pwd -P); }
+is_checkout() { [ -f "$1/install.sh" ] && [ -f "$1/bin/metacomputer" ]; }   # a metacomputer checkout, as install.sh tells one
 # Is $1 (a link target or a command path) one of an earlier version's: inside this
 # checkout, or an old name that points nowhere (the checkout moved or was renamed)?
 old_target() {
@@ -106,37 +119,132 @@ old_target() {
     */bin/metacomputer|*/skills/metacomputer) return 0 ;; esac
   return 1
 }
-# --- Claude Code: the plugin, or (before plugins, --no-plugin) a skill link and a user-scope MCP server
-MKT=metacomputer; PLUGIN_ID=metacomputer@metacomputer; TAB=$'\t'
+# --- Claude Code: the plugin (skills) or, before plugins and with --no-plugin, a skill link; and a user-scope MCP server
+MKT=metacomputer; PLUGIN_ID=metacomputer@metacomputer; TAB=$'\t'; US=$'\037'
+CLAUDE_MCP=user    # this installer registers Claude Code's MCP server itself, at user scope; plugin/bin/metacomputer looks
+                   # for this line (an install.sh without it relied on the plugin for the server)
+SERVER_ADDED=0     # 1 once this run registered Claude Code's MCP server (a restart, or /mcp, loads its tools)
+CLAUDE_FAILED=0    # 1 when Claude Code's setup didn't finish: the run ends with exit status 1, after everything else
+CLAUDE_TRIED=0     # 1 once this run set Claude Code up (claude_step with a claude command): only then is its result
+                   # recorded (agent_record); a run that skipped it leaves an earlier unfinished one recorded
+CODEX_FAILED=0     # the same two for Codex's step (codex_step: its MCP server)
+CODEX_TRIED=0
+REG_LEFT=""        # register_server's: what's left after a registration that didn't work: "none" (no server), "unknown"
+                   # (it can't be read), or "other" (something that was there stays)
 has_claude() { command -v claude >/dev/null 2>&1; }
 has_plugin_cli() { has_claude && claude plugin --help >/dev/null 2>&1; }
-# The marketplace named metacomputer as "SOURCE<TAB>WHERE" ("directory<TAB>/path", "github<TAB>owner/repo"), or nothing.
-mkt_info() {
-  claude plugin marketplace list --json 2>/dev/null | python3 -c 'import json,sys
-for m in json.load(sys.stdin):
-    if m.get("name") == "metacomputer":
-        print(m.get("source", ""), m.get("path") or m.get("repo") or m.get("url") or "", sep="\t")' 2>/dev/null || true
+# The marketplace named metacomputer as "SOURCE<TAB>WHERE" ("directory<TAB>/path", "github<TAB>owner/repo"), "absent", or
+# "error" (`claude plugin marketplace list --json` failed or answered in a shape this doesn't know): never read as absent.
+mkt_lookup() {
+  local out
+  # failures are caught inside the substitution (with set -E, install.sh's ERR trap would fire in it otherwise)
+  out="$(claude plugin marketplace list --json 2>/dev/null </dev/null || echo __mcomp_failed__)"
+  case "$out" in *__mcomp_failed__) echo error; return 0 ;; esac
+  printf '%s' "$out" | python3 -c 'import json, sys
+try:
+    rows = json.load(sys.stdin)
+except ValueError:
+    rows = None
+if not isinstance(rows, list) or not all(isinstance(m, dict) and isinstance(m.get("name"), str) for m in rows):
+    print("error"); sys.exit(0)
+mine = [m for m in rows if m["name"] == "metacomputer"]
+src = mine[0].get("source", "") if len(mine) == 1 else None
+where = (mine[0].get("path") or mine[0].get("repo") or mine[0].get("url") or "") if len(mine) == 1 else None
+if len(mine) > 1 or (mine and not (isinstance(src, str) and isinstance(where, str))) or any(c in (src or "") + (where or "") for c in "\t\n"):
+    print("error")
+else:
+    print(src + "\t" + where if mine else "absent")' 2>/dev/null || echo error
 }
-# The plugin metacomputer@metacomputer at user scope: "on", "off" (installed, turned off) or nothing.
-plugin_state() {
-  claude plugin list --json 2>/dev/null | python3 -c 'import json,sys
-for p in json.load(sys.stdin):
-    if p.get("id") == "metacomputer@metacomputer" and p.get("scope") == "user":
-        print("on" if p.get("enabled") else "off")' 2>/dev/null || true
+# Messages name a marketplace other than this checkout and the project's repository only by its name, metacomputer, and
+# "another checkout" or "another source": never its folder or location (a URL, or a "repo" that is one, can carry
+# credentials). This checkout's folder and the project's repository are named as constants.
+# The plugin metacomputer@metacomputer at user scope, from `claude plugin list --json`, as "STATE SERVERS": STATE is
+# "on", "off" (installed, turned off) or "absent"; SERVERS is "present" when it declares MCP servers of its own (a copy
+# from before this step registered the server: installed from GitHub, not updated since), else "absent". The answer is
+# "error" when the list failed, answered in a shape this doesn't know, has a record without its id or scope, or this
+# plugin's record reports errors loading it, has no true/false "enabled", or declares its servers in a shape this
+# doesn't know: never read as absent, on or off.
+plugin_lookup() {
+  local out
+  out="$(claude plugin list --json 2>/dev/null </dev/null || echo __mcomp_failed__)"
+  case "$out" in *__mcomp_failed__) echo error; return 0 ;; esac
+  printf '%s' "$out" | python3 -c 'import json, sys
+try:
+    rows = json.load(sys.stdin)
+except ValueError:
+    rows = None
+ok = isinstance(rows, list) and all(isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("scope"), str)
+                                    for p in rows)
+mine = [p for p in rows if p.get("id") == "metacomputer@metacomputer" and p.get("scope") == "user"] if ok else []
+if not ok or len(mine) > 1:
+    print("error")
+elif not mine:
+    print("absent absent")
+else:
+    p = mine[0]; srv = p.get("mcpServers")
+    if p.get("errors") or p.get("error") or not isinstance(p.get("enabled"), bool) or not isinstance(srv, (dict, type(None))):
+        print("error")
+    else:
+        print("on" if p["enabled"] else "off", "present" if srv else "absent")' 2>/dev/null || echo error
 }
-mcp_server_cmd() { # NAME: the command of the MCP server NAME that `claude mcp get` shows, or nothing
-  claude mcp get "$1" 2>/dev/null | sed -n 's/^ *Command: //p' | head -1 || true
+plugin_state() { local s; s="$(plugin_lookup)"; printf '%s\n' "${s%% *}"; }    # on, off, absent or error
+# Does the installed plugin declare MCP servers? present, absent (none, or no such plugin) or error (never read as
+# absent). The plugin declares none; a copy of it from before (installed from GitHub, not updated since) brings its own.
+plugin_servers_state() { local s; s="$(plugin_lookup)"; case "$s" in error) echo error ;; *) printf '%s\n' "${s#* }" ;; esac; }
+# A program's name for a message about something that isn't metacomputer's: its file name when that's a plain short
+# word, else "a program" (a path, or a name that's more than a name, isn't printed).
+prog_name() {
+  local n="${1%/}"; n="${n##*/}"
+  case "$n" in
+    ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._+-]*) printf 'a program' ;;
+    *) if [ "${#n}" -le 32 ]; then printf '%s' "$n"; else printf 'a program'; fi ;;
+  esac
 }
-# Earlier installs' skill link and user-scope MCP server, removed only when they are this checkout's
-# (or a moved checkout's that no longer exists), so the tools aren't listed twice.
-remove_skill_link_and_server() {
+# Claude Code's user-scope MCP server NAME, read exactly (lib/claude_mcp.py: the entry in Claude Code's configuration,
+# checked against what `claude mcp get` shows from a new empty folder, so no project or local server stands in for it,
+# and read the same before and after that), on one line of fields split by $US: OWNER, KIND, WORDS, DIGEST.
+# OWNER is what it is to this checkout (canonical command and exact arguments): "ok" (~/.local/bin/metacomputer
+# mcp-lazy), "ours" (this checkout's own launcher, or a path earlier versions registered: repaired), "checkout" (another
+# checkout's: --switch), "foreign" (anything else: never changed), "absent" or "error" (never read as absent: nothing is
+# changed). WORDS says what it is, for messages: for one that isn't metacomputer's, only its program's name and how many
+# arguments it has, or its transport (never its arguments, variables, URL or entry, which can carry credentials).
+# DIGEST stands for the whole entry, for user_recheck.
+user_server() { # NAME
+  python3 "$ROOT/lib/claude_mcp.py" user-get "$1" --root "$ROOT" --link "$CMD_LINK" 2>/dev/null </dev/null \
+    || printf 'error%serror%sclaude_mcp.py failed%s\n' "$US" "$US" "$US"
+}
+# Right before a user-scope entry is removed: read it again (from the configuration file alone, which is quick) and
+# compare the whole entry, its variables included, with the one classified (DIGEST, from user_server): "same",
+# "changed" (another Claude Code changed or removed it meanwhile: it's left as it is) or "error<US>WHY". Claude Code
+# takes no lock this could share across a remove and an add, so a change in the moment between this read and
+# `claude mcp remove` can still go unseen; only metacomputer's own entries are ever removed.
+user_recheck() { # NAME DIGEST
+  printf '%s\n' "$2" | python3 "$ROOT/lib/claude_mcp.py" user-recheck "$1" 2>/dev/null \
+    || printf 'error%sclaude_mcp.py failed\n' "$US"
+}
+entry_unchanged() { # NAME DIGEST: 0 when the user-scope entry NAME is still exactly the one classified
+  local st
+  IFS=$US read -r st _ <<<"$(user_recheck "$1" "$2")"
+  [ "$st" = same ]
+}
+# A project or local server named metacomputer in the folder this runs in takes precedence over the user-scope one
+# there: said (its scope and program's name, never its arguments, variables or URL), never changed.
+shadow_note() {
+  local out scope cmd what
+  out="$(claude mcp get metacomputer 2>/dev/null </dev/null || echo __mcomp_failed__)"
+  case "$out" in *__mcomp_failed__) return 0 ;; esac
+  scope="$(printf '%s\n' "$out" | sed -n 's/^  Scope: //p' | head -1)"
+  case "$scope" in ""|"User config"*) return 0 ;; esac
+  cmd="$(printf '%s\n' "$out" | sed -n 's/^  Command: //p' | head -1)"
+  if [ -n "$cmd" ]; then what="it runs $(prog_name "$cmd")"; else what="not a local command"; fi
+  warn "in $(tildify "$PWD"), Claude Code uses an MCP server named metacomputer from its $(prog_name "${scope%% *}") config"
+  warn "instead of the user-scope one ($what); left as it is"
+}
+# An earlier install's skill link, removed only when it is this checkout's (or a moved checkout's that no longer
+# exists), so the skill isn't listed twice.
+remove_skill_link() {
   if [ -L "$SKILL_LINK" ] && old_target "$(readlink "$SKILL_LINK")"; then
     rm "$SKILL_LINK" && ok "removed the skill link $SKILL_LINK (the plugin brings the skill)"
-  fi
-  local cmd; cmd="$(mcp_server_cmd metacomputer)"
-  if [ -n "$cmd" ] && old_target "$cmd"; then
-    claude mcp remove metacomputer -s user >/dev/null 2>&1 \
-      && ok "removed the user-scope MCP server metacomputer (the plugin brings it; tools are now mcp__plugin_metacomputer_metacomputer__*)"
   fi
   return 0
 }
@@ -154,23 +262,50 @@ mkt_is_canonical() {
     *) return 1 ;;
   esac
 }
-# Is the installed plugin this checkout's? From its marketplace, or from the canonical GitHub repository (that
-# copy runs this checkout through ~/.local/bin/metacomputer), but not from another checkout or any other source.
-plugin_is_ours() {
-  local mkt; mkt="$(mkt_info)"
-  [ -z "$mkt" ] || [ "$mkt" = "directory${TAB}$ROOT" ] || mkt_is_canonical "$mkt"
+# Is the installed plugin this checkout's? "ours" from its marketplace, or from the canonical GitHub repository (that
+# copy runs this checkout through ~/.local/bin/metacomputer), or with no marketplace of that name; "other" from another
+# checkout or any other source; "error" when the marketplaces can't be read (never taken for ours).
+plugin_owner() {
+  local mkt; mkt="$(mkt_lookup)"
+  case "$mkt" in
+    error) echo error ;;
+    absent|"directory${TAB}$ROOT") echo ours ;;
+    *) if mkt_is_canonical "$mkt"; then echo ours; else echo other; fi ;;
+  esac
 }
-remove_plugin() { # uninstall the plugin; remove the marketplace when it is this checkout
-  local mkt; mkt="$(mkt_info)"
-  if [ -n "$(plugin_state)" ]; then
-    claude plugin uninstall "$PLUGIN_ID" --scope user >/dev/null 2>&1 && ok "uninstalled the plugin $PLUGIN_ID"
+remove_plugin() { # uninstall the plugin; remove the marketplace when it is this checkout. Each is read before and
+  # checked afterwards: 1 = something is still there, or whether it is can't be read (said, with the command that removes it)
+  local mkt st rc=0; mkt="$(mkt_lookup)"; st="$(plugin_state)"
+  if [ "$mkt" = error ] || [ "$st" = error ]; then
+    warn "couldn't read Claude Code's plugins and marketplaces (claude plugin list --json, claude plugin marketplace list --json),"
+    warn "so the plugin $PLUGIN_ID and the marketplace $MKT were left as they are (claude plugin uninstall $PLUGIN_ID --scope user)"
+    return 1
   fi
-  if [ "$mkt" = "directory${TAB}$ROOT" ]; then
-    claude plugin marketplace remove "$MKT" >/dev/null 2>&1 && ok "removed the marketplace $MKT (this checkout)"
-  elif [ -n "$mkt" ]; then
-    echo "  The marketplace $MKT (${mkt//$TAB/ }) stays; to remove it: claude plugin marketplace remove $MKT"
+  if [ "$st" != absent ]; then
+    claude plugin uninstall "$PLUGIN_ID" --scope user >/dev/null 2>&1 || true
+    case "$(plugin_state)" in
+      absent) ok "uninstalled the plugin $PLUGIN_ID" ;;
+      error) warn "couldn't read the installed plugins after uninstalling $PLUGIN_ID, so whether it's gone is unknown"
+             warn "(claude plugin list; to remove it: claude plugin uninstall $PLUGIN_ID --scope user)"; rc=1 ;;
+      *) warn "couldn't uninstall the plugin $PLUGIN_ID (claude plugin uninstall $PLUGIN_ID --scope user)"; rc=1 ;;
+    esac
   fi
-  return 0
+  if [ "$rc" != 0 ]; then
+    :     # the marketplace stays too: removing it would take the plugin with it, unchecked
+  elif [ "$mkt" = "directory${TAB}$ROOT" ]; then
+    claude plugin marketplace remove "$MKT" >/dev/null 2>&1 || true
+    case "$(mkt_lookup)" in
+      absent) ok "removed the marketplace $MKT (this checkout)" ;;
+      error) warn "couldn't read Claude Code's marketplaces after removing $MKT, so whether it's gone is unknown"
+             warn "(claude plugin marketplace list; to remove it: claude plugin marketplace remove $MKT)"; rc=1 ;;
+      *) warn "couldn't remove the marketplace $MKT (claude plugin marketplace remove $MKT)"; rc=1 ;;
+    esac
+  elif mkt_is_canonical "$mkt"; then
+    echo "  The marketplace $MKT (github.com/$CANON_REPO) stays; to remove it: claude plugin marketplace remove $MKT"
+  elif [ "$mkt" != absent ]; then
+    echo "  The marketplace $MKT (another source's) stays; to remove it: claude plugin marketplace remove $MKT"
+  fi
+  return "$rc"
 }
 # What to do when something fails: the stage's own advice (FAIL_HINT, set by each stage), then
 # the two causes behind most failures, a full disk and no network, when they're the case now.
@@ -249,28 +384,25 @@ codex_python() { # found as install.sh's py311_ok finds it (Homebrew's, then pyt
   done
   return 1
 }
-codex_server() { # Codex's MCP server named metacomputer: "absent", "stdio<TAB>COMMAND", "other" (not a local
-  # command, e.g. a URL) or "error" (the lookup failed: never read as absent)
-  local out err
-  codex_python || { echo error; return 0; }
-  err="$(mktemp)" || { echo error; return 0; }
-  # failures are caught inside the substitution (install.sh's ERR trap would end the install otherwise)
-  out="$(codex mcp get metacomputer --json 2>"$err" || echo "__failed__")"
-  case "$out" in *__failed__)
-    if grep -q "No MCP server named 'metacomputer'" "$err" 2>/dev/null; then echo absent; else echo error; fi
-    rm -f "${err:?}"; return 0 ;;
-  esac
-  rm -f "${err:?}"
-  printf '%s' "$out" | "$CPY" -c 'import json, sys
-try:
-    t = json.load(sys.stdin).get("transport") or {}
-except Exception:
-    print("error"); sys.exit(0)
-cmd = t.get("command")
-print("stdio\t" + cmd if t.get("type") == "stdio" and isinstance(cmd, str) and cmd and "\n" not in cmd else "other")' \
-    2>/dev/null || echo error
+# Codex's MCP server named metacomputer, read whole (lib/agents.py codex-entry: `codex mcp get --json`), on one line of
+# fields split by $US: OWNER, WORDS, DIGEST, COMMAND, LINKED. OWNER, by the rule Claude Code's follows: "ok" (a local
+# command, exactly this checkout's bin/metacomputer or ~/.local/bin/metacomputer, with exactly ["mcp-lazy"]), "ours" (the
+# same with a path earlier versions registered under this checkout's bin/: pointed at bin/metacomputer), "foreign"
+# (anything else, a path that only starts with the checkout's included: never changed or removed), "absent" or "error"
+# (never read as absent). WORDS names metacomputer's own by its command, anything else by its program and how many
+# arguments it has, or its transport (never an argument, a variable or a URL). DIGEST stands for the whole entry, read
+# again right before any change (codex_unchanged); COMMAND is given only for ok and ours; LINKED is "link" when it runs
+# ~/.local/bin/metacomputer or mcomp themselves.
+codex_server() {
+  codex_python || { printf 'error%sthe Codex step needs Python 3.11 or later%s%s%s\n' "$US" "$US" "$US" "$US"; return 0; }
+  "$CPY" "$ROOT/lib/agents.py" codex-entry --root "$ROOT" --link "$CMD_LINK" 2>/dev/null </dev/null \
+    || printf 'error%sagents.py codex-entry failed%s%s%s\n' "$US" "$US" "$US" "$US"
 }
-codex_server_cmd() { local s; s="$(codex_server)"; case "$s" in stdio"$TAB"*) printf '%s\n' "${s#*"$TAB"}" ;; esac; }
+codex_unchanged() { # DIGEST: 0 when Codex's MCP server metacomputer is still exactly the entry classified
+  local sum
+  IFS=$US read -r _ _ sum _ <<<"$(codex_server)"
+  [ -n "$1" ] && [ "$sum" = "$1" ]
+}
 codex_rules_ours() { # rules this checkout wrote (or a moved checkout that's gone)
   [ -f "$CODEX_RULES" ] && [ "$(head -1 "$CODEX_RULES" 2>/dev/null)" = "$CODEX_MARK" ] || return 1
   local owner; owner="$(sed -n '4p' "$CODEX_RULES" 2>/dev/null)"
@@ -354,9 +486,10 @@ agents_stage() { # step 5 (and --only-agents): each agent, as the switches and e
   fi
   printf '%s\n' "  (metacomputer agents shows this any time)"
 }
-codex_config_edit() { # MODE [OLD_COMMAND]: "settings" adds the timeout and approval mode where they're missing;
-  # "command" points the registration that runs OLD_COMMAND at this checkout. Only metacomputer's own table changes,
-  # and only as asked: the whole file is parsed again and compared, or nothing is written. Everything you set stays.
+codex_config_edit() { # MODE COMMAND: "settings" adds the timeout and approval mode where they're missing; "command"
+  # points the registration at this checkout. Either only when the table still runs COMMAND with exactly ["mcp-lazy"]
+  # (metacomputer's own, as classified). Only that table changes, and only as asked: the whole file is parsed again and
+  # compared, or nothing is written. Everything you set stays.
   local cfg="$CODEX_DIR/config.toml" out
   [ -f "$cfg" ] || { echo missing; return 0; }
   # It prints ok, the notes, or failed, and exits 0: a failure inside the substitution would trip install.sh's ERR trap.
@@ -378,8 +511,8 @@ except tomllib.TOMLDecodeError:
 srv = before.get("mcp_servers", {}).get("metacomputer")
 if not isinstance(srv, dict):
     fail()
-if mode == "command" and srv.get("command") != old:
-    fail()                           # someone changed it since it was looked at: not ours to repoint
+if srv.get("command") != old or srv.get("args") != ["mcp-lazy"]:
+    fail()                           # not the entry classified as metacomputer-owned (changed since?): left alone
 lines = text.split("\n")
 heads = [i for i, l in enumerate(lines) if l.strip() == "[mcp_servers.metacomputer]"]
 if len(heads) != 1:
@@ -429,8 +562,8 @@ PY
 )"
   case "$out" in *failed*|"") echo failed ;; *) printf '%s\n' "$out" ;; esac
 }
-codex_server_settings() {
-  local out; out="$(codex_config_edit settings)"
+codex_server_settings() { # COMMAND: the one the entry runs (metacomputer's own)
+  local out; out="$(codex_config_edit settings "$1")"
   case "$out" in
     failed|missing)
       warn "couldn't set tool_timeout_sec = $CODEX_TOOL_TIMEOUT and default_tools_approval_mode = \"$CODEX_APPROVAL\" for metacomputer in $CODEX_DIR/config.toml (add them under [mcp_servers.metacomputer]: docs/codex.md)"
@@ -476,35 +609,44 @@ codex_step() {
     warn "the Codex step needs Python 3.11 or later (brew install python), so Codex was left alone; then: ./install.sh --only-codex"
     return 0
   fi
-  local srv cmd name target link
-  srv="$(codex_server)"
-  case "$srv" in
+  local own what sum cmd name target link
+  CODEX_TRIED=1
+  IFS=$US read -r own what sum cmd _ <<<"$(codex_server)"
+  case "$own" in
     error)
-      warn "couldn't read Codex's MCP servers (codex mcp get metacomputer failed), so they were left alone; try ./install.sh --only-codex again" ;;
-    other)
-      warn "Codex already has an MCP server named metacomputer that isn't a local command (a URL?); left alone (codex mcp remove metacomputer, then ./install.sh --only-codex)" ;;
+      warn "couldn't read Codex's MCP server metacomputer ($what), so it was left as it is; try ./install.sh --only-codex again"
+      CODEX_FAILED=1 ;;
+    foreign)
+      warn "Codex already has an MCP server named metacomputer that isn't metacomputer's (it runs $what); it was left as it is."
+      warn "To use metacomputer's instead: codex mcp remove metacomputer, then ./install.sh --only-codex"
+      CODEX_FAILED=1 ;;
     absent)
       if codex mcp add metacomputer -- "$ROOT/bin/metacomputer" mcp-lazy >/dev/null 2>&1; then
         ok "MCP server metacomputer for every Codex session (tools: mcp__metacomputer__*, there even while the VM is off)"
-        codex_server_settings
+        codex_server_settings "$ROOT/bin/metacomputer"
       else
         warn "could not add the MCP server to Codex; run: codex mcp add metacomputer -- $ROOT/bin/metacomputer mcp-lazy"
+        CODEX_FAILED=1
       fi ;;
-    *)
-      cmd="${srv#*"$TAB"}"
-      if [ "$cmd" = "$ROOT/bin/metacomputer" ]; then
-        ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
-        codex_server_settings
-      elif old_target "$cmd"; then
-        # an earlier (moved) checkout's: only its command changes; anything you set on it stays
-        if [ "$(codex_config_edit command "$cmd")" != failed ] && [ "$(codex_server_cmd)" = "$ROOT/bin/metacomputer" ]; then
+    ok)
+      ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
+      codex_server_settings "$cmd" ;;
+    ours)
+      # a path earlier versions registered under this checkout: only its command changes (anything you set on it stays),
+      # and only when it's still exactly the entry read above; then it's read back
+      if ! codex_unchanged "$sum"; then
+        warn "Codex's MCP server metacomputer changed since it was read, so it was left as it is; run ./install.sh --only-codex again"
+        CODEX_FAILED=1
+      else
+        codex_config_edit command "$cmd" >/dev/null
+        IFS=$US read -r own _ _ _ _ <<<"$(codex_server)"
+        if [ "$own" = ok ]; then
           ok "MCP server metacomputer now runs this checkout (your settings for it kept)"
-          codex_server_settings
+          codex_server_settings "$ROOT/bin/metacomputer"
         else
           warn "couldn't point Codex's MCP server metacomputer at this checkout; run: codex mcp remove metacomputer, then ./install.sh --only-codex"
+          CODEX_FAILED=1
         fi
-      else
-        warn "Codex already has an MCP server named metacomputer that runs $cmd; left alone (codex mcp remove metacomputer, then ./install.sh --only-codex)"
       fi ;;
   esac
   mkdir -p "$AGENT_SKILLS"
@@ -534,15 +676,51 @@ codex_step() {
                         warn "this Codex works differently from the one metacomputer was checked with (above; docs/codex.md)" ;;
     *) ok "checked: Codex's rules checker, sandbox, MCP settings and session files work as metacomputer expects" ;;
   esac
+  agent_record codex "$CODEX_TRIED" "$CODEX_FAILED"
 }
-codex_remove() { # --uninstall: only what is this checkout's
+keep_cmd_for() { # WHOSE ("Claude Code's", "Codex's"): an MCP server metacomputer that stays runs, or may run, the
+  # command links, so --uninstall keeps them
+  KEEP_CMD=1
+  case "$KEEP_WHY" in "") KEEP_WHY="$1" ;; *"$1"*) ;; *) KEEP_WHY="$KEEP_WHY and $1" ;; esac
+}
+# --uninstall, before the command links are removed: Codex's MCP server metacomputer when it's this checkout's (ok or
+# ours: its command this checkout's launcher, a path earlier versions registered under it, or ~/.local/bin/metacomputer
+# while that is this checkout's; exactly ["mcp-lazy"]), read again right before its removal, and the removal checked.
+# Anything else stays (said, by its program's name only). One that stays and runs ~/.local/bin/metacomputer or mcomp
+# keeps those links (KEEP_CMD).
+codex_server_remove() {
   has_codex || return 0
   codex_python || { warn "Codex left alone: the uninstall's Codex step needs Python 3.11 or later"; return 0; }
-  local cmd name link
-  cmd="$(codex_server_cmd)"
-  if [ -n "$cmd" ] && old_target "$cmd"; then
-    codex mcp remove metacomputer >/dev/null 2>&1 && ok "removed Codex's metacomputer MCP server"
+  local own what sum cmd lnk now
+  IFS=$US read -r own what sum cmd lnk <<<"$(codex_server)"
+  case "$own" in
+    absent) return 0 ;;
+    error) warn "couldn't read Codex's MCP server metacomputer ($what), so it was left as it is;"
+           warn "run ./install.sh --uninstall again, or remove it yourself: codex mcp remove metacomputer"
+           UNINSTALL_FAILED=1; keep_cmd_for "Codex's"; return 0 ;;
+    ok|ours) if [ "$cmd" = "$CMD_LINK" ] && ! link_points_here "$CMD_LINK" "$ROOT/bin/metacomputer"; then own=other; fi ;;
+  esac
+  if [ "$own" != ok ] && [ "$own" != ours ]; then
+    echo "  Codex's MCP server metacomputer stays: it runs $what, which isn't this checkout's"
+    [ "$lnk" != link ] || { keep_cmd_for "Codex's"; }
+    return 0
   fi
+  if ! codex_unchanged "$sum"; then
+    warn "Codex's MCP server metacomputer changed since it was read, so it was left as it is;"
+    warn "run ./install.sh --uninstall again, or remove it yourself: codex mcp remove metacomputer"
+    UNINSTALL_FAILED=1; keep_cmd_for "Codex's"; return 0
+  fi
+  codex mcp remove metacomputer >/dev/null 2>&1 || true
+  IFS=$US read -r now _ _ _ _ <<<"$(codex_server)"
+  if [ "$now" = absent ]; then ok "removed Codex's metacomputer MCP server"
+  else
+    warn "couldn't remove Codex's metacomputer MCP server (or confirm it's gone); remove it yourself: codex mcp remove metacomputer"
+    UNINSTALL_FAILED=1; keep_cmd_for "Codex's"
+  fi
+}
+codex_remove() { # --uninstall, after the command links: the skill links and rules that are this checkout's
+  has_codex || return 0
+  local name link
   for name in metacomputer cua-driver; do
     link="$AGENT_SKILLS/$name"
     if link_points_here "$link" "$(codex_skill_target "$name")"; then
@@ -555,20 +733,59 @@ codex_remove() { # --uninstall: only what is this checkout's
 
 # --- uninstall ---------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
-  step "Removing the Claude Code and Codex hooks for $ROOT"
-  for l in "$CMD_LINK" "$ALIAS_LINK"; do link_points_here "$l" "$ROOT/bin/metacomputer" && rm "$l" && ok "removed $l"; done
+  step "Removing what $ROOT set up for Claude Code and Codex"
+  # Claude Code's user-scope MCP server, read before anything is removed (the command link it runs among them). It is
+  # this checkout's when it is ~/.local/bin/metacomputer mcp-lazy while that link is this checkout's, or this checkout's
+  # own launcher ("ours": lib/claude_mcp.py). Anything else stays (said), and so do project and local servers. A lookup
+  # that fails stops the uninstall before it changes anything; a removal that doesn't take ends it with exit status 1.
+  # It goes first, while the command it runs is still there: read again right before its removal, it stays when it changed
+  # meanwhile. Codex's goes next, the same way. The command links (~/.local/bin/metacomputer, mcomp) stay whenever an
+  # entry that stays, Claude Code's or Codex's, owned or not, runs them (or may: changed, or not confirmed gone), so that
+  # no entry is left running a program that's gone.
+  srv_ours=0; UNINSTALL_FAILED=0; KEEP_CMD=0; KEEP_WHY=""; srv_words=""; srv_sum=""; srv_linked=""
+  if has_claude; then
+    IFS=$US read -r srv_own _ srv_words srv_sum srv_linked <<<"$(user_server metacomputer)"
+    case "$srv_own" in
+      error) die "couldn't read Claude Code's user-scope MCP server metacomputer ($srv_words), so nothing was removed." \
+                 "Run ./install.sh --uninstall again, or remove it yourself: claude mcp remove metacomputer -s user" ;;
+      ok) if link_points_here "$CMD_LINK" "$ROOT/bin/metacomputer"; then srv_ours=1; fi ;;
+      ours) srv_ours=1 ;;
+    esac
+  fi
+  if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then
+    warn "Claude Code's metacomputer MCP server changed since it was read (another Claude Code?), so it was left as it is;"
+    warn "run ./install.sh --uninstall again, or remove it yourself: claude mcp remove metacomputer -s user"
+    UNINSTALL_FAILED=1; keep_cmd_for "Claude Code's"
+  elif [ "$srv_ours" = 1 ]; then
+    claude mcp remove metacomputer -s user >/dev/null 2>&1 || true
+    IFS=$US read -r srv_own _ _ _ <<<"$(user_server metacomputer)"
+    if [ "$srv_own" = absent ]; then ok "removed Claude Code's metacomputer MCP server"
+    else warn "couldn't remove Claude Code's metacomputer MCP server (or confirm it's gone); remove it yourself: claude mcp remove metacomputer -s user"
+         UNINSTALL_FAILED=1; keep_cmd_for "Claude Code's"; fi
+  elif [ -n "$srv_words" ] && [ "${srv_own:-absent}" != absent ]; then
+    echo "  Claude Code's user-scope MCP server metacomputer stays: it runs $srv_words, which isn't this checkout's"
+    [ "$srv_linked" != link ] || { keep_cmd_for "Claude Code's"; }
+  fi
+  codex_server_remove
+  for l in "$CMD_LINK" "$ALIAS_LINK"; do
+    if ! link_points_here "$l" "$ROOT/bin/metacomputer"; then :
+    elif [ "$KEEP_CMD" = 1 ]; then warn "kept $l: an MCP server metacomputer that stays ($KEEP_WHY) runs, or may run, this command"
+    else rm "$l" && ok "removed $l"; fi
+  done
   link_points_here "$SKILL_LINK" "$ROOT/skills/metacomputer" && rm "$SKILL_LINK" && ok "removed the metacomputer skill"
   [ -f "$HOME/.local/share/metacomputer/bin/mcomp-vault" ] && rm "$HOME/.local/share/metacomputer/bin/mcomp-vault" \
     && ok "removed the secrets vault program (your vault file stays: ~/Library/Application Support/metacomputer)"
-  if has_claude; then
-    cmd="$(mcp_server_cmd metacomputer)"
-    if [ -n "$cmd" ] && old_target "$cmd"; then
-      claude mcp remove metacomputer -s user >/dev/null 2>&1 && ok "removed the metacomputer MCP server"
-    fi
-  fi
+  if has_claude; then shadow_note; fi
   # The plugin: from this checkout's marketplace, or from GitHub (its copy runs this checkout
   # through ~/.local/bin/metacomputer, removed above, so it can't work without it).
-  if has_plugin_cli && plugin_is_ours; then remove_plugin; fi
+  if has_plugin_cli; then
+    case "$(plugin_owner)" in
+      ours) remove_plugin || UNINSTALL_FAILED=1 ;;
+      error) warn "couldn't read Claude Code's plugin marketplaces (claude plugin marketplace list --json), so whether the plugin"
+             warn "$PLUGIN_ID is this checkout's is unknown; left as it is (if it is: claude plugin uninstall $PLUGIN_ID --scope user)"
+             UNINSTALL_FAILED=1 ;;
+    esac
+  fi
   codex_remove
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$CONF" ] && . "$CONF"
@@ -589,103 +806,395 @@ if [ "$UNINSTALL" = 1 ]; then
   if [ "$name" != lume-secure ] && [ -x "$HOME/.local/bin/lume-secure" ]; then
     echo "(lume-secure, mcomp-vm's former name, is installed too: rm -rf ~/.local/share/lume-secure ~/.local/bin/lume-secure)"
   fi
+  [ "$UNINSTALL_FAILED" = 0 ] || { printf '\n%s\n' "${y}Not everything was removed: the lines marked ! above say what's left and how to remove it.${o}" >&2; exit 1; }
   exit 0
 fi
 
 # --- the Claude Code step (4; --only-claude runs it alone) ------------------------------------
 # Plugin mode: this checkout is the marketplace `metacomputer`, and its plugin (plugin/: copies of
-# skills/metacomputer and the driver pack, and a launcher that runs ~/.local/bin/metacomputer) loads in place from here.
-plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so), 1 = failed, 3 = refused
-  local mkt; mkt="$(mkt_info)"
-  case "$mkt" in
+# skills/metacomputer and the driver pack, /metacomputer:learn, and a launcher that runs ~/.local/bin/metacomputer)
+# loads in place from here. The plugin declares no MCP server and no hooks (Anthropic's plugin directory holds a plugin
+# for review when one runs a script it can't follow); the MCP server is registered here, at user scope, in both modes.
+plugin_install() { # 0 = installed and on, 2 = installed but turned off (left so), 1 = failed, 3 = refused, 4 = another
+  # checkout's marketplace whose plugin is on or not installed (left for plugin_switch, once the server is registered and
+  # checked), 5 = Claude Code's marketplaces or plugins couldn't be read, or the plugin's record isn't one this knows
+  # (everything left as it is)
+  MKT_FOUND="$(mkt_lookup)"
+  case "$MKT_FOUND" in
+    error)
+      warn "couldn't read Claude Code's plugin marketplaces (claude plugin marketplace list --json), so the plugin was left as it is"
+      return 5 ;;
     "directory${TAB}$ROOT") ok "marketplace $MKT: this checkout (already added)" ;;
-    directory*|"")
-      if [ -n "$mkt" ]; then
-        claude plugin marketplace remove "$MKT" >/dev/null 2>&1 || true
-        ok "removed the marketplace $MKT, which was ${mkt#*"$TAB"}"
-      fi
+    directory"$TAB"*)
+      # another checkout's: its plugin is read first. One turned off stays off, and so does the rest of Claude Code's
+      # setup (as with this checkout's); one that can't be read stops the switch.
+      case "$(plugin_state)" in
+        on|absent) return 4 ;;
+        off) warn "the plugin $PLUGIN_ID, from the marketplace $MKT (another checkout's), is installed but turned off; left so"
+             warn "(to turn it on: claude plugin enable $PLUGIN_ID)"; return 2 ;;
+        *) warn "couldn't read the installed plugins (claude plugin list --json), or the plugin's record there isn't one this"
+           warn "knows, so the marketplace $MKT (another checkout's) and its plugin were left as they are"; return 5 ;;
+      esac ;;
+    absent)
       claude plugin marketplace add "$ROOT" >/dev/null 2>&1 \
         || { warn "could not add this checkout as a marketplace (claude plugin marketplace add $ROOT)"; return 1; }
       ok "marketplace $MKT: this checkout" ;;
     *)
-      if ! mkt_is_canonical "$mkt"; then
-        warn "a marketplace named $MKT is already registered from ${mkt//$TAB/ }, which is neither this checkout nor"
+      if ! mkt_is_canonical "$MKT_FOUND"; then
+        warn "a marketplace named $MKT from another source is already registered: it's neither this checkout nor"
         warn "github.com/$CANON_REPO, so its plugin is NOT installed: its code would run on this Mac. If it isn't"
         warn "yours, remove it (claude plugin marketplace remove $MKT) and run ./install.sh --only-claude again."
         return 3
       fi
-      ok "marketplace $MKT: ${mkt//$TAB/ } (its plugin runs this checkout through $CMD_LINK)" ;;
+      ok "marketplace $MKT: github.com/$CANON_REPO (its plugin runs this checkout through $CMD_LINK)" ;;
   esac
+  plugin_enable
+}
+plugin_enable() { # the plugin from the marketplace there now: 0 = on, 2 = turned off (left so), 1 = failed, 5 = unreadable
   case "$(plugin_state)" in
     on) ok "plugin $PLUGIN_ID already installed" ;;
     off) warn "the plugin $PLUGIN_ID is installed but turned off; left so (to turn it on: claude plugin enable $PLUGIN_ID)"; return 2 ;;
-    *) claude plugin install "$PLUGIN_ID" --scope user >/dev/null 2>&1 \
-         || { warn "could not install the plugin (claude plugin install $PLUGIN_ID --scope user)"; return 1; }
-       ok "plugin $PLUGIN_ID installed for every project: skills metacomputer and cua-driver, MCP server metacomputer (tools: mcp__plugin_metacomputer_metacomputer__*, there even while the VM is off)" ;;
+    absent)
+      claude plugin install "$PLUGIN_ID" --scope user >/dev/null 2>&1 \
+        || { warn "could not install the plugin (claude plugin install $PLUGIN_ID --scope user)"; return 1; }
+      ok "plugin $PLUGIN_ID installed for every project: the skills metacomputer and cua-driver, /metacomputer:learn and the metacomputer command" ;;
+    *) warn "couldn't read the installed plugins (claude plugin list --json), or the plugin's record there isn't one this"
+       warn "knows (it may have failed to load), so the plugin $PLUGIN_ID was left as it is"
+       return 5 ;;
   esac
 }
-skill_link_and_server() { # without the plugin: the skill link and a user-scope MCP server
+# Another checkout's marketplace named metacomputer (from an install there, with its plugin on or not installed: read by
+# plugin_install): its plugin may be what serves the tools now (a copy from before brings its own server), so
+# claude_step calls this only once the user-scope server is registered and checked. Removing that marketplace takes its
+# plugin with it; each step is checked. 0 = this checkout's plugin is on, 2 = installed but turned off, 1 = this
+# checkout's couldn't be added (the old one is gone), 5 = the plugins couldn't be read, 6 = the old marketplace couldn't
+# be removed, or whether it was can't be read (it stays).
+plugin_switch() {
+  claude plugin marketplace remove "$MKT" >/dev/null 2>&1 || true
+  case "$(mkt_lookup)" in
+    absent) ok "removed the marketplace $MKT, which was another checkout's" ;;
+    error) warn "couldn't read Claude Code's marketplaces after removing $MKT (another checkout's), so whether it's gone is"
+           warn "unknown (claude plugin marketplace list; to remove it: claude plugin marketplace remove $MKT)"; return 6 ;;
+    *) warn "couldn't remove the marketplace $MKT (another checkout's), so it and its plugin stay"
+       warn "(claude plugin marketplace remove $MKT, then ./install.sh --only-claude)"; return 6 ;;
+  esac
+  claude plugin marketplace add "$ROOT" >/dev/null 2>&1 \
+    || { warn "could not add this checkout as a marketplace (claude plugin marketplace add $ROOT)"; return 1; }
+  ok "marketplace $MKT: this checkout"
+  plugin_enable
+}
+skill_link() { # without the plugin: the skill as a link into this checkout
   mkdir -p "$HOME/.claude/skills"
   if [ -e "$SKILL_LINK" ] && [ ! -L "$SKILL_LINK" ]; then
     warn "$SKILL_LINK exists and isn't a link; left alone (move it away and run this again to install the skill)"
   else
     ln -sfn "$ROOT/skills/metacomputer" "$SKILL_LINK" && ok "skill: metacomputer"
   fi
+}
+# Claude Code's MCP server `metacomputer`, at user scope (every project): ~/.local/bin/metacomputer mcp-lazy, so it runs
+# the checkout the command runs (--switch moves both). Only metacomputer's own registration is ever removed or rewritten
+# (user_server's OWNER: canonical command, exact arguments): this checkout's is repaired, another checkout's moves here
+# with --switch or a yes at a terminal. Anything else is left exactly as it is: the run names it (its program and how
+# many arguments it has, or its transport; never its arguments, variables or URL), says how to remove it yourself, and
+# the step counts as unfinished. metacomputer's own is read again right before it's removed and left as it is when it
+# changed since; once the removal is done, the new one is always added and read back, and when that doesn't work the run
+# says the server is missing and the command that adds it (nothing of yours is lost: that command makes it again).
+# Returns 0 once the server is registered as it should be (read back and checked), else 1.
+register_server() {
   if ! has_claude; then
     warn "Claude Code's 'claude' command isn't installed; after installing it, run: ./install.sh --only-claude"
     return 0
   fi
-  if [ "$(mcp_server_cmd metacomputer)" = "$ROOT/bin/metacomputer" ]; then
-    ok "MCP server metacomputer already registered (tools: mcp__metacomputer__*)"
-  else
-    claude mcp remove metacomputer -s user >/dev/null 2>&1 || true
-    if claude mcp add -s user metacomputer "$ROOT/bin/metacomputer" mcp-lazy >/dev/null 2>&1; then
-      ok "MCP server metacomputer registered for every project (tools: mcp__metacomputer__*, there even while the VM is off)"
-    else
-      warn "could not register the MCP server; run: claude mcp add -s user metacomputer $ROOT/bin/metacomputer mcp-lazy"
+  local own kind what sum now nwhat removed="" add_cmd
+  add_cmd="claude mcp add -s user metacomputer $(tildify "$CMD_LINK") mcp-lazy"
+  REG_LEFT=""
+  IFS=$US read -r own kind what sum _ <<<"$(user_server metacomputer)"
+  case "$own" in
+    ok)
+      case "$what" in *", with variables of its own") what="; your variables on it are kept" ;; *) what="" ;; esac
+      ok "MCP server metacomputer already registered for every project (tools: mcp__metacomputer__*$what)"
+      shadow_note; return 0 ;;
+    error)
+      warn "couldn't read Claude Code's user-scope MCP server metacomputer ($what), so it was left as it is;"
+      warn "run ./install.sh --only-claude again"
+      REG_LEFT=unknown; return 1 ;;
+    checkout)
+      if [ "$SWITCH" = 1 ] \
+         || ask "Claude Code's MCP server metacomputer runs another checkout: $what. Point it at this one?" N; then :
+      else
+        warn "Claude Code's MCP server metacomputer runs another checkout: $what; left as it is"
+        warn "(to point it at this one: ./install.sh --only-claude --switch)"
+        REG_LEFT=other; return 1
+      fi ;;
+    foreign)
+      warn "Claude Code already has a user-scope MCP server named metacomputer that isn't metacomputer's (it runs $what);"
+      warn "it was left as it is. To use metacomputer's instead: claude mcp remove metacomputer -s user, then ./install.sh --only-claude"
+      REG_LEFT=other; return 1 ;;
+  esac
+  # absent, or metacomputer's own to repair or move here
+  if [ "$own" != absent ]; then
+    # still exactly the entry classified above, its variables included? (another Claude Code may have changed it
+    # meanwhile, or while you answered)
+    if ! entry_unchanged metacomputer "$sum"; then
+      warn "Claude Code's MCP server metacomputer changed since it was read (another Claude Code?), so it was left as it is;"
+      warn "run ./install.sh --only-claude again"
+      REG_LEFT=other; return 1
     fi
+    claude mcp remove metacomputer -s user >/dev/null 2>&1 || true
+    IFS=$US read -r now _ _ _ <<<"$(user_server metacomputer)"
+    case "$now" in
+      absent|error) removed=" (the registration that ran $what was removed)" ;;  # gone, or can't be told now: the add goes ahead
+      *) warn "couldn't remove the MCP server metacomputer that runs $what (metacomputer's own), so it was left as it is"
+         REG_LEFT=other; return 1 ;;
+    esac
   fi
+  claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy >/dev/null 2>&1 || warn "could not register the MCP server ($add_cmd failed)"
+  IFS=$US read -r now _ nwhat _ <<<"$(user_server metacomputer)"
+  case "$now" in
+    ok)
+      SERVER_ADDED=1
+      ok "MCP server metacomputer registered for every project: $(tildify "$CMD_LINK") mcp-lazy (tools: mcp__metacomputer__*, there even while the VM is off)"
+      [ "$own" = absent ] || ok "(it replaces the registration that ran $what)"
+      shadow_note; return 0 ;;
+    absent)
+      warn "Claude Code has no MCP server metacomputer now, so no metacomputer tools$removed. To add it:"
+      warn "$add_cmd (or run ./install.sh --only-claude again)"
+      REG_LEFT=none ;;
+    error)
+      warn "couldn't read Claude Code's MCP server metacomputer back ($nwhat), so whether it's there is unknown$removed."
+      warn "If claude mcp get metacomputer shows none, add it: $add_cmd (or run ./install.sh --only-claude again)"
+      REG_LEFT=unknown ;;
+    *)
+      warn "after the add, Claude Code's MCP server metacomputer runs $nwhat, not $(tildify "$CMD_LINK") mcp-lazy$removed;"
+      warn "left as it is (run ./install.sh --only-claude again)"
+      REG_LEFT=other ;;
+  esac
+  return 1
+}
+# After a registration that didn't work (register_server), when the plugin brings no MCP server of its own either (this
+# checkout's plugin declares none; an update moves the checkout, and so the plugin's declaration, before install.sh
+# runs): say plainly that new Claude Code sessions have no metacomputer tools until that's fixed, the line that fixes it,
+# and that `metacomputer update` tries again (the step is recorded as unfinished).
+tools_missing_note() {
+  local plug=absent add_cmd
+  add_cmd="claude mcp add -s user metacomputer $(tildify "$CMD_LINK") mcp-lazy"
+  case "$REG_LEFT" in none|unknown) ;; *) return 0 ;; esac
+  if has_plugin_cli; then plug="$(plugin_servers_state)"; fi
+  [ "$plug" != present ] || return 0
+  if [ "$REG_LEFT" = none ] && [ "$plug" = absent ]; then
+    warn "metacomputer's tools are missing in new Claude Code sessions until this is fixed: no MCP server metacomputer is"
+    warn "registered, and the plugin no longer brings one. To fix it: $add_cmd"
+  else
+    warn "metacomputer's tools may be missing in new Claude Code sessions until this is fixed: whether an MCP server"
+    warn "metacomputer is registered, or the plugin brings one, can't be read. If claude mcp get metacomputer shows none: $add_cmd"
+  fi
+  warn "(metacomputer update tries this step again)"
+}
+# The server names earlier versions registered (cua-linux, virtual-computer): retired only once metacomputer's own
+# server is registered and checked, and only when they're this checkout's ("ours"); each is read again right before its
+# removal, and each removal is checked. One whose owner can't be read stays, and counts as not done.
+retire_old_servers() { # 0 = none of this checkout's is left, and each name was read
+  local old own sum rc=0
+  has_claude || return 0
+  for old in cua-linux virtual-computer; do
+    IFS=$US read -r own _ _ sum _ <<<"$(user_server "$old")"
+    case "$own" in
+      ok|ours) ;;
+      error) warn "couldn't read the old MCP server name $old, so whether it's this checkout's (the tools listed twice)"
+             warn "is unknown; left as it is (run ./install.sh --only-claude again)"; rc=1; continue ;;
+      *) continue ;;
+    esac
+    if ! entry_unchanged "$old" "$sum"; then
+      warn "the old MCP server name $old changed since it was read, so it was left as it is (run ./install.sh --only-claude again)"
+      rc=1; continue
+    fi
+    claude mcp remove "$old" -s user >/dev/null 2>&1 || true
+    IFS=$US read -r own _ _ _ <<<"$(user_server "$old")"
+    if [ "$own" = absent ]; then ok "removed the old MCP server name $old (now metacomputer)"
+    else warn "couldn't remove the old MCP server name $old (claude mcp remove $old -s user)"; rc=1; fi
+  done
+  return "$rc"
+}
+# Runs only once the user-scope server is registered and checked. A copy of the plugin from before it left the MCP server
+# to this step (installed from GitHub, not updated since) still brings its own, so Claude Code would list the tools
+# twice: update it from the project's own repository, then read the plugin list again. 0 = it brings no server (read).
+plugin_server_check() {
+  local st upd=0
+  st="$(plugin_servers_state)"
+  case "$st" in
+    absent) return 0 ;;
+    error)
+      warn "couldn't read the installed plugins (claude plugin list --json), so whether $PLUGIN_ID still brings an MCP"
+      warn "server of its own is unknown; if Claude Code lists the tools twice: claude plugin update $PLUGIN_ID"
+      return 1 ;;
+  esac
+  if mkt_is_canonical "$(mkt_lookup)"; then
+    if claude plugin marketplace update "$MKT" </dev/null >/dev/null 2>&1 \
+       && claude plugin update "$PLUGIN_ID" --scope user </dev/null >/dev/null 2>&1; then upd=1; fi
+  fi
+  st="$(plugin_servers_state)"
+  case "$st" in
+    absent)
+      ok "plugin $PLUGIN_ID$([ "$upd" = 0 ] || echo " updated"): it no longer brings an MCP server of its own"
+      return 0 ;;
+    present)
+      warn "the plugin $PLUGIN_ID here is an older copy that brings its own MCP server, so Claude Code lists the tools twice"
+      warn "(mcp__metacomputer__* and mcp__plugin_metacomputer_metacomputer__*) until it's updated: claude plugin update $PLUGIN_ID" ;;
+    *)
+      warn "couldn't read the installed plugins after updating $PLUGIN_ID (claude plugin list --json), so whether it still"
+      warn "brings an MCP server of its own is unknown; if Claude Code lists the tools twice: claude plugin update $PLUGIN_ID" ;;
+  esac
+  return 1
 }
 claude_step() {
   link_command
-  # The skill name and MCP server names used by earlier versions: virtual-computer; cua-linux, virtual-computer.
-  local old cmd rc=0
+  # set up this run only with a claude command (without one, nothing of Claude Code's is read or changed): its result is
+  # recorded at the end (agent_record), before anything else runs
+  if has_claude; then CLAUDE_TRIED=1; fi
+  # The skill name used by earlier versions, virtual-computer (their server names: retire_old_servers, after the server)
+  local old rc=0 sw=0
   old="$HOME/.claude/skills/virtual-computer"
   if [ -L "$old" ] && old_target "$(readlink "$old")"; then rm -f "${old:?}" && ok "removed the old name $old"; fi
-  if has_claude; then
-    for old in cua-linux virtual-computer; do
-      cmd="$(mcp_server_cmd "$old")"
-      if [ -n "$cmd" ] && old_target "$cmd"; then
-        claude mcp remove "$old" -s user >/dev/null 2>&1 && ok "removed the old MCP server name $old (now metacomputer)"
-      fi
-    done
-  fi
   if [ "$PLUGIN" = 1 ] && has_plugin_cli; then
     plugin_install || rc=$?
     case "$rc" in
-      0) remove_skill_link_and_server ;;
-      2) ;;
-      *) warn "using a skill link and a user-scope MCP server instead (as ./install.sh --no-plugin does)"; skill_link_and_server ;;
+      0) remove_skill_link
+         # what served the tools before (an older plugin copy's own server, old server names) is retired only once the
+         # user-scope server is there and checked
+         if register_server; then
+           retire_old_servers || CLAUDE_FAILED=1
+           plugin_server_check || CLAUDE_FAILED=1
+         else
+           CLAUDE_FAILED=1
+           [ "$(plugin_servers_state)" != present ] \
+             || warn "the plugin's own MCP server (an older copy of the plugin) was left in place, so the tools are still there"
+           tools_missing_note
+         fi ;;
+      4) # another checkout's marketplace, whose plugin may be what serves the tools now: replaced by this checkout's only
+         # once the user-scope server is there and checked
+         if register_server; then
+           plugin_switch || sw=$?
+           case "$sw" in
+             0) remove_skill_link; plugin_server_check || CLAUDE_FAILED=1 ;;
+             2) ;;
+             1) warn "using a skill link instead of the plugin (as ./install.sh --no-plugin does)"; skill_link ;;
+             *) CLAUDE_FAILED=1 ;;
+           esac
+           retire_old_servers || CLAUDE_FAILED=1
+         else
+           CLAUDE_FAILED=1
+           warn "the marketplace $MKT (another checkout's) and its plugin were left in place until the MCP server is"
+           warn "registered: an older copy of the plugin may be what serves the tools now"
+           tools_missing_note
+         fi ;;
+      2) # turned off: left so, and so is everything else of Claude Code's
+         case "$(user_server metacomputer)" in "absent$US"*)
+           warn "so the MCP server metacomputer isn't added either (after claude plugin enable $PLUGIN_ID: ./install.sh --only-claude)" ;;
+         esac ;;
+      5) # Claude Code's marketplaces or plugins can't be read, or the plugin's record isn't one this knows: nothing of
+         # Claude Code's is changed (a plugin turned off may be among them), and the step counts as unfinished
+         CLAUDE_FAILED=1 ;;
+      *) warn "using a skill link instead of the plugin (as ./install.sh --no-plugin does)"; skill_link
+         if register_server; then retire_old_servers || CLAUDE_FAILED=1; else CLAUDE_FAILED=1; tools_missing_note; fi ;;
     esac
   else
     if [ "$PLUGIN" = 1 ] && has_claude; then
-      warn "this Claude Code has no 'claude plugin' command (update Claude Code for the plugin); using a skill link and a user-scope MCP server"
-    elif [ "$PLUGIN" = 0 ] && has_plugin_cli && [ -n "$(plugin_state)" ] && plugin_is_ours; then
-      remove_plugin   # --no-plugin after the plugin: don't list the tools twice
+      warn "this Claude Code has no 'claude plugin' command (update Claude Code for the plugin); using a skill link instead"
     fi
-    skill_link_and_server
+    skill_link
+    if register_server; then
+      retire_old_servers || CLAUDE_FAILED=1
+      # --no-plugin after the plugin: the skill link brings the skill instead (not listed twice). Removed only now that
+      # the user-scope server is checked, since an older plugin copy may be what serves the tools until then; another
+      # source's plugin isn't this install's to remove, and a plugin whose source can't be read stays (not done).
+      if [ "$PLUGIN" = 0 ] && has_plugin_cli; then
+        case "$(plugin_state):$(plugin_owner)" in
+          absent:*|on:other|off:other) ;;
+          on:ours|off:ours) remove_plugin || CLAUDE_FAILED=1 ;;
+          *) warn "couldn't read Claude Code's plugins or marketplaces (claude plugin list --json), so the plugin $PLUGIN_ID"
+             warn "was left as it is (if it's this checkout's: claude plugin uninstall $PLUGIN_ID --scope user)"; CLAUDE_FAILED=1 ;;
+        esac
+      fi
+    else
+      CLAUDE_FAILED=1
+      if [ "$PLUGIN" = 0 ] && has_plugin_cli && [ "$(plugin_state)" != absent ]; then
+        warn "the plugin $PLUGIN_ID stays until the MCP server is registered (it may be what serves the tools now)"
+      fi
+      tools_missing_note
+    fi
+  fi
+  agent_record claude "$CLAUDE_TRIED" "$CLAUDE_FAILED"
+}
+# Whether an agent's step finished (claude: Claude Code's, codex: Codex's MCP server), kept in installed.json's
+# "incomplete" (what `metacomputer update` reads): recorded by the step itself as its last action, so Claude Code's is
+# recorded before Codex's step runs (which could end the run), and only when the step ran (TRIED): a run that skipped it
+# (no claude or codex command, --no-claude, --no-codex) leaves an earlier unfinished one recorded. So an update runs the
+# install again after a step that didn't finish (whichever way it ran), a run whose step finishes clears that, and a
+# full install's last step follows the same rule (install_incomplete). Without installed.json, nothing's installed yet:
+# update installs anyway.
+agent_record() { # NAME TRIED FAILED
+  local stamp="$HOME/.local/share/metacomputer/installed.json" how=done
+  [ "$2" = 1 ] || return 0
+  [ "$3" = 0 ] || how=failed
+  [ -f "$stamp" ] || return 0
+  python3 - "$stamp" "$1" "$how" 2>/dev/null <<'PY' || warn "couldn't record in $(tildify "$stamp") whether the $1 setup finished"
+import json, os, sys, tempfile
+path, name, how = sys.argv[1:4]
+with open(path, encoding="utf-8") as f:
+    d = json.load(f)
+if not isinstance(d, dict):
+    sys.exit(1)
+was = d.get("incomplete") if isinstance(d.get("incomplete"), list) else []
+now = [x for x in was if x != name] + ([name] if how == "failed" else [])
+if now:
+    d["incomplete"] = now
+else:
+    d.pop("incomplete", None)
+fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    raise
+PY
+}
+stamp_incomplete() { # NAME: 0 when installed.json records NAME's step as unfinished
+  python3 - "$HOME/.local/share/metacomputer/installed.json" "$1" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and isinstance(d.get("incomplete"), list) and sys.argv[2] in d["incomplete"] else 1)
+PY
+}
+install_incomplete() { # what a full install's last step records as unfinished, as "claude", "codex" or "claude,codex": a
+  # step that failed this run, or wasn't set up this run while installed.json already records it as unfinished
+  local out=""
+  if [ "$CLAUDE_FAILED" = 1 ] || { [ "$CLAUDE_TRIED" = 0 ] && stamp_incomplete claude; }; then out=claude; fi
+  if [ "$CODEX_FAILED" = 1 ] || { [ "$CODEX_TRIED" = 0 ] && stamp_incomplete codex; }; then out="${out:+$out,}codex"; fi
+  printf '%s\n' "$out"
+}
+agents_failed_exit() { # an agent's step didn't finish: say so, and end the run with exit status 1
+  local which=""
+  [ "$CLAUDE_FAILED" = 0 ] || which="Claude Code's"
+  [ "$CODEX_FAILED" = 0 ] || which="${which:+$which and }Codex's"
+  [ -n "$which" ] || return 0
+  printf '\n%s\n' "${y}$which setup didn't finish: the lines marked ! above say why and what to run.${o}" >&2
+  exit 1
+}
+claude_reload_note() { # how open Claude Code sessions pick up this run's changes
+  if [ "$SERVER_ADDED" = 1 ]; then
+    printf '%s' "Restart open Claude Code sessions (or run /mcp in them) to load metacomputer's tools, added in this run."
+  else
+    printf '%s' "Restart open Claude Code sessions (or run /reload-plugins in them) to pick this up."
   fi
 }
-tildify() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 # --- an install that's already here: another checkout's (switching needs a yes), or a newer one (downgrading needs --allow-downgrade)
-resolve_link() { # PATH -> where it ends up, following links (relative ones from their own folder), at most 20 of them
-  local p="$1" i=0 t
-  while [ -L "$p" ] && [ $i -lt 20 ]; do
-    t="$(readlink "$p")"; case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac; i=$((i + 1))
-  done
-  printf '%s\n' "$p"
-}
-real_dir() { (cd "$1" 2>/dev/null && pwd -P); }
 stamp_field() { sed -n "s/^ *\"$1\": \"\\([^\"]*\\)\".*/\\1/p" "$HOME/.local/share/metacomputer/installed.json" 2>/dev/null | head -1 || true; }
 existing_checks() { # main | claude: the plan's lines go into todo only for main
   local here other="" tgt od s_dir s_commit s_tag this_tag head
@@ -694,17 +1203,17 @@ existing_checks() { # main | claude: the plan's lines go into todo only for main
     tgt="$(resolve_link "$CMD_LINK")"
     case "$tgt" in */bin/metacomputer)
       od="$(real_dir "$(dirname "$tgt")/..")"
-      if [ -n "$od" ] && [ "$od" != "$here" ] && [ -f "$od/install.sh" ] && [ -f "$od/bin/metacomputer" ]; then other="$od"; fi ;; esac
+      if [ -n "$od" ] && [ "$od" != "$here" ] && is_checkout "$od"; then other="$od"; fi ;; esac
   fi
   if [ -n "$other" ]; then
     if [ "$SWITCH" = 1 ]; then
-      [ "$1" != main ] || todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other") to this checkout (--switch)")
+      [ "$1" != main ] || todo+=("switch the metacomputer command and Claude Code's plugin and MCP server from $(tildify "$other") to this checkout (--switch)")
     elif [ "$YES" = 1 ] || [ ! -t 0 ]; then
-      die "the metacomputer command runs another checkout, $(tildify "$other"), and this run would switch it (and the Claude Code plugin) to $(tildify "$ROOT")." \
+      die "the metacomputer command runs another checkout, $(tildify "$other"), and this run would switch it (and Claude Code's plugin and MCP server) to $(tildify "$ROOT")." \
           "To update that install instead: metacomputer update." \
           "To move to this checkout: ./install.sh --switch (that checkout's VM, settings and vault are left as they are)."
-    elif ask "The metacomputer command runs another checkout, $(tildify "$other"). Switch it and the Claude Code plugin to this one?" N; then
-      [ "$1" != main ] || todo+=("switch the metacomputer command and the Claude Code plugin from $(tildify "$other") to this checkout")
+    elif ask "The metacomputer command runs another checkout, $(tildify "$other"). Switch it and Claude Code's plugin and MCP server to this one?" N; then
+      [ "$1" != main ] || todo+=("switch the metacomputer command and Claude Code's plugin and MCP server from $(tildify "$other") to this checkout")
     else
       echo "  Nothing was changed. To update the install that's there: metacomputer update."; exit 0
     fi
@@ -733,7 +1242,8 @@ if [ "$ONLY_CLAUDE" = 1 ]; then
   step "Claude Code"
   CLAUDE=yes; agent_remember claude on
   claude_step
-  printf '\n%s\n' "Restart open Claude Code sessions (or run /reload-plugins in them) to pick this up."
+  printf '\n%s\n' "$(claude_reload_note)"
+  agents_failed_exit
   exit 0
 fi
 if [ "$ONLY_CODEX" = 1 ]; then
@@ -742,13 +1252,19 @@ if [ "$ONLY_CODEX" = 1 ]; then
   CODEX=yes; agent_remember codex on
   codex_step
   printf '\n%s\n' "Start a new Codex session to pick this up."
+  agents_failed_exit
   exit 0
 fi
 if [ "$ONLY_AGENTS" = 1 ]; then
   existing_checks claude
   step "Claude Code and Codex"
   agents_stage
-  printf '\n%s\n' "Start new sessions (or run /reload-plugins in Claude Code) to pick this up."
+  if [ "$SERVER_ADDED" = 1 ]; then
+    printf '\n%s\n' "Start new sessions to pick this up (in an open Claude Code one, /mcp loads metacomputer's tools, added in this run)."
+  else
+    printf '\n%s\n' "Start new sessions (or run /reload-plugins in Claude Code) to pick this up."
+  fi
+  agents_failed_exit
   exit 0
 fi
 
@@ -1020,7 +1536,7 @@ else todo+=("download Cua's standard Lume, the VM runner (it always shares your 
 if [ -f "$CONF" ]; then done_+=("settings")
 else todo+=("write this Mac's settings to $(tildify "$CONF"): Firefox$([ "$chrome_in" = 1 ] && echo " and Google Chrome") in the VM$([ "$chrome_in" = 1 ] && echo " (Chrome means accepting Google's terms: https://www.google.com/chrome/terms/; --no-chrome leaves it out)")"); fi
 if claude_wanted && { has_claude || [ "$CLAUDE" = yes ]; }; then
-  todo+=("link the metacomputer command and add the Claude Code plugin (skills and tools in every project; --no-claude leaves Claude Code alone)")
+  todo+=("link the metacomputer command and set Claude Code up: the plugin (skills) and metacomputer's MCP server (tools), in every project; --no-claude leaves Claude Code alone")
 else
   todo+=("link the metacomputer command")
 fi
@@ -1147,7 +1663,7 @@ fi
 
 # --- 5. the agents: Claude Code and Codex -------------------------------------------------
 step "Claude Code and Codex"
-agents_stage
+agents_stage      # each agent's result is recorded by its own step (agent_record), Claude Code's before Codex's runs
 
 # --- 6. the secrets vault -------------------------------------------------------------
 step "Secrets vault (metacomputer secrets)" "$([ "$vault_ok" = 1 ] && echo "about 1 minute, unless it's up to date" || echo "skipped")"
@@ -1224,9 +1740,14 @@ cat <<EOF
   metacomputer status     check every layer; exit code 0 means ready
   metacomputer view       watch or take over the desktop
   metacomputer help       everything else
-In Claude Code (restart open sessions, or run /reload-plugins in them), try:
+In Claude Code ($([ "$SERVER_ADDED" = 1 ] && echo "restart open sessions, or run /mcp in them, to load the tools added in this run" || echo "restart open sessions, or run /reload-plugins in them")), try:
   "Get yourself a virtual computer and tell me what's on its screen."
 EOF
 # What's running now, against this checkout: services on older code, a VM on an earlier gateway, a vault to bind
 # again, a rebuild that would add something, and the version installed (lib/update.py; it never fails the install).
-if [ -f "$ROOT/lib/update.py" ] && { [ -n "${PY311:-}" ] || py311_ok; }; then "$PY311" "$ROOT/lib/update.py" _after-install || true; fi
+# An agent's step that didn't finish is recorded as such, so the next `metacomputer update` runs install.sh again.
+incomplete="$(install_incomplete)"
+if [ -f "$ROOT/lib/update.py" ] && { [ -n "${PY311:-}" ] || py311_ok; }; then
+  MCOMP_INSTALL_INCOMPLETE="$incomplete" "$PY311" "$ROOT/lib/update.py" _after-install || true
+fi
+agents_failed_exit     # everything else is done; an agent's step that didn't finish still fails the run

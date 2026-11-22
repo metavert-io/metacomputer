@@ -1,8 +1,9 @@
 #!/bin/bash
 # metacomputer: the Claude Code plugin's launcher. The plugin carries no settings, VM keys or tools of its own: this
 # runs the metacomputer checkout that ./install.sh (or get.sh) set up on this Mac, with the same arguments:
-# $MCOMP_HOME/bin/metacomputer, or else ~/.local/bin/metacomputer (the link install.sh makes). It is the plugin's MCP
-# server command (`metacomputer mcp-lazy`) and the `metacomputer` command on Claude Code's PATH while the plugin is on.
+# $MCOMP_HOME/bin/metacomputer, or else ~/.local/bin/metacomputer (the link install.sh makes). It is the `metacomputer`
+# command on Claude Code's PATH while the plugin is on. The plugin declares no MCP server or hooks: install.sh registers
+# Claude Code's MCP server itself, at user scope (~/.local/bin/metacomputer mcp-lazy).
 #
 # With no checkout set up, the only thing it runs is `setup`: /bin/bash with the get.sh at the root of this plugin copy,
 # which says what it will do and asks first (--confirm). Only the options below pass through; no setting or variable
@@ -13,12 +14,24 @@ mc_in_plugins() { case "$1" in "$(readlink -f "$mc_plugins" 2>/dev/null || echo 
 mc_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/metacomputer"; do
   mc_to="$(readlink -f "$mc_to" 2>/dev/null)" || continue
-  [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" && exec "$mc_to" "$@"
+  [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] && ! mc_in_plugins "$mc_to" || continue
+  # A checkout whose install.sh predates the user-scope MCP server (no CLAUDE_MCP=user line) relied on the plugin for
+  # the tools, which this plugin no longer brings: its checks and help say so (other commands just run).
+  mc_co="$(dirname "$(dirname "$mc_to")")"
+  case "${1:-}" in ""|status|agents|where|help|version)
+    if [ -f "$mc_co/install.sh" ] && ! grep -q '^CLAUDE_MCP=user' "$mc_co/install.sh" 2>/dev/null; then
+      printf '%s\n' "metacomputer: this plugin no longer brings metacomputer's MCP tools (mcp__metacomputer__*): the installer adds" \
+        "them, and the metacomputer installed in $mc_co is older than that. Run \`metacomputer update\`, then" \
+        "restart Claude Code." >&2
+    fi ;;
+  esac
+  exec "$mc_to" "$@"
 done
 mc_root="$(dirname "$(dirname "$mc_self")")"
 if ! mc_in_plugins "$mc_self"; then   # loaded in place (a local marketplace) from a checkout that isn't set up
   printf '%s\n' "metacomputer: this plugin is loaded from a metacomputer checkout that isn't set up yet: run ./install.sh" \
-    "in that folder (it links ~/.local/bin/metacomputer), or point MCOMP_HOME at it." >&2
+    "in that folder (it links ~/.local/bin/metacomputer and adds metacomputer's MCP server to Claude Code)," \
+    "or point MCOMP_HOME at it." >&2
   exit 1
 fi
 if [ "${1:-}" = setup ]; then
@@ -43,5 +56,6 @@ printf '%s\n' "metacomputer: this is the Claude Code plugin's launcher, and this
   "Set it up from here (it says what it will do and asks first; macOS on Apple silicon; it builds the VM):" \
   "  $mc_self setup" \
   "or in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" \
-  "or point MCOMP_HOME at an existing checkout." >&2
+  "or point MCOMP_HOME at an existing checkout. Setup adds metacomputer's MCP server to Claude Code for every" \
+  "project; restart Claude Code (or run /mcp) afterwards to load its tools." >&2
 exit 1

@@ -3,13 +3,16 @@
 This project is a disposable Ubuntu 24.04 ARM64 XFCE desktop (a Lume VM, named
 by `VM_NAME` in `config/local.env`, default `metacomputer`) that you operate
 through **Cua Driver's MCP server running inside the VM**, exposed as the
-`metacomputer` MCP server of the `metacomputer` Claude Code plugin (`plugin/`,
-listed by `.claude-plugin/marketplace.json`; `install.sh` installs it for every
-project → `bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
-`lib/mcp_hub.py`). Tools appear as `mcp__plugin_metacomputer_metacomputer__<tool>`,
-or `mcp__metacomputer__<tool>` where the server is registered without the plugin
-(`install.sh --no-plugin`, and the MCP configs of the benchmark and tests). The
-plugin's `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
+user-scope MCP server `metacomputer` that `install.sh` registers with Claude Code
+for every project (`claude mcp add -s user metacomputer ~/.local/bin/metacomputer
+mcp-lazy` → `bin/metacomputer mcp-lazy`, which reaches the VM through its hub,
+`lib/mcp_hub.py`). Tools appear as `mcp__metacomputer__<tool>`, as they do in Codex
+and in the MCP configs of the benchmark and tests; `mcp__plugin_metacomputer_metacomputer__<tool>`
+is what an older copy of the plugin named them, when it brought the server itself.
+The `metacomputer` Claude Code plugin (`plugin/`, listed by
+`.claude-plugin/marketplace.json`; `install.sh` installs it for every project too)
+carries the skills, `/metacomputer:learn` and the command, and no MCP server or
+hooks. Its `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
 project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rules.
 
 ## Rules
@@ -216,18 +219,49 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `scripts/lib.sh` falls back to `~/.local/bin/lume-secure` (with a notice) while
   `LUME`'s runner isn't installed; keep that until old installs are gone.
 - The Claude Code plugin is `plugin/`, regular files only (Anthropic's plugin directory takes no links, and a
-  GitHub install copies the plugin folder alone, so it must carry the notices): copies of `skills/metacomputer`,
+  GitHub install copies the plugin folder alone, so it must carry the notices). It declares no MCP server and no
+  hooks: the directory holds a version for a reviewer when a hook or MCP server command runs a script it can't
+  follow (variables other than `${CLAUDE_PLUGIN_ROOT}`, command substitution, another file), and the launcher is
+  such a script. `install.sh` registers the MCP server itself (`register_server`: user scope,
+  `~/.local/bin/metacomputer mcp-lazy`). It reads the user-scope entry exactly (`lib/claude_mcp.py`, which
+  `metacomputer agents` uses too: the entry from the configuration file Claude Code itself picks (`config_path()`),
+  read before and after `claude mcp get` from an empty folder and checked against it; never display text alone, never
+  a scope-blind lookup) and changes only metacomputer's own (`owner()`: canonical command, exact `["mcp-lazy"]`; never
+  a path prefix or a missing file); another checkout's needs `--switch` (or a yes at a terminal); anything else is never
+  removed or changed (the run says how to remove it yourself, and the step counts as unfinished); a failed lookup
+  changes nothing. Messages and `agents` name a registration that isn't metacomputer's by its program and argument
+  count, or its transport (`words()`), and a marketplace that isn't this checkout or the project's repository only as
+  another checkout's or another source's: never arguments, variables, URLs, folders or entries, which can carry
+  credentials. metacomputer's own entry is read again right before it's removed (`entry_unchanged`: left as it is
+  when it changed); once removed, the add always runs and is read back, and when that fails the run says the server
+  is missing and gives the exact `claude mcp add` command (nothing is put back or saved: it's metacomputer's own, made
+  again by that command). Whatever served the tools before (an older GitHub copy's server, another checkout's
+  marketplace, read first: turned off stays off, unreadable stops the switch; the plugin with `--no-plugin`; old server
+  names) is retired only after the new one is read back, each lookup present/absent/error (error is never absent; a
+  plugin record with load errors or a non-boolean `enabled` is an error) and each removal checked. When registration
+  fails and the plugin brings no server, the run says the tools are missing in new sessions, with the add line
+  (`tools_missing_note`). A step that didn't finish (Claude Code's or Codex's) ends the run with exit 1 and is recorded
+  as incomplete in installed.json by `agent_record`, at the end of each step (Claude Code's before Codex's runs), only
+  when the step ran (`CLAUDE_TRIED`, `CODEX_TRIED`: a run that skipped it keeps an earlier marker; a full install's
+  `install_incomplete` likewise), so `metacomputer update` runs the install again. Codex's MCP server follows the same
+  ownership rule (`lib/agents.py codex_entry`: exactly the checkout's launcher, a legacy path under its `bin/`, or
+  `~/.local/bin/metacomputer`, with exactly `mcp-lazy`; the whole entry read again before a change; never a path prefix);
+  anything else is left, said value-free, and the Codex step is unfinished. `--no-plugin` keeps the server and swaps the
+  plugin for a skill link; `--uninstall` reads and removes metacomputer's servers before the command links, and keeps
+  the links while any entry that stays (Claude Code's or Codex's, owned or not) runs them. The plugin's launcher tells a checkout whose
+  install.sh lacks the `CLAUDE_MCP=user` line (it left the server to the plugin) to run `metacomputer update`. Keep
+  `mcpServers` and `hooks` out of plugin.json (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
   `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the
   driver pack's `../../../skills/metacomputer/` links resolve in both. Edit the repository's files, then run
   `python3 scripts/sync-plugin.py` (test_plugin fails while a copy differs). Its own files: `README.md` (the directory
   listing's text, which must say everything the plugin runs, sends or fetches: keep it and PRIVACY.md current),
   `icon.png` (rendered from `icon.svg`), `commands/learn.md` and `bin/metacomputer`, a short launcher, not a copy of
-  the command: it hands over to the installed checkout (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`), whether
-  Claude Code loads the plugin in place (`install.sh`'s local marketplace) or from a GitHub install's copy. With no
-  checkout, its only other action, in a copy inside Claude Code's plugin folder, is `setup`: `/bin/bash` with the
-  `get.sh` at that copy's root, with `--confirm` and an allowlist of options; never let a variable or option pick
-  another script or repository (with `--confirm`, get.sh uses an existing checkout only when it's a clean one of the
-  project's repository). Keep `..` out of plugin.json and the launcher (the directory refuses a path that climbs out).
+  the command (the `metacomputer` command on Claude Code's PATH while the plugin is on): it hands over to the
+  installed checkout (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`), whether Claude Code loads the plugin in place
+  (`install.sh`'s local marketplace) or from a GitHub install's copy. With no checkout, its only other action, in a
+  copy inside Claude Code's plugin folder, is `setup`: `/bin/bash` with the `get.sh` at that copy's root, with
+  `--confirm` and an allowlist of options; never let a variable or option pick another script or repository (with
+  `--confirm`, get.sh uses an existing checkout only when it's a clean one of the project's repository). Keep `..` out of plugin.json and the launcher (the directory refuses a path that climbs out).
 - Installers never delete a VM on their own: a VM without its baseline is replaced only
   with `install.sh --replace-vm` (never implied by `--yes`); lookups that fail (the VM
   listing, `vm_dir`, release tags, where Lume keeps VMs) stop instead of guessing. One

@@ -224,10 +224,24 @@ runner's does.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (94 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (177 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
-so this Mac's own Claude Code setup is never touched. `--real-claude` repeats the
-install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
+so this Mac's own Claude Code setup is never touched. The stub keeps MCP servers in
+three scopes as Claude Code does (user-scope ones in the temporary home's
+`.claude.json`, where install.sh reads the exact entry; local and project ones keyed
+by the folder), shows the one that takes precedence in `mcp get` with the arguments
+joined by spaces (not found on stderr, as the real one), takes `mcp add-json`, and
+fails on demand: `mcp get` (for every name or one; or after a removal, once or every
+time), a `mcp get` that disagrees with the configuration or during which another
+Claude Code adds a variable, `mcp add`/`add-json` (or only for one command), `mcp
+remove`, `plugin update`, `plugin uninstall`, `plugin list` (an exit status, text that
+isn't JSON, another shape, a record without its id or scope, a record with load errors
+or without a true/false `enabled`; from the start or only after an update or an
+uninstall) and `plugin marketplace list` (from the start or after a removal). Any run
+whose stderr shows install.sh's ERR-trap message fails. `--real-claude` repeats the
+install and update checks with the real `claude` CLI, and checks that Claude Code and
+`lib/claude_mcp.py` read the same configuration file (an empty legacy `.config.json`,
+a folder there, both files populated, a byte-order mark), with a temporary `HOME` and
 `CLAUDE_CONFIG_DIR`; it needs no network.
 - The marketplace lists the plugin at `./plugin`, which holds no links: its copies of
   `skills/metacomputer`, `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and
@@ -241,13 +255,16 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   `..` in `plugin.json` or the launcher. The driver pack carries its own
   `LICENSE`, the same Cua MIT notice as `THIRD_PARTY_NOTICES.md`, and names no guide
   it doesn't include and no host installer.
-  `plugin.json` has no `version` and runs `${CLAUDE_PLUGIN_ROOT}/bin/metacomputer
-  mcp-lazy`; there is no root `.mcp.json`.
+  `plugin.json` has no `version`, declares no MCP server and no hooks (no `mcpServers` or
+  `hooks`, no `plugin/.mcp.json` or `plugin/hooks/`), and nothing in it names a command or
+  a script to run (Anthropic's directory holds a version for a reviewer when a hook or MCP
+  server runs a script it can't follow); there is no root `.mcp.json`.
 - `claude plugin validate` on the repository and on `plugin/` (skipped without
   `claude`): no errors, and no warning other than the missing version (so `--strict`
   fails on exactly that one, by design).
-- The plugin's launcher, copied into Claude Code's plugin folder (`~/.claude/plugins`,
-  `$CLAUDE_CONFIG_DIR/plugins`, `$CLAUDE_CODE_PLUGIN_CACHE_DIR`), execs
+- The plugin's launcher (the `metacomputer` command on Claude Code's PATH), copied into
+  Claude Code's plugin folder (`~/.claude/plugins`, `$CLAUDE_CONFIG_DIR/plugins`,
+  `$CLAUDE_CODE_PLUGIN_CACHE_DIR`), execs
   `$MCOMP_HOME/bin/metacomputer` or else `~/.local/bin/metacomputer` with the same
   arguments, never a copy inside the plugin folder; with neither it exits 1 and
   says how to set up. `bin/metacomputer` runs as always. Loaded in place, the launcher
@@ -261,18 +278,109 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   and exits 3.
 - `install.sh --only-codex` (test_install, with the real `codex` command in a throwaway HOME and CODEX_HOME): the MCP
   server with its timeout and approval mode, the skill links, the rules as Codex's own checker reads them, a second
-  run changing nothing, and `--uninstall` removing exactly those.
-- `install.sh --only-claude`: a fresh install adds the checkout as the marketplace
-  and installs the plugin at user scope; a second run changes nothing; an earlier
-  install's skill link and user-scope server are removed when they're this
-  checkout's (or a moved checkout's, dangling), and left alone when another
-  existing checkout's. `--no-plugin` swaps back. The project's own GitHub
+  run changing nothing, and `--uninstall` removing exactly those. Only metacomputer's own registration changes: a path
+  earlier versions registered under the checkout is pointed at `bin/metacomputer` with your settings kept (one that
+  changes right before, through a `python3` stand-in, is left as it is), and one it can't edit exactly is left as it was
+  (unfinished); a program elsewhere in the checkout, a moved checkout's launcher and the launcher with other arguments
+  are left byte for byte, named without their arguments (a synthetic token never printed), with the command to remove
+  them yourself and exit 1, and `--uninstall` leaves them; a Codex entry of yours that runs
+  `~/.local/bin/metacomputer --vm other mcp-lazy` keeps that link and `mcomp` at `--uninstall`.
+- `install.sh --only-claude`: a fresh install adds the checkout as the marketplace,
+  installs the plugin at user scope and registers the user-scope MCP server
+  `metacomputer` (`claude mcp add -s user metacomputer ~/.local/bin/metacomputer
+  mcp-lazy`; checked as the exact entry), names the `mcp__metacomputer__*` tools and
+  ends by saying a restart (or `/mcp`) loads them; a second run changes nothing and
+  says nothing about `/mcp`. `~/.local/bin/metacomputer` with `status`, no arguments,
+  `" mcp-lazy"` or `"mcp-lazy "` isn't taken as registered and is left exactly as it is
+  (exit 1, with the command to remove it yourself; registered once that's done; with the
+  real `claude` too); this checkout's `bin/metacomputer` is replaced, naming what it ran. An earlier install's skill link is removed when it's
+  this checkout's (or a moved checkout's, dangling) and left alone when another
+  existing checkout's.
+- Ownership: a registration that isn't metacomputer's (a program that isn't a
+  checkout) is left alone without a terminal and with `--yes`, with the plugin still
+  installed, the command to remove it yourself and exit status 1; it's never replaced.
+  Left the same way (`--yes`): another file inside the checkout, an interpreter, a path that starts with
+  the checkout's and climbs out of it, a launcher that doesn't exist, this checkout's
+  launcher with other arguments. Repaired without asking: this checkout's launcher by
+  a path with `..` in it, and a legacy path earlier versions registered (gone since).
+  Another checkout's is left alone and moved with `--switch` (with other arguments,
+  it's a configuration of yours, left even then); an HTTP server and one with
+  variables of its own and other arguments stay too, and their URL and values are
+  never printed (nor the arguments of any registration that isn't metacomputer's: a
+  synthetic token in `npx mcp-remote …?token=…`, in a variable and in a project server
+  never reaches the output, and the configuration file stays byte for byte the same); metacomputer's own with variables you set is
+  already registered, the variables kept; a failed `mcp get`, a `mcp get` that
+  disagrees with the configuration, and a configuration that isn't JSON change
+  nothing and run no plugin update.
+- Failures in order: with an older GitHub plugin copy bringing the only server, a
+  failed add runs no plugin update and leaves that server (one source of tools); once
+  metacomputer's own earlier registration is removed the add always runs, also when the
+  lookup after the removal fails, and a failed add or read-back says the server is
+  missing (or that it can't tell) with the exact `claude mcp add` command; a failed
+  remove changes nothing; a failed plugin
+  update leaves two (said, exit 1); a successful one, run after the server is read
+  back, leaves one. `--no-plugin` whose add fails keeps the plugin (no uninstall);
+  when it works, the plugin is uninstalled after the server is added; a failed
+  uninstall is said and fails the run, at install and at `--uninstall`. An old server
+  name of this checkout's is kept while the add fails and removed after it works; one
+  that isn't this checkout's stays. A `plugin list` that fails, isn't JSON, has
+  another shape, a record without its id or scope, or load errors for the plugin, or an
+  `enabled` that isn't true or false, before or after the update, is never taken for "no
+  server", nor for on or off (nothing installed or registered): no "no longer brings"
+  message, exit 1. Another checkout's marketplace is read before it's switched: its
+  plugin turned off stays off (no server registered over it), and one that can't be
+  read stops the switch; with the old plugin bringing the only server, the switch waits
+  for the user-scope server and doesn't happen when that fails. No message names a
+  foreign marketplace's folder or location (a credential in a `repo` or URL, whatever
+  its source label, never reaches the output). A plugin list or marketplace list that
+  can't be read, before or after an uninstall, leaves the plugin and marketplace (exit
+  1), and an old server name whose lookup fails is kept and counts as not done.
+- The unfinished step: `--only-claude` and `--only-agents` record it in installed.json
+  (the rest kept) and a finished run clears it; it's recorded before Codex's step (a
+  Codex step that stops the run leaves it recorded); a run with no `claude` on PATH or
+  `--no-claude` leaves it; a full install's last step (`install_incomplete`) goes by the
+  same rule. `--uninstall` removes the server before the command it runs: when the entry
+  changes right before (a `python3` stand-in plays another Claude Code) or its removal
+  doesn't take, the server and the command both stay (exit 1), and a registration of
+  yours that stays and runs `~/.local/bin/metacomputer --vm other mcp-lazy` keeps them
+  too. An entry that changes while it's read, or while a yes is being typed at a
+  terminal, is left as it is. The update from the layout where the plugin brought the
+  server, when the registration fails: it says plainly that new sessions have no tools
+  until it's fixed, with the `claude mcp add` line and that `metacomputer update` tries
+  again; unfinished; nothing else removed.
+- Scopes: local and project servers with the same command in the folder the install
+  runs in don't count as registered; the user-scope one is added (every `mcp add` and
+  `mcp remove` names `-s user`) and the others are reported and unchanged. `--uninstall`
+  where a project server shadows the user-scope one removes the user-scope one and
+  reports the project one; one whose lookup fails stops before removing anything.
+- `--no-plugin` swaps the plugin for the skill link and keeps the same server.
+- `--no-claude` runs no `claude` command: nothing is added to a fresh setup and
+  nothing removed from an existing one. The project's own GitHub
   marketplace is kept (by `owner/repo` or git URL); one named `metacomputer` from
   another repository, a fork or a URL is refused (its plugin isn't installed, the
   installer says how to remove it and falls back to the skill link and server, and
-  `--uninstall` leaves it alone); another checkout's marketplace is replaced, a plugin that's turned off is left
-  so, and without `claude plugin` (or when the plugin can't be added) it falls back
-  to the skill link and server. `--uninstall` removes whichever is there.
+  `--uninstall` leaves it alone); another checkout's marketplace is replaced, a plugin
+  that's turned off is left so (an earlier skill link and server stay, and no server
+  is added), and without `claude plugin` (or when the plugin can't be added) it falls
+  back to the skill link and server. `--uninstall` removes the plugin, the skill link
+  and the server, except a server that runs another checkout through a
+  `~/.local/bin/metacomputer` that's still there.
+- An update from the layout where the plugin brought the server (a checkout copy whose
+  `plugin.json` declares it, the plugin installed from it, no user-scope server): the
+  checkout moves to this version's `plugin.json` and `install.sh --only-agents` runs, as
+  `metacomputer update` does; afterwards the plugin declares no server and the
+  user-scope one is the only one (with the real `claude` too, which reads a directory
+  marketplace's plugin in place). An older plugin copy from GitHub that still brings
+  its own server is updated from the project's repository (`claude plugin marketplace
+  update`, `claude plugin update`); when that fails, the install says the tools are
+  listed twice and how to update it.
+- The plugin updated on its own (a GitHub copy of this version, no user-scope server)
+  over a checkout whose install.sh predates the user-scope server: no tools; the
+  plugin's launcher, for `status`, `agents` and no command, runs the checkout and says
+  to run `metacomputer update` and restart Claude Code (never the old install.sh);
+  other commands just run; the skill's no-tools step says the same; the update's
+  install step (the checkout's new install.sh) brings back exactly one server, and the
+  notice stops.
 - The skill and the driver pack name both prefixes; bench's metrics and allowed
   tools and the skill-test analyzer count both.
 
@@ -719,6 +827,9 @@ Each of these needs no VM and takes seconds.
   another branch and going back are refused; services on older code are restarted, a VM on an earlier gateway only
   when allowed (and not when another session holds it), a vault is asked to be bound again, a VM built from other
   guest files gets a rebuild note, what's installed is recorded, and status's update line comes from a daily check.
+  An install whose Claude Code step didn't finish (`MCOMP_INSTALL_INCOMPLETE=claude` from install.sh) is recorded as
+  `incomplete`; `update` then runs install.sh again at the same release (and doesn't when the record is complete),
+  and `version` says so.
 - `python3 tests/test_traces.py`: the trace recorder (on only while a trace is active, one session or all, capped,
   0600) and the Playwright export: tokens resolve through the rows of reads, clicks/fills/keys/checks/navigations
   translate, other apps are left out, and page text written to break out of the code (quotes, newlines,
@@ -868,8 +979,13 @@ Each of these needs no VM and takes seconds.
   nearest one counts, and `at-terminal` end to end with real processes: a terminal with no
   agent above it is the user's, one under a process named `codex` isn't, nor is no terminal.
 - `python3 tests/test_agents.py`: `metacomputer agents` reports each agent (not installed, set up, or left alone
-  by a remembered `--no-codex`); `agents check` passes against this Mac's codex (when installed) without touching its
-  Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
+  by a remembered `--no-codex`), and for Claude Code (a stand-in `claude`) where the skills and the tools come from:
+  the plugin and the user-scope server, a skill link and the server, the plugin with no server (no tools, and this
+  checkout's command that adds it), a user-scope server that runs something else, or `status`, no arguments,
+  `" mcp-lazy"` or `"mcp-lazy "` (exact arguments, from `~/.claude.json`: not counted), a configuration that
+  disagrees with `mcp get` and a lookup that fails (said, not taken for none), and an older plugin copy that brings
+  its own server, alone or beside the user-scope one (listed twice);
+  `agents check` passes against this Mac's codex (when installed) without touching its Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
   `codex mcp` behave differently, and against one whose answers look right but whose exit status fails, whose sandbox
   marker is only inherited, and whose strict config rejects the settings; a `codex` writable by others, or found
   only through a relative PATH entry, isn't run; the session check reads only regular files with limits (a FIFO doesn't block it, malformed lines don't crash it), a web search alone isn't taken for a missing tool call, and renamed tool items in three recent sessions fail it. test_install's `test_agent_choices` runs `--only-agents` with the

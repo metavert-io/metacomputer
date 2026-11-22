@@ -2,7 +2,12 @@
 """The coding agents metacomputer is set up for on this Mac: Claude Code and Codex (docs/codex.md).
 
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
-                                        (install.sh --no-claude / --no-codex, remembered for later runs)
+                                        (install.sh --no-claude / --no-codex, remembered for later runs). For
+                                        Claude Code: the skills (the plugin, or a skill link with --no-plugin) and
+                                        the tools (the user-scope MCP server metacomputer, read as install.sh reads
+                                        it, lib/claude_mcp.py: its command and exact arguments checked; the plugin
+                                        declares none, and an older copy of it that still brings its own is
+                                        reported), and this checkout's command that adds them
   metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
                                         without touching your Codex settings (a throwaway CODEX_HOME): its rules
                                         checker, the sandbox's marker, `codex mcp` and the two settings install.sh
@@ -50,11 +55,12 @@ def trusted(name):
     return real, None
 
 
-def run(argv, env=None, timeout=TIMEOUT):
+def run(argv, env=None, timeout=TIMEOUT, cwd=None):
     """(exit status, stdout, stderr); 127 when the program can't be run. PATH is SAFE_PATH."""
     env = dict(env if env is not None else os.environ, PATH=SAFE_PATH)
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout, stdin=subprocess.DEVNULL)
+        r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout, stdin=subprocess.DEVNULL,
+                           cwd=cwd)
         return r.returncode, r.stdout, r.stderr
     except (OSError, subprocess.SubprocessError) as e:
         return 127, "", str(e)
@@ -93,19 +99,70 @@ def claude_status():
         return st
     rc, out, _ = run([prog, "plugin", "list", "--json"])
     plugin = None
+    plugin_server = False      # an older copy of the plugin that still declares its own MCP server
     if rc == 0:
         try:
             for p in json.loads(out):
                 if p.get("id") == "metacomputer@metacomputer" and p.get("scope") == "user":
                     plugin = "on" if p.get("enabled") else "off"
+                    plugin_server = bool(p.get("mcpServers")) and plugin == "on"
         except (ValueError, AttributeError, TypeError):
             pass
     st["plugin"] = plugin
-    rc, out, _ = run([prog, "mcp", "get", "metacomputer"])
-    st["user_mcp_server"] = rc == 0 and "Command:" in out
+    st["plugin_mcp_server"] = plugin_server
+    srv = user_server(prog)
+    st["user_mcp_server"] = srv["kind"] not in ("absent", "error")
+    st["mcp_server"] = srv["words"] if st["user_mcp_server"] else None
+    st["mcp_ok"] = srv["owner"] == "ok"
+    if srv["kind"] == "error":
+        st["mcp_error"] = srv["words"]
     st["skill_link"] = link_target(os.path.expanduser("~/.claude/skills/metacomputer"))
-    st["set_up"] = plugin == "on" or st["user_mcp_server"]
+    st["set_up"] = st["mcp_ok"] or plugin_server
     return st
+
+
+def user_server(prog):
+    """Claude Code's user-scope MCP server metacomputer, read as install.sh reads it (lib/claude_mcp.py: the entry in
+    Claude Code's configuration, checked against `claude mcp get` from an empty folder; its exact arguments compared):
+    {"owner", "kind", "words"}. The words are claude_mcp's: metacomputer's own command and arguments, or for anything
+    else only its program's name and how many arguments it has, or its transport; never an argument, a variable, a URL
+    or the entry (they can carry credentials)."""
+    import claude_mcp
+    env = dict(os.environ, PATH=SAFE_PATH)
+    res = claude_mcp.user_entry(prog, "metacomputer", env)
+    own = claude_mcp.owner(res, LAB, os.path.expanduser("~/.local/bin/metacomputer"))
+    return {"owner": own, "kind": res["kind"], "words": claude_mcp.words(res, env, own)}
+
+
+INSTALL_CLAUDE = f"{os.path.join(LAB, 'install.sh')} --only-claude"
+
+
+def claude_skills(s):
+    return ("the plugin's skills" if s.get("plugin") == "on" else
+            "a skill link" if s.get("skill_link") else "no metacomputer skill")
+
+
+def claude_way(s):
+    """How Claude Code is set up, in words: where the skills come from and where the tools come from."""
+    skills = claude_skills(s)
+    if s.get("mcp_ok") and s.get("plugin_mcp_server"):
+        return (f"{skills} and the MCP server metacomputer; the plugin is an older copy that brings its own too, so the "
+                "tools are listed twice: claude plugin update metacomputer@metacomputer")
+    if s.get("plugin_mcp_server"):
+        return f"{skills}, and the tools from an older copy of the plugin; {INSTALL_CLAUDE} moves them to the " \
+               "MCP server metacomputer"
+    return f"{skills} and the MCP server metacomputer"
+
+
+def claude_missing(s):
+    """Claude Code installed, but without metacomputer's tools: why, and what this checkout runs to add them."""
+    skills = claude_skills(s)
+    if s.get("mcp_error"):
+        return f"{skills}; the MCP server metacomputer couldn't be read ({s['mcp_error']})"
+    if s.get("user_mcp_server"):
+        return (f"{skills}, but the user-scope MCP server metacomputer runs {s['mcp_server']}, not "
+                f"~/.local/bin/metacomputer mcp-lazy (no metacomputer tools); {INSTALL_CLAUDE} says how to replace it")
+    return f"{skills}, but no MCP server metacomputer (no tools); {INSTALL_CLAUDE} adds it"
 
 
 def codex_status():
@@ -117,11 +174,17 @@ def codex_status():
         return st
     rc, out, err = run([prog, "mcp", "get", "metacomputer", "--json"])
     srv = None
+    set_up = False
     if rc == 0:
         try:
             t = json.loads(out).get("transport") or {}
-            srv = {"type": t.get("type"), "command": t.get("command")}
-        except ValueError:
+            cmd = t.get("command")
+            set_up = bool(cmd)
+            # this checkout's launcher by its path; anything else by its program's name only (never a path or an argument)
+            import claude_mcp
+            srv = {"type": t.get("type"),
+                   "command": cmd if cmd == CLI else (claude_mcp.program_name(cmd) or "a program") if cmd else None}
+        except (ValueError, AttributeError):
             srv = {"error": "unreadable"}
     st["mcp_server"] = srv
     try:
@@ -138,8 +201,50 @@ def codex_status():
         st["rules"] = rules if head[0].startswith("# metacomputer's rules for Codex.") else "someone else's"
     except OSError:
         st["rules"] = None
-    st["set_up"] = bool(srv and srv.get("command"))
+    st["set_up"] = set_up
     return st
+
+
+def codex_entry(prog, root, link):
+    """Codex's MCP server metacomputer, read whole (`codex mcp get --json`), for install.sh: [owner, words, digest,
+    command, linked], by the rule install.sh uses for Claude Code's (lib/claude_mcp.py):
+      ok       a local command, exactly ROOT/bin/metacomputer or LINK (~/.local/bin/metacomputer), with exactly
+               ["mcp-lazy"] (whatever else you set on it is kept)
+      ours     the same with a path earlier versions registered under ROOT/bin (its command is pointed at
+               ROOT/bin/metacomputer, the rest kept)
+      foreign  anything else, a path that only starts with the checkout's included: never changed or removed
+      absent, error (never read as absent)
+    The words name metacomputer's own by its command, anything else by its program and how many arguments it has, or
+    its transport (never an argument, a variable or a URL); the digest stands for the whole entry (read again right
+    before a change); the command is given only for ok and ours; linked is "link" when it runs LINK or the alias mcomp
+    beside it, whoever's it is."""
+    import claude_mcp
+    rc, out, err = run([prog, "mcp", "get", "metacomputer", "--json"])
+    if rc != 0:
+        if "No MCP server named 'metacomputer'" in err:
+            return ["absent", "nothing", "", "", ""]
+        return ["error", f"codex mcp get metacomputer failed (exit {rc})", "", "", ""]
+    try:
+        d = json.loads(out)
+    except ValueError:
+        d = None
+    t = d.get("transport") if isinstance(d, dict) else None
+    if not isinstance(t, dict) or not isinstance(t.get("type"), str):
+        return ["error", "codex mcp get metacomputer answered in a shape this doesn't know", "", "", ""]
+    kind, cmd, args, envs = t["type"], t.get("command"), t.get("args") or [], t.get("env") or {}
+    if kind == "stdio" and (not isinstance(cmd, str) or not cmd or not isinstance(args, list)
+                            or not all(isinstance(a, str) for a in args) or not isinstance(envs, dict)):
+        return ["error", "its entry has an unexpected shape", "", "", ""]
+    res = {"kind": kind, "entry": {"command": cmd, "args": args, "env": envs} if kind == "stdio" else t}
+    own = "foreign"
+    if kind == "stdio" and args == claude_mcp.MCP_ARGS:
+        if cmd in (os.path.join(root, "bin", "metacomputer"), link):
+            own = "ok"
+        elif cmd in {os.path.join(r, "bin", n) for r in (root, os.path.realpath(root)) for n in claude_mcp.LEGACY_NAMES}:
+            own = "ours"
+    env = dict(os.environ)
+    return [own, claude_mcp.words(res, env, own), claude_mcp.digest(d), cmd if own in ("ok", "ours") else "",
+            "link" if claude_mcp.linked(res, link) else ""]
 
 
 def render_rules(path):
@@ -291,6 +396,15 @@ def session_check(limit=20):
 
 
 def main(argv):
+    if argv[:1] == ["codex-entry"]:            # for install.sh (see codex_entry)
+        if len(argv) != 5 or argv[1] != "--root" or argv[3] != "--link":
+            print("usage: agents.py codex-entry --root CHECKOUT --link ~/.local/bin/metacomputer", file=sys.stderr)
+            return 2
+        prog, why = trusted("codex")
+        fields = (codex_entry(prog, argv[2], argv[4]) if prog else
+                  ["error", why or "Codex's codex command isn't on PATH", "", "", ""])
+        print("\x1f".join(str(f).replace("\x1f", " ").replace("\n", " ") for f in fields))
+        return 0
     ap = argparse.ArgumentParser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
     ap.add_argument("what", nargs="?", default="status", choices=("status", "check"))
     ap.add_argument("--json", action="store_true")
@@ -334,11 +448,14 @@ def main(argv):
             how = f"{s['version'] or 'installed'}: left alone (--no-{flag}; --{flag} sets it up)"
         elif s.get("set_up"):
             if label == "Claude Code":
-                way = "the plugin" if s.get("plugin") == "on" else "a user-scope MCP server and skill link"
+                way = claude_way(s)
             else:
                 way = "MCP server" + (", skills" if all(s.get("skills", {}).values()) else ", skills missing") + \
                       (", rules" if s.get("rules") and s.get("rules") != "someone else's" else ", rules missing")
             how = f"{s['version'] or 'installed'}: set up ({way})"
+        elif label == "Claude Code" and (s.get("plugin") == "on" or s.get("skill_link") or s.get("user_mcp_server")
+                                         or s.get("mcp_error")):
+            how = f"{s['version'] or 'installed'}: {claude_missing(s)}"
         else:
             how = f"{s['version'] or 'installed'}: not set up; ./install.sh --only-agents sets it up"
         print(f"{label:<12} {how}")

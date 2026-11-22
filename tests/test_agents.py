@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """`metacomputer agents` (lib/agents.py): which coding agents are set up, and the check of what metacomputer relies
 on in Codex. No VM. The real check runs against this Mac's codex when it's installed (in a throwaway CODEX_HOME:
-your Codex settings aren't touched); a stand-in codex that behaves differently must fail it.
+your Codex settings aren't touched); a stand-in codex that behaves differently must fail it. Claude Code's setup is
+read from a stand-in claude: the plugin's skills and the user-scope MCP server (the tools), a skill link without the
+plugin, a plugin with no server registered, and an older plugin copy that brings its own server (alone, or beside
+the user-scope one: the tools listed twice).
 
   python3 tests/test_agents.py
 """
@@ -57,6 +60,92 @@ case "$1" in
   *) exit 2 ;;
 esac
 """
+
+
+# A claude that answers `plugin list --json` with $FAKE_PLUGINS and `mcp get metacomputer` with a user-scope server
+# running $FAKE_MCP $FAKE_ARGS (default mcp-lazy); "No MCP server" on stderr without one, as the real one; FAKE_MCP_FAIL:
+# the lookup fails. The same server is in ~/.claude.json, where Claude Code keeps it (the test writes it), since
+# agents reads the exact entry from there and checks it against `mcp get`.
+FAKE_CLAUDE = """#!/bin/sh
+case "$1 $2" in
+  "--version ") echo "2.1.999 (Claude Code)" ;;
+  "plugin list") printf '%s\\n' "${FAKE_PLUGINS:-[]}" ;;
+  "mcp get") [ -z "${FAKE_MCP_FAIL:-}" ] || { echo "config unreadable" >&2; exit 2; }
+             [ -n "${FAKE_MCP:-}" ] || { echo "No MCP server named \\"metacomputer\\"." >&2; exit 1; }
+             printf 'metacomputer:\\n  Scope: User config (available in all your projects)\\n  Type: stdio\\n  Command: %s\\n  Args: %s\\n' \\
+               "$FAKE_MCP" "${FAKE_ARGS-mcp-lazy}" ;;
+  *) exit 2 ;;
+esac
+"""
+
+
+def claude_cases(t, base):
+    fake = os.path.join(t, "fakeclaude")
+    os.makedirs(fake)
+    with open(os.path.join(fake, "claude"), "w") as f:
+        f.write(FAKE_CLAUDE)
+    os.chmod(os.path.join(fake, "claude"), 0o755)
+    cmd = os.path.join(base["HOME"], ".local", "bin", "metacomputer")
+    plug = {"id": "metacomputer@metacomputer", "scope": "user", "enabled": True}
+    old = dict(plug, mcpServers={"metacomputer": {"command": "${CLAUDE_PLUGIN_ROOT}/bin/metacomputer"}})
+    link = os.path.join(base["HOME"], ".claude", "skills", "metacomputer")
+
+    def agents(plugins, mcp, *args, argv=("mcp-lazy",), **extra):
+        with open(os.path.join(base["HOME"], ".claude.json"), "w") as f:
+            json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": mcp, "args": list(argv), "env": {}}}
+                       if mcp else {}}, f)
+        env = dict(base, PATH=fake + ":/usr/bin:/bin", FAKE_PLUGINS=json.dumps(plugins), FAKE_MCP=mcp,
+                   FAKE_ARGS=" ".join(argv))
+        env.update(extra)            # FAKE_ARGS here: what `mcp get` shows, against what the configuration holds
+        return run(list(args), env)
+    fix = os.path.join(LAB, "install.sh") + " --only-claude"
+
+    r = agents([plug], cmd, "--json")
+    st = json.loads(r.stdout or "{}").get("claude_code", {})
+    check("Claude Code with the plugin and the user-scope server: set up, the server's command reported, no plugin server",
+          st.get("set_up") is True and st.get("plugin") == "on" and st.get("user_mcp_server") is True
+          and st.get("mcp_server") == "~/.local/bin/metacomputer mcp-lazy" and st.get("plugin_mcp_server") is False, st)
+    r = agents([plug], cmd)
+    check("...said as the plugin's skills and the MCP server metacomputer",
+          "set up (the plugin's skills and the MCP server metacomputer)" in r.stdout, r.stdout)
+    r = agents([plug], "")
+    check("the plugin without the server: not set up (no tools), and this checkout's command that adds it",
+          "no MCP server metacomputer (no tools)" in r.stdout and fix in r.stdout
+          and json.loads(agents([plug], "", "--json").stdout)["claude_code"]["set_up"] is False, r.stdout)
+    r = agents([plug], "/opt/other/bin/thing")
+    check("a user-scope server that runs something else: no metacomputer tools, and what it is (its program, not its "
+          "path or arguments)", "runs thing with 1 argument (not shown), not ~/.local/bin/metacomputer mcp-lazy" in r.stdout
+          and "/opt/other" not in r.stdout and fix in r.stdout, r.stdout)
+    for argv in (["status"], [" mcp-lazy"], ["mcp-lazy "], []):
+        r = agents([plug], cmd, argv=argv)
+        check(f"metacomputer's command with the arguments {argv}: not counted as set up (exact arguments compared)",
+              "runs metacomputer" in r.stdout and "/.local/bin" not in r.stdout.split("not ~/.local")[0]
+              and "no metacomputer tools" in r.stdout
+              and json.loads(agents([plug], cmd, "--json", argv=argv).stdout)["claude_code"]["set_up"] is False, r.stdout)
+    token = "SYNTHETIC-TOKEN-4f9c2e71d0"
+    remote = ["-y", "mcp-remote", f"https://mcp.example.invalid/mcp?token={token}"]
+    r, rj = agents([plug], "npx", argv=remote), agents([plug], "npx", "--json", argv=remote)
+    check("a server whose arguments carry a token (npx mcp-remote URL?token=…): named by its program and how many "
+          "arguments it has; the token is in neither the text nor the JSON",
+          "runs npx with 3 arguments (not shown)" in r.stdout and token not in r.stdout + r.stderr + rj.stdout + rj.stderr
+          and json.loads(rj.stdout)["claude_code"]["mcp_server"] == "npx with 3 arguments (not shown)", r.stdout + rj.stdout)
+    r = agents([plug], cmd, FAKE_ARGS="other")
+    check("the configuration and `claude mcp get` disagree: said as unreadable, not set up", "couldn't be read" in r.stdout,
+          r.stdout)
+    r = agents([plug], cmd, FAKE_MCP_FAIL="1")
+    check("a lookup that fails is said, not taken for no server", "couldn't be read" in r.stdout, r.stdout)
+    r = agents([old], "")
+    check("an older plugin copy that brings its own server: its tools counted, and how to move them to the user-scope server",
+          "an older copy of the plugin" in r.stdout and fix in r.stdout, r.stdout)
+    r = agents([old], cmd)
+    check("an older plugin copy beside the user-scope server: says the tools are listed twice, and how to update it",
+          "listed twice" in r.stdout and "claude plugin update metacomputer@metacomputer" in r.stdout, r.stdout)
+    os.makedirs(os.path.dirname(link))
+    os.symlink(os.path.join(t, "checkout", "skills", "metacomputer"), link)
+    r = agents([], cmd)
+    check("without the plugin (--no-plugin): a skill link and the MCP server metacomputer",
+          "set up (a skill link and the MCP server metacomputer)" in r.stdout, r.stdout)
+    os.remove(link)
 
 
 def session_file(path, sid, mtime, *, calls=(), items=(), extra_lines=()):
@@ -136,6 +225,9 @@ def main():
         check("your remembered choice (install.sh --no-codex) is reported", json.loads(r.stdout)["codex"].get("choice") == "off",
               r.stdout)
 
+        print("Claude Code's setup")
+        claude_cases(t, base)
+
         print("check")
         r = run(["check"], env)
         check("check without Codex: nothing to check, exit 0", r.returncode == 0 and "isn't installed" in r.stdout, r.stdout)
@@ -163,6 +255,13 @@ def main():
               "and settings its strict config rejects all fail", r.returncode == 1 and res.get("rules") is False
               and res.get("sandbox marker") is False and res.get("mcp config") is True and res.get("mcp settings") is False,
               (res, r.stdout[-400:]))
+        with open(os.path.join(base["CODEX_HOME"], "cmd"), "w") as f:
+            f.write("/opt/someone/private-tools/bin/server\n")
+        r = run(["--json"], dict(base, PATH=fake2 + ":/usr/bin:/bin"))
+        srv = (json.loads(r.stdout or "{}").get("codex") or {}).get("mcp_server") or {}
+        check("Codex's server that isn't this checkout's: reported by its program's name, not its path",
+              srv.get("command") == "server" and "/opt/someone" not in r.stdout, r.stdout)
+        os.remove(os.path.join(base["CODEX_HOME"], "cmd"))
         os.chmod(os.path.join(fake2, "codex"), 0o777)
         r = run(["check"], dict(base, PATH=fake2 + ":/usr/bin:/bin"))
         check("a codex other accounts can write isn't run", r.returncode == 1 and "writable by others" in r.stdout, r.stdout)

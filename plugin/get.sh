@@ -12,7 +12,7 @@
 #   3. Downloads metacomputer into ~/metacomputer (git clone), or updates the copy already there,
 #      at the latest release (main until the first release).
 #   4. Runs ./install.sh --yes in it: the missing Homebrew packages, the VM runner (mcomp-vm),
-#      this Mac's settings, the Claude Code plugin, the secrets vault, and the VM itself.
+#      this Mac's settings, the Claude Code plugin and MCP server, the secrets vault, and the VM itself.
 #   5. Starts the VM, checks it (metacomputer status) and shows what to try in Claude Code.
 #
 # It never asks for, sees or stores a password and never runs sudo; Homebrew's installer and
@@ -569,7 +569,7 @@ install() {
   if [ "$DRY" = 1 ]; then
     act "$DIR/install.sh" "${args[@]}"
     note "it installs the missing Homebrew packages, builds mcomp-vm (the VM runner) and the secrets vault,"
-    note "writes config/local.env, adds the Claude Code plugin, and builds the VM (about 1.5 GB of downloads)"
+    note "writes config/local.env, adds the Claude Code plugin and metacomputer's MCP server, and builds the VM (about 1.5 GB of downloads)"
     return 0
   fi
   # install.sh writes vm_built=1 to MCOMP_INSTALL_REPORT when it built the VM in this run: only then does
@@ -648,7 +648,7 @@ EOF
     cat <<EOF
 The VM is running (metacomputer stop to stop it; Claude starts it again when it needs it).
 
-Open Claude Code or Codex (start a new session, or run /reload-plugins in an open Claude Code one) and try:
+Open Claude Code or Codex (start a new session: an open Claude Code one needs a restart, or /mcp, to load the tools) and try:
   "Get yourself a virtual computer and tell me what's on its screen."
   "On your virtual computer, open news.ycombinator.com in Firefox and summarize the top three stories."
   "Is this link safe? Open it on your virtual computer and tell me what it does: <a link you're unsure of>"
@@ -665,7 +665,7 @@ agents_found() { # what the plan says about the coding agents on this Mac
   [ "$NO_CODEX" = 0 ] && command -v codex >/dev/null 2>&1 && x=1
   case "$c$x" in
     11) printf '%s' "metacomputer for Claude Code and Codex (both found here)" ;;
-    10) printf '%s' "the Claude Code plugin (Claude Code found here)" ;;
+    10) printf '%s' "the Claude Code plugin and MCP server (Claude Code found here)" ;;
     01) printf '%s' "metacomputer for Codex (found here)" ;;
     *) printf '%s' "the metacomputer command (no coding agent found: install Claude Code or Codex, then ./install.sh --only-agents)" ;;
   esac
@@ -684,7 +684,7 @@ ${b}metacomputer setup${o} will:
      $([ "$NO_BUILD" = 1 ] && echo "NOT the VM (--no-build)" || echo "the VM: an Ubuntu desktop with Firefox$([ "$NO_CHROME" = 1 ] || echo " and Google Chrome"), about 1.5 GB of downloads");
   5. check it: a VM it built gets started and a quick self-test; a VM you already had gets only
      read-only checks (started only if it's stopped), so nothing open in it is touched.
-Nothing outside $DIR, ~/.local, ~/.ssh/metacomputer and the agents' settings (Claude Code's plugins; Codex's
+Nothing outside $DIR, ~/.local, ~/.ssh/metacomputer and the agents' settings (Claude Code's plugins and MCP servers; Codex's
 ~/.codex and ~/.agents/skills) changes,
 apart from Homebrew packages and the VM itself (Lume keeps it in ~/.lume). Expect a minute or two
 of your time; about 5 minutes in all on a fast connection with the prerequisites in place, 15-30 on a

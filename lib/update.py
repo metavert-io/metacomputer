@@ -19,7 +19,9 @@ After any install (install.sh's last step, so `metacomputer update`, the install
     the gateway program; at a terminal it offers to run it);
   - a VM built from older guest files: what a rebuild would add (never rebuilt on its own).
 The installed version is kept in ~/.local/share/metacomputer/installed.json. `metacomputer status` shows an update
-that's available, from a check against the repository's tags at most once a day (UPDATE_CHECK=off turns it off).
+that's available, from a check against the repository's tags at most once a day (UPDATE_CHECK=off turns it off). An
+install whose Claude Code step didn't finish is recorded as such ("incomplete"), and `update` runs install.sh again
+even when the checkout is already at the release.
 """
 import argparse
 import fcntl
@@ -392,6 +394,11 @@ def after_install(restart="ask", quiet=False):
                     f"`{cmd}` (the vault pins the gateway program, which changed; fills say so until you do)")
     new_stamp = {"version": st["version"], "tag": st["tag"], "after": st["after"], "commit": st["commit"],
                  "checkout": LAB, "gateway": now_gw, "installed_at": time.time(), "bind_pending": pending}
+    # install.sh says which agent steps didn't finish (MCOMP_INSTALL_INCOMPLETE=claude): recorded, so the next
+    # `metacomputer update` runs install.sh again even when the checkout is already at the release
+    incomplete = [x for x in (os.environ.get("MCOMP_INSTALL_INCOMPLETE") or "").split(",") if x in ("claude", "codex")]
+    if incomplete:
+        new_stamp["incomplete"] = incomplete
     try:
         write_json(STAMP, new_stamp)
     except OSError as e:
@@ -441,6 +448,9 @@ def cmd_version(a):
           f"{', local changes' if st['dirty'] else ''})")
     if stamp and stamp.get("commit") != st["commit"]:
         print(f"installed     {stamp.get('version')}: this checkout changed since; run ./install.sh (or metacomputer update)")
+    elif stamp.get("incomplete"):
+        print(f"installed     {stamp.get('version')}, but its {' and '.join('Claude Code' if x == 'claude' else 'Codex' for x in stamp['incomplete'])} "
+              "setup didn't finish: metacomputer update runs the install again")
     for v in out["vms"]:
         print(f"vm {v['vm']:<12} {v['state'] or '?':<8} built by {v['built_by'] or 'an earlier version'}"
               f"{'' if v['guest_current'] else ' (a rebuild would add newer guest files)'}"
@@ -510,7 +520,7 @@ def cmd_update(a):
             git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", tcommit, timeout=120)
         if git("rev-parse", "HEAD") != tcommit:
             raise Refused(f"couldn't move {LAB} to {target}")
-    installed_here = (stamp.get("commit") == tcommit and
+    installed_here = (stamp.get("commit") == tcommit and not stamp.get("incomplete") and
                       os.path.realpath(str(stamp.get("checkout") or "")) == os.path.realpath(LAB))
     if same and installed_here:
         after_install(restart=restart)
