@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-22
+
 ### Added
 
 - **PRIVACY.md**: what stays on your Mac, what your coding agent sends its model provider, and every connection metacomputer makes (installing, the daily update check, the VM, and the sinks, proxy and storage you set up). Metavert runs no server for it and receives nothing from it.
