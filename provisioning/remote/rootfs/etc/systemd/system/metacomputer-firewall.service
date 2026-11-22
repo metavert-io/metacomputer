@@ -1,0 +1,14 @@
+[Unit]
+Description=metacomputer guest firewall (no metadata, link-local or private ranges; SSH only inbound)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+After=local-fs.target nftables.service netfilter-persistent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/metacomputer/bin/guest-firewall apply
+
+[Install]
+WantedBy=sysinit.target

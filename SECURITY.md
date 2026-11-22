@@ -1639,6 +1639,42 @@ another VM:
   the same without one. Claude's skill passes `--confirm` only for a VM you named for
   deletion.
 
+## A computer elsewhere (`--on server`, `--on oci`)
+
+A computer can be an Ubuntu 24.04 VM reached over SSH instead of a Lume VM on your Mac: your own server, or one Oracle
+Cloud makes ([docs/remote.md](docs/remote.md)). The Mac stays the controller, so the hub and every guard, the vault,
+recordings, the action log, handoffs and the one-controller rule apply as they do on the Mac. What changes is the
+boundary: there's no gateway on your Mac between it and the world, so the computer enforces its own.
+
+- **SSH in, and nothing else.** Key only: no passwords, no root login, `AllowUsers` naming metacomputer's accounts (and,
+  on your own server, the account you set it up from). A computer a provider makes sits behind the provider's firewall
+  too, which metacomputer sets to SSH (port 22) and the ICMP message TCP needs to size its packets. The live view's
+  VNC server listens on the computer's own `127.0.0.1:5900` only and is reached through an SSH tunnel opened from your
+  Mac with a key that may open that one forward and nothing else (`view --tailnet` is refused for it).
+- **Out: never metadata, link-local or private ranges.** Its firewall (`guest-firewall`, nftables, loaded before the
+  network) refuses every account, root included, the cloud's metadata services and every link-local address
+  (169.254.0.0/16, fe80::/10) and private, shared and reserved ranges (10/8, 172.16/12, 192.168/16, 100.64/10,
+  fc00::/7, ...), except the DNS resolver, the DHCP client and the clock, each to its one port and matched by its
+  account. `EGRESS=off` lets nothing else out but package downloads. It has no allowlist of names (`net allow` is
+  refused).
+- **Keys of its own, and a host key that's never trusted on first use.** Each computer has its own set of keys in
+  `~/.ssh/metacomputer-NAME/` (0600), each limited to its job in the guest's root-owned key lists (the driver's key
+  runs only the driver; the view key opens only the live view's forward). A provider's computer gets a host key made
+  on your Mac, given to cloud-init and pinned before the first connection; your own server's host key is the one your
+  own SSH already trusts, read over that connection. Either is pinned as `mcomp-NAME`, never under an address.
+- **The provider holds what's in the VM.** Its screen, disk and whatever is typed into it are on the provider's
+  hardware, and the host key's private half is in the instance's user-data, which the provider keeps (the guest
+  firewall refuses the metadata service to everyone in the VM, and cloud-init is turned off once it's set up). Use a
+  VM on your Mac for work you wouldn't put on a provider's machine. No file, secret or key of your Mac's goes there:
+  the vault types a value over its fill account's connection and keeps API keys on the Mac behind its proxy.
+- **Provider credentials reach one program.** OCI's come only from the environment of the command you run (your
+  secrets manager hands them over); `lib/remote.py`, the one program that calls OCI, gets them, and nothing else
+  metacomputer starts does (the hub, ssh, the helpers). Everything it makes is in the one compartment you name, tagged
+  `metacomputer`.
+- **What isn't there yet:** `SSH_AUTH=cert` (refused: its certificates name the Mac's gateway address), snapshots and
+  `reset`, volumes and Mac folders, and the event watcher's health checks. Your own server's other software and
+  accounts are yours to keep apart; give metacomputer a server of its own.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands

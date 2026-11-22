@@ -286,6 +286,26 @@ runner's does.
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).
 
+## A computer elsewhere: `tests/test_remote.py`
+
+`python3 tests/test_remote.py` needs no VM and makes no network call or provider call (a stand-in for Oracle's API;
+the CLI checks run in a copy of the checkout with its own HOME and a fake runner, tests/test_multi_vm.py's `Box`).
+- The transport: SSH straight to a computer's address, its host key pinned as `mcomp-NAME`; addresses that could be
+  options, loopback, link-local or multicast refused; the hook a provider's tunnel registers becomes ssh's
+  ProxyCommand through `lib/proxywrap.py`, which ends a tunnel that ignores SIGHUP when ssh goes or dies.
+- What the guest is given: each key limited to its job, cloud-init user-data with the host key made on the Mac, no
+  default account and `bootstrap.sh`; the firewall's rules (SSH alone in; out, metadata, link-local and private
+  ranges refused for every account, the system services' exceptions by account and port, `EGRESS=off`).
+- The OCI driver: sizes, each availability domain tried once when one is full, then a refusal; wake, sleep, delete,
+  status and list; credentials named but never shown.
+- The CLI: `vm create --on server|oci` and its refusals, `ssh_base` for each role, provider credentials kept from
+  everything but `lib/remote.py`, `list` and `--on`, what a computer elsewhere refuses (`reset`, `checkpoint`,
+  `net allow`, volumes, `view --tailnet`, `SSH_AUTH=cert`, `PLACE` in `config/local.env`), `stop` and `vm delete`.
+
+The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME build`, then the GUI suite and
+`tests/test_vault_vm.py` with `MCOMP_CONFIG=config/vms/NAME.env`; for Oracle Cloud, with its credentials in the
+environment. The vault's remote binding (its address and alias, no gateway) is in `tests/test_secrets.py`.
+
 ## Places and providers: `tests/test_cloud_adapters.py`
 
 `python3 tests/test_cloud_adapters.py` (194 checks, a second) needs no VM and makes no network call.

@@ -8,8 +8,8 @@
 #                                  same. Without it: your default computer (metacomputer default), else
 #                                  config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
 #   --on PLACE                     act on the computer at PLACE: mac (this Mac; your default computer when it's
-#                                  there), or cloud. Every computer is on this Mac: cloud says there are none and
-#                                  does nothing. With --vm, both must agree
+#                                  there), server (your own server), oci (Oracle Cloud), or cloud (anywhere but
+#                                  this Mac). With --vm, both must agree
 #   list [--on PLACE] [--json]     every computer: where it is (WHERE), state, disk, ports, baseline; * marks the
 #                                  one these settings act on (without --vm: your default computer)
 #   default [NAME] [--json]        your default computer, the one a command acts on when none is named, and its
@@ -17,6 +17,11 @@
 #   vm list [--on PLACE] [--json]  the same as list: this checkout's VMs (settings files and the runner)
 #   vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]
 #                                  a VM of its own: writes config/vms/NAME.env (ports, keys, folders, vault) and builds it
+#   vm create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | --on oci [--size SIZE] [--egress internet|off]
+#                                  a computer elsewhere, an Ubuntu 24.04 VM reached over SSH (docs/remote.md): your
+#                                  own server (set up once over your SSH, with sudo), or one Oracle Cloud makes
+#   cloud status|doctor|setup|teardown PROVIDER [--json]
+#                                  what metacomputer made at a provider (oci), checks, its network, removing it
 #   vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
 #                                  delete a VM, its baseline and config/vms/NAME.env, after you type its name
 #                                  (--yes doesn't count); volumes and the vault folder stay unless their flag asks
@@ -190,7 +195,7 @@ if [ -n "${MCOMP_EXPECT_SSH_PORT:-}" ] && [ "$MCOMP_EXPECT_SSH_PORT" != "$SSH_PO
   echo "metacomputer: the settings now give $VM_NAME the SSH port $SSH_PORT, not $MCOMP_EXPECT_SSH_PORT as when this started (MCOMP_EXPECT_SSH_PORT); refusing$mc_hint" >&2
   exit 1
 fi
-if [ -n "${MCOMP_EXPECT_HOSTKEY:-}" ] && [ "$(grep -F "[127.0.0.1]:$SSH_PORT " "$KNOWN_HOSTS" 2>/dev/null | head -1)" != "$MCOMP_EXPECT_HOSTKEY" ]; then
+if [ -n "${MCOMP_EXPECT_HOSTKEY:-}" ] && [ "$(grep -F "$(mc_hostkey_name) " "$KNOWN_HOSTS" 2>/dev/null | head -1)" != "$MCOMP_EXPECT_HOSTKEY" ]; then
   echo "metacomputer: $VM_NAME's pinned host key (known_hosts in its SSH_DIR) isn't the one it had when this started (MCOMP_EXPECT_HOSTKEY); refusing$mc_hint" >&2
   exit 1
 fi
@@ -204,8 +209,8 @@ on_resolve() {
   local args=(--on "$MC_ON_ARG") n r main
   main="$(mc_main_identity | head -1)"
   [ -z "$main" ] || args+=(--computer "$main=mac")
-  for n in $(mc_vm_files); do args+=(--computer "$n=mac"); done
-  args+=(--computer "$VM_NAME=mac")
+  for n in $(mc_vm_files); do args+=(--computer "$n=$(mc_file_place "$MC_VMS_DIR/$n.env")"); done
+  args+=(--computer "$VM_NAME=${PLACE:-mac}")
   if [ -n "$MC_VM_SAID$MC_ENV_SAID" ]; then
     args+=(--vm "$VM_NAME")
   elif [ "${MC_IMPLICIT:-0}" != 1 ] && [ -z "${MC_DEFAULT_PROBLEM:-}" ]; then
@@ -217,13 +222,14 @@ on_resolve() {
 if [ "$MC_ON_GIVEN" = 1 ]; then
   case "$cmd" in
     help|-h|--help) ;;
+    vm) [ "${1:-}" = create ] || on_resolve ;;      # vm create --on PLACE: where to make it (vm-commands.sh)
     default) die "metacomputer default takes the computer's name, without --on or --vm: metacomputer default NAME" ;;
     *) on_resolve ;;
   esac
 fi
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
-case "$cmd" in help|-h|--help|where|setup|vm|list|default|events|notify|learn|actions|version|agents) ;; *) vm_target_check ;; esac
+case "$cmd" in help|-h|--help|where|setup|vm|list|default|events|notify|learn|actions|version|agents|cloud) ;; *) vm_target_check ;; esac
 # The session guard (lib/sessionvm.py): run from an agent session (Claude Code, Codex) that holds a computer, through
 # its MCP tools or a claim, a command that names no computer and would act on another one refuses, saying which and how
 # to go on; one that only reads goes ahead with a note. A computer named with --vm, MCOMP_VM or MCOMP_CONFIG, or pinned
@@ -244,7 +250,7 @@ session_guard() {
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
 }
 case "$cmd" in
-  help|-h|--help|where|setup|update|version|vm|list|default|events|notify|learn|actions|agents|each|mcp|mcp-lazy) ;;
+  help|-h|--help|where|setup|update|version|vm|list|default|events|notify|learn|actions|agents|each|mcp|mcp-lazy|cloud) ;;
   volume|refdisk|contact-sheet|checkpoints|_*) ;;
   *) session_guard "$@" ;;
 esac
@@ -322,6 +328,72 @@ guest_import() { # DEST [--quiet]
 }
 
 need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
+
+# --- a computer reached over SSH (scripts/lib.sh MC_REMOTE; lib/remote.py; docs/remote.md) -------------------
+remote_made() { [ "${PROVIDER:-ubuntu-vm}" != ubuntu-vm ]; }    # a provider makes (and starts, stops) it
+remote_where() { case "${PROVIDER:-}" in oci) echo "Oracle Cloud" ;; *) echo "your own server at ${SSH_HOST:-?}" ;; esac; }
+remote_only_mac() { # WHAT WHY: refused for a computer elsewhere, saying why (lib/cloud/capabilities.py's feature map)
+  [ "${MC_REMOTE:-0}" = 1 ] || return 0
+  die "$1 isn't available for $VM_NAME, a computer reached over SSH ($(remote_where)): $2"
+}
+do_start_remote() {
+  local a; for a in "$@"; do case "$a" in --no-volumes) ;; *) die "usage: metacomputer start" ;; esac; done
+  vm_lock_or_die "metacomputer start"
+  expect_guard
+  vm_exists "$VM_NAME" || die "$VM_NAME isn't set up yet: $(mc_cmd) build"
+  say "starting $VM_NAME ($(remote_where))"
+  if remote_made; then
+    if remote_can_ask; then
+      remote_py wake --vm "$VM_NAME" >/dev/null || die "couldn't start it (above)"
+      MC_REMOTE_STATUS=""; MC_T_USER=""      # its address may be new
+      ok "running ($(remote_where))"
+    elif ! vm_running "$VM_NAME"; then
+      die "$VM_NAME doesn't answer: it's stopped (it stops itself after IDLE_STOP minutes unused) or unreachable, and starting it needs $(remote_where)'s credentials in this command's environment (docs/remote.md)"
+    fi
+  fi
+  wait_ssh ops 300 || die "SSH to $VM_NAME didn't answer (metacomputer status)"
+  ok "SSH ($(mc_hostkey_name), pinned host key)"
+  sync_guest_options
+  wait_session 300 || die "XFCE session not ready (metacomputer ssh admin; sudo metacomputer-admin logs)"
+  ok "XFCE session ready"
+  mcp_probe >/dev/null && ok "Cua Driver MCP answers" || warn "Cua Driver MCP did not answer (metacomputer status)"
+  emit_event lifecycle started info "The computer $VM_NAME started" ""
+  say "ready. Live view: metacomputer view"
+}
+do_stop_remote() {
+  parse_flags "$@"
+  expect_guard
+  if ! remote_made; then
+    hub_stop
+    ok "metacomputer doesn't power your own server off; this Mac's connection to it (the hub) is closed"
+    return 0
+  fi
+  owners_check
+  handoff_hold_unless_override
+  hub_stop
+  if [ -s "$RUN_DIR/manual-recording" ]; then
+    say "finishing the desktop recording first"
+    ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
+  fi
+  remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md); or leave it: it stops itself after ${IDLE_STOP:-15} minutes unused"
+  say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept)"
+  remote_py sleep --vm "$VM_NAME" >/dev/null || die "couldn't stop it (above)"
+  emit_event lifecycle stopped info "The computer $VM_NAME stopped" "" "forced=no"
+  ok "stopped"
+}
+view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT here to its live view (x11vnc on its own
+  # 127.0.0.1:5900), opened with its view key (which may open that one forward and nothing else). It stays up while
+  # a viewer that connects within 20 s is connected, then closes by itself.
+  [ "${MC_REMOTE:-0}" = 1 ] || return 0
+  vm_running "$VM_NAME" || die "$VM_NAME doesn't answer (metacomputer start)"
+  if lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh; then return 0; fi
+  ! lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN >/dev/null 2>&1 || die "something else on this Mac listens on 127.0.0.1:$VNC_PORT (VNC_PORT); nothing was opened"
+  ssh_base view
+  # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead.
+  ssh -f -T -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view </dev/null 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 >&2) \
+    || die "couldn't open the live view's SSH tunnel to $VM_NAME"
+  ok "live view tunnel: 127.0.0.1:$VNC_PORT -> $VM_NAME's 127.0.0.1:5900, over SSH (connect within 20 s; it closes when the viewer does)"
+}
 
 do_start() { # [--no-volumes]
   local novol=0 a
@@ -676,12 +748,19 @@ do_status() {
   local vm_state lease ssh_ok=false gs="{}" mcp="{}" hs="" layout=current
   vm_state="$(vm_exists "$VM_NAME" && vm_status "$VM_NAME" || echo missing)"
   local base_state; base_state="$(vm_exists "$BASELINE_NAME" && echo present || echo missing)"
-  local gw=false fwd=""
+  local gw=false fwd="" remote="{}"
   netgw_alive && gw=true
   fwd="$(lsof -nP -iTCP:"$SSH_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | sort -u | tr '\n' ' ')"
   lease=""
+  if [ "${MC_REMOTE:-0}" = 1 ]; then
+    # A computer elsewhere: no gateway or forwards here; where it is and what its provider says instead.
+    base_state=none; fwd=""
+    local off=--offline; ! remote_can_ask || off=""
+    remote="$(remote_py status --vm "$VM_NAME" --json $off 2>/dev/null || echo '{}')"
+    [ "$remote" != "{}" ] || remote="$("$PY" -c 'import json, sys; print(json.dumps({"where": sys.argv[1], "host": sys.argv[2] or None, "provider": sys.argv[3]}))' "$(remote_where)" "${SSH_HOST:-}" "${PROVIDER:-}")"
+  fi
   if [ "$vm_state" = running ] && $gw; then
-    lease="$(netgw_control "lease $(vm_mac "$VM_NAME")")"
+    [ "${MC_REMOTE:-0}" = 1 ] || lease="$(netgw_control "lease $(vm_mac "$VM_NAME")")"
     if gssh ops true >/dev/null 2>&1; then
       ssh_ok=true
       # VMs built by earlier versions keep their helpers in /opt/cua-lab or /opt/virtual-computer.
@@ -691,7 +770,7 @@ do_status() {
       # What the VM actually has from the host: virtio console port names (the
       # SPICE clipboard port), virtio device ids (0x0019 = sound) and virtiofs
       # tags (the Rosetta share is tagged "rosetta").
-      hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
+      [ "${MC_REMOTE:-0}" = 1 ] || hs="$(gssh ops 'cat /sys/class/virtio-ports/*/name 2>/dev/null; echo ---; cat /sys/bus/virtio/devices/*/device 2>/dev/null; echo ---; cat /sys/fs/virtiofs/*/tag 2>/dev/null' 2>/dev/null || true)"
     fi
   fi
   export_options
@@ -699,16 +778,16 @@ do_status() {
   local hub; hub="$("$PY" "$LAB_ROOT/lib/mcp_hub.py" status --json 2>/dev/null || echo '{}')"
   local stg; stg="$(storage_py status --json 2>/dev/null || echo '{}')"
   record_env
-  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" "$hub" "$stg" <<'EOF'
+  "$PY" - "$json" "$vm_state" "$base_state" "$gw" "$fwd" "$lease" "$ssh_ok" "$gs" "$mcp" "${hs:-}" "$LUME" "$layout" "$ev" "$LAB_ROOT/lib" "$hub" "$stg" "$remote" <<'EOF'
 import json, math, os, re, sys
-js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib, hub, stg = sys.argv[1:]
+js, vm, base, gw, fwd, lease, sshok, gs, mcp, hs, lume, layout, ev, lib, hub, stg, remote = sys.argv[1:]
 def parsed(text):   # the VM side's JSON: anything that isn't an object is no report
     try:
         v = json.loads(text or "{}")
     except (ValueError, RecursionError):
         return {}
     return v if isinstance(v, dict) else {}
-gs = parsed(gs); mcp = parsed(mcp); stg = parsed(stg)
+gs = parsed(gs); mcp = parsed(mcp); stg = parsed(stg); remote = parsed(remote)
 try:
     hub = json.loads(hub or "{}")
 except ValueError:
@@ -733,7 +812,10 @@ out = {"vm": vm, "baseline": base, "gateway": gw == "true", "forwards_on": fwd.s
                    "driver_profile": os.environ.get("MCOMP_DRIVER_PROFILE", "") if os.environ.get("MCOMP_DRIVER_MODE") == "bounded" else None},
        "events": {k: ev.get(k) for k in ("sinks", "names", "watcher", "backlog", "failing")} if ev else None,
        "hub": hub or None,
-       "storage": dict(stg, guest=gs.get("storage") if isinstance(gs.get("storage"), dict) else None) if stg else None}
+       "storage": dict(stg, guest=gs.get("storage") if isinstance(gs.get("storage"), dict) else None) if stg else None,
+       "remote": remote or None}
+if remote:
+    out["gateway"] = None                 # a computer elsewhere: its own firewall, no gateway on this Mac
 sys.path.insert(0, lib)
 try:
     import learn_store
@@ -759,7 +841,14 @@ def esc_all(o, depth=0):
 gs, mcp, lease, fwd = esc_all(gs), esc_all(mcp), _esc(lease), _esc(fwd)
 def m(b): return "\033[32m✓\033[0m" if b else "\033[31m✗\033[0m"
 print(f"VM            {vm}    baseline: {base}")
-print(f"gateway       {m(out['gateway'])} mcomp-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
+if remote:
+    r = esc_all(remote)
+    print(f"where         {r.get('where')}   {r.get('host') or '-'}   {r.get('state') or ''}"
+          + (f"   {r.get('size')} ({r.get('arch')})" if r.get("size") else "") + (f"   ({r['note']})" if r.get("note") else ""))
+    print(f"network       its own firewall: EGRESS={r.get('egress') or os.environ.get('MCOMP_EGRESS', 'internet')}, SSH only in"
+          + (f"   idle stop: {r.get('idle_stop')} min" if r.get("idle_stop") not in (None, "off") else ""))
+else:
+    print(f"gateway       {m(out['gateway'])} mcomp-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
 if layout == "old":
     print("guest         \033[33mbuilt by an earlier version (older layout)\033[0m: rebuild it with "
@@ -1824,7 +1913,7 @@ do_view() { # [--open | --print | --tailnet | --forget] [--remember | --no-remem
   local a mode="" flag=""
   for a in "$@"; do
     case "$a" in
-      --open|--print|--tailnet|--forget) [ -z "$mode" ] || die "usage: metacomputer view: one of --open, --print, --tailnet, --forget"
+      --open|--print|--tailnet|--forget|--tunnel) [ -z "$mode" ] || die "usage: metacomputer view: one of --open, --print, --tailnet, --forget, --tunnel"
                                          mode="${a#--}" ;;
       --remember|--no-remember) [ -z "$flag" ] || die "usage: metacomputer view: --remember or --no-remember, not both"
                                 flag="${a#--}" ;;
@@ -1837,6 +1926,8 @@ do_view() { # [--open | --print | --tailnet | --forget] [--remember | --no-remem
     print) view_print; return 0 ;;
     tailnet) view_tailnet; return 0 ;;
     forget) view_forget; return $? ;;
+    tunnel) [ "${MC_REMOTE:-0}" = 1 ] || die "view --tunnel is for a computer reached over SSH; this VM's live view is on 127.0.0.1:$VNC_PORT already"
+            view_tunnel; echo "Connect a VNC client to 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))."; return 0 ;;
   esac
   [ "$flag" = remember ] && { view_remember_now; return $?; }
   # Plain view: a person at a terminal on the Mac's own screen gets the live view itself; anyone else (SSH, another
@@ -1846,6 +1937,17 @@ do_view() { # [--open | --print | --tailnet | --forget] [--remember | --no-remem
 }
 
 view_print() {
+  if [ "${MC_REMOTE:-0}" = 1 ]; then
+    cat <<EOF
+Live view of $VM_NAME's desktop ($(remote_where); VNC, view + take over), through SSH only:
+  on this Mac:          metacomputer --vm $VM_NAME view --open   (opens the tunnel, then Screen Sharing)
+  any VNC client here:  metacomputer --vm $VM_NAME view --tunnel, then connect to 127.0.0.1:$VNC_PORT within 20 s
+  password:             $(vnc_password_hint)
+In $VM_NAME, x11vnc listens on its own 127.0.0.1:5900 only, and its firewall and its provider's let in SSH
+alone: the tunnel (its view key may open that one forward and nothing else) is the only way to the live view.
+EOF
+    return 0
+  fi
   cat <<EOF
 Live view of the guest desktop (VNC, view + take over):
   on this Mac:          metacomputer view --open   (or plain metacomputer view, in Terminal on the Mac's screen)
@@ -1994,6 +2096,7 @@ EOF
   else
     warn "couldn't set up SSH to the VM, so the agent's leftover virtual input devices were left as they are (metacomputer input-reset)"
   fi
+  view_tunnel                       # a computer elsewhere: its live view through an SSH tunnel (none here)
   open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
   echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
   return $failed
@@ -2003,6 +2106,7 @@ EOF
 # Mac's networking, so it's yours to run (and to undo).
 view_tailnet() {
   local ts="" name=""
+  remote_only_mac "view --tailnet" "its live view is reached through an SSH tunnel opened from this Mac (metacomputer view --tunnel)"
   if command -v tailscale >/dev/null 2>&1; then ts=tailscale
   elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale; fi
   if [ -n "$ts" ]; then
@@ -2155,8 +2259,19 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
     bind)
       local vm="$VM_NAME" hk
       if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then vm="$1"; shift; fi
-      hk="$(grep -F "[127.0.0.1]:$SSH_PORT " "$KNOWN_HOSTS" 2>/dev/null | head -1)"
+      hk="$(grep -F "$(mc_hostkey_name) " "$KNOWN_HOSTS" 2>/dev/null | head -1)"
       [ -n "$hk" ] || hk="$(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub" 2>/dev/null)"
+      # A computer elsewhere: the vault signs in at its address, its host key pinned under mcomp-NAME, with no gateway.
+      local where=(--port "$SSH_PORT" --gateway "$NETGW_BIN")
+      if [ "${MC_REMOTE:-0}" = 1 ]; then
+        [ "${TRANSPORT:-ssh}" = ssh ] || die "the vault reaches a computer only straight over SSH for now, not through TRANSPORT=$TRANSPORT"
+        mc_remote_target "$GUEST_USER" || die "can't tell how to reach $VM_NAME: $MC_REFUSAL"
+        local i rhost="" rport=""
+        for ((i = 0; i < ${#MC_T_ARGS[@]}; i++)); do [ "${MC_T_ARGS[$i]}" != -p ] || rport="${MC_T_ARGS[$((i + 1))]}"; done
+        rhost="${MC_T_ARGS[${#MC_T_ARGS[@]}-1]#*@}"
+        [ -n "$rhost" ] && [ -n "$rport" ] || die "can't tell $VM_NAME's address"
+        where=(--port "$rport" --host "$rhost" --host-key-alias "$(mc_hostkey_name)")
+      fi
       [ -f "$SSH_DIR/fill" ] || die "no fill key ($SSH_DIR/fill): VMs built before secrets support have no fill account. Rebuild the VM to use secrets (metacomputer build --replace, or a new VM_NAME)"
       [ "${SSH_AUTH:-key}" = cert ] && warn "SSH_AUTH=cert: sealed sessions sign in with the static ops key, which a VM on certificates refuses (fills use their own account and still work)"
       [ -f "$SSH_DIR/hostkey" ] && warn "the VM's private host key is still in $SSH_DIR/hostkey: anything that can read it can pose as the VM. Nothing on the Mac needs it after the build (newer builds delete it): delete it with rm $SSH_DIR/hostkey"
@@ -2168,8 +2283,8 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         warn "no proxy key ($SSH_DIR/proxy): this VM was built before API tokens, so 'metacomputer secrets token' won't work with it until it is rebuilt (fills and sessions do)"
       fi
       # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
-      exec "$VAULT_BIN" bind "$vm" --port "$SSH_PORT" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
-        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" --gateway "$NETGW_BIN" ${proxy[@]+"${proxy[@]}"} "$@" ;;
+      exec "$VAULT_BIN" bind "$vm" "${where[@]}" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
+        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" ${proxy[@]+"${proxy[@]}"} "$@" ;;
     import-session)
       # The session is for this VM (its approval policy, and where `session load` puts it).
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
@@ -2293,6 +2408,25 @@ for line in sys.stdin:
         d.pop("token", None); print(json.dumps(d, sort_keys=True))' 2>/dev/null || true
 }
 
+if [ "${MC_REMOTE:-0}" = 1 ]; then
+  # A computer elsewhere: its own start, stop and build; what needs the Mac's runner or gateway says why not.
+  case "$cmd" in
+    start)    do_start_remote "$@"; exit $? ;;
+    stop)     do_stop_remote "$@"; exit $? ;;
+    restart)  do_stop_remote "$@"; do_start_remote; exit $? ;;
+    build)    mc_export_provider_env; exec "$LAB_ROOT/scripts/remote-build.sh" "$@" ;;
+    reset|baseline|restore|checkpoint|checkpoints)
+              remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
+    net)      case "${1:-status}" in
+                status) echo "network: $VM_NAME's own firewall: EGRESS=${EGRESS:-internet} ($([ "${EGRESS:-internet}" = off ] && echo "nothing out but package updates" || echo "the internet, with metadata, link-local and private ranges refused"))"
+                        gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | sed 's/^/in force there: EGRESS=/' | term_safe; exit 0 ;;
+                *) remote_only_mac "metacomputer net $1" "it has no allowlist of names; set EGRESS=internet or off in $MC_SETTINGS_LABEL, then $(mc_cmd) build (docs/remote.md)" ;;
+              esac ;;
+    volume|refdisk) remote_only_mac "metacomputer $cmd" "volumes and reference disks reach a VM on this Mac only, for now" ;;
+    logs)     n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"
+              gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null | term_safe; exit 0 ;;
+  esac
+fi
 case "$cmd" in
   start)      do_start "$@" ;;
   stop)       do_stop "$@" ;;
@@ -2381,6 +2515,8 @@ case "$cmd" in
   secrets)    do_secrets "$@"; exit $? ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
+  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json]   (PROVIDER: oci)"
+              PROVIDER="$2" remote_py cloud "$@"; exit $? ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
               [ "$MC_SETTINGS_KIND" != vm ] || die "setup sets up this checkout's main VM (config/local.env); for $VM_NAME: metacomputer --vm $VM_NAME build"

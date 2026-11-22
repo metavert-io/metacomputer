@@ -6,6 +6,10 @@
 # /var/lib/metacomputer/provisioned; cloud-init's power_state then reboots into the
 # XFCE desktop. On failure it writes /var/lib/metacomputer/failed and leaves the VM
 # running so the host can collect /var/log/metacomputer-provision.log over SSH.
+# MCOMP_TARGET=remote in versions.env (an Ubuntu 24.04 VM reached over the internet: lib/remote.py uploads the
+# payload over SSH and runs this, then reboots it) changes only what such a VM needs: a display in memory (Xorg's
+# dummy driver), its own firewall instead of the Mac's gateway (provisioning/remote/), the live view on 127.0.0.1,
+# arm64 or amd64, and no storage modules. Run again, it changes nothing that's already right.
 set -Eeuo pipefail
 PAYLOAD="${1:-/opt/metacomputer-payload}"
 LOG=/var/log/metacomputer-provision.log
@@ -19,6 +23,13 @@ step() { echo; echo "=== [$(date -Is)] $*"; }
 . "$PAYLOAD/versions.env"
 GUSER="${GUEST_USER:-cua}"
 AUSER="${ADMIN_USER:-cuaadmin}"
+TARGET="${MCOMP_TARGET:-lume}"
+ARCH="$(dpkg --print-architecture)"
+case "$TARGET" in
+  lume) ;;
+  remote) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
+  *) echo "MCOMP_TARGET must be lume or remote, not $TARGET"; false ;;
+esac
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 # Cua Driver: no telemetry, no update checks - for every process in this
 # guest (SSH sessions included), set before the driver binary ever runs.
@@ -52,10 +63,19 @@ done
 # --no-same-owner, so everything copied here is root-owned; the desktop
 # user's home is re-owned below.
 cp -r --preserve=mode,timestamps "$PAYLOAD/rootfs/." /
+# A VM reached over the internet: its firewall, idle stop, the live view's SSH tunnel and a display in memory.
+if [ "$TARGET" = remote ]; then cp -r --preserve=mode,timestamps "$PAYLOAD/remote/rootfs/." /; fi
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
 install -d -m 0755 /etc/apt/keyrings
 # Only the pinned key (scripts/pin-gpg-key.sh on the Mac); mozilla.sources names it in Signed-By.
 install -m 0644 "$PAYLOAD/mozilla-repo-signing-key.gpg" /etc/apt/keyrings/packages.mozilla.org.asc
+
+if [ "$TARGET" = remote ] && [ "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" -lt 4000000 ] && [ -z "$(swapon --show=NAME --noheadings)" ]; then
+  step "swap: this VM has less than 4 GB of memory, so a 2 GB swap file"
+  [ -f /swapfile ] || { fallocate -l 2G /swapfile; chmod 600 /swapfile; mkswap /swapfile >/dev/null; }
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 step "apt: update + full upgrade"
 "${APT[@]}" update
@@ -90,6 +110,8 @@ PKGS=(
   # maintenance + containment
   unattended-upgrades ufw curl ca-certificates jq locales
 )
+# A VM with no display of its own draws into memory; its own firewall is nftables (guest-firewall).
+if [ "$TARGET" = remote ]; then PKGS+=(xserver-xorg-video-dummy nftables); fi
 "${APT[@]}" install --no-install-recommends "${PKGS[@]}"
 # Nothing that locks the screen or syncs the host clipboard may be present.
 purge_unwanted() {
@@ -133,12 +155,12 @@ case " ${MCOMP_BROWSERS:-firefox} " in *" chrome "*)
   # is then referenced by nothing, so APT never trusts it.
   printf 'repo_add_once="false"\nrepo_reenable_on_distupgrade="false"\n' > /etc/default/google-chrome
   rm -f /etc/apt/sources.list.d/google-chrome.sources /etc/apt/sources.list.d/google-chrome.list
-  cat > /etc/apt/sources.list.d/metacomputer-google-chrome.sources <<'SRC'
+  cat > /etc/apt/sources.list.d/metacomputer-google-chrome.sources <<SRC
 Types: deb
 URIs: https://dl.google.com/linux/chrome/deb/
 Suites: stable
 Components: main
-Architectures: arm64
+Architectures: $ARCH
 Signed-By: /etc/apt/keyrings/google-chrome.asc
 SRC
   "${APT[@]}" update
@@ -219,7 +241,7 @@ PA
   dpkg-query -W -f='${Package} ${Version}\n' pulseaudio libasound2-plugins | tee -a "$STATE/package-versions.txt"
 fi
 
-step "Cua Driver ${CUA_DRIVER_VERSION} (linux-arm64) from the host-verified payload"
+step "Cua Driver ${CUA_DRIVER_VERSION} ($CUA_DRIVER_TARBALL) from the host-verified payload"
 TARBALL="$PAYLOAD/$CUA_DRIVER_TARBALL"
 echo "$CUA_DRIVER_SHA256  $TARBALL" | sha256sum -c -
 install -d -m 0755 /opt/cua-driver
@@ -301,6 +323,9 @@ step "storage: volumes, Mac folders and reference disks (metacomputer-admin stor
 # (/opt/metacomputer/bin/storage-helper); nothing mounts them otherwise (udev rule 61).
 printf 'desktop_user=%s\n' "$GUSER" > /etc/metacomputer/storage.conf
 chmod 0644 /etc/metacomputer/storage.conf
+if [ "$TARGET" = remote ]; then
+  echo "a VM reached over the internet has no volumes from the Mac yet: no storage modules"
+else
 # ext4 is built in; folders need virtiofs, reference disks ISO 9660 or UDF (virtio or USB).
 # Check the newest installed kernel (the one the reboot starts) and add its extra modules if needed.
 KVER="$(ls /lib/modules | sort -V | tail -1)"
@@ -316,6 +341,7 @@ fi
 for m in virtiofs isofs udf usb_storage; do
   modinfo -k "$KVER" "$m" >/dev/null 2>&1 && echo "kernel module $m: present" || { echo "kernel module $m: MISSING"; false; }
 done
+fi
 
 step "identity wallpaper (desktop screenshots and recordings say this is the virtual computer)"
 # Applied at each login by session-init, with the Applications-menu title.
@@ -323,9 +349,13 @@ install -d -m 0755 /usr/share/backgrounds/metacomputer
 WP=/usr/share/backgrounds/metacomputer/metacomputer.png
 FB=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 FR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+WP_TEXT="metacomputer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac"
+if [ "$TARGET" = remote ]; then
+  WP_TEXT="metacomputer  |  Ubuntu 24.04 $(echo "$ARCH" | tr a-z A-Z) cloud VM  |  not the user's computer"
+fi
 convert -size 1920x1080 xc:'#17324d' -gravity center \
     -font "$FB" -pointsize 112 -fill '#ffffff' -annotate +0-70 'VIRTUAL COMPUTER' \
-    -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "metacomputer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac" \
+    -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "$WP_TEXT" \
     "$WP" || convert -size 1920x1080 xc:'#17324d' "$WP"
 chmod 0644 "$WP"
 
@@ -342,6 +372,34 @@ step "uinput for the driver's X11 virtual-pointer route"
 udevadm control --reload-rules || true
 modprobe uinput || true
 
+if [ "$TARGET" = remote ]; then
+  step "ssh hardening + the guest firewall (this VM's own boundary: SSH in, no metadata or private ranges out)"
+  # Your own server: the account it was set up from keeps signing in, with its own keys, as before.
+  OWNER="$(head -n 1 /etc/metacomputer/owner 2>/dev/null || true)"
+  if [ -n "$OWNER" ]; then
+    [[ "$OWNER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && getent passwd "$OWNER" >/dev/null || { echo "/etc/metacomputer/owner: no account $OWNER"; false; }
+    sed -i "s/^AllowUsers .*/AllowUsers $GUSER $AUSER mcfill mcproxy $OWNER/" /etc/ssh/sshd_config.d/10-metacomputer.conf
+    printf '%s\n' "# metacomputer: $OWNER set this server up and keeps signing in with the keys in its home." \
+      "Match User $OWNER" "	AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2" "Match all" \
+      > /etc/ssh/sshd_config.d/11-metacomputer-owner.conf
+    sshd -T -C "user=$OWNER,host=localhost,addr=127.0.0.1" | grep -x 'authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2' >/dev/null \
+      || { echo "sshd wouldn't read $OWNER's own keys"; false; }
+  fi
+  sshd -t
+  printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
+  printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
+  date -Is > /etc/metacomputer/remote
+  chmod 0644 /etc/metacomputer/egress /etc/metacomputer/vnc-listen /etc/metacomputer/remote
+  /opt/metacomputer/bin/guest-firewall apply
+  systemctl daemon-reload
+  systemctl enable metacomputer-firewall.service
+  /opt/metacomputer/bin/guest-firewall status | head -40
+  step "idle stop (IDLE_STOP=${MCOMP_IDLE_STOP:-off})"
+  printf '%s\n' "${MCOMP_IDLE_STOP:-off}" > /etc/metacomputer/idle-stop
+  chmod 0644 /etc/metacomputer/idle-stop
+  if [ "${MCOMP_IDLE_STOP:-off}" = off ]; then systemctl disable --now metacomputer-idle.timer 2>/dev/null || true
+  else systemctl enable metacomputer-idle.timer; fi
+else
 step "ssh hardening + host firewall (defense in depth; the host gateway is the real boundary)"
 sshd -t
 ufw --force reset >/dev/null
@@ -351,6 +409,7 @@ ufw allow in on enp0s1 from "$NET_GATEWAY_IP" to any port 22 proto tcp comment '
 ufw allow in on enp0s1 from "$NET_GATEWAY_IP" to any port 5900 proto tcp comment 'metacomputer vnc via host gateway'
 ufw --force enable
 ufw status verbose
+fi
 
 step "trim services the lab doesn't need"
 for unit in multipathd.service multipathd.socket ModemManager.service apport.service \

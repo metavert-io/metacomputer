@@ -1,0 +1,59 @@
+#!/bin/bash
+# metacomputer bootstrap for an Ubuntu 24.04 VM reached over the internet. Runs once as root, before the setup:
+#   - a VM a provider made: cloud-init runs it at first boot (lib/cloud/guest.py writes it into the user-data);
+#   - your own server: metacomputer runs it over your own SSH connection, with sudo (lib/remote.py).
+# It makes the two accounts metacomputer signs in with, each reached only with keys made on the Mac for this
+# computer, and nothing else:
+#   cua        the desktop user, no sudo (its keys: the shell, the driver, the live view's tunnel)
+#   cuaadmin   maintenance: full sudo only until the setup ends (finalize.sh then narrows it to metacomputer-admin)
+# Its folder ($1) holds keys-guest and keys-admin (authorized_keys lines, options included); the account it was run
+# for, if any ($2, your own server), keeps signing in as before. It prints the host's ed25519 public key last, which
+# the Mac pins (read over a connection you already trust). Running it again changes nothing that's already right.
+set -Eeuo pipefail
+DIR="${1:?usage: bootstrap.sh DIR [OWNER]}"
+OWNER="${2:-}"
+GUSER=cua
+AUSER=cuaadmin
+fail() { echo "bootstrap: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || fail "run it as root"
+. /etc/os-release
+[ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = 24.04 ] || fail "this is ${PRETTY_NAME:-not Ubuntu}: metacomputer sets up Ubuntu 24.04 only"
+case "$(dpkg --print-architecture)" in arm64|amd64) ;; *) fail "$(dpkg --print-architecture) isn't arm64 or amd64" ;; esac
+for f in keys-guest keys-admin; do [ -s "$DIR/$f" ] || fail "no $f in $DIR"; done
+case "$OWNER" in ''|"$GUSER"|"$AUSER"|root|mcfill|mcproxy) [ -z "$OWNER" ] || fail "$OWNER can't be the owner's account" ;;
+  *) [[ "$OWNER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && getent passwd "$OWNER" >/dev/null || fail "no account $OWNER here" ;; esac
+
+for u in "$GUSER" "$AUSER"; do
+  if ! getent passwd "$u" >/dev/null; then
+    useradd --create-home --shell /bin/bash --comment "metacomputer" "$u"
+  fi
+  passwd -l "$u" >/dev/null
+done
+# Nothing but metacomputer's own sudo rule: the desktop user is in no admin group.
+for g in sudo admin adm wheel lxd docker; do gpasswd -d "$GUSER" "$g" >/dev/null 2>&1 || true; done
+
+# The key lists, root-owned, outside the homes (sshd reads only these once the setup has installed its settings),
+# and the same lines in the homes until then (finalize.sh removes those).
+install -d -o root -g root -m 0755 /etc/ssh/metacomputer-keys
+install -o root -g root -m 0644 "$DIR/keys-guest" "/etc/ssh/metacomputer-keys/$GUSER"
+install -o root -g root -m 0644 "$DIR/keys-admin" "/etc/ssh/metacomputer-keys/$AUSER"
+for pair in "$GUSER:keys-guest" "$AUSER:keys-admin"; do
+  u="${pair%%:*}"; home="$(getent passwd "$u" | cut -d: -f6)"
+  install -d -o "$u" -g "$u" -m 0700 "$home/.ssh"
+  install -o "$u" -g "$u" -m 0600 "$DIR/${pair#*:}" "$home/.ssh/authorized_keys"
+done
+
+# Full sudo for the maintenance account until the setup ends: finalize.sh replaces it with the narrow rule. Run again
+# (your own server: you run it, with your sudo, to set the server up again), it opens that window again.
+printf '%s\n' "# metacomputer setup (bootstrap.sh): removed by finalize.sh when the setup ends" \
+  "$AUSER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/89-metacomputer-setup
+chmod 0440 /etc/sudoers.d/89-metacomputer-setup
+visudo -cf /etc/sudoers.d/89-metacomputer-setup >/dev/null
+install -d -m 0755 /etc/metacomputer /var/lib/metacomputer
+[ -z "$OWNER" ] || printf '%s\n' "$OWNER" > /etc/metacomputer/owner
+# sshd reads the accounts' home key files until the setup's settings are in place: let it now.
+sshd -t
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+[ -s /etc/ssh/ssh_host_ed25519_key.pub ] || ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
+echo "bootstrap: accounts $GUSER and $AUSER ready"
+echo "HOSTKEY $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"

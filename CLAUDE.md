@@ -206,6 +206,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   (`tests/test_session_guard.py` fails on a new one). The bridge's own tools, `list_computers` and `select_computer`
   (lib/mcp_lazy.py), move the session's tools to another computer's own hub: one hub per computer. A hub's claims carry
   the client connection that wrote them, and a connection that goes drops only its own (`owners.drop_claim(pid, conn)`).
+  A computer elsewhere (docs/remote.md: `PLACE=server|oci` in a `config/vms/` file only; `lib/cloud/ubuntu_vm.py`,
+  `oci.py`, `lib/remote.py`, `scripts/remote-build.sh`, `provisioning/remote/`) is reached only through
+  `lib/cloud/transport.py` (scripts/lib.sh `ssh_base`'s remote half and the vault's binding): its host key pinned as
+  `mcomp-NAME`, never an address, never trusted on first use; a provider's tunnel registers there and runs through
+  `lib/proxywrap.py`. Provider credentials come only from the environment and reach only `lib/remote.py`
+  (`remote_py`, `mc_export_provider_env`): never a file, an argument, a log or another child. Its own firewall
+  (`guest-firewall`) is the boundary there: never let metadata, link-local or private ranges through, and keep the live
+  view on its `127.0.0.1` behind the `view` key. Everything a provider makes stays in the configured compartment,
+  tagged. Tests: `python3 tests/test_remote.py` (no VM, no network).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
@@ -321,7 +330,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

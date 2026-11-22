@@ -18,14 +18,26 @@ for u in "$GUSER" "$ADMIN"; do
   home="$(getent passwd "$u" | cut -d: -f6)"
   [ -n "$home" ] && rm -f "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"
 done
+# A VM set up over the internet: its setup sudo (bootstrap.sh) goes. On your own server, the account you set it
+# up from keeps its own sudo (cloud-init's rule for it stays); a VM a provider made has no such account.
+rm -f /etc/sudoers.d/89-metacomputer-setup
+OWNER="$(head -n 1 /etc/metacomputer/owner 2>/dev/null || true)"
 cat > /etc/sudoers.d/90-metacomputer <<EOF
 # metacomputer: the maintenance account may run only this fixed-verb script as root.
 $ADMIN ALL=(root) NOPASSWD: /usr/local/sbin/metacomputer-admin
 EOF
 chmod 0440 /etc/sudoers.d/90-metacomputer
 visudo -cf /etc/sudoers.d/90-metacomputer
-rm -f /etc/sudoers.d/90-cloud-init-users
+[ -n "$OWNER" ] || rm -f /etc/sudoers.d/90-cloud-init-users
+# A VM a provider made (reached over SSH, no owner's account): no sudo rule but metacomputer's. Its image may carry
+# rules for the provider's agent (OCI's Ubuntu images do, for its run-command account), whose agent isn't there.
+if [ -e /etc/metacomputer/remote ] && [ -z "$OWNER" ]; then
+  for f in /etc/sudoers.d/*; do
+    case "$(basename "$f")" in 90-metacomputer|README) ;; *) rm -f -- "$f" ;; esac
+  done
+fi
 visudo -c
+if sudo -l -U "$GUSER" 2>/dev/null | grep -q '(.*) .*ALL'; then echo "finalize: $GUSER can still use sudo"; exit 1; fi
 touch /etc/cloud/cloud-init.disabled
 rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.txt.i \
       /var/lib/cloud/instances/*/user-data.txt /var/lib/cloud/instances/*/user-data.txt.i

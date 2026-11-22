@@ -29,7 +29,24 @@ case "${1:-}" in
     journalctl --no-pager -b -n "$N" ;;
   provision-log)   cat /var/log/metacomputer-provision.log ;;
   updates)         apt-get -q update && unattended-upgrade -v ;;
-  firewall)        ufw status verbose ;;
+  firewall)        if [ -e /etc/metacomputer/remote ]; then /opt/metacomputer/bin/guest-firewall status; else ufw status verbose; fi ;;
+  egress)
+    # A VM reached over the internet (its own firewall, guest-firewall): EGRESS=internet or off.
+    [ -e /etc/metacomputer/remote ] || { echo "egress: this VM's network is the Mac's gateway (metacomputer net)" >&2; exit 2; }
+    case "${2:-}" in
+      status) head -n 1 /etc/metacomputer/egress 2>/dev/null || echo internet ;;
+      internet|off) printf '%s\n' "$2" > /etc/metacomputer/egress; /opt/metacomputer/bin/guest-firewall apply ;;
+      *) echo "usage: metacomputer-admin egress status|internet|off" >&2; exit 2 ;;
+    esac ;;
+  idle)
+    # A computer a provider makes (/etc/metacomputer/idle-stop): minutes unused before it powers itself off, or off.
+    [ -x /opt/metacomputer/bin/idle-stop ] && [ ! -s /etc/metacomputer/owner ] || { echo "idle: this computer has no idle stop" >&2; exit 2; }
+    case "${2:-status}" in
+      status) /opt/metacomputer/bin/idle-stop status ;;
+      off) printf 'off\n' > /etc/metacomputer/idle-stop; systemctl disable --now metacomputer-idle.timer ;;
+      [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) printf '%s\n' "$2" > /etc/metacomputer/idle-stop; systemctl enable --now metacomputer-idle.timer ;;
+      *) echo "usage: metacomputer-admin idle status|off|MINUTES (1-999)" >&2; exit 2 ;;
+    esac ;;
   ssh-auth)
     # SSH_AUTH on the host. cert: the automation user (cua) signs in only with a
     # short-lived certificate from the host's CA (the CA's public key on stdin);

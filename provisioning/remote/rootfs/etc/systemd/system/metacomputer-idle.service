@@ -1,0 +1,6 @@
+[Unit]
+Description=metacomputer idle stop (power off after IDLE_STOP minutes unused)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/metacomputer/bin/idle-stop check

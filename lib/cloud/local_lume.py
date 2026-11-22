@@ -59,6 +59,10 @@ class LocalLume(Adapter):
     def list(self):
         self._cli("listing the computers", ["metacomputer", "vm", "list", "--json"])
 
+    def ssh_endpoint(self, name):
+        check_name(name)
+        return None                  # the VM's own port on 127.0.0.1 (scripts/lib.sh ssh_base), not an endpoint
+
     def ssh_proxy_command(self, name):
         check_name(name)
         return None                  # plain SSH to the VM's own port on 127.0.0.1 (scripts/lib.sh ssh_base)

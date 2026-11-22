@@ -1,0 +1,51 @@
+#!/bin/sh
+# idle-stop: power off a computer a provider bills by the hour once nothing has used it for a while
+# (/etc/metacomputer/idle-stop: minutes, or "off"; 15 by default). metacomputer-idle.timer runs it every minute.
+# A provider counts an instance the guest shut down as stopped, so it stops billing for it (its disk still costs);
+# `metacomputer start` starts it again. Your own server never gets this (metacomputer never powers it off).
+#
+# In use means any of: an SSH connection to it (the hub's connection to the driver, a shell, a copy, the live
+# view's tunnel, a recording streaming to the Mac), a tmux session of the desktop user (Claude inside the
+# computer), or a desktop recording running in it. The clock starts again at every boot.
+#
+#   idle-stop check      what the timer runs: note use, or power off after the idle minutes
+#   idle-stop status     minutes idle, and the setting
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/metacomputer/idle-stop
+STAMP=/run/metacomputer/idle-active
+GUSER="$(sed -n 's/^desktop_user=//p' /etc/metacomputer/fill.conf 2>/dev/null | head -n 1)"; [ -n "$GUSER" ] || GUSER=cua
+
+minutes() {
+  m="$(head -n 1 "$CONF" 2>/dev/null | tr -d ' \t\r' || true)"
+  case "$m" in ''|off|0) echo off ;; *[!0-9]*) echo 15 ;; *) echo "$m" ;; esac
+}
+in_use() {
+  [ -n "$(ss -Htn state established '( sport = :22 )' 2>/dev/null | head -n 1)" ] && return 0
+  pgrep -u "$GUSER" -x tmux >/dev/null 2>&1 && return 0
+  pgrep -u "$GUSER" -x ffmpeg >/dev/null 2>&1 && return 0
+  return 1
+}
+idle_min() {
+  [ -f "$STAMP" ] || { install -d -m 0755 /run/metacomputer; : > "$STAMP"; }
+  echo $(( ($(date +%s) - $(stat -c %Y "$STAMP")) / 60 ))
+}
+
+case "${1:-check}" in
+  check)
+    m="$(minutes)"
+    [ "$m" != off ] || exit 0
+    [ -f /var/lib/metacomputer/provisioned ] || exit 0     # never while it's being set up
+    if in_use; then install -d -m 0755 /run/metacomputer; : > "$STAMP"; exit 0; fi
+    idle="$(idle_min)"
+    if [ "$idle" -ge "$m" ]; then
+      logger -t metacomputer "idle for $idle minutes (IDLE_STOP=$m): powering off"
+      systemctl poweroff
+    fi ;;
+  status)
+    m="$(minutes)"
+    if [ "$m" = off ]; then echo "idle stop: off"; else
+      if in_use; then echo "idle stop: after $m minutes unused; in use now"; else echo "idle stop: after $m minutes unused; unused for $(idle_min) minutes"; fi
+    fi ;;
+  *) echo "usage: idle-stop check | status" >&2; exit 2 ;;
+esac

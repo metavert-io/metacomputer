@@ -99,6 +99,11 @@ class Fake(Adapter):
         return dict(self._get(name)["files"])
 
     # transport
+    def ssh_endpoint(self, name):
+        self._get(name)
+        return {"host": "fake-host", "port": 22, "alias": "mcomp-" + name, "proxy": self.ssh_proxy_command(name),
+                "transport": "fake"}
+
     def ssh_proxy_command(self, name):
         self._get(name)
         return ["fake-proxy", "--computer", name]       # never run: the contract only checks its shape

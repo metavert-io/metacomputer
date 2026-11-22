@@ -13,6 +13,8 @@
 - The feature map: every feature gives None or a plain reason for every adapter.
 - The resolver: names, providers, places and the default, in that order; refusals when it's unclear or empty;
   --vm and --on together; --on cloud (or any provider's name) says this metacomputer has no cloud computers.
+- The registered providers (your own server, Oracle Cloud) make up `cloud`; their adapters pass the same contract with
+  no credentials and no network (tests/test_remote.py covers their transport, guest setup and the OCI driver).
 """
 import ast
 import copy
@@ -62,7 +64,8 @@ KEEPER = dict(copy.deepcopy(FAKE_MANIFEST), label="a keeping stand-in", root_dis
 
 def subjects():
     """(label, adapter) for every registered adapter, and the stand-in with the other manifests."""
-    out = [(n, cloud.adapter(n)) for n in cloud.registered()]
+    # A provider's adapter is made with no credentials (env={}): the contract never reaches a provider.
+    out = [(n, cloud.adapter(n, env={}) if n == "oci" else cloud.adapter(n)) for n in cloud.registered()]
     out += [("fake (bare)", Fake(BARE)), ("fake (keeper)", Fake(KEEPER))]
     return out
 
@@ -192,8 +195,11 @@ def registry():
           cloud.registered())
     check("every registered adapter is an Adapter, under its own name",
           all(issubclass(c, cloud.Adapter) and c.name == n for n, c in cloud.ADAPTERS.items()))
-    check("no provider is registered: cloud is empty here (the stand-in and this Mac don't count)",
-          cloud.providers() == {} and placement.PROVIDERS == {}, cloud.providers())
+    check("the providers are your own server and Oracle Cloud (the stand-in and this Mac don't count)",
+          cloud.providers() == {"server": "your own server", "oci": "Oracle Cloud"} == placement.PROVIDERS, cloud.providers())
+    check("by_place finds each place's adapter, and none for a place there isn't",
+          cloud.by_place("mac").name == "local-lume" and cloud.by_place("oci").name == "oci"
+          and cloud.by_place("server").name == "ubuntu-vm" and call(cloud.by_place, "fake")[0] == "error")
     check("an adapter that isn't registered is a KeyError", call(cloud.adapter, "nosuch")[0] == "error")
     # Static: the adapters' code imports nothing that reaches the network or starts programs.
     banned = {"socket", "urllib", "http", "subprocess", "requests", "ssl", "asyncio"}
@@ -325,9 +331,15 @@ def resolver():
         kind, msg = refusal(R, two, word, "metacomputer")
         check(f"{word}: no cloud computers set up, said plainly", kind == "NotFound" and msg == placement.NO_CLOUD, msg)
     for word in ("fly", "cloudflare", "elsewhere"):
-        kind, msg = refusal(R, two, word, "metacomputer")
-        check(f"'{word}': nothing's called that, and no cloud computers are set up", kind == "NotFound"
+        kind, msg = refusal(R, two, word, "metacomputer", {})
+        check(f"'{word}' with no provider: nothing's called that, and no cloud computers are set up", kind == "NotFound"
               and "has no cloud computers set up" in msg, msg)
+    kind, msg = refusal(R, two, "oci", "metacomputer")
+    check("a registered provider with no computer there yet: says so", kind == "NotFound"
+          and "no computer on Oracle Cloud yet" in msg, msg)
+    kind, msg = refusal(R, [("metacomputer", "mac"), ("box", "server")], "fly", "metacomputer")
+    check("a word that's no place, with a computer elsewhere: refused, listing the computers and places", kind == "NotFound"
+          and "box" in msg and "server" in msg and "cloud" in msg, msg)
     kind, msg = refusal(R, [], None)
     check("no computers at all: says so", kind == "NotFound" and "no computer yet" in msg, msg)
     # With providers (as data: none is registered here).
@@ -346,20 +358,32 @@ def resolver():
     # The CLI's flags.
     check("--vm and --on that agree: the VM", F(two, vm="demo", on="mac") == "demo")
     check("--on mac alone: the default", F(two, on="mac", default="demo") == "demo")
-    kind, msg = refusal(F, two, vm="demo", on="cloud")
+    kind, msg = refusal(F, two, vm="demo", on="cloud", providers={})
     check("--vm and --on that disagree: refused, saying where it is and that there are no cloud computers",
           kind == "Refused" and "disagree" in msg and "this Mac" in msg and "no cloud computers set up" in msg, msg)
     kind, msg = refusal(F, two, on="demo")
     check("--on with a computer's name: refused, pointing at --vm", kind == "Refused" and "--vm demo" in msg, msg)
     for word in ("cloud", "fly", "cloudflare"):
-        kind, msg = refusal(F, two, on=word, default="metacomputer")
-        check(f"--on {word}: this metacomputer has no cloud computers set up", kind == "NotFound"
+        kind, msg = refusal(F, two, on=word, default="metacomputer", providers={})
+        check(f"--on {word} with no provider: this metacomputer has no cloud computers set up", kind == "NotFound"
               and msg.startswith("this metacomputer has no cloud computers set up"), msg)
+    kind, msg = refusal(F, two, on="cloud", default="metacomputer")
+    check("--on cloud with the providers registered and every computer on this Mac: no cloud computers",
+          kind == "NotFound" and msg == placement.NO_CLOUD, msg)
+    mixed = [("metacomputer", "mac"), ("box", "server"), ("arm", "oci")]
+    check("--on oci: the one computer there", F(mixed, on="oci", default="metacomputer") == "arm")
+    check("--on server: the one there", F(mixed, on="server", default="metacomputer") == "box")
+    kind, msg = refusal(F, mixed, on="cloud", default="metacomputer")
+    check("--on cloud with one on each provider and the default on this Mac: unclear, listing them",
+          kind == "Unclear" and "arm, box" in msg, msg)
+    check("--on cloud with the default in the cloud: it", F(mixed, on="cloud", default="arm") == "arm")
+    kind, msg = refusal(F, mixed, vm="box", on="oci")
+    check("--vm box --on oci: they disagree (it's your own server)", kind == "Refused" and "your own server" in msg, msg)
     kind, msg = refusal(F, two, on="")
     check("--on with nothing: refused", kind == "Refused", msg)
     # Computers named like places (made by hand: vm create refuses the names): never what a place means.
     look = [("cloud", "mac"), ("mac", "mac"), ("main", "mac")]
-    kind, msg = refusal(F, look, on="cloud", default="cloud")
+    kind, msg = refusal(F, look, on="cloud", default="cloud", providers={})
     check("--on cloud with a local computer named cloud as the default: no cloud computers (never that one)",
           kind == "NotFound" and msg == placement.NO_CLOUD, msg)
     kind, msg = refusal(F, look, vm="cloud", on="cloud")
@@ -370,7 +394,7 @@ def resolver():
         kind, msg = refusal(R, look, word, "main")
         check(f"resolve('{word}') with a computer of that name: unclear, naming --vm and --on",
               kind == "Unclear" and "--vm" in msg and "--on" in msg, (kind, msg))
-    kind, msg = refusal(R, look, "Cloud", "main")
+    kind, msg = refusal(R, look, "Cloud", "main", {})
     check("resolve('Cloud'): the place (names keep their case): no cloud computers", kind == "NotFound"
           and msg == placement.NO_CLOUD, (kind, msg))
     named = [("p1", "mac"), ("a", "p1"), ("b", "p2")]
@@ -382,6 +406,8 @@ def resolver():
     r2 = subprocess.run([sys.executable, os.path.join(LAB, "lib", "placement.py"), "name-ok", "demo"], capture_output=True, text=True)
     check("placement.py name-ok: exit 1 with why for cloud, 0 for demo", r.returncode == 1 and "place's name" in r.stdout
           and r2.returncode == 0, (r, r2))
+    r3 = subprocess.run([sys.executable, os.path.join(LAB, "lib", "placement.py"), "name-ok", "oci"], capture_output=True, text=True)
+    check("...and for a provider's place (oci): a computer can't be called that", r3.returncode == 1, r3)
     r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "placement.py"), "resolve", "--on", "cloud",
                         "--computer", "metacomputer=mac", "--default", "metacomputer"], capture_output=True, text=True)
     check("placement.py resolve --on cloud: exit 1, the reason on stderr, nothing on stdout", r.returncode == 1

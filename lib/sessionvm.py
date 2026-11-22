@@ -63,7 +63,7 @@ _CS_DARWIN_USER_TEMP_DIR = 65537
 # a form it doesn't know as a read acts. A word that isn't a command is left to bin/metacomputer, which says so.
 EXEMPT = {"help", "-h", "--help", "where", "setup", "update", "version", "vm", "list", "default", "events", "notify",
           "learn", "actions", "agents", "each", "mcp", "mcp-lazy", "volume", "refdisk", "contact-sheet",
-          "checkpoints"}                                    # checkpoints: the runner's list on the Mac
+          "checkpoints", "cloud"}       # checkpoints: the runner's list on the Mac; cloud: a provider's own, no one computer
 READS = {"who", "status", "inspect", "logs", "get", "shot"}     # whatever their arguments
 ACTS = {"start", "stop", "restart", "reset", "restore", "baseline", "checkpoint", "build", "desktop-restart", "test",
         "call", "web", "put", "rename", "sh", "ssh", "task", "release"}

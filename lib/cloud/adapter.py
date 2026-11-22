@@ -1,8 +1,10 @@
 """The interface every provider adapter implements: what a computer's provider can do, in six groups.
 
     lifecycle   create, wake, sleep, delete, status, list
-    transport   ssh_proxy_command (how SSH reaches the computer; None: plain SSH to a port on this Mac's loopback),
-                port_forward (one of the computer's ports, on this Mac's loopback)
+    transport   ssh_endpoint (where SSH reaches the computer: None for this Mac's own VMs, a port on its loopback
+                (scripts/lib.sh ssh_base); else lib/cloud/transport.py's endpoint), ssh_proxy_command (the program that
+                carries the connection; None: ssh connects straight to the endpoint), port_forward (one of the
+                computer's ports, on this Mac's loopback)
     snapshots   snapshot, snapshots, restore, delete_snapshot
     egress      egress (what the computer may reach), set_egress
     connection  setup, doctor
@@ -78,6 +80,9 @@ class Adapter:
         self._no("list of computers")
 
     # transport
+    def ssh_endpoint(self, name):
+        self._no("SSH transport")
+
     def ssh_proxy_command(self, name):
         self._no("SSH transport")
 
@@ -126,7 +131,7 @@ class Adapter:
 # Every method of the interface, by group (the contract test checks each adapter answers every one).
 INTERFACE = {
     "lifecycle": ("create", "wake", "sleep", "delete", "status", "list"),
-    "transport": ("ssh_proxy_command", "port_forward"),
+    "transport": ("ssh_endpoint", "ssh_proxy_command", "port_forward"),
     "snapshots": ("snapshot", "snapshots", "restore", "delete_snapshot"),
     "egress": ("egress", "set_egress"),
     "connection": ("setup", "doctor"),

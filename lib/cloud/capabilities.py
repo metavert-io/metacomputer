@@ -13,7 +13,9 @@ A manifest is plain data (a dict), checked by check_manifest():
     bucket_mount           None, or a storage bucket as a folder: {"how": text, "home": bool (whether it can hold a
                            home folder or browser profile: needs locks and atomic renames)}
     sleep_wake             {"kind": "stop-start" | "auto-sleep" | "none", "keeps_processes": bool}
-    egress                 {"model": one of EGRESS_MODELS, "allowlist": bool, "private_ranges_blocked": bool}
+    egress                 {"model": one of EGRESS_MODELS, "allowlist": bool, "private_ranges_blocked": bool}:
+                           mac-gateway (this Mac's gateway), guest-firewall (rules in the computer itself, set up
+                           by metacomputer: lib/cloud/guest.py), or what the provider enforces from outside
     port_forward           bool: one of the computer's ports can be reached on this Mac's loopback
     sizes, regions         tuples of what create() takes (empty: not chosen per computer)
     fresh_start            bool: the computer can start from its image every time (PERSIST=none)
@@ -26,7 +28,7 @@ those the manifest offers; a mode it doesn't offer is refused, saying which it d
 ROOT_DISK = ("persistent", "ephemeral")
 SLEEP_KINDS = ("stop-start", "auto-sleep", "none")
 ATTACH = ("at create", "at start", "any time")
-EGRESS_MODELS = ("mac-gateway", "dns-allowlist", "network-policy", "http-intercept", "open")
+EGRESS_MODELS = ("mac-gateway", "guest-firewall", "dns-allowlist", "network-policy", "http-intercept", "open")
 PERSIST_MODES = ("disk", "volume", "backup", "none")      # auto's order, best first
 PERSIST_WORDS = {
     "disk": "the root disk keeps everything",

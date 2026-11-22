@@ -1633,17 +1633,18 @@ CLAIMS = [
      < fn_src("scripts/vm-commands.sh", "vm_default").find('vm_default_write "$name"')
      and 'elif [ "$MC_DEFAULT_PTR" = "$VM_NAME" ]; then' in fn_src("scripts/vm-commands.sh", "vm_delete_plan")
      and 'vm_lock_or_die "metacomputer vm delete $VM_NAME"' in fn_src("scripts/vm-commands.sh", "vm_delete")),
-    ("docs/commands.md", r"matched against places only \(a VM named `cloud` or `mac` is never what `--on` means; `vm create` refuses those names",
+    ("docs/commands.md", r"matched against places only \(a VM named like a place is never what `--on` means; `vm create` refuses those names",
      lambda m: "return _pick(sorted(n for n, p in comps.items() if at(p, where)), default, where, providers)" in raw("lib/placement.py")
      and 'placement.py" name-ok "$name"' in fn_src("scripts/vm-commands.sh", "vm_create")),
     ("docs/commands.md", r"It writes `config/default-vm` in one step \(a temporary file renamed over it\) and changes nothing else: no VM is started, stopped or changed",
      lambda m: 'mktemp "$LAB_ROOT/config/.default-vm.XXXXXX"' in fn_src("scripts/vm-commands.sh", "vm_default_write")
      and "os.replace(sys.argv[1], sys.argv[2])" in fn_src("scripts/vm-commands.sh", "vm_default_write")
      and not re.search(r"vm_(start|stop)|runner_delete|\$LUME", fn_src("scripts/vm-commands.sh", "vm_default"))),
-    ("docs/commands.md", r"`--on cloud` \(or any other place name\) says this metacomputer has no cloud computers set up and runs nothing",
+    ("docs/commands.md", r"A place with no computer there says so and runs nothing \(`--on cloud` with every computer on this Mac: this metacomputer has no cloud computers set up\)",
      lambda m: 'on_resolve() {' in raw("bin/metacomputer") and '|| exit 1' in fn_src("bin/metacomputer", "on_resolve")
      and raw("bin/metacomputer").index("*) on_resolve ;;") < raw("bin/metacomputer").index("*) vm_target_check ;; esac")
-     and "PROVIDERS = cloud.providers()" in raw("lib/placement.py")),
+     and "PROVIDERS = cloud.providers()" in raw("lib/placement.py")
+     and 'mc_file_place "$MC_VMS_DIR/$n.env"' in fn_src("bin/metacomputer", "on_resolve")),
     # An agent session's computer (lib/sessionvm.py, bin/metacomputer session_guard, lib/mcp_lazy.py)
     ("docs/commands.md", r"a command that names no computer and would act on another computer than\s+the one the session holds refuses before it does anything",
      lambda m: "3) exit 1 ;;" in fn_src("bin/metacomputer", "session_guard")
@@ -1729,6 +1730,28 @@ CLAIMS = [
      lambda m: "old.retired = True" in raw("lib/mcp_lazy.py") and 'target=old.close, kwargs={"keep_for_handoff": True}' in raw("lib/mcp_lazy.py")
      and "self.hand_over_claim(client, running, drop_own=client.holder == client.peer_pid)" in raw("lib/mcp_hub.py")
      and 'client.holder = (client.claude or parent or client.peer_pid) if kind == "call" else client.peer_pid' in raw("lib/mcp_hub.py")),
+    # A computer elsewhere (docs/remote.md, SECURITY.md): the promises its code keeps.
+    ("SECURITY.md", r"refuses every account, root included, the cloud's metadata services and every link-local address",
+     lambda m: 'ip daddr @private4 counter reject' in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "169.254.0.0/16" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "fe80::/10" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "Before=network-pre.target" in raw("provisioning/remote/rootfs/etc/systemd/system/metacomputer-firewall.service")),
+    ("SECURITY.md", r"VNC server listens on the computer's own `127.0.0.1:5900` only",
+     lambda m: '[ "$(head -n 1 /etc/metacomputer/vnc-listen 2>/dev/null)" = 127.0.0.1 ] && LISTEN=127.0.0.1'
+     in raw("provisioning/guest/rootfs/opt/metacomputer/bin/session-init")
+     and "printf '127.0.0.1\\n' > /etc/metacomputer/vnc-listen" in raw("provisioning/guest/provision.sh")
+     and 'permitopen="127.0.0.1:5900"' in raw("lib/cloud/guest.py")),
+    ("SECURITY.md", r"A provider's computer gets a host key made\s+on your Mac, given to cloud-init and pinned before the first connection",
+     lambda m: 'ssh-keygen -q -t ed25519 -N \'\' -C "mcomp-$VM_NAME-host" -f "$SSH_DIR/hostkey"' in raw("scripts/remote-build.sh")
+     and raw("scripts/remote-build.sh").index('> "$KNOWN_HOSTS"') < raw("scripts/remote-build.sh").index("remote_py create")
+     and "StrictHostKeyChecking=yes" in fn_src("scripts/lib.sh", "ssh_base")),
+    ("SECURITY.md", r"`lib/remote.py`, the one program that calls OCI, gets them, and nothing else\s+metacomputer starts does",
+     lambda m: 'for mc_k in $MC_PROVIDER_ENV; do export -n "$mc_k"' in raw("scripts/lib.sh")
+     and "mc_export_provider_env; exec" in fn_src("scripts/lib.sh", "remote_py")),
+    ("docs/remote.md", r"tries each of\s+the region's other domains once and then stops",
+     lambda m: "Every availability domain was tried once" in raw("lib/cloud/oci.py") and "for ad in ads:" in raw("lib/cloud/oci.py")),
+    ("SECURITY.md", r"`SSH_AUTH=cert` \(refused: its certificates name the Mac's gateway address\)",
+     lambda m: "SSH_AUTH=cert isn't available for a computer reached over SSH" in raw("scripts/lib.sh")),
     ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
      lambda m: 'BASELINE_NAME must be $VM_NAME-baseline' in raw("scripts/lib.sh") and "def check_identity" in raw("lib/vms.py")
      and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),
