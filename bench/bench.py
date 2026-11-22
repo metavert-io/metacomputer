@@ -27,6 +27,12 @@ baseline before every task). Switches (flag or environment variable):
   --reset / BENCH_RESET            each | none    (reset the VM before each task)
   --lessons / BENCH_LESSONS        off | on       (the lessons approved with `metacomputer learn`, from
                                                    MCOMP_LESSONS_DIR or the default store; default off)
+  --agent / BENCH_AGENT            claude | codex (default claude). codex: `codex exec` with the work folder's
+                                   project config (the skill in .agents/skills, metacomputer's rules in
+                                   .codex/rules), Codex's default sandbox and model unless --model names a GPT
+                                   model; --budget, --cap and --effort don't apply: Codex reports tokens, not a
+                                   cost, so a Codex run counts nothing against the cap (each task still has its
+                                   timeout)
 """
 import argparse
 import datetime
@@ -38,6 +44,7 @@ import math
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -70,7 +77,7 @@ SHELL_FORBID = ("\n\nDon't use a shell inside the virtual computer for this (no 
                 "`metacomputer sh`): work through its desktop.")
 DEFAULTS = {"model": "claude-opus-5-5", "skill": os.path.join(LAB, "skills", "metacomputer"), "shell": "allow",
             "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each",
-            "lessons": "off"}
+            "lessons": "off", "agent": "claude"}
 
 
 def log(msg):
@@ -237,15 +244,15 @@ def check_task(t):
 
 
 # --- the headless session ---------------------------------------------------------------------
-def trusted_claude(path=None):
-    """The `claude` program as an absolute path, looked up on PATH as it was before the
+def trusted_claude(path=None, name="claude"):
+    """The `claude` program (or `codex`, with name) as an absolute path, looked up on PATH as it was before the
     shim folder goes in front (absolute entries only), and owned by you or root and not
     writable by other accounts. The session runs this file, never a `claude` found
     through the shim folder."""
     entries = [d for d in (path if path is not None else os.environ.get("PATH", "")).split(os.pathsep) if os.path.isabs(d)]
-    p = shutil.which("claude", path=os.pathsep.join(entries))
+    p = shutil.which(name, path=os.pathsep.join(entries))
     if not p:
-        sys.exit("claude isn't on PATH")
+        sys.exit(f"{name} isn't on PATH")
     real = os.path.realpath(p)
     st = os.stat(real)
     if st.st_uid not in (0, os.getuid()) or st.st_mode & 0o022:
@@ -263,7 +270,7 @@ def prepare_workdir(run_id, sw):
     st = os.lstat(work)
     if not os.path.isdir(work) or os.path.islink(work) or st.st_uid != os.getuid() or st.st_mode & 0o077:
         sys.exit(f"refusing the work folder {work}: not a private folder of yours")
-    skill_dst = os.path.join(work, ".claude", "skills", "metacomputer")
+    skill_dst = os.path.join(work, ".agents" if sw.get("agent") == "codex" else ".claude", "skills", "metacomputer")
     shutil.copytree(sw["skill"], skill_dst)
     # The skill names the installed launcher; point the copy at the checkout under test.
     for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
@@ -282,7 +289,82 @@ def prepare_workdir(run_id, sw):
     env.update(lessons_env(sw))
     json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
               open(cfg, "w"))
+    if sw.get("agent") == "codex":
+        # Codex reads the project's rules once the folder is trusted (the session's -c says so): metacomputer's, for
+        # the commands as the skill and the shim name them, so they run outside its sandbox as an install sets up.
+        names = ["metacomputer", "mcomp", CLI, os.path.join(shim, "metacomputer"), os.path.join(shim, "mcomp")]
+        rules = open(os.path.join(LAB, "config", "codex", "metacomputer.rules.in")).read()
+        os.makedirs(os.path.join(work, ".codex", "rules"))
+        open(os.path.join(work, ".codex", "rules", "metacomputer.rules"), "w").write(
+            rules.replace("@COMMANDS@", json.dumps(names)))
     return work, cfg, shim
+
+
+def codex_session_args(t, sw, cfg):
+    """`codex exec` for one task: its MCP server as the Claude sessions get it (command, args, env) and as an install
+    sets it up (a 600 s tool timeout, its tools approved: they act only on the VM, through the hub's guards), the work
+    folder trusted (its skill and rules), Codex's default sandbox, no approvals to wait for."""
+    srv = json.load(open(cfg))["mcpServers"]["metacomputer"]
+    env = "{" + ", ".join(f"{k} = {json.dumps(v)}" for k, v in srv["env"].items()) + "}"
+    work = os.path.dirname(cfg)
+    args = ["exec", "--json", "--skip-git-repo-check", "-s", "workspace-write", "-c", 'approval_policy="never"',
+            "-c", f"mcp_servers.metacomputer.command={json.dumps(srv['command'])}",
+            "-c", 'mcp_servers.metacomputer.args=["mcp-lazy"]', "-c", "mcp_servers.metacomputer.tool_timeout_sec=600",
+            "-c", 'mcp_servers.metacomputer.default_tools_approval_mode="approve"',
+            "-c", f"mcp_servers.metacomputer.env={env}", "-c", f'projects.{json.dumps(work)}.trust_level="trusted"']
+    if sw["model"].startswith(("gpt", "o")):
+        args += ["-m", sw["model"]]
+    args.append(PREFIX + t["prompt"].strip() + (SHELL_FORBID if sw["shell"] == "forbid" else ""))
+    return args, None          # no dollar budget: Codex has none to set and reports tokens, not a cost
+
+
+def codex_events(ev, state):
+    """One `codex exec --json` event as stream-json events (what metrics.py and transcripts.py read): a finished MCP
+    call or shell command as an assistant tool_use plus the user's tool_result, an agent message as text, the end of
+    the turn as the result (tokens, no cost)."""
+    t = ev.get("type")
+    it = ev.get("item") if isinstance(ev.get("item"), dict) else {}
+    if t == "thread.started":
+        state["sid"] = ev.get("thread_id")
+        return [{"type": "system", "subtype": "init", "session_id": ev.get("thread_id"), "model": "codex",
+                 "cwd": state.get("cwd"), "tools": []}]
+    if t == "turn.completed":
+        u = ev.get("usage") or {}
+        state["turns"] = state.get("turns", 0) + 1
+        return [{"type": "result", "subtype": "success", "is_error": False, "num_turns": state["calls"],
+                 "total_cost_usd": None, "session_id": state.get("sid"),
+                 "usage": {"input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
+                           "cache_read_input_tokens": u.get("cached_input_tokens")}}]
+    if t == "turn.failed":
+        return [{"type": "result", "subtype": "error", "is_error": True, "total_cost_usd": None,
+                 "session_id": state.get("sid"), "result": str((ev.get("error") or {}).get("message"))[:300]}]
+    if t != "item.completed":
+        return []
+    kind = it.get("type")
+    if kind == "agent_message":
+        return [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": it.get("text") or ""}]}}]
+    if kind not in ("mcp_tool_call", "command_execution"):
+        return []
+    state["calls"] = state.get("calls", 0) + 1
+    cid = f"codex_{it.get('id') or state['calls']}"
+    if kind == "mcp_tool_call":
+        name = f"mcp__{it.get('server')}__{it.get('tool')}"
+        inp = it.get("arguments") if isinstance(it.get("arguments"), dict) else {}
+        res = it.get("result") if isinstance(it.get("result"), dict) else {}
+        content = res.get("content") if isinstance(res.get("content"), list) else []
+        err = it.get("error")
+        is_err = bool(err) or it.get("status") == "failed" or res.get("isError") is True or res.get("is_error") is True
+        if err and not content:
+            content = [{"type": "text", "text": str(err.get("message") if isinstance(err, dict) else err)}]
+    else:
+        name, inp = "Bash", {"command": it.get("command") or ""}
+        content = [{"type": "text", "text": (it.get("aggregated_output") or "")[:20000]}]
+        is_err = it.get("status") == "failed" or (isinstance(it.get("exit_code"), int) and it["exit_code"] != 0)
+    return [{"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": cid, "name": name, "input": inp}]}, "session_id": state.get("sid")},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": cid, "content": content, "is_error": is_err}]},
+             "session_id": state.get("sid")}]
 
 
 def session_args(t, sw, cfg):
@@ -333,10 +415,53 @@ def lessons_record(sw):
             "lessons_problem": s["problem"]}
 
 
+def codex_config_path(env=None):
+    env = os.environ if env is None else env
+    return os.path.join(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "config.toml")
+
+
+def read_or_none(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def undo_codex_trust(before, work, path=None):
+    """Codex saves the work folder's trust (a `-c projects.<work>.trust_level` override) into your own config.toml when
+    a session starts. Put the file back exactly as it was when that table is the only change; anything else changed
+    in it is left alone, with a note. Returns what was done: "unchanged", "restored" or "left"."""
+    import re
+    path = path or codex_config_path()
+    after = read_or_none(path)
+    if after == before or after is None or before is None:
+        return "unchanged"
+    stripped = after
+    for name in {work, os.path.realpath(work)}:
+        stripped = re.sub(r"\n*\[projects\." + re.escape(json.dumps(name)) + r"\]\ntrust_level = \"trusted\"\n",
+                          "\n", stripped)
+    squeeze = lambda s: re.sub(r"\n\s*\n", "\n", s).strip()      # noqa: E731  (blank lines don't count)
+    if squeeze(stripped) != squeeze(before):
+        log(f"  note: Codex changed {path} during the run in other ways too; left as it is")
+        return "left"
+    if read_or_none(path) != after:            # changed again meanwhile: leave it
+        return "left"
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    tmp = path + ".mcomp-bench.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(before)
+    os.replace(tmp, path)
+    return "restored"
+
+
 def run_session(t, sw, work, cfg, shim, tdir, claude=None):
-    args, budget = session_args(t, sw, cfg)
+    codex = sw.get("agent") == "codex"
+    codex_before = read_or_none(codex_config_path()) if codex else None
+    args, budget = codex_session_args(t, sw, cfg) if codex else session_args(t, sw, cfg)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    claude = claude or trusted_claude(env.get("PATH", ""))   # resolved before the shim goes first
+    claude = claude or trusted_claude(env.get("PATH", ""), "codex" if codex else "claude")   # before the shim goes first
     env["PATH"] = shim + os.pathsep + env.get("PATH", "")
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
     if sw.get("hub"):
@@ -350,17 +475,20 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     proc = subprocess.Popen([claude, *args], cwd=work, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=err, text=True, start_new_session=True)
 
+    state = {"cwd": work, "calls": 0}
+
     def reader():
         for line in proc.stdout:
             try:
                 ev = json.loads(line)
             except ValueError:
                 continue
-            small = metrics.compact(ev)
-            dt = round(time.time() - t0, 2)
-            events.append(small)
-            times.append(dt)
-            tr.write(json.dumps({"t": dt, **small}) + "\n")
+            for e in (codex_events(ev, state) if codex else [ev]):
+                small = metrics.compact(e)
+                dt = round(time.time() - t0, 2)
+                events.append(small)
+                times.append(dt)
+                tr.write(json.dumps({"t": dt, **small}) + "\n")
 
     th = threading.Thread(target=reader, daemon=True)
     th.start()
@@ -383,6 +511,8 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
     th.join(timeout=10)
     tr.close()
     err.close()
+    if codex:
+        undo_codex_trust(codex_before, os.path.dirname(cfg))
     return events, times, {"exit": proc.returncode, "timed_out": timed_out, "wall_s": round(time.time() - t0, 1),
                            "timeout_s": timeout, "budget_usd": budget, "max_turns": int(t.get("max_turns", 60))}
 
@@ -411,8 +541,11 @@ def switches_from(a):
         sw[k] = v if v not in (None, "") else os.environ.get("BENCH_" + k.upper(), d)
     sw["skill"] = os.path.abspath(os.path.expanduser(sw["skill"]))
     if sw["shell"] not in ("allow", "forbid") or sw["coord_guard"] not in ("on", "off") or sw["reset"] not in ("each", "none") \
-            or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off"):
-        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off)")
+            or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off") or sw["agent"] not in ("claude", "codex"):
+        sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off, "
+                 "agent claude|codex)")
+    if sw["agent"] == "codex" and not sw["model"].startswith(("gpt", "o")):
+        sw["model"] = "codex-default"          # Codex runs its own default model unless --model names a GPT one
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
     for k in ("budget", "cap"):
@@ -552,9 +685,12 @@ def cmd_run(a):
     run_id = a.run_id or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     rdir = os.path.join(RESULTS, run_id)
     os.makedirs(rdir, exist_ok=True)
-    claude_v = subprocess.run([trusted_claude(), "--version"], capture_output=True, text=True).stdout.strip()
+    codex = sw["agent"] == "codex"
+    agent_v = subprocess.run([trusted_claude(None, "codex" if codex else "claude"), "--version"],
+                             capture_output=True, text=True).stdout.strip()
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
-            "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "claude_code": claude_v,
+            "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "agent_version": agent_v,
+            **({} if codex else {"claude_code": agent_v}),
             "switches": dict(sw, skill_hash=skill_hash(sw["skill"]), **lessons_record(sw),
                              coord_guard_in_bridge=os.path.exists(os.path.join(LAB, "lib", "mcp_hub.py"))
                              and "MCOMP_COORD_GUARD" in open(os.path.join(LAB, "lib", "mcp_hub.py")).read()),
@@ -563,6 +699,10 @@ def cmd_run(a):
             "vm_options": status().get("options")}   # the optional hardening (action log, SSH, driver mode)
     # Resuming: keep the first start time, and count what the run has spent already against the cap.
     old = json.load(open(os.path.join(rdir, "run.json"))) if os.path.exists(os.path.join(rdir, "run.json")) else None
+    old_agent = ((old or {}).get("switches") or {}).get("agent") or "claude"
+    if old and old_agent != sw["agent"]:
+        # one agent per run: its costs (dollars or none), its reports and its comparison all assume it
+        sys.exit(f"run {run_id} was made with {old_agent}; a run holds one agent's results: use another --run-id")
     all_recs = report.load_all(rdir)
     if old:
         meta["started"] = old.get("started", meta["started"])
@@ -583,8 +723,8 @@ def cmd_run(a):
             if t["id"] in done:
                 log(f"[{i}/{len(tasks)}] {t['id']}: already in this run, skipped")
                 continue
-            budget = float(t.get("budget_usd") or sw["budget"])
-            if spent + budget > cap:
+            budget = 0.0 if codex else float(t.get("budget_usd") or sw["budget"])   # Codex: no dollars to count
+            if not codex and spent + budget > cap:        # Codex runs (older ones charged budgets) aren't capped
                 log(f"stopping: ${spent:.2f} spent, the next task could take ${budget:.2f}, cap ${cap:.2f}")
                 meta["stopped"] = f"cap: ${spent:.2f} spent before {t['id']}"
                 break
@@ -603,7 +743,8 @@ def cmd_run(a):
             rec = run_task(t, sw, rdir, work, cfg, shim)
             rec["budget_usd"] = budget
             rec["reservation"] = res["id"]
-            if rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
+            rec["agent"] = sw["agent"]
+            if not codex and rec.get("session") and not isinstance((rec.get("metrics") or {}).get("cost_usd"), (int, float)):
                 rec["cost_unknown"] = True       # no cost reported: counted at its budget
             spent += charge(rec)
             with open(os.path.join(rdir, "results.jsonl"), "a") as f:
@@ -614,8 +755,11 @@ def cmd_run(a):
             write_meta(rdir, meta)
             mm = rec["metrics"]
             log(f"  {'PASS' if rec['check'].get('pass') else 'fail'} score={rec['check'].get('score')} "
-                f"cost=${mm.get('cost_usd') or 0:.2f} turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
-                f"shots={mm.get('screenshots')} tree={mm.get('tree_reads')} shell={mm.get('shell_calls')}  (run total ${spent:.2f})")
+                + (f"tokens={mm.get('input_tokens') or 0:,} in/{mm.get('output_tokens') or 0:,} out " if codex
+                   else f"cost=${mm.get('cost_usd') or 0:.2f} ")
+                + f"turns={mm.get('turns')} {rec['session'].get('wall_s')} s "
+                f"shots={mm.get('screenshots')} tree={mm.get('tree_reads')} shell={mm.get('shell_calls')}"
+                + ("" if codex else f"  (run total ${spent:.2f})"))
             why = infra_reason(rec)
             if why and why.startswith("api"):
                 # A usage or rate limit fails every later task in a second; stop, and retry

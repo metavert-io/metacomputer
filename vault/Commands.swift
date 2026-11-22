@@ -857,7 +857,7 @@ func cmdTokenRenew(_ paths: Paths, _ argv: [String]) throws -> Int32 {
           a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }) else { throw usageError(usage) }
     // Whether this runs at a terminal (you typing it): the unlock process checks the kernel's view too, and a renewal
     // of another requester's token from anywhere else asks.
-    var req: [String: Any] = ["op": "renew", "vm": vm, "interactive": isatty(0) == 1 && isatty(2) == 1]
+    var req: [String: Any] = ["op": "renew", "vm": vm, "interactive": isatty(0) == 1 && isatty(2) == 1 && atUserTerminal()]
     if let id = a.positional.first { req["id"] = id } else { req["all"] = true }
     if let t = a.last("ttl") {
         guard let ttl = parseDuration(t), ttl <= tokenMaxTTL else { throw usageError("--ttl: like 90s, 15m or 2h (at most 8h)") }

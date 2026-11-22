@@ -156,6 +156,7 @@ def run(td, procs):
     os.makedirs(proj1)
     os.makedirs(proj2)
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "MCOMP_VAULT_DIR": vdir, "LANG": "en_US.UTF-8",
+           "MCOMP_VAULT_TEST_IGNORE_AGENT": "1",
            "MCOMP_VAULT_TEST_SSH": stub}
     sock = os.path.join(vdir, "vault.sock")
     alog = os.path.join(vdir, "audit.jsonl")

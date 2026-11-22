@@ -487,6 +487,7 @@ def run(td, procs):
         return [json.loads(l) for l in open(stub_log)] if os.path.exists(stub_log) else []
 
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "MCOMP_VAULT_DIR": vdir, "LANG": "en_US.UTF-8",
+           "MCOMP_VAULT_TEST_IGNORE_AGENT": "1",
            "MCOMP_VAULT_TEST_SSH": stub, "MCOMP_EVENTS_SPOOL": spool, "MCOMP_VAULT_TEST_CODE_MIN_TTL": "2",
            "MCOMP_VAULT_TEST_LISTENERS": f"{my_name},cua-netgw", "MCOMP_VAULT_TEST_PROMPT_TIMEOUT": "20"}
     alog = os.path.join(vdir, "audit.jsonl")

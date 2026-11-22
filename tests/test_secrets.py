@@ -35,6 +35,13 @@ import time
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import actionlog  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import userterm  # noqa: E402
+
+# The suites that type at a pty may be run by an agent (Claude Code, Codex), which the vault's terminal check refuses
+# (vault/TTY.swift, atUserTerminal). A TEST build of mcomp-vault leaves that part out with this set; the check with it
+# unset is below ("a terminal under an agent session").
+os.environ["MCOMP_VAULT_TEST_IGNORE_AGENT"] = "1"
 
 PASS = "dummy passphrase for tests 9"
 PW_VALUE = "Dummy-Pass-4815"
@@ -502,6 +509,7 @@ def run(td, procs):
         return [json.loads(l) for l in open(stub_log)] if os.path.exists(stub_log) else []
 
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "MCOMP_VAULT_DIR": vdir, "LANG": "en_US.UTF-8",
+           "MCOMP_VAULT_TEST_IGNORE_AGENT": "1",
            "MCOMP_VAULT_TEST_SSH": stub}
     sock = os.path.join(vdir, "vault.sock")
 
@@ -540,6 +548,16 @@ def run(td, procs):
     # --- creating the vault --------------------------------------------------------------
     r = client("init")
     check("init without a terminal refused", r.returncode != 0 and "own terminal" in r.stderr and not os.path.exists(vdir + "/vault.json"))
+    fake = userterm.fake_agent("codex")
+    if fake:
+        p = Pty([fake, BIN, "init"], {k: v for k, v in env.items() if k != "MCOMP_VAULT_TEST_IGNORE_AGENT"})
+        rc = p.wait(60)
+        p.close()
+        check("a terminal under an agent session (Codex can give its commands one) isn't the user's: init refused "
+              "before it asks", rc != 0 and "not from inside Claude Code or Codex" in p.text()
+              and "passphrase" not in p.text().lower() and not os.path.exists(vdir + "/vault.json"), p.text()[-300:])
+    else:
+        print("SKIP the agent-terminal check: no C compiler for the stand-in")
     rc, out = tty([BIN, "init"], [("New vault passphrase", "too short\n")])
     check("init: a passphrase under 12 characters refused", rc != 0 and "at least 12" in out and not os.path.exists(vdir + "/vault.json"))
     rc, out = tty([BIN, "init"], [("New vault passphrase", PASS + "\n"), ("same passphrase again", PASS + "x\n")])

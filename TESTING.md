@@ -253,6 +253,9 @@ install checks with the real `claude` CLI (15 more), with a temporary `HOME` and
   elsewhere; a `get.sh` that's a link, or one in `bin/`, is refused. With a checkout,
   `setup` hands over like any command. The real get.sh, with no terminal, explains
   and exits 3.
+- `install.sh --only-codex` (test_install, with the real `codex` command in a throwaway HOME and CODEX_HOME): the MCP
+  server with its timeout and approval mode, the skill links, the rules as Codex's own checker reads them, a second
+  run changing nothing, and `--uninstall` removing exactly those.
 - `install.sh --only-claude`: a fresh install adds the checkout as the marketplace
   and installs the plugin at user scope; a second run changes nothing; an earlier
   install's skill link and user-scope server are removed when they're this
@@ -849,15 +852,33 @@ Each of these needs no VM and takes seconds.
   the asking session can't say done; then the user's done at a pseudo-terminal ends it, the waiting command
   returns 0 with the note, the same acting call goes through, and the events are there without the note.
   Events go to a temporary folder, never your sinks.
-- `python3 tests/test_owners.py` (14 checks): a `metacomputer sh` claim made outside
+- `python3 tests/test_owners.py` (22 checks): a `metacomputer sh` claim made outside
   Claude Code outlives its short-lived shell for the activity window, counts as the same
   controller from the same terminal session and as another one from a different
   session, then expires; Claude Code and bridge claims still go with their process;
   the owners lock times out with `TimeoutError` while another process holds it, leaves
-  no file open, and is free again once the holder leaves.
-- `python3 tests/test_bench_workdir.py` (7 checks): the benchmark's work folder is a
+  no file open, and is free again once the holder leaves. Claude Code and Codex are agent
+  sessions however they're installed (Codex's node launcher and look-alikes aren't), the
+  nearest one counts, and `at-terminal` end to end with real processes: a terminal with no
+  agent above it is the user's, one under a process named `codex` isn't, nor is no terminal.
+- `python3 tests/test_agents.py`: `metacomputer agents` reports each agent (not installed, set up, or left alone
+  by a remembered `--no-codex`); `agents check` passes against this Mac's codex (when installed) without touching its
+  Codex settings, and fails, saying what changed, against a stand-in codex whose rules checker, sandbox and
+  `codex mcp` behave differently, and against one whose answers look right but whose exit status fails, whose sandbox
+  marker is only inherited, and whose strict config rejects the settings; a `codex` writable by others, or found
+  only through a relative PATH entry, isn't run; the session check reads only regular files with limits (a FIFO doesn't block it, malformed lines don't crash it), a web search alone isn't taken for a missing tool call, and renamed tool items in three recent sessions fail it. test_install's `test_agent_choices` runs `--only-agents` with the
+  real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
+  skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
+  neither agent on PATH.
+- Tests of commands only the user runs type at a pty in a process launchd has adopted
+  (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
+  builds a small program named `codex` to stand for one. The vault suites use the TEST
+  build's `MCOMP_VAULT_TEST_IGNORE_AGENT=1` for that, and test_secrets checks the refusal
+  with it unset.
+- `python3 tests/test_bench_workdir.py` (12 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
-  relative PATH entry is never run.
+  relative PATH entry is never run; after a Codex session, the trust table Codex saved for the
+  run's folder is undone (the file put back exactly, its mode kept) only when it's the only change.
 - `python3 tests/test_bench_checks.py` (96 checks, a few seconds): the benchmark's check
   readers on made-up ODF and OOXML files (what shows in bold, sheets by name, a chart
   frame's size from LibreOffice's inches, a chart object that doesn't parse, `.xlsx`

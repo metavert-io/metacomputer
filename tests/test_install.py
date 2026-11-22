@@ -1689,6 +1689,195 @@ def test_vnc_real_keychain():
         shutil.rmtree(t, ignore_errors=True)
 
 
+def test_codex_step():
+    """install.sh --only-codex with the real codex command, in a throwaway HOME and CODEX_HOME: the MCP server with its
+    tool timeout, the skill links, the rules (checked by Codex's own checker), a second run changing nothing, and
+    --uninstall removing exactly those."""
+    codex = shutil.which("codex")
+    if not codex:
+        print("SKIP the Codex step's checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-codex-")
+    try:
+        home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
+        os.makedirs(ch)
+        write(os.path.join(ch, "config.toml"), '[tui]\n\n[mcp_servers.other]\ncommand = "/bin/echo"\n')
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        for k in ("MCOMP_CONFIG", "MCOMP_VM"):
+            env.pop(k, None)
+        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        cfg = open(os.path.join(ch, "config.toml")).read()
+        import tomllib
+        srv = tomllib.loads(cfg)["mcp_servers"]
+        check("--only-codex: the MCP server metacomputer runs this checkout's mcp-lazy, with a 600 s tool timeout and its "
+              "tools approved, and the other server stays", p.returncode == 0 and srv["metacomputer"]["command"] == CLI
+              and srv["metacomputer"]["args"] == ["mcp-lazy"] and srv["metacomputer"]["tool_timeout_sec"] == 600
+              and srv["metacomputer"]["default_tools_approval_mode"] == "approve"
+              and srv["other"]["command"] == "/bin/echo", (p.returncode, p.stdout[-400:], p.stderr[-300:], cfg))
+        sk = os.path.join(home, ".agents", "skills")
+        check("...the skills metacomputer and cua-driver link into the checkout (~/.agents/skills)",
+              os.readlink(os.path.join(sk, "metacomputer")) == os.path.join(LAB, "skills", "metacomputer")
+              and os.readlink(os.path.join(sk, "cua-driver")) == os.path.join(LAB, ".claude", "skills", "cua-driver"))
+        rules = os.path.join(ch, "rules", "metacomputer.rules")
+
+        def decision(*cmd):
+            r = subprocess.run([codex, "execpolicy", "check", "-r", rules, *cmd], capture_output=True, text=True, timeout=60)
+            try:
+                return json.loads(r.stdout).get("decision")
+            except ValueError:
+                return r.stdout + r.stderr
+        want = {("metacomputer", "status"): "allow", ("mcomp", "web", "debug", "x"): "allow",
+                (os.path.join(home, ".local", "bin", "metacomputer"), "sh", "-c", "ls"): "allow",
+                (CLI, "reset"): "prompt", ("metacomputer", "--vm", "demo", "reset"): "prompt",
+                ("metacomputer", "vm", "delete", "x"): "prompt", ("metacomputer", "learn", "approve", "x"): "prompt",
+                ("metacomputer", "secrets", "unlock"): "forbidden", ("metacomputer", "handoff", "done"): "forbidden",
+                ("metacomputer", "view", "--remember"): "forbidden", ("metacomputer", "secrets", "fill", "gh"): "allow",
+                ("metacomputer", "each", "main", "--", "reset", "--yes"): "prompt", ("metacomputer", "test"): "prompt",
+                ("metacomputer", "some-new-command"): None, ("metacomputer", "stop"): "allow",
+                ("metacomputer", "stop", "--override", "--force"): "prompt", ("metacomputer", "stop", "--force"): "prompt",
+                ("metacomputer", "sh", "--override", "-c", "x"): "prompt"}
+        got = {k: decision(*k) for k in want}
+        check("...the rules: everyday commands allowed, VM changes and `each` ask, the user's own commands refused, a "
+              "command no rule names stays in the sandbox (Codex's checker)",
+              got == want, {k: v for k, v in got.items() if want[k] != v})
+        p2 = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+        check("...a second run changes nothing", p2.returncode == 0 and open(os.path.join(ch, "config.toml")).read() == cfg
+              and "already registered" in p2.stdout, (p2.returncode, p2.stdout[-300:]))
+        # the first format of the rules (never released: no checkout line) is metacomputer's own, and is rewritten
+        rules_text = open(rules).read().split("\n")
+        legacy = "\n".join(rules_text[:3] + ["#"] + rules_text[4:]).replace('"each", ', "")
+        write(rules, legacy)
+        p4 = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+        check("...rules in the first format (no checkout line) are rewritten with the current ones",
+              p4.returncode == 0 and decision("metacomputer", "each", "main", "--", "reset") == "prompt"
+              and open(rules).read().split("\n")[3] == "# metacomputer checkout: " + LAB, p4.stdout[-300:])
+        write(os.path.join(ch, "rules", "mine.rules"), "# the user's own\n")
+        p3 = subprocess.run([INSTALL, "--uninstall"], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+        left = tomllib.loads(open(os.path.join(ch, "config.toml")).read()).get("mcp_servers", {})
+        check("--uninstall removes the server, the skill links and the rules, and nothing of the user's",
+              p3.returncode == 0 and "metacomputer" not in left and "other" in left and not os.listdir(sk)
+              and os.listdir(os.path.join(ch, "rules")) == ["mine.rules"], (p3.returncode, left, os.listdir(sk)))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def test_codex_config_edits():
+    """The Codex step never writes a config.toml it can't edit exactly: a header that only appears inside a string, with
+    the real server under a quoted name, is left alone (and the install goes on); a moved checkout's registration keeps
+    everything you set on it."""
+    if not shutil.which("codex"):
+        print("SKIP the Codex config checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-codex-")
+    try:
+        import tomllib
+        home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
+        os.makedirs(ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        for k in ("MCOMP_CONFIG", "MCOMP_VM"):
+            env.pop(k, None)
+        tricky = ('developer_instructions = """\nAn example:\n[mcp_servers.metacomputer]\ncommand = "x"\n"""\n\n'
+                  '[mcp_servers."metacomputer"]\ncommand = "/gone/old/bin/metacomputer"\nargs = ["mcp-lazy"]\n')
+        write(os.path.join(ch, "config.toml"), tricky)
+        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        check("Codex: a server table it can't edit exactly (its header only inside a string) is left as it was, and "
+              "the install goes on", p.returncode == 0 and open(os.path.join(ch, "config.toml")).read() == tricky
+              and "couldn't point" in p.stdout and "rules:" in p.stdout, (p.returncode, p.stdout[-400:], p.stderr[-300:]))
+        mine = ('[mcp_servers.metacomputer]\ncommand = "/gone/old/bin/metacomputer"\nargs = ["mcp-lazy"]\n'
+                'default_tools_approval_mode = "writes"\ndisabled_tools = ["kill_app"]\nenv = { A = "1" }\n')
+        write(os.path.join(ch, "config.toml"), mine)
+        p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        srv = tomllib.loads(open(os.path.join(ch, "config.toml")).read())["mcp_servers"]["metacomputer"]
+        check("Codex: a moved checkout's registration now runs this one, and keeps what you set on it",
+              p.returncode == 0 and srv["command"] == CLI and srv["default_tools_approval_mode"] == "writes"
+              and srv["disabled_tools"] == ["kill_app"] and srv["env"] == {"A": "1"} and srv["tool_timeout_sec"] == 600,
+              (srv, p.stdout[-300:]))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def test_agent_choices():
+    """Each run sets up the agents installed on this Mac (Claude Code, Codex), and remembers --no-claude / --no-codex
+    until --claude / --codex; with neither installed, the command is still linked and it says how to add one later."""
+    codex, claude = shutil.which("codex"), shutil.which("claude")
+    if not codex:
+        print("SKIP the agent choice checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-agents-")
+    try:
+        home = os.path.join(t, "home")
+        os.makedirs(os.path.join(home, ".codex"))
+        env = dict(os.environ, HOME=home, CODEX_HOME=os.path.join(home, ".codex"))
+        for k in ("MCOMP_CONFIG", "MCOMP_VM", "CLAUDE_CONFIG_DIR", "CLAUDECODE"):
+            env.pop(k, None)
+
+        def go(*args, path=None):
+            e = dict(env, PATH=path) if path else env
+            return subprocess.run([INSTALL, "--only-agents", *args], env=e, capture_output=True, text=True, timeout=300,
+                                  stdin=subprocess.DEVNULL)
+
+        def codex_set_up():
+            import tomllib
+            try:
+                cfg = tomllib.loads(open(os.path.join(home, ".codex", "config.toml")).read())
+            except OSError:
+                return False
+            return "metacomputer" in cfg.get("mcp_servers", {})
+
+        def choice():
+            try:
+                return json.load(open(os.path.join(home, ".local", "share", "metacomputer", "agents.json")))
+            except (OSError, ValueError):
+                return {}
+        p = go("--no-claude")
+        check("--only-agents sets up the agents installed here: Codex (Claude Code left alone with --no-claude)",
+              p.returncode == 0 and codex_set_up() and "Claude Code: left alone (--no-claude;" in p.stdout
+              and os.path.islink(os.path.join(home, ".local", "bin", "metacomputer")), (p.returncode, p.stdout[-500:]))
+        old_skill = os.path.join(home, ".claude", "skills", "virtual-computer")
+        os.makedirs(os.path.dirname(old_skill))
+        os.symlink(os.path.join(t, "old-checkout", "skills", "virtual-computer"), old_skill)
+        p = go("--no-claude")
+        check("--no-claude leaves everything of Claude Code's alone, the old skill name's link included",
+              p.returncode == 0 and os.path.islink(old_skill), p.stdout[-300:])
+        os.remove(os.path.join(home, ".codex", "config.toml"))
+        p = go("--no-codex")
+        check("--no-codex leaves Codex alone and is remembered", p.returncode == 0 and not codex_set_up()
+              and "Codex: left alone (--no-codex;" in p.stdout and choice().get("codex") == "off"
+              and choice().get("claude") == "off", (p.stdout[-400:], choice()))
+        p = go()
+        check("...so a later run (an update) doesn't add it either, and says why", p.returncode == 0 and not codex_set_up()
+              and "--no-codex in an earlier run" in p.stdout and "--no-claude in an earlier run" in p.stdout, p.stdout[-400:])
+        other = os.path.join(t, "other")
+        os.makedirs(os.path.join(other, "bin"))
+        for f in ("install.sh", os.path.join("bin", "metacomputer")):
+            with open(os.path.join(other, f), "w") as fh:
+                fh.write("#!/bin/sh\n")
+        link = os.path.join(home, ".local", "bin", "metacomputer")
+        os.remove(link)
+        os.symlink(os.path.join(other, "bin", "metacomputer"), link)
+        p = go()
+        check("with both agents left alone, a run still links the command, so moving it from another checkout is "
+              "refused without --switch (no terminal to ask), the link unchanged",
+              p.returncode != 0 and "runs another checkout" in p.stdout + p.stderr
+              and os.readlink(link) == os.path.join(other, "bin", "metacomputer"), (p.returncode, (p.stdout + p.stderr)[-400:]))
+        os.remove(link)
+        p = go("--codex")
+        check("--codex sets it up again and remembers that", p.returncode == 0 and codex_set_up()
+              and choice().get("codex") == "on", (p.stdout[-400:], choice()))
+        p = go(path="/usr/bin:/bin")
+        check("with neither agent on PATH: the command is linked, and it says how to add one later",
+              p.returncode == 0 and "neither Claude Code nor Codex is installed" in p.stdout
+              and os.path.islink(os.path.join(home, ".local", "bin", "metacomputer")), p.stdout[-400:])
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def test_setup_in_checkout():
     t = tempfile.mkdtemp(prefix="mcomp-install-")
     try:
@@ -1904,6 +2093,9 @@ test_vm_dir()
 test_vnc_password()
 test_vnc_real_keychain()
 test_setup_in_checkout()
+test_codex_step()
+test_codex_config_edits()
+test_agent_choices()
 test_build_vault_quiet()
 test_quiet_builds()
 test_vm_build_footer()

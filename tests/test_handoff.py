@@ -41,6 +41,8 @@ for k in ("MCOMP_CONFIG", "MCOMP_VM_STATE"):
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import owners  # noqa: E402
 import handoff  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import userterm  # noqa: E402
 
 FAILS = []
 PASSES = [0]
@@ -54,6 +56,9 @@ os.chmod(os.path.join(ENV["MCOMP_SSH_DIR"], "vnc-pass"), 0o600)
 # whatever runs this test), with a 1-second minimum time limit so the limit can be tested quickly.
 PRELUDE = ("import os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import owners; "
            "_c = os.environ.get('FAKE_CLAUDE'); owners.claude_of = (lambda *a: int(_c)) if _c else (lambda *a: None); "
+           "_real_ps = owners.ps_table; "
+           "owners.ps_table = ((lambda strict=False: (_ for _ in ()).throw(OSError('ps failed')) if strict else {}) "
+           "if os.environ.get('FAKE_PS_FAIL') else _real_ps); "
            "import handoff; handoff.MIN_TIMEOUT_S = 1; "
            "handoff.OPEN_WAIT_S = float(os.environ.get('TEST_OPEN_WAIT', '40')); "
            "sys.exit(handoff.main(sys.argv[1:]))") % LAB
@@ -169,6 +174,12 @@ def basic_checks():
     r = run("done", claude=SESSION_A)
     check("the session that asked can't say done for the user (no terminal): exit 3, still open",
           r.returncode == 3 and "can't say the user is done" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
+    r = run("done", claude=SESSION_A + 1)
+    check("...nor can another agent session (another Claude Code or Codex, or one started from the first)",
+          r.returncode == 3 and "an agent session" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
+    r = run("done", claude=None, FAKE_PS_FAIL="1")
+    check("...nor anything when the process list can't be read (unknown is never the user)",
+          r.returncode == 3 and "couldn't tell whether" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
     note = "solved it\x1b[31m, ‮all good"
     r = run("done", "--note", note, claude=None)
     rc, o, e = finish(p)
@@ -178,7 +189,7 @@ def basic_checks():
           and "Read the screen again" in o and "Their note: solved it" in o and "\x1b" not in o and "‮" not in o, o)
     check("its output carries the instructions: view --open, the clipboard, handoff done/cancel",
           "metacomputer view --open" in o and "clipboard" in o and "Cmd+V" in o and "metacomputer handoff done" in o
-          and "metacomputer handoff cancel" in o and "For Claude" in o, o)
+          and "metacomputer handoff cancel" in o and "For you, the agent" in o, o)
     rec = owners.handoff_record()
     check("the record says done, from where, with the note", rec["status"] == "done" and rec["ended_from"] == "process"
           and rec["note"].startswith("solved it"), rec)
@@ -305,7 +316,8 @@ def terminal_checks():
     os.close(m)
     check("Ctrl-C at that terminal cancels (exit 4)", rc == 4 and owners.handoff_record()["ended_from"] == "ctrl_c",
           (rc, o, e))
-    # done at a terminal is the user's, even inside the session that asked (their own `!` command at a pty)
+    # A terminal inside the session that asked isn't the user's: Codex can give its commands a pseudo-terminal, so
+    # there `done` would be the agent saying the user is done (owners.at_user_terminal).
     clear()
     p = start("--why", "captcha", "--say", SAY)
     wait_open()
@@ -314,8 +326,14 @@ def terminal_checks():
                        timeout=30)
     os.close(s)
     os.close(m)
+    check("done at a terminal inside the session that asked is refused (an agent's own terminal isn't the user's)",
+          r.returncode == 3 and "can't say the user is done" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
+    m, s = pty.openpty()
+    r = subprocess.run(hcmd("done"), env=env(FAKE_CLAUDE=None), stdin=s, capture_output=True, text=True, timeout=30)
+    os.close(s)
+    os.close(m)
     rc, o, e = finish(p)
-    check("done at a terminal works in the session that asked too", r.returncode == 0 and rc == 0
+    check("...and done at the user's own terminal works", r.returncode == 0 and rc == 0
           and owners.handoff_record()["ended_from"] == "terminal", (r.returncode, r.stderr, rc))
 
 
@@ -825,10 +843,10 @@ def fill_checks():
 OSASCRIPT = r"""#!/bin/sh
 printf 'osascript %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$STUB/argv.log"
 if [ "$1" = "-e" ]; then
-  # The handoff's dialog (AppleScript: -e SCRIPT MODE TEXT SECONDS): its arguments exactly, then it "waits for
+  # The handoff's dialog (AppleScript: -e SCRIPT MODE TEXT SECONDS WHO): its arguments exactly, then it "waits for
   # the user" (dialog.answer) for up to 30 s, the way a dialog blocks.
   printf '%s' "$2" > "$STUB/dialog.script"; printf '%s' "$4" > "$STUB/dialog.text"
-  printf '%s %s %s\n' "$3" "$5" "$#" > "$STUB/dialog.args"; echo $$ > "$STUB/dialog.pid"
+  printf '%s %s %s %s\n' "$3" "$5" "$#" "$6" > "$STUB/dialog.args"; echo $$ > "$STUB/dialog.pid"
   i=0; while [ ! -f "$STUB/dialog.answer" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
   cat "$STUB/dialog.answer" 2>/dev/null; echo done >> "$STUB/dialog.ended"; exit 0
 fi
@@ -1052,8 +1070,9 @@ def view_tty(vd, stub, lume, ssh, *args, answer=None, store="file", extra_cfg=""
     for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
         e.pop(k, None)
     m, s = pty.openpty()
-    p = subprocess.Popen([os.path.join(LAB, "bin", "metacomputer"), "view"] + list(args), env=e, stdin=s, stdout=s,
-                         stderr=s)
+    # as the user at their own terminal: no agent session running this test is above it (tests/userterm.py)
+    p = userterm.spawn([os.path.join(LAB, "bin", "metacomputer"), "view"] + list(args), env=e, stdin=s, stdout=s,
+                       stderr=s)
     os.close(s)
     buf, asked, end = b"", False, time.time() + 60
     while time.time() < end:
@@ -1246,7 +1265,7 @@ def remember_helper_checks():
         # At a terminal: wait for the prompt (echo is turned off before it's written), look at the terminal's echo
         # flag, type the password, then collect what the terminal showed: with echo on, the password would be there.
         m, s = pty.openpty()
-        p = subprocess.Popen(lv + list(args), env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = userterm.spawn(lv + list(args), env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         err, end = b"", time.time() + 30
         while time.time() < end and b"isn't shown" not in err:
             ready, _, _ = select.select([p.stderr], [], [], 0.2)
@@ -1490,18 +1509,25 @@ def dialog_checks():
     check("on: a dialog is shown, and handoff says so", shown and "A dialog on the Mac's screen" in o, (o, e))
     check("…handoff didn't wait for it: it ended as soon as the handoff did, while the dialog was still up",
           rc == 4 and time.time() - t0 < 10, rc)
-    check("…osascript got the fixed script, then show, the --say text exactly as data, and the seconds left",
+    check("…osascript got the fixed script, then show, the --say text exactly as data, the seconds left and who asks",
           dfile("dialog.script") == handoff.DIALOG_SCRIPT and dfile("dialog.text") == handoff.dialog_text(nasty)
-          and dfile("dialog.args").split()[0] == "show" and dfile("dialog.args").split()[2] == "5"
+          and dfile("dialog.args").split()[0] == "show" and dfile("dialog.args").split()[2:] == ["6", "Claude"]
           and 1 <= int(dfile("dialog.args").split()[1]) <= 120, (dfile("dialog.args"), dfile("dialog.text")))
     check("…and the dialog is taken down when the handoff ends", wait_for(lambda: dfile("dialog.pid") and not
                                                                            pid_alive(int(dfile("dialog.pid"))), 8))
-    r = subprocess.run(["osascript", "-e", handoff.DIALOG_SCRIPT, "compose", handoff.dialog_text(nasty), "5"],
+    r = subprocess.run(["osascript", "-e", handoff.DIALOG_SCRIPT, "compose", handoff.dialog_text(nasty), "5", "Claude"],
                        capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     check("the real osascript, in the script's compose mode (no dialog): the text comes back verbatim after "
           "\"Claude needs you: \", and nothing in it ran (quotes, backslashes, do shell script, end run, tell)",
           r.returncode == 0 and r.stdout.rstrip("\n") == "Claude needs you: " + handoff.dialog_text(nasty)
           and not os.path.exists(os.path.join(vd, "canary")), (r.returncode, r.stdout, r.stderr))
+    r = subprocess.run(["osascript", "-e", handoff.DIALOG_SCRIPT, "compose", "Tick the box", "5", "Codex"],
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    check("...and a handoff a Codex session opened says Codex", r.stdout.rstrip("\n") == "Codex needs you: Tick the box",
+          (r.returncode, r.stdout, r.stderr))
+    check("...which the record decides (agent_word)", handoff.agent_word({"agent": "Codex"}) == "Codex"
+          and handoff.agent_word({"agent": "Claude Code"}) == "Claude" and handoff.agent_word({}) == "Claude"
+          and handoff.agent_word({"agent": "Evil\nname"}) == "Claude")
     long_say = "x" * 600
     check("the dialog's text is cleaned and capped (240 characters)", len(handoff.dialog_text(long_say)) == 240
           and handoff.dialog_text("a\x1b[31mb\nc") == "a [31mb c", handoff.dialog_text("a\x1b[31mb\nc"))

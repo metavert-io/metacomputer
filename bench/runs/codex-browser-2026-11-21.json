@@ -1,0 +1,80 @@
+{
+  "run_id": "codex-browser-2026-11-21",
+  "date": "2026-11-21",
+  "agent": "codex",
+  "model": "codex-default",
+  "cua_driver": "0.53.0",
+  "metacomputer": {
+    "commit": "341f13d4057077752894e6fe28ffff1749a30164",
+    "uncommitted_changes": false
+  },
+  "task_set": "standard",
+  "switches": {
+    "hub": "the VM's setting (MCP_HUB)",
+    "coord_guard": "off",
+    "shell": "allow",
+    "lessons": "off",
+    "lessons_count": 0,
+    "lessons_ids": []
+  },
+  "tasks": [
+    {
+      "task": "ff-read",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 13,
+      "minutes": 1.08,
+      "patterns": {}
+    },
+    {
+      "task": "ff-form",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 17,
+      "minutes": 1.28,
+      "patterns": {}
+    },
+    {
+      "task": "ff-pick-color",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 13,
+      "minutes": 0.74,
+      "patterns": {}
+    },
+    {
+      "task": "ff-canvas-code",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 16,
+      "minutes": 0.86,
+      "patterns": {}
+    },
+    {
+      "task": "chrome-form",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 12,
+      "minutes": 1.18,
+      "patterns": {}
+    },
+    {
+      "task": "chrome-nav",
+      "pass": true,
+      "invalid_calls": 0,
+      "turns": 17,
+      "minutes": 0.82,
+      "patterns": {}
+    }
+  ],
+  "totals": {
+    "tasks": 6,
+    "passed": 6,
+    "invalid_calls": 0,
+    "mean_turns": 14.67,
+    "mean_minutes": 0.99,
+    "targeted": 0,
+    "failed_driver_calls": 0,
+    "patterns": {}
+  }
+}

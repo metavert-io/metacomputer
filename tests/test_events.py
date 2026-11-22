@@ -1928,13 +1928,32 @@ def main():
                        capture_output=True, text=True, env=menv, timeout=60, stdin=subprocess.DEVNULL)
         m_, s_ = pty.openpty()
         os.remove(os.path.join(events.state_dir(), "debounce.json"))
-        rt = subprocess.run(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; cmd=secrets; {trap}\nexit 3'],
-                            capture_output=True, text=True, env=menv, timeout=60, stdin=s_)
+        # at the user's own terminal: no agent session running this test above it (tests/userterm.py)
+        import userterm
+        rt = userterm.spawn(["bash", "-c", f'. "{LAB}/scripts/lib.sh"; cmd=secrets; {trap}\nexit 3'], env=menv,
+                            stdin=s_, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         os.close(s_)
+        rt.communicate(timeout=60)
         os.close(m_)
         check("L1 the secrets hook: once in 5 min, silent when you ran it at your terminal, worded neutrally",
               local_log()[n1:] == [] and rt.returncode == 3 and "isn't unlocked" in new[0]["message"]
               and "doesn't exist" in new[0]["message"], (local_log()[n1:], new[:1]))
+        fake = userterm.fake_agent("codex")
+        if fake:
+            try:
+                os.remove(os.path.join(events.state_dir(), "debounce.json"))
+            except FileNotFoundError:
+                pass
+            n2 = len(local_log())
+            m_, s_ = pty.openpty()
+            ra = userterm.spawn([fake, "/bin/bash", "-c", f'. "{LAB}/scripts/lib.sh"; cmd=secrets; {trap}\nexit 3'],
+                                env=menv, stdin=s_, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            os.close(s_)
+            ra.communicate(timeout=60)
+            os.close(m_)
+            check("...but a terminal inside an agent session (Codex) isn't yours: the user hears about it",
+                  ra.returncode == 3 and [(e["family"], e["type"]) for e in local_log()[n2:]] == [("needs_you", "vault_locked")],
+                  local_log()[n2:])
         btrap = re.search(r"^trap 'rc=\$\?;.*?' EXIT$", open(os.path.join(LAB, "scripts", "build-vm.sh")).read(), re.M | re.S)
         rcs, n0 = [], len(local_log())
         for body in ("true", 'die "boom"', 'BUILD_QUIET_EXIT=1; die "exists, use --replace"', "exit 130"):

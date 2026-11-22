@@ -212,6 +212,7 @@ def run(td, procs):
         return [json.loads(l) for l in open(stub_log)] if os.path.exists(stub_log) else []
 
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "MCOMP_VAULT_DIR": vdir, "LANG": "en_US.UTF-8",
+           "MCOMP_VAULT_TEST_IGNORE_AGENT": "1",
            "MCOMP_VAULT_TEST_SSH": stub, "MCOMP_VAULT_TEST_CHROME_DIR": chrome, "MCOMP_VAULT_TEST_CHROME_KEY": CHROME_KEY}
     sock = os.path.join(vdir, "vault.sock")
     alog = os.path.join(vdir, "audit.jsonl")

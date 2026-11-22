@@ -33,8 +33,8 @@ the driver: until they end or the driver connection closes, at most the activity
 window. It isn't another controller to that client's process or its Claude Code
 session.
 
-"Self" is the caller's own Claude Code session (its nearest `claude` ancestor),
-or a shell it runs under, so a session never blocks itself.
+"Self" is the caller's own agent session (its nearest `claude` or `codex` ancestor:
+Claude Code or Codex), or a shell it runs under, so a session never blocks itself.
 
 A handoff (lib/handoff.py, `metacomputer handoff`) gives the computer to the user:
 while one is open, others() lists it for every caller, its own session included,
@@ -45,6 +45,7 @@ CLI (used by bin/metacomputer):
   owners.py who [--json]      list controllers
   owners.py check             exit 3 (and explain) if another controller is active; 4 while the user has it (a handoff)
   owners.py release           forget other sessions' claims (after the user agrees)
+  owners.py at-terminal [--stderr]   exit 0 when stdin (and stderr) is the user's own terminal (at_user_terminal)
 """
 import contextlib
 import json
@@ -88,8 +89,13 @@ def cli():
     return own
 
 
-def ps_table():
-    out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True).stdout
+def ps_table(strict=False):
+    """{pid: (ppid, comm)} for every process. strict: OSError when ps fails or lists nothing, instead of a table
+    that would look like one without agents."""
+    r = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
+    out = r.stdout
+    if strict and (r.returncode != 0 or not out.strip()):
+        raise OSError(f"ps failed (exit {r.returncode})")
     table = {}
     for line in out.splitlines():
         parts = line.split(None, 2)
@@ -111,6 +117,8 @@ def ancestors(pid, table):
     return chain
 
 
+# Agent sessions: the coding agent a command or bridge runs under. Its process owns the claims of everything it
+# starts (bridge, `metacomputer call`, `sh`), so a session never blocks itself.
 # Claude Code's process: `claude` (npm, Homebrew, the IDE extensions' native-binary/claude) or,
 # for the native installer, the version file itself: ~/.local/share/claude/versions/2.1.325.
 _NATIVE_CLAUDE = re.compile(r"/claude/versions/\d+\.\d+\.\d+[^/]*$")
@@ -121,12 +129,77 @@ def is_claude(comm):
     return os.path.basename(comm or "") == "claude" or bool(_NATIVE_CLAUDE.search(comm or ""))
 
 
+def is_codex(comm):
+    """True when a process table command is Codex: its native `codex` binary. npm and Homebrew install a node
+    launcher (bin/codex.js) that starts it; the IDE extensions, the desktop app and the terminal app's shared
+    background server (`codex app-server --managed-daemon`, which `codex` starts on first use) run `codex
+    app-server`, one process for all of their conversations, which therefore count as one session here."""
+    return os.path.basename(comm or "") == "codex"
+
+
+def agent_kind(comm):
+    """"Claude Code", "Codex" or None for a process table command."""
+    return "Claude Code" if is_claude(comm) else "Codex" if is_codex(comm) else None
+
+
 def claude_of(pid, table):
-    """Nearest Claude Code process above pid (None outside Claude Code)."""
+    """Nearest agent session process above pid: Claude Code or Codex (None outside both). The name is older than
+    Codex support; claims, events and the vault still call this process claude_pid."""
     for p in ancestors(pid, table)[1:]:
-        if is_claude(table[p][1]):
+        if agent_kind(table[p][1]):
             return p
     return None
+
+
+_AGENT_NAMES = {}
+
+
+def agent_name(pid):
+    """"Claude Code" or "Codex" for a live agent session process (cached per pid), else None."""
+    if not pid:
+        return None
+    if pid not in _AGENT_NAMES:
+        try:
+            comm = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(int(pid))], capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        _AGENT_NAMES[pid] = agent_kind(comm)
+    return _AGENT_NAMES[pid]
+
+
+def at_user_terminal(fds=(0,)):
+    """The bar for commands only the user runs: every fd in fds is a terminal and no agent session (Claude Code or
+    Codex) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
+    give a command a pseudo-terminal of its own. Fails closed when the process table can't be read. Like every
+    check against your own account, this stops an agent from passing by accident, not a program that sets out to
+    (it can start a command outside the agent's process tree)."""
+    try:
+        if not all(os.isatty(fd) for fd in fds):
+            return False
+    except (OSError, ValueError):
+        return False
+    try:
+        table = ps_table(strict=True)
+        return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None
+    except Exception:
+        return False
+
+
+def ancestry_complete(pid, table):
+    """True when every process from pid up to launchd (pid 1) is in the table: a walk that stops early (a process
+    ps didn't list, a loop) can't say there's no agent above, so it counts as unknown."""
+    seen = set()
+    while pid > 1:
+        if pid not in table or pid in seen:
+            return False
+        seen.add(pid)
+        pid = table[pid][0]
+    return pid == 1
+
+
+AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through Claude Code, Codex, a "
+                    "script or a pipe")
 
 
 def proc_cwd(pid):
@@ -220,8 +293,10 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None,
     os.makedirs(OWNERS_DIR, exist_ok=True)
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
+    if claude_pid and not (extra or {}).get("agent"):
+        rec["agent"] = agent_name(claude_pid) or "Claude Code"
     if kind:
-        # "shell": metacomputer sh outside Claude Code (kept by its time, see claims()); "lease": the hub holding
+        # "shell": metacomputer sh outside an agent session (kept by its time, see claims()); "lease": the hub holding
         # the computer for acting calls a client left running when it disconnected (mcp_hub.Hub.hand_over_claim)
         rec["kind"] = kind
     if sid is not None:
@@ -356,7 +431,8 @@ def handoff_valid(rec):
             and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
             and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S + 1    # + 1: float rounding of a 2 h limit
             and opt("say", str) and opt("cwd", str) and opt("note", str) and opt("ended_from", str)
-            and opt("claude_pid", int) and (rec.get("ended") is None or _finite(rec.get("ended"))))
+            and opt("claude_pid", int) and rec.get("agent") in (None, "Claude Code", "Codex")
+            and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
 UNREADABLE_FILE = "handoff-unreadable"     # in RUN_DIR: when the record was first found impossible to look at
@@ -559,17 +635,21 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
     return found
 
 
+def _agent(o):
+    return o.get("agent") if o.get("agent") in ("Claude Code", "Codex") else "Claude Code"
+
+
 def describe(o):
     if o["kind"] == "handoff":
         return handoff_describe(o)
     if o["kind"] == "session":
         state = "ACTIVE" if o["active"] else "idle"
         if o.get("claim") == "pending":
-            src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (holder pid {o.get('bridge_pid')})"
+            src = f"{_agent(o)} session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (holder pid {o.get('bridge_pid')})"
             return (f"an unfinished {o.get('last_tool')} call from a {src}, still running in the driver, in "
                     f"{short(o.get('cwd'))}: started {o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [ACTIVE]")
         if o.get("claim") == "inner":
-            src = (f"a Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid")
+            src = (f"a {_agent(o)} session (pid {o['claude_pid']})" if o.get("claude_pid")
                    else f"a shell (terminal session {o.get('sid')})")
             s = o.get("session") or "?"
             return (f"Claude Code inside the VM (metacomputer claude, session {s}), started by {src} in "
@@ -577,14 +657,14 @@ def describe(o):
                     f"{o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [{state}]; metacomputer claude stop"
                     f"{'' if s == 'claude' else ' --session ' + s} ends it")
         if o.get("claim") == "lease":
-            src = f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (pid {o.get('client_pid')})"
+            src = f"{_agent(o)} session (pid {o['claude_pid']})" if o.get("claude_pid") else f"client (pid {o.get('client_pid')})"
             return (f"unfinished call(s) ({o.get('last_tool')}) that a {src} left running when it disconnected, held by "
                     f"the hub (pid {o.get('bridge_pid')}) until they end, in {short(o.get('cwd'))}: "
                     f"{o['idle_s'] // 60} min {o['idle_s'] % 60} s ago [{state}]")
-        who = (f"Claude Code session (pid {o['claude_pid']})" if o.get("claude_pid")
-               else f"metacomputer sh outside Claude Code (shell pid {o.get('bridge_pid')}"
+        who = (f"{_agent(o)} session (pid {o['claude_pid']})" if o.get("claude_pid")
+               else f"metacomputer sh outside an agent session (shell pid {o.get('bridge_pid')}"
                     f"{', exited' if o.get('holder_gone') else ''}, terminal session {o.get('sid')})" if o.get("claim") == "shell"
-               else f"MCP client outside Claude Code (bridge pid {o.get('bridge_pid')})")
+               else f"MCP client outside an agent session (bridge pid {o.get('bridge_pid')})")
         return (f"{who} in {short(o.get('cwd'))}: last action "
                 f"{o['idle_s'] // 60} min {o['idle_s'] % 60} s ago ({o.get('last_tool')}) [{state}]")
     return f"direct connection (ssh pid {o['ssh_pid']}) from {o['via']} in {short(o.get('cwd'))} [ACTIVE]"
@@ -666,6 +746,10 @@ def main(argv):
             except Exception:
                 pass
         return 0
+    if cmd == "at-terminal":
+        # exit 0 when standard input (and with --stderr, standard error) is the user's own terminal: a terminal
+        # with no agent session above it (bin/metacomputer's user-only commands)
+        return 0 if at_user_terminal((0, 2) if "--stderr" in argv else (0,)) else 1
     print(__doc__)
     return 2
 

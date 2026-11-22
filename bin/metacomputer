@@ -108,6 +108,9 @@
 #           | fill --request ID | rule add code|relay ...   one-time codes and sign-in links (SECURITY.md)
 #                                  use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
+#   agents [--json] | agents check [--json]
+#                                  the coding agents metacomputer is set up for (Claude Code, Codex), and a check of
+#                                  what it relies on in this Mac's Codex (docs/codex.md)
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
 #                                  mine your own sessions for repeated mistakes; approved lessons reach
 #                                  every new session's instructions as advice (docs/learn.md)
@@ -133,8 +136,8 @@ if mc_in_plugins "$mc_self"; then
     while [ $# -gt 0 ]; do
       case "$1" in
         --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }; mc_args+=(--dir "$2"); shift ;;
-        --no-chrome|--no-build|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
-        *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --yes, --dry-run)" >&2; exit 2 ;;
+        --no-chrome|--no-build|--no-codex|--no-claude|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
+        *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --yes, --dry-run)" >&2; exit 2 ;;
       esac
       shift
     done
@@ -153,6 +156,19 @@ if mc_in_plugins "$mc_self"; then
     "or in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" \
     "or point MCOMP_HOME at an existing checkout." >&2
   exit 1
+fi
+# Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
+# Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
+# confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
+# (docs/codex.md). The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox. A Codex setup that
+# grants all of that anyway can set MCOMP_CODEX_SANDBOX=allow.
+if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
+  case "${1:-help}" in
+    help|-h|--help) ;;
+    *) printf '%s\n' "metacomputer: this command is running inside Codex's sandbox ($CODEX_SANDBOX), which blocks what metacomputer needs on this Mac (its state folders, the VM's SSH port, the hub's and the vault's sockets). Nothing was run." \
+         "Run it outside the sandbox: ask for escalated permissions for this command, or add metacomputer's Codex rules (install.sh does it; docs/codex.md) so everyday metacomputer commands run outside it. The metacomputer MCP tools aren't affected." >&2
+       exit 77 ;;
+  esac
 fi
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
@@ -194,7 +210,7 @@ unset mc_hint
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
-case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions|version) ;; *) vm_target_check ;; esac
+case "$cmd" in help|-h|--help|where|setup|vm|events|notify|learn|actions|version|agents) ;; *) vm_target_check ;; esac
 case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
@@ -1840,7 +1856,7 @@ view_remember_decide() {
   case "${VIEW_REMEMBER:-ask}" in on|off|ask) ;; *) warn "VIEW_REMEMBER=${VIEW_REMEMBER} isn't ask, on or off, so it counts as off" ;; esac
   [ "$flag" = no-remember ] && return 0
   if [ "$flag" = remember ]; then
-    [ -t 0 ] || die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal"
+    user_tty || die "view --remember saves the live-view password in your login keychain, so it's yours to run: in your own terminal (not through Claude Code or Codex)"
     [ "$setting" = off ] && die "$(view_off_note)"
     VIEW_SAVE=create                              # made or updated; lib/liveview.py says why if it can't
     return 0
@@ -1854,7 +1870,8 @@ view_remember_decide() {
   [ $rc = 0 ] && { VIEW_SAVE=refresh; return 0; } # there already, with the user's yes: brought up to date
   [ $rc = 1 ] || return 0                         # the keychain couldn't say: the clipboard, as before
   [ "$setting" = on ] && { VIEW_SAVE=create; return 0; }
-  if ! [ -t 0 ] || ! [ -t 1 ]; then VIEW_HINT=1; return 0; fi
+  # the question is the user's: a terminal with no agent session above it (Codex can give a command a terminal)
+  if ! [ -t 1 ] || ! user_tty; then VIEW_HINT=1; return 0; fi
   echo "Screen Sharing can remember the live-view password, so the live view opens without asking for it:"
   echo "metacomputer saves it in your login keychain, where Screen Sharing (and osascript, which writes it) can"
   echo "read it without asking, and updates it after each rebuild. It isn't your Mac's password."
@@ -1876,7 +1893,7 @@ view_remember_now() { # view --remember: save it now, without opening anything
 
 view_forget() { # view --forget: remove Screen Sharing's saved live-view password (only the item metacomputer made)
   local how
-  [ -t 0 ] || die "view --forget changes your login keychain, so it's yours to run: in your own terminal"
+  user_tty || die "view --forget changes your login keychain, so it's yours to run: in your own terminal (not through Claude Code or Codex)"
   how="$("$PY" "$LAB_ROOT/lib/liveview.py" forget --port "$VNC_PORT" --from-view </dev/null)" || die "couldn't remove it (above)"
   case "$how" in
     removed) echo "Removed the live-view password metacomputer saved for Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
@@ -2301,6 +2318,7 @@ case "$cmd" in
   security)   do_security "$@" ;;
   secrets)    do_secrets "$@"; exit $? ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
+  agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
               [ "$MC_SETTINGS_KIND" != vm ] || die "setup sets up this checkout's main VM (config/local.env); for $VM_NAME: metacomputer --vm $VM_NAME build"

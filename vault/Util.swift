@@ -624,16 +624,30 @@ func procArgs(_ pid: pid_t) -> [String] {
     return out
 }
 
-/// Who sent a request: the client process and the nearest Claude Code process above it
-/// (a process named claude, or node running a script named claude*), with its start time
-/// and working folder (the project). Attribution only: any process running as you can
-/// arrange the same ancestry.
+/// The agent session a process is, if any: "Claude Code" (a process named claude, node running a script named
+/// claude*, or the native installer's version file) or "Codex" (its native binary, named codex; npm and Homebrew start
+/// it from a node launcher, and the IDE extensions and the desktop app run `codex app-server`, one process for all of
+/// their conversations).
+func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
+    if e.name == "claude"
+        || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
+        || (processPath(p).map { matches($0, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") } ?? false) {
+        return "Claude Code"
+    }
+    if e.name == "codex" { return "Codex" }
+    return nil
+}
+
+/// Who sent a request: the client process and the nearest agent session process above it (Claude Code or Codex;
+/// agentKind), with its start time and working folder (the project). The fields keep their older names (claudePID):
+/// they mean that agent session. Attribution only: any process running as you can arrange the same ancestry.
 struct Requester {
     let clientPID: pid_t
     let clientExe: String
     let claudePID: pid_t?
     let claudeStart: Double?
     let project: String?
+    var agent: String? = nil        // "Claude Code" or "Codex": what claudePID is
     // What the client says about whom it asks for (`--on-behalf-pid`): the Claude Code process it names.
     // Shown and recorded, never used to decide anything (project limits, rules and grants use the fields above).
     var claimedClaudePID: pid_t? = nil
@@ -646,12 +660,17 @@ struct Requester {
         for _ in 0..<64 {
             guard p > 1, let e = procEntry(p) else { break }
             // Claude Code from the native installer runs as its version file (.../claude/versions/2.1.325).
-            let isClaude = e.name == "claude"
-                || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
-                || (processPath(p).map { matches($0, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") } ?? false)
-            if isClaude && p != pid {
+            if p != pid, let kind = agentKind(p, e) {
+                let args = kind == "Codex" ? procArgs(p) : []
+                if kind == "Codex" && (args.isEmpty || args.dropFirst().contains("app-server")) {
+                    // Codex's IDE extension and desktop app run every conversation in this one process: it names no
+                    // single session, so it gets none of a session's answers, project rules or tokens (each use asks).
+                    // Arguments that can't be read count the same way: unknown never names a session.
+                    return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil,
+                                     agent: "Codex app server")
+                }
                 let cwd = procCwd(p).map { realPath($0) ?? $0 }
-                return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd)
+                return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd, agent: kind)
             }
             p = e.ppid
         }
@@ -681,6 +700,7 @@ struct Requester {
     var record: [String: Any] {
         var d: [String: Any] = ["client_pid": Int(clientPID), "client": clientExe]
         if let p = claudePID { d["claude_pid"] = Int(p) }
+        if let a = agent, a != "Claude Code" { d["agent"] = a }
         if let pr = project { d["project"] = pr }
         if let c = claimedClaudePID {
             var b: [String: Any] = ["claude_pid": Int(c), "verified": false]
@@ -693,11 +713,15 @@ struct Requester {
 
     /// One printable line (a folder or program name can hold a newline or terminal codes).
     var describe: String {
-        let claim = claimedClaudePID.map { ", for Claude Code in \(tildePath(claimedProject ?? "?")) (pid \($0)) as it says (unverified)" } ?? ""
+        let claim = claimedClaudePID.map { ", for an agent session in \(tildePath(claimedProject ?? "?")) (pid \($0)) as it says (unverified)" } ?? ""
         if let p = claudePID {
-            return clean("Claude Code in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
+            return clean("\(agent ?? "Claude Code") in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
         }
-        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code" + claim, max: 300)
+        if agent == "Codex app server" {
+            return clean("\(clientExe) (pid \(clientPID)) under Codex's app server, whose conversations share one process"
+                         + " (no session's answers apply)" + claim, max: 300)
+        }
+        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code or Codex" + claim, max: 300)
     }
 }
 

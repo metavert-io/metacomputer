@@ -84,17 +84,24 @@ class Lock:
         os.close(self.fd)
 
 
+LOCAL_NAMES = ("localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0")
+NUMERIC_LABEL = re.compile(r"^(0x[0-9a-f]*|[0-9]+)$")     # no real top-level domain is a number (decimal or hex)
+
+
 def normalize(name, exact=False):
     """The gateway patterns for one name, or Refused. Lowercase letters, digits and hyphens, at least two labels;
     `*.x.y` for only the subdomains. A plain name covers itself and its subdomains unless exact."""
     if not isinstance(name, str):
         raise Refused("a name must be text")
     n = name.strip().lower().rstrip(".")
+    if n in LOCAL_NAMES or n.endswith(".localhost"):
+        raise Refused(f"{name[:80]!r} is the virtual computer itself: its own pages never go through the gateway, so they "
+                      "need no allowlist (the list is for sites on the internet)")
     wild = n.startswith("*.")
     core = n[2:] if wild else n
     labels = core.split(".")
     if (len(core) > 253 or len(labels) < 2 or not all(LABEL_RE.match(lb) for lb in labels)
-            or all(lb.isdigit() for lb in labels)):
+            or NUMERIC_LABEL.match(labels[-1])):        # an address however it's spelled: 10.0.0.1, 0x7f.1, 0x7f.0.0.1
         raise Refused(f"not a host name: {name[:80]!r} (letters, digits and hyphens, like example.com or *.example.com;"
                       " addresses aren't accepted)")
     if wild:
@@ -319,7 +326,10 @@ def until(ts):
 
 
 def at_terminal():
-    return sys.stdin.isatty() and sys.stderr.isatty()
+    """The user's own terminal: stdin and stderr are terminals and no agent session (Claude Code or Codex) is above
+    this process. Codex can give its commands a pseudo-terminal, so a terminal alone isn't the user."""
+    import owners
+    return owners.at_user_terminal((0, 2))
 
 
 def describe(st):
@@ -547,6 +557,11 @@ def main(argv):
     except Refused as e:
         print(f"metacomputer net: {e}", file=sys.stderr)
         return 3
+    except OSError as e:
+        # its folder or lock can't be used (a sandbox, permissions): say so, never a traceback; nothing was changed
+        print(f"metacomputer net: can't use {e.filename or 'its state folder'} ({e.strerror or e}); nothing changed",
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

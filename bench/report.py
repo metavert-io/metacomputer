@@ -150,20 +150,32 @@ def totals(rows):
             "invalid_share": s("invalid") / max(1, s("tool_calls")), "refused_share": s("refused") / max(1, s("tool_calls"))}
 
 
+def is_codex(meta):
+    """A Codex run: it reports tokens, never a cost, so its cost cells read n/a rather than 0."""
+    return (meta.get("switches") or {}).get("agent") == "codex"
+
+
+def money(v, codex, fmt="{:.2f}"):
+    return "n/a" if codex else fmt.format(v)
+
+
 def header(meta):
     sw = meta.get("switches") or {}
     g = meta.get("metacomputer") or {}
     return (f"- metacomputer `{(g.get('sha') or '')[:10]}` ({g.get('branch')}{', uncommitted changes' if g.get('dirty') else ''}); "
             f"VM `{meta.get('vm')}` (reset to `{meta.get('baseline')}` before each task: {sw.get('reset')})\n"
-            f"- model `{sw.get('model')}`, effort {sw.get('effort') or 'default'}; {meta.get('claude_code')}\n"
+            f"- model `{sw.get('model')}`, effort {sw.get('effort') or 'default'}; "
+            f"{(meta.get('agent_version') or 'Codex, version not recorded') if is_codex(meta) else (meta.get('agent_version') or meta.get('claude_code'))}\n"
             f"- skill `{sw.get('skill')}` (hash {sw.get('skill_hash')}); shell {sw.get('shell')}; "
             f"coordinate guard {sw.get('coord_guard')}{'' if sw.get('coord_guard_in_bridge') else ' (the bridge does not read it yet)'}; "
             f"hub {sw.get('hub') or 'as configured'}; "
             f"screen {sw.get('screen') or 'VM default'}; "
             f"lessons {sw.get('lessons') or 'off'}"
             + (f" ({sw.get('lessons_count')}, hash {sw.get('lessons_hash')})" if sw.get("lessons_hash") else "") + "\n"
-            f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
-            f"spent ${meta.get('spent_usd', 0):.2f}; {meta.get('started')} to {meta.get('finished', '?')}"
+            + ("- Codex reports tokens, not a cost: no budget or cap applies; " if is_codex(meta) else
+               f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
+               f"spent ${meta.get('spent_usd', 0):.2f}; ")
+            + f"{meta.get('started')} to {meta.get('finished', '?')}"
             + (f" (resumed {', '.join(meta['resumed'])})" if meta.get("resumed") else "")
             + (f"\n- resumed on metacomputer `{((meta['resume_note'].get('earlier_metacomputer') or {}).get('sha') or '')[:10]}` before; "
                "check that the code under test didn't change between the two" if meta.get("resume_note") else "")
@@ -172,6 +184,7 @@ def header(meta):
 
 def write_summary(rdir):
     meta, recs = load(rdir)
+    nc = is_codex(meta)
     rows = [row(r) for r in recs]
     env = (recs[0].get("env") or {}) if recs else {}
     calcs = sorted({str((r.get("env") or {}).get("calc")) for r in recs if (r.get("env") or {}).get("calc")})
@@ -182,15 +195,15 @@ def write_summary(rdir):
            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for r in rows:
         flag = " (timeout)" if r["timeout"] else (" (infra)" if r["infra"] else (f" ({r['end']})" if r["end"] not in ("success", "") else ""))
-        out.append(f"| {r['task']} | {r['route']} | {'yes' if r['pass'] else 'no'}{flag} | {r['score']:.2f} | {r['cost']:.2f} | "
+        out.append(f"| {r['task']} | {r['route']} | {'yes' if r['pass'] else 'no'}{flag} | {r['score']:.2f} | {money(r['cost'], nc)} | "
                    f"{r['turns']} | {r['min']:.1f} | {r['shots']} | {r['tree']} | {r['ax']} | {r['pixel']} | {r['kbd']} | "
                    f"{r['page']} | {r['steps']} | {r['shell']} | {r['refused']} | {r['invalid']} | {r['errors']} |")
     if rows:
         t = totals(rows)
-        out.append(f"| **total** | | **{t['passed']}/{t['n']}** | **{t['score']:.2f}** | **{t['cost']:.2f}** | "
+        out.append(f"| **total** | | **{t['passed']}/{t['n']}** | **{t['score']:.2f}** | **{money(t['cost'], nc)}** | "
                    f"{t['turns_mean']:.1f} avg | {t['min_total']:.1f} | {t['shots']} | {t['tree']} | {t['ax']} | {t['pixel']} | "
                    f"{t['kbd']} | {t['page']} | {t['steps']} | {t['shell']} | {t['refused']} | {t['invalid']} | {t['errors']} |")
-        out += ["", f"Means per task: cost ${t['cost_mean']:.2f}, {t['turns_mean']:.1f} turns, {t['min_mean']:.1f} min, "
+        out += ["", f"Means per task: cost {money(t['cost_mean'], nc, '${:.2f}')}, {t['turns_mean']:.1f} turns, {t['min_mean']:.1f} min, "
                 f"{t['shots'] / t['n']:.1f} screenshots, {t['tree'] / t['n']:.1f} tree reads, {t['tool_calls'] / t['n']:.1f} tool calls. "
                 f"Tokens: {t['in_tok']:,} input (incl. cache), {t['out_tok']:,} output. "
                 f"Refused {t['refused_share']:.1%} and invalid-argument {t['invalid_share']:.1%} of {t['tool_calls']} tool calls.", ""]
@@ -201,7 +214,7 @@ def write_summary(rdir):
                 "| --- | --- | --- | --- | --- | --- | --- | --- |"]
         for k in sorted(by):
             t = totals(by[k])
-            out.append(f"| {k} | {t['n']} | {t['passed']} | {t['score']:.2f} | {t['cost_mean']:.2f} | {t['turns_mean']:.1f} | {t['shots']} | {t['shell']} |")
+            out.append(f"| {k} | {t['n']} | {t['passed']} | {t['score']:.2f} | {money(t['cost_mean'], nc)} | {t['turns_mean']:.1f} | {t['shots']} | {t['shell']} |")
         seen, targeted_by = pattern_totals(rows)
         if seen or targeted_by:
             out += ["", "Failure patterns, by `metacomputer learn`'s classifier over each task's transcript "
@@ -267,7 +280,7 @@ def public_summary(rdir):
     t = totals(rows)
     seen, _ = pattern_totals(rows)
     return {
-        "run_id": meta.get("run_id"), "date": str(meta.get("started") or "")[:10], "model": sw.get("model"),
+        "run_id": meta.get("run_id"), "date": str(meta.get("started") or "")[:10], "agent": sw.get("agent") or "claude", "model": sw.get("model"),
         "cua_driver": (env.get("driver_version") or "").replace("cua-driver ", "") or None,
         "metacomputer": {"commit": g.get("sha"), "uncommitted_changes": bool(g.get("dirty"))},
         "task_set": ", ".join(meta.get("task_sets") or ["standard"]),
@@ -288,6 +301,7 @@ def write_compare(ra, rb):
     A = {r["task"]: row(r) for r in xa}
     B = {r["task"]: row(r) for r in xb}
     sa, sb = ma.get("switches") or {}, mb.get("switches") or {}
+    ca, cb = is_codex(ma), is_codex(mb)
     diffs = [f"`{k}`: {sa.get(k)} → {sb.get(k)}" for k in sorted(set(sa) | set(sb)) if sa.get(k) != sb.get(k)]
     ga, gb = (ma.get("metacomputer") or {}).get("sha", "")[:10], (mb.get("metacomputer") or {}).get("sha", "")[:10]
     if ga != gb:
@@ -302,7 +316,8 @@ def write_compare(ra, rb):
         f = lambda key, fmt="{}": f"{fmt.format(a[key]) if a else '-'} / {fmt.format(b[key]) if b else '-'}"  # noqa: E731
         ri = f"{(a['refused'] + a['invalid']) if a else '-'} / {(b['refused'] + b['invalid']) if b else '-'}"
         tg = f('targeted') if (a or b or {}).get("targets") else "-"
-        out.append(f"| {k} | {yn(a)} → {yn(b)} | {f('score', '{:.2f}')} | {f('cost', '{:.2f}')} | {f('turns')} | "
+        cost = (f"{money(a['cost'], ca) if a else '-'} / {money(b['cost'], cb) if b else '-'}")
+        out.append(f"| {k} | {yn(a)} → {yn(b)} | {f('score', '{:.2f}')} | {cost} | {f('turns')} | "
                    f"{f('min', '{:.1f}')} | {f('shots')} | {f('tree')} | {f('shell')} | {ri} | {tg} |")
     common = [k for k in A if k in B]
     ta, tb = totals([A[k] for k in common]), totals([B[k] for k in common])
@@ -318,6 +333,9 @@ def write_compare(ra, rb):
                             ("refused calls", "refused", "{}"), ("invalid-argument calls", "invalid", "{}"),
                             ("input tokens", "in_tok", "{:,}"), ("output tokens", "out_tok", "{:,}")]:
         va, vb = ta[key], tb[key]
+        if key in ("cost", "cost_mean") and (ca or cb):      # Codex reports no cost: nothing to subtract
+            out.append(f"| {label} | {money(va, ca, fmt)} | {money(vb, cb, fmt)} | - |")
+            continue
         delta = ("{:+.0%}" if key == "pass_rate" else "{:+,.2f}" if isinstance(va, float) else "{:+,}").format(vb - va)
         out.append(f"| {label} | {fmt.format(va)} | {fmt.format(vb)} | {delta} |")
     out += pattern_table(pa, pb, dict(tga, **tgb), ta, tb, mb)

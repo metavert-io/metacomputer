@@ -67,11 +67,25 @@ LIVE_VIEW = ("Open the live view: run `metacomputer view --open` on your Mac. Sc
 ACTION = ("Run `metacomputer view --open` (Screen Sharing; paste the live-view password with Cmd+V if it asks), "
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
 SPACES = re.compile(r"\s+")
+AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex"}
+
+
+def agent_word(rec):
+    """Who asked, for the user's messages: "Codex" for a handoff a Codex session opened, else "Claude"."""
+    return "Codex" if isinstance(rec, dict) and rec.get("agent") == "Codex" else "Claude"
+
+
+def at_terminal():
+    """The user's own terminal: standard input is a terminal and no agent session (Claude Code or Codex) is above this
+    process (owners.at_user_terminal). Codex can give its commands a pseudo-terminal, so a terminal alone isn't the
+    user: there, pressing Enter or `handoff done` would be the agent saying the user is done."""
+    return owners.at_user_terminal((0,))
 # The dialog (INTERACTIVE_PROMPTS=on). argv: mode ("show"; "compose" returns the text instead, for the tests), the
-# --say text, seconds until it gives up. The text is data: AppleScript never parses it.
+# --say text, seconds until it gives up, and who asks ("Claude" or "Codex"). The text is data: AppleScript never
+# parses it.
 DIALOG_SCRIPT = '''on run argv
-	set {mode, msg, secs} to {item 1 of argv, item 2 of argv, (item 3 of argv) as integer}
-	set txt to "Claude needs you: " & msg
+	set {mode, msg, secs, who} to {item 1 of argv, item 2 of argv, (item 3 of argv) as integer, item 4 of argv}
+	set txt to who & " needs you: " & msg
 	if mode is "compose" then return txt
 	set r to display dialog txt with title "metacomputer" buttons {"Later", "Open live view"} \u00ac
 		default button "Open live view" giving up after secs with icon caution
@@ -176,10 +190,11 @@ def emit_end(rec):
         import events
         s = rec["status"]
         took = owners.fmt_s(rec["ended"] - rec["opened"])
-        msg = {"done": f"The user handed the virtual computer back to Claude after {took} (handoff: {rec['why']})",
-               "cancelled": f"The handoff ({rec['why']}) was cancelled after {took}; Claude stops and asks how to go on",
+        w = agent_word(rec)
+        msg = {"done": f"The user handed the virtual computer back to {w} after {took} (handoff: {rec['why']})",
+               "cancelled": f"The handoff ({rec['why']}) was cancelled after {took}; {w} stops and asks how to go on",
                "timed_out": f"Nobody handed the virtual computer back within {took} (handoff: {rec['why']}); "
-                            "the handoff ended and Claude's actions are no longer paused"}[s]
+                            f"the handoff ended and {w}'s actions are no longer paused"}[s]
         events.emit("lifecycle", EVENT_TYPES[s], msg, "warn" if s == "timed_out" else "info",
                     data={"handoff_id": rec["id"], "why": rec["why"], "open_s": int(rec["ended"] - rec["opened"]),
                           "ended_from": rec.get("ended_from"), "has_note": bool(rec.get("note"))},
@@ -246,7 +261,7 @@ def report(rec, as_json, hid=None):
         out(f"handoff cancelled after {took}{who}: stop this step and ask the user how to go on. Don't try the "
             "check again yourself.")
     elif s == "timed_out":
-        out(f"handoff ended at its time limit ({took}) with no answer: Claude's actions are no longer paused. "
+        out(f"handoff ended at its time limit ({took}) with no answer: {agent_word(rec)}'s actions are no longer paused. "
             "Don't try the check yourself: tell the user it is still waiting for them, and ask how to go on "
             "(a new handoff when they're ready).")
     else:
@@ -258,13 +273,13 @@ def report(rec, as_json, hid=None):
 
 
 def instructions(rec, interactive):
-    out(f"metacomputer: handed the virtual computer to you ({rec['why']}). Claude's desktop actions are paused "
-        "until you hand it back.")
+    out(f"metacomputer: handed the virtual computer to you ({rec['why']}). {agent_word(rec)}'s desktop actions are "
+        "paused until you hand it back.")
     out("  What to do: " + termsafe.escape_for_terminal(rec["say"]))
     out("  1. " + LIVE_VIEW)
     out("     From another device: `metacomputer view` shows the SSH tunnel (`metacomputer view --tailnet`: your "
         "own tailnet).")
-    out("  2. When you're done: metacomputer handoff done   (add --note \"...\" for anything Claude should know)")
+    out(f"  2. When you're done: metacomputer handoff done   (add --note \"...\" for anything {agent_word(rec)} should know)")
     out("     To call it off:   metacomputer handoff cancel")
     if interactive:
         out("     Or here: press Enter when you're done; c and Enter, or Ctrl-C, calls it off.")
@@ -341,7 +356,7 @@ def announce(rec, interactive):
                 line = ("notified: " + "; ".join(f"{n} {s}" for n, s in rep)) if rep else \
                     "No event sink takes needs_you events, so nobody was pinged: say it in your reply."
         events.emit("lifecycle", "handoff_opened",
-                    f"Claude handed the virtual computer to you ({rec['why']}); its desktop actions are paused until "
+                    f"{agent_word(rec)} handed the virtual computer to you ({rec['why']}); its desktop actions are paused until "
                     f"you run `metacomputer handoff done` (or `cancel`), {owners.fmt_s(rec['timeout_s'])} at most",
                     data={"handoff_id": rec["id"], "why": rec["why"], "timeout_s": rec["timeout_s"]},
                     project=rec.get("cwd"), origin="cli")
@@ -352,7 +367,7 @@ def announce(rec, interactive):
 
 # --- the dialog (INTERACTIVE_PROMPTS=on) ------------------------------------------------------------
 def dialog_text(say):
-    """The --say text as the dialog shows it after "Claude needs you: ": cleaned (one line, no control characters)
+    """The --say text as the dialog shows it after "Claude needs you: " (or "Codex needs you: "): cleaned (one line, no control characters)
     and at most DIALOG_TEXT_MAX characters."""
     t = clean_text(say)
     return t if len(t) <= DIALOG_TEXT_MAX else t[:DIALOG_TEXT_MAX - 1] + "\N{HORIZONTAL ELLIPSIS}"
@@ -412,7 +427,7 @@ def run_dialog(hid):
         return 0
     secs = str(max(1, min(int(rec["deadline"] - time.time()), owners.HANDOFF_MAX_S)))
     try:
-        p = subprocess.Popen(["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs],
+        p = subprocess.Popen(["osascript", "-e", DIALOG_SCRIPT, "show", dialog_text(rec.get("say")), secs, agent_word(rec)],
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return 1
@@ -451,7 +466,7 @@ def cmd_open(a):
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
         err("the virtual computer is off, so there's nothing to hand over: `metacomputer start` first")
         return EXIT_ERROR
-    interactive = sys.stdin.isatty()
+    interactive = at_terminal()
     opened = {}
     with stoppable(interactive):
         try:
@@ -555,7 +570,8 @@ def open_and_wait(a, say, timeout, interactive, opened):
             now = time.time()
             rec = {"v": 1, "id": "h-" + secrets.token_hex(6), "status": "open", "why": a.why, "say": say,
                    "opened": now, "deadline": now + timeout, "timeout_s": int(timeout), "opener_pid": os.getpid(),
-                   "claude_pid": claude, "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
+                   "claude_pid": claude, "agent": owners.agent_kind(table.get(claude, (None, ""))[1]) if claude else None,
+                   "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
                    "ended": None, "ended_from": None, "note": None}
             opened["id"] = rec["id"]             # before the write: a signal during it still finds the record
             write_record(rec)
@@ -573,7 +589,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
     if told:
         out("  " + told)
     if not interactive:
-        out("  For Claude: tell the user the same in your reply, then wait for this command to end. Exit 0: they're "
+        out("  For you, the agent: tell the user the same in your reply, then wait for this command to end. Exit 0: they're "
             "done, read the screen again and carry on; 4: cancelled, stop and ask; 124: time limit, ask (don't "
             "try the check yourself).")
     return wait_for(rec["id"], interactive, a.json)
@@ -581,7 +597,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
 
 def cmd_end(a, to):
     note = clean_text(a.note) or None
-    interactive = sys.stdin.isatty()
+    interactive = at_terminal()
     settle()
     rec = owners.handoff_record()
     if rec is None or (rec["status"] != "open" and not rec.get("unreadable")) or (
@@ -592,10 +608,23 @@ def cmd_end(a, to):
     if rec.get("unreadable") and to == "done":
         err(owners.handoff_describe(rec) + "; nothing to hand back")
         return EXIT_ERROR
-    claude = owners.claude_of(os.getpid(), owners.ps_table())
+    try:
+        table = owners.ps_table(strict=True)
+        known = owners.ancestry_complete(os.getpid(), table)
+    except OSError:
+        table, known = {}, False
+    claude = owners.claude_of(os.getpid(), table) if table else None
     own_session = bool(claude) and claude == rec.get("claude_pid")
-    if to == "done" and own_session and not interactive:
-        err("this Claude Code session asked for the handoff, so it can't say the user is done. The user runs "
+    if to == "done" and not interactive and not known:
+        err("couldn't tell whether this runs inside an agent session (the process list couldn't be read all the way "
+            "up), so it can't say the user is done. The user runs `metacomputer handoff done` in their own terminal.")
+        return EXIT_REFUSED
+    if to == "done" and claude and not interactive:
+        # Any agent session, not only the one that asked: another Claude Code or Codex session (or one started from
+        # the session that asked) saying "done" would be an agent saying the user is done.
+        who = ("this " + (rec.get("agent") if rec.get("agent") in ("Claude Code", "Codex") else "Claude Code")
+               + " session asked for the handoff, so it" if own_session else "an agent session (Claude Code or Codex)")
+        err(f"{who} can't say the user is done. The user runs "
             "`metacomputer handoff done` in their own terminal (or presses Enter where `metacomputer handoff` "
             "waits at a terminal). Ask them; if they've changed their mind, `metacomputer handoff cancel` calls it off.")
         return EXIT_REFUSED
@@ -612,11 +641,11 @@ def cmd_end(a, to):
     if new["status"] == "gone":
         out("Removed the handoff record that couldn't be read; acting calls aren't paused for it any more.")
     elif new["status"] == "timed_out":
-        out("That handoff had already reached its time limit, so Claude's actions weren't paused any more.")
+        out(f"That handoff had already reached its time limit, so {agent_word(new)}'s actions weren't paused any more.")
     elif new["status"] == "done":
-        out("Handed the virtual computer back to Claude" + (" with your note." if note else "."))
+        out(f"Handed the virtual computer back to {agent_word(new)}" + (" with your note." if note else "."))
     else:
-        out("Cancelled the handoff: Claude stops this step and asks you how to go on.")
+        out(f"Cancelled the handoff: {agent_word(new)} stops this step and asks you how to go on.")
     return EXIT_DONE
 
 
@@ -636,7 +665,7 @@ def cmd_wait(a):
         return EXIT_ERROR
     if rec["status"] != "open":
         return report(rec, a.json)               # it ended while nobody waited: how
-    interactive = sys.stdin.isatty()
+    interactive = at_terminal()
     with stoppable(interactive):
         try:
             return wait_for(rec.get("id"), interactive, a.json)

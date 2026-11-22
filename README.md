@@ -2,13 +2,16 @@
 
 **Agentic coding plus a real desktop, with the controls you'd want around it.**
 
-metacomputer gives Claude Code a disposable Ubuntu computer of its own: a
-virtual machine on your Mac. Claude operates it the way a person would: it
+metacomputer gives your coding agent, Claude Code or Codex, a disposable Ubuntu
+computer of its own: a virtual machine on your Mac. The agent operates it the way a person would: it
 reads the screen through the accessibility tree, clicks and types, uses
 Firefox and Chrome, and records video of what it did. It also works in it the
 way a programmer would, with a shell, Python, LibreOffice, ImageMagick and
 ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
-network, and what Claude does there can be logged, limited and approved.
+network, and what the agent does there can be logged, limited and approved.
+
+Both agents get the same tools, skill and protections: Claude Code through its plugin, Codex through its MCP
+server, skills and sandbox rules ([docs/codex.md](docs/codex.md)). Install once and whichever you have is set up.
 
 https://github.com/user-attachments/assets/9465c66c-88fd-4e58-845e-a430c61ddf1a
 
@@ -22,14 +25,14 @@ curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.s
 ```
 
 That's the whole install. There's no VM for you to set up: the script builds
-it, installs the Claude Code plugin, and checks that everything works. On a Mac
+it, sets it up for Claude Code and Codex (whichever you have), and checks that everything works. On a Mac
 that already has Homebrew and Apple's Command Line Tools it takes about 5 minutes
 and asks you nothing; on a new Mac it offers to install those first.
 
 ## Try it
 
-Start a new Claude Code session (or restart the ones you have open, so they load
-the plugin), then ask:
+Start a new Claude Code or Codex session (restart open Claude Code sessions, so
+they load the plugin), then ask:
 
 > Get yourself a virtual computer and tell me what's on its screen.
 
@@ -40,7 +43,7 @@ the plugin), then ask:
 
 > Someone sent me this link: https://example.com. What does it do, and is it safe to open?
 
-Claude says which computer it's using before it acts, starts the VM if it isn't
+The agent says which computer it's using before it acts, starts the VM if it isn't
 running, checks its own results and tells you where the evidence is. To watch it
 work, `metacomputer view --open` opens the live desktop in Screen Sharing; say
 yes once and Screen Sharing remembers its password, so there's nothing to paste.
@@ -56,12 +59,12 @@ More ideas:
 3. It clones metacomputer into `~/metacomputer` and runs `./install.sh --yes`, which
    adds Go, GnuPG and ffmpeg from Homebrew if they're missing, builds the VM runner
    (mcomp-vm) and the secrets vault from source, writes this Mac's settings, installs
-   the Claude Code plugin, and builds the VM: about 1.5 GB of downloads (Ubuntu's
+   metacomputer for Claude Code and Codex (whichever is installed), and builds the VM: about 1.5 GB of downloads (Ubuntu's
    cloud image and packages, Cua Driver, the Go and Swift code the build needs),
    unattended provisioning, then a clean snapshot.
 4. It starts the VM, runs `metacomputer status` and a short self-test, and prints
    three prompts to try. The VM is left running; `metacomputer stop` stops it, and
-   Claude starts it again when it needs it.
+   your agent starts it again when it needs it.
 
 **What you click or answer.** On a Mac that already has Homebrew and Apple's
 Command Line Tools: nothing. On a new Mac, press Enter when get.sh offers to run
@@ -117,14 +120,14 @@ reaches the public internet and nothing of yours: not your Mac, your LAN or your
 tailnet. For a task that needs only a few sites, `metacomputer net allow
 example.com --for 2h` narrows it to those: the gateway on your Mac enforces it,
 and only you can widen it. Page text that's likely hidden from you, or that addresses AI agents, is
-marked in what Claude reads, so it can point it out to you; and at a CAPTCHA or a
-sign-in that's yours, Claude hands you the computer and waits. A signed log of
+marked in what the agent reads, so it can point it out to you; and at a CAPTCHA or a
+sign-in that's yours, the agent hands you the computer and waits. A signed log of
 every action, a restricted mode that holds Cua Driver to the apps and sites you
 list, and recordings saved on your Mac as they're made are there when you want
 them ([Security in brief](#security-in-brief)).
 
-**Key management: Claude signs in without seeing your passwords.** The vault on
-your Mac types a password or the current 2FA code into the page and tells Claude
+**Key management: your agent signs in without seeing your passwords.** The vault on
+your Mac types a password or the current 2FA code into the page and tells the agent
 only the outcome, and API keys go through a proxy on your Mac, so they never enter
 the VM, not even for Claude Code running inside it. Uses can wait for your
 approval, by Touch ID where the Mac has it, and each one lands in an audit trail
@@ -138,8 +141,8 @@ Finder), folders can stay in step with an S3 bucket, and reference disks give an
 number of VMs the same read-only files. Nothing is attached until you list it
 ([docs/storage.md](docs/storage.md)).
 
-**Self-sovereign: no cloud services that you need.** Beyond Claude Code itself,
-which is Anthropic's service, and the install's downloads from GitHub, Ubuntu and
+**Self-sovereign: no cloud services that you need.** Beyond your coding agent itself,
+(Anthropic's or OpenAI's service), and the install's downloads from GitHub, Ubuntu and
 the projects it builds on, it needs nothing else in the cloud: no account, no
 subscription. It's the self-hosted way to run Cua's open-source stack (Lume, Cua
 Driver, the cua-netgw gateway), at pinned versions you can fork. Your keys stay on your Mac,
@@ -154,7 +157,7 @@ and GUI apps and signed-in sites to the screen ([docs/shell.md](docs/shell.md)).
 The hub and the benchmark follow the same study.
 
 **`metacomputer learn`: it learns your apps without being told.** It reads
-Claude's own past sessions, finds where it stumbled (refused calls, pixel clicks
+your agent's own past sessions (Claude Code's and Codex's), finds where it stumbled (refused calls, pixel clicks
 without a fresh screenshot, repeated mistakes, the apps where the time went) and
 proposes short lessons with the evidence. You approve the ones you want, and every
 new session starts with them, as part of the instructions sent to the model: you
@@ -184,7 +187,7 @@ were run again ([records](bench/runs/)).
 Ask in plain words. "A computer", "your computer", a real browser or a GUI app
 means the VM; "my screen", "my Mac" or "my Chrome" means yours, and the VM never
 stands in for it. Code, files on your Mac and pages a plain fetch can read stay
-with Claude Code's normal tools.
+with your agent's normal tools.
 
 **On the desktop**
 - **Desktop apps:** LibreOffice Writer and Calc, a calculator, a file manager, a
@@ -210,7 +213,7 @@ with Claude Code's normal tools.
 - **3D pages, honestly:** the browsers render on a real display, so what a canvas
   draws is what you'd see; but the VM has no GPU, so WebGL and WebGPU run in
   software: they work, slowly, and say nothing about frame rates on real hardware.
-- **From a session to a test:** `metacomputer trace` records Claude's browser steps
+- **From a session to a test:** `metacomputer trace` records the agent's browser steps
   and `trace export` writes them as a Playwright test you can run in CI without a
   model.
 - **Your own web app:** its static build served on the VM's localhost and clicked
@@ -229,7 +232,7 @@ with Claude Code's normal tools.
   a long job renews its token (`secrets token renew`) instead of getting a new one.
 - **Claude inside the metacomputer:** `metacomputer claude` installs and starts
   Claude Code in the VM, signed in through that proxy (your subscription token or
-  API key stays on the Mac), and Claude drives it with `send` and `read`; `--show`
+  API key stays on the Mac), and your agent drives it with `send` and `read`; `--show`
   puts it on the VM's desktop for the live view and recordings.
 - **Storage:** disk volumes, shared Mac folders, S3-backed folders and reference
   disks.
@@ -247,11 +250,11 @@ with Claude Code's normal tools.
   keychain; otherwise it's on your clipboard; `view` over SSH shows the tunnel
   from another device), `inspect`, checkpoints and `reset`.
 - **Handing it to you:** at a CAPTCHA or bot check, or a sign-in or 2FA prompt
-  that's yours to do, Claude runs `metacomputer handoff` instead of trying to get
+  that's yours to do, the agent runs `metacomputer handoff` instead of trying to get
   past it. You get a notice (and, if you turn on `INTERACTIVE_PROMPTS`, a dialog
   on the Mac with an Open live view button), do that step in the live view and
-  run `metacomputer handoff done`; Claude's actions wait until then.
-- **Notifications and events:** `metacomputer notify` when Claude is blocked on
+  run `metacomputer handoff done`; the agent's actions wait until then.
+- **Notifications and events:** `metacomputer notify` when the agent is blocked on
   you, and events to your phone (ntfy), Slack, an OpenTelemetry Collector or a
   SIEM, once you add a sink. The first blocked connection after a quiet spell
   reaches them within seconds.
@@ -271,7 +274,7 @@ behind it.
 
 ## Worked examples
 
-Each one shows what you ask, what Claude does, and what you get back.
+Each one shows what you ask, what the agent does, and what you get back.
 
 <details open>
 <summary><b>A spreadsheet with a chart</b></summary>
@@ -279,7 +282,7 @@ Each one shows what you ask, what Claude does, and what you get back.
 **You ask:** "Here's sales.csv. Build a Calc workbook with totals by region and a
 column chart, and save it as sales.ods and sales.xlsx."
 
-**Claude:**
+**The agent:**
 1. Says it's using the virtual computer, checks that no other session is using
    it (`metacomputer who`), and starts it if it's off.
 2. Copies the file in with `metacomputer put sales.csv` (it lands in `~/Inbox`).
@@ -299,27 +302,27 @@ checked.
 <details>
 <summary><b>Signing in with a saved password and a 2FA code</b></summary>
 
-**Once, in your own terminal** (Claude can't run these, and never asks for a
+**Once, in your own terminal** (your agent can't run these, and never asks for a
 password or code in the chat):
 
 ```bash
 metacomputer secrets set demo --kind password --origin https://dashboard.example.com --username you@example.com --approval each
 metacomputer secrets set demo-otp --kind totp --origin https://dashboard.example.com   # the 2FA seed
 metacomputer secrets bind                 # pin the VM: check its fingerprint, type yes
-metacomputer secrets unlock --for 1h      # keep this terminal open while Claude works
+metacomputer secrets unlock --for 1h      # keep this terminal open while the agent works
 ```
 
 **You ask:** "Sign in to dashboard.example.com with my `demo` login and its 2FA
 code, then download this month's report."
 
-**Claude:**
+**The agent:**
 1. Lists what's stored (`metacomputer secrets list`: names, sites and usernames,
    never values).
 2. Opens the sign-in page in page-mode Chrome and finds the two fields.
 3. Runs `metacomputer secrets login demo --username-selector '#email'
    --password-selector '#password'`. The vault checks, from the browser's own
    view, that the page is on the login's site and each field is the right kind,
-   then types both values through a locked account in the VM. Claude gets back
+   then types both values through a locked account in the VM. The agent gets back
    the fields filled, a masked username and the character counts.
 4. Because the login asks first (`--approval each`; imported logins do too), your
    unlock terminal shows the request and who asked, and on a Mac with Touch ID you
@@ -350,7 +353,7 @@ metacomputer secrets unlock --for 2h
 **You ask:** "Give me Claude inside the metacomputer, show it on the desktop, and have
 it write and test a small CSV parser in its own folder."
 
-**Claude:**
+**The agent:**
 1. Runs `metacomputer claude --token claude-sub --show`. That installs Claude Code in
    the VM if it's missing, gets a 1-hour token from the vault, sets Claude Code's
    first-run choices, and starts it in tmux, in a terminal on the VM's desktop. The
@@ -379,7 +382,7 @@ api.anthropic.com, and only until it was revoked.
 date, invoice number and total out of every PDF into a spreadsheet, and put it in
 a folder I can open in Finder."
 
-**Claude** (storage changes only because you asked for them):
+**The agent** (storage changes only because you asked for them):
 1. Runs `metacomputer volume create invoices --folder ~/work/invoices` (read-only)
    and `metacomputer volume create handoff --folder ~/vm-handoff.noindex` (a
    read-write folder needs `.noindex` in its path, which keeps Spotlight out).
@@ -403,7 +406,7 @@ writes there. Your invoices folder was never writable from the VM.
 **You ask:** "Does our pricing page look the same in Firefox and Chrome? Check it
 at phone width too, and run an accessibility check."
 
-**Claude:**
+**The agent:**
 1. Runs `metacomputer web compare https://example.com/pricing`: the page in both
    browsers side by side, with differences in title, headings, links, controls
    and text.
@@ -426,14 +429,14 @@ difference images. These checks need no model, so you can run them yourself too.
 **You ask:** "Someone sent me this link: https://example.com/invoice. What does it
 do, and is it safe to open?"
 
-**Claude:**
+**The agent:**
 1. Runs `metacomputer web open-untrusted https://example.com/invoice`. Inside the
    VM, `curl` follows the server's redirects.
 2. The link then opens in a throwaway Chrome profile, watched for in-page
    redirects, new tabs and the final page. Nothing on the page is clicked or
    typed into.
 3. The report notes any password fields (a sign the page wants your credentials)
-   and any downloads it started, which stay in the VM. Claude treats all of it as
+   and any downloads it started, which stay in the VM. The agent treats all of it as
    untrusted data, never as instructions.
 
 **You get:** where the link really goes, a screenshot of the final page, and
@@ -449,7 +452,7 @@ security event. Your Mac never opened the link.
 **You ask:** "Record yourself filling in the sign-up form on our staging site in
 Chrome, with the typing visible, so I can attach it to the issue."
 
-**Claude:**
+**The agent:**
 1. Runs `metacomputer task start signup-demo`, which makes a task folder in the VM
    and one on your Mac.
 2. Starts Cua Driver's recorder into that folder before the first action.
@@ -477,7 +480,7 @@ seconds, and the newest step and the video at `task finish`.
 <summary><b>A game studio: STARBREAK, with art, sound and a trailer made in the VM's apps</b></summary>
 
 **Once:** add the apps and a sound card in `config/local.env`, then rebuild the VM
-with `metacomputer build --replace` (it replaces everything in the VM, so Claude
+with `metacomputer build --replace` (it replaces everything in the VM, so the agent
 runs it only with your OK):
 
 ```bash
@@ -490,7 +493,7 @@ shooter called STARBREAK in Python with pygame. Draw the ships and the planet in
 Inkscape, make the sound effects and level them in Audacity, balance the waves in
 a Calc sheet, playtest it, and cut a short trailer in Kdenlive. Record all of it."
 
-**Claude:**
+**The agent:**
 1. Writes the game's code on your Mac with its normal tools, and copies it into
    the VM.
 2. **Art:** draws the ships, hazards and a ringed planet in Inkscape, with real
@@ -500,7 +503,7 @@ a Calc sheet, playtest it, and cut a short trailer in Kdenlive. Record all of it
    fades and levels them in Audacity. It can't hear, so it judges the sound from
    the waveform.
 4. **Balance:** an autopilot plays many games headless through `metacomputer sh`;
-   the numbers per wave go into a Calc sheet with a chart, and Claude tunes the
+   the numbers per wave go into a Calc sheet with a chart, and the agent tunes the
    waves table until its goals hold.
 5. **Playtest:** plays the game on the desktop from screenshots and key presses
    (a pygame window isn't in the accessibility tree), notes what's wrong, and
@@ -537,8 +540,8 @@ fifty, from office work and games to research and teaching it a new app.
 
 ```text
 Your Mac                                                         The VM: Ubuntu 24.04, XFCE
-Claude Code
- └─ the metacomputer plugin: the skill + MCP tools
+Claude Code or Codex
+ └─ metacomputer's skill + MCP tools (the plugin; for Codex, its config)
      └─ the hub: one per VM, every guard ───────────── SSH ──▶ Cua Driver ──▶ the desktop's apps
  metacomputer sh ───────────────────────────────────── SSH ──▶ bash, as the desktop user
  the secrets vault, unlocked in your terminal ──────── SSH ──▶ locked fill and proxy accounts
@@ -547,14 +550,14 @@ Claude Code
  mcomp-vm: runs the VM on Apple's Virtualization framework
 ```
 
-The plugin gives Claude Code the `metacomputer` skill, which says when a task
+Install gives your agent the `metacomputer` skill (Claude Code's plugin; Codex's skills folder), which says when a task
 belongs on the VM and how to drive this desktop, and an MCP server whose tools
 are Cua Driver's, running inside the VM. Every call goes through the hub, which
 holds the only connection to the driver and applies the same guards to Claude
-Code, `metacomputer call` and scripts. Files go over the shell channel, and
+Code, Codex, `metacomputer call` and scripts. Files go over the shell channel, and
 sign-ins and API keys through the vault. Each part exists on its own, mostly from
 Cua; metacomputer builds them from pinned, verified sources with one command and
-teaches Claude this particular desktop. [architecture.md](architecture.md) has
+teaches the agent this particular desktop. [architecture.md](architecture.md) has
 the design, and [docs/commands.md](docs/commands.md#the-claude-code-plugin) the
 plugin's tool names and updates.
 
@@ -578,13 +581,13 @@ through the vault rather than the chat.
 - **The VM is treated as hostile.** What comes back is bounded and checked, files
   arrive as plain files, and its text is escaped before your terminal shows it.
 - **Every guard on every path.** One session at a time, real input for Chrome, and
-  bounded mode's limits, for Claude Code, `metacomputer call` and scripts alike.
+  bounded mode's limits, for Claude Code, Codex, `metacomputer call` and scripts alike.
   The coordinate guard refuses a pixel click after certain window-layout changes
   since its screenshot (the window resized, or covered by a dialog or another
   app); it compares window geometry, not content. A refusal is reported to you,
   never worked around.
 - **Hidden text marked.** Page text a person likely can't see (tiny, off the page,
-  no size on screen) or that addresses AI agents is marked in what Claude reads,
+  no size on screen) or that addresses AI agents is marked in what the agent reads,
   so it tells you about it; a label, not a filter: colour and opacity aren't
   detected ([SECURITY.md](SECURITY.md#hidden-page-text)).
 
@@ -629,13 +632,14 @@ detail.
 - Homebrew and Apple's Command Line Tools; the install offers both when they're missing.
 - Python 3.11 or later on the Mac. Apple's own `python3` is 3.9, so where that's the only one, the install
   adds Homebrew's.
-- [Claude Code](https://claude.com/claude-code), for the plugin.
+- A coding agent: [Claude Code](https://claude.com/claude-code) (the plugin) or
+  [Codex](https://github.com/openai/codex) ([docs/codex.md](docs/codex.md)), or both.
 - Optional: Google Chrome in the VM, which means accepting
   [Google's terms](https://www.google.com/chrome/terms/).
 
 ## Everyday commands
 
-`metacomputer` (alias `mcomp`, in `~/.local/bin`). Claude runs these for you;
+`metacomputer` (alias `mcomp`, in `~/.local/bin`). Your agent runs these for you;
 they're here for when you want to yourself.
 
 | Command | What it does |
@@ -643,7 +647,7 @@ they're here for when you want to yourself.
 | `start`, `stop`, `status` | Boot the VM (about 12 s), shut it down, check every layer |
 | `who`, `release` | Which session is using the VM; hand it over |
 | `view [--open]` | Watch or take over the live desktop (`--open`: Screen Sharing, with the password it remembers, or on the clipboard) |
-| `handoff done`, `handoff cancel` | Hand the computer back to Claude after a step it handed you, or call it off |
+| `handoff done`, `handoff cancel` | Hand the computer back to the agent after a step it handed you, or call it off |
 | `sh -c 'CMD'`, `put FILE`, `get PATH` | Bash in the VM; copy files in and out |
 | `web compare\|responsive\|a11y\|open-untrusted\|debug\|read\|gpu URL` | Browser checks that need no model |
 | `web page open URL \| read \| fill REF VALUE \| click REF \| close` | Precise page tools in a Firefox of their own |
@@ -656,12 +660,12 @@ they're here for when you want to yourself.
 | `secrets unlock`, `secrets list` | Unlock the vault, in your own terminal; what it holds, never values |
 | `claude --token NAME`, `claude send\|read\|stop` | Claude Code inside the VM, signed in through the vault's proxy |
 | `security`, `actions verify` | The optional hardening; check the signed action log |
-| `events status`, `notify "TEXT"` | The event stream; tell your sinks Claude is blocked |
+| `events status`, `notify "TEXT"` | The event stream; tell your sinks the agent is blocked |
 | `learn report\|review\|list` | Lessons from your own sessions |
 | `test`, `help` | Six recorded GUI checks; every command |
 
 `reset`, `restore`, `baseline` and deleting a checkpoint ask first, `vm delete`
-wants the VM's name typed, and Claude runs them only with your OK. [docs/commands.md](docs/commands.md) has every
+wants the VM's name typed, and the agent runs them only with your OK. [docs/commands.md](docs/commands.md) has every
 command and option.
 
 ## Configuration
@@ -676,7 +680,7 @@ The settings people change most:
 | `VOLUMES`, `REFDISKS` | Storage to attach (next start) |
 | `RECORD_QUALITY`, `RECORD_TO`, `RECORD_DIR` | Desktop recordings |
 | `ACTION_LOG`, `DRIVER_MODE`, `SSH_AUTH` | The optional hardening |
-| `BROWSER`, `MODE` | The browser and mode Claude starts with (`metacomputer browser` sets them) |
+| `BROWSER`, `MODE` | The browser and mode the agent starts with (`metacomputer browser` sets them) |
 
 Event sinks and the vault keep their own settings and change only from your
 terminal. [docs/commands.md](docs/commands.md#configuration) lists every setting.
@@ -707,11 +711,12 @@ unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 | --- | --- |
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the logs; `metacomputer restart` stops the VM and starts it again. |
 | A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `plugin:metacomputer:metacomputer`, or restart Claude Code. `./install.sh --only-claude` sets it up again. |
+| A Codex session has no metacomputer tools, or a `metacomputer` command exits 77 | `./install.sh --only-codex`, then a new Codex session ([docs/codex.md](docs/codex.md#if-something-doesnt-work)). |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
-| "Paused: the user has the computer" | Claude handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
+| "Paused: the user has the computer" | Your agent handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
 | Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` brings the one Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard instead (paste with Cmd+V). |
-| A site's "Verify you are human" check keeps failing | Sites with bot checks may refuse the VM's automated browser, even when you tick the box yourself: page-mode Chrome is driven through DevTools, which they detect. metacomputer doesn't disguise it, and Claude hands such checks to you rather than trying to get past them. If one keeps failing, do that step on your own computer. |
-| A sign-in looks different from usual (no code box, "check your email" but nothing arrives) | The site has likely flagged an automated browser: page-mode Chrome is driven through DevTools. Account pages start in human mode (the VM's Firefox, real clicks and keys); when a flow looks degraded anyway, Claude switches to human mode and tries once more. |
+| A site's "Verify you are human" check keeps failing | Sites with bot checks may refuse the VM's automated browser, even when you tick the box yourself: page-mode Chrome is driven through DevTools, which they detect. metacomputer doesn't disguise it, and the agent hands such checks to you rather than trying to get past them. If one keeps failing, do that step on your own computer. |
+| A sign-in looks different from usual (no code box, "check your email" but nothing arrives) | The site has likely flagged an automated browser: page-mode Chrome is driven through DevTools. Account pages start in human mode (the VM's Firefox, real clicks and keys); when a flow looks degraded anyway, the agent switches to human mode and tries once more. |
 | Chrome ignores typing | `metacomputer input-reset`. |
 | The vault says it's locked | Run `metacomputer secrets unlock` in your own terminal, and keep it open. |
 | The install stops | Fix what it names and run it again; finished steps are skipped and it never deletes a VM. |
@@ -726,7 +731,8 @@ The guide has [the full table](docs/guide.md#troubleshooting) and
 metacomputer update          # --check: only say what's new
 ```
 
-It moves your checkout to the latest release, rebuilds only what changed, restarts
+It moves your checkout to the latest release, sets metacomputer up for each agent installed (Claude Code, Codex,
+including one you installed since; `--no-claude` / `--no-codex` at install keep one out), rebuilds only what changed, restarts
 what runs older code (it asks before restarting a VM) and tells you what's left:
 a `secrets bind` when the gateway changed, or what a VM rebuild would add
 (`metacomputer build --replace`, when you're ready; it never rebuilds on its own).
@@ -737,7 +743,7 @@ updates with `claude plugin update metacomputer@metacomputer`.
 
 ```bash
 metacomputer stop
-~/metacomputer/install.sh --uninstall   # the command, the plugin and the vault program
+~/metacomputer/install.sh --uninstall   # the command, the plugin, Codex's setup and the vault program
 ```
 
 It then prints the commands that remove the VM and its keys. Your vault, event
@@ -747,7 +753,7 @@ sinks and volumes stay until you delete them
 ## Documentation
 
 - [docs/install.md](docs/install.md): installing, options, what goes where, updating, uninstalling.
-- [docs/guide.md](docs/guide.md): what to ask Claude Code, task by task, with the commands; the prompt gallery; isolation in detail; known limitations; troubleshooting.
+- [docs/guide.md](docs/guide.md): what to ask your agent, task by task, with the commands; the prompt gallery; isolation in detail; known limitations; troubleshooting.
 - [docs/commands.md](docs/commands.md): every command and setting, and the plugin.
 - [SECURITY.md](SECURITY.md): every control, what it protects against, where it ends, the vault in full, and how to report a vulnerability.
 - [architecture.md](architecture.md): the design, pinned versions, the hub, the network, recording and the event spool.
@@ -755,6 +761,7 @@ sinks and volumes stay until you delete them
 - [docs/shell.md](docs/shell.md): `metacomputer sh` and how it treats the VM.
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
 - [docs/learn.md](docs/learn.md): lessons from your own sessions.
+- [docs/codex.md](docs/codex.md): using it from Codex: setup, its sandbox and the rules, and where it differs.
 - [docs/moving-from-spaces.md](docs/moving-from-spaces.md): coming from Cua Spaces' Keyvault.
 - [bench/README.md](bench/README.md): the benchmark, with each cited run's records in [bench/runs/](bench/runs/).
 - [TESTING.md](TESTING.md): every test and how to run it.
@@ -768,7 +775,7 @@ Issues and pull requests are welcome. Before you change code:
 - Read [architecture.md](architecture.md) and [CLAUDE.md](CLAUDE.md), which describes the repository's conventions.
 - Settings belong in `config/defaults.env` and `config/local.env`. Don't hard-code a machine's names, paths or hosts.
 - The optional hardening stays off by default, so metacomputer behaves like Cua Driver out of the box.
-- Run the tests in [TESTING.md](TESTING.md) that cover your change, and `scripts/check-public.sh -a`, which checks the tree and history for anything personal. For a change to how Claude works the desktop, the benchmark shows whether it helps.
+- Run the tests in [TESTING.md](TESTING.md) that cover your change, and `scripts/check-public.sh -a`, which checks the tree and history for anything personal. For a change to how the agent works the desktop, the benchmark shows whether it helps.
 
 Report security problems privately, as [SECURITY.md](SECURITY.md#reporting-a-vulnerability)
 describes. Bugs in Cua Driver or Lume themselves belong upstream at

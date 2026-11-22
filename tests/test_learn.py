@@ -28,7 +28,7 @@ STORE = os.path.join(TD, "store")
 CONF = os.path.join(TD, "claude")
 REAL_STORE = os.path.join(os.path.expanduser("~"), ".local", "share", "metacomputer", "lessons")
 REAL_STORE_EXISTED = os.path.exists(REAL_STORE)
-os.environ.update(CLAUDE_CONFIG_DIR=CONF, MCOMP_LESSONS_DIR=STORE, MCOMP_LESSONS="on",
+os.environ.update(CLAUDE_CONFIG_DIR=CONF, CODEX_HOME=os.path.join(TD, "codex"), MCOMP_LESSONS_DIR=STORE, MCOMP_LESSONS="on",
                   MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
                   MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_RUN_DIR=os.path.join(TD, "run"),
                   BENCH_RESULTS=os.path.join(TD, "bench"), MCOMP_VM_NAME="learntest",
@@ -44,6 +44,8 @@ sys.path.insert(0, os.path.join(LAB, "bench"))
 import learn  # noqa: E402
 import learn_mine  # noqa: E402
 import learn_store  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import userterm  # noqa: E402
 import mcp_hub  # noqa: E402
 import transcripts  # noqa: E402
 
@@ -189,7 +191,8 @@ def run_tty(args, typed, env=None, timeout=60):
     e = dict(os.environ, MCOMP_CONFIG=CONFIG)
     e.update(env or {})
     master, slave = pty.openpty()
-    p = subprocess.Popen([CLI, *args], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e)
+    # as the user at their own terminal: no agent session running this test is above it (tests/userterm.py)
+    p = userterm.spawn([CLI, *args], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e)
     os.close(slave)
     os.write(master, typed.encode())
     try:
@@ -204,6 +207,67 @@ def local_events():
         return [json.loads(x) for x in open(os.path.join(TD, "logs", "events.jsonl"))]
     except OSError:
         return []
+
+
+def codex_rollout(sid, cwd, t0, calls):
+    """A Codex session file (rollout-*.jsonl): session_meta, the user's message, then each call as an item_completed
+    event: an McpToolCall (server, tool, arguments, result with isError), or a CommandExecution for tool None."""
+    out = [{"timestamp": _iso(t0), "type": "session_meta",
+            "payload": {"id": sid, "cwd": cwd, "originator": "codex_exec", "cli_version": "0.167.0"}},
+           {"timestamp": _iso(t0), "type": "event_msg", "payload": {
+               "type": "item_completed", "started_at_ms": int(t0 * 1000), "completed_at_ms": int(t0 * 1000),
+               "item": {"type": "UserMessage", "id": "u1", "content": [{"type": "text", "text": "Do the task. " + INJECT}]}}}]
+    t = t0
+    for i, (server, tool, inp, text, err) in enumerate(calls):
+        t += 2
+        if tool is None:
+            item = {"type": "CommandExecution", "id": f"exec-c{i}", "command": ["/bin/zsh", "-lc", inp],
+                    "exit_code": 1 if err else 0, "status": "failed" if err else "completed", "aggregated_output": text}
+        else:
+            item = {"type": "McpToolCall", "id": f"exec-m{i}", "server": server, "tool": tool, "arguments": inp,
+                    "status": "completed", "result": {"content": [{"type": "text", "text": text}], "isError": err}}
+        out.append({"timestamp": _iso(t + 0.5), "type": "event_msg", "payload": {
+            "type": "item_completed", "started_at_ms": int(t * 1000), "completed_at_ms": int((t + 0.5) * 1000),
+            "item": item}})
+    return out
+
+
+def test_codex_sessions():
+    print("Codex sessions ($CODEX_HOME/sessions)")
+    home, conf = os.path.join(TD, "codex2"), os.path.join(TD, "claude-empty")
+    os.makedirs(conf, exist_ok=True)
+    now = time.time()
+    proj = os.path.join(TD, "codexproj")
+    os.makedirs(proj, exist_ok=True)
+    day = time.strftime("%Y/%m/%d", time.localtime(now - 1200))
+    write_jsonl(os.path.join(home, "sessions", day, "rollout-x-eeee5555-session.jsonl"), codex_rollout(
+        "eeee5555-session", proj, now - 1200, [
+            ("metacomputer", "list_windows", {}, LW, False),
+            ("metacomputer", "click", {"pid": 50, "window_id": 11, "x": 10, "y": 10}, NOFRAME, True),
+            ("metacomputer", "click", {"pid": 50, "window_id": 11, "x": 10, "y": 10}, NOFRAME, True),
+            ("other_server", "click", {}, INJECT, True),
+            (None, None, "~/.local/bin/metacomputer sh -c 'ls ~/Documents'", INJECT, False),
+            ("metacomputer", "not_a_driver_tool_" + "x" * 5, {"note": INJECT}, INJECT, True)]))
+    # a Codex session that never called metacomputer (Jon's reviews, say): only scanned for the marker
+    write_jsonl(os.path.join(home, "sessions", day, "rollout-y-ffff6666-session.jsonl"), codex_rollout(
+        "ffff6666-session", proj, now - 900, [(None, None, "git status", INJECT, False)]))
+    env = dict(os.environ, CODEX_HOME=home, CLAUDE_CONFIG_DIR=conf)
+    rep = learn_mine.mine(env, since="7d", log_dirs=[], bench_dirs=[])
+    check("a Codex session with metacomputer calls is mined, one without is left out",
+          rep["sessions"] == 1 and rep["sources"].get("codex_sessions") == 1 and rep["sources"]["claude_code_sessions"] == 0,
+          rep["sources"])
+    check("its calls count like Claude Code's: driver calls, the no-frame class, another server's call left out",
+          rep["driver_calls"] == 4 and rep["failures_by_tool"].get("click:no_frame") == 2
+          and rep["failed_calls"] == 3, (rep["driver_calls"], rep["failures_by_tool"], rep["failed_calls"]))
+    check("...and a made-up tool name is counted as unknown_tool, never kept as text",
+          any(k.startswith("unknown_tool:") for k in rep["failures_by_tool"]), rep["failures_by_tool"])
+    check("--project: the session's folder (from its session_meta) decides",
+          learn_mine.mine(env, since="7d", project=proj, log_dirs=[], bench_dirs=[])["sessions"] == 1
+          and learn_mine.mine(env, since="7d", project=os.path.join(TD, "projB"), log_dirs=[], bench_dirs=[])["sessions"] == 0)
+    props = learn.build_proposals(rep, min_count=2)
+    check("proposals from a Codex session hold no text from it (no injection)",
+          props and not clean_of_injection(json.dumps(props)) and not clean_of_injection(json.dumps(rep)),
+          (clean_of_injection(json.dumps(props)), clean_of_injection(json.dumps(rep))))
 
 
 # --- checks --------------------------------------------------------------------------------------
@@ -632,6 +696,20 @@ def lessons_set_checks():
           "Lessons the with-run's sessions got: no-frame, check-text; tasks whose targets they answer: ff-seat-map" in out, out)
     s = report.write_summary(a)
     check("a run's summary lists the failure patterns", "Failure patterns" in open(s).read() and "ff-seat-map" in open(s).read())
+    cx = a + "-codex"                      # the same run as Codex made it: tokens, never a cost
+    shutil.copytree(a, cx)
+    m = json.load(open(os.path.join(cx, "run.json")))
+    m["switches"]["agent"] = "codex"
+    m["agent_version"] = "codex-cli 0.167.0"
+    m["claude_code"] = "2.1.325 (Claude Code)"     # what runs before the fix recorded: never shown for Codex
+    json.dump(m, open(os.path.join(cx, "run.json"), "w"))
+    md = open(report.write_summary(cx)).read()
+    check("a Codex run's summary: its own version, cost n/a (not 0.00), and no budget, cap or dollars spent",
+          "codex-cli 0.167.0" in md and "Claude Code" not in md and "Codex reports tokens, not a cost" in md
+          and "spent $" not in md and "cost n/a" in md and "| 0.00 |" not in md, md[:900])
+    md = open(report.write_compare(a, cx)).read()
+    check("…and compared with a Claude run, Codex's cost cells read n/a with no difference taken",
+          re.search(r"\| total cost \$ \| [0-9.]+ \| n/a \| - \|", md) and " / n/a |" in md, md[-1500:])
     pub = report.public_summary(b)
     blob = json.dumps(pub)
     check("the public summary (bench/runs/) has the patterns and targets but no costs or paths",
@@ -803,7 +881,7 @@ def review_binding_check(shot):
     first = json.load(open(pp))["pending"][0]["id"]
     e = dict(os.environ, MCOMP_CONFIG=CONFIG, **e3)
     master, slave = pty.openpty()
-    p = subprocess.Popen([CLI, "learn", "review"], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e)
+    p = userterm.spawn([CLI, "learn", "review"], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e)
     os.close(slave)
     buf, end = b"", time.time() + 60
     while b"[a]pprove" not in buf and time.time() < end:
@@ -904,6 +982,9 @@ def budget_checks():
     check("charge(): no cost reported after a session ran = its budget; a reported cost = that cost; no session = 0",
           bench.charge(ran) == 3.0 and bench.charge({"session": {"budget_usd": 3}, "metrics": {"cost_usd": 0.42}}) == 0.42
           and bench.charge({"session": {}, "metrics": {}}) == 0.0)
+    check("…a Codex task (no dollar budget: it reports tokens) counts nothing against the cap",
+          bench.charge({"agent": "codex", "budget_usd": 0.0, "session": {"wall_s": 90, "budget_usd": None},
+                        "metrics": {"cost_usd": None}}) == 0.0)
     recs = [dict(ran, task="a", started="2026-11-18T10:00:00", reservation="r-a")]
     meta = {"reservations": [{"id": "r-a", "task": "a", "usd": 3.0, "at": "2026-11-18T10:00:00"},
                              {"id": "r-b", "task": "b", "usd": 2.0, "at": "2026-11-18T10:05:00"}]}
@@ -1117,6 +1198,7 @@ def main():
         shot = build_world()
         test_classes()
         rep = test_mining(shot)
+        test_codex_sessions()
         test_approval_flow.rep = rep
         test_proposals_and_injection(rep, shot)
         test_drafts(shot)

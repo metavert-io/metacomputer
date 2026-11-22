@@ -343,9 +343,12 @@ def require_sealed():
 
 
 def is_tty():
+    """The user's own terminal: stdin is a terminal and no agent session (Claude Code or Codex) is above this
+    process (owners.at_user_terminal; Codex can give its commands a pseudo-terminal)."""
     try:
-        return sys.stdin.isatty()
-    except (AttributeError, ValueError):
+        import owners
+        return owners.at_user_terminal((0,))
+    except (ImportError, AttributeError, ValueError):
         return False
 
 
@@ -353,7 +356,7 @@ def require_terminal(what):
     """The vault's bar for user-only commands: standard input must be a terminal. Friction, not a lock:
     a program running as you can open a pseudo-terminal (SECURITY.md, "Lessons")."""
     if not is_tty():
-        die(f"{what} needs your own terminal: run it yourself in Terminal (not through Claude, a script or a pipe). "
+        die(f"{what} needs your own terminal: run it yourself in Terminal (not through Claude Code, Codex, a script or a pipe). "
             "Free text goes into every later session's instructions, so only you write it.")
 
 
@@ -447,7 +450,8 @@ def print_report(rep, out=sys.stdout):
     src = rep["sources"]
     p(f"Sessions with the metacomputer tools: {rep['sessions']} ({_window(rep)}; since {esc(rep['since'])}"
       + (f"; project {esc(rep['project'])}" if rep.get("project") else "") + ")")
-    p(f"  sources: {src['claude_code_sessions']} Claude Code sessions, {src['headless_transcripts']} headless transcripts, "
+    p(f"  sources: {src['claude_code_sessions']} Claude Code sessions, {src.get('codex_sessions', 0)} Codex sessions, "
+      f"{src['headless_transcripts']} headless transcripts, "
       f"{src['benchmark_sessions']} benchmark sessions ({src['scanned_files']} recent transcript files looked at, "
       f"{src['duplicates_skipped']} duplicate copies skipped"
       + (f", {src['unreadable']} unreadable" if src.get("unreadable") else "")

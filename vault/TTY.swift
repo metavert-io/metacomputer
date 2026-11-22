@@ -18,9 +18,39 @@ nonisolated(unsafe) var waitHook: (() -> Void)? = nil
 nonisolated(unsafe) var savedTermios = termios()
 nonisolated(unsafe) var termiosSaved: Int32 = 0
 
+/// The user's own terminal: stdin is a terminal and no agent session (Claude Code or Codex) is above this process.
+/// Codex's command tool can give a command a pseudo-terminal of its own, so a terminal alone doesn't tell the user from
+/// an agent. Like the terminal check itself, this keeps an agent from passing by accident; a program running as you
+/// can still start a command outside the agent's process tree.
+func atUserTerminal() -> Bool {
+    guard isatty(0) == 1 else { return false }
+    #if MCOMP_VAULT_TESTING
+    // The test suites run under whatever agent runs them; a test build may leave the agent check out.
+    if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_IGNORE_AGENT"] == "1" { return true }
+    #endif
+    return agentAbove(getpid()) == false
+}
+
+/// Is an agent session (Claude Code, or Codex, its app server included) above pid? nil when the walk can't reach
+/// launchd (a process it can't read, more than 256 steps): unknown, which never counts as the user's terminal.
+func agentAbove(_ pid: pid_t) -> Bool? {
+    var p = pid
+    var steps = 0
+    while p > 1 {
+        guard steps < 256, let e = procEntry(p) else { return nil }
+        if p != pid && agentKind(p, e) != nil { return true }
+        p = e.ppid
+        steps += 1
+    }
+    return false
+}
+
 func requireTTY(_ what: String) throws {
     guard isatty(0) == 1 else {
-        throw VaultError("\(what) needs your own terminal: run it yourself in Terminal (not through Claude, a script or a pipe)")
+        throw VaultError("\(what) needs your own terminal: run it yourself in Terminal (not through Claude Code, Codex, a script or a pipe)")
+    }
+    guard atUserTerminal() else {
+        throw VaultError("\(what) needs your own terminal: run it yourself in Terminal, not from inside Claude Code or Codex (even with a terminal of its own)")
     }
 }
 

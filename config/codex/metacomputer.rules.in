@@ -1,0 +1,84 @@
+# metacomputer's rules for Codex. install.sh writes this file from config/codex/metacomputer.rules.in, and rewrites or
+# removes it later (it's recognized by this first line and the checkout below), so keep your own changes in a rules
+# file of another name. docs/codex.md explains them.
+# metacomputer checkout: @CHECKOUT@
+#
+# Codex runs commands in a sandbox that blocks what metacomputer needs on this Mac: its state folders, the virtual
+# computer's SSH port, the hub's and the vault's sockets. `allow` runs a matching command outside the sandbox without
+# asking; `prompt` asks you each time; `forbidden` refuses it. When several rules match, the strictest one wins. A
+# metacomputer command no rule names stays in the sandbox, where it stops at once and says so, and Codex asks you
+# before running it outside. These rules are a convenience, not the protection: metacomputer's own checks apply
+# whatever runs it.
+
+MC = @COMMANDS@
+
+prefix_rule(
+    pattern = [MC, ["status", "start", "stop", "who", "where", "help", "version", "web", "browser", "net", "trace", "handoff",
+                    "notify", "events", "inspect", "call", "sh", "ssh", "put", "get", "shot", "contact-sheet", "task",
+                    "record", "recordings", "view", "secrets", "learn", "claude", "hub", "input-reset", "rename",
+                    "actions", "logs", "checkpoints", "agents"]],
+    decision = "allow",
+    justification = "these metacomputer commands act on the virtual computer (an isolated VM) or only read; they need to run outside Codex's sandbox to reach it",
+)
+
+prefix_rule(
+    pattern = [MC, ["reset", "restore", "baseline", "checkpoint", "build", "vm", "volume", "refdisk", "update", "setup",
+                    "release", "restart", "desktop-restart", "test", "security", "each", "--vm"]],
+    decision = "prompt",
+    justification = "this replaces, deletes or stops the virtual computer, its storage, its apps or its settings, runs commands on several VMs, or takes it from another session: the user decides",
+)
+
+prefix_rule(
+    pattern = [MC, ["stop", "sh", "handoff"], ["--override", "--force"]],
+    decision = "prompt",
+    justification = "--override takes the computer from another session (or ends a step the user has), and stop --force powers it off at once: the user decides. (Rules see flags only where they're written first; the agent asks before --override anywhere.)",
+)
+
+prefix_rule(
+    pattern = [MC, "events", ["sink", "sinks"]],
+    decision = "prompt",
+    justification = "event sinks decide what leaves this Mac: only when the user asks",
+)
+
+prefix_rule(
+    pattern = [MC, "hub", "stop"],
+    decision = "prompt",
+    justification = "stopping the hub disconnects every session using the virtual computer",
+)
+
+prefix_rule(
+    pattern = [MC, "learn", ["approve", "add", "edit", "remove", "reject", "reseal", "bench"]],
+    decision = "prompt",
+    justification = "lessons go into every later session's instructions (and learn bench resets a VM): only when the user names it",
+)
+
+prefix_rule(
+    pattern = [MC, "browser", "profiles", "--delete"],
+    decision = "prompt",
+    justification = "deleting a kept browser profile signs its sites out: ask first",
+)
+
+prefix_rule(
+    pattern = [MC, "secrets", ["init", "set", "policy", "bind", "unlock", "rekey", "recover", "approve", "rule", "give",
+                               "import-passwords", "import-session", "audit-sink"]],
+    decision = "forbidden",
+    justification = "only the user runs this, in their own terminal (never ask for or type passwords, codes or keys)",
+)
+
+prefix_rule(
+    pattern = [MC, "volume", "keys"],
+    decision = "forbidden",
+    justification = "only the user types storage keys, in their own terminal",
+)
+
+prefix_rule(
+    pattern = [MC, "view", ["--remember", "--forget"]],
+    decision = "forbidden",
+    justification = "this changes the user's login keychain: only the user runs it, in their own terminal",
+)
+
+prefix_rule(
+    pattern = [MC, "handoff", "done"],
+    decision = "forbidden",
+    justification = "only the user says they're done with a handoff; wait for `metacomputer handoff` to return",
+)

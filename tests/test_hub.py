@@ -2867,7 +2867,7 @@ def who_checks():
     p = subprocess.run([PY, os.path.join(LAB, "lib", "owners.py"), "who"], capture_output=True, text=True,
                        env=dict(os.environ), timeout=60)
     check("a shell claim and a lease are described, not mistaken for direct connections", p.returncode == 0
-          and "metacomputer sh outside Claude Code" in p.stdout and "left running" in p.stdout, (p.stdout, p.stderr[-300:]))
+          and "metacomputer sh outside an agent session" in p.stdout and "left running" in p.stdout, (p.stdout, p.stderr[-300:]))
     clear_claims()
 
 

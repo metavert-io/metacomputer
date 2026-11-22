@@ -3651,9 +3651,10 @@ def cmd_volume_keys(a):
     rec = reg_load("volume", check_name(a.name))
     if not rec or rec.get("kind") != "s3":
         raise StorageError(f"no S3 volume named {a.name} (metacomputer volume list)")
-    if not sys.stdin.isatty():
+    import owners
+    if not owners.at_user_terminal((0,)):
         raise StorageError("volume keys asks for the keys at your terminal; run it in your own terminal, not through "
-                           "Claude or a script (keys never go on a command line)")
+                           "Claude Code, Codex or a script (keys never go on a command line)")
     svc = keychain_service(a.name)
     for what, label in (("access_key_id", "access key ID"), ("secret_access_key", "secret access key")):
         print(f"The {label} for s3://{rec['s3']['bucket']} (macOS asks twice; nothing shows as you type):", flush=True)

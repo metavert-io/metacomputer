@@ -261,9 +261,14 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--no-build` | Set everything up but don't build the VM yet |
 | `--replace-vm` | Delete the VM and its clean snapshot and build them again (otherwise a VM is never replaced) |
 | `--fresh-sources` | Build the host tools and mcomp-vm from new temporary clones (the tools even if they're up to date), leaving the checkout's `.cache` alone; what setup from the plugin uses |
-| `--no-claude` | Don't touch Claude Code |
+| `--no-claude` | Leave Claude Code alone, in this run and later ones (`--claude` undoes it) |
+| `--claude` | Set Claude Code up even after an earlier `--no-claude` |
 | `--no-plugin` | Claude Code without the plugin: a skill link and a user-scope MCP server (tools `mcp__metacomputer__*`) |
 | `--only-claude` | Only the Claude Code step |
+| `--codex` | Set Codex up even after an earlier `--no-codex`: [codex.md](codex.md) |
+| `--no-codex` | Leave Codex alone, in this run and later ones (`--codex` undoes it) |
+| `--only-agents` | Only the Claude Code and Codex steps, for whichever is installed (after installing one) |
+| `--only-codex` | Only the Codex step: its MCP server, the skills in `~/.agents/skills` and metacomputer's rules for its sandbox |
 | `--uninstall` | Remove the command, the plugin and the vault program (the VM stays) |
 
 `MCOMP_CONFIG=FILE ./install.sh` writes and reads that settings file instead of

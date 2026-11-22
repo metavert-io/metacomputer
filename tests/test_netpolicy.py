@@ -57,11 +57,20 @@ def net(run, *args, **extra):
     return r.returncode, r.stdout + r.stderr
 
 
+# netpolicy.py in a fresh Python, its view of the agent session above it set by FAKE_AGENT (a pid: an agent session such
+# as Codex, which can give a command a terminal of its own; unset: none, as at the user's own terminal, even when an
+# agent runs this test). tests/test_owners.py checks the process-table side end to end.
+NP_AS = ("import os, runpy, sys; sys.path.insert(0, %r); import owners; "
+         "_a = os.environ.get('FAKE_AGENT'); owners.claude_of = (lambda *a: int(_a)) if _a else (lambda *a: None); "
+         "sys.argv = [%r] + sys.argv[1:]; runpy.run_path(%r, run_name='__main__')") % (os.path.join(LAB, "lib"), NP, NP)
+
+
 def net_tty(run, *args, **extra):
-    """Run with stdin and stderr on a terminal (a pty), as at the user's own terminal."""
+    """Run with stdin and stderr on a terminal (a pty), as at the user's own terminal (FAKE_AGENT="pid": a terminal an
+    agent session gave the command)."""
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(sys.executable, [sys.executable, NP, *args], env(run, **extra))
+        os.execve(sys.executable, [sys.executable, "-c", NP_AS, *args], env(run, **extra))
     out, deadline = b"", time.time() + 60
     while time.time() < deadline:
         r, _, _ = select.select([fd], [], [], 0.5)
@@ -105,13 +114,17 @@ def names_checks():
     check("--exact: only the name", n("example.com", exact=True) == ["example.com"])
     check("*.name: only the subdomains", n("*.example.com") == ["*.example.com"])
     for bad in ("1.2.3.4", "localhost", "exa mple.com", "-bad.com", "a..com", "*", "*.com.", "x" * 64 + ".com",
-                "ex_ample.com", "例え.jp", "http://example.com", "example.com/path", "example.com:443"):
+                "ex_ample.com", "例え.jp", "http://example.com", "example.com/path", "example.com:443",
+                "0x7f.1", "0x7f.0.0.1", "*.0x7f.0.0.1", "10.0x0.1", "1.0x7f", "2130706433.0"):
         try:
             n(bad)
             ok = False
         except netpolicy.Refused:
             ok = True
         check(f"refused as a name: {bad[:40]!r}", ok)
+    check("names with digits or 0x in them are still names", n("0x7f.example.com", exact=True) == ["0x7f.example.com"]
+          and n("123.example.com", exact=True) == ["123.example.com"] and n("localhost.example.com", exact=True)
+          == ["localhost.example.com"])
     c = netpolicy.covered
     allow = ["example.com", "*.example.com"]
     check("a subdomain of an allowed wildcard is covered (adding it widens nothing)",
@@ -154,6 +167,11 @@ def allow_checks():
     check("removing a name works without a terminal (it narrows the list)", rc == 0
           and sorted(st2["allow"]) == ["*.example.com", "example.com"] and st2["expires"] == st["expires"], (rc, out))
     check("…and the gateway's rules follow", sorted(rules(run)["domains"]["allow"]) == ["*.example.com", "example.com"])
+    rc, out = net_tty(run, "allow", "github.com", FAKE_AGENT="4242")
+    check("a terminal under an agent session (Codex can give its commands one) doesn't widen the list",
+          rc == 3 and "github.com" not in state(run)["allow"] and "at your own terminal" in out, (rc, out))
+    rc, out = net_tty(run, "clear", FAKE_AGENT="4242")
+    check("...or lift it", rc == 3 and os.path.exists(os.path.join(run, "net-allow.json")), (rc, out))
     rc, out = net_tty(run, "allow", "github.com")
     check("at a terminal, a name can be added", rc == 0 and "github.com" in state(run)["allow"]
           and "github.com" in rules(run)["domains"]["allow"], (rc, out))
@@ -169,6 +187,10 @@ def allow_checks():
           out)
     rc, out = net(run, "allow", "1.1.1.1")
     check("an address is refused (names only)", rc == 3 and "addresses aren't accepted" in out, out)
+    for local in ("localhost", "127.0.0.1", "app.localhost"):
+        rc, out = net(run, "allow", local)
+        check(f"{local}: refused with why (the VM's own pages never go through the gateway)", rc == 3
+              and "the virtual computer itself" in out and not os.path.exists(os.path.join(run, "net-allow.json")), out)
 
 
 def failure_checks():
