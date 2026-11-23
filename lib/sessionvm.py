@@ -63,7 +63,7 @@ _CS_DARWIN_USER_TEMP_DIR = 65537
 # a form it doesn't know as a read acts. A word that isn't a command is left to bin/metacomputer, which says so.
 EXEMPT = {"help", "-h", "--help", "where", "setup", "update", "version", "vm", "list", "default", "events", "notify",
           "learn", "actions", "agents", "each", "mcp", "mcp-lazy", "volume", "refdisk", "contact-sheet",
-          "checkpoints"}                                    # checkpoints: the runner's list on the Mac
+          "checkpoints", "cloud"}       # checkpoints: the runner's list on the Mac; cloud: a provider's own, no one computer
 READS = {"who", "status", "inspect", "logs", "get", "shot"}     # whatever their arguments
 ACTS = {"start", "stop", "restart", "reset", "restore", "baseline", "checkpoint", "build", "desktop-restart", "test",
         "call", "web", "put", "rename", "sh", "ssh", "task", "release"}
@@ -93,7 +93,7 @@ def _input_reset(a):    # do_input_reset: only the first argument counts; --chec
 def _view(a):           # do_view, any order: --open (and plain view, which opens at a terminal on the Mac's screen)
     if "--open" in a:   # first removes the agent's leftover input devices in the VM (lib/input_reset.py for_view)
         return "act"
-    if "--print" in a or "--tailnet" in a:
+    if "--print" in a or "--tailnet" in a or "--tunnel" in a:    # --tunnel: a computer elsewhere's live view, only its tunnel
         return "read"
     return "exempt" if "--forget" in a or "--remember" in a else "act"   # those two only touch the Mac's keychain
 
@@ -120,8 +120,10 @@ def _handoff(a):        # lib/handoff.py: status and wait, first, only look; any
     return "read" if _first(a) in ("status", "wait") else "exempt" if _first(a) in HELP else "act"
 
 
-def _net(a):            # lib/netpolicy.py: the subcommand first, status when there's none (the gateway on the Mac)
-    return "exempt" if _first(a) in ("", "status") + HELP else "act"
+def _net(a):            # lib/netpolicy.py: the subcommand first, status when there's none: what the computer can
+    # reach now (its gateway's rules on this Mac; a computer elsewhere: read from it over SSH, and its provider's);
+    # egress (a computer elsewhere), allow, remove and clear change it
+    return "read" if _first(a) in ("", "status") else "exempt" if _first(a) in HELP else "act"
 
 
 def _trace(a):          # lib/traces.py: list, show and export read the traces kept on the Mac

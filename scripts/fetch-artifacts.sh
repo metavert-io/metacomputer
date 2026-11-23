@@ -8,6 +8,9 @@
 #   - Mozilla (and Google) APT signing keys: fingerprints pinned in config/defaults.env;
 #     only the pinned key is kept from each download (scripts/pin-gpg-key.sh)
 #
+#   scripts/fetch-artifacts.sh remote arm64|x86_64   what a computer reached over SSH gets (docs/remote.md): Cua
+#     Driver's Linux build for that architecture (pinned, cross-checked as above) and the APT keys; no Ubuntu image
+#     (it boots its provider's, or is your server)
 #   scripts/fetch-artifacts.sh rclone   only rclone, for S3-backed folder volumes (Mac side):
 #     SHA256SUMS signed by rclone's release key (fingerprint pinned; only that key kept),
 #     the zip's SHA-256 pinned and cross-checked, installed to .cache/rclone-vVERSION/rclone
@@ -64,7 +67,16 @@ fetch_rclone() {
   ok "rclone $RCLONE_VERSION installed at $R/rclone (its sha256 is the pinned RCLONE_BIN_SHA256)"
 }
 if [ "${1:-}" = rclone ]; then fetch_rclone; exit 0; fi
+REMOTE_ARCH=""
+if [ "${1:-}" = remote ]; then
+  case "${2:-}" in
+    arm64) REMOTE_ARCH=arm64 ;;
+    x86_64) REMOTE_ARCH=x86_64; CUA_DRIVER_TARBALL="$CUA_DRIVER_TARBALL_X86_64"; CUA_DRIVER_SHA256="$CUA_DRIVER_SHA256_X86_64" ;;
+    *) die "usage: fetch-artifacts.sh remote arm64|x86_64" ;;
+  esac
+fi
 
+fetch_image() {
 say "Ubuntu cloud image ($UBUNTU_RELEASE)"
 curl -fsSL -o "$U/SHA256SUMS" "$UBUNTU_BASE_URL/SHA256SUMS"
 curl -fsSL -o "$U/SHA256SUMS.gpg" "$UBUNTU_BASE_URL/SHA256SUMS.gpg"
@@ -96,8 +108,10 @@ if [ ! -f "$U/$UBUNTU_IMAGE" ] || ! image_ok "$U/$UBUNTU_IMAGE"; then
 fi
 image_ok "$U/$UBUNTU_IMAGE" || { rm -f "$U/$UBUNTU_IMAGE"; die "image digest mismatch (the file is removed; the next build downloads it again)"; }
 ok "$UBUNTU_IMAGE sha256 verified"
+}
+[ -n "$REMOTE_ARCH" ] || fetch_image
 
-say "Cua Driver $CUA_DRIVER_VERSION (linux-arm64)"
+say "Cua Driver $CUA_DRIVER_VERSION ($CUA_DRIVER_TARBALL)"
 D="$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION"; mkdir -p "$D"
 REL="https://github.com/trycua/cua/releases/download/cua-driver-rs-v$CUA_DRIVER_VERSION"
 curl -fsSL -o "$D/SHA256SUMS" "$REL/SHA256SUMS"

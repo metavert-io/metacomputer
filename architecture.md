@@ -767,6 +767,15 @@ images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-
 
 ## Network
 
+A computer elsewhere has no gateway on this Mac: its own firewall (`guest-firewall`, an
+nftables table loaded before the network, which requires it; an SSH-only fallback when its
+rules don't load, docs/remote.md) is the boundary there, with the provider's rules outside
+it where the provider enforces them (on Oracle Cloud, the computer's own network security
+group: public IPv4 only, or nothing; never 169.254.0.0/16, which OCI doesn't filter). SSH
+is the only way in; out, every account is refused metadata, link-local and private ranges
+except the DNS resolver, DHCP client and clock on their own ports, and `EGRESS=off` closes
+the rest. What follows is the Mac's VM.
+
 Lume runs the VM in `gateway:` mode: its network device is a datagram socket
 to mcomp-netgw (Cua's cua-netgw with metacomputer's patch, below), a user-mode gateway (gvisor-tap-vsock) on the host. The guest
 gets `10.213.77.2/24` by static DHCP lease; DNS goes to the gateway, which
@@ -897,8 +906,10 @@ With an event sink configured (or a sink-change announcement still waiting),
 
 ## Placement and providers
 
-Every computer has a name and a place. Every one is on this Mac (`mac`); `cloud`
-is the group of providers' places, and has none.
+Every computer has a name and a place: this Mac (`mac`), or a provider's place
+(`server`, your own server; `oci`, Oracle Cloud), which `cloud` stands for as a group.
+A computer's place is its settings' `PLACE` (`mac` unless a `config/vms/NAME.env` says
+otherwise).
 
 - **The default computer.** `config/default-vm` (not committed; written by
   `metacomputer default NAME`) names the VM a command acts on when it names none: with
@@ -970,12 +981,46 @@ is the group of providers' places, and has none.
   regions), `PERSIST=auto|disk|volume|backup|none` (`auto`: the first the manifest
   offers, in that order; another mode must be one it offers) and the feature map
   (each feature, the capabilities it needs, and the reason when one is missing).
-  Two adapters are registered: `local-lume`, which describes this Mac (a persistent
+  The adapters: `local-lume`, which describes this Mac (a persistent
   disk, volumes and Mac folders, checkpoints, the gateway's allowlist, no cost) and
   hands every action to the existing command (`HandledByCLI`: the lifecycle code in
-  `bin/metacomputer` and `scripts/` is what runs, unchanged), and `fake`, an in-memory
+  `bin/metacomputer` and `scripts/` is what runs, unchanged); `ubuntu-vm` (your own
+  server) and `oci` (Oracle Cloud), below; and `fake`, an in-memory
   stand-in for the tests that never counts as a provider. `tests/test_cloud_adapters.py`
   runs the same contract against each registered adapter.
+- **A computer elsewhere** ([docs/remote.md](docs/remote.md)): an Ubuntu 24.04 VM reached
+  over SSH. `lib/cloud/ubuntu_vm.py` has what every such VM shares (a persistent disk, no
+  snapshots or volumes yet, its own firewall as the egress model, the live view as the one
+  port forward) and the bring-your-own-server adapter, which needs no provider code;
+  `lib/cloud/oci.py` adds a thin driver (make, start, stop, delete, list, the network and
+  each computer's network security group, its serial console's last lines) on Oracle's
+  SDK, imported only when a call needs it, with credentials only from the environment.
+  Each manifest says what's enforced outside the VM (`outside_egress`) and what a stopped
+  computer bills (`billing`). `lib/remote.py` is what the CLI calls for the provider and
+  the computer's record (`RUN_DIR/remote.json`, 0600: the instance and the address it was
+  given, and a launch in progress, by its operation tag, so a lost one is found again, and what that operation
+  found there, so a failed build's `abort --op` deletes only what it made) and
+  identity (`computer-id`, which the vault's binding names);
+  `scripts/remote-build.sh` sets it up the same way wherever it is: a provider's computer
+  boots with cloud-init user-data (`lib/cloud/guest.py`: the host key made here, no default
+  account, `provisioning/remote/bootstrap.sh`), your own server runs `bootstrap.sh` once over
+  your own SSH; then the payload goes up over SSH and `provision.sh` runs with
+  `MCOMP_TARGET=remote` (Xorg's dummy driver, `guest-firewall`, `idle-stop`, the live view
+  on `127.0.0.1`), followed by the reboot, the checks and `finalize.sh`, as on the Mac.
+  `bin/metacomputer` routes `start`, `stop`, `build`, `status` and `view` to their remote
+  forms and refuses what needs the Mac's runner or gateway, with the feature map's reason.
+- **The transport** (`lib/cloud/transport.py`). One answer to "how does SSH reach this
+  computer", for every command: `scripts/lib.sh` `ssh_base` (the hub's driver connection
+  through `metacomputer mcp`, `sh`, `put`/`get`, `shot`, `record`, `inspect`, the live
+  view's tunnel with its own key) asks `lib/remote.py target` once per command for the
+  options and destination; the vault's binding pins the same address and alias. The host
+  key is pinned under `mcomp-NAME` (`HostKeyAlias`), so `known_hosts`, the hub's
+  `pin_identity` (`MCOMP_HOSTKEY_NAME`) and the vault match on that name, never an address.
+  `TRANSPORT=ssh` connects straight to `SSH_HOST:SSH_HOST_PORT` (or the address the
+  provider gave). A provider whose computers have no address (Fly Sprites, next) registers
+  an opener that returns its tunnel program; ssh runs it as its ProxyCommand through
+  `lib/proxywrap.py`, which ends it (SIGTERM, then SIGKILL) when ssh goes, so an orphaned
+  tunnel can't keep a computer awake and billing.
 
 ## Event stream (optional)
 

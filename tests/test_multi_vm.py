@@ -629,19 +629,24 @@ def default_computer(td):
               and any(ln.startswith("*") and " mainvm " in ln for ln in r.stdout.splitlines())
               and "Your default computer is demo" in r.stdout, r.stdout)
         check("list --on mac: the same computers", json_of(b.run("list", "--on", "mac", "--json")).get("vms") == d.get("vms"))
-        for place in ("cloud", "fly", "cloudflare"):
+        # Every computer is on this Mac: cloud has none, a provider's place has none yet, and a word that's no place
+        # is said to be none (the providers are your own server and Oracle Cloud).
+        said = {"cloud": "has no cloud computers set up", "oci": "no computer on Oracle Cloud yet",
+                "server": "no computer on your own server yet", "fly": "no place called 'fly'",
+                "cloudflare": "no place called 'cloudflare'"}
+        for place in ("cloud", "oci", "server", "fly", "cloudflare"):
             r = b.run("list", "--on", place)
             dj = json_of(b.run("list", "--on", place, "--json"))
-            check(f"list --on {place}: none, saying this metacomputer has no cloud computers set up", r.returncode == 0
-                  and "has no cloud computers set up" in r.stdout and dj.get("vms") == [] and dj.get("other") == []
-                  and "no cloud computers" in (dj.get("note") or ""), (r.stdout, dj))
+            check(f"list --on {place}: none, saying so ({said[place]})", r.returncode == 0
+                  and said[place] in r.stdout and dj.get("vms") == [] and dj.get("other") == []
+                  and said[place] in (dj.get("note") or ""), (r.stdout, dj))
 
         # --on PLACE
         open(b.log, "w").close()
-        for place in ("cloud", "fly", "cloudflare", "Cloud"):
+        for place in ("cloud", "oci", "fly", "cloudflare", "Cloud"):
             r = b.run("--on", place, "status")
-            check(f"--on {place} status: refused, this metacomputer has no cloud computers set up, nothing run",
-                  r.returncode == 1 and "has no cloud computers set up" in r.stderr and "nothing was done" in r.stderr
+            check(f"--on {place} status: refused, saying there's nothing there ({said[place.lower()]}), nothing run",
+                  r.returncode == 1 and said[place.lower()] in r.stderr and "nothing was done" in r.stderr
                   and r.stdout == "", r.stdout + r.stderr)
         check("...and the runner only read its settings (loading demo's, as for --vm demo): no VM was listed or touched",
               set(open(b.log).read().splitlines()) <= {"config get"}, open(b.log).read())
@@ -2866,6 +2871,10 @@ DELETE_EXCEPTIONS = [
     ("lib/vm_shell_guest.py", "shutil.rmtree(d, ignore_errors=True)", "guest"),
     ("lib/page_guest.py", "shutil.rmtree(self.profile, ignore_errors=True)", "guest"),   # its own throwaway profile, in the VM
     ("lib/page_guest.py", "shutil.rmtree(prof, ignore_errors=True)", "guest"),           # ...a kept page's, checked as one
+    # A computer elsewhere (scripts/remote-build.sh): the bootstrap's own folder on your server, removed there by the
+    # command it runs; the payload's folder in the computer, before a new one is unpacked.
+    ("scripts/remote-build.sh", "rc=\\$?; rm -rf ~/$rdir; exit \\$rc", "guest"),
+    ("scripts/remote-build.sh", "gssh admin 'sudo rm -rf /opt/metacomputer-payload && sudo install -d", "guest"),
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),

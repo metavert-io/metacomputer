@@ -1,0 +1,18 @@
+[Unit]
+Description=metacomputer guest firewall (no metadata, link-local or private ranges; SSH only inbound)
+# Before the network, which requires it (systemd-networkd.service.d/ and NetworkManager.service.d/
+# 10-metacomputer-firewall.conf: the two network managers Ubuntu uses; provision.sh refuses a server whose network is
+# managed by anything else): when even the SSH-only fallback can't be loaded, this fails and the network doesn't come
+# up (fail closed; fix it from the provider's console).
+DefaultDependencies=no
+Before=network-pre.target systemd-networkd.service NetworkManager.service
+Wants=network-pre.target
+After=local-fs.target nftables.service netfilter-persistent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/metacomputer/bin/guest-firewall apply
+
+[Install]
+WantedBy=sysinit.target

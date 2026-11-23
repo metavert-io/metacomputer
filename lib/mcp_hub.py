@@ -760,12 +760,15 @@ def pin_identity(env):
     as MCOMP_EXPECT_VM, _SSH_PORT and _HOSTKEY, and is refused, saying why, when the settings then name another VM:
     their file is gone (the defaults' VM), was changed, or now points elsewhere. Never a reconnect to another VM."""
     vm, port, ssh_dir = env.get("MCOMP_VM_NAME", ""), env.get("MCOMP_SSH_PORT", ""), env.get("MCOMP_SSH_DIR", "")
+    # The name the host key is pinned under: the loopback port here, mcomp-NAME for a computer elsewhere
+    # (scripts/lib.sh mc_hostkey_name, passed as MCOMP_HOSTKEY_NAME).
+    name = env.get("MCOMP_HOSTKEY_NAME") or f"[127.0.0.1]:{port}"
     hostkey = ""
     if port and ssh_dir:
         try:
             with open(os.path.join(ssh_dir, "known_hosts")) as f:
                 for line in f:
-                    if f"[127.0.0.1]:{port} " in line:   # as bin/metacomputer reads it (grep -F, the first line)
+                    if f"{name} " in line:   # as bin/metacomputer reads it (grep -F, the first line)
                         hostkey = line.rstrip("\n")
                         break
         except OSError:

@@ -347,9 +347,10 @@ def build(rows, runner, selected=None, default=None, on=None, default_problem=No
     seen = {}
     for r in rows:
         name = r.get("vm") or ""
+        place = r.get("place") or placement.MAC
         item = {"name": name or None, "settings": r.get("file"), "kind": r.get("kind"), "error": r.get("error"),
                 "selected": bool(r.get("ok") and selected and name == selected),
-                "place": placement.MAC, "where": placement.label(placement.MAC),
+                "place": place, "where": placement.label(place),
                 "default": bool(r.get("ok") and default and name == default)}
         if r.get("ok"):
             base = r.get("baseline") or ""
@@ -357,13 +358,19 @@ def build(rows, runner, selected=None, default=None, on=None, default_problem=No
             pre = name + "-ckpt-"
             ckpts = sorted(n for n in idx if n.startswith(pre))
             claimed.update([name, base, prev, *ckpts])
+            remote = place != placement.MAC
+            if remote:
+                # A computer elsewhere: not one of the runner's VMs. Its SSH answering or not (lib/remote.py probe).
+                state = {"reachable": "running", "unreachable": "unreachable"}.get(r.get("remote_state"),
+                                                                                   r.get("remote_state") or "unknown")
             item.update({
-                "state": idx[name]["state"] if name in idx else ("not built" if runner is not None else "unknown"),
+                "state": state if remote else (idx[name]["state"] if name in idx else ("not built" if runner is not None else "unknown")),
                 "disk_bytes": idx.get(name, {}).get("bytes"),
                 "baseline": {"name": base, "present": base in idx, "disk_bytes": idx.get(base, {}).get("bytes")},
                 "previous_baseline": ({"name": prev, "disk_bytes": idx[prev]["bytes"]} if prev in idx else None),
                 "checkpoints": [c[len(pre):] for c in ckpts],
                 "ssh_port": r.get("ssh_port"), "vnc_port": r.get("vnc_port"),
+                "provider": r.get("provider") if remote else None,
                 "vault": r.get("vault"), "spool": r.get("spool"), "volumes": r.get("volumes") or ""})
             if name in seen:
                 problems.append(f"{name} has two settings files here: {seen[name]} and {r.get('file')}")
@@ -443,8 +450,9 @@ def render(listing):
         base = human(b["disk_bytes"]) if b["present"] else "none"
         if v["checkpoints"]:
             base += f" +{len(v['checkpoints'])} ckpt"
+        here = v.get("place", "mac") == "mac"    # a computer elsewhere: SSH goes to its own address, not a port here
         rows.append(("*" if v["selected"] else "", esc(v["name"]), esc(v["where"]), esc(v["state"]),
-                     human(v["disk_bytes"]), base, esc(str(v["ssh_port"])), esc(str(v["vnc_port"])),
+                     human(v["disk_bytes"]), base, esc(str(v["ssh_port"])) if here else "-", esc(str(v["vnc_port"])),
                      esc(v["settings"] or "")))
     if listing.get("note"):
         lines.append(esc(listing["note"]))

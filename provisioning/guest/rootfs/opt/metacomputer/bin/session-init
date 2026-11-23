@@ -5,7 +5,8 @@
 #    so SSH-launched tools (Cua Driver MCP, recorder) reach this X display,
 #    its auth cookie and its D-Bus session bus (AT-SPI lives there)
 #  - starts the password-protected VNC view on :5900 (reachable only through
-#    the host gateway's 127.0.0.1 forward)
+#    the host gateway's 127.0.0.1 forward; on a VM reached over the internet it
+#    listens on 127.0.0.1 only, /etc/metacomputer/vnc-listen, reached through SSH)
 set -u
 RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/metacomputer"
 mkdir -p "$RUN" "$HOME/.cache/metacomputer"
@@ -27,8 +28,10 @@ tmp="$RUN/session.env.tmp"
   echo "XDG_SESSION_ID=${XDG_SESSION_ID:-}"
 } > "$tmp" && mv "$tmp" "$RUN/session.env"
 
+LISTEN=0.0.0.0
+[ "$(head -n 1 /etc/metacomputer/vnc-listen 2>/dev/null)" = 127.0.0.1 ] && LISTEN=127.0.0.1
 if [ -s "$HOME/.config/metacomputer/vnc-pass" ] && ! pgrep -u "$(id -u)" -x x11vnc >/dev/null; then
-  x11vnc -display "${DISPLAY:-:0}" -rfbport 5900 -listen 0.0.0.0 -noipv6 \
+  x11vnc -display "${DISPLAY:-:0}" -rfbport 5900 -listen "$LISTEN" -noipv6 \
     -forever -shared -repeat -noxdamage -quiet \
     -passwdfile "$HOME/.config/metacomputer/vnc-pass" \
     -o "$HOME/.cache/metacomputer/x11vnc.log" -bg >/dev/null 2>&1 || true

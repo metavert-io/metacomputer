@@ -709,6 +709,18 @@ its own, with other VMs in the runner, makes you say which with `--vm`. `vm dele
 never takes the VM in use without `--force`, and keeps volumes and the vault folder
 unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 
+A computer can also be an Ubuntu 24.04 VM elsewhere, reached over SSH: your own server, or
+one Oracle Cloud makes (Arm within its Always Free allowance costs nothing). Same desktop,
+driver and guards, with the Mac still the controller; its own firewall keeps it from cloud
+metadata and private networks, and its live view is reached only through SSH
+([docs/remote.md](docs/remote.md)):
+
+```bash
+metacomputer vm create box --on server --host 203.0.113.5 --user ubuntu   # your server, set up over your SSH
+metacomputer vm create arm1 --on oci --size arm-2x12                       # with OCI_* in the environment
+metacomputer --on oci start                                                 # list, --on and default know them
+```
+
 ## Troubleshooting
 
 | Symptom | What to do |

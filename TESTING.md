@@ -286,6 +286,62 @@ runner's does.
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).
 
+## A computer elsewhere: `tests/test_remote.py`
+
+`python3 tests/test_remote.py` needs no VM and makes no network call or provider call (a stand-in for Oracle's API;
+the CLI checks run in a copy of the checkout with its own HOME and a fake runner, tests/test_multi_vm.py's `Box`).
+- The transport: SSH straight to a computer's address, its host key pinned as `mcomp-NAME`; addresses that could be
+  options, loopback, link-local or multicast refused; the hook a provider's tunnel registers becomes ssh's
+  ProxyCommand through `lib/proxywrap.py`, which ends a tunnel that ignores SIGHUP when ssh goes or dies.
+- What the guest is given: each key limited to its job, cloud-init user-data with the host key made on the Mac, no
+  default account, the guest firewall and `bootstrap.sh`; the firewall's rules (SSH alone in, on every port sshd
+  listens on; out, metadata, link-local and private ranges refused for every account, the system services'
+  exceptions by account and port, `EGRESS=off`, only replies let out as part of an open connection), the SSH-only
+  fallback, `apply` with a stand-in `nft` (the full rules, the fallback, or exit 1), the network's dependency on
+  it, the order of `bootstrap.sh` and `provision.sh` (firewall and SSH settings before accounts and upgrades, the
+  server's own SSH settings saved first) and `remote-uninstall`.
+- The OCI driver: sizes, each availability domain tried once when one is full, then a refusal (a launch never
+  retried by the SDK); a stop waited for through OCI's shutdown window; the console capture read to its end; one network whatever runs at once (the lock across processes, `vm delete` leaving a network
+  another computer is being made in, the oldest of two used); each computer's
+  network security group made before its instance (public addresses only, or none), the SDK facade's rules against a
+  recording stand-in; `start` refusing to stop a RUNNING instance whose console shows no power-off, `stop --force`;
+  wake, sleep, delete, status and list; the manifest's outside-egress and billing truth; credentials named but
+  never shown.
+- The CLI: `vm create --on server|oci` and its refusals, `ssh_base` for each role, `list` and `--on`, what a computer
+  elsewhere refuses (`reset`, `checkpoint`, `net allow`, volumes, `view --tailnet`, `SSH_AUTH=cert`, `PLACE` in
+  `config/local.env`), `stop` and `vm delete`.
+- The review's fixes: provider credentials reaching `lib/remote.py` and no other program (every program metacomputer
+  runs goes through a logging stand-in on PATH), the computer's identity, `default` naming where a computer is,
+  `net egress` changing nothing when it can't be applied, `vm delete` refusing a computer a session uses (its checks
+  repeated under the lock), `--remove-from-server`, a failed build deleting (or, with `--keep-on-failure`,
+  stopping) what it made, `lib/remote.py create` deleting an instance it can't record and finding a lost launch, and
+  `lib/proxywrap.py` ending a tunnel's leftover children however it ends; `start` checking who has the computer.
+- Round three: `lib/remote.py`'s own children (getconf among them) without `OCI_*`; a failed build deleting only
+  what its operation made (an instance of the same name it found is left alone); `cloud setup|teardown` under the
+  network lock, teardown leaving a network a computer is being made in; `remote-uninstall` in a sandbox with a
+  stand-in systemctl (the network manager never stops with the firewall); and your own server's owner checks
+  against a real `sshd` started here, with a ControlMaster connection open: the build's check after the bootstrap
+  and `vm delete --remove-from-server`'s after the removal both see that a new connection is refused (skipped where
+  there's no sshd). The vault's tokens for a computer elsewhere (`tests/test_vault_tokens.py` 6b): refused, revoked
+  and their tunnel closed when the identity beside its keys changes; a new tunnel for a new binding.
+- Round four: a request whose body is still coming, and an answer that streams, when the computer changes (refused
+  before forwarding; cut within seconds), pruning on a new binding and `revoke --vm`; your own account's ssh options
+  under `ssh -G` over a config that forwards everything; DHCP for both network stacks in the full rules and the
+  fallback; the setup marker's expiry (`meta time`, an old marker ignored) and the closing of the setup's egress on a
+  failed, kept or resumed build; a kept instance recorded before a retry; network ownership recorded under the lock;
+  the journal made durable before the launch.
+- Round five: a retry of a kept computer records its identity and opens its provider's rules for the setup, closing
+  them on failure (a stand-in ssh that lets it boot); the build's own deadline closing the setup's downloads; the
+  setup marker by boot and uptime (another boot, a future or an old one, the old date kind: ignored) with its
+  monotonic timer and `end-setup`; abort deleting only the network and group by the OCIDs it recorded (a
+  replacement survives); an I/O error making the journal durable refusing the launch, fsync where F_FULLFSYNC
+  isn't supported.
+
+The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME build`, then the GUI suite and
+`tests/test_vault_vm.py` with `MCOMP_CONFIG=config/vms/NAME.env`; for Oracle Cloud, with its credentials in the
+environment. The vault's remote binding (its address, alias and the computer's identity, no gateway) is in
+`tests/test_secrets.py`.
+
 ## Places and providers: `tests/test_cloud_adapters.py`
 
 `python3 tests/test_cloud_adapters.py` (194 checks, a second) needs no VM and makes no network call.

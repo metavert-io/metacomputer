@@ -144,9 +144,17 @@ FORMS = [
     ("handoff", ["status", "--json"], "read"), ("handoff", ["wait"], "read"), ("handoff", ["--help"], "exempt"),
     ("handoff", ["--why", "login", "--say", "x"], "act"), ("handoff", ["done"], "act"), ("handoff", ["cancel"], "act"),
     ("handoff", ["--json", "status"], "act*"),
-    # net
-    ("net", [], "exempt"), ("net", ["status", "--json"], "exempt"), ("net", ["allow", "x.com", "--for", "1h"], "act"),
-    ("net", ["remove", "x.com"], "act"), ("net", ["clear"], "act"), ("net", ["--json", "status"], "act*"),
+    # net: status reads what the computer can reach (a computer elsewhere: from it, over SSH); the rest changes it
+    ("net", [], "read"), ("net", ["status", "--json"], "read"), ("net", ["--help"], "exempt"),
+    ("net", ["allow", "x.com", "--for", "1h"], "act"), ("net", ["remove", "x.com"], "act"), ("net", ["clear"], "act"),
+    ("net", ["--json", "status"], "act*"), ("net", ["egress", "off"], "act"), ("net", ["egress", "internet", "--override"], "act"),
+    # a computer elsewhere (docs/remote.md): its own forms of the lifecycle commands, and the provider's resources
+    ("start", ["--override"], "act"), ("stop", ["--force"], "act"), ("build", ["--keep-on-failure"], "act"),
+    ("view", ["--tunnel"], "read"), ("ssh", ["admin"], "act"),
+    ("vm", ["delete", "x", "--confirm", "x", "--remove-from-server"], "exempt"),
+    ("vm", ["create", "x", "--on", "oci", "--egress", "off", "--yes"], "exempt"),
+    ("cloud", ["status", "oci"], "exempt"), ("cloud", ["doctor", "oci", "--json"], "exempt"),
+    ("cloud", ["setup", "oci"], "exempt"), ("cloud", ["teardown", "oci"], "exempt"),
     # trace
     ("trace", ["list"], "exempt"), ("trace", ["show", "t"], "exempt"), ("trace", ["export", "t", "--out", "f"], "exempt"),
     ("trace", ["start", "t"], "act"), ("trace", ["stop"], "act"), ("trace", ["delete", "t"], "act"),

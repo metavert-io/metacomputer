@@ -1260,7 +1260,9 @@ final class UnlockServer {
             if let u = b.proxy_user { d["proxy_user"] = u }
             if let pp = b.proxy_port { d["proxy_port"] = pp }
             if let g = b.gateway_path { d["gateway"] = g }
-            if b.fill_user == nil || b.gateway_path == nil || b.gateway_sha256 == nil { d["needs_bind"] = true }
+            if let h = b.ssh_host { d["ssh_host"] = h }
+            if b.fill_user == nil || (!b.isRemote && (b.gateway_path == nil || b.gateway_sha256 == nil))
+                || (b.isRemote && (b.host_key_alias == nil || b.computer_id == nil)) { d["needs_bind"] = true }
             return d
         }
         let sessions: [[String: Any]] = p.sessions.keys.sorted().map { n in
@@ -1680,7 +1682,7 @@ final class UnlockServer {
             return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
         }
         let ttl = max(1, min(ttlAsked, tokenMaxTTL, remaining()))
-        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who, secret: s)
+        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who, secret: s, computer: t.binding.computer_id)
         let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
         var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
         res = finish("token", fields, res, who, approval: approval)
@@ -1721,9 +1723,11 @@ final class UnlockServer {
     /// flush: deliver the record to the audit sinks now (not while a question waits: the next delivery takes it).
     func opRevoke(_ req: [String: Any], _ who: Requester, flush: Bool = true) -> [String: Any] {
         let id = req["id"] as? String
+        let vm = req["vm"] as? String
         guard id == nil || (id.map { matches($0, "^[0-9a-f]{8}$") } ?? false) else { return ["ok": false, "status": "error", "reason": "bad token id"] }
-        let gone = hub.revoke(id)
-        say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? " (all)") + ", asked by \(who.describe)")
+        guard vm == nil || (id == nil && validName(vm!)) else { return ["ok": false, "status": "error", "reason": "bad VM name"] }
+        let gone = vm.map { hub.revokeVM($0) } ?? hub.revoke(id)
+        say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? vm.map { " (VM \($0))" } ?? " (all)") + ", asked by \(who.describe)")
         record(["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
         if flush { flushSinks(force: true) }
         return ["ok": true, "status": "ok", "revoked": gone.map { $0.id }]

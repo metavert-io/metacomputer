@@ -70,6 +70,8 @@ MCP_KEY_RE = re.compile(r"IdentityFile=\S*/mcp(?:\s|$)")
 # This VM's loopback SSH port (bin/metacomputer passes SSH_PORT). With two VMs side by side,
 # a connection to the other VM's port is not an owner of this one.
 SSH_PORT = os.environ.get("MCOMP_SSH_PORT", "")
+# A computer elsewhere (scripts/lib.sh mc_hostkey_name): its connections carry HostKeyAlias=mcomp-NAME.
+HOSTKEY_ALIAS = os.environ.get("MCOMP_HOSTKEY_NAME", "") if os.environ.get("MCOMP_HOSTKEY_NAME", "").startswith("mcomp-") else ""
 
 
 def for_this_vm(cmd):
@@ -666,7 +668,10 @@ def direct_connections(table):
         if os.path.basename(comm) != "ssh":
             continue
         cmd = full_command(pid)
-        if not MCP_KEY_RE.search(cmd) or "@127.0.0.1" not in cmd or not for_this_vm(cmd):
+        # This VM's: to its loopback port here, or (a computer elsewhere) pinned under its own host key alias.
+        here = "@127.0.0.1" in cmd and for_this_vm(cmd)
+        elsewhere = bool(HOSTKEY_ALIAS) and f"HostKeyAlias={HOSTKEY_ALIAS}" in cmd
+        if not MCP_KEY_RE.search(cmd) or not (here or elsewhere):
             continue
         parent = full_command(ppid)
         if "mcp_lazy.py" in parent or "mcp_hub.py" in parent:

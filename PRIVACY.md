@@ -39,6 +39,9 @@ plain sight, and then a screenshot or a recording holds it too.
 - Ubuntu's cloud images and keyserver, and, from the VM while it's built, Ubuntu's package archive, Mozilla's
   package repository for Firefox and, if you choose Chrome, Google's.
 - rclone's downloads, for S3-backed folders.
+- For a computer elsewhere ([docs/remote.md](docs/remote.md)): Cua Driver's Linux build for its architecture from
+  GitHub (to your Mac, then over SSH to the computer), and, from the computer while it's set up, the same package
+  repositories as the VM on your Mac.
 
 The programs metacomputer installs are pinned to a version or commit and checked against a checksum or signature.
 Ubuntu, Firefox and Chrome packages come signed from their own repositories, current when the VM is built.
@@ -51,6 +54,14 @@ take it. The gateway refuses connections to your Mac, your local network, your t
 outbound mail. Telemetry is turned off where the parts have it: Cua Driver's (on by default upstream) in the VM,
 Lume's on your Mac, Firefox's telemetry and studies, and Chrome's usage reports. The browsers otherwise contact
 their makers' services as they normally do, such as safe-browsing checks.
+
+**A computer elsewhere** (your own server, or one Oracle Cloud makes; only when you make one): your Mac reaches it
+over SSH, and everything in it (its screen, its files, what's typed into it) is on that server or the provider's
+hardware, under your agreement with them. For Oracle Cloud, `lib/remote.py` calls Oracle's API with the credentials
+you hand it, to make, start, stop and delete the computer and its network; nothing else is sent to Oracle. The
+computer reaches the internet itself (no gateway on your Mac): its own firewall refuses cloud metadata services and
+private and link-local addresses (on Oracle Cloud, its own network security group also lets out only public
+addresses), and `EGRESS=off` turns its internet off, package updates included.
 
 **Only when you set them up:**
 - Event sinks and the vault's audit sinks: events go to the webhook, OpenTelemetry Collector, syslog server or ntfy

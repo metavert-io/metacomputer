@@ -23,6 +23,9 @@ MANIFEST = {
     # The gateway on this Mac (mcomp-netgw): this Mac, the LAN, the tailnet and cloud metadata refused; an
     # allowlist with metacomputer net allow.
     "egress": {"model": "mac-gateway", "allowlist": True, "private_ranges_blocked": True},
+    # The gateway runs on this Mac, outside the VM: nothing in the VM can change it.
+    "outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True},
+    "billing": {"stopped": "none", "guest_poweroff": "n/a", "note": "runs on this Mac: nothing is billed"},
     "port_forward": True,
     "sizes": (),      # VM_CPU and VM_MEMORY in the VM's settings
     "regions": (),
@@ -58,6 +61,10 @@ class LocalLume(Adapter):
 
     def list(self):
         self._cli("listing the computers", ["metacomputer", "vm", "list", "--json"])
+
+    def ssh_endpoint(self, name):
+        check_name(name)
+        return None                  # the VM's own port on 127.0.0.1 (scripts/lib.sh ssh_base), not an endpoint
 
     def ssh_proxy_command(self, name):
         check_name(name)

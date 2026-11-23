@@ -12,7 +12,7 @@
 VM_COPY_KEYS="LUME VM_CPU VM_MEMORY VM_DISK_BYTES VM_DISPLAY BROWSERS EXTRA_PACKAGES BROWSER_EXTENSIONS VIRTUAL_AUDIO
 SHARE_CLIPBOARD SHARE_AUDIO SHARE_ROSETTA STORAGE_DIR ACTION_LOG ACTION_LOG_TEXT ACTION_LOG_KEY SSH_AUTH SSH_CERT_TTL
 SSH_CA_KEY DRIVER_MODE DRIVER_PROFILE DRIVER_ORIGINS DRIVER_MANIFEST DRIVER_EXPIRES DRIVER_IDLE VM_SHELL SHELL_LOG
-MCP_HUB COORD_GUARD VIEW_REMEMBER INTERACTIVE_PROMPTS"
+MCP_HUB COORD_GUARD VIEW_REMEMBER INTERACTIVE_PROMPTS OCI_PYTHON"
 
 do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
   local sub="${1:-list}"; [ $# -gt 0 ] && shift
@@ -21,7 +21,7 @@ do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
     create) vm_create "$@" ;;
     delete) vm_delete "$@" ;;
     help|-h|--help) sed -n '/^#   --vm NAME/,/^#   start /p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
-    *) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]" ;;
+    *) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | create NAME --on oci [--size SIZE] [--egress internet|off] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]" ;;
   esac
 }
 
@@ -29,11 +29,20 @@ do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
 # (in a subshell: this command's own settings stay as they are), or the reason they're refused.
 vm_settings_row() {
   ( if mc_load_settings "$1" "$2" >/dev/null 2>&1; then
+      # A computer elsewhere (PLACE): whether its SSH answers now (a few seconds at most; its provider isn't asked).
+      local rstate=""
+      if [ "${PLACE:-mac}" != mac ]; then
+        rstate="$("$PY" "$LAB_ROOT/lib/remote.py" probe --vm "$VM_NAME" --run-dir "${RUN_DIR:-$LAB_ROOT/.run-vms/$VM_NAME}" \
+                   --transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" --timeout 2 2>/dev/null || echo unknown)"
+        grep -q "^mcomp-$VM_NAME " "$SSH_DIR/known_hosts" 2>/dev/null || rstate="not set up"
+      fi
       "$PY" -c 'import json, sys
-k = ["file", "kind", "vm", "baseline", "ssh_port", "vnc_port", "vault", "spool", "volumes", "ssh_dir", "run_dir", "log_dir"]
+k = ["file", "kind", "vm", "baseline", "ssh_port", "vnc_port", "vault", "spool", "volumes", "ssh_dir", "run_dir", "log_dir",
+     "place", "remote_state", "provider"]
 print(json.dumps(dict(zip(k, sys.argv[1:]), ok=True)))' \
         "$MC_SETTINGS_LABEL" "$MC_SETTINGS_KIND" "$VM_NAME" "$BASELINE_NAME" "$SSH_PORT" "$VNC_PORT" "$(mc_vault_dir)" \
-        "${EVENTS_SPOOL:-}" "${VOLUMES:-}" "$SSH_DIR" "${RUN_DIR:-$LAB_ROOT/.run}" "${LOG_DIR:-$LAB_ROOT/logs}"
+        "${EVENTS_SPOOL:-}" "${VOLUMES:-}" "$SSH_DIR" "${RUN_DIR:-$LAB_ROOT/.run}" "${LOG_DIR:-$LAB_ROOT/logs}" \
+        "${PLACE:-mac}" "$rstate" "${PROVIDER:-local-lume}"
     else
       # Refused, but still a VM's settings: its names and folders as the file says them (unchecked) go in the row,
       # so nothing that's that VM's can be deleted with another; `vm delete` refuses folders it can't know.
@@ -200,13 +209,14 @@ vm_main_is_default() {
 # Which computer is the default, and where its settings are; refused (exit 1) when config/default-vm doesn't resolve,
 # or when there's none (no config/local.env, and more than one VM to choose from).
 vm_default_show() { # JSON
-  local name="" label="" pointer="" err="" env=""
+  local name="" label="" pointer="" err="" env="" place=mac
   if ! mc_read_default; then
     err="$MC_REFUSAL"
   elif [ -n "$MC_DEFAULT_PTR" ]; then
     name="$MC_DEFAULT_PTR"; pointer="config/default-vm"
-    label="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; }; printf '%s' "$MC_SETTINGS_LABEL")" \
+    label="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; }; printf '%s\n%s' "$MC_SETTINGS_LABEL" "${PLACE:-mac}")" \
       || { err="config/default-vm makes $name your default computer, but: $label"; label=""; }
+    [ -n "$err" ] || { place="$(printf '%s\n' "$label" | tail -1)"; label="$(printf '%s\n' "$label" | head -1)"; }
   elif vm_main_is_default; then
     name="$(mc_main_identity | head -1)"
     label="$(mc_load_settings "$name" "" >/dev/null 2>&1 || { printf '%s' "$MC_REFUSAL"; exit 1; }; printf '%s' "$MC_SETTINGS_LABEL")" \
@@ -220,20 +230,24 @@ vm_default_show() { # JSON
   [ -z "${MC_ENV_VM:-}" ] || env="MCOMP_VM=$MC_ENV_VM"
   if [ "$1" = 1 ]; then
     "$PY" -c 'import json, sys
-n, label, pointer, err, env = sys.argv[1:6]
-print(json.dumps({"default": n or None, "place": "mac" if n and not err else None, "where": "this Mac" if n and not err else None,
+sys.path.insert(0, sys.argv[7])
+import placement
+n, label, pointer, err, env, place = sys.argv[1:7]
+print(json.dumps({"default": n or None, "place": place if n and not err else None,
+                  "where": placement.label(place) if n and not err else None,
                   "settings": label or None, "pointer": pointer or None, "ok": not err, "error": err or None,
-                  "overridden_by": env or None}))' "$name" "$label" "$pointer" "$err" "$env"
+                  "overridden_by": env or None}))' "$name" "$label" "$pointer" "$err" "$env" "$place" "$LAB_ROOT/lib"
     [ -z "$err" ]; return
   fi
   if [ -n "$err" ]; then
     printf '%s\n' "metacomputer: $err." "Commands that name no VM refuse until it's fixed (it never falls back to another VM): metacomputer default NAME chooses one (metacomputer list shows them; metacomputer default $(mc_main_identity | head -1) goes back to the main VM)." >&2
     return 1
   fi
+  local where; where="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import placement; print(placement.label(sys.argv[2]))' "$LAB_ROOT/lib" "$place")"
   if [ -n "$pointer" ]; then
-    printf '%s\n' "$name (this Mac, $label) is your default computer (config/default-vm): commands that name no VM act on it."
+    printf '%s\n' "$name ($where, $label) is your default computer (config/default-vm): commands that name no VM act on it$([ "$place" = mac ] || echo ", on $where's hardware, not this Mac")."
   else
-    printf '%s\n' "$name (this Mac, $label) is your default computer: the main VM, as there's no config/default-vm."
+    printf '%s\n' "$name ($where, $label) is your default computer: the main VM, as there's no config/default-vm."
   fi
   case "$env" in
     '') ;;
@@ -245,17 +259,26 @@ print(json.dumps({"default": n or None, "place": "mac" if n and not err else Non
 
 vm_port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
-vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes]
+vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes] | NAME --on PLACE [--host H --user U --port P] [--size S] [--egress E]
   local name="" ssh="" vnc="" build=1 a used p f vault rows k v def tmp rc
+  local on="${MC_ON_ARG:-}" host="" huser="" hport="" size="" egress="" idle=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --on) [ $# -ge 2 ] || die "--on needs a place: server (your own server) or oci (Oracle Cloud)"; on="$2"; shift ;;
+      --on=*) on="${1#*=}" ;;
+      --host) [ $# -ge 2 ] || die "--host needs your server's address"; host="$2"; shift ;;
+      --user) [ $# -ge 2 ] || die "--user needs your account on the server"; huser="$2"; shift ;;
+      --port) [ $# -ge 2 ] || die "--port needs your server's SSH port"; hport="$2"; shift ;;
+      --size) [ $# -ge 2 ] || die "--size needs a size"; size="$2"; shift ;;
+      --egress) [ $# -ge 2 ] || die "--egress needs internet or off"; egress="$2"; shift ;;
+      --idle-stop) [ $# -ge 2 ] || die "--idle-stop needs minutes, or off"; idle="$2"; shift ;;
       --ssh-port) [ $# -ge 2 ] || die "--ssh-port needs a port"; ssh="$2"; shift ;;
       --vnc-port) [ $# -ge 2 ] || die "--vnc-port needs a port"; vnc="$2"; shift ;;
       --ssh-port=*) ssh="${1#*=}" ;;
       --vnc-port=*) vnc="${1#*=}" ;;
       --no-build) build=0 ;;
       --yes|-y) ASSUME_YES=1 ;;
-      -*) die "unknown option $1 (metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes])" ;;
+      -*) die "unknown option $1 (metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]; elsewhere: --on server --host ADDRESS --user ACCOUNT [--port P], or --on oci [--size SIZE]; both: [--egress internet|off])" ;;
       *) [ -z "$name" ] || die "one VM name, please (got '$name' and '$1')"; name="$1" ;;
     esac
     shift
@@ -265,6 +288,33 @@ vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes]
     || die "a new VM's name: up to 24 lowercase letters, digits and dashes, starting with a letter or digit, not ending in -baseline, -prev or a dash, and without -ckpt-"
   # Not a place's name (mac, cloud): --on PLACE and a request for that place must never mean a VM (lib/placement.py).
   a="$("$PY" "$LAB_ROOT/lib/placement.py" name-ok "$name")" || die "${a:-$name is the name of a place}; choose another name for the new VM"
+  # Where: this Mac (a Lume VM, as before), or an Ubuntu VM elsewhere (docs/remote.md): your own server, or a provider's.
+  local rprov="" rlines=()
+  case "${on:-mac}" in
+    mac) [ -z "$host$huser$hport$size$egress$idle" ] || die "--host, --user, --port, --size, --egress and --idle-stop are for a computer elsewhere (--on server or --on oci)" ;;
+    server)
+      rprov=ubuntu-vm
+      [ -n "$host" ] && [ -n "$huser" ] || die "your own server: --host ADDRESS --user YOUR_ACCOUNT (an account that signs in with a key and may use sudo)"
+      [ -z "$size$idle" ] || die "--size and --idle-stop are for a computer a provider makes; metacomputer never powers your own server off"
+      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from cloud import transport
+try: print(transport.check_host(sys.argv[2])); transport.check_port(sys.argv[3] or 22)
+except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$host" "$hport")" || die "$a"
+      host="$a"
+      [[ "$huser" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "--user: an account name"
+      rlines=("SSH_HOST=$host" "SSH_HOST_PORT=${hport:-22}" "SETUP_USER=$huser" "IDLE_STOP=off") ;;
+    oci)
+      rprov=oci
+      [ -z "$host$huser$hport" ] || die "--host, --user and --port are for your own server; Oracle Cloud gives the computer its address"
+      size="${size:-arm-2x12}"
+      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from cloud import oci
+try: oci.size_of(sys.argv[2])
+except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$size")" || die "$a"
+      case "${idle:-15}" in off|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) die "--idle-stop: minutes (1-999), or off" ;; esac
+      rlines=("SIZE=$size" "IDLE_STOP=${idle:-15}") ;;
+    *) die "--on $on: vm create makes a VM on this Mac (mac), sets up your own server (server), or makes one on Oracle Cloud (oci)" ;;
+  esac
+  case "${egress:-internet}" in internet|off) ;; *) die "--egress: internet or off" ;; esac
+  [ -z "$rprov" ] || rlines=("PLACE=$on" "PROVIDER=$rprov" "TRANSPORT=ssh" "EGRESS=${egress:-internet}" "${rlines[@]}")
   # The new VM's lock, from the first look until the build ends (the build inherits it): one change per VM at a time.
   rc=0; lock_hold "$(vm_lock_name "$name")" "${MCOMP_LOCK_WAIT:-10}" "metacomputer vm create $name" || rc=$?
   case "$rc" in
@@ -290,11 +340,13 @@ for line in sys.stdin:
     except ValueError: continue
     if d.get("ok") and sys.argv[1] in (d.get("vm"), d.get("baseline")): sys.exit(1)' "$name" \
     || die "this checkout's settings already use the name $name (metacomputer vm list)"
+  if [ -z "$rprov" ]; then
   command -v "$LUME" >/dev/null 2>&1 || die "the VM runner $LUME isn't installed (./install.sh installs it)"
   for v in "$name" "$name-baseline"; do
     a="$(vm_lookup "$v")" || die "couldn't list the VMs with $LUME, so it can't tell whether $v exists; nothing was done"
     [ "$a" = absent ] || die "the runner has a VM named $v already; vm create makes new VMs only (metacomputer vm list)"
   done
+  fi
   # Ports: the ones given, else the first free pair from 2300 (live view = SSH + 3700, like 2277/5977). Never one
   # another VM's settings here use, or that something on this Mac listens on.
   used=" $(printf '%s\n' "$rows" | "$PY" -c 'import json, sys
@@ -335,6 +387,9 @@ print(" ".join(out))') "
       "# Used by: metacomputer --vm $name COMMAND (or MCOMP_VM=$name). Read after config/defaults.env, on its own:" \
       "# config/local.env isn't read for this VM. Bash syntax. Its own names and ports:" \
       "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc" \
+      ${rprov:+"# Where it is: an Ubuntu 24.04 VM reached over SSH (docs/remote.md). SSH_PORT is kept only so no two"} \
+      ${rprov:+"# computers here share a port; VNC_PORT is where its live view's SSH tunnel listens on this Mac."} \
+      ${rlines[@]+"${rlines[@]}"} \
       "# Its folders are fixed by its name and can't be set here (SSH_DIR, RUN_DIR, LOG_DIR, VAULT_DIR, EVENTS_SPOOL):" \
       "#   keys $(mc_tilde "$(mc_vm_default SSH_DIR "$name")"), runtime .run-vms/$name and logs logs-vms/$name in this checkout," \
       "#   vault $(mc_tilde "$vault") (its event spool in it)."
@@ -360,26 +415,45 @@ print(" ".join(out))') "
     || { rm -f "$f"; die "the new settings were refused, so they were removed: $a"; }
   exec 9>&-   # the settings are written: the next vm create sees them (the VM's own lock stays, through the build)
   MCOMP_VM_NOTICE=1
+  if [ -n "$rprov" ]; then
+    printf '%s\n' "metacomputer: new computer $name ($([ "$rprov" = oci ] && echo "Oracle Cloud, $size" || echo "your own server, $huser@$host")): config/vms/$name.env, live view through SSH on 127.0.0.1:$vnc, vault $(mc_tilde "$vault")" >&2
+  else
   printf '%s\n' "metacomputer: new VM $name: config/vms/$name.env, SSH 127.0.0.1:$ssh, live view 127.0.0.1:$vnc, vault $(mc_tilde "$vault")" >&2
+  fi
   emit_event lifecycle vm_created info "Settings for a new VM $name were made (config/vms/$name.env)" "metacomputer --vm $name build" "name=$name"
   if [ "$build" = 0 ]; then
     ok "settings written; build it with: metacomputer --vm $name build"
     return 0
   fi
+  if [ "$rprov" = oci ]; then
+    # Something billed: the rate and what it keeps, before anything is made (lib/cloud/oci.py rates).
+    a="$(MCOMP_VM="$name" remote_py rates --vm "$name" 2>/dev/null || true)"
+    printf '%s\n' "Oracle Cloud: ${a:-rates unknown}" "PERSIST=disk: its disk keeps everything while it's stopped. It powers itself off after ${idle:-15} minutes unused (IDLE_STOP), which saves nothing at Oracle: a billed size is billed as running until it's stopped there (metacomputer --vm $name stop); stopped, only its disk is billed (docs/remote.md, What a stopped computer costs)." >&2
+  fi
   if [ "${ASSUME_YES:-0}" != 1 ]; then
+    if [ -n "$rprov" ]; then
+      printf 'Set up %s now? %s [y/N] ' "$name" "$([ "$rprov" = oci ] && echo "This makes the instance on Oracle Cloud, then installs the desktop (about 10 minutes)." || echo "This takes your server over for metacomputer: its firewall, accounts and desktop (about 10 minutes).")"
+    else
     printf 'Build the VM %s now? About 1.5 GB of downloads the first time (kept for later builds), then a few minutes. [y/N] ' "$name"
+    fi
     read -r a
     case "$a" in y|Y) ;; *) ok "not built. Its settings are in config/vms/$name.env: metacomputer --vm $name build builds it, metacomputer vm delete $name removes them"; return 0 ;; esac
   fi
   rc=0
-  env -u MCOMP_CONFIG -u MCOMP_VM -u MCOMP_VM_NOTICE "$SELF" --vm "$name" build || rc=$?
+  # The build may make a provider's instance: the credentials go to it (metacomputer takes them off its environment
+  # first thing), and the selection it was given doesn't (bash builtins only: no other program sees them).
+  ( unset MCOMP_CONFIG MCOMP_VM MCOMP_VM_NOTICE; mc_export_provider_env; exec "$SELF" --vm "$name" build ) || rc=$?
   if [ "$rc" = 0 ]; then
     say "the VM $name is built. Next:"
     printf '%s\n' "  metacomputer --vm $name start" \
       "  metacomputer --vm $name secrets init        (its own vault, in your own terminal; then secrets bind)" \
       "  a Claude Code session on it: docs/guide.md, \"Run a second VM side by side\""
   else
-    warn "the build of $name failed (above). Its settings stay in config/vms/$name.env: metacomputer --vm $name build --replace tries again; metacomputer vm delete $name removes it all"
+    if [ -z "$on" ] || [ "$on" = mac ]; then
+      warn "the build of $name failed (above). Its settings stay in config/vms/$name.env: metacomputer --vm $name build --replace tries again; metacomputer vm delete $name removes it all"
+    else
+      warn "the build of $name failed (above). Its settings stay in config/vms/$name.env: metacomputer --vm $name build tries again; metacomputer vm delete $name removes it all"
+    fi
   fi
   return "$rc"
 }
@@ -391,7 +465,7 @@ vm_q() { # KEY VALUE: KEY='VALUE' for a settings file (quoted for bash)
 # `vm delete NAME` runs with NAME's own settings (its baseline, lock, runtime folders): when this command's settings
 # are another VM's, it runs itself again with --vm NAME, and the checks below happen there.
 vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
-  local name="" confirm_name="" force=0 del_vault=0 del_vols=0 yes_given=0 a args=("$@")
+  local name="" confirm_name="" force=0 del_vault=0 del_vols=0 yes_given=0 remove_from_server=0 a args=("$@")
   while [ $# -gt 0 ]; do
     case "$1" in
       --confirm) [ $# -ge 2 ] || die "--confirm needs the VM's name"; confirm_name="$2"; shift ;;
@@ -399,8 +473,9 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
       --force) force=1 ;;
       --delete-vault) del_vault=1 ;;
       --delete-volumes) del_vols=1 ;;
+      --remove-from-server) remove_from_server=1 ;;
       --yes|-y) yes_given=1 ;;
-      -*) die "unknown option $1 (metacomputer vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes])" ;;
+      -*) die "unknown option $1 (metacomputer vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes] [--remove-from-server])" ;;
       *) [ -z "$name" ] || die "one VM at a time (got '$name' and '$1')"; name="$1" ;;
     esac
     shift
@@ -413,11 +488,15 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
     if [ ! -f "$MC_VMS_DIR/$name.env" ] && [ "$main_vm" != "$name" ] && { [ -f "$MC_MAIN_CONFIG" ] || [ "$name" != "$MC_DEFAULT_VM" ]; }; then
       die "this checkout has no settings for a VM named $name, so it doesn't know its baseline, keys or folders; nothing was deleted. metacomputer vm list shows the VMs it has settings for (a VM made with another settings file: MCOMP_CONFIG=FILE metacomputer vm delete $name)"
     fi
-    exec env -u MCOMP_CONFIG -u MCOMP_VM -u MCOMP_VM_NOTICE MC_VM_DELETE_HOP=1 "$SELF" --vm "$name" vm delete ${args[@]+"${args[@]}"}
+    unset MCOMP_CONFIG MCOMP_VM MCOMP_VM_NOTICE; export MC_VM_DELETE_HOP=1
+    mc_export_provider_env   # a computer elsewhere: its provider deletes the instance (only metacomputer gets them)
+    exec "$SELF" --vm "$name" vm delete ${args[@]+"${args[@]}"}
   fi
   vm_notice
   # The VM's lock from here to the end: no build, reset, restore or start of it (start takes it too) meanwhile.
   vm_lock_or_die "metacomputer vm delete $VM_NAME"
+  if [ "${MC_REMOTE:-0}" = 1 ]; then vm_delete_remote; return $?; fi
+  [ "$remove_from_server" = 0 ] || die "--remove-from-server is for your own server (a computer reached over SSH); nothing was deleted"
   command -v "$LUME" >/dev/null 2>&1 || die "the VM runner $LUME isn't installed; nothing was deleted"
   local settings_file="" own_vault="$MC_VMS_APP_DIR/$VM_NAME" lab_p first v
   [ "$MC_SETTINGS_KIND" = vm ] && settings_file="$LOCAL_CONFIG"
@@ -499,6 +578,113 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   done
   return 0
 }
+# vm delete of a computer elsewhere (MC_REMOTE): a provider's instance (and its boot volume) is deleted at the
+# provider, and its network with the last one; your own server is left exactly as it is (its accounts and desktop stay:
+# what to remove there is said). Here: its settings file and runtime folder; its keys and logs stay, as for any VM.
+# The typed name, the owners lock and the in-use checks are vm delete's own.
+# What vm delete of a computer elsewhere checks, before the prompt and again under its owners lock right before
+# anything is stopped or deleted: in use (a session, a handoff), the default computer, its folders, and what its
+# provider record says (RDP_SIG sums it up, to compare). Dies with the reason; uses vm_delete_remote's variables.
+remote_delete_plan() {
+  local why=() a v
+  if [ "$RUN_DIR" = "$LAB_ROOT/.run-vms/$VM_NAME" ]; then
+    a="$(vm_rmtree "$lab_p" ".run-vms/$VM_NAME" --check)" || die "not deleting $VM_NAME: $a. Nothing was deleted"
+    [ "$a" = absent ] && run=0 || run=1
+  fi
+  [ "$del_vault" = 0 ] || { a="$(vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME" --check)" || die "--delete-vault: $a. Nothing was deleted"; }
+  if ! mc_read_default; then why+=("which VM is your default computer can't be told, so it may be this one ($MC_REFUSAL)")
+  elif [ "$MC_DEFAULT_PTR" = "$VM_NAME" ]; then why+=("it's your default computer (metacomputer default NAME chooses another first)"); fi
+  "$PY" "$LAB_ROOT/lib/owners.py" check >/dev/null 2>&1 || why+=("a session or a handoff is using it (metacomputer --vm $VM_NAME who)")
+  if [ ${#why[@]} -gt 0 ] && [ "$force" != 1 ]; then
+    a=""; for v in "${why[@]}"; do a="${a:+$a; }$v"; done
+    die "not deleting $VM_NAME: $a. Add --force to delete it anyway; nothing was deleted"
+  fi
+  RDP_SIG="in-use=${#why[@]} run=$run record=$(shasum -a 256 "$RUN_DIR/remote.json" 2>/dev/null | cut -c1-16) settings=$(shasum -a 256 "$settings_file" 2>/dev/null | cut -c1-16)"
+}
+vm_delete_remote() {
+  local settings_file="$LOCAL_CONFIG" own_vault="$MC_VMS_APP_DIR/$VM_NAME" lab_p v a run=0 gone=() first
+  [ "$MC_SETTINGS_KIND" = vm ] || die "$VM_NAME's settings aren't a file of its own; nothing was deleted"
+  lab_p="$(cd "$LAB_ROOT" && pwd -P)" || die "can't read the checkout's folder; nothing was deleted"
+  if remote_made; then remote_can_ask || die "deleting $VM_NAME's instance needs $(remote_where)'s credentials in this command's environment (docs/remote.md); nothing was deleted"; fi
+  [ "$remove_from_server" = 0 ] || ! remote_made || die "--remove-from-server is for your own server: $(remote_where) deletes its computer whole; nothing was deleted"
+  remote_delete_plan
+  printf '%s\n' "This deletes:"
+  if remote_made; then printf '%s\n' "  its instance on $(remote_where) and the instance's disk (everything on it), its security group, and metacomputer's network there once no computer of yours uses it"
+  elif [ "$remove_from_server" = 1 ]; then printf '%s\n' "  metacomputer's setup on your server at ${SSH_HOST:-?}, through your own SSH and sudo: its SSH settings (yours put back), its firewall, its sudo rules and its accounts' access (their homes and the packages stay)"
+  else printf '%s\n' "  nothing on your server: $VM_NAME is your own server at ${SSH_HOST:-?}, which stays as it is (--remove-from-server takes metacomputer's setup off it)"; fi
+  printf '%s\n' "  its identity, so its vault binding and every API token made for it stop working (a computer made again under this name is bound again); its own vault is locked if it's unlocked"
+  printf '%s\n' "  its settings, config/vms/$VM_NAME.env, and its runtime folder"
+  [ "$del_vault" = 0 ] || printf '%s\n' "  its vault folder $(mc_tilde "$own_vault"), with every secret in it"
+  printf '%s\n' "It keeps:" "  its logs ($(vm_path "$LOG_DIR")) and SSH keys ($(mc_tilde "$SSH_DIR"))"
+  [ "$del_vault" = 1 ] || printf '%s\n' "  the vault folder $(mc_tilde "$(mc_vault_dir)") (--delete-vault deletes a VM's own)"
+  if [ -n "$confirm_name" ]; then
+    [ "$confirm_name" = "$VM_NAME" ] || die "--confirm names '$confirm_name', not $VM_NAME; nothing was deleted"
+  else
+    [ -t 0 ] || die "deleting $VM_NAME needs its name typed: run this in a terminal, or add --confirm $VM_NAME$([ "$yes_given" = 0 ] || echo ' (--yes doesn'"'"'t count)'). Nothing was deleted"
+    printf 'Type the name of the computer to delete it (%s): ' "$VM_NAME"
+    IFS= read -r v || v=""
+    [ "$v" = "$VM_NAME" ] || die "that isn't $VM_NAME; nothing was deleted"
+  fi
+  expect_guard
+  ( umask 077; mkdir -p "$RUN_DIR/owners" ) 2>/dev/null
+  exec 6>>"$RUN_DIR/owners/.lock" || die "can't open $VM_NAME's owners lock; nothing was deleted"
+  lock_fd_take 6 "${MCOMP_LOCK_WAIT:-10}" || die "a session holds $VM_NAME's owners lock; nothing was deleted (metacomputer --vm $VM_NAME who)"
+  # Everything again, under the lock: a session or handoff that started while you were confirming, a default set
+  # meanwhile, or a record that changed refuses here, before anything stops.
+  first="$RDP_SIG"
+  remote_delete_plan
+  [ "$RDP_SIG" = "$first" ] || die "$VM_NAME changed while you were confirming ($first, now $RDP_SIG); nothing was deleted. Run this again"
+  events_watcher_stop
+  hub_stop
+  if [ "$remove_from_server" = 1 ]; then
+    say "taking metacomputer's setup off $SSH_HOST (as ${SETUP_USER:-?}, with your sudo)"
+    # Never through a shared connection (your ssh config's ControlMaster): the check after the removal is a new
+    # process that authenticates on its own; nothing of this Mac's is forwarded (scripts/lib.sh mc_owner_ssh_opts).
+    mc_owner_ssh_opts "${SSH_HOST_PORT:-22}"
+    local own=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}" "${SETUP_USER:-}@${SSH_HOST:-}")
+    "${own[@]}" 'sudo -n /opt/metacomputer/bin/remote-uninstall all' </dev/null \
+      || die "it couldn't be taken off (above: your own SSH, with sudo that doesn't ask, is needed); nothing here was deleted"
+    "${own[@]}" true </dev/null || die "after the removal your own account can't sign in to ${SSH_HOST:-?}: use your provider's console. Nothing here was deleted"
+    ok "your own account still signs in"
+    gone+=("metacomputer's setup on your server")
+  fi
+  remote_py identity --vm "$VM_NAME" --remove >/dev/null 2>&1 || true
+  # Its identity is gone, so its vault binding refuses, and every token made for it stops at its next use (the vault
+  # checks the identity then, and again while an answer streams). Its tokens are revoked now, in whatever vault it
+  # uses (anyone may revoke: it only restricts); its own vault is locked too, which also closes its tunnel now,
+  # whether or not --delete-vault removes the folder after.
+  if [ -S "$(mc_vault_dir)/vault.sock" ] && [ -x "$VAULT_BIN" ]; then
+    MCOMP_VAULT_DIR="$(mc_vault_dir)" "$VAULT_BIN" revoke --vm "$VM_NAME" >/dev/null 2>&1 || true
+  fi
+  if [ "$(mc_vault_dir)" = "$own_vault" ] && [ -S "$own_vault/vault.sock" ] && [ -x "$VAULT_BIN" ]; then
+    MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 && gone+=("its vault's live tokens and tunnel (the vault is locked)")
+  fi
+  if remote_made; then
+    local had=0
+    "$PY" -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("instance") else 1)' "$RUN_DIR/remote.json" 2>/dev/null && had=1
+    say "deleting what $(remote_where) has for $VM_NAME"
+    remote_py delete --vm "$VM_NAME" --network-too || die "it wasn't deleted at $(remote_where) (above); its settings stay, so you can try again"
+    [ "$had" = 0 ] || gone+=("its instance on $(remote_where)")
+  fi
+  rm -f "$settings_file" && gone+=("config/vms/$VM_NAME.env")
+  if [ "$run" = 1 ]; then a="$(vm_rmtree "$lab_p" ".run-vms/$VM_NAME")" || warn "kept its runtime folder: $a"; fi
+  if [ "$del_vault" = 1 ]; then
+    [ ! -S "$own_vault/vault.sock" ] || [ ! -x "$VAULT_BIN" ] || MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 || true
+    if a="$(vm_rmtree "$MC_VMS_APP_DIR" "$VM_NAME")"; then [ "$a" = absent ] || gone+=("the vault folder $(mc_tilde "$own_vault")")
+    else warn "kept the vault folder: $a"; fi
+  fi
+  emit_event lifecycle vm_deleted info "The computer $VM_NAME was deleted" "" "name=$VM_NAME"
+  local list=""; for v in ${gone[@]+"${gone[@]}"}; do list="${list:+$list, }$v"; done
+  ok "deleted: ${list:-nothing}"
+  if ! remote_made && [ "$remove_from_server" = 0 ]; then
+    printf '%s\n' "Your server still has metacomputer's setup: its accounts (cua, cuaadmin, mcfill, mcproxy), its desktop, its" \
+      "SSH settings and its firewall, and its keys here still sign in to it. To take it off: on the server, with sudo," \
+      "/opt/metacomputer/bin/remote-uninstall all (it puts your SSH settings back and turns the firewall off); or delete" \
+      "$(mc_tilde "$SSH_DIR") here so this Mac can't sign in."
+  fi
+  return 0
+}
+
 # Every settings file of this checkout but this VM's own, as identity records (scripts/lib.sh mc_identity_records):
 # the main VM's (unless this is it) and every other config/vms/ VM's.
 vm_other_identities() {

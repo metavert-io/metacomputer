@@ -2,6 +2,11 @@
 # metacomputer host library: configuration, Lume + mcomp-netgw (cua-netgw)
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
+# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
+# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
+# child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
+
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- which VM: its settings (docs/commands.md, "More than one VM") -------------------
@@ -57,6 +62,10 @@ mc_realpath() { # PATH -> absolute, with its folder's links resolved (the file i
 mc_tilde() { case "$1" in "$MC_SYS_HOME"/*) printf '~/%s' "${1#"$MC_SYS_HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 mc_file_vm_name() { # FILE -> the VM_NAME it ends with, after the defaults (sourced in a subshell)
   ( . "$LAB_ROOT/config/defaults.env"; . "$1" >/dev/null 2>&1; printf '%s' "$VM_NAME" ) 2>/dev/null
+}
+mc_file_place() { # FILE -> the PLACE it ends with, after the defaults (mac: this Mac); "?" when that isn't a place's name
+  local p; p="$( { . "$LAB_ROOT/config/defaults.env"; . "$1" >/dev/null 2>&1; printf '%s' "${PLACE:-mac}"; } 2>/dev/null )"
+  case "$p" in ''|*[!a-z0-9-]*) printf '?' ;; *) printf '%s' "$p" ;; esac
 }
 mc_main_identity() { # the main VM's VM_NAME BASELINE_NAME SSH_DIR SSH_PORT VNC_PORT RUN_DIR LOG_DIR, one per line
   ( . "$LAB_ROOT/config/defaults.env"; [ ! -f "$MC_MAIN_CONFIG" ] || . "$MC_MAIN_CONFIG" >/dev/null 2>&1
@@ -355,6 +364,15 @@ mc_load_settings() {
     if [ "$main_vm" = "$VM_NAME" ] && [ -f "$MC_MAIN_CONFIG" ]; then
       MC_REFUSAL="config/local.env and config/vms/$name.env are both settings for the VM $name; keep one"; return 1
     fi
+    # A computer elsewhere (PLACE other than mac: an Ubuntu VM reached over SSH) says which provider's it is; the
+    # names are checked against the registered adapters where they're used (lib/remote.py).
+    case "${PLACE:-mac}" in
+      mac) ;;
+      *) [[ "$PLACE" =~ ^[a-z][a-z0-9-]{0,31}$ ]] && [[ "${PROVIDER:-}" =~ ^[a-z][a-z0-9-]{0,31}$ ]] && [ "$PROVIDER" != local-lume ] \
+           || { MC_REFUSAL="config/vms/$name.env: PLACE=$PLACE needs the PROVIDER whose computer it is (docs/remote.md)"; return 1; }
+         [ "${SSH_AUTH:-key}" = key ] \
+           || { MC_REFUSAL="config/vms/$name.env: SSH_AUTH=cert isn't available for a computer reached over SSH yet (its certificates name this Mac's gateway address); use SSH_AUTH=key"; return 1; } ;;
+    esac
     MC_SETTINGS_KIND=vm
     mc_identity_check || { MC_REFUSAL="config/vms/$name.env: $MC_REFUSAL"; return 1; }
     v="$MC_IDENTITY_OUT"
@@ -363,6 +381,10 @@ mc_load_settings() {
   elif [ -n "$file" ]; then
     # shellcheck source=/dev/null
     mc_source_strict "$file" || return 1
+  fi
+  if [ "$kind" != vm ] && [ "${PLACE:-mac}" != mac ]; then
+    MC_REFUSAL="PLACE=$PLACE in $( [ -n "$file" ] && mc_tilde "$file" || echo the defaults): only a computer of its own (config/vms/NAME.env, made by metacomputer vm create NAME --on PLACE) can be elsewhere; this checkout's main VM is on this Mac"
+    return 1
   fi
   # The vault folder and the event spool (handed to mcomp-vault as MCOMP_VAULT_DIR and MCOMP_EVENTS_SPOOL), as the
   # folders they really are. Empty for the main VM and MCOMP_CONFIG files unless set: the vault's and the event
@@ -454,6 +476,9 @@ elif [ -z "${MCOMP_CONFIG:-}" ]; then
 fi
 unset MCOMP_VM_ARG mc_sel_name
 GUEST_RUN_DIR="/home/$GUEST_USER/metacomputer-runs"
+# A computer elsewhere: an Ubuntu VM reached over SSH (PLACE other than mac; docs/remote.md). Its SSH goes to its own
+# address (or through its provider's tunnel), not to a port on this Mac; its lifecycle is its provider's.
+MC_REMOTE=0; [ "${PLACE:-mac}" = mac ] || MC_REMOTE=1
 
 RUN_DIR="${RUN_DIR:-$LAB_ROOT/.run}"   # RUN_DIR / LOG_DIR: config/defaults.env
 # Unix socket paths are limited to ~104 bytes, so the gateway's sockets live
@@ -595,6 +620,46 @@ print(v)' "$1" "$2"
 vm_status() { lume_field "$1" status; }
 vm_running() { [ "$(vm_status "$1")" = "running" ]; }
 vm_mac() { lume_field "$1" macAddress; }
+
+# --- a computer reached over SSH (MC_REMOTE=1: lib/remote.py, lib/cloud/) -------------------------------------
+# The name its host key is pinned under in known_hosts: the VM's loopback port here, mcomp-NAME for a computer
+# elsewhere (HostKeyAlias: never its address, which can change).
+mc_hostkey_name() { if [ "${MC_REMOTE:-0}" = 1 ]; then printf 'mcomp-%s' "$VM_NAME"; else printf '[127.0.0.1]:%s' "$SSH_PORT"; fi; }
+# A provider's credentials (lib/cloud/oci.py ENV_KEYS) reach lib/remote.py only: this shell keeps them, unexported, so
+# nothing else it starts (the hub, ssh, the helpers) inherits them; remote_py hands them to its one child.
+MC_PROVIDER_ENV="OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT"   # as at the top
+mc_export_provider_env() { # in a subshell, before it runs what needs them: lib/remote.py, or metacomputer itself
+  local k; for k in $MC_PROVIDER_ENV; do [ -z "${!k:-}" ] || export "$k"; done
+}
+remote_py() { # lib/remote.py with the Python that has the provider's SDK (OCI_PYTHON for oci; it needs nothing else)
+  local py="$PY"
+  [ "${PROVIDER:-}" != oci ] || [ -z "${OCI_PYTHON:-}" ] || py="$OCI_PYTHON"
+  ( mc_export_provider_env; exec "$py" "$LAB_ROOT/lib/remote.py" "$@" )
+}
+# Every connection made as your own account to your own server (the setup's checks, its bootstrap, the uninstall):
+# your ssh config and agent sign it in, but it never shares a connection you have open (each check authenticates on
+# its own), and nothing of this Mac goes to the server through it: no agent, no X11, no port forwardings, no local or
+# remote command from a config file, no delegated credentials. PORT -> MC_OWNER_OPTS.
+mc_owner_ssh_opts() {
+  MC_OWNER_OPTS=(-o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no
+    -o ClearAllForwardings=yes -o PermitLocalCommand=no -o RemoteCommand=none -o GSSAPIDelegateCredentials=no
+    -o Tunnel=no -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+    -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${1:-22}")
+}
+remote_can_ask() { # whether the provider can be asked from here (its credentials are in this command's environment)
+  case "${PROVIDER:-}" in oci) [ -n "${OCI_USER:-}" ] && [ -n "${OCI_API_KEY_PEM:-}" ] ;; *) return 1 ;; esac
+}
+mc_remote_target() { # USER -> MC_T_ARGS: the transport's options and destination (lib/remote.py target), once per user
+  local x
+  [ "${MC_T_USER:-}" = "$1" ] && [ ${#MC_T_ARGS[@]} -gt 0 ] && return 0
+  MC_T_ARGS=(); MC_T_USER="$1"
+  while IFS= read -r -d '' x; do MC_T_ARGS+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" target --vm "$VM_NAME" \
+    --run-dir "$RUN_DIR" --user "$1" --transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" 2>"$SOCK_DIR/target.err")
+  if [ ${#MC_T_ARGS[@]} -gt 0 ]; then case "${MC_T_ARGS[${#MC_T_ARGS[@]}-1]}" in "$1@"*) return 0 ;; esac; fi
+  MC_T_ARGS=(); MC_T_USER=""
+  MC_REFUSAL="$(head -c 400 "$SOCK_DIR/target.err" 2>/dev/null | sed 's/^metacomputer: //')"
+  return 1
+}
 # NAME -> the VM's folder, from Lume itself: the storage location `lume get` names (locationName), looked up
 # in `lume config get` by its exact name, listed exactly once, and an existing absolute folder (canonical).
 # Nothing is guessed: any doubt is status 1, with the reason on stderr.
@@ -885,7 +950,8 @@ export_options() {
          MCOMP_DRIVER_IDLE="$DRIVER_IDLE" MCOMP_BROWSERS="$BROWSERS" MCOMP_GUEST_USER="$GUEST_USER" \
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
          MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}" \
-         MCOMP_VM_EVENTS_SPOOL="${EVENTS_SPOOL:-}"   # this VM's spool (empty: lib/events.py's default)
+         MCOMP_VM_EVENTS_SPOOL="${EVENTS_SPOOL:-}" \
+         MCOMP_HOSTKEY_NAME="$(mc_hostkey_name)"     # this VM's spool (empty: lib/events.py's default); its pinned host key's name
   # Dialogs on this Mac that wait for the user (a handoff's "Open live view"): off unless the user turned them on.
   export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
   # The hub (lib/mcp_hub.py), its coordinate guard, its hidden-text marks and its human pacing (lib/pacing.py).
@@ -967,9 +1033,26 @@ cert_for() { # ROLE -> sets CERT_KEY (KEY-cert.pub beside it); reused for half i
   CERT_KEY="$key"
 }
 
-ssh_base() { # ROLE(admin|ops|mcp) -> prints nothing; sets SSH_ARGS array
+ssh_base() { # ROLE(admin|ops|mcp|view) -> prints nothing; sets SSH_ARGS array
   local role="$1" user
-  case "$role" in admin) user="$ADMIN_USER" ;; ops|mcp) user="$GUEST_USER" ;; *) die "bad ssh role $role" ;; esac
+  case "$role" in admin) user="$ADMIN_USER" ;; ops|mcp|view) user="$GUEST_USER" ;; *) die "bad ssh role $role" ;; esac
+  if [ "${MC_REMOTE:-0}" = 1 ]; then
+    # A computer elsewhere: the same rules (no config file, nothing of the Mac's forwarded, the pinned host key, only
+    # this role's key), to the endpoint its transport gives (lib/cloud/transport.py: its address, or its provider's
+    # tunnel as the ProxyCommand), its host key pinned under mcomp-NAME. Only the view role forwards one port (the
+    # live view's tunnel: its key allows nothing else). Static keys only (SSH_AUTH=cert is refused for these).
+    mc_remote_target "$user" || die "can't tell how to reach $VM_NAME: ${MC_REFUSAL:-its settings (SSH_HOST, TRANSPORT)}"
+    local fwd=(-o ClearAllForwardings=yes); [ "$role" != view ] || fwd=(-o ExitOnForwardFailure=yes)
+    SSH_ARGS=(-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile="$SSH_DIR/$role" -o IdentityAgent=none
+              -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null
+              -o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no "${fwd[@]}"
+              -o Tunnel=no -o ControlMaster=no -o ControlPath=none -o PermitLocalCommand=no
+              -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR
+              "${MC_T_ARGS[@]}")
+    return 0
+  fi
+  [ "$role" != view ] || die "the view role is for a computer reached over SSH"
   local ids=(-o IdentityFile="$SSH_DIR/$role")
   if [ "$role" != admin ]; then
     if [ "${SSH_AUTH:-key}" = cert ]; then
@@ -1064,3 +1147,27 @@ sync_guest_options() { # [all]: quiet unless something changes; skips the VM in 
   fi
   if [ "${SSH_AUTH:-key}" = cert ] || [ "${DRIVER_MODE:-standard}" = bounded ]; then : > "$mark"; else rm -f "$mark"; fi
 }
+
+# --- a computer elsewhere: what differs from a Lume VM here (defined last, so these replace the Lume versions) ---
+if [ "${MC_REMOTE:-0}" = 1 ]; then
+  # Its state: the provider's word when the provider can be asked from here; else whether its SSH port answers.
+  # Once per command (MC_REMOTE_STATUS): running, stopped, starting, stopping, absent or unreachable.
+  remote_status_load() { # sets MC_REMOTE_STATUS, once per command (never in a subshell, so it stays set)
+    [ -z "${MC_REMOTE_STATUS:-}" ] || return 0
+    local w=unknown
+    if remote_can_ask; then w="$(remote_py state --vm "$VM_NAME" 2>/dev/null)"; fi
+    case "$w" in
+      awake) MC_REMOTE_STATUS=running ;;
+      stopped|absent|starting|stopping) MC_REMOTE_STATUS="$w" ;;
+      *) case "$("$PY" "$LAB_ROOT/lib/remote.py" probe --vm "$VM_NAME" --run-dir "$RUN_DIR" --transport "${TRANSPORT:-ssh}" \
+                   --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" 2>/dev/null)" in
+           reachable) MC_REMOTE_STATUS=running ;; *) MC_REMOTE_STATUS=unreachable ;; esac ;;
+    esac
+  }
+  vm_status() { [ "$1" = "$VM_NAME" ] || { echo unknown; return 0; }; remote_status_load; printf '%s\n' "$MC_REMOTE_STATUS"; }
+  vm_running() { [ "$1" = "$VM_NAME" ] && remote_status_load && [ "$MC_REMOTE_STATUS" = running ]; }
+  # Set up (or being set up) once its host key is pinned.
+  vm_exists() { [ "$1" = "$VM_NAME" ] && grep -q "^mcomp-$VM_NAME " "$KNOWN_HOSTS" 2>/dev/null; }
+  vm_lookup() { echo "metacomputer: $VM_NAME is a computer reached over SSH, not one of the runner's VMs" >&2; return 1; }
+  netgw_alive() { return 0; }    # no gateway on this Mac: its own firewall is the boundary
+fi

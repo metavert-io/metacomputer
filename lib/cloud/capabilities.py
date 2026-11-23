@@ -13,7 +13,18 @@ A manifest is plain data (a dict), checked by check_manifest():
     bucket_mount           None, or a storage bucket as a folder: {"how": text, "home": bool (whether it can hold a
                            home folder or browser profile: needs locks and atomic renames)}
     sleep_wake             {"kind": "stop-start" | "auto-sleep" | "none", "keeps_processes": bool}
-    egress                 {"model": one of EGRESS_MODELS, "allowlist": bool, "private_ranges_blocked": bool}
+    egress                 {"model": one of EGRESS_MODELS, "allowlist": bool, "private_ranges_blocked": bool}:
+                           mac-gateway (this Mac's gateway), guest-firewall (rules in the computer itself, set up
+                           by metacomputer: lib/cloud/guest.py), or what the provider enforces from outside
+    outside_egress         what is enforced OUTSIDE the computer, which root inside it can't undo: {"enforced": bool
+                           (anything at all), "private_ranges": bool (private, shared and reserved ranges refused),
+                           "metadata": bool (the cloud's metadata service refused), "off": bool (all egress can be
+                           turned off from outside)}. Never more than the provider really enforces: what's only in
+                           the guest's own firewall doesn't count here
+    billing                what a computer costs when it isn't running: {"stopped": "none" | "storage" | "full" |
+                           "unknown" (what a computer stopped through the provider still bills), "guest_poweroff":
+                           "stops-billing" | "nothing" | "n/a" (what the guest powering itself off saves, which is
+                           what an idle stop does), "note": text}
     port_forward           bool: one of the computer's ports can be reached on this Mac's loopback
     sizes, regions         tuples of what create() takes (empty: not chosen per computer)
     fresh_start            bool: the computer can start from its image every time (PERSIST=none)
@@ -26,7 +37,7 @@ those the manifest offers; a mode it doesn't offer is refused, saying which it d
 ROOT_DISK = ("persistent", "ephemeral")
 SLEEP_KINDS = ("stop-start", "auto-sleep", "none")
 ATTACH = ("at create", "at start", "any time")
-EGRESS_MODELS = ("mac-gateway", "dns-allowlist", "network-policy", "http-intercept", "open")
+EGRESS_MODELS = ("mac-gateway", "guest-firewall", "dns-allowlist", "network-policy", "http-intercept", "open")
 PERSIST_MODES = ("disk", "volume", "backup", "none")      # auto's order, best first
 PERSIST_WORDS = {
     "disk": "the root disk keeps everything",
@@ -35,7 +46,9 @@ PERSIST_WORDS = {
     "none": "it starts fresh every time: nothing is kept",
 }
 KEYS = ("name", "place", "label", "beta", "root_disk", "volumes", "snapshots", "backup", "bucket_mount", "sleep_wake",
-        "egress", "port_forward", "sizes", "regions", "fresh_start")
+        "egress", "outside_egress", "billing", "port_forward", "sizes", "regions", "fresh_start")
+BILLING_STOPPED = ("none", "storage", "full", "unknown")
+BILLING_POWEROFF = ("stops-billing", "nothing", "n/a")
 
 
 class Unavailable(ValueError):
@@ -89,6 +102,17 @@ def check_manifest(m):
     if (not isinstance(eg, dict) or eg.get("model") not in EGRESS_MODELS or not is_bool(eg.get("allowlist"))
             or not is_bool(eg.get("private_ranges_blocked"))):
         bad.append(f"egress: {{'model': {' | '.join(EGRESS_MODELS)}, 'allowlist': bool, 'private_ranges_blocked': bool}}")
+    oe = m["outside_egress"]
+    if not isinstance(oe, dict) or set(oe) != {"enforced", "private_ranges", "metadata", "off"} \
+            or not all(is_bool(v) for v in oe.values()):
+        bad.append("outside_egress: {'enforced': bool, 'private_ranges': bool, 'metadata': bool, 'off': bool}")
+    elif not oe["enforced"] and any(oe[k] for k in ("private_ranges", "metadata", "off")):
+        bad.append("outside_egress: nothing is enforced outside, so nothing can be claimed for it")
+    bl = m["billing"]
+    if (not isinstance(bl, dict) or bl.get("stopped") not in BILLING_STOPPED
+            or bl.get("guest_poweroff") not in BILLING_POWEROFF or not is_text(bl.get("note"))):
+        bad.append(f"billing: {{'stopped': {' | '.join(BILLING_STOPPED)}, 'guest_poweroff': "
+                   f"{' | '.join(BILLING_POWEROFF)}, 'note': text}}")
     for k in ("sizes", "regions"):
         kind(k, isinstance(m[k], tuple) and all(is_text(x) for x in m[k]), "a tuple of names")
     return bad

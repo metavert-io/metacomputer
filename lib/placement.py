@@ -3,9 +3,8 @@
 listings and anything else that has to turn "the one on my Mac" into a computer.
 
 Every computer has a name and a place. The places: `mac`, this Mac, and the providers' places, which `cloud` stands
-for as a group. Every computer here is on this Mac: no provider is registered (lib/cloud/ has the
-providers' interface, with this Mac's own adapter and a stand-in for tests), so PROVIDERS is empty and `cloud` has
-no computers.
+for as a group: `server` (your own server) and `oci` (Oracle Cloud), from the adapters lib/cloud/ registers. A
+computer's place is its settings' PLACE (config/vms/NAME.env; mac unless it says otherwise).
 
 resolve(names_and_places, said, default) picks a computer from (name, place) pairs, in this order:
   1. a computer's name: that computer;
@@ -37,7 +36,7 @@ MAC = "mac"
 CLOUD = "cloud"
 PLACES = {MAC: "this Mac"}
 # The providers' places, which `cloud` is the group of: place -> how it's shown, from the registered adapters
-# (lib/cloud providers(): neither this Mac's nor the tests' stand-in). There are none.
+# (lib/cloud providers(): neither this Mac's nor the tests' stand-in).
 PROVIDERS = cloud.providers()
 NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 NO_CLOUD = "this metacomputer has no cloud computers set up; every computer it has is on this Mac (metacomputer list)"

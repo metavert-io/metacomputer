@@ -1639,6 +1639,98 @@ another VM:
   the same without one. Claude's skill passes `--confirm` only for a VM you named for
   deletion.
 
+## A computer elsewhere (`--on server`, `--on oci`)
+
+A computer can be an Ubuntu 24.04 VM reached over SSH instead of a Lume VM on your Mac: your own server, or one Oracle
+Cloud makes ([docs/remote.md](docs/remote.md)). The Mac stays the controller, so the hub and every guard, the vault,
+recordings, the action log, handoffs and the one-controller rule apply as they do on the Mac. What changes is the
+boundary: there's no gateway on your Mac between it and the world, so the computer enforces its own, with the
+provider's rules outside it where the provider enforces them, and no more than that is claimed.
+
+- **SSH in, and nothing else.** Key only: no passwords, no root login, `AllowUsers` naming metacomputer's accounts (and,
+  on your own server, the account you set it up from). A computer a provider makes sits behind the provider's firewall
+  too, which metacomputer sets to SSH (port 22) and the ICMP message TCP needs to size its packets. The live view's
+  VNC server listens on the computer's own `127.0.0.1:5900` only and is reached through an SSH tunnel opened from your
+  Mac with a key that may open that one forward and nothing else (`view --tailnet` is refused for it).
+- **Out, outside the VM (only where the provider enforces it).** On Oracle Cloud the subnet's security list lets
+  nothing out, and each computer's own network security group lets out public IPv4 addresses only (`EGRESS=internet`)
+  or nothing (`EGRESS=off`, from the end of its setup: while it's set up it lets out public addresses, for the
+  packages); nothing in the guest can change that. **What it can't do:** OCI applies no security rule
+  to 169.254.0.0/16, so the instance metadata service (and the VCN's resolver and clock there) stays reachable at the
+  network level; only the guest firewall refuses it. Your own server gets no outside layer from metacomputer. The
+  provider's manifest says which of these it enforces (`outside_egress`), and `net status` shows it.
+- **Out, inside the VM: never metadata, link-local or private ranges.** Its firewall (`guest-firewall`, nftables)
+  applies to every account, root included, though root in the guest could remove it; the desktop's accounts have no
+  root (`cua` has no sudo, `cuaadmin` may run only `metacomputer-admin`). It refuses the cloud's metadata services and
+  every link-local address (169.254.0.0/16, fe80::/10) and private, shared and reserved ranges (10/8, 172.16/12,
+  192.168/16, 100.64/10, fc00::/7, ...), except the DNS resolver and the clock, each to its one port and matched by
+  its account, and DHCP, whichever network stack sends it, matched by its privileged ports and a DHCP server's
+  destinations (68 to 67: broadcast, private and link-local; 546 to 547: ff02::1:2 and link-local). `EGRESS=off` lets
+  nothing else out (while the computer is being set up, apt's downloads too: the `_apt` account, TCP 80 and 443,
+  public addresses only; a successful setup ends that and reads both layers back, every failure ends it inside and
+  outside, and the build ends it on its own deadline, 3 hours on this Mac's clock whatever the guest's says. Inside,
+  it also ends by itself after 3 hours of the guest's uptime in the same boot, on a monotonic timer: a marker of
+  another boot or from the future counts for nothing. The rule's own wall-clock end is only a backstop. A computer set
+  up again opens both layers again for its setup and closes them the same ways). It
+  has no allowlist of names (`net allow` is refused). A tightened rule applies to connections already open (only replies to connections made to the computer
+  pass as part of one), and `net egress` changes nothing unless it can apply the change and read it back.
+- **Fail closed.** The firewall's service runs before the network, and the network requires it (systemd-networkd or
+  NetworkManager, the two Ubuntu uses; a server whose network something else manages is refused): rules that don't
+  load give way to an SSH-only fallback (nothing out but replies, and nothing of the full rules in it), and if that
+  doesn't load either, the network stays down. On a provider's first boot, `bootstrap.sh` loads the firewall before it
+  makes any account.
+- **Your own server keeps your access.** Setup keeps every port sshd listens on open, saves the server's own SSH
+  settings first, checks your account's access before its settings apply and with a fresh connection of yours after
+  the bootstrap, the setup and the reboot, and takes its SSH settings and firewall back off if your account can't sign
+  in. A fresh connection is never one shared with a connection you have open (`ControlMaster=no`, `ControlPath=none`):
+  it authenticates on its own. And no connection as your account forwards anything of your Mac's to the server, even
+  if your ssh config would (no agent, X11, port forwardings, tunnel, local or remote command, delegated credentials):
+  your agent signs it in and stays on your Mac. `vm delete NAME --remove-from-server` takes the setup off again (`remote-uninstall
+  all`, which removes the network's dependency on the firewall before stopping it, so the network keeps running), with
+  the same fresh check after.
+- **Keys of its own, and a host key that's never trusted on first use.** Each computer has its own set of keys in
+  `~/.ssh/metacomputer-NAME/` (0600), each limited to its job in the guest's root-owned key lists (the driver's key
+  runs only the driver; the view key opens only the live view's forward). A provider's computer gets a host key made
+  on your Mac, given to cloud-init and pinned before the first connection; your own server's host key is the one your
+  own SSH already trusts, read over that connection. Either is pinned as `mcomp-NAME`, never under an address.
+- **The provider holds what's in the VM.** Its screen, disk and whatever is typed into it are on the provider's
+  hardware, and the host key's private half is in the instance's user-data, which the provider keeps (the guest
+  firewall refuses the metadata service to everyone in the VM, and cloud-init is turned off once it's set up). Use a
+  VM on your Mac for work you wouldn't put on a provider's machine. No file, secret or key of your Mac's goes there:
+  the vault types a value over its fill account's connection and keeps API keys on the Mac behind its proxy.
+- **Provider credentials reach one program.** OCI's come only from the environment of the command you run (your
+  secrets manager hands them over). `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh` take them out
+  of the environment before anything else runs; `lib/remote.py`, the one program that calls OCI, is started with
+  them, and nothing else metacomputer starts is (the hub, ssh, the helpers, the build's own commands). `lib/remote.py`
+  takes them out of its own environment first and hands them to the adapter as a value, so nothing it starts either
+  (getconf, the settings resolver, ssh) gets them. Everything it makes is in the one compartment you name, tagged
+  `metacomputer`.
+- **The vault binds a computer, not a name.** A binding to a computer elsewhere names its identity (its provider
+  instance or your server's setup, with its pinned host key, hashed); one deleted and made again under the same name
+  is refused until it's bound again. An API token is for the computer it was made for: each request checks that the
+  binding and the identity beside the computer's keys still name it, when the request arrives, again just before it's
+  forwarded (its body may take minutes), and every second while its answer streams; otherwise the token is revoked,
+  nothing (more) is sent and the tunnel is closed. A binding that names another computer gets a new tunnel, and the
+  tokens made for the computer before are pruned. `vm delete` removes the identity, revokes the VM's tokens in
+  whatever vault it uses, and locks the computer's own vault. A computer set up again (kept after a failed setup,
+  even one whose launch answer was lost) gets its identity before its setup can finish; the setup refuses to finish
+  without one.
+- **Nothing left billing by surprise, and nothing deleted that a build didn't make.** A build that fails or is
+  interrupted after making an instance deletes what that build made, found by the operation it tagged its launch with,
+  and never an instance it found (or, with `--keep-on-failure`, records it as kept, so no later try takes it for a
+  lost launch, then stops it and says what still bills). What a build makes of the shared network and its computer's
+  group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact
+  resources and no others; the journal is on the disk (`F_FULLFSYNC`, or `fsync` where that isn't supported) before
+  anything billable is launched, and an error making it so refuses the launch. `start` checks
+  that no session or handoff has the computer, and never hard-stops a running instance unless its whole console
+  capture ends with the guest's power-off; a stop is waited for through OCI's 15-minute shutdown window; `vm delete`
+  checks again, under the computer's lock, that no session is using it before anything is stopped; the shared network
+  is changed only under a lock (`vm create`, `cloud setup` and `cloud teardown` alike), and never deleted while a
+  computer is being made in it.
+- **What isn't there yet:** `SSH_AUTH=cert` (refused: its certificates name the Mac's gateway address), snapshots and
+  `reset`, volumes and Mac folders, and the event watcher's health checks. Your own server's other software and
+  accounts are yours to keep apart; give metacomputer a server of its own.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands

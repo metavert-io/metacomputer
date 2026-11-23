@@ -169,7 +169,9 @@ import json, os, sys
 LOG = {log!r}
 argv = sys.argv[1:]
 remote = argv[-1] if argv else ""
-dest = next((a for a in argv if a.endswith("@127.0.0.1")), "")
+# The destination: user@127.0.0.1 for a VM on this Mac, user@ADDRESS for a computer reached over SSH elsewhere.
+import re as _re
+dest = next((a for a in argv if _re.fullmatch(r"[a-z_][a-z0-9_-]*@[A-Za-z0-9.:-]+", a)), "")
 rec = {{"argv": argv, "env": dict(os.environ), "user": dest.split("@")[0]}}
 # The pinned host key arrives as KnownHostsCommand=/bin/echo LINE (no file): what ssh would read.
 khc = next((a.split("=", 1)[1] for a in argv if a.startswith("KnownHostsCommand=")), None)
@@ -625,6 +627,23 @@ def run(td, procs):
         rc, out = tty([BIN, "bind", vm, "--port", str(p), *common, "--gateway", g],
                       [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
         check(f"bind {vm}", rc == 0, out)
+    # A computer reached over SSH elsewhere (docs/remote.md): its address and its host key's alias, no gateway, and
+    # the identity beside its keys (lib/remote.py identity), which a fill must find unchanged.
+    r = client("bind", "noidvm", "--port", "22", "--host", "203.0.113.9", "--host-key-alias", "mcomp-noidvm", *common)
+    check("bind a computer elsewhere with no identity beside its keys: refused", r.returncode != 0
+          and "no identity beside" in r.stderr, r.stderr)
+    ident = os.path.join(sshdir, "computer-id")
+    open(ident, "w").write("a" * 64 + "\n")
+    rc, out = tty([BIN, "bind", "remotevm", "--port", "22", "--host", "203.0.113.9", "--host-key-alias", "mcomp-remotevm",
+                   *common], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    check("bind a computer elsewhere: its address, alias and identity pinned, and no gateway", rc == 0
+          and "203.0.113.9:22" in out and "mcomp-remotevm" in out and "no gateway" in out and "aaaaaaaaaaaaaaaa" in out, out)
+    for extra, why in ((["--host", "203.0.113.9", "--host-key-alias", "mcomp-x", "--gateway", my_exe], "--gateway is for a VM on this Mac"),
+                       (["--host", "203.0.113.9"], "--host-key-alias"),
+                       (["--host", "-oProxyCommand=x", "--host-key-alias", "mcomp-x"], "--host"),
+                       (["--host", "203.0.113.9", "--host-key-alias", "x"], "--host-key-alias")):
+        r = client("bind", "badremote", "--port", "22", *extra, *common)
+        check(f"bind {' '.join(extra)[:50]}: refused", r.returncode == 64 and why in r.stderr, r.stderr)
     odd = sshdir + "/fill‮x"
     shutil.copy(sshdir + "/fill", odd)
     os.chmod(odd, 0o600)
@@ -717,6 +736,23 @@ def run(td, procs):
     sent = json.loads(calls()[-1]["stdin"])
     check("fill text, with the profile and selector passed on", r.returncode == 0 and sent["value"] == TEXT
           and sent.get("profile") == "prof1" and sent.get("selector") == "#notes")
+    r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")
+    c = calls()[-1]
+    check("fill a computer elsewhere: no listener check (it has no gateway here), ssh to its address as mcfill",
+          r.returncode == 0 and c["user"] == "mcfill" and "mcfill@203.0.113.9" in c["argv"] and "-p" in c["argv"]
+          and c["argv"][c["argv"].index("-p") + 1] == "22", (r.stdout, c["argv"]))
+    check("...its host key pinned under its alias (HostKeyAlias, KnownHostsCommand), never its address",
+          "HostKeyAlias=mcomp-remotevm" in c["argv"] and c["known_hosts"] == f"mcomp-remotevm {hostkey}\n"
+          and "StrictHostKeyChecking=yes" in c["argv"] and "ProxyCommand=none" in c["argv"], (c["known_hosts"], c["argv"]))
+    check("...the value on ssh's stdin only", json.loads(c["stdin"]).get("value") == PW_VALUE and PW_VALUE not in " ".join(c["argv"]))
+    n = len(calls())
+    open(ident, "w").write("b" * 64 + "\n")          # the computer of that name was deleted and made again
+    r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")
+    check("a computer made again under the same name (another identity): the old binding refuses, nothing is sent",
+          r.returncode == 2 and "bind` again" in js(r).get("reason", "") and len(calls()) == n, r.stdout)
+    os.remove(ident)                                   # deleted (vm delete removes the identity)
+    r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")
+    check("...and one deleted (no identity): refused too, nothing sent", r.returncode == 2 and len(calls()) == n, r.stdout)
 
     n = len(calls())
     for name, field in (("web-login", "otp"), ("web-otp", "password"), ("web-text", "password")):
