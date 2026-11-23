@@ -15,7 +15,9 @@ Run: python3 tests/test_secrets.py
 import base64
 import hmac
 import io
+import hashlib
 import json
+import re
 import os
 import pty
 import pwd
@@ -638,6 +640,35 @@ def run(td, procs):
                    *common], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
     check("bind a computer elsewhere: its address, alias and identity pinned, and no gateway", rc == 0
           and "203.0.113.9:22" in out and "mcomp-remotevm" in out and "no gateway" in out and "aaaaaaaaaaaaaaaa" in out, out)
+    # A computer with no address of its own (Fly Sprites): its provider's tunnel, pinned (program and contents, and its
+    # arguments), run by the vault as ssh's ProxyCommand through itself (`_tunnel`).
+    tunnel_prog = os.path.join(td, "sprite-standin")
+    provider_answer = os.path.join(td, "provider-answer.json")       # what the provider says about the computer now
+    open(provider_answer, "w").write('{"id": "sprite-0042", "name": "spritevm"}\n')
+    answers = os.path.join(td, "provider-answers")                  # or, while it has lines: one answer per question
+    open(tunnel_prog, "w").write(f"#!/bin/sh\nif [ \"$1\" = check ]; then\n  if [ -s {answers} ]; then head -n 1 {answers}; "
+                                 f"tail -n +2 {answers} > {answers}.t && mv {answers}.t {answers}\n"
+                                 f"  else cat {provider_answer}; fi\nfi\nexit 0\n")
+    os.chmod(tunnel_prog, 0o755)
+    targs = ["-o", "some-org", "-s", "spritevm", "proxy", "-W", ":22"]
+    rc, out = tty([BIN, "bind", "spritevm", "--port", "22", "--host", "spritevm", "--host-key-alias", "mcomp-spritevm",
+                   "--tunnel", tunnel_prog, *[f"--tunnel-arg={x}" for x in targs], "--tunnel-id", "sprite-0042",
+                   "--tunnel-check-arg=check", *common],
+                  [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    check("bind a computer reached through its provider's tunnel: the program, its arguments and its contents pinned, "
+          "and the provider's own id for it", rc == 0 and "tunnel" in out and tunnel_prog in out and "proxy -W :22" in out
+          and "sha256" in out and "ended when ssh goes" in out and "sprite-0042" in out, out)
+    for extra, why in ((["--host", "203.0.113.9", "--host-key-alias", "mcomp-x", "--tunnel", "/nonexistent/sprite"], "no tunnel program"),
+                       (["--tunnel", tunnel_prog], "--tunnel is for a computer at --host"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel", tunnel_prog, "--tunnel-arg=a b"], "--tunnel-arg"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel", tunnel_prog, "--tunnel-arg=%h"], "--tunnel-arg"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel-arg=-o"], "--tunnel-arg and --tunnel-id go with --tunnel"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel", tunnel_prog, "--tunnel-id", "sprite-1"],
+                        "--tunnel-id needs --tunnel-check-arg"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel", tunnel_prog, "--tunnel-check-arg=x"],
+                        "--tunnel-check-arg goes with --tunnel-id")):
+        r = client("bind", "badtunnel", "--port", "22", *extra, *common)
+        check(f"bind {' '.join(extra)[-50:]}: refused", r.returncode in (1, 64) and why in r.stderr, r.stderr)
     for extra, why in ((["--host", "203.0.113.9", "--host-key-alias", "mcomp-x", "--gateway", my_exe], "--gateway is for a VM on this Mac"),
                        (["--host", "203.0.113.9"], "--host-key-alias"),
                        (["--host", "-oProxyCommand=x", "--host-key-alias", "mcomp-x"], "--host"),
@@ -745,6 +776,69 @@ def run(td, procs):
           "HostKeyAlias=mcomp-remotevm" in c["argv"] and c["known_hosts"] == f"mcomp-remotevm {hostkey}\n"
           and "StrictHostKeyChecking=yes" in c["argv"] and "ProxyCommand=none" in c["argv"], (c["known_hosts"], c["argv"]))
     check("...the value on ssh's stdin only", json.loads(c["stdin"]).get("value") == PW_VALUE and PW_VALUE not in " ".join(c["argv"]))
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    c = calls()[-1]
+    pc = next((x for x in c["argv"] if x.startswith("ProxyCommand=")), "")
+    words = re.findall(r"'([^']*)'", pc)          # each word single-quoted (ssh hands the line to /bin/sh)
+    pin = hashlib.sha256(open(tunnel_prog, "rb").read()).hexdigest()
+    staged = os.path.join(vdir, "tunnels", pin)
+    check("fill a computer through its provider's tunnel: ssh's ProxyCommand runs the pinned program through the vault, "
+          "from the vault's own copy of it (checked again right before it runs: found by review, the path could change "
+          "between the check and the run)",
+          r.returncode == 0 and c["user"] == "mcfill" and "mcfill@spritevm" in c["argv"]
+          and pc == "ProxyCommand=" + " ".join(f"'{w}'" for w in words) and len(words) == 6 + len(targs)
+          and os.path.realpath(words[0]) == os.path.realpath(BIN) and words[1:5] == ["_tunnel", "--sha256", pin, "--"]
+          and os.path.realpath(words[5]) == os.path.realpath(staged) and words[6:] == targs
+          and open(staged, "rb").read() == open(tunnel_prog, "rb").read()
+          and oct(os.stat(staged).st_mode & 0o777) == "0o500" and oct(os.stat(os.path.dirname(staged)).st_mode & 0o777) == "0o700"
+          and "HostKeyAlias=mcomp-spritevm" in c["argv"] and c["argv"].count("ProxyCommand=none") == 0, (r.stdout, pc))
+    # The copy is checked again by `_tunnel` right before it runs: another program there is never run.
+    other = os.path.join(td, "not-pinned")
+    open(other, "w").write(f"#!/bin/sh\ntouch {td}/ran-unpinned\n")
+    os.chmod(other, 0o755)
+    rr = subprocess.run([BIN, "_tunnel", "--sha256", pin, "--", other], capture_output=True, text=True, env=env, timeout=30)
+    check("_tunnel --sha256: a program whose contents aren't the pin isn't run (exit 126)",
+          rr.returncode == 126 and not os.path.exists(os.path.join(td, "ran-unpinned")), (rr.returncode, rr.stderr))
+    # Found by review: an already orphaned `_tunnel` took launchd for its parent and ran the tunnel for good.
+    started = os.path.join(td, "tunnel-started")
+    starter = os.path.join(td, "starter.sh")
+    open(starter, "w").write(f"#!/bin/sh\necho $$ > {started}\nexec sleep 60\n")
+    os.chmod(starter, 0o755)
+    subprocess.run(["/bin/sh", "-c", f"'{BIN}' _tunnel -- '{starter}' </dev/null >/dev/null 2>&1 &"], env=env, timeout=10)
+    time.sleep(3)
+    still = False
+    if os.path.exists(started):
+        try:
+            os.kill(int(open(started).read().strip()), 0)
+            still = True
+            os.kill(int(open(started).read().strip()), 9)
+        except (ProcessLookupError, ValueError):
+            pass
+    check("_tunnel started after its ssh had gone (orphaned from the start): no tunnel left running", not still)
+    # The provider's own id for the computer, asked before every connection (found by review: a Sprite made again
+    # under the name, with the old host key, would have got the fill).
+    n = len(calls())
+    open(provider_answer, "w").write('{"id": "sprite-0099", "name": "spritevm"}\n')
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...the provider's computer of that name has another id: refused, nothing sent, bind again",
+          r.returncode == 2 and "isn't the one bound" in js(r).get("reason", "") and len(calls()) == n, r.stdout)
+    open(provider_answer, "w").write('{"id": "sprite-0042", "name": "spritevm"}\n')
+    # Found by the re-check: the provider was asked once before a step, and not for the connection(s) after it. Now
+    # before every connection: here the computer of that name changes between the step's look and its connection.
+    n = len(calls())
+    open(answers, "w").write('{"id": "sprite-0042", "name": "spritevm"}\n{"id": "sprite-0099", "name": "spritevm"}\n')
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...asked again right before each connection: another id by the time the fill connects: refused, nothing sent",
+          r.returncode != 0 and "isn't the one bound" in js(r).get("reason", "") and len(calls()) == n
+          and open(answers).read() == "", (r.stdout, open(answers).read()))
+    n = len(calls())
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...and the same computer at each look: filled", r.returncode == 0 and len(calls()) == n + 1, r.stdout)
+    n = len(calls())
+    open(tunnel_prog, "a").write("# changed\n")          # the tunnel program isn't the one pinned at bind any more
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...its tunnel program changed since bind: refused, nothing sent, bind again",
+          r.returncode == 2 and "isn't the one pinned at bind" in js(r).get("reason", "") and len(calls()) == n, r.stdout)
     n = len(calls())
     open(ident, "w").write("b" * 64 + "\n")          # the computer of that name was deleted and made again
     r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")

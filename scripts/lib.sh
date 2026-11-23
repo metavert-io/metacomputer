@@ -646,15 +646,32 @@ mc_owner_ssh_opts() {
     -o Tunnel=no -o PreferredAuthentications=publickey -o PasswordAuthentication=no
     -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${1:-22}")
 }
-remote_can_ask() { # whether the provider can be asked from here (its credentials are in this command's environment)
-  case "${PROVIDER:-}" in oci) [ -n "${OCI_USER:-}" ] && [ -n "${OCI_API_KEY_PEM:-}" ] ;; *) return 1 ;; esac
+remote_can_ask() { # whether the provider can be asked from here (its credentials are in this command's environment;
+  # Fly Sprites: its sprite command, which keeps its own sign-in)
+  case "${PROVIDER:-}" in
+    oci) [ -n "${OCI_USER:-}" ] && [ -n "${OCI_API_KEY_PEM:-}" ] ;;
+    sprites) [ -x "$(mc_sprite_cli)" ] ;;
+    *) return 1 ;;
+  esac
 }
-mc_remote_target() { # USER -> MC_T_ARGS: the transport's options and destination (lib/remote.py target), once per user
+remote_can_ask_for() { local PROVIDER="$1"; remote_can_ask; }   # PROVIDER: before a computer of its own has settings
+mc_sprite_cli() { # SPRITE_CLI, else sprite on PATH, else ~/.local/bin/sprite (lib/cloud/sprites.py default_cli)
+  if [ -n "${SPRITE_CLI:-}" ]; then printf '%s' "${SPRITE_CLI/#\~/$HOME}"
+  elif command -v sprite >/dev/null 2>&1; then command -v sprite
+  else printf '%s' "$HOME/.local/bin/sprite"; fi
+}
+# The transport's settings as bash loaded them, for lib/remote.py target, tunnel and probe (no second reading).
+MC_T_WHERE=(--transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}"
+            --sprite-org "${SPRITE_ORG:-}" --sprite-name "${SPRITE_NAME:-}" --sprite-cli "${SPRITE_CLI:-}")
+# USER -> MC_T_ARGS: the transport's options and destination (lib/remote.py target), once per user and command. Kept
+# arguments are safe to reuse: a Fly Sprite's ProxyCommand asks Fly for the Sprite's id again on every connection, before
+# its tunnel starts (lib/proxywrap.py --id), so a Sprite made again under the name meanwhile gets no connection.
+mc_remote_target() {
   local x
   [ "${MC_T_USER:-}" = "$1" ] && [ ${#MC_T_ARGS[@]} -gt 0 ] && return 0
   MC_T_ARGS=(); MC_T_USER="$1"
   while IFS= read -r -d '' x; do MC_T_ARGS+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" target --vm "$VM_NAME" \
-    --run-dir "$RUN_DIR" --user "$1" --transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" 2>"$SOCK_DIR/target.err")
+    --run-dir "$RUN_DIR" --user "$1" "${MC_T_WHERE[@]}" 2>"$SOCK_DIR/target.err")
   if [ ${#MC_T_ARGS[@]} -gt 0 ]; then case "${MC_T_ARGS[${#MC_T_ARGS[@]}-1]}" in "$1@"*) return 0 ;; esac; fi
   MC_T_ARGS=(); MC_T_USER=""
   MC_REFUSAL="$(head -c 400 "$SOCK_DIR/target.err" 2>/dev/null | sed 's/^metacomputer: //')"
@@ -964,7 +981,11 @@ export_options() {
   # Approved lessons (metacomputer learn, lib/learn_store.py): the environment wins here too (the benchmark's
   # lessons switch, an isolated store for tests).
   export MCOMP_LESSONS="${MCOMP_LESSONS:-${LESSONS:-on}}" MCOMP_LESSONS_DIR="${MCOMP_LESSONS_DIR:-${LESSONS_DIR:-}}"
+  # Whether the driver's background input reaches this computer's desktop (its provider's manifest, lib/cloud/: input):
+  # off where there's no /dev/uinput (Fly Sprites), and the hub sends keys, typing and pixel clicks in the foreground.
+  export MCOMP_BACKGROUND_INPUT="$(mc_background_input)"
 }
+mc_background_input() { case "${PROVIDER:-local-lume}" in sprites) printf off ;; *) printf on ;; esac; }
 
 # --- the optional event stream (docs/events.md; off until a sink is added) ------
 # Best effort: it never fails the command, and waits at most about 3 s per sink.
@@ -1157,10 +1178,10 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     local w=unknown
     if remote_can_ask; then w="$(remote_py state --vm "$VM_NAME" 2>/dev/null)"; fi
     case "$w" in
-      awake) MC_REMOTE_STATUS=running ;;
+      # A Sprite asleep wakes at the first connection: it's there to be used.
+      awake|asleep) MC_REMOTE_STATUS=running ;;
       stopped|absent|starting|stopping) MC_REMOTE_STATUS="$w" ;;
-      *) case "$("$PY" "$LAB_ROOT/lib/remote.py" probe --vm "$VM_NAME" --run-dir "$RUN_DIR" --transport "${TRANSPORT:-ssh}" \
-                   --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" 2>/dev/null)" in
+      *) case "$("$PY" "$LAB_ROOT/lib/remote.py" probe --vm "$VM_NAME" --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}" 2>/dev/null)" in
            reachable) MC_REMOTE_STATUS=running ;; *) MC_REMOTE_STATUS=unreachable ;; esac ;;
     esac
   }

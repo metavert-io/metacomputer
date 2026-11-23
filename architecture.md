@@ -907,7 +907,7 @@ With an event sink configured (or a sink-change announcement still waiting),
 ## Placement and providers
 
 Every computer has a name and a place: this Mac (`mac`), or a provider's place
-(`server`, your own server; `oci`, Oracle Cloud), which `cloud` stands for as a group.
+(`server`, your own server; `oci`, Oracle Cloud; `sprites`, Fly Sprites), which `cloud` stands for as a group.
 A computer's place is its settings' `PLACE` (`mac` unless a `config/vms/NAME.env` says
 otherwise).
 
@@ -985,7 +985,7 @@ otherwise).
   disk, volumes and Mac folders, checkpoints, the gateway's allowlist, no cost) and
   hands every action to the existing command (`HandledByCLI`: the lifecycle code in
   `bin/metacomputer` and `scripts/` is what runs, unchanged); `ubuntu-vm` (your own
-  server) and `oci` (Oracle Cloud), below; and `fake`, an in-memory
+  server), `oci` (Oracle Cloud) and `sprites` (Fly Sprites), below; and `fake`, an in-memory
   stand-in for the tests that never counts as a provider. `tests/test_cloud_adapters.py`
   runs the same contract against each registered adapter.
 - **A computer elsewhere** ([docs/remote.md](docs/remote.md)): an Ubuntu 24.04 VM reached
@@ -1019,8 +1019,26 @@ otherwise).
   `TRANSPORT=ssh` connects straight to `SSH_HOST:SSH_HOST_PORT` (or the address the
   provider gave). A provider whose computers have no address (Fly Sprites, next) registers
   an opener that returns its tunnel program; ssh runs it as its ProxyCommand through
-  `lib/proxywrap.py`, which ends it (SIGTERM, then SIGKILL) when ssh goes, so an orphaned
-  tunnel can't keep a computer awake and billing.
+  `lib/proxywrap.py`, which leaves ssh's process group (so a group kill aimed at ssh can't
+  end it first) and ends the tunnel (SIGTERM, then SIGKILL) when ssh goes, so an orphaned
+  tunnel can't keep a computer awake and billing. The vault does the same through itself
+  (`mcomp-vault _tunnel`), with the tunnel's program pinned at bind.
+- **Fly Sprites** ([docs/sprites.md](docs/sprites.md)): `lib/cloud/sprites.py` (the
+  manifest, the adapter, the `sprite` opener: `sprite proxy -W :22`) over `lib/spritecli.py`,
+  the facade of Fly's `sprite` command (`sprite api` for the Sprites API, `sprite exec
+  --no-port-forward` for the first step), which only `lib/remote.py` makes. The build
+  (`scripts/remote-build.sh`, `KIND=sprite`) makes the Sprite (journaled; a lost launch is
+  found by name and time), sets its network policy, runs `provisioning/sprite/bootstrap.sh`
+  through `sprite exec` (accounts, sshd as a Sprites service on the loopback, the host key
+  read back over that channel), then the common payload and `provision.sh` with
+  `MCOMP_TARGET=sprite` (Xvfb, no systemd, DNS over HTTPS off) over SSH with one connection
+  held open so the Sprite doesn't pause, then the `xvfb` and `desktop` services, the checks,
+  `finalize.sh` and a baseline checkpoint. The desktop and sshd run in one session (`svc-session`:
+  a mount namespace with `/.sprite` hidden by `hide-sprite-api`, and a PID namespace with its own
+  `/proc`), joined through `in-session` before anything runs as the desktop's account. Every
+  operation checks the Sprite's id with Fly's API first. Egress is Fly's network policy
+  (DNS names, outside the VM); checkpoints are Fly's; the hub sends input in the foreground
+  (`MCOMP_BACKGROUND_INPUT=off`, from the manifest's `input`).
 
 ## Event stream (optional)
 

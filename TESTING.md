@@ -286,6 +286,30 @@ runner's does.
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).
 
+## Fly Sprites: `tests/test_sprites.py`
+
+`python3 tests/test_sprites.py` needs no VM, no network and no Fly account: a stand-in `sprite` command keeps the
+Sprites API's answers in a file under its HOME.
+- The `sprite` transport: `sprite proxy -W :22` as ssh's ProxyCommand through `lib/proxywrap.py`, the host key pinned
+  as `mcomp-NAME`; bad organizations, Sprite names and command paths refused.
+- The network policy: `EGRESS=internet` (every name), `off` (no name), an allowlist (each name with its subdomains
+  unless `--exact`); addresses and anything that isn't a DNS name refused; what's read back classified.
+- The adapter through `lib/spritecli.py`: create (refused over an existing Sprite), wake, sleep, status, delete
+  (never another Sprite of the same name), checkpoints by name, the policy read back; the command gets HOME, PATH
+  and LANG only, and `exec` never forwards ports back to the Mac.
+- `lib/remote.py`: the launch journal, a lost launch found by name and time and deleted (an older Sprite of that name
+  left alone), abort and `--keep`.
+- The hub without background input (keys and typing in the foreground, aimed at an element too; pixel clicks; element
+  clicks left), the guest's services (the session's mount and PID namespaces, joined before anything runs as the
+  desktop's account; sshd on the loopback, DNS over HTTPS off), each operation's check of the Sprite's id, lost
+  launches only by their operation's label, network policy changes judged on where they end, byte caps on what Fly's
+  command prints, and the CLI in a copy of
+  the checkout: `vm create --on sprites`, `ssh_base`, `net status|egress|allow|remove|clear` (widening only at your
+  own terminal), checkpoints, `stop`, `cloud status`, `vm delete`.
+
+The vault's side (a binding with `--tunnel`: the program pinned, ssh's ProxyCommand through `mcomp-vault _tunnel`, a
+changed program refused) is in `tests/test_secrets.py`.
+
 ## A computer elsewhere: `tests/test_remote.py`
 
 `python3 tests/test_remote.py` needs no VM and makes no network call or provider call (a stand-in for Oracle's API;

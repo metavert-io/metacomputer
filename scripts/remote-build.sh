@@ -1,6 +1,8 @@
 #!/bin/bash
 # Set up a computer reached over SSH (docs/remote.md): an Ubuntu 24.04 VM that a provider makes (oci) or your own
-# server (server). The same desktop, driver and accounts as the Mac's VM, set up the same way on both:
+# server (server); or a Fly Sprite (sprites, docs/sprites.md: its first step through Fly's own channel, `sprite exec`;
+# no reboot: its desktop is Sprites services). The same desktop, driver and accounts as the Mac's VM, set up the same
+# way on all of them:
 #   1. a provider's: its keys and host key made here, then its instance, whose cloud-init runs bootstrap.sh;
 #      your own: bootstrap.sh run once over your own SSH connection (your account, with sudo), and the host key it
 #      reports pinned;
@@ -56,7 +58,7 @@ WOKEN=0            # an instance this build started to set it up again (it was s
 # The marker also expires by itself (guest-firewall), so a computer this can't reach closes too.
 wanted_egress() { local w; w="$(plan egress 2>/dev/null)"; printf '%s' "${w:-${EGRESS:-internet}}"; }
 close_guest_setup_egress() {
-  [ "$SETUP_OPEN" = 1 ] && [ "$ROLLED_BACK" != 1 ] || return 0
+  [ "$SETUP_OPEN" = 1 ] && [ "$ROLLED_BACK" != 1 ] && [ "${KIND:-}" != sprite ] || return 0
   # sync: on the disk before anything stops it (a stop through the provider is a power-off; found live: the marker
   # came back after one)
   if gssh admin 'sudo rm -f /etc/metacomputer/setup-egress && sudo /opt/metacomputer/bin/guest-firewall apply && sync' >/dev/null 2>&1; then
@@ -66,7 +68,7 @@ close_guest_setup_egress() {
   fi
 }
 close_provider_setup_egress() {
-  [ "$SETUP_OPEN" = 1 ] && [ "$KIND" = made ] || return 0
+  [ "$SETUP_OPEN" = 1 ] && [ "$KIND" != own ] || return 0
   if remote_py egress --vm "$VM_NAME" --set "$(wanted_egress)" >/dev/null; then ok "$WHERE's rules: EGRESS=$(wanted_egress)"
   else warn "$WHERE's rules couldn't be set back to EGRESS=$(wanted_egress): metacomputer --vm $VM_NAME net egress $(wanted_egress)"; fi
 }
@@ -77,9 +79,9 @@ cleanup_failed() { # RC
   if [ -n "$ABORT_OP" ] && [ "$KEEP_ON_FAILURE" != 1 ]; then
     say "the setup failed; deleting what this build made at $WHERE (an instance bills while it exists)"
     if remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"; then
-      ok "nothing this build made is left billing at $WHERE (metacomputer cloud status oci lists what's there)"
+      ok "nothing this build made is left billing at $WHERE (metacomputer cloud status $PROVIDER lists what's there)"
     else
-      warn "what this build made could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status oci, then delete it in Oracle's console)"
+      warn "what this build made could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status $PROVIDER, then delete it in the provider's console)"
       close_guest_setup_egress; close_provider_setup_egress
     fi
     return 0
@@ -103,7 +105,18 @@ cleanup_failed() { # RC
       || warn "it couldn't be stopped: it is RUNNING and billing at $WHERE (metacomputer --vm $VM_NAME stop --force)"
   fi
 }
-trap 'rc=$?; trap - ERR; set +e; cleanup_failed $rc
+# Fly Sprites: one SSH connection held open while the build runs (a Sprite pauses about 10 s after its last connection
+# closes, and its programs, the setup's included, with it). Through lib/proxywrap.py, like every connection: when it's
+# ended, Fly's tunnel ends too.
+KEEP_PID=""
+keep_awake_start() {
+  [ "${KIND:-}" = sprite ] && [ -z "$KEEP_PID" ] || return 0
+  ssh_base admin
+  ssh -T "${SSH_ARGS[@]}" 'exec sleep 21600' </dev/null >/dev/null 2>&1 &
+  KEEP_PID=$!
+}
+keep_awake_stop() { [ -z "$KEEP_PID" ] || { kill "$KEEP_PID" 2>/dev/null; wait "$KEEP_PID" 2>/dev/null; KEEP_PID=""; }; }
+trap 'rc=$?; trap - ERR; set +e; cleanup_failed $rc; keep_awake_stop
       if [ $rc = 0 ]; then emit_event lifecycle build_done info "The computer $VM_NAME was set up" "$(mc_cmd) start";
       elif [ "$BUILD_QUIET_EXIT" = 0 ]; then emit_event lifecycle build_failed error "Setting up the computer $VM_NAME failed (exit $rc)" "see ${BUILD_LOG:-the newest logs build-*.log}" "exit=$rc"; fi' EXIT
 # Interrupted (Ctrl-C, the terminal closed, killed): a failure like any other, so what it made is cleaned up (bash
@@ -127,7 +140,12 @@ for b in $BROWSERS; do case "$b" in firefox|chrome|webkit) ;; *) die "BROWSERS: 
 PLAN="$(remote_py plan --vm "$VM_NAME")" || die "can't set up $VM_NAME (above)"
 plan() { printf '%s\n' "$PLAN" | sed -n "s/^$1=//p"; }
 KIND="$(plan kind)"; ARCH="$(plan arch)"; WHERE="$(plan label)"
-ok "$VM_NAME: $([ "$KIND" = made ] && echo "a computer $WHERE makes" || echo "your own server at ${SSH_HOST:-?}"), egress $(plan egress), idle stop $(plan idle_stop)"
+case "$KIND" in
+  made) what="a computer $WHERE makes" ;;
+  sprite) what="a Sprite on Fly (${SPRITE_NAME:-$VM_NAME} in ${SPRITE_ORG:-?})" ;;
+  *) what="your own server at ${SSH_HOST:-?}" ;;
+esac
+ok "$VM_NAME: $what, egress $(plan egress), idle stop $(plan idle_stop)"
 
 # --- keys: one set for this computer, 0600 in its own folder ---------------------------------------------------
 ( umask 077; mkdir -p "$SSH_DIR" ); chmod 700 "$SSH_DIR"
@@ -139,8 +157,58 @@ HK_NAME="$(mc_hostkey_name)"
 
 # --- 1. the instance, or the owner's bootstrap -----------------------------------------------------------------
 STATE_HAS_INSTANCE=0
-[ "$KIND" != made ] || ! "$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("instance") else 1)' "$RUN_DIR/remote.json" 2>/dev/null || STATE_HAS_INSTANCE=1
-if [ "$KIND" = made ]; then
+[ "$KIND" = own ] || ! "$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("instance") else 1)' "$RUN_DIR/remote.json" 2>/dev/null || STATE_HAS_INSTANCE=1
+if [ "$KIND" = sprite ]; then
+  remote_can_ask || die "Fly's sprite command isn't installed: install it and sign in (sprite login), then run this again (docs/sprites.md)"
+  if [ "$STATE_HAS_INSTANCE" = 0 ]; then
+    op="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$op" =~ ^[0-9a-f]{32}$ ]] || die "couldn't make an operation id"
+    ABORT_OP="$op"           # from here, a failure deletes what this operation made, and only that (cleanup_failed)
+    open_setup
+    remote_py create --vm "$VM_NAME" --op "$op" || die "the Sprite wasn't made (above); metacomputer --vm $VM_NAME status shows what's there"
+  else
+    say "the Sprite exists: setting it up again"
+    # One that's set up isn't set up again (and its policy isn't opened): asked through Fly's channel, before anything.
+    if remote_py exec --vm "$VM_NAME" --timeout 60 -- test -f /var/lib/metacomputer/finalized >/dev/null 2>&1; then
+      BUILD_QUIET_EXIT=1
+      die "$VM_NAME is set up already (metacomputer --vm $VM_NAME status). To set it up from scratch: metacomputer vm delete $VM_NAME, then vm create it again"
+    fi
+    open_setup
+    RESUMING=1
+    # The setup's downloads: Fly's network policy lets every name out until the setup ends (then EGRESS).
+    remote_py egress --vm "$VM_NAME" --set internet --setup >/dev/null || die "couldn't open Fly's network policy for the setup's downloads (above)"
+  fi
+  # The first step through Fly's own channel (sprite exec, as the Sprite's `sprite` account, with sudo): the accounts,
+  # their key lists and sshd as a Sprites service on the Sprite's loopback, with /.sprite hidden from its sessions.
+  # The host key it reports came over that authenticated channel: pinned here, never learned from a first connection.
+  BS="$(mktemp -d "$SOCK_DIR/bootstrap.XXXXXX")"
+  cp "$LAB_ROOT/provisioning/sprite/bootstrap.sh" "$BS/"
+  cp -R "$LAB_ROOT/provisioning/sprite/rootfs" "$BS/"
+  remote_py key-lists --vm "$VM_NAME" --dir "$BS" || die "couldn't write the key lists"
+  say "bootstrap through Fly's own channel (sprite exec): accounts, and sshd on the Sprite's loopback with /.sprite hidden"
+  out="$( (cd "$BS" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - bootstrap.sh keys-guest keys-admin rootfs) \
+    | remote_py exec --vm "$VM_NAME" --timeout 900 --stdin -- sudo -n bash -c 'd="$(mktemp -d)"; tar -xf - -C "$d" --no-same-owner; bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc')" \
+    || { printf '%s\n' "$out" | grep -v '^HOSTKEY ' || true; die "the bootstrap failed (above)"; }
+  "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$BS"
+  printf '%s\n' "$out" | grep -v '^HOSTKEY ' || true
+  hk="$(printf '%s\n' "$out" | sed -n 's/^HOSTKEY \(ssh-ed25519 [A-Za-z0-9+/=]*\)$/\1/p' | tail -1)"
+  [ -n "$hk" ] || die "the bootstrap didn't report the Sprite's host key; nothing was pinned"
+  if [ "$RESUMING" = 1 ] && [ -s "$KNOWN_HOSTS" ] && ! grep -qxF "$HK_NAME $hk" "$KNOWN_HOSTS"; then
+    die "the Sprite's host key isn't the one pinned for $VM_NAME: it isn't the computer this Mac set up (metacomputer vm delete $VM_NAME, then vm create it again)"
+  fi
+  echo "$HK_NAME $hk" > "$KNOWN_HOSTS"; chmod 600 "$KNOWN_HOSTS"
+  ok "host key pinned as $HK_NAME (read through Fly's channel): $(ssh-keygen -lf "$KNOWN_HOSTS" | cut -d' ' -f2)"
+  remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity"
+  MC_T_USER=""
+  wait_ssh admin 120 || die "metacomputer's own key doesn't sign in to the Sprite as $ADMIN_USER (through Fly's tunnel)"
+  if gssh admin 'test -f /var/lib/metacomputer/finalized'; then
+    BUILD_QUIET_EXIT=1; SETUP_OPEN=0
+    die "$VM_NAME is set up already (metacomputer --vm $VM_NAME status). To set it up from scratch: metacomputer vm delete $VM_NAME, then vm create it again"
+  fi
+  keep_awake_start
+  setup_deadline_check
+  ARCH_SEEN="$(gssh admin 'dpkg --print-architecture')"
+elif [ "$KIND" = made ]; then
   remote_can_ask || die "making a computer on $WHERE needs its credentials in this command's environment (docs/remote.md)"
   if [ "$STATE_HAS_INSTANCE" = 0 ]; then
     # Its host key, made here and given to cloud-init: the first connection is already checked against it.
@@ -249,6 +317,7 @@ mkdir -p "$P/payload/remote"
 cp -R "$LAB_ROOT/provisioning/guest/." "$P/payload/"
 cp -R "$LAB_ROOT/provisioning/remote/rootfs" "$P/payload/remote/"
 cp "$LAB_ROOT/provisioning/remote/bootstrap.sh" "$P/payload/remote/"
+[ "$KIND" != sprite ] || cp -R "$LAB_ROOT/provisioning/sprite" "$P/payload/sprite"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$P/payload/"
 echo "$CUA_DRIVER_SHA256  $P/payload/$CUA_DRIVER_TARBALL" | shasum -a 256 -c - >/dev/null || die "the driver in the payload isn't the pinned one"
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$P/payload/mozilla-repo-signing-key.gpg"
@@ -259,7 +328,7 @@ remote_py key-lists --vm "$VM_NAME" --dir "$P/payload" || die "couldn't write th
   echo "GUEST_USER=$GUEST_USER"; echo "ADMIN_USER=$ADMIN_USER"
   echo "CUA_DRIVER_VERSION=$CUA_DRIVER_VERSION"; echo "CUA_DRIVER_TARBALL=$CUA_DRIVER_TARBALL"
   echo "CUA_DRIVER_SHA256=$CUA_DRIVER_SHA256"; echo "CUA_SRC_COMMIT=$CUA_SRC_COMMIT"; echo "BUILD_ID=$TS"
-  echo "MCOMP_TARGET=remote"; echo "MCOMP_GUEST_ARCH=$([ "$ARCH" = x86_64 ] && echo amd64 || echo arm64)"
+  echo "MCOMP_TARGET=$([ "$KIND" = sprite ] && echo sprite || echo remote)"; echo "MCOMP_GUEST_ARCH=$([ "$ARCH" = x86_64 ] && echo amd64 || echo arm64)"
   echo "MCOMP_SSH_PORT=${SSH_HOST_PORT:-22}"
   echo "MCOMP_EGRESS=$(plan egress)"; echo "MCOMP_IDLE_STOP=$(plan idle_stop)"
   echo "MCOMP_BROWSERS=\"$BROWSERS\""
@@ -274,8 +343,15 @@ gssh admin 'sudo rm -rf /opt/metacomputer-payload && sudo install -d -m 0700 /op
   < "$P/payload.tgz" || die "couldn't upload the payload"
 "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$P"
 BOOT1="$(gssh admin 'cat /proc/sys/kernel/random/boot_id')"
+if [ "$KIND" = sprite ]; then
+  # No systemd: the setup runs in a session of its own, detached from this SSH connection (the Sprite stays awake for
+  # it: keep_awake_start).
+  gssh admin "sudo rm -f /var/lib/metacomputer/provisioned /var/lib/metacomputer/failed; sudo setsid nohup bash /opt/metacomputer-payload/provision.sh /opt/metacomputer-payload </dev/null >/dev/null 2>&1 &" \
+    || die "couldn't start the setup on $VM_NAME"
+else
 gssh admin "sudo rm -f /var/lib/metacomputer/provisioned /var/lib/metacomputer/failed; sudo systemd-run --quiet --collect --unit=metacomputer-setup-$TS bash /opt/metacomputer-payload/provision.sh /opt/metacomputer-payload" \
   || die "couldn't start the setup on $VM_NAME"
+fi
 say "setting up the desktop on $VM_NAME (apt: about 5-10 minutes)"
 last=""; start=$(date +%s)
 while :; do
@@ -284,18 +360,25 @@ while :; do
   case "$st" in
     DONE) break ;;
     FAILED) gssh admin 'sudo tail -60 /var/log/metacomputer-provision.log' || true
-            [ "$KIND" = made ] || owner_check "after the failed setup"
-            die "the setup failed (above)$([ "$KIND" = made ] || echo "; your server is left as the setup left it, your access checked: metacomputer --vm $VM_NAME ssh admin to look")" ;;
+            [ "$KIND" != own ] || owner_check "after the failed setup"
+            die "the setup failed (above)$([ "$KIND" != own ] || echo "; your server is left as the setup left it, your access checked: metacomputer --vm $VM_NAME ssh admin to look")" ;;
   esac
   [ $(( $(date +%s) - start )) -gt 3600 ] && die "the setup took over an hour"
   setup_deadline_check
   sleep 10
 done
 ok "set up in $(( ($(date +%s) - start) / 60 )) min"
-[ "$KIND" = made ] || owner_check "after the setup"
+[ "$KIND" != own ] || owner_check "after the setup"
 gssh admin 'sudo cat /var/log/metacomputer-provision.log' > "$LOG_DIR/provision-$TS.log" 2>/dev/null || true
 
 # --- 3. reboot into the desktop, check it, finalize ------------------------------------------------------------
+if [ "$KIND" = sprite ]; then
+  # No reboot: the desktop is two Sprites services (xvfb, then desktop), made through Fly's own channel (sessions
+  # can't reach the Sprite's API); Fly starts them again after a restore or a restart.
+  say "starting the desktop as Sprites services (xvfb, desktop)"
+  remote_py exec --vm "$VM_NAME" --timeout 120 -- sudo -n /opt/metacomputer/sprite/services desktop >/dev/null \
+    || die "couldn't create the desktop's services (above)"
+else
 say "rebooting into the desktop"
 gssh admin 'sudo systemctl reboot' >/dev/null 2>&1 || true
 start=$(date +%s)
@@ -305,9 +388,10 @@ while :; do
   [ $(( $(date +%s) - start )) -gt 900 ] && die "$VM_NAME did not come back after the reboot"
   sleep 5
 done
+fi
 wait_session 300 || die "the desktop session never became ready (metacomputer --vm $VM_NAME ssh admin; sudo metacomputer-admin logs)"
 ok "desktop session ready"
-[ "$KIND" = made ] || owner_check "after the reboot, with the firewall loaded at boot"
+[ "$KIND" != own ] || owner_check "after the reboot, with the firewall loaded at boot"
 "$LAB_ROOT/bin/metacomputer" _vnc-install
 gssh ops /opt/metacomputer/bin/guest-status > "$LOG_DIR/guest-status-$TS.json"
 "$PY" - "$LOG_DIR/guest-status-$TS.json" <<'EOF' || die "the desktop isn't ready (see the guest-status log)"
@@ -324,17 +408,31 @@ setup_deadline_check
 gssh admin "sudo bash -s $ADMIN_USER '$GUEST_USER'" < "$LAB_ROOT/provisioning/guest/finalize.sh"
 gssh admin 'sync; test -f /var/lib/metacomputer/finalized && sudo -n -l | grep -q metacomputer-admin && ! sudo -n -l | grep -q "(ALL) NOPASSWD: ALL"' \
   || die "finalize did not take effect"
-ok "finalized: $ADMIN_USER may run only metacomputer-admin with sudo; cloud-init is off"
+ok "finalized: $ADMIN_USER may run only metacomputer-admin with sudo$([ "$KIND" = sprite ] || echo "; cloud-init is off")"
 # EGRESS as set, now that the setup's downloads are over: its own firewall, then the provider's rules (open to public
 # addresses while it was set up), each read back. A computer this build made that can't be held to it is deleted.
+# A Fly Sprite has no firewall of its own: Fly's network policy, outside it, is the one layer.
 want_egress="$(plan egress)"
+if [ "$KIND" != sprite ]; then
 got="$(gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | tail -1)"
 [ "$got" = "$want_egress" ] || die "its own firewall reads back as '${got:-nothing}', not EGRESS=$want_egress"
-if [ "$KIND" = made ]; then
+fi
+if [ "$KIND" != own ]; then
   got="$(remote_py egress --vm "$VM_NAME" --set "$want_egress")" || die "$WHERE didn't take EGRESS=$want_egress (above)"
   [ "$got" = "$want_egress" ] || die "$WHERE's rules read back as '$got', not EGRESS=$want_egress"
 fi
-ok "EGRESS=$want_egress: in force in its own firewall$([ "$KIND" = made ] && echo " and in $WHERE's rules")"
+case "$KIND" in
+  sprite) ok "EGRESS=$want_egress: in force in Fly's network policy, outside the computer" ;;
+  made) ok "EGRESS=$want_egress: in force in its own firewall and in $WHERE's rules" ;;
+  *) ok "EGRESS=$want_egress: in force in its own firewall" ;;
+esac
+if [ "$KIND" = sprite ]; then
+  # Set up: the setup's exception to the network policy's rule (widening only at your own terminal) is over for good.
+  remote_py setup-done --vm "$VM_NAME" || die "couldn't record that $VM_NAME is set up"
+  # Its baseline (metacomputer reset goes back to it): a checkpoint at Fly, taken while it runs.
+  remote_py checkpoint --vm "$VM_NAME" create baseline --replace >/dev/null || die "couldn't make the baseline checkpoint (above)"
+  ok "baseline: a checkpoint at Fly (metacomputer --vm $VM_NAME reset goes back to it)"
+fi
 ABORT_OP=""; SETUP_DONE=1; SETUP_OPEN=0   # set up: from here nothing is deleted or closed on a failure
 # The computer's private host key now lives only in it; the Mac keeps the public half (known_hosts, the vault).
 rm -f "$SSH_DIR/hostkey"
@@ -343,7 +441,7 @@ T1=$(date +%s)
 launch="$("$PY" -c 'import json,sys
 try: print(int(json.load(open(sys.argv[1])).get("launch_started") or 0))
 except Exception: print(0)' "$RUN_DIR/remote.json" 2>/dev/null || echo 0)"
-if [ "$KIND" = made ] && [ "$STATE_HAS_INSTANCE" = 0 ] && [ "$launch" -gt 0 ]; then
+if [ "$KIND" != own ] && [ "$STATE_HAS_INSTANCE" = 0 ] && [ "$launch" -gt 0 ]; then
   ok "ready $(( T1 - launch )) s after the launch began (SSH after $(( T_SSH - launch )) s)"
 else
   ok "ready in $(( T1 - T0 )) s"

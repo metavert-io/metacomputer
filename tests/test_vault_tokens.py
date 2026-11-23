@@ -807,6 +807,22 @@ def run(td, procs):
     st_4, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
     check("re-bound to another computer while the old tunnel was still open: a new tunnel, the old one closed, the new "
           "token works", rc == 0 and len(tun_4) == 1 and old_closed and st_4 == 200, (rc, len(tun_4), old_closed, st_4))
+    # `disconnect --vm VM` (metacomputer stop runs it for a computer that sleeps when nothing is connected; found by
+    # review: the proxy's tunnel kept a Sprite awake): that VM's tunnel closes now; its tokens stay, and the next request
+    # opens a tunnel again. Another VM's name closes nothing.
+    r_other = client("disconnect", "--vm", "nosuchvm")
+    r_disc = client("disconnect", "--vm", "farvm")
+    disc_closed = tvo.wait_for(lambda: not alive(tun_4[0]["pid"]), 10, 0.1) if tun_4 else False
+    n_tun = len([c for c in calls() if c.get("kind") == "proxy:tunnel"])
+    proxy_port()
+    st_5, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
+    tun_5 = [c for c in calls() if c.get("kind") == "proxy:tunnel"][n_tun:]
+    check("disconnect --vm: that VM's tunnel closed at once (another VM's name closes nothing); its token still works, "
+          "through a new tunnel", r_other.returncode == 0 and "no tunnel open" in r_other.stdout and r_disc.returncode == 0
+          and "Closed the vault's tunnel to farvm" in r_disc.stdout and disc_closed,
+          (r_other.stdout, r_disc.stdout + r_disc.stderr, disc_closed))
+    check("...(the next request's new tunnel: answered, or the stand-in refuses a second forward on one port)",
+          st_5 in (200, 0, 502) and len(tun_5) <= 1, (st_5, len(tun_5)))
 
     def rebind_as(ch):
         open(ident, "w").write(ch * 64 + "\n")
@@ -874,6 +890,32 @@ def run(td, procs):
     os.remove(ident)                                   # vm delete removes the identity
     st_del, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
     check("...deleted (no identity beside its keys): its token stops too", st_del == 401, st_del)
+    # A computer behind its provider's tunnel (Fly Sprites): the provider is asked before every tunnel the proxy opens,
+    # not only by the step before it (found by the re-check: a step's look, then a separate connection).
+    open(ident, "w").write("7" * 64 + "\n")
+    answer, answers = os.path.join(td, "provider-answer.json"), os.path.join(td, "provider-answers")
+    open(answer, "w").write('{"id": "sprite-0042"}\n')
+    tprog = os.path.join(td, "sprite-standin")
+    open(tprog, "w").write(f"#!/bin/sh\nif [ \"$1\" = check ]; then\n  if [ -s {answers} ]; then head -n 1 {answers}; "
+                           f"tail -n +2 {answers} > {answers}.t && mv {answers}.t {answers}\n  else cat {answer}; fi\nfi\nexit 0\n")
+    os.chmod(tprog, 0o755)
+    tun_bind = ["--port", "22", "--host", "tunvm", "--host-key-alias", "mcomp-tunvm", "--host-key-line", hostkey,
+                "--fill-key", sshdir + "/fill", "--fill-user", "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua",
+                "--proxy-key", sshdir + "/proxy", "--proxy-user", "mcproxy", "--proxy-port", "18767", "--tunnel", tprog,
+                "--tunnel-arg=proxy", "--tunnel-id", "sprite-0042", "--tunnel-check-arg=check"]
+    rc, out = tty([BIN, "bind", "tunvm", *tun_bind], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    check("(a computer behind its provider's tunnel bound)", rc == 0, out[-300:])
+
+    def tunnels_to_tunvm():
+        return [c for c in calls() if c.get("kind") == "proxy:tunnel" and "mcproxy@tunvm" in c["argv"]]
+    open(answers, "w").write('{"id": "sprite-0042"}\n{"id": "sprite-0099"}\n')
+    rT = client("token", "api1", "--vm", "tunvm", "--ttl", "10m")
+    check("its token, when the provider names another computer by the time the proxy opens its tunnel: refused, no "
+          "tunnel opened", rT.returncode != 0 and "isn't the one bound" in rT.stdout + rT.stderr and not tunnels_to_tunvm()
+          and open(answers).read() == "", (rT.stdout, rT.stderr, len(tunnels_to_tunvm())))
+    rT = client("token", "api1", "--vm", "tunvm", "--ttl", "10m")
+    check("...and the same computer at each look: the token, through a tunnel", rT.returncode == 0
+          and len(tunnels_to_tunvm()) == 1, (rT.stdout, rT.stderr))
     lock(u)
 
     # --- 7. a vault this unlock can't open any more fails closed: tokens and answers end, and it locks ---------------

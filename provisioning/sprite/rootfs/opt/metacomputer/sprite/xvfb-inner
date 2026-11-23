@@ -1,0 +1,12 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: the X server's part inside the session's namespaces (svc-xvfb runs it through
+# in-session, as root): the X cookie, then Xvfb, both as the desktop user.
+set -eu
+. /etc/metacomputer/sprite.env
+U="${GUEST_USER:-cua}"; D="${DISPLAY_NUM:-0}"; G="${SCREEN:-1920x1080}"
+grep -q ' /.sprite rw,[^ ]* - tmpfs sprite-hidden ' /proc/self/mountinfo || { echo "xvfb-inner: not in the session" >&2; exit 1; }
+XA="/home/$U/.Xauthority"
+if ! runuser -u "$U" -- xauth -f "$XA" list ":$D" 2>/dev/null | grep -q MIT-MAGIC-COOKIE-1; then
+  runuser -u "$U" -- xauth -f "$XA" add ":$D" MIT-MAGIC-COOKIE-1 "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+fi
+exec runuser -u "$U" -- /usr/bin/Xvfb ":$D" -screen 0 "${G}x24" -dpi 96 -nolisten tcp -nolisten local -auth "$XA" +extension RANDR

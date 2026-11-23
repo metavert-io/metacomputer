@@ -1,7 +1,8 @@
 # A computer elsewhere: an Ubuntu VM reached over SSH
 
 metacomputer's computers normally run on your Mac (Lume VMs). A computer can also be an **Ubuntu 24.04 VM somewhere
-else**, reached over SSH: **your own server**, or one a **provider** makes for you (Oracle Cloud first). It gets the
+else**, reached over SSH: **your own server**, or one a **provider** makes for you (Oracle Cloud first). A **Fly
+Sprite** is a computer elsewhere too, reached through Fly's tunnel, with its own page: [docs/sprites.md](sprites.md). It gets the
 same desktop (XFCE, Firefox, optionally Chrome, LibreOffice), the same Cua Driver, the same accounts, and your Mac
 stays the controller: the hub and all its guards, the vault, recordings, the action log and the CLI run here, as for
 a VM on your Mac. The difference is where the VM runs, and what keeps it apart from everything else (its own firewall
@@ -276,9 +277,10 @@ Every command that talks to the computer (the hub's driver connection, `sh`, `pu
 view's tunnel, the vault's fills and tokens) uses one transport (`lib/cloud/transport.py`, through `scripts/lib.sh`'s
 `ssh_base` and the vault's binding): SSH straight to the computer's address, its host key pinned under `mcomp-NAME`
 (never under the address). A provider whose computers have no address of their own adds its tunnel there
-(`transport.register`, run as ssh's ProxyCommand through `lib/proxywrap.py`, which ends the tunnel when ssh goes, so
-it never keeps a computer awake and billing); the vault takes a computer reached that way once its binding learns
-the tunnel too.
+(`transport.register`, run as ssh's ProxyCommand through `lib/proxywrap.py`, which leaves ssh's process group and ends
+the tunnel when ssh goes, so it never keeps a computer awake and billing). Fly Sprites register `sprite proxy -W :22`
+([docs/sprites.md](sprites.md)); the vault's binding pins that program and runs it through itself (`mcomp-vault
+_tunnel`).
 
 ## Settings (`config/vms/NAME.env`)
 

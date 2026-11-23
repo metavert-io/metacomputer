@@ -1,0 +1,22 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: run a command (as root) inside the session's namespaces (svc-session): its mount
+# namespace, where /.sprite is covered, and its PID namespace, where nothing outside is visible. Waits up to 10 s for
+# the session, and checks it's the one svc-session made (unshare's child, in other namespaces than this one, with
+# /.sprite covered and no API socket under its root) before entering; refuses otherwise.
+set -eu
+pidf=/run/metacomputer/session.pid
+for _ in $(seq 1 100); do
+  up="$(cat "$pidf" 2>/dev/null || true)"; c=""
+  if [[ "$up" =~ ^[0-9]+$ ]] && tr '\0' ' ' < "/proc/$up/cmdline" 2>/dev/null | grep -q '^unshare .*--pid .*hide-sprite-api'; then
+    c="$(pgrep -P "$up" | head -n 1 || true)"
+  fi
+  if [ -n "$c" ] && [ "$(readlink "/proc/$c/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ] \
+     && [ "$(readlink "/proc/$c/ns/pid")" != "$(readlink /proc/self/ns/pid)" ] \
+     && grep -q ' /.sprite rw,[^ ]* - tmpfs sprite-hidden ' "/proc/$c/mountinfo" 2>/dev/null \
+     && [ ! -e "/proc/$c/root/.sprite/api.sock" ]; then
+    exec nsenter --target "$c" --mount --pid -- "$@"
+  fi
+  sleep 0.1
+done
+echo "in-session: the session's namespaces aren't there (the session service: /opt/metacomputer/sprite/svc-session)" >&2
+exit 1

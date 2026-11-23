@@ -759,7 +759,9 @@ notice (`--say` cleaned like every event) and writes a record,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
   unless you add `--override`, and look again right before they change anything,
-  after any question they ask; `release` doesn't end it.
+  after any question they ask; so do a Fly Sprite's `checkpoint NAME` and
+  `checkpoint --delete` (a checkpoint of the running computer would keep what you
+  did in it); `release` doesn't end it.
 
 **Your mouse and keyboard in the live view.** The driver's background input goes through a pair of virtual
 input devices of its own ("CUA v1.…", XInput2 multi-pointer), which it keeps between actions; while one exists,
@@ -1730,6 +1732,81 @@ provider's rules outside it where the provider enforces them, and no more than t
 - **What isn't there yet:** `SSH_AUTH=cert` (refused: its certificates name the Mac's gateway address), snapshots and
   `reset`, volumes and Mac folders, and the event watcher's health checks. Your own server's other software and
   accounts are yours to keep apart; give metacomputer a server of its own.
+
+## Fly Sprites
+
+A computer can be a Fly.io Sprite ([docs/sprites.md](docs/sprites.md)): a persistent VM that pauses by itself when
+nothing is connected. It's a computer elsewhere as above (the Mac stays the controller; keys of its own; a host key
+pinned before the first connection, read over Fly's authenticated channel), with these differences:
+
+- **Fly's management API is hidden from the desktop and from SSH sessions.** A Sprite's API socket,
+  `/.sprite/api.sock`, is world-writable (`srw-rw-rw-`, root), and it can create services, which run as the Sprite's
+  `sprite` account, which has sudo: any account that reaches it has root (checked on a Sprite: the desktop account
+  made a service that ran `sudo -n id` as root). It can also create tasks that keep the Sprite awake and billing, and
+  make or restore checkpoints. This is the provider's, and it was reported to Fly. metacomputer's mitigation, a
+  **session** that everything of the desktop's and SSH's runs in (`provisioning/sprite/rootfs/opt/metacomputer/sprite/`):
+  - a mount namespace where `hide-sprite-api` covers `/.sprite` with an empty tmpfs, and a **PID namespace with its own
+    `/proc`**, made by the `session` service (`svc-session`; `tini` is its init). sshd, the X server and the desktop
+    join it (`in-session`) before anything runs as the desktop's account, the X cookie's `xauth` included: nothing of
+    that account's ever runs outside it. So every SSH session (the driver, `metacomputer sh`, the vault's fill and
+    proxy accounts, `cuaadmin`) and every program of the desktop's is inside;
+  - inside, the socket isn't there ("connection refused"). The desktop's accounts have no root to unmount the tmpfs,
+    and a user namespace of their own can't (the mount is locked there). And no process outside the session is
+    visible, so another process's `/proc/PID/root` (whose `/.sprite` would be the real one) can't be used: a same-UID
+    process left outside would have been the way around a mount namespace alone (found by review, and shown on a
+    live Sprite: through `/proc/PID/root` of such a process the API answered; in the session it isn't visible at all).
+    Checked live with a hostile process of the desktop's account trying every `/proc/*/root` it can see, while the
+    desktop restarts too.
+  Fly's own channel (`sprite exec`, the services Fly starts) keeps the real `/.sprite`: it's the controller's, as the
+  Mac's owner is for a VM on the Mac, and only Fly's sign-in on your Mac reaches it. If Fly changes the socket's path
+  or permissions the mask must follow; `bootstrap.sh` refuses a Sprite without it, and checks that sshd is in the
+  session.
+- **Egress is Fly's network policy, outside the VM, and nothing else.** A list of DNS names that nothing in the Sprite,
+  root included, can change. While one is in force, Fly refuses raw IP addresses (an address is let through only after
+  an allowed name resolved to it), private ranges, the metadata service and Fly's own private network, even through a
+  name that resolves to one of them (checked live: 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254.169.254, Fly's
+  private network refused or unanswered). With no rules Fly enforces nothing, so metacomputer always sets one:
+  `EGRESS=internet` (every name), `EGRESS=off` (no name), or an allowlist (`net allow`; addresses are refused). A change
+  whose resulting policy lets out anything the one in force doesn't runs only at your own terminal, judged on where it
+  ends, never on the step (found by review: `net egress off`, then `net egress internet`, got around it); the one
+  exception is a computer's own setup opening it for its packages, and only until its setup has finished. Each change
+  is read back. There's no firewall in the guest:
+  the manifest's `outside_egress` claims what Fly enforces and nothing more. The browsers' own DNS over HTTPS is
+  locked off, so names go through the policy.
+- **SSH only through Fly's tunnel.** sshd listens on the Sprite's loopback by number (`localhost` is the Sprite's
+  network address there), reached only through `sprite proxy -W :22`, signed in to Fly, then metacomputer's keys and
+  the pinned host key. Every tunnel runs through a wrapper that ends it when ssh goes, and leaves ssh's process group
+  first, so a group kill aimed at ssh (the hub's, the vault's) can't end it before the tunnel: an open tunnel keeps a
+  Sprite awake and billing (found live, and fixed: `hub stop` used to leave one). A wrapper that starts after its ssh
+  has already gone runs no tunnel. `stop` closes the hub's, the live view's and the vault's connections (the vault's
+  API proxy tunnel: `mcomp-vault disconnect --vm`), and says it stays awake when one is still open. The vault pins
+  Fly's `sprite` command (path and contents) and the tunnel's arguments at `secrets bind`, runs its own copy of it
+  (in the vault's folder, checked against the pin before it's copied and again right before it runs: an update
+  between the check and the run changes nothing), through itself (`mcomp-vault _tunnel`), and refuses a command that
+  changed since.
+- **The computer's own Sprite, and nothing else.** A Sprite's name in its organization isn't its identity: one deleted
+  and made again under the name (by anyone) is another. Every Sprite is made with its build's operation as a label
+  (set atomically when Fly makes it), and its id is recorded. Every operation (the network policy, checkpoints,
+  restore, `sprite exec`, each SSH connection, the vault's binding) checks against Fly's API that the Sprite of that
+  name has that id, under the organization and name it was made with, before it acts. An SSH connection asks in its
+  own ProxyCommand, right before its tunnel starts (`lib/proxywrap.py --id`), so the arguments a command keeps for
+  its later connections, or the hub for its life, never reach a Sprite made again meanwhile (found by re-check: they
+  were checked only when made). `secrets bind` gets the tunnel, its arguments, the id and how to ask Fly about it
+  from one call whose failure binds nothing (found by re-check: a lookup that failed was skipped, and the name was
+  bound as an address, straight over SSH). The vault pins the id and asks before every connection it makes (each
+  step's, and each tunnel its API proxy opens), and for requests on an open tunnel at least once a minute, closing the
+  tunnel and ending that computer's tokens otherwise. A build whose answer was lost deletes only a Sprite carrying
+  its operation's label: one without it is left alone, and said (found by review: a name and a time were taken as
+  proof).
+- **Fly's sign-in stays Fly's.** The `sprite` command keeps its own token in your login keychain; metacomputer runs it
+  with `HOME`, `PATH` and `LANG` only, never reads or prints the token, and runs `sprite exec` with
+  `--no-port-forward` (otherwise ports a command opens in the Sprite would be forwarded to your Mac). What it prints
+  can come from the guest (`logs` reads its services' logs): it's read with a byte cap on each stream (4 MB of
+  output, 1 MB for `exec`, 64 KB of errors), and a command past it is ended, nothing of it passed on.
+- **Input is foreground only** (no `/dev/uinput` in a Sprite's kernel): the hub sends keys and typing (aimed at an
+  element too) and pixel clicks in the foreground, and says so; a person watching the live view sees the pointer move.
+- **Fly holds what's in the VM**, as any provider does: use a VM on your Mac for work you wouldn't put there.
+- **What isn't there:** volumes and Mac folders, `SSH_AUTH=cert`, the event watcher's health checks, update timers.
 
 ## Secrets and logins (`metacomputer secrets`)
 

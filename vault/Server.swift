@@ -611,6 +611,8 @@ final class UnlockServer {
         // A revoke only restricts, and must win at once: it doesn't wait behind a question (a renewal that's waiting then
         // finds its token gone). Its audit record is written now; the sinks get it on the next delivery.
         case "revoke": res = opRevoke(req, who, flush: false)
+        // A disconnect only closes (the computer can sleep), and must win at once too.
+        case "disconnect": res = opDisconnect(req, who)
         case "lock":
             stopReason = "locked with `lock` (from \(who.describe))"
             hub.lockdown()          // every token ends now, before the answer: nothing is renewed or served after it
@@ -1154,6 +1156,7 @@ final class UnlockServer {
         case "renew": res = opRenew(req, who)
         case "tokens": res = opTokens()
         case "revoke": res = opRevoke(req, who)
+        case "disconnect": res = opDisconnect(req, who)
         case "sinks": res = opSinks()
         case "sink_flush": res = opSinkFlush(req, who)
         case "audit_verify": res = opAuditVerify()
@@ -1731,6 +1734,16 @@ final class UnlockServer {
         record(["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
         if flush { flushSinks(force: true) }
         return ["ok": true, "status": "ok", "revoked": gone.map { $0.id }]
+    }
+
+    /// `disconnect --vm VM`: close the API proxy's tunnel to that VM now, and wait until its ssh (and the provider's tunnel
+    /// it runs) is gone; tokens stay. Other VMs' tunnels are left alone.
+    func opDisconnect(_ req: [String: Any], _ who: Requester) -> [String: Any] {
+        guard let vm = req["vm"] as? String, validName(vm) else { return ["ok": false, "status": "error", "reason": "bad VM name"] }
+        let n = hub.disconnect(vm)
+        say("\(clockTime())  closed \(n) tunnel(s) to VM \(vm), asked by \(who.describe)")
+        record(["op": "disconnect", "result": "ok", "vm": vm, "closed": n, "requester": who.record])
+        return ["ok": true, "status": "ok", "closed": n]
     }
 
     // MARK: renewing api tokens

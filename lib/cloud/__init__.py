@@ -6,6 +6,8 @@
     ubuntu_vm.py      an Ubuntu 24.04 VM reached over SSH: what all of them share, and your own server
                       (`ubuntu-vm`, place `server`), which needs no provider code
     oci.py            Oracle Cloud (`oci`): a thin driver that makes, starts, stops and deletes such VMs
+    sprites.py        Fly Sprites (`sprites`): Sprites made, checkpointed and deleted through Fly's sprite command,
+                      reached through its tunnel (the `sprite` transport)
     transport.py      how SSH reaches a computer that isn't on this Mac: the hook a provider's tunnel plugs into
     guest.py          the cloud-init user-data and key lists a VM reached over SSH is given
     fake.py           an in-memory stand-in for the tests (`fake`), never a provider
@@ -17,9 +19,10 @@ from .adapter import INTERFACE, Adapter, AdapterError, HandledByCLI, NotSupporte
 from .fake import Fake
 from .local_lume import LocalLume
 from .oci import OCI
+from .sprites import Sprites
 from .ubuntu_vm import UbuntuVM
 
-ADAPTERS = {LocalLume.name: LocalLume, Fake.name: Fake, UbuntuVM.name: UbuntuVM, OCI.name: OCI}
+ADAPTERS = {LocalLume.name: LocalLume, Fake.name: Fake, UbuntuVM.name: UbuntuVM, OCI.name: OCI, Sprites.name: Sprites}
 
 __all__ = ["ADAPTERS", "INTERFACE", "Adapter", "AdapterError", "HandledByCLI", "NotSupported", "adapter",
            "by_place", "capabilities", "providers", "registered"]

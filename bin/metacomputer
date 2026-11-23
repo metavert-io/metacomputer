@@ -8,8 +8,8 @@
 #                                  same. Without it: your default computer (metacomputer default), else
 #                                  config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
 #   --on PLACE                     act on the computer at PLACE: mac (this Mac; your default computer when it's
-#                                  there), server (your own server), oci (Oracle Cloud), or cloud (anywhere but
-#                                  this Mac). With --vm, both must agree
+#                                  there), server (your own server), oci (Oracle Cloud), sprites (Fly Sprites), or
+#                                  cloud (anywhere but this Mac). With --vm, both must agree
 #   list [--on PLACE] [--json]     every computer: where it is (WHERE), state, disk, ports, baseline; * marks the
 #                                  one these settings act on (without --vm: your default computer)
 #   default [NAME] [--json]        your default computer, the one a command acts on when none is named, and its
@@ -20,8 +20,10 @@
 #   vm create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | --on oci [--size SIZE] [--egress internet|off]
 #                                  a computer elsewhere, an Ubuntu 24.04 VM reached over SSH (docs/remote.md): your
 #                                  own server (set up once over your SSH, with sudo), or one Oracle Cloud makes
-#   cloud status|doctor|setup|teardown PROVIDER [--json]
-#                                  what metacomputer made at a provider (oci), checks, its network, removing it
+#   vm create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off]
+#                                  a Sprite on Fly.io, reached through Fly's tunnel (docs/sprites.md)
+#   cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG]
+#                                  what metacomputer made at a provider (oci, sprites), checks, its network, removing it
 #   vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
 #                                  delete a VM, its baseline and config/vms/NAME.env, after you type its name
 #                                  (--yes doesn't count); volumes and the vault folder stay unless their flag asks
@@ -335,7 +337,7 @@ need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (meta
 
 # --- a computer reached over SSH (scripts/lib.sh MC_REMOTE; lib/remote.py; docs/remote.md) -------------------
 remote_made() { [ "${PROVIDER:-ubuntu-vm}" != ubuntu-vm ]; }    # a provider makes (and starts, stops) it
-remote_where() { case "${PROVIDER:-}" in oci) echo "Oracle Cloud" ;; *) echo "your own server at ${SSH_HOST:-?}" ;; esac; }
+remote_where() { case "${PROVIDER:-}" in oci) echo "Oracle Cloud" ;; sprites) echo "Fly Sprites" ;; *) echo "your own server at ${SSH_HOST:-?}" ;; esac; }
 remote_only_mac() { # WHAT WHY: refused for a computer elsewhere, saying why (lib/cloud/capabilities.py's feature map)
   [ "${MC_REMOTE:-0}" = 1 ] || return 0
   die "$1 isn't available for $VM_NAME, a computer reached over SSH ($(remote_where)): $2"
@@ -385,6 +387,23 @@ do_stop_remote() {
     say "finishing the desktop recording first"
     ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
   fi
+  if [ "${PROVIDER:-}" = sprites ]; then
+    # Nothing to send: a Sprite pauses by itself about 10 s after its last connection closes. This Mac's are closed
+    # here: the hub (above), a recording (above), the live view's tunnel, and the vault's (its API proxy's tunnel).
+    # Every tunnel runs through a wrapper that ends Fly's proxy when ssh goes; then this checks none is left.
+    view_tunnel_close
+    vault_disconnect
+    remote_py sleep --vm "$VM_NAME" >/dev/null 2>&1 || true
+    local left; left="$(sprite_tunnels_left)"
+    if [ -n "$left" ]; then
+      warn "$left connection(s) of this Mac's to $VM_NAME are still open (ps: sprite proxy -W for ${SPRITE_NAME:-$VM_NAME}): it stays awake, and billing, until they close"
+      emit_event lifecycle stopped warning "The computer $VM_NAME was left to sleep, but $left connection(s) keep it awake" "" "forced=no"
+      return 1
+    fi
+    emit_event lifecycle stopped info "The computer $VM_NAME was left to sleep" "" "forced=no"
+    ok "this Mac's connections to $VM_NAME are closed (the hub's, the live view's, the vault's): Fly pauses it about 10 s later (asleep, only its disk is billed); the next command wakes it"
+    return 0
+  fi
   remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md). Left alone, it powers itself off after ${IDLE_STOP:-15} minutes unused, but $(remote_where) counts it as running (and bills a billed size) until it's stopped there"
   if [ -n "$force" ]; then say "stopping $VM_NAME at once (--force: $(remote_where) powers it off; its disk is kept)"
   else say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept. If it doesn't answer, this can take up to 15 minutes: --force powers it off at once)"; fi
@@ -401,6 +420,7 @@ remote_egress_guest() { # the guest's own firewall's EGRESS, or "unknown"
 remote_net_status() {
   local outside="not asked (no credentials in this command)" guest
   case "${PROVIDER:-}" in ubuntu-vm) outside="none: only its own firewall (your server's host may add its own)" ;; esac
+  if [ "${PROVIDER:-}" = sprites ]; then sprite_net_status; return $?; fi
   if remote_can_ask; then outside="$(remote_py egress --vm "$VM_NAME" 2>/dev/null || echo unknown)"; fi
   guest="unknown (it doesn't answer)"; vm_running "$VM_NAME" && guest="$(remote_egress_guest)"
   printf '%s
@@ -413,6 +433,16 @@ remote_net_egress() { # internet|off: the provider's rules (where it has them), 
   case "$want" in internet|off) ;; *) die "usage: metacomputer net egress internet|off" ;; esac
   owners_check
   handoff_hold_unless_override
+  if [ "${PROVIDER:-}" = sprites ]; then
+    # Fly's network policy is the boundary (outside the VM): set, read back, then the setting.
+    remote_can_ask || die "Fly's sprite command isn't installed (docs/sprites.md); nothing was changed"
+    got="$(remote_py egress --vm "$VM_NAME" --set "$want")" || die "Fly's network policy wasn't changed (above); nothing else was"
+    [ "$got" = "$want" ] || die "Fly's network policy reads back as '$got', not $want; the setting wasn't changed"
+    ok "Fly's network policy: EGRESS=$want (in force now, outside the computer)"
+    browser_set EGRESS "$want"
+    ok "EGRESS=$want in $MC_SETTINGS_LABEL"
+    return 0
+  fi
   vm_running "$VM_NAME" || die "$VM_NAME doesn't answer (metacomputer start): its firewall can't be changed; nothing was"
   if remote_made; then
     remote_can_ask || die "changing $VM_NAME's egress needs $(remote_where)'s credentials in this command's environment (its rules outside the computer change too); nothing was changed"
@@ -427,6 +457,135 @@ remote_net_egress() { # internet|off: the provider's rules (where it has them), 
   browser_set EGRESS "$want"
   ok "EGRESS=$want in $MC_SETTINGS_LABEL"
 }
+# Fly Sprites: what its network policy lets out, read from Fly (the setting and what's in force, apart).
+sprite_net_status() {
+  local j
+  remote_can_ask || { printf '%s\n' "network of $VM_NAME:" "  setting (in $MC_SETTINGS_LABEL)  EGRESS=${EGRESS:-internet}" "  Fly's network policy  not asked (the sprite command isn't installed)"; return 0; }
+  j="$(remote_py allow --vm "$VM_NAME" --show 2>/dev/null)" || die "couldn't read $VM_NAME's network policy from Fly (above)"
+  "$PY" - "$j" "${EGRESS:-internet}" "$VM_NAME" "$MC_SETTINGS_LABEL" <<'PYEOF'
+import json, sys
+d, setting, vm, label = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+kind, names = d.get("outside") or "unknown", d.get("allow") or []
+words = {"internet": "every name (raw IP addresses, private ranges and the metadata service refused)",
+         "off": "no name: nothing goes out", "none": "NOTHING ENFORCED (no rules): metacomputer always sets one",
+         "other": "rules metacomputer didn't set"}
+print(f"network of {vm}:")
+print(f"  setting (in {label})  EGRESS={setting}")
+print(f"  Fly's network policy (outside the computer)  " + (f"allowlist: {', '.join(names)}" if kind == "allowlist" else f"{kind}: {words.get(kind, '')}"))
+if kind in ("internet", "off") and kind != setting:
+    print(f"  ! what's in force isn't the setting: metacomputer --vm {vm} net egress {setting}")
+if kind == "allowlist":
+    print(f"  an allowlist is in force until net clear (back to EGRESS={setting}); a blocked name looks like a DNS failure (dnsNotFound)")
+PYEOF
+}
+sprite_net_list() { # allow NAME... [--exact] | remove NAME... | clear: Fly's network policy as an allowlist of names
+  local sub="$1"; shift
+  owners_check
+  handoff_hold_unless_override
+  remote_can_ask || die "Fly's sprite command isn't installed (docs/sprites.md); nothing was changed"
+  local a args=() exact=() names=()
+  for a in "$@"; do case "$a" in --exact) exact=(--exact) ;; --for|--for=*) die "a Sprite's allowlist stays until net clear: --for isn't available (docs/sprites.md)" ;; --override) ;; -*) die "usage: metacomputer net allow NAME... [--exact] | net remove NAME... | net clear" ;; *) names+=("$a") ;; esac; done
+  case "$sub" in
+    allow) args=(${exact[@]+"${exact[@]}"} ${names[@]+"${names[@]}"}) ;;
+    remove) args=(--remove ${names[@]+"${names[@]}"}) ;;
+    clear) [ ${#names[@]} = 0 ] || die "usage: metacomputer net clear"; args=(--clear) ;;
+  esac
+  remote_py allow --vm "$VM_NAME" ${args[@]+"${args[@]}"} >/dev/null || exit 3
+  emit_event security net_allowlist_changed info "The network allowlist of $VM_NAME changed ($sub)" "" "change=$sub"
+  sprite_net_status
+}
+vault_disconnect() { # the vault's connections to this computer (its API proxy's tunnel), closed: in whatever vault it uses
+  [ -x "${VAULT_BIN:-}" ] || return 0
+  local d; d="$(mc_vault_dir)"
+  [ -S "$d/vault.sock" ] || return 0
+  MCOMP_VAULT_DIR="$d" "$VAULT_BIN" disconnect --vm "$VM_NAME" >/dev/null 2>&1 \
+    || warn "the vault didn't say it closed its tunnel to $VM_NAME (metacomputer secrets status)"
+}
+sprite_tunnels_left() { # how many of this Mac's tunnels to this Sprite are still running, after up to 6 s
+  local i n=0 pat="-o ${SPRITE_ORG:-} -s ${SPRITE_NAME:-$VM_NAME} proxy -W :22"
+  for i in $(seq 1 24); do
+    n="$(ps -axo command= 2>/dev/null | grep -F -- "$pat" | grep -cvE '^(ssh|grep) ' || true)"
+    [ "${n:-0}" -gt 0 ] || { echo ""; return 0; }
+    sleep 0.25
+  done
+  echo "$n"
+}
+view_tunnel_close() { # the live view's tunnel to a computer elsewhere, if this Mac's ssh holds it open
+  local p
+  for p in $(lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN -t 2>/dev/null); do
+    [ "$(ps -o comm= -p "$p" 2>/dev/null)" = ssh ] && kill "$p" 2>/dev/null || true
+  done
+}
+# Fly Sprites: checkpoints of the whole disk, through Fly (a restore restarts the Sprite's programs: the desktop comes
+# back as a service; open apps close and connections are cut).
+sprite_wait_desktop() {
+  MC_REMOTE_STATUS=""; MC_T_USER=""
+  wait_ssh ops 180 || die "SSH to $VM_NAME didn't answer after the restore (metacomputer status)"
+  wait_session 180 || die "the desktop didn't come back after the restore (metacomputer logs)"
+}
+do_snap_sprite() { # reset|baseline|restore|checkpoint|checkpoints ARGS...
+  local cmd="$1"; shift
+  parse_flags "$@"
+  set -- ${REST[@]+"${REST[@]}"}
+  remote_can_ask || die "Fly's sprite command isn't installed (docs/sprites.md)"
+  local t0 out
+  case "$cmd" in
+    checkpoints) remote_py checkpoint --vm "$VM_NAME" list; return $? ;;
+    checkpoint)
+      vm_change_lock "metacomputer checkpoint"
+      if [ "${1:-}" = --delete ]; then
+        ckpt_name "${2:-}"; [ "$2" != baseline ] || die "the baseline goes with metacomputer baseline (it replaces it)"
+        owners_check
+        confirm "Delete checkpoint '$2' of $VM_NAME at Fly?"
+        handoff_hold_unless_override     # held through Fly's change, as every acting command's
+        remote_py checkpoint --vm "$VM_NAME" delete "$2" >/dev/null || die "checkpoint '$2' wasn't deleted (above)"
+        emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
+        ok "checkpoint '$2' deleted"; return 0
+      fi
+      local name="" replace=0 a
+      for a in "$@"; do case "$a" in --replace) replace=1 ;; -*) die "usage: metacomputer checkpoint NAME [--replace]" ;; *) name="$a" ;; esac; done
+      ckpt_name "$name"; [ "$name" != baseline ] || die "'baseline' is the baseline's name: metacomputer baseline"
+      if remote_py checkpoint --vm "$VM_NAME" list 2>/dev/null | cut -f1 | grep -qx "$name"; then
+        [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
+      fi
+      owners_check
+      # A checkpoint of the running computer keeps what is on its disk: never once the user has it (a handoff), so the
+      # dispatch lock is held from the last look for one until Fly has made it.
+      handoff_hold_unless_override
+      out="$(remote_py checkpoint --vm "$VM_NAME" create "$name" $([ $replace = 1 ] && echo --replace))" || die "the checkpoint wasn't made (above)"
+      emit_event lifecycle checkpoint info "Checkpoint '$name' of $VM_NAME saved" "" "name=$name" "change=saved"
+      ok "checkpoint '$name' saved while it runs, in $(printf '%s' "$out" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["seconds"])') s (restore with: metacomputer --vm $VM_NAME restore $name)"
+      return 0 ;;
+    baseline)
+      vm_change_lock "metacomputer baseline"
+      owners_check
+      confirm "Make the current state of '$VM_NAME' its baseline (what metacomputer reset goes back to)?"
+      handoff_hold_unless_override
+      out="$(remote_py checkpoint --vm "$VM_NAME" create baseline --replace)" || die "the baseline wasn't made (above)"
+      ok "baseline saved (a checkpoint at Fly, made while it runs; an earlier one deleted)"
+      return 0 ;;
+    reset|restore)
+      local label=baseline what="a fresh copy of its baseline"
+      if [ "$cmd" = restore ]; then label="${1:-}"; ckpt_name "$label"; what="checkpoint '$label'"; fi
+      vm_change_lock "metacomputer $cmd"
+      owners_check
+      confirm "Put '$VM_NAME' back to $what? Its current state is discarded, its programs restart (open apps close) and its connections are cut (host recordings and results are kept)"
+      handoff_hold_unless_override
+      if [ -s "$RUN_DIR/manual-recording" ]; then
+        say "finishing the desktop recording first"
+        ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
+      fi
+      hub_stop
+      view_tunnel_close
+      t0=$(date +%s)
+      out="$(remote_py checkpoint --vm "$VM_NAME" restore "$label")" || die "Fly didn't restore '$label' (above)"
+      ok "restored at Fly in $(( $(date +%s) - t0 )) s; waiting for the desktop"
+      sprite_wait_desktop
+      ok "desktop back $(( $(date +%s) - t0 )) s after the restore began (open apps closed: launch them again)"
+      emit_event lifecycle "$([ "$cmd" = reset ] && echo reset || echo restored)" info "The computer $VM_NAME was put back to $label" "" "from=$label"
+      return 0 ;;
+  esac
+}
 view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT here to its live view (x11vnc on its own
   # 127.0.0.1:5900), opened with its view key (which may open that one forward and nothing else). It stays up while
   # a viewer that connects within 20 s is connected, then closes by itself.
@@ -435,9 +594,24 @@ view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT he
   if lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh; then return 0; fi
   ! lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN >/dev/null 2>&1 || die "something else on this Mac listens on 127.0.0.1:$VNC_PORT (VNC_PORT); nothing was opened"
   ssh_base view
+  if [ "${TRANSPORT:-ssh}" != ssh ]; then
+    # A provider's tunnel (Fly Sprites) runs through lib/proxywrap.py, which ends it when the ssh that started it goes:
+    # `ssh -f` forks away from it (and the tunnel would end at once), so ssh runs in the background here instead, in
+    # a session of its own, and the forward is waited for. It ends as `ssh -f`'s would: with the key's forced sleep, or
+    # the viewer.
+    daemonize "$LOG_DIR/view-tunnel.log" ssh -T -o ExitOnForwardFailure=yes -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view
+    local i
+    for i in $(seq 1 60); do
+      lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh && break
+      sleep 0.25
+    done
+    lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh \
+      || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$LOG_DIR")/view-tunnel.log)"
+  else
   # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead.
   ssh -f -T -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view </dev/null 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 >&2) \
     || die "couldn't open the live view's SSH tunnel to $VM_NAME"
+  fi
   ok "live view tunnel: 127.0.0.1:$VNC_PORT -> $VM_NAME's 127.0.0.1:5900, over SSH (connect within 20 s; it closes when the viewer does)"
 }
 
@@ -801,6 +975,7 @@ do_status() {
   if [ "${MC_REMOTE:-0}" = 1 ]; then
     # A computer elsewhere: no gateway or forwards here; where it is and what its provider says instead.
     base_state=none; fwd=""
+    [ "${PROVIDER:-}" != sprites ] || base_state="a checkpoint at Fly (metacomputer checkpoints)"
     local off=--offline; ! remote_can_ask || off=""
     remote="$(remote_py status --vm "$VM_NAME" --json $off 2>/dev/null || echo '{}')"
     [ "$remote" != "{}" ] || remote="$("$PY" -c 'import json, sys; print(json.dumps({"where": sys.argv[1], "host": sys.argv[2] or None, "provider": sys.argv[3]}))' "$(remote_where)" "${SSH_HOST:-}" "${PROVIDER:-}")"
@@ -891,8 +1066,16 @@ if remote:
     r = esc_all(remote)
     print(f"where         {r.get('where')}   {r.get('host') or '-'}   {r.get('state') or ''}"
           + (f"   {r.get('size')} ({r.get('arch')})" if r.get("size") else "") + (f"   ({r['note']})" if r.get("note") else ""))
-    print(f"network       its own firewall: EGRESS={r.get('egress') or os.environ.get('MCOMP_EGRESS', 'internet')}, SSH only in"
-          + (f"   idle stop: {r.get('idle_stop')} min" if r.get("idle_stop") not in (None, "off") else ""))
+    eg = r.get('egress') or os.environ.get('MCOMP_EGRESS', 'internet')
+    if r.get("provider") == "sprites":
+        # Fly Sprites: no firewall of its own; Fly's network policy, outside it (metacomputer net status reads it).
+        print(f"network       Fly's network policy: EGRESS={eg} (net status reads what's in force), SSH only through Fly's tunnel"
+              f"   sleep: by itself about 10 s after nothing is connected")
+    else:
+        print(f"network       its own firewall: EGRESS={eg}, SSH only in"
+              + (f"   idle stop: {r.get('idle_stop')} min" if r.get("idle_stop") not in (None, "off") else ""))
+    if r.get("input"):
+        print(f"input         {r['input']}")
 else:
     print(f"gateway       {m(out['gateway'])} mcomp-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
@@ -904,7 +1087,8 @@ if gs:
           f"{m(gs.get('session_env_published'))} session env  resolution {gs.get('resolution')}")
     print(f"accessibility {m(gs.get('atspi_bus'))} AT-SPI bus  {m(gs.get('toolkit_accessibility'))} toolkit-accessibility")
     print(f"active window {gs.get('active_window_title')!r}   windows: {len(gs.get('windows', []))}")
-    print(f"driver        {gs.get('driver_version')}   doctor rc={gs.get('driver_doctor_rc')}   uinput {m(gs.get('uinput_writable'))}")
+    print(f"driver        {gs.get('driver_version')}   doctor rc={gs.get('driver_doctor_rc')}   uinput {m(gs.get('uinput_writable'))}"
+          + ("  (none on a Sprite: foreground input)" if remote and r.get("provider") == "sprites" else ""))
     print(f"live view     {m(gs.get('x11vnc_running'))} x11vnc (metacomputer view)")
     sf = gs.get("secrets_fill") or {}
     if sf.get("present"):
@@ -1542,7 +1726,13 @@ do_desktop_restart() { # [--override]: log the desktop session out and back in (
   parse_flags "$@"; owners_check; need_running
   handoff_hold_unless_override
   say "restarting the desktop session (every open app closes)"
+  if [ "${PROVIDER:-}" = sprites ]; then
+    # Its desktop is two Sprites services, which only Fly's own channel reaches: made again, they start again.
+    remote_py exec --vm "$VM_NAME" --timeout 120 -- sudo -n /opt/metacomputer/sprite/services desktop >/dev/null \
+      || die "couldn't restart the desktop's services (above)"
+  else
   gssh admin 'sudo /usr/local/sbin/metacomputer-admin restart-desktop' >/dev/null 2>&1 || true
+  fi
   sleep 5
   wait_session 120 || die "the desktop session did not come back (metacomputer status)"
   ok "desktop session ready"
@@ -2310,13 +2500,29 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       # A computer elsewhere: the vault signs in at its address, its host key pinned under mcomp-NAME, with no gateway.
       local where=(--port "$SSH_PORT" --gateway "$NETGW_BIN")
       if [ "${MC_REMOTE:-0}" = 1 ]; then
-        [ "${TRANSPORT:-ssh}" = ssh ] || die "the vault reaches a computer only straight over SSH for now, not through TRANSPORT=$TRANSPORT"
         mc_remote_target "$GUEST_USER" || die "can't tell how to reach $VM_NAME: $MC_REFUSAL"
-        local i rhost="" rport=""
+        local i rhost="" rport="" x
         for ((i = 0; i < ${#MC_T_ARGS[@]}; i++)); do [ "${MC_T_ARGS[$i]}" != -p ] || rport="${MC_T_ARGS[$((i + 1))]}"; done
         rhost="${MC_T_ARGS[${#MC_T_ARGS[@]}-1]#*@}"
         [ -n "$rhost" ] && [ -n "$rport" ] || die "can't tell $VM_NAME's address"
         where=(--port "$rport" --host "$rhost" --host-key-alias "$(mc_hostkey_name)")
+        # A provider's tunnel (Fly Sprites: sprite proxy -W :22): the vault pins its program (path and contents) and
+        # arguments, and runs it as ssh's ProxyCommand through itself, ending it when ssh goes; and the provider's own id
+        # for the computer (recorded when it was made, checked against the provider now), with how the same program asks
+        # the provider about it: the vault asks before every connection. All of it from one call, whose exit status is
+        # checked; less than all of it, and nothing is bound (never the name bound as an address, straight over SSH).
+        if [ "${TRANSPORT:-ssh}" != ssh ]; then
+          local tb tw=() has_id=0 has_chk=0
+          tb="$("$PY" "$LAB_ROOT/lib/remote.py" tunnel --vm "$VM_NAME" --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}")" \
+            || die "can't tell the vault how to reach $VM_NAME through $(remote_where) (above): nothing was bound"
+          while IFS= read -r x; do
+            case "$x" in "") continue ;; --tunnel-id) has_id=1 ;; --tunnel-check-arg=?*) has_chk=1 ;; esac
+            tw+=("$x")
+          done <<< "$tb"
+          [ ${#tw[@]} -ge 4 ] && [ "${tw[0]}" = --tunnel ] && [ -n "${tw[1]}" ] && [ $has_id = 1 ] && [ $has_chk = 1 ] \
+            || die "$VM_NAME's tunnel, or the provider's id for it, couldn't be told: nothing was bound"
+          where+=("${tw[@]}")
+        fi
       fi
       [ -f "$SSH_DIR/fill" ] || die "no fill key ($SSH_DIR/fill): VMs built before secrets support have no fill account. Rebuild the VM to use secrets (metacomputer build --replace, or a new VM_NAME)"
       [ "${SSH_AUTH:-key}" = cert ] && warn "SSH_AUTH=cert: sealed sessions sign in with the static ops key, which a VM on certificates refuses (fills use their own account and still work)"
@@ -2462,14 +2668,22 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     restart)  do_stop_remote "$@"; do_start_remote; exit $? ;;
     build)    mc_export_provider_env; exec "$LAB_ROOT/scripts/remote-build.sh" "$@" ;;
     reset|baseline|restore|checkpoint|checkpoints)
+              if [ "${PROVIDER:-}" = sprites ]; then do_snap_sprite "$cmd" "$@"; exit $?; fi
               remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
     net)      case "${1:-status}" in
                 status) remote_net_status; exit $? ;;
                 egress) remote_net_egress "${2:-}"; exit $? ;;
+                allow|remove|clear) [ "${PROVIDER:-}" = sprites ] || remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)"
+                        sprite_net_list "$@"; exit $? ;;
                 *) remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)" ;;
               esac ;;
     volume|refdisk) remote_only_mac "metacomputer $cmd" "volumes and reference disks reach a VM on this Mac only, for now" ;;
     logs)     n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"
+              if [ "${PROVIDER:-}" = sprites ]; then
+                # The services' logs are under /.sprite, which SSH sessions can't see: read through Fly's channel.
+                remote_py exec --vm "$VM_NAME" --timeout 60 -- sudo -n sh -c "tail -n $n /var/log/metacomputer-provision.log; for f in /.sprite/logs/services/*.log; do echo \"== \$f\"; tail -n $n \"\$f\"; done" 2>/dev/null | term_safe
+                exit 0
+              fi
               gssh admin "sudo /usr/local/sbin/metacomputer-admin logs $n" 2>/dev/null | term_safe; exit 0 ;;
   esac
 fi
@@ -2561,7 +2775,7 @@ case "$cmd" in
   secrets)    do_secrets "$@"; exit $? ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
-  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json]   (PROVIDER: oci)"
+  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG]   (PROVIDER: oci, sprites)"
               PROVIDER="$2" remote_py cloud "$@"; exit $? ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)

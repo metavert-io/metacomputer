@@ -1,0 +1,17 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: the Sprites service "xvfb" (root, through sudo; needs session). The X server in memory
+# (Xvfb: there's no GPU, and Xorg's dummy driver would add nothing without /dev/uinput). As root, here: /dev/shm made
+# large enough for Firefox (64 MB on a Sprite), the X socket's folder, a stale X lock removed (/tmp is on the disk and
+# in checkpoints, so a restore brings one back). Then everything else (the X cookie and the server, both as the
+# desktop user) inside the session's namespaces (in-session, xvfb-inner): nothing of the desktop user's runs outside.
+set -eu
+. /etc/metacomputer/sprite.env
+U="${GUEST_USER:-cua}"; UID_="$(id -u "$U")"; D="${DISPLAY_NUM:-0}"
+mount -o remount,size=2g /dev/shm 2>/dev/null || echo "svc-xvfb: could not enlarge /dev/shm" >&2
+install -d -o "$U" -g "$U" -m 0700 "/run/user/$UID_"
+install -d -m 1777 /tmp/.X11-unix
+if [ -e "/tmp/.X$D-lock" ] && ! kill -0 "$(tr -d ' ' < "/tmp/.X$D-lock" 2>/dev/null)" 2>/dev/null; then
+  echo "svc-xvfb: removing a stale /tmp/.X$D-lock" >&2
+  rm -f "/tmp/.X$D-lock" "/tmp/.X11-unix/X$D"
+fi
+exec /opt/metacomputer/sprite/in-session /opt/metacomputer/sprite/xvfb-inner

@@ -721,6 +721,13 @@ metacomputer vm create arm1 --on oci --size arm-2x12                       # wit
 metacomputer --on oci start                                                 # list, --on and default know them
 ```
 
+Or a Sprite on Fly.io, which sleeps by itself when nothing is connected and wakes in a second, with Fly's network
+policy outside it and checkpoints for `reset` ([docs/sprites.md](docs/sprites.md)):
+
+```bash
+metacomputer vm create work --on sprites --org YOUR-ORG                   # after sprite login, in your own terminal
+```
+
 ## Troubleshooting
 
 | Symptom | What to do |

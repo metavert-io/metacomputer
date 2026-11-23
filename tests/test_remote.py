@@ -178,6 +178,41 @@ def proxywrap():
                 os.kill(gc, signal.SIGKILL)
         r = subprocess.run([PY, os.path.join(LAB, "lib", "proxywrap.py"), PY], capture_output=True, timeout=10)
         check("without -- PROGRAM: usage, exit 2", r.returncode == 2, r.returncode)
+        # Found live: the hub ends a connection by SIGKILLing its whole process group (ssh and the wrapper ssh started),
+        # which used to end the wrapper before it could end the tunnel. Now the wrapper leaves that group first: the
+        # group's SIGKILL reaches ssh (here, a stand-in parent), and the wrapper ends the tunnel when it sees ssh gone.
+        os.remove(mark) if os.path.exists(mark) else None
+        pw = os.path.join(LAB, "lib", "proxywrap.py")
+        ssh_like = subprocess.Popen([PY, "-c", "import subprocess, sys, time\n"
+                                     f"subprocess.Popen([{PY!r}, {pw!r}, '--', {PY!r}, {prog!r}])\n"
+                                     "time.sleep(60)\n"], stdout=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(1.0)
+        os.killpg(ssh_like.pid, signal.SIGKILL)       # the hub's _end_transport: SIGKILL to the connection's group
+        ssh_like.wait(timeout=10)
+        for _ in range(80):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.1)
+        check("a SIGKILL to ssh's whole process group (as the hub ends a connection): the tunnel is still ended",
+              os.path.exists(mark) and open(mark).read() == "TERM")
+        # Found by review: a wrapper whose ssh had already gone when it started took launchd for its parent, and ran the
+        # tunnel for good. Started orphaned (the shell that started it exits at once), it never leaves one running.
+        started = os.path.join(td, "started.pid")
+        starter = os.path.join(td, "starter.py")
+        with open(starter, "w") as f:
+            f.write(f"import os, time\nopen({started!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+        subprocess.run(["/bin/sh", "-c", f"{PY} {pw} -- {PY} {starter} </dev/null >/dev/null 2>&1 &"], timeout=10)
+        time.sleep(3)
+        alive = False
+        if os.path.exists(started):
+            pid = int(open(started).read() or 0)
+            try:
+                os.kill(pid, 0)
+                alive = True
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+        check("a wrapper started after its ssh had gone (orphaned from the start): no tunnel left running", not alive)
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -1232,7 +1267,7 @@ def network_race():
           api.network_calls and all(api.network_calls) and not held, api.network_calls)
     rsrc = open(os.path.join(LAB, "lib", "remote.py")).read()
     check("remote.py gives the OCI adapter that lock (its name: oci-network)",
-          'kw["network_lock"] = lambda: mac_lock("oci-network")' in rsrc and "**provider_kw(prov))" in rsrc)
+          'kw["network_lock"] = lambda: mac_lock("oci-network")' in rsrc and "**provider_kw(prov, s))" in rsrc)
     # A delete with --network-too while another computer's group exists (it's being made): the network stays.
     rd = tempfile.mkdtemp(prefix="mcnet-")
     try:

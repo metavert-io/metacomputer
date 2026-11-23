@@ -1,0 +1,24 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: (re)create the Sprites services that are the desktop, through the Sprite's own API
+# (sprite-env; run as root through `sprite exec`, the controller's channel: SSH sessions can't reach it).
+#   services sshd      the session (its namespaces: svc-session), then the SSH server in it (bootstrap.sh)
+#   services desktop   xvfb, then desktop (needs xvfb), in the session, after the setup (scripts/remote-build.sh)
+#   services status    the services and their state
+# Services run as the Sprite's `sprite` account, which may use sudo: each runs its fixed root-owned script with
+# `sudo -n`. Running it again replaces a service's definition with the same one.
+set -eu
+ENV=/.sprite/bin/sprite-env
+[ -x "$ENV" ] || ENV="$(command -v sprite-env)"
+mk() { # NAME SCRIPT [NEEDS] (deleted first: run again, a service gets the same definition)
+  "$ENV" services delete "$1" >/dev/null 2>&1 || true
+  if [ -n "${3:-}" ]; then "$ENV" services create "$1" --cmd /usr/bin/sudo --args "-n,/opt/metacomputer/sprite/$2" --needs "$3"
+  else "$ENV" services create "$1" --cmd /usr/bin/sudo --args "-n,/opt/metacomputer/sprite/$2"; fi
+}
+case "${1:-}" in
+  # The session's namespaces end with it (and everything in them): made again, so is everything that runs in them.
+  sshd) for s in desktop xvfb sshd; do "$ENV" services delete "$s" >/dev/null 2>&1 || true; done
+        mk session svc-session; mk sshd svc-sshd session ;;
+  desktop) mk xvfb svc-xvfb session; mk desktop svc-desktop xvfb ;;
+  status) "$ENV" services list ;;
+  *) echo "usage: services sshd|desktop|status" >&2; exit 2 ;;
+esac

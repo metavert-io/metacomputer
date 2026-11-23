@@ -1,0 +1,15 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: the Sprites service "session" (root, through sudo; services run as `sprite`). It makes
+# the namespaces everything of the desktop's and SSH's runs in, and keeps them while it runs:
+#   - a mount namespace where an empty tmpfs covers /.sprite (hide-sprite-api): the Sprite's API socket there is
+#     world-writable, and anything that reaches it can make a service that runs with root;
+#   - a PID namespace with its own /proc, so a process in it sees no process outside it: /proc/PID/root of a process in
+#     the Sprite's own namespaces (where /.sprite isn't covered) can't be reached from inside, by any account.
+# tini is the namespace's init (it reaps what's orphaned there); a sleep keeps it running. sshd, the X server and the
+# desktop join these namespaces (in-session) before anything runs as the desktop's account: nothing of the desktop's
+# account ever runs outside them. Its pid, for in-session, in /run/metacomputer/session.pid.
+set -eu
+install -d -o root -g root -m 0755 /run/metacomputer
+echo "$$" > /run/metacomputer/session.pid
+exec unshare --mount --pid --fork --propagation private --mount-proc -- \
+  /opt/metacomputer/sprite/hide-sprite-api /usr/bin/tini -- /usr/bin/sleep infinity

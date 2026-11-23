@@ -13,8 +13,9 @@
 - The feature map: every feature gives None or a plain reason for every adapter.
 - The resolver: names, providers, places and the default, in that order; refusals when it's unclear or empty;
   --vm and --on together; --on cloud (or any provider's name) says this metacomputer has no cloud computers.
-- The registered providers (your own server, Oracle Cloud) make up `cloud`; their adapters pass the same contract with
-  no credentials and no network (tests/test_remote.py covers their transport, guest setup and the OCI driver).
+- The registered providers (your own server, Oracle Cloud, Fly Sprites) make up `cloud`; their adapters pass the same
+  contract with no credentials and no network (tests/test_remote.py covers their transport, guest setup and the OCI
+  driver; tests/test_sprites.py the Sprites adapter against a stand-in `sprite` command).
 """
 import ast
 import copy
@@ -195,11 +196,13 @@ def registry():
           cloud.registered())
     check("every registered adapter is an Adapter, under its own name",
           all(issubclass(c, cloud.Adapter) and c.name == n for n, c in cloud.ADAPTERS.items()))
-    check("the providers are your own server and Oracle Cloud (the stand-in and this Mac don't count)",
-          cloud.providers() == {"server": "your own server", "oci": "Oracle Cloud"} == placement.PROVIDERS, cloud.providers())
+    check("the providers are your own server, Oracle Cloud and Fly Sprites (the stand-in and this Mac don't count)",
+          cloud.providers() == {"server": "your own server", "oci": "Oracle Cloud", "sprites": "Fly Sprites"}
+          == placement.PROVIDERS, cloud.providers())
     check("by_place finds each place's adapter, and none for a place there isn't",
           cloud.by_place("mac").name == "local-lume" and cloud.by_place("oci").name == "oci"
-          and cloud.by_place("server").name == "ubuntu-vm" and call(cloud.by_place, "fake")[0] == "error")
+          and cloud.by_place("server").name == "ubuntu-vm" and cloud.by_place("sprites").name == "sprites"
+          and call(cloud.by_place, "fake")[0] == "error")
     check("an adapter that isn't registered is a KeyError", call(cloud.adapter, "nosuch")[0] == "error")
     # Static: the adapters' code imports nothing that reaches the network or starts programs.
     banned = {"socket", "urllib", "http", "subprocess", "requests", "ssl", "asyncio"}
@@ -321,6 +324,7 @@ def manifests():
           "powered itself off as running; its rules outside refuse private ranges but not the metadata service; your "
           "own server: nothing enforced outside, its billing unknown; this Mac: nothing billed",
           truth["oci"] == ({"enforced": True, "private_ranges": True, "metadata": False, "off": True}, "storage", "nothing")
+          and truth["sprites"] == ({"enforced": True, "private_ranges": True, "metadata": True, "off": True}, "storage", "n/a")
           and truth["ubuntu-vm"] == (nothing, "unknown", "n/a") and truth["local-lume"][1:] == ("none", "n/a"), truth)
 
 

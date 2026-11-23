@@ -31,7 +31,8 @@ def session_env():
 env, have_session = session_env()
 out = {"checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "hostname": os.uname().nodename}
 out["lightdm"] = sh(["systemctl", "is-active", "lightdm"])[1]
-out["xorg_running"] = sh(["pgrep", "-x", "Xorg"])[0] == 0
+# The X server: Xorg (a VM with a display manager), or Xvfb (a Fly Sprite: the desktop is a Sprites service)
+out["xorg_running"] = sh(["pgrep", "-x", "Xorg"])[0] == 0 or sh(["pgrep", "-x", "Xvfb"])[0] == 0
 out["xfce_session_running"] = sh(["pgrep", "-u", str(UID), "-x", "xfce4-session"])[0] == 0
 out["session_env_published"] = have_session
 try:

@@ -154,6 +154,12 @@ FORMS = [
     ("vm", ["delete", "x", "--confirm", "x", "--remove-from-server"], "exempt"),
     ("vm", ["create", "x", "--on", "oci", "--egress", "off", "--yes"], "exempt"),
     ("cloud", ["status", "oci"], "exempt"), ("cloud", ["doctor", "oci", "--json"], "exempt"),
+    # Fly Sprites (docs/sprites.md): its own forms
+    ("vm", ["create", "x", "--on", "sprites", "--org", "o", "--sprite", "x", "--yes"], "exempt"),
+    ("cloud", ["status", "sprites", "--org", "o"], "exempt"), ("cloud", ["doctor", "sprites"], "exempt"),
+    ("net", ["allow", "example.com", "--exact"], "act"), ("checkpoint", ["ck", "--replace"], "act"),
+    ("restore", ["ck", "--yes"], "act"), ("reset", ["--yes"], "act"), ("baseline", ["--yes"], "act"),
+    ("desktop-restart", [], "act"),
     ("cloud", ["setup", "oci"], "exempt"), ("cloud", ["teardown", "oci"], "exempt"),
     # trace
     ("trace", ["list"], "exempt"), ("trace", ["show", "t"], "exempt"), ("trace", ["export", "t", "--out", "f"], "exempt"),
@@ -180,7 +186,7 @@ FORMS = [
     ("secrets", ["presence", "on"], "act"), ("secrets", ["import-passwords", "--csv", "f"], "act"),
     ("secrets", ["import-session", "--browser", "chrome"], "act"), ("secrets", ["session", "save", "n"], "act"),
     ("secrets", ["session", "policy", "n"], "act"), ("secrets", ["session", "delete", "n"], "act"),
-    ("secrets", ["revoke", "--all"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
+    ("secrets", ["revoke", "--all"], "act"), ("secrets", ["disconnect", "--vm", "x"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
 ]
 ORDER_FREE = sessionvm.READS | {"security", "recordings", "view"}

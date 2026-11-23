@@ -25,6 +25,10 @@ A manifest is plain data (a dict), checked by check_manifest():
                            "unknown" (what a computer stopped through the provider still bills), "guest_poweroff":
                            "stops-billing" | "nothing" | "n/a" (what the guest powering itself off saves, which is
                            what an idle stop does), "note": text}
+    input                  how Cua Driver's input reaches the desktop: {"background": bool (input that doesn't take
+                           the focus: the driver's virtual devices, which need /dev/uinput), "note": text}. Without
+                           it, keys, typing and pixel clicks go in the foreground (the desktop's own pointer and
+                           keyboard); clicks and actions on an element still go through accessibility
     port_forward           bool: one of the computer's ports can be reached on this Mac's loopback
     sizes, regions         tuples of what create() takes (empty: not chosen per computer)
     fresh_start            bool: the computer can start from its image every time (PERSIST=none)
@@ -46,7 +50,7 @@ PERSIST_WORDS = {
     "none": "it starts fresh every time: nothing is kept",
 }
 KEYS = ("name", "place", "label", "beta", "root_disk", "volumes", "snapshots", "backup", "bucket_mount", "sleep_wake",
-        "egress", "outside_egress", "billing", "port_forward", "sizes", "regions", "fresh_start")
+        "egress", "outside_egress", "billing", "input", "port_forward", "sizes", "regions", "fresh_start")
 BILLING_STOPPED = ("none", "storage", "full", "unknown")
 BILLING_POWEROFF = ("stops-billing", "nothing", "n/a")
 
@@ -113,6 +117,10 @@ def check_manifest(m):
             or bl.get("guest_poweroff") not in BILLING_POWEROFF or not is_text(bl.get("note"))):
         bad.append(f"billing: {{'stopped': {' | '.join(BILLING_STOPPED)}, 'guest_poweroff': "
                    f"{' | '.join(BILLING_POWEROFF)}, 'note': text}}")
+    ip = m["input"]
+    if not isinstance(ip, dict) or set(ip) != {"background", "note"} or not is_bool(ip.get("background")) \
+            or not is_text(ip.get("note")):
+        bad.append("input: {'background': bool, 'note': text}")
     for k in ("sizes", "regions"):
         kind(k, isinstance(m[k], tuple) and all(is_text(x) for x in m[k]), "a tuple of names")
     return bad
@@ -164,6 +172,8 @@ FEATURES = {
     "view": (("port_forward",), "the live view needs a port forward to this Mac"),
     "net_allowlist": (("egress_allowlist",), "a network allowlist (metacomputer net allow) needs an egress allowlist"),
     "sleep": (("sleep",), "putting the computer to sleep needs sleep and wake"),
+    "background_input": (("background_input",), "input that leaves the focus alone (background keys, typing and pixel "
+                                                 "clicks) needs the driver's virtual devices (/dev/uinput)"),
     "recordings": ((), "recordings stream to this Mac, so they need nothing of the provider"),
 }
 
@@ -181,6 +191,8 @@ def has(m, cap, persist=None):
         return m["sleep_wake"]["kind"] != "none"
     if cap == "port_forward":
         return m["port_forward"]
+    if cap == "background_input":
+        return m["input"]["background"]
     if cap in ("volumes", "snapshots", "backup", "bucket_mount"):
         return bool(m[cap])
     raise KeyError(cap)

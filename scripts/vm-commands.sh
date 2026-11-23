@@ -21,7 +21,7 @@ do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
     create) vm_create "$@" ;;
     delete) vm_delete "$@" ;;
     help|-h|--help) sed -n '/^#   --vm NAME/,/^#   start /p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//' ;;
-    *) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | create NAME --on oci [--size SIZE] [--egress internet|off] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]" ;;
+    *) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | create NAME --on oci [--size SIZE] [--egress internet|off] | create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]" ;;
   esac
 }
 
@@ -29,11 +29,14 @@ do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
 # (in a subshell: this command's own settings stay as they are), or the reason they're refused.
 vm_settings_row() {
   ( if mc_load_settings "$1" "$2" >/dev/null 2>&1; then
-      # A computer elsewhere (PLACE): whether its SSH answers now (a few seconds at most; its provider isn't asked).
+      # A computer elsewhere (PLACE): whether its SSH answers now (a few seconds at most; its provider isn't asked,
+      # except Fly's API for a Sprite, which says asleep or awake without waking it).
       local rstate=""
       if [ "${PLACE:-mac}" != mac ]; then
         rstate="$("$PY" "$LAB_ROOT/lib/remote.py" probe --vm "$VM_NAME" --run-dir "${RUN_DIR:-$LAB_ROOT/.run-vms/$VM_NAME}" \
-                   --transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" --timeout 2 2>/dev/null || echo unknown)"
+                   --transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}" \
+                   --sprite-org "${SPRITE_ORG:-}" --sprite-name "${SPRITE_NAME:-}" --sprite-cli "${SPRITE_CLI:-}" \
+                   --timeout 2 2>/dev/null || echo unknown)"
         grep -q "^mcomp-$VM_NAME " "$SSH_DIR/known_hosts" 2>/dev/null || rstate="not set up"
       fi
       "$PY" -c 'import json, sys
@@ -261,7 +264,7 @@ vm_port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes] | NAME --on PLACE [--host H --user U --port P] [--size S] [--egress E]
   local name="" ssh="" vnc="" build=1 a used p f vault rows k v def tmp rc
-  local on="${MC_ON_ARG:-}" host="" huser="" hport="" size="" egress="" idle=""
+  local on="${MC_ON_ARG:-}" host="" huser="" hport="" size="" egress="" idle="" org="${SPRITES_ORG:-}" sprite=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --on) [ $# -ge 2 ] || die "--on needs a place: server (your own server) or oci (Oracle Cloud)"; on="$2"; shift ;;
@@ -272,13 +275,15 @@ vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes] | NAME -
       --size) [ $# -ge 2 ] || die "--size needs a size"; size="$2"; shift ;;
       --egress) [ $# -ge 2 ] || die "--egress needs internet or off"; egress="$2"; shift ;;
       --idle-stop) [ $# -ge 2 ] || die "--idle-stop needs minutes, or off"; idle="$2"; shift ;;
+      --org) [ $# -ge 2 ] || die "--org needs the Fly organization's name"; org="$2"; shift ;;
+      --sprite) [ $# -ge 2 ] || die "--sprite needs the Sprite's name"; sprite="$2"; shift ;;
       --ssh-port) [ $# -ge 2 ] || die "--ssh-port needs a port"; ssh="$2"; shift ;;
       --vnc-port) [ $# -ge 2 ] || die "--vnc-port needs a port"; vnc="$2"; shift ;;
       --ssh-port=*) ssh="${1#*=}" ;;
       --vnc-port=*) vnc="${1#*=}" ;;
       --no-build) build=0 ;;
       --yes|-y) ASSUME_YES=1 ;;
-      -*) die "unknown option $1 (metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]; elsewhere: --on server --host ADDRESS --user ACCOUNT [--port P], or --on oci [--size SIZE]; both: [--egress internet|off])" ;;
+      -*) die "unknown option $1 (metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]; elsewhere: --on server --host ADDRESS --user ACCOUNT [--port P], --on oci [--size SIZE], or --on sprites --org ORG [--sprite SPRITE]; all three: [--egress internet|off])" ;;
       *) [ -z "$name" ] || die "one VM name, please (got '$name' and '$1')"; name="$1" ;;
     esac
     shift
@@ -291,7 +296,7 @@ vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes] | NAME -
   # Where: this Mac (a Lume VM, as before), or an Ubuntu VM elsewhere (docs/remote.md): your own server, or a provider's.
   local rprov="" rlines=()
   case "${on:-mac}" in
-    mac) [ -z "$host$huser$hport$size$egress$idle" ] || die "--host, --user, --port, --size, --egress and --idle-stop are for a computer elsewhere (--on server or --on oci)" ;;
+    mac) [ -z "$host$huser$hport$size$egress$idle$sprite" ] || die "--host, --user, --port, --size, --egress, --idle-stop and --sprite are for a computer elsewhere (--on server, oci or sprites)" ;;
     server)
       rprov=ubuntu-vm
       [ -n "$host" ] && [ -n "$huser" ] || die "your own server: --host ADDRESS --user YOUR_ACCOUNT (an account that signs in with a key and may use sudo)"
@@ -311,10 +316,22 @@ try: oci.size_of(sys.argv[2])
 except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$size")" || die "$a"
       case "${idle:-15}" in off|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) die "--idle-stop: minutes (1-999), or off" ;; esac
       rlines=("SIZE=$size" "IDLE_STOP=${idle:-15}") ;;
-    *) die "--on $on: vm create makes a VM on this Mac (mac), sets up your own server (server), or makes one on Oracle Cloud (oci)" ;;
+    sprites)
+      rprov=sprites
+      [ -z "$host$huser$hport$size$idle" ] || die "--host, --user, --port, --size and --idle-stop aren't for a Sprite: Fly sizes it, and it sleeps by itself about 10 s after nothing is connected"
+      [ -n "$org" ] || die "a Sprite is made in one of your Fly organizations: --org ORG (or SPRITES_ORG in config/local.env)"
+      sprite="${sprite:-$name}"
+      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from cloud import sprites
+try: sprites.org_of({"SPRITE_ORG": sys.argv[2]}); print(sprites.sprite_of({"SPRITE_NAME": sys.argv[3]}))
+except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$org" "$sprite")" || die "$a"
+      remote_can_ask_for sprites || die "Fly's sprite command isn't installed: install it and sign in (sprite login), then run this again (docs/sprites.md)"
+      rlines=("SPRITE_ORG=$org" "SPRITE_NAME=$sprite" "IDLE_STOP=off")
+      [ -z "${SPRITE_CLI:-}" ] || rlines+=("SPRITE_CLI=$(mc_sprite_cli)") ;;
+    *) die "--on $on: vm create makes a VM on this Mac (mac), sets up your own server (server), or makes one on Oracle Cloud (oci) or Fly Sprites (sprites)" ;;
   esac
+  [ "$rprov" = sprites ] || [ -z "$sprite" ] || die "--sprite is for --on sprites"
   case "${egress:-internet}" in internet|off) ;; *) die "--egress: internet or off" ;; esac
-  [ -z "$rprov" ] || rlines=("PLACE=$on" "PROVIDER=$rprov" "TRANSPORT=ssh" "EGRESS=${egress:-internet}" "${rlines[@]}")
+  [ -z "$rprov" ] || rlines=("PLACE=$on" "PROVIDER=$rprov" "TRANSPORT=$([ "$rprov" = sprites ] && echo sprite || echo ssh)" "EGRESS=${egress:-internet}" "${rlines[@]}")
   # The new VM's lock, from the first look until the build ends (the build inherits it): one change per VM at a time.
   rc=0; lock_hold "$(vm_lock_name "$name")" "${MCOMP_LOCK_WAIT:-10}" "metacomputer vm create $name" || rc=$?
   case "$rc" in
@@ -387,7 +404,7 @@ print(" ".join(out))') "
       "# Used by: metacomputer --vm $name COMMAND (or MCOMP_VM=$name). Read after config/defaults.env, on its own:" \
       "# config/local.env isn't read for this VM. Bash syntax. Its own names and ports:" \
       "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc" \
-      ${rprov:+"# Where it is: an Ubuntu 24.04 VM reached over SSH (docs/remote.md). SSH_PORT is kept only so no two"} \
+      ${rprov:+"# Where it is: a computer reached over SSH (docs/remote.md, docs/sprites.md). SSH_PORT is kept only so no two"} \
       ${rprov:+"# computers here share a port; VNC_PORT is where its live view's SSH tunnel listens on this Mac."} \
       ${rlines[@]+"${rlines[@]}"} \
       "# Its folders are fixed by its name and can't be set here (SSH_DIR, RUN_DIR, LOG_DIR, VAULT_DIR, EVENTS_SPOOL):" \
@@ -416,7 +433,7 @@ print(" ".join(out))') "
   exec 9>&-   # the settings are written: the next vm create sees them (the VM's own lock stays, through the build)
   MCOMP_VM_NOTICE=1
   if [ -n "$rprov" ]; then
-    printf '%s\n' "metacomputer: new computer $name ($([ "$rprov" = oci ] && echo "Oracle Cloud, $size" || echo "your own server, $huser@$host")): config/vms/$name.env, live view through SSH on 127.0.0.1:$vnc, vault $(mc_tilde "$vault")" >&2
+    printf '%s\n' "metacomputer: new computer $name ($(case "$rprov" in (oci) echo "Oracle Cloud, $size" ;; (sprites) echo "Fly Sprites, the Sprite $sprite in $org" ;; (*) echo "your own server, $huser@$host" ;; esac)): config/vms/$name.env, live view through SSH on 127.0.0.1:$vnc, vault $(mc_tilde "$vault")" >&2
   else
   printf '%s\n' "metacomputer: new VM $name: config/vms/$name.env, SSH 127.0.0.1:$ssh, live view 127.0.0.1:$vnc, vault $(mc_tilde "$vault")" >&2
   fi
@@ -425,6 +442,11 @@ print(" ".join(out))') "
     ok "settings written; build it with: metacomputer --vm $name build"
     return 0
   fi
+  if [ "$rprov" = sprites ]; then
+    # Something billed: the rate and what it keeps, before anything is made (lib/cloud/sprites.py rates).
+    a="$(MCOMP_VM="$name" remote_py rates --vm "$name" 2>/dev/null || true)"
+    printf '%s\n' "Fly Sprites: ${a:-rates unknown}" "PERSIST=disk: its disk keeps everything while it sleeps. It sleeps by itself about 10 s after nothing is connected (the hub lets go after HUB_IDLE unused); asleep, only its disk is billed. Its network policy is EGRESS=${egress:-internet}, enforced by Fly outside the computer (docs/sprites.md)." >&2
+  fi
   if [ "$rprov" = oci ]; then
     # Something billed: the rate and what it keeps, before anything is made (lib/cloud/oci.py rates).
     a="$(MCOMP_VM="$name" remote_py rates --vm "$name" 2>/dev/null || true)"
@@ -432,7 +454,7 @@ print(" ".join(out))') "
   fi
   if [ "${ASSUME_YES:-0}" != 1 ]; then
     if [ -n "$rprov" ]; then
-      printf 'Set up %s now? %s [y/N] ' "$name" "$([ "$rprov" = oci ] && echo "This makes the instance on Oracle Cloud, then installs the desktop (about 10 minutes)." || echo "This takes your server over for metacomputer: its firewall, accounts and desktop (about 10 minutes).")"
+      printf 'Set up %s now? %s [y/N] ' "$name" "$(case "$rprov" in (oci) echo "This makes the instance on Oracle Cloud, then installs the desktop (about 10 minutes)." ;; (sprites) echo "This makes the Sprite on Fly, then installs the desktop (about 5 minutes)." ;; (*) echo "This takes your server over for metacomputer: its firewall, accounts and desktop (about 10 minutes)." ;; esac)"
     else
     printf 'Build the VM %s now? About 1.5 GB of downloads the first time (kept for later builds), then a few minutes. [y/N] ' "$name"
     fi
@@ -609,7 +631,8 @@ vm_delete_remote() {
   [ "$remove_from_server" = 0 ] || ! remote_made || die "--remove-from-server is for your own server: $(remote_where) deletes its computer whole; nothing was deleted"
   remote_delete_plan
   printf '%s\n' "This deletes:"
-  if remote_made; then printf '%s\n' "  its instance on $(remote_where) and the instance's disk (everything on it), its security group, and metacomputer's network there once no computer of yours uses it"
+  if [ "${PROVIDER:-}" = sprites ]; then printf '%s\n' "  its Sprite on Fly (${SPRITE_NAME:-$VM_NAME} in ${SPRITE_ORG:-?}): its disk (everything on it) and its checkpoints"
+  elif remote_made; then printf '%s\n' "  its instance on $(remote_where) and the instance's disk (everything on it), its security group, and metacomputer's network there once no computer of yours uses it"
   elif [ "$remove_from_server" = 1 ]; then printf '%s\n' "  metacomputer's setup on your server at ${SSH_HOST:-?}, through your own SSH and sudo: its SSH settings (yours put back), its firewall, its sudo rules and its accounts' access (their homes and the packages stay)"
   else printf '%s\n' "  nothing on your server: $VM_NAME is your own server at ${SSH_HOST:-?}, which stays as it is (--remove-from-server takes metacomputer's setup off it)"; fi
   printf '%s\n' "  its identity, so its vault binding and every API token made for it stop working (a computer made again under this name is bound again); its own vault is locked if it's unlocked"
@@ -664,7 +687,7 @@ vm_delete_remote() {
     "$PY" -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("instance") else 1)' "$RUN_DIR/remote.json" 2>/dev/null && had=1
     say "deleting what $(remote_where) has for $VM_NAME"
     remote_py delete --vm "$VM_NAME" --network-too || die "it wasn't deleted at $(remote_where) (above); its settings stay, so you can try again"
-    [ "$had" = 0 ] || gone+=("its instance on $(remote_where)")
+    [ "$had" = 0 ] || gone+=("its $([ "${PROVIDER:-}" = sprites ] && echo Sprite || echo instance) on $(remote_where)")
   fi
   rm -f "$settings_file" && gone+=("config/vms/$VM_NAME.env")
   if [ "$run" = 1 ]; then a="$(vm_rmtree "$lab_p" ".run-vms/$VM_NAME")" || warn "kept its runtime folder: $a"; fi

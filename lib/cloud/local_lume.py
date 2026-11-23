@@ -26,6 +26,7 @@ MANIFEST = {
     # The gateway runs on this Mac, outside the VM: nothing in the VM can change it.
     "outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True},
     "billing": {"stopped": "none", "guest_poweroff": "n/a", "note": "runs on this Mac: nothing is billed"},
+    "input": {"background": True, "note": "the driver's virtual pointer and keyboard (/dev/uinput)"},
     "port_forward": True,
     "sizes": (),      # VM_CPU and VM_MEMORY in the VM's settings
     "regions": (),
