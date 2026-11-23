@@ -219,9 +219,9 @@ form as a driver connection ([SECURITY.md](../SECURITY.md)):
 | Record | Holds |
 | --- | --- |
 | `start` | who ran it (`via: "shell"`), from which project, the VM and its settings |
-| `call`, tool `vm_shell` | the script's SHA-256 and size, how it was given (`command`, `file`, `stdin`), `cwd`, timeout, cap, `read_only`, `override`; the script and its arguments only with `ACTION_LOG_TEXT=keep`, otherwise their length |
+| `call`, tool `vm_shell` | the script's keyed hash (`script_hmac`) and size, how it was given (`command`, `file`, `stdin`), `cwd`, timeout, cap, `read_only`, `override`; the script and its arguments only with `ACTION_LOG_TEXT=keep`, otherwise their length |
 | `checkpoint` | a signature over the call, made before anything runs |
-| `result`, tool `vm_shell` | status, `kind`, exit code, duration, `desktop`, `held_open`, and each stream's full size and SHA-256 (and whether it was capped); a message written by the Mac; the VM's own diagnostics (its error text, ssh's stderr) as `remote` size and SHA-256. The output text and diagnostics as text (`remote_text`) only with `ACTION_LOG_TEXT=keep` |
+| `result`, tool `vm_shell` | status, `kind`, exit code, duration, `desktop`, `held_open`, and each stream's full size and keyed hash (`hmac`; and whether it was capped); a message written by the Mac; the VM's own diagnostics (its error text, ssh's stderr) as `remote` size and keyed hash. The output text and diagnostics as text (`remote_text`) only with `ACTION_LOG_TEXT=keep` |
 | `refused` | the call's arguments as above and why |
 | `end`, final `checkpoint` | the signature over the whole file |
 
@@ -229,7 +229,7 @@ form as a driver connection ([SECURITY.md](../SECURITY.md)):
 | --- | --- | --- | --- |
 | `off` | any | any | not logged |
 | `on` | `off` | any | not logged |
-| `on` | `auto` | `redact` (default) | logged: hashes and sizes, no script or output text |
+| `on` | `auto` | `redact` (default) | logged: keyed hashes and sizes, no script or output text |
 | `on` | `auto` | `keep` | logged with the script, its arguments and the output text |
 
 What stays in plain text with `ACTION_LOG_TEXT=redact`: the folder in the VM
@@ -237,7 +237,7 @@ What stays in plain text with `ACTION_LOG_TEXT=redact`: the folder in the VM
 paths), the Mac folder it was run from, the VM's name and settings, and
 refusal reasons, which can name another session's project folder. Everything
 the script contains, its arguments, everything it printed and everything the
-VM said in its own words is a size and a hash.
+VM said in its own words is a size and a keyed hash.
 
 If logging applies, the log must open and sign the call before anything
 runs; otherwise the run is refused (125) rather than run unlogged. If the
@@ -249,8 +249,14 @@ answer within 10 s is stopped and counts as a failure. `metacomputer actions sho
 desktop recording's key moments include shell runs made during it.
 
 The output hashes let you check a file you have against what the VM said a
-run printed, without keeping the text in the log. They are the VM's report,
-not proof (see "A VM that misbehaves").
+run printed, without keeping the text in the log. They're keyed: an HMAC-SHA256
+of the text's SHA-256 (`sha256:` and its hex digest) under a per-install secret
+beside the log's signing key (`action-log.results-hmac` in the VM's SSH folder,
+0600, made with the log's first run; the hub's result fingerprints use it too).
+A plain SHA-256 of a short output (a code, a number) could be found by trying
+every candidate; the keyed one needs that file. They are the VM's report, not
+proof (see "A VM that misbehaves"), though an output that came back whole must
+match the SHA-256 the VM gave for it.
 
 ## Tests
 

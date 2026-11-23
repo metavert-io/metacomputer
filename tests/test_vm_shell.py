@@ -198,6 +198,7 @@ def unit_checks():
         "an extra field": reply(note="hi"),
         "metacomputer_sh true": reply(metacomputer_sh=True),
         "sha256 not hex": reply(stdout={**good["stdout"], "sha256": "\x1b[2J" + "0" * 60}),
+        "a whole stream whose sha256 isn't its own": reply(stdout={**good["stdout"], "sha256": "0" * 64}),
         "head not base64": reply(stdout={**good["stdout"], "head": "!!!!!!!!"}),
         "head longer than its size": reply(stdout={**good["stdout"], "bytes": 2}),
         "over the cap, not truncated": reply(stdout={**good["stdout"], "bytes": 70000}),
@@ -498,10 +499,10 @@ def hostile_checks(td):
     r = fake_reply(err_reply, MCOMP_ACTION_LOG="on", FAKE_STDERR="secret-ssh-diag")
     raw = open(log_files(td)[-1]).read()
     res = next((x for x in map(json.loads, raw.splitlines()) if x["type"] == "result"), {}).get("result") or {}
-    check("ACTION_LOG_TEXT=redact: the VM's diagnostics only as size and hash; the message is the Mac's",
+    check("ACTION_LOG_TEXT=redact: the VM's diagnostics only as size and keyed hash; the message is the Mac's",
           "secret" not in raw and res.get("kind") == "guest" and (res.get("remote") or {}).get("bytes", 0) > 30
-          and len((res.get("remote") or {}).get("sha256", "")) == 64 and res.get("message") == "the virtual computer's side failed",
-          res)
+          and len((res.get("remote") or {}).get("hmac", "")) == 64 and "sha256" not in (res.get("remote") or {})
+          and res.get("message") == "the virtual computer's side failed", res)
     r = fake_reply(err_reply, MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_TEXT="keep", FAKE_STDERR="secret-ssh-diag")
     raw = open(log_files(td)[-1]).read()
     check("ACTION_LOG_TEXT=keep: they're kept", "secret-guest-diag" in raw and "secret-ssh-diag" in raw)
@@ -630,13 +631,23 @@ def log_checks(td):
               kinds == ["start", "call", "checkpoint", "result", "end", "checkpoint"] and call.get("tool") == "vm_shell"
               and recs[-1].get("final") and not recs[2].get("final") and (recs[0].get("session") or {}).get("via") == "shell", kinds)
         a = call.get("args") or {}
-        check("call: script hash and size, cwd; script and its arguments redacted",
-              a.get("script_sha256") == hashlib.sha256(body.encode()).hexdigest() and a.get("script_bytes") == len(body)
+        # Keyed hashes: an unkeyed SHA-256 of a short output (a code, a number) could be found by trying candidates.
+        kpath = os.path.join(td, "keys", "action-log.results-hmac")
+        mk = actionlog.result_mac_key(os.path.join(td, "keys", "action-log"))
+        check("the key results are fingerprinted under: per install, beside the log's signing key, 0600",
+              os.path.isfile(kpath) and oct(os.stat(kpath).st_mode & 0o777) == "0o600" and len(mk) >= 32,
+              oct(os.stat(kpath).st_mode & 0o777) if os.path.exists(kpath) else "missing")
+        check("call: the script's keyed hash (HMAC) and size, cwd; script and its arguments redacted",
+              a.get("script_hmac") == vm_shell.keyed(mk, hashlib.sha256(body.encode()).hexdigest())
+              and "script_sha256" not in a and a.get("script_bytes") == len(body)
               and (a.get("script") or {}).get("redacted") and (a.get("script_args") or {}).get("count") == 1 and a.get("cwd"), a)
-        check("result: exit code, output sizes and hashes",
+        check("result: exit code, output sizes and keyed hashes (HMAC), no unkeyed hash anywhere in the file",
               res.get("exit_code") == 3 and res.get("error") is True
-              and (res.get("stdout") or {}).get("sha256") == hashlib.sha256(b"secret-out-marker\n").hexdigest()
-              and (res.get("stderr") or {}).get("bytes") == len("secret-err-marker\n"), res)
+              and (res.get("stdout") or {}).get("hmac") == vm_shell.keyed(mk, hashlib.sha256(b"secret-out-marker\n").hexdigest())
+              and "sha256" not in (res.get("stdout") or {}) and "sha256" not in (res.get("stderr") or {})
+              and (res.get("stderr") or {}).get("bytes") == len("secret-err-marker\n")
+              and not any(hashlib.sha256(x).hexdigest() in raw
+                          for x in (body.encode(), b"secret-out-marker\n", b"secret-err-marker\n")), res)
         check("no script, argument or output text in the file", "secret" not in raw)
         v = verifies(td, files[-1])
         check("the log verifies", v["ok"] and v["final"] and v["calls"] == 1, v)

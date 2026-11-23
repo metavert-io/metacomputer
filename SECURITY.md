@@ -1139,11 +1139,16 @@ Settings:
   refuses every run (exit 125).
 - `SHELL_LOG=auto` (the default) records every run in the signed action log
   when `ACTION_LOG=on`, as a `vm_shell` call and result: the script's
-  SHA-256 and size, the folder, the exit code and duration, and each output
-  stream's size and SHA-256. The script, its arguments, the output text and
+  size and keyed hash, the folder, the exit code and duration, and each output
+  stream's size and keyed hash. The script, its arguments, the output text and
   the VM's own diagnostics are kept only with `ACTION_LOG_TEXT=keep`, like
-  typed text; otherwise they're a size and a hash, and the result's message
-  is written by the Mac. In plain text either way: the folder in the VM, the
+  typed text; otherwise they're a size and a keyed hash, and the result's message
+  is written by the Mac. A keyed hash is an HMAC-SHA256 of the text's SHA-256
+  under a per-install secret beside the log's signing key (`action-log.results-hmac`,
+  0600, made with the log's first run, the same one the hub's result fingerprints
+  use), so a short output in the log (a code, a number) can't be found by
+  trying every candidate, as a plain SHA-256 of it would allow; with that key and
+  the text you can still check it. In plain text either way: the folder in the VM, the
   `--file` name, the Mac folder it was run from, and refusal reasons.
   `SHELL_LOG=off` keeps shell runs out of the log; with `ACTION_LOG=off`
   nothing is logged either way. Refused runs and malformed answers are logged
@@ -1163,8 +1168,9 @@ Settings:
 - The log records what was sent and hashes of what came back; it doesn't
   record what the script did inside the VM. Programs it started detached keep
   running after the run is logged.
-- The sizes and hashes in a result are the VM's own report. They let you
-  check a file against what the VM said, but a compromised VM can report
+- The sizes and hashes in a result are the VM's own report (an output that
+  came back whole must match its SHA-256, or the answer is refused). They let
+  you check a file against what the VM said, but a compromised VM can report
   anything that fits the schema, so they don't prove what ran or printed.
 - (Fixed with the hub: tool calls now check and claim under the same owners lock as
   `metacomputer sh`, so a shell run and an acting tool call from two sessions

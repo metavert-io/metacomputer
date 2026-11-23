@@ -793,6 +793,16 @@ CLAIMS = [
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),
+    # metacomputer sh's log: keyed hashes only (an unkeyed SHA-256 of a short output can be reversed by guessing)
+    ("SECURITY.md", r"A keyed hash is an HMAC-SHA256 of the text's SHA-256 under a per-install secret beside the log's "
+                    r"signing key \(`action-log.results-hmac`, 0600",
+     lambda m: 'return hmac.new(mac_key, b"sha256:" + sha_hex.encode("ascii"), hashlib.sha256).hexdigest()' in raw("lib/vm_shell.py")
+     and "return actionlog.result_mac_key(actionlog.settings()[\"key\"])" in raw("lib/vm_shell.py")
+     and '"script_sha256"' not in raw("lib/vm_shell.py") and '"sha256": st["sha256"]' not in raw("lib/vm_shell.py")
+     and '"sha256": hashlib.sha256(remote)' not in raw("lib/vm_shell.py")
+     and 'key + ".results-hmac"' in raw("lib/actionlog.py") and "os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600" in raw("lib/actionlog.py")),
+    ("SECURITY.md", r"an output that\s+came back whole must match its SHA-256, or the answer is refused",
+     lambda m: 'if hashlib.sha256(head).hexdigest() != sha:' in raw("lib/vm_shell.py")),
     ("SECURITY.md", r"\*\*Recognising agent sessions is best-effort defense in depth.\*\*.*?So it is never what an approval that "
                     r"matters rests on: those also\s+need you present, Touch ID \(or macOS's login-password dialog\) in "
                     r"presence mode, or the confirmation typed at the\s+terminal where you unlocked the vault",

@@ -483,11 +483,22 @@ def test_f():
             recs = [json.loads(x) for x in raw.splitlines()]
             call = next((x for x in recs if x["type"] == "call"), {})
             res = next((x for x in recs if x["type"] == "result"), {}).get("result") or {}
-            check("it records a vm_shell call: script hash and size, cwd", call.get("tool") == "vm_shell"
-                  and (call.get("args") or {}).get("script_sha256") == hashlib.sha256(body.encode()).hexdigest()
+            # keyed hashes, under the per-install results key beside the log's signing key (lib/vm_shell.py keyed)
+            try:
+                with open(os.path.join(s["ssh_dir"], "action-log.results-hmac"), "rb") as f:
+                    mk = f.read(64).strip()
+            except OSError:
+                mk = b""
+
+            def keyed(data):
+                import hmac
+                return hmac.new(mk, b"sha256:" + hashlib.sha256(data).hexdigest().encode(), hashlib.sha256).hexdigest()
+            check("it records a vm_shell call: the script's keyed hash and size, cwd", call.get("tool") == "vm_shell"
+                  and mk and (call.get("args") or {}).get("script_hmac") == keyed(body.encode())
                   and (call.get("args") or {}).get("cwd") == home, call.get("args"))
-            check("... and its result: exit code, output sizes and hashes", res.get("exit_code") == 0
-                  and (res.get("stdout") or {}).get("sha256") == hashlib.sha256(b"optf-secret-out\n").hexdigest()
+            check("... and its result: exit code, output sizes and keyed hashes", res.get("exit_code") == 0
+                  and (res.get("stdout") or {}).get("hmac") == keyed(b"optf-secret-out\n")
+                  and hashlib.sha256(b"optf-secret-out\n").hexdigest() not in raw
                   and (res.get("stderr") or {}).get("bytes") == len("optf-secret-err\n"), res)
             check("script, arguments and output text are redacted", "optf-secret" not in raw)
             v = mcomp(alog, "actions", "verify", os.path.relpath(new[0], os.path.join(s["logs"], "actions")))

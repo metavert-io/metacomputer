@@ -19,7 +19,8 @@ Whatever comes back, this side:
 - accepts only a reply that fits a strict schema, and shows nothing of one
   that doesn't;
 - escapes control characters before they reach a terminal (--raw opts out);
-- logs only hashes and sizes of the VM's free text unless ACTION_LOG_TEXT=keep.
+- logs only sizes and keyed hashes (HMAC-SHA256 under the action log's per-install results key) of the script and
+  the VM's free text unless ACTION_LOG_TEXT=keep: an unkeyed hash of short output could be reversed by guessing.
 
 Settings (config/defaults.env, passed in by bin/metacomputer):
   VM_SHELL   auto | on | off     auto = on, except off while DRIVER_MODE=bounded
@@ -31,6 +32,7 @@ import base64
 import binascii
 import contextlib
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -327,6 +329,8 @@ def check_stream(d, cap, what):
         if n > cap:
             raise Protocol(f"{what}: over the cap but not marked truncated")
         head, tail = _b64(d["head"], n, what), b""
+        if hashlib.sha256(head).hexdigest() != sha:       # all of it is here: its SHA-256 must be what it is
+            raise Protocol(f"{what}: its sha256 isn't the output's")
     return {"bytes": n, "sha256": sha, "truncated": t, "head": head, "tail": tail}
 
 
@@ -421,15 +425,25 @@ def session_info(s):
             "vm_shell": s["vm_shell"]}
 
 
-def call_args(o, script, cwd, keep_text):
+def keyed(mac_key, sha_hex):
+    """A keyed fingerprint of a SHA-256 digest (HMAC-SHA256 under the action log's per-install results key,
+    actionlog.result_mac_key): whoever has the text and that key can check it (keyed(key, sha256(text))), but the log
+    alone can't be used to try candidates, as an unkeyed hash of a short output (a code, a number) would allow."""
+    return hmac.new(mac_key, b"sha256:" + sha_hex.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def call_args(o, script, cwd, keep_text, mac_key=None):
     """The call record's arguments. The script and its arguments are kept only
-    with ACTION_LOG_TEXT=keep, like typed text; their hash and size always. The
-    guest folder and the --file name are paths, kept like a driver call's paths."""
+    with ACTION_LOG_TEXT=keep, like typed text; their size always, and a keyed hash
+    (keyed) when the log is on (mac_key). The guest folder and the --file name are
+    paths, kept like a driver call's paths."""
     text = script.decode("utf-8", "replace")
     args = {"script": text if keep_text else {"redacted": True, "chars": len(text)},
-            "script_bytes": len(script), "script_sha256": hashlib.sha256(script).hexdigest(),
+            "script_bytes": len(script),
             "source": o["source"], "cwd": cwd, "timeout_s": o["timeout"], "max_output": o["max_output"],
             "read_only": o["read_only"], "override": o["override"]}
+    if mac_key:
+        args["script_hmac"] = keyed(mac_key, hashlib.sha256(script).hexdigest())
     if o["source"] == "file":
         args["file"] = os.path.basename(o["file"])
     if o["args"]:
@@ -438,9 +452,10 @@ def call_args(o, script, cwd, keep_text):
     return args
 
 
-def result_fields(res, keep_text):
+def result_fields(res, keep_text, mac_key=None):
     """The result record. Only fixed text written here and checked values; what the
-    VM said in its own words (output, diagnostics) only as size and hash unless keep."""
+    VM said in its own words (output, diagnostics) only as size and keyed hash (keyed,
+    under mac_key) unless keep."""
     out = {"status": res["status"], "kind": res.get("kind"), "exit_code": res.get("exit_code"),
            "error": res["status"] != "exited" or res.get("exit_code") != 0 or bool(res.get("kind")),
            "desktop": res.get("desktop"), "held_open": res.get("held_open")}
@@ -449,7 +464,9 @@ def result_fields(res, keep_text):
     for k in ("stdout", "stderr"):
         st = (res.get("_streams") or {}).get(k)
         if st:
-            out[k] = {"bytes": st["bytes"], "sha256": st["sha256"], "truncated": st["truncated"]}
+            out[k] = {"bytes": st["bytes"], "truncated": st["truncated"]}
+            if mac_key:
+                out[k]["hmac"] = keyed(mac_key, st["sha256"])
             if keep_text:
                 out[k]["text"] = shown_bytes(st, k).decode("utf-8", "replace")
     remote = res.get("_remote") or b""
@@ -457,7 +474,9 @@ def result_fields(res, keep_text):
         if keep_text:
             out["remote_text"] = remote[-2000:].decode("utf-8", "replace")
         else:
-            out["remote"] = {"bytes": len(remote), "sha256": hashlib.sha256(remote).hexdigest()}
+            out["remote"] = {"bytes": len(remote)}
+            if mac_key:
+                out["remote"]["hmac"] = keyed(mac_key, hashlib.sha256(remote).hexdigest())
     return out
 
 
@@ -479,6 +498,12 @@ class Log:
 
     def name(self):
         return self.log.name if self.log else None
+
+    def mac_key(self):
+        """The per-install secret results are fingerprinted under (beside the log's signing key, 0600, made on first
+        use: actionlog.result_mac_key, the hub's and the relay's too). Only asked for when the log is on."""
+        import actionlog
+        return actionlog.result_mac_key(actionlog.settings()["key"])
 
     def refused(self, args, reason):
         if self.log:
@@ -778,7 +803,14 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
                 f"SHELL_LOG={s['shell_log']!r} isn't one of auto, off; refusing to run without knowing "
                 "whether it should be logged (fix it in the config)"}, EXIT_REFUSED
     log = Log(s, tool)
-    args = log_args(log.keep) if log_args else call_args(o, script, cwd, log.keep)
+    mac_key = None
+    if log_on:
+        try:
+            mac_key = log.mac_key()
+        except Exception as e:  # never run unlogged, nor logged with an unkeyed hash, by accident
+            return {**base, "status": "refused", "message": f"the action log is on but its results key couldn't be read "
+                    f"or made ({type(e).__name__}); not running unlogged"}, EXIT_REFUSED
+    args = log_args(log.keep) if log_args else call_args(o, script, cwd, log.keep, mac_key)
 
     def open_log():
         """None, or why the log (required here) couldn't be opened."""
@@ -904,7 +936,7 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
             res = {**base, "status": "error", "kind": "internal", "exit_code": None,
                    "message": "metacomputer sh stopped unexpectedly"}
         if log.log:
-            log.result(int((time.monotonic() - t0) * 1000), result_fields(res, log.keep))
+            log.result(int((time.monotonic() - t0) * 1000), result_fields(res, log.keep, mac_key))
             if not log.close():
                 res = {**res, "status": "error", "kind": "log", "message":
                        (f"the script ended ({res.get('status')}, exit code {res.get('exit_code')}) but its "

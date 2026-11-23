@@ -963,7 +963,7 @@ The GUI suite also runs under the `desktop` profile: put
 
 ## The shell channel: `tests/test_vm_shell.py`, `tests/test_options.py F`
 
-`python3 tests/test_vm_shell.py` needs no VM (97 checks). `bash -c` stands in
+`python3 tests/test_vm_shell.py` needs no VM (98 checks). `bash -c` stands in
 for SSH, so the Mac's half (`lib/vm_shell.py`) and the VM's half
 (`lib/vm_shell_guest.py`) both run locally; a fake, hostile VM stands in for
 the rest. It checks:
@@ -984,8 +984,8 @@ the rest. It checks:
   changes nothing;
 - the hostile VM: endless stdout, endless stderr and one endless line are cut
   off at the wire limit; a VM that stops reading stdin or never answers is
-  given up at the deadline; 28 malformed answers (wrong types, exit code 256,
-  NaN, bad hashes or base64, sizes that don't match, duplicate keys, extra
+  given up at the deadline; 29 malformed answers (wrong types, exit code 256,
+  NaN, bad hashes or base64, a whole stream whose SHA-256 isn't its own, sizes that don't match, duplicate keys, extra
   lines, deep nesting) are rejected with fixed text; end to end they exit 255,
   show nothing and are logged as signed protocol errors;
 - control characters reach a terminal only escaped (checked on a
@@ -1010,7 +1010,8 @@ the rest. It checks:
   relay under another client is;
 - the action log: no file with `ACTION_LOG=off` or `SHELL_LOG=off`; with
   logging, a `vm_shell` call signed before anything runs and a result with
-  hashes and sizes, nothing of the script, its output or the VM's diagnostics
+  keyed hashes (HMAC under the per-install results key, 0600; no plain SHA-256
+  of the script or output anywhere in the file) and sizes, nothing of the script, its output or the VM's diagnostics
   unless `ACTION_LOG_TEXT=keep`, refusals and timeouts recorded, a log that
   can't be signed at the start refusing the run, a failed final signature
   failing the command, and `actions verify --all` passing.
