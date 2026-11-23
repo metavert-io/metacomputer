@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The coding agents metacomputer is set up for on this Mac: Claude Code, Codex (docs/codex.md), OpenClaw
-(docs/openclaw.md), Hermes Agent (docs/hermes.md) and Gemini CLI (docs/gemini.md).
+(docs/openclaw.md), Hermes Agent (docs/hermes.md), Gemini CLI (docs/gemini.md) and Antigravity CLI
+(docs/antigravity.md).
 
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
                                         (install.sh --no-claude, --no-codex, ..., remembered for later runs). For
@@ -9,9 +10,9 @@
                                         it, lib/claude_mcp.py: its command and exact arguments checked; the plugin
                                         declares none, and an older copy of it that still brings its own is
                                         reported), and this checkout's command that adds them. For OpenClaw,
-                                        Hermes Agent and Gemini CLI: the MCP server metacomputer as each keeps it
-                                        (lib/agent_setup.py, read by the agent's own CLI, or Gemini CLI's
-                                        settings.json) and the skill links
+                                        Hermes Agent, Gemini CLI and Antigravity CLI: the MCP server metacomputer as
+                                        each keeps it (lib/agent_setup.py, read by the agent's own CLI, or Gemini
+                                        CLI's settings.json and Antigravity CLI's mcp_config.json) and the skill links
   metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
                                         without touching your Codex settings (a throwaway CODEX_HOME): its rules
                                         checker, the sandbox's marker, `codex mcp` and the two settings install.sh
@@ -73,7 +74,8 @@ def run(argv, env=None, timeout=TIMEOUT, cwd=None):
 def choices():
     try:
         d = json.load(open(AGENTS_FILE))
-        return {k: d.get(k) for k in ("claude", "codex", "openclaw", "hermes", "gemini") if d.get(k) in ("on", "off")}
+        return {k: d.get(k) for k in ("claude", "codex", "openclaw", "hermes", "gemini", "antigravity")
+                if d.get(k) in ("on", "off")}
     except (OSError, ValueError):
         return {}
 
@@ -446,7 +448,7 @@ def main(argv):
         return 0
     for label, s in (("Claude Code", st["claude_code"]), ("Codex", st["codex"])):
         if s.get("untrusted"):
-            print(f"{label:<12} {s['untrusted']}")
+            print(f"{label:<15} {s['untrusted']}")
             continue
         if not s["installed"]:
             how = "isn't installed" + ("; you chose to leave it alone" if s.get("choice") == "off" else
@@ -466,14 +468,14 @@ def main(argv):
             how = f"{s['version'] or 'installed'}: {claude_missing(s)}"
         else:
             how = f"{s['version'] or 'installed'}: not set up; ./install.sh --only-agents sets it up"
-        print(f"{label:<12} {how}")
+        print(f"{label:<15} {how}")
     for name, ag in more.items():
-        print(f"{ag.label:<12} {more_line(name, ag, st[name])}")
+        print(f"{ag.label:<15} {more_line(name, ag, st[name])}")
     return 0
 
 
 def more_line(name, ag, s):
-    """One line for OpenClaw, Hermes Agent or Gemini CLI (lib/agent_setup.py status)."""
+    """One line for OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI (lib/agent_setup.py status)."""
     if s.get("untrusted"):
         return s["untrusted"]
     if not s["installed"]:

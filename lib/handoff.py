@@ -77,7 +77,8 @@ ACTION = ("Run `metacomputer view --open` (Screen Sharing; paste the live-view p
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
 SPACES = re.compile(r"\s+")
 AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex", "OpenClaw": "OpenClaw", "Hermes Agent": "Hermes",
-               "Gemini CLI": "Gemini", owners.UNKNOWN_AGENT: "Your agent"}
+               "Gemini CLI": "Gemini", "Antigravity CLI": "Antigravity",
+               "Antigravity app": "Antigravity", owners.UNKNOWN_AGENT: "Your agent"}
 
 
 def agent_word(rec):
@@ -88,7 +89,7 @@ def agent_word(rec):
 
 def at_terminal():
     """The user's own terminal: standard input is a terminal and no agent session (Claude Code, Codex, OpenClaw, Hermes
-    Agent or Gemini CLI) is above this
+    Agent, Gemini CLI or Antigravity CLI) is above this
     process (owners.at_user_terminal). Codex can give its commands a pseudo-terminal, so a terminal alone isn't the
     user: there, pressing Enter or `handoff done` would be the agent saying the user is done."""
     return owners.at_user_terminal((0,))
@@ -667,7 +668,7 @@ def cmd_end(a, to):
         # that asked) saying "done" would be an agent saying the user is done.
         who = ("this " + (rec.get("agent") if rec.get("agent") in owners.AGENTS else "Claude Code")
                + " session asked for the handoff, so it" if own_session
-               else "an agent session (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI)")
+               else "an agent session (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI)")
         err(f"{who} can't say the user is done. The user runs "
             "`metacomputer handoff done` in their own terminal (or presses Enter where `metacomputer handoff` "
             "waits at a terminal). Ask them; if they've changed their mind, `metacomputer handoff cancel` calls it off.")

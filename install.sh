@@ -15,7 +15,8 @@
 #                              the tools even if they're up to date; the checkout's .cache is left alone
 #                              (what `metacomputer setup` from the plugin uses)
 #   Every run (a first install, `metacomputer update`, the install line again) sets metacomputer up for each coding
-#   agent installed on this Mac (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI), and for one installed since
+#   agent installed on this Mac (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI), and for one
+#   installed since
 #   the last run:
 #   ./install.sh --no-claude   leave Claude Code alone (plugin, skill, MCP server), this time and in later runs
 #   ./install.sh --claude      set Claude Code up even if an earlier run had --no-claude
@@ -26,11 +27,13 @@
 #   ./install.sh --codex       set Codex up even if an earlier run had --no-codex
 #   ./install.sh --only-codex  only the Codex step: its MCP server, the skills in ~/.agents/skills and metacomputer's
 #                              rules for its sandbox (no tools, Lume, settings, vault or VM)
-#   ./install.sh --no-openclaw, --no-hermes, --no-gemini   leave OpenClaw, Hermes Agent or Gemini CLI alone, this time
-#                              and in later runs (docs/openclaw.md, docs/hermes.md, docs/gemini.md)
-#   ./install.sh --openclaw, --hermes, --gemini   set it up even if an earlier run said --no-...
-#   ./install.sh --only-openclaw, --only-hermes, --only-gemini   only that agent's step: its MCP server (registered
-#                              with its own CLI) and the skills where it reads them (no tools, Lume, settings, vault or VM)
+#   ./install.sh --no-openclaw, --no-hermes, --no-gemini, --no-antigravity   leave OpenClaw, Hermes Agent, Gemini CLI
+#                              or Antigravity CLI alone, this time and in later runs (docs/openclaw.md, docs/hermes.md,
+#                              docs/gemini.md, docs/antigravity.md)
+#   ./install.sh --openclaw, --hermes, --gemini, --antigravity   set it up even if an earlier run said --no-...
+#   ./install.sh --only-openclaw, --only-hermes, --only-gemini, --only-antigravity   only that agent's step: its MCP
+#                              server (registered with its own CLI) and the skills where it reads them (no tools, Lume,
+#                              settings, vault or VM)
 #   ./install.sh --only-agents only the agents' steps, for whichever agents are installed (after installing one)
 #   ./install.sh --uninstall   remove what this installed for the agents, and the command (the VM stays)
 #   ./install.sh --switch      the metacomputer command runs another checkout: move it (and Claude Code's plugin
@@ -56,15 +59,16 @@
 #      the plugin declares no MCP server or hooks). Without `claude plugin`, or with --no-plugin: the
 #      `metacomputer` skill link instead of the plugin, and the same server.
 #      With Codex (see --codex): its MCP server metacomputer (tools mcp__metacomputer__*), the
-#      skills in ~/.agents/skills and $CODEX_HOME/rules/metacomputer.rules. With OpenClaw, Hermes Agent or
-#      Gemini CLI: its MCP server metacomputer, ~/.local/bin/metacomputer mcp-lazy (lib/agent_setup.py), and the skills
+#      skills in ~/.agents/skills and $CODEX_HOME/rules/metacomputer.rules. With OpenClaw, Hermes Agent, Gemini CLI
+#      or Antigravity CLI: its MCP server metacomputer, ~/.local/bin/metacomputer mcp-lazy (lib/agent_setup.py), and the
+#      skills
 #   6. builds the secrets vault, mcomp-vault (`metacomputer secrets`), with swiftc
 #   7. builds the VM: about 1.5 GB of downloads, then a few minutes unattended
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 YES=0; CHROME=""; BUILD=""; CLAUDE=auto; PLUGIN=1; ONLY_CLAUDE=0; UNINSTALL=0; LUME_CHOICE=""; REPLACE_VM=0; FRESH_SOURCES=0
 SWITCH=0; ALLOW_DOWNGRADE=0; CODEX=auto; ONLY_CODEX=0; ONLY_AGENTS=0
-OPENCLAW=auto; HERMES=auto; GEMINI=auto; ONLY_OPENCLAW=0; ONLY_HERMES=0; ONLY_GEMINI=0
+OPENCLAW=auto; HERMES=auto; GEMINI=auto; ANTIGRAVITY=auto; ONLY_OPENCLAW=0; ONLY_HERMES=0; ONLY_GEMINI=0; ONLY_ANTIGRAVITY=0
 for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;; --no-chrome) CHROME=no ;; --no-build) BUILD=no ;; --replace-vm) REPLACE_VM=1 ;; --fresh-sources) FRESH_SOURCES=1 ;;
@@ -74,6 +78,7 @@ for a in "$@"; do
     --openclaw) OPENCLAW=yes ;; --no-openclaw) OPENCLAW=no ;; --only-openclaw) ONLY_OPENCLAW=1 ;;
     --hermes) HERMES=yes ;; --no-hermes) HERMES=no ;; --only-hermes) ONLY_HERMES=1 ;;
     --gemini) GEMINI=yes ;; --no-gemini) GEMINI=no ;; --only-gemini) ONLY_GEMINI=1 ;;
+    --antigravity) ANTIGRAVITY=yes ;; --no-antigravity) ANTIGRAVITY=no ;; --only-antigravity) ONLY_ANTIGRAVITY=1 ;;
     --lume=mcomp-vm|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
     --lume=secure) LUME_CHOICE=mcomp-vm ;;   # mcomp-vm's former name, lume-secure
     -h|--help) sed -n '2,/^set -Eeuo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -85,7 +90,8 @@ done
 [ "$ONLY_OPENCLAW" = 0 ] || [ "$OPENCLAW" != no ] || { echo "--only-openclaw and --no-openclaw together leave nothing to do" >&2; exit 2; }
 [ "$ONLY_HERMES" = 0 ] || [ "$HERMES" != no ] || { echo "--only-hermes and --no-hermes together leave nothing to do" >&2; exit 2; }
 [ "$ONLY_GEMINI" = 0 ] || [ "$GEMINI" != no ] || { echo "--only-gemini and --no-gemini together leave nothing to do" >&2; exit 2; }
-[ "$((ONLY_CODEX + ONLY_CLAUDE + ONLY_AGENTS + ONLY_OPENCLAW + ONLY_HERMES + ONLY_GEMINI))" -le 1 ] || { echo "--only-claude, --only-codex, --only-openclaw, --only-hermes, --only-gemini and --only-agents: one at a time (--only-agents does them all)" >&2; exit 2; }
+[ "$ONLY_ANTIGRAVITY" = 0 ] || [ "$ANTIGRAVITY" != no ] || { echo "--only-antigravity and --no-antigravity together leave nothing to do" >&2; exit 2; }
+[ "$((ONLY_CODEX + ONLY_CLAUDE + ONLY_AGENTS + ONLY_OPENCLAW + ONLY_HERMES + ONLY_GEMINI + ONLY_ANTIGRAVITY))" -le 1 ] || { echo "--only-claude, --only-codex, --only-openclaw, --only-hermes, --only-gemini, --only-antigravity and --only-agents: one at a time (--only-agents does them all)" >&2; exit 2; }
 
 b=$'\033[1m'; d=$'\033[2m'; g=$'\033[32m'; y=$'\033[33m'; r=$'\033[31m'; o=$'\033[0m'
 [ -t 1 ] || { b=; d=; g=; y=; r=; o=; }
@@ -143,8 +149,9 @@ CLAUDE_TRIED=0     # 1 once this run set Claude Code up (claude_step with a clau
                    # recorded (agent_record); a run that skipped it leaves an earlier unfinished one recorded
 CODEX_FAILED=0     # the same two for Codex's step (codex_step: its MCP server)
 CODEX_TRIED=0
-# and for OpenClaw's, Hermes Agent's and Gemini CLI's (agent_step: their MCP servers)
+# and for OpenClaw's, Hermes Agent's, Gemini CLI's and Antigravity CLI's (agent_step: their MCP servers)
 OPENCLAW_FAILED=0; OPENCLAW_TRIED=0; HERMES_FAILED=0; HERMES_TRIED=0; GEMINI_FAILED=0; GEMINI_TRIED=0
+ANTIGRAVITY_FAILED=0; ANTIGRAVITY_TRIED=0
 REG_LEFT=""        # register_server's: what's left after a registration that didn't work: "none" (no server), "unknown"
                    # (it can't be read), or "other" (something that was there stays)
 has_claude() { command -v claude >/dev/null 2>&1; }
@@ -436,7 +443,7 @@ agent_choice() { # NAME: "on" (you asked for it), "off" (--no-NAME in an earlier
 }
 agent_remember() { # NAME on|off: an explicit --NAME / --no-NAME, for later runs
   local n v body="" sep=""
-  for n in claude codex openclaw hermes gemini; do
+  for n in claude codex openclaw hermes gemini antigravity; do
     if [ "$n" = "$1" ]; then v="$2"; else v="$(agent_choice "$n")"; fi
     body="$body$sep  \"$n\": \"${v:-auto}\""; sep=$',\n'
   done
@@ -514,7 +521,7 @@ agents_stage() { # step 5 (and --only-agents): each agent, as the switches and e
   done
   [ -z "$missing" ] || printf '%s\n' "  Not installed here: $missing; once one is: ./install.sh --only-agents (or metacomputer update)"
   if ! any_agent; then
-    warn "no coding agent is installed (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI): metacomputer works from any of them. Install one, then: ./install.sh --only-agents"
+    warn "no coding agent is installed (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI): metacomputer works from any of them. Install one, then: ./install.sh --only-agents"
   fi
   printf '%s\n' "  (metacomputer agents shows this any time)"
 }
@@ -771,18 +778,20 @@ codex_remove() { # --uninstall, after the command links: the skill links and rul
   return 0
 }
 
-# --- OpenClaw, Hermes Agent and Gemini CLI (docs/openclaw.md, docs/hermes.md, docs/gemini.md) ---------------------
+# --- OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI (docs/openclaw.md, hermes.md, gemini.md, antigravity.md) ---
 # Each one's MCP server metacomputer (~/.local/bin/metacomputer mcp-lazy), registered with the agent's own CLI, and the
 # skills where the agent reads them: lib/agent_setup.py. Its MCP server follows the rule Codex's does: only
 # metacomputer's own entry (exactly ~/.local/bin/metacomputer or this checkout's launcher, with exactly mcp-lazy) is
 # ever changed or removed, read again right before; anything else is named by its program and left, and the step counts
 # as unfinished (recorded by agent_record, so `metacomputer update` runs it again).
-MORE_AGENTS="openclaw hermes gemini"
-agent_label() { case "$1" in openclaw) echo "OpenClaw" ;; hermes) echo "Hermes Agent" ;; gemini) echo "Gemini CLI" ;; esac; }
+MORE_AGENTS="openclaw hermes gemini antigravity"
+agent_label() { case "$1" in openclaw) echo "OpenClaw" ;; hermes) echo "Hermes Agent" ;; gemini) echo "Gemini CLI" ;;
+                             antigravity) echo "Antigravity CLI" ;; esac; }
+agent_cmd() { case "$1" in antigravity) echo agy ;; *) echo "$1" ;; esac; }   # NAME: the agent's command
 agent_upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 agent_var() { eval "printf '%s' \"\${$1:-}\""; }                # VARNAME: its value
 agent_flag() { local v; v="$(agent_var "$(agent_upper "$1")")"; printf '%s' "${v:-auto}"; }   # auto, yes, no
-has_agent() { command -v "$1" >/dev/null 2>&1; }
+has_agent() { command -v "$(agent_cmd "$1")" >/dev/null 2>&1; }   # NAME
 any_agent() { # is any coding agent installed?
   local a
   if has_claude || has_codex; then return 0; fi
@@ -799,13 +808,13 @@ agent_lines() { # agent_setup.py's lines on stdin: ok, warn, say; "keep" (uninst
     case "$kind" in ok) ok "$text" ;; warn) warn "$text" ;; say) printf '%s\n' "  $text" ;; keep) keep_cmd_for "$text" ;; esac
   done
 }
-agent_step() { # NAME: openclaw, hermes or gemini
+agent_step() { # NAME: openclaw, hermes, gemini or antigravity
   local up label out rc=0
   up="$(agent_upper "$1")"; label="$(agent_label "$1")"
   link_command
   printf '%s\n' "  $label:"
   if ! has_agent "$1"; then
-    warn "$label's '$1' command isn't installed; after installing it, run: ./install.sh --only-$1"
+    warn "$label's '$(agent_cmd "$1")' command isn't installed; after installing it, run: ./install.sh --only-$1"
     return 0
   fi
   if ! codex_python; then
@@ -835,6 +844,7 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
   # would leave out), whichever one the agent's CLI uses
   case "$1" in
     gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" "$HOME/.gemini/settings.json" ;;
+    antigravity) set -- "$HOME/.gemini/config/mcp_config.json" ;;
     hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml"
             for d in "$HOME"/.hermes/profiles/*/; do set -- "$@" "${d}config.yaml"; done ;;
     openclaw) set -- "${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME}/.openclaw}/openclaw.json}" \
@@ -1719,7 +1729,7 @@ for a in $MORE_AGENTS; do
   fi
 done
 if ! any_agent; then
-  todo+=("note: no coding agent is installed (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI); metacomputer works from any of them (install one, then ./install.sh --only-agents)")
+  todo+=("note: no coding agent is installed (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI); metacomputer works from any of them (install one, then ./install.sh --only-agents)")
 fi
 [ "$vault_ok" = 1 ] && todo+=("build the secrets vault (metacomputer secrets)  ${d}(about 1 minute; skipped if it's up to date)${o}")
 case "$vm_state:$build_vm:$vm_replace" in
@@ -1836,7 +1846,7 @@ fi
 # shellcheck source=/dev/null
 . "$CONF"
 
-# --- 5. the agents: Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI ---------------------------------
+# --- 5. the agents: Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI -------------------
 step "Coding agents"
 agents_stage      # each agent's result is recorded by its own step (agent_record), Claude Code's before Codex's runs
 

@@ -11,8 +11,8 @@ subscription (below).
 
 **Gemini CLI and Antigravity CLI.** Since 2026-06-18 Google serves free and Google AI Pro/Ultra users through its
 successor, Antigravity CLI (`agy`); Gemini CLI goes on for Gemini Code Assist Standard and Enterprise and for paid
-Gemini API keys, and is still released. **Antigravity CLI is not yet supported**: it keeps its own MCP configuration
-(`~/.gemini/config/mcp_config.json`) and plugins, which this install doesn't set up.
+Gemini API keys, and is still released. Antigravity CLI keeps its own MCP configuration
+(`~/.gemini/config/mcp_config.json`) and skills, which the install sets up too: [antigravity.md](antigravity.md).
 
 ## Set it up
 

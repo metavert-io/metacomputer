@@ -48,9 +48,9 @@ before doing anything. The installer:
   and the installer says how to remove it yourself;
 - if you also use OpenAI's Codex, adds metacomputer to Codex: its MCP server, its skills, and rules that let
   metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves Codex alone);
-- likewise for OpenClaw, Hermes Agent and Gemini CLI, when they're installed: metacomputer's MCP server in each one's
-  configuration, through its own CLI, and the skills where it reads them (`--no-openclaw`, `--no-hermes`,
-  `--no-gemini` leave one alone).
+- likewise for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI, when they're installed: metacomputer's MCP server
+  in each one's configuration, through its own CLI, and the skills where it reads them (`--no-openclaw`, `--no-hermes`,
+  `--no-gemini`, `--no-antigravity` leave one alone).
 
 It changes no Claude Code permission settings. `~/metacomputer/install.sh --uninstall` removes the command, the plugin,
 the MCP server and the other agents' setup.

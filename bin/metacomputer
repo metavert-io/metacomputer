@@ -135,7 +135,7 @@
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
 #   agents [--json] | agents check [--json]
 #                                  the coding agents metacomputer is set up for (Claude Code, Codex, OpenClaw,
-#                                  Hermes Agent, Gemini CLI), and a check of what it relies on in this Mac's Codex
+#                                  Hermes Agent, Gemini CLI, Antigravity CLI), and a check of what it relies on in this Mac's Codex
 #                                  (docs/codex.md)
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
 #                                  mine your own sessions for repeated mistakes; approved lessons reach

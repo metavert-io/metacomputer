@@ -1,7 +1,7 @@
 """Mining the user's own sessions with the metacomputer tools (`metacomputer learn report`, docs/learn.md).
 
 It finds the Claude Code transcripts that called the metacomputer tools (either prefix), Codex's, Gemini CLI's,
-OpenClaw's and Hermes Agent's sessions that did (the last two from their SQLite databases, lib/session_dbs.py), plus
+Antigravity CLI's, OpenClaw's and Hermes Agent's sessions that did (the last two from their SQLite databases, lib/session_dbs.py), plus
 action logs, event logs and benchmark results where present, and reports:
 - failed driver calls by class: malformed arguments, each hub guard's refusal, element not found, a pixel
   action without a screenshot frame, and the other classes the driver's messages name;
@@ -484,6 +484,20 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                     bad += 1
                 elif hit:
                     out.append((p, source))
+    # Antigravity CLI's conversations: one compact transcript each (transcripts.antigravity_transcripts)
+    for p in transcripts.antigravity_transcripts(env) if projects else []:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_mtime < cutoff:
+            continue
+        scanned += 1
+        hit = _probe(p)
+        if hit is None:
+            bad += 1
+        elif hit:
+            out.append((p, "project"))
     for b in bench_dirs:
         b = os.path.abspath(os.path.expanduser(b))
         if not os.path.isdir(b):
@@ -575,8 +589,8 @@ def _mine_tr(tr, source, cutoff, project):
         shift = end - (tr.last or 0.0)
         tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
     else:
-        src = ("headless" if tr.kind == "stream" else tr.kind if tr.kind in ("codex", "gemini", "openclaw", "hermes")
-               else "claude-code")
+        src = ("headless" if tr.kind == "stream" else tr.kind
+               if tr.kind in ("codex", "gemini", "antigravity", "openclaw", "hermes") else "claude-code")
     if project and src != "bench" and not _under(tr.cwd, project):
         return None
     if tr.last is not None and tr.last < cutoff:
@@ -712,7 +726,8 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
         "window": {"from": time.strftime("%Y-%m-%d", time.localtime(min(starts))) if starts else None,
                    "to": time.strftime("%Y-%m-%d", time.localtime(max(ends))) if ends else None},
         "sources": {"claude_code_sessions": src["claude-code"], "codex_sessions": src["codex"],
-                    "gemini_sessions": src["gemini"], "openclaw_sessions": src["openclaw"],
+                    "gemini_sessions": src["gemini"], "antigravity_sessions": src["antigravity"],
+                    "openclaw_sessions": src["openclaw"],
                     "hermes_sessions": src["hermes"],
                     "headless_transcripts": src["headless"],
                     "benchmark_sessions": src["bench"], **stats},

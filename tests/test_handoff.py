@@ -1091,6 +1091,19 @@ def fill_checks():
         rc, o, er = at_pty([agent, mc, "input-reset"])
         check("...but not from an agent session, even with a terminal of its own (exit 4, the guest isn't asked)",
               rc == 4 and "the user has the computer" in er and "input-reset" not in read(sshlog), (rc, er[-300:]))
+        # The Antigravity app and IDE run their agent inside the app: under its main executable or its language server
+        # (the stand-in copied into an app bundle's places), the user's own commands refuse as under any agent session.
+        bundle = os.path.join(fd, "apps", "Antigravity.app", "Contents")
+        for dst in (os.path.join(bundle, "MacOS", "Antigravity"), os.path.join(bundle, "Resources", "bin", "language_server"),
+                    os.path.join(fd, "apps", "Antigravity IDE.app", "Contents", "MacOS", "Electron")):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(agent, dst)
+            rc, o, er = at_pty([dst, mc, "input-reset"])
+            check(f"...nor under the Antigravity app ({os.path.basename(dst)}), with a terminal of its own (exit 4)",
+                  rc == 4 and "the user has the computer" in er and "input-reset" not in read(sshlog), (rc, er[-300:]))
+            rc, o, er = at_pty([dst, mc, "handoff", "done"])
+            check(f"...and `handoff done` under it doesn't end the user's handoff ({os.path.basename(dst)})",
+                  rc != 0 and owners.open_handoff(), (rc, o[-200:], er[-300:]))
     else:
         print("SKIP input-reset from an agent with a terminal: no C compiler for the stand-in agent")
     r = subprocess.run([mc, "input-reset"], env=eu, capture_output=True, text=True, timeout=60)

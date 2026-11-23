@@ -76,6 +76,11 @@ type the answers (see "Tampering" below).
 - **Codex's sessions**, `$CODEX_HOME/sessions/**/rollout-*.jsonl` (else `~/.codex`; [codex.md](codex.md)).
 - **Gemini CLI's sessions**, `~/.gemini/tmp/<project>/chats/*.jsonl` (`$GEMINI_CLI_HOME/.gemini`;
   [gemini.md](gemini.md)): its MCP calls (`mcp_metacomputer_*`) and shell commands.
+- **Antigravity CLI's conversations**, the transcript it keeps of each,
+  `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl` (`$ANTIGRAVITY_APP_DATA_DIR`
+  for the folder; [antigravity.md](antigravity.md)): its calls of metacomputer's server through `call_mcp_tool` and its
+  `run_command` shell commands, the project folder from `conversation_summaries.db` beside it (read like OpenClaw's and
+  Hermes Agent's databases, below).
 - **OpenClaw's sessions**, kept in SQLite: `<state>/agents/<agent>/agent/openclaw-agent.sqlite` for `~/.openclaw`, each
   `~/.openclaw-<profile>` and `$OPENCLAW_STATE_DIR` (`$OPENCLAW_HOME` moves `~`; [openclaw.md](openclaw.md)): its MCP
   calls (`metacomputer__*`, and the same calls made through its tool search's `dispatch_action`) and its `exec` shell
@@ -106,7 +111,8 @@ the report's notes, and the report goes on.
 
 Only sessions that called a metacomputer tool are read, under either prefix
 (`mcp__metacomputer__*`, or `mcp__plugin_metacomputer_metacomputer__*` in sessions from
-when the plugin brought the server itself; Gemini CLI's `mcp_metacomputer_*`; OpenClaw's `metacomputer__*`). Every
+when the plugin brought the server itself; Gemini CLI's `mcp_metacomputer_*`; OpenClaw's `metacomputer__*`; Antigravity
+CLI's `call_mcp_tool` with the server `metacomputer`). Every
 transcript file changed within `--since` is scanned for that tool call's marker,
 and nothing else is kept from files that don't have it; in OpenClaw's and Hermes Agent's databases, only sessions
 with an entry within `--since` are read. `--since` takes `7d`

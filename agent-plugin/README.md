@@ -30,7 +30,7 @@ The package needs metacomputer installed on the Mac, which builds the VM: see
 installer says what it will do and asks first).
 
 The installer also sets metacomputer up for each coding agent it finds (Claude Code, Codex, OpenClaw, Hermes Agent,
-Gemini CLI), so with it you don't need this package; an MCP server named `metacomputer` in your own configuration takes
+Gemini CLI, Antigravity CLI), so with it you don't need this package; an MCP server named `metacomputer` in your own configuration takes
 precedence over the package's.
 
 Its skills, `plugin.json` and `mcp.json` are made from the repository's own files by `scripts/sync-plugin.py`; edit

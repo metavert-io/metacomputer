@@ -1282,7 +1282,7 @@ def other_agents_checks():
     hermes_cli's gateway; OpenClaw: a process named openclaw-gateway), holds a computer through a bridge under it, and
     a command from it that names no computer is refused on another computer, with the agent's name; at-terminal refuses
     under it. And look-alikes don't count: node or python running something else, OpenClaw's own helper processes."""
-    print("the other agents: OpenClaw, Hermes Agent, Gemini CLI")
+    print("the other agents: OpenClaw, Hermes Agent, Gemini CLI, the Antigravity app")
     node, python = userterm.fake_interpreter("node"), userterm.fake_interpreter("python3")
     native = userterm.fake_interpreter("gemini")           # a native executable named gemini (Gemini CLI's standalone)
     if not node or not python or not native:
@@ -1311,6 +1311,17 @@ def other_agents_checks():
              ("Gemini CLI", [node, "./gm", "--", *run], None, S("alias")),
              ("OpenClaw", ["openclaw-gateway", "--", *run], node, None),
              ("OpenClaw", ["openclaw", "--", *run], node, None))
+    # The Antigravity app and IDE: their own executables (here the stand-in, copied into an app bundle's places), by
+    # their realpath: the app's main executable and its language server, the IDE's Electron
+    bundle = os.path.join(TD, "apps", "Antigravity.app", "Contents")
+    ide = os.path.join(TD, "apps", "Antigravity IDE.app", "Contents", "MacOS", "Electron")
+    app_exes = (os.path.join(bundle, "MacOS", "Antigravity"), os.path.join(bundle, "Resources", "bin", "language_server"),
+                ide)
+    for dst in app_exes:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if not os.path.exists(dst):
+            shutil.copy2(native, dst)
+    cases += tuple(("Antigravity app", [x, "--", *run], None, None) for x in app_exes)
     for name, argv, exe, cwd in cases:
         r = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=120, env=dict(os.environ),
                            cwd=cwd)

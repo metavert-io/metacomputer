@@ -169,7 +169,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   "Event spool"). Tests: `python3 tests/test_events.py` (no VM) and
   `tests/test_options.py E` (VM).
 - Lessons (`metacomputer learn`, docs/learn.md; `lib/learn*.py`,
-  `lib/transcripts.py`, which reads Claude Code's, Codex's and Gemini CLI's sessions, and `lib/session_dbs.py`, OpenClaw's and
+  `lib/transcripts.py`, which reads Claude Code's, Codex's, Gemini CLI's and Antigravity CLI's sessions, and `lib/session_dbs.py`, OpenClaw's and
   Hermes Agent's SQLite databases: read into memory from their files with the write-ahead log's commits applied, or opened
   `immutable`; never a write, a lock or a file beside them): proposals come only from structured fields (classes,
   counts, tool names, app names from a fixed list); never copy text from a
@@ -214,15 +214,17 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   manifests, `PERSIST`, the feature map; `local-lume` hands actions to the existing commands, never reroutes
   them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
   Which processes are agent sessions is `lib/owners.py` `agent_kind`/`agent_of` (Claude Code, Codex, OpenClaw, Hermes
-  Agent, Gemini CLI; by what a process executes (`process_agent`): its name, its executable (`proc_exe`, the realpath
-  of its text image: a native gemini) and, for an interpreter (node, bun, deno, python), the program it runs
+  Agent, Gemini CLI, Antigravity CLI; by what a process executes (`process_agent`): its name, its executable (`proc_exe`, the realpath
+  of its text image: a native gemini, Antigravity CLI's `agy`/`antigravity`, names matched exactly; the Antigravity app and
+  IDE, "Antigravity app", by `app_agent`: an executable in an Antigravity app bundle's `Contents/MacOS` or an Antigravity
+  language server) and, for an interpreter (node, bun, deno, python), the program it runs
   (`script_agent`: its script, the first argument that isn't an option or the value of an option known to take one
   (`NODE_VALUE_FLAGS`, `DENO_VALUE_FLAGS`; unknown options take none), relative ones from its working folder
   (`proc_cwd`), checked as written and resolved against `AGENT_NAMES`/`AGENT_PATH_WORDS`; a preload; a -m module) plus
   any argument naming an agent's package (`AGENT_PACKAGE_WORDS`, `AGENT_PACKAGE_FOLDERS`, as written or resolved;
   OpenClaw's own helpers excepted), read only through ps_table's `ProcTable`; arguments or a working folder that can't be read, or a script
   that isn't there, are `UNKNOWN_AGENT`, an agent: fail closed) and, for the vault, `vault/Util.swift` `agentKindOf` (and `sharedAgentProcess`:
-  Codex's app server, OpenClaw's and Hermes Agent's gateways and an unidentified agent get no session answers): keep the
+  Codex's app server, OpenClaw's and Hermes Agent's gateways, `agy acp`/`agy remote-control`, the Antigravity app and an unidentified agent get no session answers): keep the
   two the same; tests/fixtures/agent_argv.json holds the cases both are checked against (test_session_guard, and
   test_vault_ops through the test build's `test-agent-kind`).
   An agent session's computer (`lib/sessionvm.py`; docs/commands.md "An agent session's computer"): the MCP bridge and
@@ -330,12 +332,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `install_incomplete` likewise), so `metacomputer update` runs the install again. Codex's MCP server follows the same
   ownership rule (`lib/agents.py codex_entry`: exactly the checkout's launcher, a legacy path under its `bin/`, or
   `~/.local/bin/metacomputer`, with exactly `mcp-lazy`; the whole entry read again before a change; never a path prefix);
-  anything else is left, said value-free, and the Codex step is unfinished. OpenClaw's, Hermes Agent's and Gemini CLI's
-  MCP servers follow the same rule (`lib/agent_setup.py`: `~/.local/bin/metacomputer mcp-lazy`, registered with each
-  agent's own CLI, `openclaw mcp add --no-probe`, `hermes config set`, `gemini mcp add -s user --trust`; read through it,
-  or Gemini CLI's settings.json as it reads it, again right before any change and back after; their adds that replace
-  a same-named entry run only when it's still missing), each step recorded by `agent_step`'s `agent_record` (names
-  `openclaw`, `hermes`, `gemini`), and `--uninstall` removes only metacomputer's own (`agent_uninstall`, before the
+  anything else is left, said value-free, and the Codex step is unfinished. OpenClaw's, Hermes Agent's, Gemini CLI's and
+  Antigravity CLI's MCP servers follow the same rule (`lib/agent_setup.py`: `~/.local/bin/metacomputer mcp-lazy`, registered with each
+  agent's own CLI, `openclaw mcp add --no-probe`, `hermes config set`, `gemini mcp add -s user --trust`, `agy mcp add`; read through it,
+  or Gemini CLI's settings.json / Antigravity CLI's `~/.gemini/config/mcp_config.json` as each reads it, again right before any change and back after; their adds that replace
+  a same-named entry run only when it's still missing; Antigravity CLI's `timeoutSeconds` is written by `settle` only into
+  metacomputer's own entry, and its permission rule `mcp(metacomputer/*)` by `added` (only when the run adds the server;
+  an ask/deny rule of the user's wins) and taken out by `removed` in `~/.gemini/antigravity-cli/settings.json`, each
+  only as plain JSON and only over the exact file read, `replace_if_unchanged`), each step recorded by `agent_step`'s `agent_record` (names
+  `openclaw`, `hermes`, `gemini`, `antigravity`; install.sh's `agent_cmd` maps a name to its command, `agy`), and `--uninstall` removes only metacomputer's own (`agent_uninstall`, before the
   command links). Its output is lines of kinds (`ok`, `warn`, `say`, `keep`), never a configured value. `--no-plugin` keeps the server and swaps the
   plugin for a skill link; `--uninstall` reads and removes metacomputer's servers before the command links, and keeps
   the links while any entry that stays (Claude Code's or Codex's, owned or not) runs them. The plugin's launcher tells a checkout whose

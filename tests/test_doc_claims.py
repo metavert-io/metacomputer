@@ -662,7 +662,16 @@ def sh_function(rel, name):
 
 
 def function_src(rel, name):
+    """A top-level function's source; "Class.method" for a method (up to the class's next method, or its end)."""
     text = raw(rel)
+    if "." in name:
+        cls, meth = name.split(".", 1)
+        c = text.index(f"\nclass {cls}(")
+        end = text.find("\nclass ", c + 1)
+        body = text[c:end if end > 0 else len(text)]
+        i = body.index(f"\n    def {meth}(")
+        j = body.find("\n    def ", i + 1)
+        return body[i:j if j > 0 else len(body)]
     i = text.index(f"\ndef {name}(")
     j = text.find("\ndef ", i + 1)
     return text[i:j if j > 0 else len(text)]
@@ -708,6 +717,23 @@ def profiles_deleted_in_the_vm():
             and "shutil.rmtree(name, dir_fd=root)" in g and "follow_symlinks=False" in g)
 
 
+def replaces_only_unchanged():
+    """lib/agent_setup.py replace_if_unchanged: a target that is a link never replaced, a new file beside it (O_EXCL, no
+    link followed, the target's mode), the target read again right before the rename (_still: its content through a
+    descriptor that follows no link, and the same file before, after and at the path now), which comes last."""
+    f = function_src("lib/agent_setup.py", "replace_if_unchanged")
+    still = function_src("lib/agent_setup.py", "_still")
+    return ("os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW" in f
+            and 'if st is not None and stat.S_ISLNK(st.st_mode):\n            return "link"' in f
+            and f.index('return "link"') < f.index("os.open(tmp,")
+            and "if not _still(path, data):" in f and f.index("if not _still(path, data):") < f.index("os.replace(tmp, path)")
+            and f[f.index("if not _still(path, data):"):f.index("os.replace(tmp, path)")].count("\n") <= 3
+            and 'with open(path, "rb", opener=_nofollow) as f:' in still
+            and "return again == data and stat.S_ISREG(now.st_mode) and _identity(before) == _identity(after) == _identity(now)" in still
+            and "return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns" in function_src("lib/agent_setup.py", "_identity")
+            and "os.O_NOFOLLOW" in function_src("lib/agent_setup.py", "_nofollow"))
+
+
 def vault_types_on_its_own_path():
     """The vault reaches the VM with /usr/bin/ssh itself; nothing in vault/ talks to the hub."""
     files = [f for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift")]
@@ -716,7 +742,7 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
-    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node, bun, deno or python process above them can't be told.*?A process\s+is told by what it executes: its executable \(a native `gemini`.*?the first argument that isn't an option or the value of an option known\s+to take one.*?plus any of its arguments naming an agent's package by an identifier of its own \(`@google/gemini-cli`,.*?A file merely named `gemini` is no agent. It can't\s+be told when its arguments or working folder can't be read or its script isn't there",
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity\s+CLI or the Antigravity app or IDE \(whose agent runs inside the app: their own terminals included\) is above them in the\s+process tree.*?and\s+also when a node, bun, deno or python process above them can't be told.*?A process\s+is told by what it executes: its executable \(a native `gemini`.*?the first argument that isn't an option or the value of an option known\s+to take one.*?plus any of its arguments naming an agent's package by an identifier of its own \(`@google/gemini-cli`,.*?A file merely named `gemini` is no agent. It can't\s+be told when its arguments or working folder can't be read or its script isn't there",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
      and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
@@ -739,7 +765,10 @@ CLAIMS = [
      and "guard let w = cwd(), !w.isEmpty else { return .unreadable }" in raw("vault/Util.swift")
      and "guard let a = args() else { return unknownAgent }" in raw("vault/Util.swift")
      and 'case unknownAgent:\n        return "an unidentified agent\'s process"' in raw("vault/Util.swift")
-     and all(f': "{a}"' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
+     and all(f': "{a}"' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent", "Antigravity CLI",
+                                                         "Antigravity app"))
+     and "got = name_agent(comm) or app_agent(comm)" in function_src("lib/owners.py", "agent_kind")
+     and "return agentNames[base] ?? appAgent(s)" in raw("vault/Util.swift")
      and "if agent_of(p, table):" in function_src("lib/owners.py", "claude_of")
      and "owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py") and "owners.at_user_terminal((0,))" in raw("lib/learn.py")
      and "return owners.at_user_terminal((0,))" in raw("lib/handoff.py")
@@ -2378,7 +2407,7 @@ CLAIMS = [
      and 'eval "${up}_TRIED=1"' in sh_function("install.sh", "agent_step")
      and '[ "$(agent_var "${up}_TRIED")" = 0 ] && stamp_incomplete "$a"; }' in sh_function("install.sh", "install_incomplete")
      and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 3),
-    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, any agent's \(Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's\), metacomputer's or not, runs it, or\s+may: an agent's configuration that can't be read \(its CLI missing, or no Python to read it\) keeps them too",
+    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, any agent's \(Claude Code's, Codex's, OpenClaw's, Hermes Agent's, Gemini CLI's or Antigravity CLI's\), metacomputer's or not, runs it, or\s+may: an agent's configuration that can't be read \(its CLI missing, or no Python to read it\) keeps them too",
      lambda m: raw("install.sh").index('if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then')
      < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for a in $MORE_AGENTS; do agent_uninstall "$a"; done\n')
      < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
@@ -2655,7 +2684,7 @@ CLAIMS = [
     ("SECURITY.md", r"the audit log and the terminal show\s+only a short id derived from it, which isn't a key",
      lambda m: "id = String(sha256Hex(Array(key.utf8)).prefix(8))" in raw("vault/PaymentServer.swift")
      and 'func validPurchaseKey(_ s: String) -> Bool { matches(s, "^[0-9a-f]{32}$") }' in raw("vault/PaymentServer.swift")),
-    ("SECURITY.md", r"one started from an agent's shared process \(Codex's app\s+server, an OpenClaw or Hermes Agent gateway: every conversation in one process\) belongs to that process, so its\s+conversations aren't kept apart from each other\. One started from outside any agent session has nothing to bind\s+to, so it can't be resumed",
+    ("SECURITY.md", r"one started from an agent's shared process \(Codex's app\s+server, an OpenClaw or Hermes Agent gateway, Antigravity CLI serving an editor or remote devices, the Antigravity app: every conversation in one process\) belongs to that process, so its\s+conversations aren't kept apart from each other\. One started from outside any agent session has nothing to bind\s+to, so it can't be resumed",
      lambda m: 'return (nil, "purchase \\(pu.id) belongs to another \\(pu.agentName ?? "agent process")")' in raw("vault/PaymentServer.swift")
      and "} else if !ending {" in raw("vault/PaymentServer.swift")
      and "if who.claudePID == nil && who.hostPID == nil && (human || fills.isEmpty) {" in raw("vault/PaymentServer.swift")
@@ -2822,6 +2851,78 @@ CLAIMS = [
      and "ORDER BY w DESC LIMIT ?" in function_src("lib/session_dbs.py", "_recent")
      and "(cutoff, MAX_SESSIONS + 1)" in function_src("lib/session_dbs.py", "_recent")
      and all("_recent(con, " in function_src("lib/session_dbs.py", f) for f in ("read_openclaw", "read_hermes"))),
+    # Antigravity CLI (docs/antigravity.md; lib/agent_setup.py Antigravity, lib/owners.py, vault/Util.swift)
+    ("docs/antigravity.md", r"It changes Antigravity CLI's MCP server `metacomputer` only when\s+there's none, by the rule it uses for the "
+                            r"other agents.*?Anything else is never changed or removed",
+     lambda m: 'return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]' in function_src("lib/agent_setup.py", "Antigravity.add_argv")
+     and 'if classify(agent.read(prog, env), root, link) != "absent":' in function_src("lib/agent_setup.py", "_register")
+     and 'AGENTS = {a.name: a for a in (OpenClaw(), Hermes(), Gemini(), Antigravity())}' in raw("lib/agent_setup.py")),
+    ("docs/antigravity.md", r"when\s+metacomputer's own entry has no `timeoutSeconds` \(one you set stays as you set it\), the install writes the file again.*?"
+                            r"with `\"timeoutSeconds\": (\d+)` added to that entry, to a new file\s+beside it that replaces it only while the "
+                            r"file is still exactly what was read.*?A `mcp_config.json` that is a link \(a file you keep elsewhere\) is never "
+                            r"replaced",
+     lambda m: f"TOOL_TIMEOUT = {m[1]}" in raw("lib/agent_setup.py")
+     and 'if "timeoutSeconds" in entry:\n            return' in function_src("lib/agent_setup.py", "Antigravity.settle")
+     and 'classify(_entry_res(entry), root, link) != "ok"' in function_src("lib/agent_setup.py", "Antigravity.settle")
+     and "got = replace_if_unchanged(path, data," in function_src("lib/agent_setup.py", "Antigravity.settle")
+     and 'if got == "link":' in function_src("lib/agent_setup.py", "Antigravity.settle")
+     and replaces_only_unchanged()),
+    ("docs/antigravity.md", r"the run that adds metacomputer's MCP server also adds\s+metacomputer's own rule, exactly `mcp\(metacomputer/\*\)`, "
+                            r"to `permissions.allow`.*?Nothing else in that file changes.*?Only plain JSON is written.*?one with "
+                            r"comments or trailing commas is left as it is.*?A `settings.json` that is a link is never\s+replaced.*?"
+                            r"An `ask` or `deny` rule of yours.*?wins: no allow rule "
+                            r"is added next to it.*?Only a run that adds the server adds the rule.*?`--uninstall` takes out exactly "
+                            r"that rule once metacomputer's server is gone.*?and only when this install added it: the install notes that "
+                            r"it did in\s+`~/.local/share/metacomputer/antigravity-rule.json`. The same rule written by you \(before the "
+                            r"install, or after you\s+took it out\) stays",
+     lambda m: 'allow = f"mcp({NAME}/*)"' in raw("lib/agent_setup.py")
+     and "d = json.loads(data.decode(\"utf-8\"))" in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and 'x == "mcp(*)" or x.startswith(f"mcp({NAME}/") or x == f"mcp({NAME})"' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and 'd.setdefault("permissions", perms)["allow"] = allow + [rule]' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and 'perms["allow"] = [x for x in allow if x != rule]' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and "got = replace_if_unchanged(path, data, new)" in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and "agent.added(prog, root, link, env, out)" in function_src("lib/agent_setup.py", "_register")
+     and function_src("lib/agent_setup.py", "_register").count("agent.added(") == 1
+     and function_src("lib/agent_setup.py", "_register").index("agent.run(agent.add_argv(prog, link), env)")
+     < function_src("lib/agent_setup.py", "_register").index("agent.added(")
+     and function_src("lib/agent_setup.py", "_unregister").count("agent.removed(env, out)") == 2
+     and 'if got == "added" and not self._remember(env, True):' in function_src("lib/agent_setup.py", "Antigravity.added")
+     and "if not self._recorded(env):" in function_src("lib/agent_setup.py", "Antigravity.removed")
+     and function_src("lib/agent_setup.py", "Antigravity.removed").split("if not self._recorded(env):", 1)[1]
+     .split("\n        got = ", 1)[0].rstrip().endswith("return True")
+     and function_src("lib/agent_setup.py", "Antigravity.removed").index("self._recorded(env)")
+     < function_src("lib/agent_setup.py", "Antigravity.removed").index("self._settings_change(env, out, add=False)")
+     and 'd.get("rule") == self.allow and d.get("settings") == self.settings(env)' in function_src("lib/agent_setup.py", "Antigravity._recorded")
+     and '"link": "is a link' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and replaces_only_unchanged()),
+    ("docs/install.md", r"Antigravity CLI's files read again and compared right before they're replaced\. That\s+narrows the window to "
+                        r"an instant without closing it: a file can't be compared and swapped against any writer",
+     lambda m: replaces_only_unchanged()
+     and "got = replace_if_unchanged(" in function_src("lib/agent_setup.py", "Antigravity.settle")
+     and "got = replace_if_unchanged(path, data, new)" in function_src("lib/agent_setup.py", "Antigravity._settings_change")),
+    ("docs/antigravity.md", r"Antigravity CLI loads the first ([\d,]+) bytes of a skill's text.*?come first, within those bytes\s+"
+                            r"\(`tests/test_agent_setup.py` fails when an edit pushes one of them past\)",
+     lambda m: f"SKILL_BUDGET = {m[1].replace(',', '')}" in raw("tests/test_agent_setup.py")
+     and "    skill_budget_cases()" in function_src("tests/test_agent_setup.py", "main")
+     and '"## Rules"' in raw("tests/test_agent_setup.py") and "**Untrusted content.**" in raw("tests/test_agent_setup.py")
+     and "**Hidden or AI-directed text" in raw("tests/test_agent_setup.py")),
+    ("docs/antigravity.md", r"\*\*The Antigravity app and IDE\*\* run their agent inside the app \(its language server\), so their own "
+                            r"processes are an\s+agent session too, recognized by the executable's realpath: one in the "
+                            r"`Contents/MacOS` of an Antigravity app bundle.*?or a language server.*?in a folder of "
+                            r"Antigravity's own \(a path component that is or\s+starts with `antigravity`, case aside.*?never the "
+                            r"word inside\s+another name, such as `not-antigravity`\).*?so the vault treats them like Codex's app server",
+     lambda m: 'ANTIGRAVITY_BUNDLE = re.compile(r"/Antigravity[^/]*\\.app/Contents/MacOS/[^/]+$")' in raw("lib/owners.py")
+     and 'let antigravityBundle = "/Antigravity[^/]*\\\\.app/Contents/MacOS/[^/]+$"' in raw("vault/Util.swift")
+     and "if LANGUAGE_SERVER.match(os.path.basename(p)) and antigravity_path(os.path.dirname(p)):" in function_src("lib/owners.py", "app_agent")
+     and 'return any(c.lower().startswith(("antigravity", ".antigravity")) for c in (path or "").split("/"))' in function_src("lib/owners.py", "antigravity_path")
+     and 'matches(pathBase(path), languageServer) && antigravityPath(pathDir(path))' in raw("vault/Util.swift")
+     and 'return l.hasPrefix("antigravity") || l.hasPrefix(".antigravity")' in raw("vault/Util.swift")
+     and '"argv": ["/opt/not-antigravity/bin/language_server"], "agent": null' in raw("tests/fixtures/agent_argv.json")
+     and 'case "Antigravity app":\n        return "Antigravity app"' in raw("vault/Util.swift")
+     and '"agent": "Antigravity app"' in raw("tests/fixtures/agent_argv.json")),
+    ("docs/antigravity.md", r"Antigravity CLI serving an editor \(`agy acp`\)\s+or remote devices \(`agy remote-control`\) runs several "
+                            r"conversations in one process, so requests from under those get\s+none of these",
+     lambda m: 'sub.contains("acp") || sub.contains("remote-control") ? "Antigravity CLI server" : nil' in raw("vault/Util.swift")),
     ("docs/learn.md", r"A database\s+of a layout this version doesn't know, or one that can't be read, is counted in the report's notes, "
                       r"and the report\s+goes on",
      lambda m: "except Layout:" in function_src("lib/session_dbs.py", "sessions")

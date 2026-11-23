@@ -33,6 +33,7 @@ REAL_STORE_EXISTED = os.path.exists(REAL_STORE)
 os.environ.update(CLAUDE_CONFIG_DIR=CONF, CODEX_HOME=os.path.join(TD, "codex"), GEMINI_CLI_HOME=os.path.join(TD, "gemini"), MCOMP_LESSONS_DIR=STORE, MCOMP_LESSONS="on",
                   # OpenClaw's and Hermes Agent's session databases (lib/session_dbs.py): never this account's own
                   OPENCLAW_HOME=os.path.join(TD, "openclaw"), HERMES_HOME=os.path.join(TD, "hermes", ".hermes"),
+                  ANTIGRAVITY_APP_DATA_DIR=os.path.join(TD, "antigravity"),    # Antigravity CLI's transcripts: nor its
                   MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
                   MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_RUN_DIR=os.path.join(TD, "run"),
                   BENCH_RESULTS=os.path.join(TD, "bench"), MCOMP_VM_NAME="learntest",
@@ -1265,6 +1266,91 @@ def page_signin_checks():
           not any(w in blob.lower() for w in BAD_WORDS) and "example.com" not in blob, blob[:300])
 
 
+def agy_steps(t0, calls, plugin=False):
+    """An Antigravity CLI conversation's compact transcript (transcript.jsonl): the user's input, then per call a
+    PLANNER_RESPONSE with the call (each argument JSON-encoded, as the compact copy has them) and the step with its result.
+    calls: (server, tool, args, text, is_error); server None = run_command (args = the command line)."""
+    out = [{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at": _iso(t0),
+            "content": "<USER_REQUEST>Do it. " + INJECT + "</USER_REQUEST>"}]
+    t, k = t0, 1
+    for server, tool, args, text, err in calls:
+        t += 3
+        if server is None:
+            tc = {"name": "run_command", "args": {"CommandLine": json.dumps(args), "toolSummary": json.dumps(INJECT),
+                                                  "WaitMsBeforeAsync": "2000"}}
+            content = f"Created At: x\nCompleted At: x\nCommand exited with code {1 if err else 0}.\n\nCommand output:\n" + INJECT
+        else:
+            sname = ("metacomputer_metacomputer" if plugin else "metacomputer") if server == "metacomputer" else server
+            tc = {"name": "call_mcp_tool", "args": {"ServerName": json.dumps(sname), "ToolName": json.dumps(tool),
+                                                    "Arguments": json.dumps(args)}}
+            content = "Created At: x\nCompleted At: x\n" + text
+        out.append({"step_index": k, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+                    "created_at": _iso(t), "content": INJECT, "tool_calls": [tc]})
+        res = {"step_index": k + 1, "source": "MODEL", "type": "GENERIC", "status": "ERROR" if err and server else "DONE",
+               "created_at": _iso(t + 1), "content": content}
+        if err and server:
+            res["error"] = text
+        out.append(res)
+        out.append({"step_index": k + 2, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE",
+                    "created_at": _iso(t + 1), "content": INJECT})
+        k += 3
+    return out
+
+
+def test_antigravity_sessions():
+    print("Antigravity CLI's conversations (<app data>/brain/<id>/.system_generated/logs/transcript.jsonl)")
+    now = time.time()
+    app = os.path.join(TD, "agy-app")
+    proj = os.path.join(TD, "agyproj")
+    os.makedirs(proj, exist_ok=True)
+    calls = [("metacomputer", "list_windows", {}, LW, False),
+             ("metacomputer", "click", {"pid": 50, "window_id": 11, "x": 10, "y": 10}, NOFRAME, True),
+             ("metacomputer", "click", {"pid": 50, "window_id": 11, "x": 10, "y": 10}, NOFRAME, True),
+             ("other", "click", {"note": INJECT}, INJECT, True),
+             (None, None, "~/.local/bin/metacomputer sh -c 'ls ~/Documents'", INJECT, False),
+             ("metacomputer", "not_a_driver_tool_" + "x" * 5, {"note": INJECT}, INJECT, True)]
+
+    def conv(cid, steps, mtime=None):
+        p = os.path.join(app, "brain", cid, ".system_generated", "logs", "transcript.jsonl")
+        write_jsonl(p, steps, mtime)
+        # the same steps in its full copy and in its chunks: never read as more conversations
+        write_jsonl(os.path.join(os.path.dirname(p), "transcript_full.jsonl"), steps, mtime)
+        write_jsonl(os.path.join(os.path.dirname(p), "chunks", "transcript", "00000000.jsonl"), steps, mtime)
+    conv("aaaa1111-agy", agy_steps(now - 1200, calls))
+    conv("bbbb2222-agy", agy_steps(now - 900, calls[:3], plugin=True))          # through the plugin's server name
+    conv("cccc3333-agy", agy_steps(now - 800, [(None, None, "git status", INJECT, False)]))
+    db = os.path.join(app, "conversation_summaries.db")
+    con = sqlite3.connect(db)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT NOT NULL)")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute("INSERT INTO conversation_summaries VALUES ('aaaa1111-agy', ?)", (json.dumps(["file://" + proj]),))
+    con.commit()                                       # in the write-ahead log of a connection that stays open
+    env = dict(os.environ, ANTIGRAVITY_APP_DATA_DIR=app, CLAUDE_CONFIG_DIR=os.path.join(TD, "claude-empty"),
+               CODEX_HOME=os.path.join(TD, "nocodex"), GEMINI_CLI_HOME=os.path.join(TD, "nogemini"))
+    try:
+        rep = learn_mine.mine(env, since="7d", log_dirs=[], bench_dirs=[])
+        check("Antigravity CLI conversations with metacomputer calls are mined (its own server, and the plugin's "
+              "metacomputer_metacomputer); one without, and the full and chunk copies, left out",
+              rep["sources"].get("antigravity_sessions") == 2 and rep["sources"]["claude_code_sessions"] == 0,
+              rep["sources"])
+        check("its calls count like the others' (call_mcp_tool of metacomputer's server; results in order after the "
+              "call): the no-frame class, another server's call and a made-up tool kept out of the classes",
+              rep["driver_calls"] == 4 + 3 and rep["failures_by_tool"].get("click:no_frame") == 4,
+              (rep["driver_calls"], rep["failures_by_tool"]))
+        check("run_command is read as the shell: the VM's shell gets its time",
+              any(a["app"] == learn_mine.SHELL for a in rep["time"]["by_app"]), rep["time"]["by_app"])
+        sp = learn_mine.mine(env, since="7d", project=proj, log_dirs=[], bench_dirs=[])["sources"]
+        check("--project: the conversation's folder comes from conversation_summaries.db (read from its write-ahead log, "
+              "without a lock)", sp.get("antigravity_sessions") == 1, sp)
+        props = learn.build_proposals(rep, min_count=2)
+        check("proposals from Antigravity CLI conversations hold no text from them (no injection)",
+              props and not clean_of_injection(json.dumps(props)) and not clean_of_injection(json.dumps(rep)),
+              (clean_of_injection(json.dumps(props)), clean_of_injection(json.dumps(rep))))
+    finally:
+        con.close()
+
+
 # --- OpenClaw's and Hermes Agent's SQLite sessions -----------------------------------------------------------------
 OC_DDL = """CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT,
   created_at INTEGER NOT NULL, event_zstd BLOB, event_utf8_bytes INTEGER, message_role TEXT,
@@ -1831,6 +1917,7 @@ def main():
         test_gemini_sessions()
         test_db_sessions()
         test_db_bounds()
+        test_antigravity_sessions()
         test_approval_flow.rep = rep
         test_proposals_and_injection(rep, shot)
         test_drafts(shot)

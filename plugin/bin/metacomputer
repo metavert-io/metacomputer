@@ -39,8 +39,8 @@ if [ "${1:-}" = setup ]; then
   while [ $# -gt 0 ]; do
     case "$1" in
       --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }; mc_args+=(--dir "$2"); shift ;;
-      --no-chrome|--no-build|--no-codex|--no-claude|--no-openclaw|--no-hermes|--no-gemini|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
-      *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --no-openclaw, --no-hermes, --no-gemini, --yes, --dry-run)" >&2; exit 2 ;;
+      --no-chrome|--no-build|--no-codex|--no-claude|--no-openclaw|--no-hermes|--no-gemini|--no-antigravity|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
+      *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --no-openclaw, --no-hermes, --no-gemini, --no-antigravity, --yes, --dry-run)" >&2; exit 2 ;;
     esac
     shift
   done

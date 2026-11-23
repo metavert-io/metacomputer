@@ -5,7 +5,7 @@ Last updated: 22 November 2026.
 metacomputer is made by Metavert LLC, and [Metavert's privacy policy](https://www.metavert.io/privacy-policy) applies
 to it: its "Self-hosted software" section covers software you install and run yourself, like this. This page is the
 product documentation that section refers to. It covers this repository, its Claude Code plugin, its other agent packages and the
-setup it adds to Codex, OpenClaw, Hermes Agent and Gemini CLI. metacomputer runs on your Mac. **Metavert runs no server for it and receives nothing from it**: there is no
+setup it adds to Codex, OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI. metacomputer runs on your Mac. **Metavert runs no server for it and receives nothing from it**: there is no
 account, no telemetry, no analytics and no crash reporting. What leaves your Mac goes where you, your coding agent
 or the tasks you give it send it, as described below.
 
@@ -14,8 +14,8 @@ or the tasks you give it send it, as described below.
 - **The virtual computer** and everything in it: files, browser profiles, the sites you sign in to there.
 - **Records metacomputer keeps:** recordings and screenshots, the action log, task folders, the event spool, its
   settings, which computer each coding-agent session uses (process ids, VM names and settings paths, removed once the
-  session ends), and the lessons `metacomputer learn` proposes. `learn` reads your Claude Code, Codex and Gemini CLI session files
-  on your Mac and keeps only structured fields (classes of mistakes, counts, tool and app names), never their text.
+  session ends), and the lessons `metacomputer learn` proposes. `learn` reads your Claude Code, Codex, Gemini CLI, Antigravity CLI,
+  OpenClaw and Hermes Agent sessions on your Mac (files, and OpenClaw's and Hermes Agent's databases, only read) and keeps only structured fields (classes of mistakes, counts, tool and app names), never their text.
 - **The secrets vault:** the passwords, one-time-code seeds, API keys and payment cards you add, encrypted on your Mac,
   with a record of what each card spent (for its caps). The vault
   types a value into a page in the VM, or uses a key for a request the VM makes through its proxy; it never gives a
@@ -24,7 +24,7 @@ or the tasks you give it send it, as described below.
 ## What your coding agent sends to its model provider
 
 metacomputer's tools return what your agent asks for: screenshots of the VM, accessibility and page text, command
-output and the contents of files in the VM. Your agent (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI) sends those to its model
+output and the contents of files in the VM. Your agent (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI) sends those to its model
 provider (Anthropic, OpenAI, Google, or whichever provider you chose for OpenClaw or Hermes Agent) as part of the
 conversation, under that provider's terms and privacy policy. So don't put
 anything in the VM that you wouldn't show your agent's provider. A page can show a username or a one-time code in

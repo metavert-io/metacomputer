@@ -2978,8 +2978,8 @@ a purchase sends one.
    written, nothing is sent. It's never taken back: a fill that reports a failure may still have handed the part over.
 6. **Who holds it.** `pay` gives its requester a 32-hex-digit key (`purchase_id`); the audit log and the terminal show
    only a short id derived from it, which isn't a key. A purchase started from an agent session (Claude Code, Codex,
-   OpenClaw, Hermes Agent, Gemini CLI) belongs to that session; one started from an agent's shared process (Codex's app
-   server, an OpenClaw or Hermes Agent gateway: every conversation in one process) belongs to that process, so its
+   OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI) belongs to that session; one started from an agent's shared process (Codex's app
+   server, an OpenClaw or Hermes Agent gateway, Antigravity CLI serving an editor or remote devices, the Antigravity app: every conversation in one process) belongs to that process, so its
    conversations aren't kept apart from each other. One started from outside any agent session has nothing to bind
    to, so it can't be resumed: its own `pay` call fills the parts it names (`--fill`) and the key only ends it; a `pay`
    from there that would need resuming (no `--fill`, or human mode) is refused before anything is asked. Ending a
@@ -3579,8 +3579,9 @@ something waits for you:
       so this only raises the bar.
 
   The terminal requirement keeps values off pipes and command lines. A terminal inside an agent session doesn't
-  count: commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above
-  them in the process tree, since Codex's command tool (and Gemini CLI's) can give a command a terminal of its own, and
+  count: commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity
+  CLI or the Antigravity app or IDE (whose agent runs inside the app: their own terminals included) is above them in the
+  process tree, since Codex's command tool (and Gemini CLI's) can give a command a terminal of its own, and
   also when a node, bun, deno or python process above them can't be told (it may be one of those agents). A process
   is told by what it executes: its executable (a native `gemini`, through a link of another name too) and, for an
   interpreter, the program it runs (its script, the first argument that isn't an option or the value of an option known
