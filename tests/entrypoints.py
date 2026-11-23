@@ -179,6 +179,9 @@ PASSTHROUGH = {G + "session-run", S + "hide-sprite-api", S + "in-session"}      
 GUARD_ANY_WORDS = {("lib/vm_claude_guest.sh", "keys"), ("lib/vm_claude_guest.sh", "start")}
 
 
+MAIN = re.compile(rb"""^if __name__ == ["']__main__["']:""", re.M)     # a Python program's own entry, at a line's start
+
+
 def entry_points():
     """Every program, by a scan (not a list): tracked files that are executable, start with #! or are Python with a
     __main__ (the suites aside), and the Go programs the repository compiles (tools/NAME/main.go)."""
@@ -193,7 +196,7 @@ def entry_points():
         if path.startswith("tools/") and path.endswith("/main.go") and b"package main" in data:
             found.add(os.path.dirname(path))
             continue
-        if meta.split()[0] == "100755" or data.startswith(b"#!") or (path.endswith(".py") and b'__name__ == "__main__"' in data):
+        if meta.split()[0] == "100755" or data.startswith(b"#!") or (path.endswith(".py") and MAIN.search(data)):
             found.add(path)
     return found
 
