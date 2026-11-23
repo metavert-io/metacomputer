@@ -201,6 +201,19 @@ FORMS = [
     ("secrets", ["revoke", "--all"], "act"), ("secrets", ["disconnect", "--vm", "x"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
     ("secrets", ["test-agent-kind", "cases.json"], "act"),       # test builds only: what lib/owners.py is checked against
+    # paying for things: a store's rules and what's public or waiting only read; every purchase and change acts
+    ("secrets", ["merchant-rules", "https://shop.example"], "exempt"), ("secrets", ["ap2", "key"], "exempt"),
+    ("secrets", ["ap2", "key", "--json"], "exempt"), ("secrets", ["wba", "status"], "exempt"), ("secrets", ["wba", "directory"], "exempt"),
+    ("secrets", ["shop-cli", "show"], "exempt"), ("secrets", ["spend-resolve"], "exempt"),
+    ("secrets", ["wba", "directory", "--headers"], "act"), ("secrets", ["wba", "directory", "--headers", "--days", "90"], "act"),
+    ("secrets", ["wba", "directory", "--days", "90", "--headers"], "act"),
+    ("secrets", ["pay", "card", "--origin", "https://shop.example"], "act"), ("secrets", ["pay", "--purchase", "k", "--done"], "act"),
+    ("secrets", ["shop-complete", "c", "--shop", "s.example"], "act"), ("secrets", ["shop-card", "n", "--spend-request", "r"], "act"),
+    ("secrets", ["ap2", "sign", "card"], "act"), ("secrets", ["ap2", "init"], "act"), ("secrets", ["wba", "sign", "https://s"], "act"),
+    ("secrets", ["wba", "on"], "act"), ("secrets", ["shop-cli", "set"], "act"), ("secrets", ["spend-resolve", "n"], "act"),
+    ("secrets", ["spend-resolve", "--discard-pending"], "act"),
+    ("shop", ["status"], "exempt"), ("shop", ["login", "--wait", "90"], "exempt"), ("shop", ["--help"], "exempt"),
+    ("shop", ["complete", "c", "--shop", "s"], "act"), ("shop", ["card", "n", "--spend-request", "r"], "act"), ("shop", [], "act"),
 ]
 ORDER_FREE = sessionvm.READS | {"security", "recordings", "view"}
 

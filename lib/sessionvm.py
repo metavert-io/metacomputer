@@ -142,13 +142,24 @@ def _trace(a):          # lib/traces.py: list, show and export read the traces k
     return "exempt" if _first(a) in ("list", "show", "export") + HELP else "act"
 
 
+def _shop(a):           # lib/shop.py: status and login use Shop's CLI on the Mac; complete and card are purchases
+    return "exempt" if _first(a) in ("status", "login") + HELP else "act"
+
+
 # The vault's subcommands (vault/Commands.swift) that only read it, on the Mac, and change nothing; and its nested ones.
-SECRETS_READS = ("status", "list", "audit", "tokens", "requests", "selftest", "settle", "version") + HELP
-SECRETS_NESTED_READS = (("rule", "list"), ("audit-sink", "list"), ("audit-sink", "show"))
+# merchant-rules reads a store's published rules from the Mac; ap2 key and wba status|directory print what's public
+# (directory --headers signs, with the vault's private key: it acts);
+# shop-cli show and a bare spend-resolve list what's pinned or waiting. A purchase (pay, shop-complete, shop-card, ap2
+# sign) acts, as does every command that changes the vault.
+SECRETS_READS = ("status", "list", "audit", "tokens", "requests", "selftest", "settle", "version", "merchant-rules") + HELP
+SECRETS_NESTED_READS = (("rule", "list"), ("audit-sink", "list"), ("audit-sink", "show"), ("ap2", "key"), ("wba", "status"),
+                        ("wba", "directory"), ("shop-cli", "show"), ("spend-resolve", ""))
 
 
 def _secrets(a):        # do_secrets: the vault's subcommand first, status when there's none
     s = _first(a) or "status"
+    if (s, _second(a)) == ("wba", "directory") and any(x == "--headers" or x.startswith("--headers=") for x in a):
+        return "act"        # the directory's signed headers: a signature with the unlocked vault's private key
     if s in SECRETS_READS or (s, _second(a)) in SECRETS_NESTED_READS:
         return "exempt"
     return "act"
@@ -156,7 +167,7 @@ def _secrets(a):        # do_secrets: the vault's subcommand first, status when 
 
 FORMS = {"security": _security, "recordings": _recordings, "input-reset": _input_reset, "view": _view, "record": _record,
          "browser": _browser, "hub": _hub, "claude": _claude, "handoff": _handoff, "net": _net, "trace": _trace,
-         "secrets": _secrets, "vm": _vm, "cloud": _cloud}
+         "secrets": _secrets, "shop": _shop, "vm": _vm, "cloud": _cloud}
 
 
 def classify(cmd, args=()):
