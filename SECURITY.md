@@ -1668,8 +1668,10 @@ provider's rules outside it where the provider enforces them, and no more than t
   destinations (68 to 67: broadcast, private and link-local; 546 to 547: ff02::1:2 and link-local). `EGRESS=off` lets
   nothing else out (while the computer is being set up, apt's downloads too: the `_apt` account, TCP 80 and 443,
   public addresses only; a successful setup ends that and reads both layers back, every failure ends it inside and
-  outside, and it ends by itself 3 hours after the setup started: the marker is ignored then and the rule's own time
-  runs out). It
+  outside, and the build ends it on its own deadline, 3 hours on this Mac's clock whatever the guest's says. Inside,
+  it also ends by itself after 3 hours of the guest's uptime in the same boot, on a monotonic timer: a marker of
+  another boot or from the future counts for nothing. The rule's own wall-clock end is only a backstop. A computer set
+  up again opens both layers again for its setup and closes them the same ways). It
   has no allowlist of names (`net allow` is refused). A tightened rule applies to connections already open (only replies to connections made to the computer
   pass as part of one), and `net egress` changes nothing unless it can apply the change and read it back.
 - **Fail closed.** The firewall's service runs before the network, and the network requires it (systemd-networkd or
@@ -1710,13 +1712,16 @@ provider's rules outside it where the provider enforces them, and no more than t
   forwarded (its body may take minutes), and every second while its answer streams; otherwise the token is revoked,
   nothing (more) is sent and the tunnel is closed. A binding that names another computer gets a new tunnel, and the
   tokens made for the computer before are pruned. `vm delete` removes the identity, revokes the VM's tokens in
-  whatever vault it uses, and locks the computer's own vault.
+  whatever vault it uses, and locks the computer's own vault. A computer set up again (kept after a failed setup,
+  even one whose launch answer was lost) gets its identity before its setup can finish; the setup refuses to finish
+  without one.
 - **Nothing left billing by surprise, and nothing deleted that a build didn't make.** A build that fails or is
   interrupted after making an instance deletes what that build made, found by the operation it tagged its launch with,
   and never an instance it found (or, with `--keep-on-failure`, records it as kept, so no later try takes it for a
   lost launch, then stops it and says what still bills). What a build makes of the shared network and its computer's
-  group is recorded under the network lock, as it's made; the journal is on the disk (`F_FULLFSYNC`) before anything
-  billable is launched. `start` checks
+  group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact
+  resources and no others; the journal is on the disk (`F_FULLFSYNC`, or `fsync` where that isn't supported) before
+  anything billable is launched, and an error making it so refuses the launch. `start` checks
   that no session or handoff has the computer, and never hard-stops a running instance unless its whole console
   capture ends with the guest's power-off; a stop is waited for through OCI's 15-minute shutdown window; `vm delete`
   checks again, under the computer's lock, that no session is using it before anything is stopped; the shared network

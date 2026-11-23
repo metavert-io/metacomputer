@@ -330,6 +330,12 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   fallback; the setup marker's expiry (`meta time`, an old marker ignored) and the closing of the setup's egress on a
   failed, kept or resumed build; a kept instance recorded before a retry; network ownership recorded under the lock;
   the journal made durable before the launch.
+- Round five: a retry of a kept computer records its identity and opens its provider's rules for the setup, closing
+  them on failure (a stand-in ssh that lets it boot); the build's own deadline closing the setup's downloads; the
+  setup marker by boot and uptime (another boot, a future or an old one, the old date kind: ignored) with its
+  monotonic timer and `end-setup`; abort deleting only the network and group by the OCIDs it recorded (a
+  replacement survives); an I/O error making the journal durable refusing the launch, fsync where F_FULLFSYNC
+  isn't supported.
 
 The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME build`, then the GUI suite and
 `tests/test_vault_vm.py` with `MCOMP_CONFIG=config/vms/NAME.env`; for Oracle Cloud, with its credentials in the

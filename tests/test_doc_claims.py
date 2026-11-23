@@ -1777,7 +1777,7 @@ CLAIMS = [
      and "remote_py delete" not in fn_src("scripts/remote-build.sh", "cleanup_failed")
      and "cleanup_failed $rc" in raw("scripts/remote-build.sh") and "trap 'exit 143' TERM" in raw("scripts/remote-build.sh")
      and 'for i in a.api.instances(s["VM_NAME"], op=op):' in py_top_fn("lib/remote.py", "cmd_abort")
-     and 'if st.get("made_nsg") and not others:' in py_top_fn("lib/remote.py", "cmd_abort")
+     and 'a.api.delete_nsg_by_id(made_nsg, s["VM_NAME"])' in py_top_fn("lib/remote.py", "cmd_abort")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
     ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
      lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
@@ -1820,18 +1820,34 @@ CLAIMS = [
     ("SECURITY.md", r"records it as kept, so no later try takes it for a\s+lost launch, then stops it",
      lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=found[0][\"id\"], op=op, kept=now()")
      < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(i["id"], "STOP")')),
-    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, as it's made; the journal is on the disk \(`F_FULLFSYNC`\) before anything\s+billable is launched",
-     lambda m: 'made("made_network")' in raw("lib/cloud/oci.py") and 'made("made_nsg")' in raw("lib/cloud/oci.py")
+    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others; the journal is on the disk \(`F_FULLFSYNC`, or `fsync` where that isn't supported\) before\s+anything billable is launched, and an error making it so refuses the launch",
+     lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py") and 'made("made_nsg", nsg)' in raw("lib/cloud/oci.py")
      and raw("lib/cloud/oci.py").index("with self._network_lock():\n            # What this operation makes")
-     < raw("lib/cloud/oci.py").index('made("made_network")')
+     < raw("lib/cloud/oci.py").index('made("made_network", net["vcn"])')
+     and "a.api.delete_network_by_id(made_net)" in py_top_fn("lib/remote.py", "cmd_abort")
+     and "delete_network()" not in py_top_fn("lib/remote.py", "cmd_abort")
+     and "if e.errno not in (errno.ENOTSUP" in py_top_fn("lib/remote.py", "durable")
+     and "nothing was launched" in py_top_fn("lib/remote.py", "cmd_create")
      and "had_network" not in raw("lib/remote.py") and "durable(f.fileno())" in py_top_fn("lib/remote.py", "write_state")
      and "durable(dfd)" in py_top_fn("lib/remote.py", "write_state") and "F_FULLFSYNC" in py_top_fn("lib/remote.py", "durable")),
-    ("SECURITY.md", r"every failure ends it inside and\s+outside, and it ends by itself 3 hours after the setup started",
+    ("SECURITY.md", r"every failure ends it inside and\s+outside, and the build ends it on its own deadline, 3 hours on this Mac's clock whatever the guest's says",
      lambda m: "SETUP_MAX_S=10800" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "meta time < %s" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and '--on-active="${left}s"' in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and '[ "$m_boot" != "$b" ] || [ "$m_up" -gt "$u" ]' in fn_src("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall", "setup_left")
+     and 'SETUP_DEADLINE_S="${MCOMP_SETUP_DEADLINE_S:-10800}"' in raw("scripts/remote-build.sh")
+     and raw("scripts/remote-build.sh").count("setup_deadline_check") >= 4
      and "end_setup_egress' ERR" in raw("provisioning/guest/provision.sh")
      and "close_guest_setup_egress" in fn_src("scripts/remote-build.sh", "cleanup_failed")
      and "close_provider_setup_egress" in fn_src("scripts/remote-build.sh", "cleanup_failed")),
+    ("SECURITY.md", r"A computer set\s+up again opens both layers again for its setup and closes them the same ways",
+     lambda m: 'remote_py egress --vm "$VM_NAME" --set internet' in raw("scripts/remote-build.sh")
+     and raw("scripts/remote-build.sh").index('remote_py egress --vm "$VM_NAME" --set internet')
+     > raw("scripts/remote-build.sh").index("test -f /var/lib/metacomputer/finalized")),
+    ("SECURITY.md", r"A computer set up again \(kept after a failed setup,\s+even one whose launch answer was lost\) gets its identity before its setup can finish; the setup refuses to finish\s+without one",
+     lambda m: raw("scripts/remote-build.sh").count('remote_py identity --vm "$VM_NAME" --write') >= 3
+     and raw("scripts/remote-build.sh").index('[ -s "$SSH_DIR/computer-id" ] || die')
+     < raw("scripts/remote-build.sh").index('gssh admin "sudo bash -s $ADMIN_USER')),
     ("SECURITY.md", r"and DHCP, whichever network stack sends it, matched by its privileged ports and a DHCP server's\s+destinations",
      lambda m: "udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall").count("  dhcp_rules\n") == 2

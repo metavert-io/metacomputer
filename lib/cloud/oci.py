@@ -206,15 +206,7 @@ class SDK:
         """{vcn, subnet, igw} ids of metacomputer's network in the compartment (the oldest, if there are more), or
         None."""
         vcns = self.networks()
-        if not vcns:
-            return None
-        v = vcns[0]
-        subs = [s for s in self._all(self.net.list_subnets, self.compartment, vcn_id=v.id)
-                if s.lifecycle_state == "AVAILABLE"]
-        igws = [g for g in self._all(self.net.list_internet_gateways, self.compartment, vcn_id=v.id)
-                if g.lifecycle_state == "AVAILABLE"]
-        return {"vcn": v.id, "subnet": subs[0].id if subs else None, "igw": igws[0].id if igws else None,
-                "security_list": v.default_security_list_id, "route_table": v.default_route_table_id}
+        return self._network_of(vcns[0]) if vcns else None
 
     def make_network(self):
         m, tags = self.oci.core.models, {TAG: NETWORK_TAG}
@@ -359,6 +351,47 @@ class SDK:
             time.sleep(3)
         raise AdapterError("a network resource wasn't deleted in time; metacomputer cloud status oci shows what's left")
 
+    def network_by_id(self, vcn_id):
+        """metacomputer's network whose VCN is exactly `vcn_id` (tagged, in the compartment, available), or None."""
+        for v in self.networks():
+            if v.id == vcn_id:
+                return self._network_of(v)
+        return None
+
+    def _network_of(self, v):
+        subs = [s for s in self._all(self.net.list_subnets, self.compartment, vcn_id=v.id) if s.lifecycle_state == "AVAILABLE"]
+        igws = [g for g in self._all(self.net.list_internet_gateways, self.compartment, vcn_id=v.id)
+                if g.lifecycle_state == "AVAILABLE"]
+        return {"vcn": v.id, "subnet": subs[0].id if subs else None, "igw": igws[0].id if igws else None,
+                "security_list": v.default_security_list_id, "route_table": v.default_route_table_id}
+
+    def delete_network_by_id(self, vcn_id):
+        """Deletes the network whose VCN is exactly `vcn_id`, if it's still metacomputer's and has no security group
+        left in it; never another one."""
+        n = self.network_by_id(vcn_id)
+        if not n:
+            return False
+        groups = [g for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=vcn_id)
+                  if g.lifecycle_state not in ("TERMINATED", "TERMINATING")]
+        if groups:
+            return False
+        self._delete_network_parts(n)
+        return True
+
+    def delete_nsg_by_id(self, gid, name):
+        """Deletes the security group `gid` if it's still the one of computer `name`; never another one."""
+        try:
+            g = self.net.get_network_security_group(gid).data
+        except self.oci.exceptions.ServiceError as e:
+            if e.status == 404:
+                return False
+            raise
+        if (g.freeform_tags or {}).get(TAG) != name or g.lifecycle_state in ("TERMINATED", "TERMINATING") \
+                or g.compartment_id != self.compartment:
+            return False
+        self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
+        return True
+
     def delete_network(self):
         """Deletes every network of metacomputer's in the compartment (called once no instance is left)."""
         done = False
@@ -370,10 +403,14 @@ class SDK:
         n = self.network()
         if not n:
             return False
-        m = self.oci.core.models
         for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=n["vcn"]):
             if g.lifecycle_state != "TERMINATED" and (g.freeform_tags or {}).get(TAG):
                 self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, g.id)
+        self._delete_network_parts(n)
+        return True
+
+    def _delete_network_parts(self, n):
+        m = self.oci.core.models
         if n["subnet"]:
             self._delete(self.net.delete_subnet, self.net.get_subnet, n["subnet"])
         try:
@@ -384,7 +421,6 @@ class SDK:
         if n["igw"]:
             self._delete(self.net.delete_internet_gateway, self.net.get_internet_gateway, n["igw"])
         self._delete(self.net.delete_vcn, self.net.get_vcn, n["vcn"])
-        return True
 
     def _delete(self, delete, get, rid):
         """Delete a network resource and wait until it's gone; one already gone (404) is fine."""
@@ -516,11 +552,11 @@ class OCI(RemoteVM):
             new_net = api.network() is None
             net = api.make_network()
             if new_net and made:
-                made("made_network")
+                made("made_network", net["vcn"])
             new_nsg = api.nsg(name) is None
             nsg = api.make_nsg(name, egress)
             if new_nsg and made:
-                made("made_nsg")
+                made("made_nsg", nsg)
         img = api.image(shape)
         tried = []
         ads = ads or api.availability_domains(shape)

@@ -29,8 +29,12 @@
 #     included), as the provider's rules say too where it has them.
 #   - While the computer is being set up (/etc/metacomputer/setup-egress, which finalize.sh, a failed setup and the
 #     build's own failure handling remove), EGRESS=off lets out apt's downloads too (the _apt account, TCP 80 and 443,
-#     public addresses only): what the setup installs. That ends by itself as well: a marker older than the setup's
-#     longest time (3 hours) is ignored, and the rule itself holds only until then (nftables' meta time).
+#     public addresses only): what the setup installs. What ends it, in order: the build (finalize.sh, a failed setup,
+#     and the build's own deadline on the Mac's clock); then, inside, elapsed time, not the clock: the marker names
+#     this boot and the uptime it was made at (`guest-firewall mark-setup`), so it counts only in the same boot, never
+#     from the future, and for 3 hours of uptime at most, and a timer on the monotonic clock ends it then (systemd-run
+#     --on-active); last, a backstop, the rule's own wall-clock end (nftables' meta time), which a clock set back could
+#     stretch but never past the timer.
 #   - DHCP, whichever network stack runs it (systemd-networkd as its own account, NetworkManager as root): matched by
 #     its ports, which only a privileged process can bind (68 -> 67, 546 -> 547), and its destinations (broadcast, the
 #     local network's private and link-local addresses, ff02::1:2).
@@ -41,7 +45,24 @@ PORTS_CONF=/etc/metacomputer/ssh-ports
 TABLE=metacomputer
 MARK=/run/metacomputer/firewall-fallback
 SETUP=/etc/metacomputer/setup-egress
-SETUP_MAX_S=10800                   # the setup's longest time: an older marker is ignored, and the rule ends then
+SETUP_MAX_S=10800                   # the setup's longest time, in uptime: an older marker is ignored, and it ends then
+BOOT_ID=/proc/sys/kernel/random/boot_id
+UPTIME=/proc/uptime
+
+boot_now() { tr -d ' \n' < "$BOOT_ID" 2>/dev/null || true; }
+uptime_now() { cut -d. -f1 "$UPTIME" 2>/dev/null || true; }
+setup_left() { # seconds of uptime the setup's downloads may stay open: 0 unless the marker names this boot, an uptime
+  # not in the future, and less than SETUP_MAX_S ago (a marker of another boot, a malformed or older one: 0)
+  m_boot=""; m_up=""
+  [ -s "$SETUP" ] && read -r m_boot m_up < "$SETUP" 2>/dev/null || true
+  b="$(boot_now)"; u="$(uptime_now)"
+  case "$m_up" in ''|*[!0-9]*) echo 0; return ;; esac
+  case "$u" in ''|*[!0-9]*) echo 0; return ;; esac
+  if [ -z "$b" ] || [ "$m_boot" != "$b" ] || [ "$m_up" -gt "$u" ]; then echo 0; return; fi
+  left=$(( m_up + SETUP_MAX_S - u ))
+  [ "$left" -gt 0 ] || left=0
+  echo "$left"
+}
 
 private4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3"
 private6="::/127, ::ffff:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 100::/64, 2001:db8::/32, fc00::/7, fe80::/10, ff00::/8"
@@ -162,18 +183,24 @@ opts() { # parse --egress --ports --uids --until into EG PT UI UN
 case "${1:-}" in
   apply)
     egress="$(head -n 1 "$CONF" 2>/dev/null | tr -d ' \t\r' || true)"; [ -n "$egress" ] || egress=internet
-    # off, but the setup's apt downloads: only while the marker is younger than the setup's longest time, and the
-    # rule holds only until that time (it ends by itself even if nothing loads the rules again)
-    until=""
+    # off, but the setup's apt downloads: only while the marker counts (setup_left), ended by a monotonic timer when
+    # its time is up; the rule's own wall-clock end (meta time) is a backstop.
+    until=""; left=0
     if [ "$egress" = off ] && [ -e "$SETUP" ]; then
-      born="$(date -r "$SETUP" +%s 2>/dev/null || echo 0)"
-      until=$(( born + SETUP_MAX_S ))
-      [ "$until" -le "$(date +%s)" ] || egress=setup
+      left="$(setup_left)"
+      if [ "$left" -gt 0 ]; then egress=setup; until=$(( $(date +%s) + left )); fi
     fi
     install -d -m 0755 /run/metacomputer
     tmp="$(mktemp /run/metacomputer-firewall.XXXXXX)"
     if (render "$egress" "$(saved_ports)" "$(system_uids)" "$until") > "$tmp" 2>/dev/null && nft -c -f "$tmp" && nft -f "$tmp"; then
       rm -f "$tmp" "$MARK"
+      if [ "$egress" = setup ]; then
+        # The end, on the monotonic clock: in `left` seconds of elapsed time, whatever the wall clock says.
+        systemctl stop metacomputer-setup-egress-end.timer 2>/dev/null || true
+        systemd-run --quiet --collect --unit=metacomputer-setup-egress-end --on-active="${left}s" \
+          /opt/metacomputer/bin/guest-firewall end-setup 2>/dev/null \
+          || echo "guest-firewall: couldn't set the timer that ends the setup's downloads; the build's own deadline and the rule's end stay" >&2
+      fi
       echo "guest-firewall: EGRESS=$egress loaded (SSH in on $(ports_of "$(saved_ports)"))"
       exit 0
     fi
@@ -187,10 +214,20 @@ case "${1:-}" in
     rm -f "$tmp"
     echo "guest-firewall: not even the fallback loaded; the network stays down (fix it from the provider's console)" >&2
     exit 1 ;;
+  mark-setup)   # the setup's downloads may start: this boot, and the uptime now (bootstrap.sh, provision.sh)
+    b="$(boot_now)"; u="$(uptime_now)"
+    case "$u" in ''|*[!0-9]*) echo "guest-firewall: no uptime to mark the setup with" >&2; exit 1 ;; esac
+    [ -n "$b" ] || { echo "guest-firewall: no boot id to mark the setup with" >&2; exit 1; }
+    install -d -m 0755 "$(dirname "$SETUP")"
+    printf '%s %s\n' "$b" "$u" > "$SETUP.tmp" && chmod 0644 "$SETUP.tmp" && mv -f "$SETUP.tmp" "$SETUP" ;;
+  end-setup)    # the setup's downloads end (its timer; anyone with root): the marker goes, the policy is loaded again
+    rm -f "$SETUP"
+    sync
+    exec /bin/sh "$0" apply ;;
   render) shift; opts "$@"; render "$EG" "$PT" "$UI" "$UN" ;;
   render-emergency) shift; opts "$@"; render_emergency "$PT" "$UI" ;;
   status)
     [ ! -e "$MARK" ] || echo "the SSH-only fallback is loaded (since $(cat "$MARK")): the full rules didn't load"
     nft list table inet "$TABLE" ;;
-  *) echo "usage: guest-firewall apply | render [--egress internet|off] [--ports LIST] [--uids LIST] | render-emergency | status" >&2; exit 2 ;;
+  *) echo "usage: guest-firewall apply | mark-setup | end-setup | render [--egress internet|off|setup] [--ports LIST] [--uids LIST] [--until T] | render-emergency | status" >&2; exit 2 ;;
 esac

@@ -37,6 +37,17 @@ for a in "$@"; do case "$a" in --keep-on-failure) KEEP_ON_FAILURE=1 ;; *) die "u
 # failure deletes only what this operation made (lib/remote.py abort --op), never an instance it found.
 ABORT_OP=""
 SETUP_OPEN=0       # the setup's egress may be open (EGRESS=off: apt's downloads inside, public addresses outside)
+SETUP_OPENED_AT=0  # when (this build's own elapsed time, $SECONDS) it was opened
+SETUP_DEADLINE_S="${MCOMP_SETUP_DEADLINE_S:-10800}"   # how long it may stay open, on this Mac's clock, whatever the guest's
+RESUMING=0         # setting up again an instance this computer already has (kept after a failed setup)
+open_setup() { SETUP_OPEN=1; SETUP_OPENED_AT=$SECONDS; }
+# The setup's downloads close on the Mac's own deadline too: past it, the build stops, and its failure handling closes
+# them inside and outside (the guest's own end, on its uptime and the rule's time, is a backstop to this).
+setup_deadline_check() {
+  [ "$SETUP_OPEN" = 1 ] || return 0
+  [ $(( SECONDS - SETUP_OPENED_AT )) -lt "$SETUP_DEADLINE_S" ] \
+    || die "the setup's downloads may stay open $(( SETUP_DEADLINE_S / 60 )) minutes at most (this Mac's clock): closing them; the setup stops here"
+}
 SETUP_DONE=0       # finalized: from here nothing is undone on a failure
 ROLLED_BACK=0      # your own server's setup was taken back off (owner_check): its firewall stays off
 WOKEN=0            # an instance this build started to set it up again (it was stopped): stopped again on a failure
@@ -141,15 +152,16 @@ if [ "$KIND" = made ]; then
     op="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
     [[ "$op" =~ ^[0-9a-f]{32}$ ]] || die "couldn't make an operation id"
     ABORT_OP="$op"           # from here, a failure deletes what this operation made, and only that (cleanup_failed)
-    SETUP_OPEN=1
+    open_setup
     remote_py create --vm "$VM_NAME" --op "$op" || die "the instance wasn't made (above); metacomputer --vm $VM_NAME status shows what's there"
     remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity"
   else
     say "the instance exists: setting it up again"
     was="$(remote_py status --vm "$VM_NAME" --json 2>/dev/null | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("provider_state",""))' 2>/dev/null)"
-    SETUP_OPEN=1
+    open_setup
     remote_py wake --vm "$VM_NAME" >/dev/null || die "couldn't start the instance (above)"
     [ "$was" = RUNNING ] || WOKEN=1
+    RESUMING=1
   fi
   MC_T_USER=""   # its address is in its record now
   say "waiting for its first boot (cloud-init loads its firewall and makes the accounts)"
@@ -158,6 +170,16 @@ if [ "$KIND" = made ]; then
     BUILD_QUIET_EXIT=1; SETUP_OPEN=0; WOKEN=0      # set up already: nothing of a setup to close, and it stays as it was
     die "$VM_NAME is set up already (metacomputer --vm $VM_NAME status). To set it up from scratch: metacomputer vm delete $VM_NAME, then vm create it again"
   fi
+  if [ "$RESUMING" = 1 ]; then
+    # Its identity, from its recorded instance and the host key pinned for it: a launch whose answer was lost (kept by
+    # --keep-on-failure) never got one, and the vault binds nothing without it.
+    remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity (its instance and pinned host key)"
+    # The setup's downloads again outside too: a failed setup set its provider's rules back to EGRESS. Closed again
+    # on every path, as for a new computer (cleanup_failed; after finalize, EGRESS is set and read back).
+    remote_py egress --vm "$VM_NAME" --set internet >/dev/null || die "couldn't open $WHERE's rules for the setup's downloads (above)"
+    ok "setting it up again: its identity recorded; $WHERE's rules let out public addresses until the setup ends (then EGRESS=$(plan egress))"
+  fi
+  setup_deadline_check
   ARCH_SEEN="$(gssh admin 'dpkg --print-architecture')"
 else
   [ -n "${SSH_HOST:-}" ] && [ -n "${SETUP_USER:-}" ] || die "your own server needs SSH_HOST and SETUP_USER in $MC_SETTINGS_LABEL (metacomputer vm create NAME --on server --host ADDRESS --user YOUR_ACCOUNT)"
@@ -193,7 +215,7 @@ else
     | "${OWN[@]}" "umask 077; mkdir -p ~/$rdir && tar -xf - -C ~/$rdir" || die "couldn't copy the bootstrap to $SSH_HOST"
   "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$BS"
   say "bootstrap on $SSH_HOST as $SETUP_USER (with sudo)"
-  SETUP_OPEN=1              # bootstrap.sh marks the setup's egress (EGRESS=off: apt's downloads) from here
+  open_setup                # bootstrap.sh marks the setup's egress (EGRESS=off: apt's downloads) from here
   if "${OWN[@]}" 'sudo -n true' </dev/null 2>/dev/null; then
     out="$("${OWN[@]}" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER ${SSH_HOST_PORT:-22}; rc=\$?; rm -rf ~/$rdir; exit \$rc" </dev/null)"
     printf '%s\n' "$out" | grep -v '^HOSTKEY ' || true
@@ -266,6 +288,7 @@ while :; do
             die "the setup failed (above)$([ "$KIND" = made ] || echo "; your server is left as the setup left it, your access checked: metacomputer --vm $VM_NAME ssh admin to look")" ;;
   esac
   [ $(( $(date +%s) - start )) -gt 3600 ] && die "the setup took over an hour"
+  setup_deadline_check
   sleep 10
 done
 ok "set up in $(( ($(date +%s) - start) / 60 )) min"
@@ -295,6 +318,9 @@ for k in ("xorg_running", "xfce_session_running", "session_env_published", "atsp
 print(f"  resolution {s.get('resolution')}, driver {s.get('driver_version')}, doctor rc {s.get('driver_doctor_rc')}")
 sys.exit(0 if s.get("ready") else 1)
 EOF
+setup_deadline_check
+# A computer the vault can bind: its identity is recorded (lib/remote.py identity), or the setup doesn't finish.
+[ -s "$SSH_DIR/computer-id" ] || die "$VM_NAME has no identity recorded ($(mc_tilde "$SSH_DIR")/computer-id): the setup won't finish without it (the vault couldn't bind it)"
 gssh admin "sudo bash -s $ADMIN_USER '$GUEST_USER'" < "$LAB_ROOT/provisioning/guest/finalize.sh"
 gssh admin 'sync; test -f /var/lib/metacomputer/finalized && sudo -n -l | grep -q metacomputer-admin && ! sudo -n -l | grep -q "(ALL) NOPASSWD: ALL"' \
   || die "finalize did not take effect"

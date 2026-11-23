@@ -113,7 +113,7 @@ remote_ssh_and_firewall() {
   fi
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
   printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
-  date -Is > /etc/metacomputer/setup-egress        # EGRESS=off: apt's downloads until finalize.sh removes this
+  /opt/metacomputer/bin/guest-firewall mark-setup  # EGRESS=off: apt's downloads, this boot, until finalize.sh (3 h at most)
   printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
   date -Is > /etc/metacomputer/remote
   chmod 0644 /etc/metacomputer/egress /etc/metacomputer/vnc-listen /etc/metacomputer/remote /etc/metacomputer/ssh-ports

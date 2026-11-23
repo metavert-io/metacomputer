@@ -151,14 +151,18 @@ def write_state(rd, d):
 
 
 def durable(fd):
-    """What's written to fd is on the disk when this returns (macOS: F_FULLFSYNC; elsewhere, fsync)."""
+    """What's written to fd is on the disk when this returns (macOS: F_FULLFSYNC; elsewhere, fsync). Only a file
+    system that doesn't support F_FULLFSYNC falls back to fsync; any other error (an I/O error) is raised: a journal
+    that may not be on the disk refuses the launch."""
+    import errno
     import fcntl
     if hasattr(fcntl, "F_FULLFSYNC"):
         try:
             fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
             return
-        except OSError:
-            pass                                     # a file system without it: fsync is what there is
+        except OSError as e:
+            if e.errno not in (errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP), errno.ENOTTY, errno.EINVAL):
+                raise
     os.fsync(fd)
 
 
@@ -264,14 +268,17 @@ def cmd_create(s, args):
     ud = user_data(s)
     t0 = time.time()
     st = {k: v for k, v in st.items() if k not in ("made_network", "made_nsg", "kept")}
-    write_state(rd, dict(st, provider=a.name, launching=op))   # the journal, durable before anything is billed
+    try:
+        write_state(rd, dict(st, provider=a.name, launching=op))   # the journal, durable before anything is billed
+    except OSError as e:
+        raise Refused(f"couldn't make the launch's journal durable ({e.strerror or e}): nothing was launched") from None
 
-    def made_here(what):
-        # Called under the network lock the moment this operation makes the network or the computer's group: only
-        # what's recorded here as made by it is ever its to delete (cmd_abort).
+    def made_here(what, rid):
+        # Called under the network lock the moment this operation makes the network or the computer's group, with its
+        # OCID: only that exact resource is ever this operation's to delete (cmd_abort).
         cur = read_state(rd)
         if cur.get("launching") == op:
-            write_state(rd, dict(cur, **{what: True}))
+            write_state(rd, dict(cur, **{what: rid}))
     print(f"metacomputer: making {s['VM_NAME']} on {a.manifest['label']} ({s.get('SIZE') or 'the default size'})",
           file=sys.stderr)
     made = a.create(s["VM_NAME"], size=s.get("SIZE") or None, persist=s.get("PERSIST") or "auto", user_data=ud,
@@ -279,7 +286,7 @@ def cmd_create(s, args):
                     made=made_here)
     mine = read_state(rd)
     st = {"provider": a.name, "created": now(), "launch_started": t0, "op": op, "made_by_build": True,
-          "made_network": bool(mine.get("made_network")), "made_nsg": bool(mine.get("made_nsg")), **made}
+          "made_network": mine.get("made_network"), "made_nsg": mine.get("made_nsg"), **made}
     try:
         write_state(rd, st)                  # the instance is recorded before anything else can fail
     except OSError as e:
@@ -344,21 +351,25 @@ def cmd_abort(s, args):
     if gone:
         print(f"deleted the instance this build made, and its boot volume ({a.manifest['label']})", file=sys.stderr)
     others = a.api.instances(s["VM_NAME"])
-    if st.get("made_nsg") and not others:
-        a.api.delete_nsg(s["VM_NAME"])
+    made_nsg, made_net = st.get("made_nsg"), st.get("made_network")
     if st.get("instance") in gone or st.get("launching") == op:
         st = {k: v for k, v in st.items() if k not in ("instance", "launching", "host", "op")}
         st["aborted"] = now()
         write_state(rd, st)
-    if st.get("made_network"):
+    # The group and the network this operation made, by their own OCIDs (recorded as it made them), under the lock
+    # creates and `cloud setup|teardown` take: never whichever group or network exists now (one made since, after
+    # this one's was gone, is someone else's). A record from before OCIDs were kept (True) deletes nothing.
+    if isinstance(made_nsg, str) or isinstance(made_net, str):
         try:
             with mac_lock("oci-network"):
-                if not a.api.instances() and not a.api.nsg_names() and a.api.delete_network():
-                    print(f"deleted metacomputer's network at {a.manifest['label']} (this build made it; nothing "
-                          "uses it now)", file=sys.stderr)
+                if isinstance(made_nsg, str) and not others and a.api.delete_nsg_by_id(made_nsg, s["VM_NAME"]):
+                    print(f"deleted the security group this build made ({a.manifest['label']})", file=sys.stderr)
+                if isinstance(made_net, str) and not a.api.instances() and a.api.delete_network_by_id(made_net):
+                    print(f"deleted the network this build made at {a.manifest['label']} (nothing uses it now)",
+                          file=sys.stderr)
         except Exception as e:  # noqa: BLE001  (nothing billed is left: say so, don't fail)
-            print(f"metacomputer's network wasn't deleted ({e}); it costs nothing: metacomputer cloud teardown oci",
-                  file=sys.stderr)
+            print(f"what this build made of metacomputer's network wasn't all deleted ({e}); it costs nothing: "
+                  "metacomputer cloud teardown oci", file=sys.stderr)
     if others:
         print(f"left alone: {len(others)} instance(s) of {s['VM_NAME']} this build didn't make "
               "(metacomputer cloud status oci)", file=sys.stderr)

@@ -326,6 +326,11 @@ def fail_closed():
                     'case "$FAIL" in all) exit 1 ;; element) grep -q "10.0.0.0/33" "$file" && exit 1 ;; esac\n'
                     '[ "$1" = -c ] || cp "$file" "$LOADED"\nexit 0\n')
         os.chmod(os.path.join(fake, "nft"), 0o755)
+        sdrun = os.path.join(td, "systemd-run.log")
+        for n in ("systemd-run", "systemctl"):           # what apply asks of systemd, recorded
+            with open(os.path.join(fake, n), "w") as f:
+                f.write(f'#!/bin/sh\necho "{n} $*" >> {sdrun}\nexit 0\n')
+            os.chmod(os.path.join(fake, n), 0o755)
         with open(os.path.join(fake, "id"), "w") as f:     # the guest's system accounts (this Mac has none of them)
             f.write('#!/bin/sh\ncase "$2" in systemd-resolve) echo 991 ;; systemd-network) echo 998 ;; _chrony) echo 995 ;;\n'
                     '  _apt) echo 42 ;; *) exit 1 ;; esac\n')
@@ -338,6 +343,7 @@ def fail_closed():
         src = src.replace("PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={fake}:/usr/sbin:/usr/bin:/sbin:/bin")
         src = src.replace("/etc/metacomputer/", etc + "/").replace("/run/metacomputer-firewall.", td + "/fw.")
         src = src.replace("/run/metacomputer/firewall-fallback", td + "/fallback").replace("/run/metacomputer", td + "/run")
+        src = src.replace("/proc/", td + "/proc/").replace("/opt/metacomputer/bin/guest-firewall end-setup", "end-setup")
         broken = src.replace("10.0.0.0/8", "10.0.0.0/33", 1)       # the live test's break: one impossible address
         script = os.path.join(td, "guest-firewall")
         open(script, "w").write(src)
@@ -347,6 +353,8 @@ def fail_closed():
             if os.path.exists(loaded):
                 os.remove(loaded)
             open(script, "w").write(broken if fail == "element" else src)
+            if os.path.exists(sdrun):
+                os.remove(sdrun)
             return subprocess.run(["/bin/sh", script, "apply"], capture_output=True, text=True,
                                   env={"FAIL": fail, "LOADED": loaded, "PATH": "/usr/bin:/bin"})
         r = apply("")
@@ -360,21 +368,50 @@ def fail_closed():
         r = apply("all")
         check("not even the fallback loads: exit 1 (the network, which requires it, doesn't come up)",
               r.returncode == 1 and not os.path.exists(loaded) and "network stays down" in r.stderr, r.stderr)
-        # The setup's downloads (EGRESS=off): while the marker is young, until its time plus 3 hours; older, ignored.
+        # The setup's downloads (EGRESS=off): counted in this boot's uptime, never by the wall clock alone.
         open(os.path.join(etc, "egress"), "w").write("off\n")
         marker = os.path.join(etc, "setup-egress")
-        open(marker, "w").write("x\n")
-        born = int(os.stat(marker).st_mtime)
+        proc = os.path.join(td, "proc")
+        os.makedirs(os.path.join(proc, "sys", "kernel", "random"), exist_ok=True)
+        open(os.path.join(proc, "sys", "kernel", "random", "boot_id"), "w").write("boot-one\n")
+
+        def at_uptime(sec):
+            open(os.path.join(proc, "uptime"), "w").write(f"{sec}.42 99.0\n")
+        at_uptime(1000)
+        r = subprocess.run(["/bin/sh", script, "mark-setup"], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        check("mark-setup: the marker names this boot and the uptime now", r.returncode == 0
+              and open(marker).read().split() == ["boot-one", "1000"], (r.stderr, open(marker).read() if os.path.exists(marker) else ""))
+        at_uptime(1600)                     # 10 minutes of uptime later
+        t0 = int(time.time())
         r = apply("")
         got = open(loaded).read() if os.path.exists(loaded) else ""
-        check("apply with the setup's marker: apt's downloads, in a rule that ends 3 hours after the marker was made "
-              "(nftables' meta time: it ends by itself)", r.returncode == 0 and f"meta time < {born + 10800} " in got
-              and '"EGRESS=off"' in got, (r.stderr, got[-500:]))
-        os.utime(marker, (time.time() - 4 * 3600, time.time() - 4 * 3600))
-        r = apply("")
+        runs = open(sdrun).read() if os.path.exists(sdrun) else ""
+        until = int(got.split("meta time < ")[1].split()[0]) if "meta time < " in got else 0
+        check("apply in the same boot, 10 minutes of uptime after the marker: apt's downloads, ended by a timer on the "
+              "monotonic clock after the 2 h 50 min left (systemd-run --on-active), the rule's wall-clock end a backstop",
+              r.returncode == 0 and "--on-active=10200s" in runs and "end-setup" in runs and t0 + 10200 <= until <= t0 + 10205
+              and '"EGRESS=off"' in got, (r.stderr, runs, got[-300:]))
+        for what, boot, up, mark in (("a marker of another boot (after a reboot)", "boot-two", "1600", "boot-one 1000"),
+                                     ("a marker from the future (its uptime ahead of now: a reset clock or a forged one)",
+                                      "boot-one", "900", "boot-one 1000"),
+                                     ("a marker 3 hours of uptime old", "boot-one", str(1000 + 10800), "boot-one 1000"),
+                                     ("a marker of the old kind (a date: the wall clock alone)", "boot-one", "1600",
+                                      "2026-11-23T04:00:00+00:00")):
+            open(os.path.join(proc, "sys", "kernel", "random", "boot_id"), "w").write(boot + "\n")
+            at_uptime(int(up))
+            open(marker, "w").write(mark + "\n")
+            r = apply("")
+            got = open(loaded).read() if os.path.exists(loaded) else ""
+            check(f"...{what}: ignored, off is off (found by review: the wall clock decided)",
+                  r.returncode == 0 and "80, 443" not in got and '"EGRESS=off"' in got, got[-300:])
+        open(os.path.join(proc, "sys", "kernel", "random", "boot_id"), "w").write("boot-one\n")
+        at_uptime(1600)
+        open(marker, "w").write("boot-one 1000\n")
+        r = subprocess.run(["/bin/sh", script, "end-setup"], capture_output=True, text=True,
+                           env={"FAIL": "", "LOADED": loaded, "PATH": "/usr/bin:/bin", "SDRUN": sdrun})
         got = open(loaded).read() if os.path.exists(loaded) else ""
-        check("...a marker older than that is ignored: off is off (found by review: a failed setup kept the exception "
-              "for good)", r.returncode == 0 and "80, 443" not in got and '"EGRESS=off"' in got, got[-400:])
+        check("end-setup (what the timer runs): the marker gone, off loaded", r.returncode == 0 and not os.path.exists(marker)
+              and "80, 443" not in got and '"EGRESS=off"' in got, (r.stderr, got[-300:]))
     finally:
         shutil.rmtree(td, ignore_errors=True)
     def readf(*parts):
@@ -422,7 +459,7 @@ def fail_closed():
           in_order(fn, "systemctl is-enabled --quiet systemd-networkd.service", "NetworkManager.service",
                    "remote-uninstall rollback", "false"))
     check("the setup's apt downloads for EGRESS=off: marked by bootstrap.sh and provision.sh, ended by finalize.sh, "
-          "which loads the rules again", "/etc/metacomputer/setup-egress" in boot and "/etc/metacomputer/setup-egress" in fn
+          "which loads the rules again", "guest-firewall mark-setup" in boot and "guest-firewall mark-setup" in fn
           and in_order(readf("provisioning", "guest", "finalize.sh"), "rm -f /etc/metacomputer/setup-egress",
                        "/opt/metacomputer/bin/guest-firewall apply", "finalized"))
     prov_fail = prov.split("end_setup_egress() {", 1)[1].split("\n}\n", 1)[0] if "end_setup_egress() {" in prov else ""
@@ -538,6 +575,22 @@ class FakeOCI:
     def delete_network(self):
         had, self.net = self.net is not None, None
         return had
+
+    def network_by_id(self, vid):
+        return self.net if self.net and self.net["vcn"] == vid else None
+
+    def delete_network_by_id(self, vid):
+        if not self.network_by_id(vid) or self.nsgs:
+            return False
+        self.net = None
+        return True
+
+    def delete_nsg_by_id(self, gid, name):
+        g = self.nsgs.get(name)
+        if not g or g["id"] != gid:
+            return False
+        del self.nsgs[name]
+        return True
 
 
 def oci_driver():
@@ -790,6 +843,57 @@ def journal_r4():
               not st2.get("made_network") and st2.get("made_nsg") and api.net is not None and "box" not in api.nsgs,
               (st2, api.net, api.nsgs))
         remote_mod.mac_lock = old_lock
+        # N3: abort deletes the exact network and group this operation made, never a replacement made since
+        api = FakeOCI(full={"AD-1", "AD-2", "AD-3"})
+        remote_mod.API_FACTORY = lambda: api
+        rd4 = os.path.join(rd, "four")
+        os.makedirs(rd4)
+        s4 = dict(settings, RUN_DIR=rd4, SSH_DIR=rd4)
+        raises(remote_mod.cmd_create, s4, type("A", (), {"op": "b2" * 16})(), kind=Exception)
+        st4 = remote_mod.read_state(rd4)
+        api.nsgs.clear()                                   # its group gone, then `cloud teardown` and `cloud setup`:
+        api.net = {"vcn": "v2", "subnet": "s2", "igw": "g2", "security_list": "sl2", "route_table": "rt2"}
+        remote_mod.cmd_abort(s4, type("A", (), {"op": "b2" * 16, "keep": False})())
+        check("abort deletes only the network and group this operation made, by the ids it recorded when it made them: a "
+              "network made since (its own gone) is left alone (found by review: whichever network existed was deleted)",
+              st4.get("made_network") == "v" and st4.get("made_nsg") == "nsg-box" and api.net and api.net["vcn"] == "v2",
+              (st4.get("made_network"), st4.get("made_nsg"), api.net))
+        api.net = None
+        raises(remote_mod.cmd_create, s4, type("A", (), {"op": "b3" * 16})(), kind=Exception)
+        remote_mod.cmd_abort(s4, type("A", (), {"op": "b3" * 16, "keep": False})())
+        check("...and its own, still there, goes", api.net is None and not api.nsgs, (api.net, api.nsgs))
+        # N4: durability errors refuse the launch; only F_FULLFSYNC not being supported falls back to fsync
+        import errno
+        import fcntl
+        real_fcntl, real_fsync = fcntl.fcntl, os.fsync
+        synced = []
+
+        def eio(fd, op, *a):
+            if op == getattr(fcntl, "F_FULLFSYNC", -1):
+                raise OSError(errno.EIO, "I/O error")
+            return real_fcntl(fd, op, *a)
+
+        def unsupported(fd, op, *a):
+            if op == getattr(fcntl, "F_FULLFSYNC", -1):
+                raise OSError(errno.ENOTSUP, "not supported")
+            return real_fcntl(fd, op, *a)
+        api = FakeOCI()
+        remote_mod.API_FACTORY = lambda: api
+        rd5 = os.path.join(rd, "five")
+        os.makedirs(rd5)
+        try:
+            fcntl.fcntl = eio
+            why = raises(remote_mod.cmd_create, dict(settings, RUN_DIR=rd5, SSH_DIR=rd5), type("A", (), {"op": "c1" * 16})(),
+                         kind=remote_mod.Refused)
+            check("an I/O error making the journal durable refuses the launch: nothing launched (found by review: it "
+                  "was swallowed, fsync taken instead)", why and "durable" in why and not api.launches, (why, api.launches))
+            fcntl.fcntl = unsupported
+            os.fsync = lambda fd: synced.append(fd) or real_fsync(fd)
+            remote_mod.write_state(rd5, {"x": 1})
+            check("...a file system without F_FULLFSYNC: fsync instead, and the journal is written",
+                  len(synced) >= 2 and remote_mod.read_state(rd5) == {"x": 1}, synced)
+        finally:
+            fcntl.fcntl, os.fsync = real_fcntl, real_fsync
         # F7: the journal is on the disk (contents, then the folder's entry) before the launch
         events = []
         real = remote_mod.durable
@@ -1274,7 +1378,8 @@ def review(td):
         b.run("vm", "create", "own1", "--on", "server", "--host", "192.0.2.10", "--user", "owner", "--no-build", "--yes")
         b.run("vm", "create", "arm1", "--on", "oci", "--size", "arm-1x6", "--no-build", "--yes")
         for part in (review_credentials, review_identity, review_default, review_egress, review_delete_recheck,
-                     review_remove_from_server, review_build_cleanup, review_resumed_failure, review_start_owners,
+                     review_remove_from_server, review_build_cleanup, review_resumed_failure, review_resume_setup,
+                     review_start_owners,
                      review_create_journal):
             if REVIEW_GUARD:
                 REVIEW_GUARD(part.__name__, part, c)
@@ -1510,6 +1615,69 @@ def review_resumed_failure(c):
           and "sleep --vm arm1 --force" in ops and ops.index("egress --vm arm1 --set off") < ops.index("sleep --vm arm1 --force")
           and not any(o.startswith(("abort", "delete")) for o in ops), (ops, r.stdout[-400:]))
     os.remove(os.path.join(rd, "remote.json"))
+
+
+def review_resume_setup(c):
+    """N1, N5, N2: a build setting up again a kept instance records its identity (a launch whose answer was lost never
+    got one) and opens its provider's rules for the setup's downloads, both closed again on failure; and past the
+    build's own deadline (this Mac's clock), the build closes the setup's downloads and stops."""
+    b, td, tmv = c["b"], c["td"], c["tmv"]
+    fakepy = os.path.join(td, "fake-oci-python-3")
+    oplog = os.path.join(td, "ops3.log")
+    with open(fakepy, "w") as f:
+        f.write("\n".join([
+            "#!" + tmv.PY,
+            "import json, os, sys",
+            "cmd = sys.argv[2] if len(sys.argv) > 2 else ''",
+            "open(%r, 'a').write(' '.join(sys.argv[2:]) + chr(10))" % oplog,
+            "if cmd == 'plan':",
+            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=off', sep=chr(10))",
+            "elif cmd == 'status':",
+            "    print(json.dumps({'provider_state': 'STOPPED'}))",
+            "elif cmd == 'egress':",
+            "    print(sys.argv[-1] if '--set' in sys.argv else 'off')",
+            ""]))
+    os.chmod(fakepy, 0o755)
+    fakessh = os.path.join(td, "fakessh3")
+    os.makedirs(fakessh, exist_ok=True)
+    with open(os.path.join(fakessh, "ssh"), "w") as f:      # it boots; it isn't finalized; nothing else answers
+        f.write('#!/bin/sh\nfor a in "$@"; do last="$a"; done\ncase "$last" in true) exit 0 ;; '
+                '"test -f /var/lib/metacomputer/finalized") exit 1 ;; *) exit 255 ;; esac\n')
+    os.chmod(os.path.join(fakessh, "ssh"), 0o755)
+    rd = os.path.join(b.co, ".run-vms", "arm1")
+    os.makedirs(rd, exist_ok=True)
+    os.makedirs(os.path.join(b.home, ".ssh", "metacomputer-arm1"), exist_ok=True)
+    open(os.path.join(b.home, ".ssh", "metacomputer-arm1", "known_hosts"), "w").write("mcomp-arm1 " + KEY + "\n")
+    for extra, label in (({}, "resume"), ({"MCOMP_SETUP_DEADLINE_S": "0"}, "deadline")):
+        if os.path.exists(oplog):
+            os.remove(oplog)
+        json.dump({"instance": "i-kept", "host": "192.0.2.1", "provider": "oci", "op": "c" * 32, "kept": "x"},
+                  open(os.path.join(rd, "remote.json"), "w"))
+        r = subprocess.run([b.mc, "--vm", "arm1", "build"], capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+                           env=b.env(OCI_PYTHON=fakepy, OCI_USER="u", OCI_API_KEY_PEM="k",
+                                     PATH=f"{fakessh}:{os.path.dirname(tmv.PY)}:/usr/bin:/bin:/usr/sbin:/sbin", **extra))
+        ops = open(oplog).read().splitlines() if os.path.exists(oplog) else []
+        out = r.stdout + r.stderr
+
+        def at(o):
+            return ops.index(o) if o in ops else -1
+        if label == "resume":
+            check("setting up again a kept instance: its identity recorded (N5: a lost launch's never was), its provider's "
+                  "rules opened for the setup's downloads (N1: a failed setup had closed them), then on failure closed "
+                  "again and the instance stopped again",
+                  r.returncode != 0 and 0 <= at("wake --vm arm1") < at("identity --vm arm1 --write")
+                  and at("identity --vm arm1 --write") < at("egress --vm arm1 --set internet") < at("egress --vm arm1 --set off")
+                  < at("sleep --vm arm1 --force"), (ops, out[-400:]))
+        else:
+            check("past the build's own deadline (this Mac's clock, whatever the guest's says): it stops, and the setup's "
+                  "downloads are closed outside (N2)", r.returncode != 0 and "may stay open 0 minutes at most" in out
+                  and at("egress --vm arm1 --set internet") < at("egress --vm arm1 --set off"), (ops, out[-400:]))
+    os.remove(os.path.join(rd, "remote.json"))
+    rb = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+    fin = rb.index('gssh admin "sudo bash -s $ADMIN_USER')
+    check("the setup never finishes without the computer's identity: checked just before finalize.sh (N5)",
+          rb.rfind('[ -s "$SSH_DIR/computer-id" ] || die', 0, fin) > rb.rfind("setup_deadline_check", 0, fin) - 400 > 0
+          and rb.rfind('[ -s "$SSH_DIR/computer-id" ] || die', 0, fin) > 0)
 
 
 def review_start_owners(c):
