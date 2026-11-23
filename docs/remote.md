@@ -103,8 +103,13 @@ Allow group <group> to inspect compartments in tenancy
   and lets **nothing** out. It's made under a lock that one process on this Mac holds at a time, so two `vm create`s
   at once share one network, and `vm delete` leaves it while another computer is being made in it (if two Macs each
   made one, the oldest is used and deleting deletes both);
-- each computer's own **network security group** (`metacomputer-NAME`), made before its instance and deleted with
-  it: with `EGRESS=internet` it lets out every public IPv4 address (103 blocks: everything except the private,
+- each computer's own **network security group** (`metacomputer-NAME-` and the first 12 digits of the build's
+  operation, tagged with the computer and that operation), made new by each build before its instance (never one
+  found by its name: a group of the same name another Mac or an earlier try made is left as it is) and deleted with
+  it. Its OCID is recorded from the create's answer before anything configures it, and everything afterwards (`net
+  egress`, `vm delete`, the clean-up) acts only on that recorded OCID, read again and still tagged for this computer
+  and this operation; a group an earlier version made carries no operation, so `net egress` refuses to change it
+  (delete the computer and make it again). With `EGRESS=internet` it lets out every public IPv4 address (103 blocks: everything except the private,
   shared, loopback, link-local, documentation, benchmarking, multicast and reserved ranges the guest firewall also
   refuses), with `EGRESS=off` nothing once the computer is set up (while it's set up, the public addresses, for the
   packages it installs: OCI's rules can't tell apt from anything else; the guest firewall can, below). OCI enforces it outside the VM, so nothing in the guest, root included, can
@@ -140,7 +145,9 @@ capture, through to its end): only when the guest's last words are its power-off
 the instance and start it again;
 otherwise it refuses and stops nothing (the guest may be busy, or just unreachable from here), and `stop --force`
 then `start` restarts it. `status` says when it's RUNNING at OCI but doesn't answer. `vm delete NAME` terminates the
-instance with its boot volume and its security group, and the network once no computer of yours uses it. **A monthly
+instance with its boot volume and its security groups (the ones its record names: its own, and any an earlier build of
+it left behind, found by that build's operation tag, never by the name), and the network once no computer of yours uses
+it. **A monthly
 limit**: OCI's budgets (with an alert to your email) are set by the tenancy's administrator in the console;
 metacomputer's API user can't set or enforce one, so keep a budget alert there.
 
@@ -286,7 +293,9 @@ size, stop or delete it when you're done.
 `metacomputer cloud status oci` (instances, network, boot volumes metacomputer made), `cloud doctor oci` (the
 credentials, the network's rules), `cloud setup oci` (makes the network) and `cloud teardown oci` (deletes the
 network when no instance is left and no computer is being made in it: its security group there without an instance
-yet). Both change the network under the same lock as `vm create`. For `hetzner`, `digitalocean` and `vultr`: `cloud
+yet; a group no computer's record on this Mac names, another Mac's or one whose record is gone, is never deleted on
+its name: teardown says so, and you delete it in OCI's console once you know it's no one's). Both change the network
+under the same lock as `vm create`. For `hetzner`, `digitalocean` and `vultr`: `cloud
 status` lists the servers, firewalls and keys metacomputer made there (Hetzner: and their IPv4 addresses), `cloud
 doctor` checks the token and each computer's firewall (SSH only in; out, public addresses or nothing), `cloud setup`
 checks the token (there's no shared network to make), and `cloud teardown` deletes first-boot keys left over, once no

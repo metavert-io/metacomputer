@@ -1856,7 +1856,7 @@ CLAIMS = [
     ("SECURITY.md", r"each computer's own network security group lets out public IPv4 addresses only",
      lambda m: "egress_security_rules=[]))" in raw("lib/cloud/oci.py") and "for cidr in public_v4()]" in raw("lib/cloud/oci.py")
      and "nsg_ids=[nsg_id] if nsg_id else None" in raw("lib/cloud/oci.py")
-     and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress)") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
+     and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress, op=op,") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
     ("SECURITY.md", r"rules that don't\s+load give way to an SSH-only fallback \(nothing out but replies, and nothing of the full rules in it\), and if that\s+doesn't load either, the network stays down",
      lambda m: "render_emergency()" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "set private" not in subprocess.run(["/bin/sh", os.path.join(LAB, "provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall"),
@@ -1894,7 +1894,8 @@ CLAIMS = [
      and 'rows = [i["id"] for i in a.api.instances(name, op=op) if i["id"] not in found]' in py_top_fn("lib/remote.py", "reconcile")
      and 'found.update(owned_all(a, rows, name, op, "listed for"))' in py_top_fn("lib/remote.py", "reconcile")
      and "found, unresolved = reconcile(s, st, a, op)" in py_top_fn("lib/remote.py", "cmd_abort")
-     and "a.api.delete_nsg_by_id(g, name)" in py_top_fn("lib/remote.py", "delete_op_parts")
+     and "delete_group(a, g, name, op)" in py_top_fn("lib/remote.py", "delete_op_parts")
+     and "return a.api.delete_nsg_by_id(gid, name)" in py_top_fn("lib/remote.py", "delete_group")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
     ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
      lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
@@ -1938,8 +1939,9 @@ CLAIMS = [
     ("SECURITY.md", r"records it as kept, so no later try takes it for a\s+lost launch, then stops it",
      lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=next(iter(found)), op=op, kept=now()")
      < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(iid, "STOP")')),
-    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others; the journal is on the disk \(`F_FULLFSYNC`, or `fsync` where that isn't supported\) before\s+anything billable is launched, and an error making it so refuses the launch",
-     lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py") and 'made("made_nsg", nsg)' in raw("lib/cloud/oci.py")
+    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others;[^;]*; the journal is on the disk \(`F_FULLFSYNC`,\s+or `fsync` where that isn't supported\) before anything billable is launched, and an error making it so refuses the launch",
+     lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py")
+     and 'on_made=lambda gid: made("made_nsg", gid)' in raw("lib/cloud/oci.py")
      and raw("lib/cloud/oci.py").index("with self._network_lock():\n            # What this operation makes")
      < raw("lib/cloud/oci.py").index('made("made_network", net["vcn"])')
      and "a.api.delete_network_by_id(made_net)" in py_top_fn("lib/remote.py", "delete_op_parts")
@@ -2977,6 +2979,32 @@ CLAIMS = [
      and "except Unreadable as e:" in function_src("lib/session_dbs.py", "sessions")
      and "trs, notes = [], [f\"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})\"]"
      in function_src("lib/learn_mine.py", "mine_sessions")),
+    # Oracle Cloud's security groups: the create's answer, never a lookup by name (lib/cloud/oci.py, lib/remote.py).
+    ("SECURITY.md", r"at Oracle Cloud each build makes a group of its own, tagged with the computer and its\s+operation, never one found by its name",
+     lambda m: "self.nsg(" not in raw("lib/cloud/oci.py") and "def nsg(self" not in raw("lib/cloud/oci.py")
+     and "def delete_nsg(self, name)" not in raw("lib/cloud/oci.py")
+     and "freeform_tags={TAG: name, OP_TAG: op}" in raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
+     and raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
+     < raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("self.nsg_egress(g.id, egress)")
+     and raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
+     < raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("self.oci.wait_until(")),
+    ("SECURITY.md", r"`net egress` and `vm delete` act only on the OCIDs the computer's record\s+names, each read by its id and still tagged for this computer and one of its recorded operations",
+     lambda m: "a.api.nsg_owner(fw)" in py_top_fn("lib/remote.py", "check_firewall")
+     and hasattr(__import__("cloud").ADAPTERS["oci"], "delete_groups") and __import__("cloud").ADAPTERS["oci"].groups_by_record
+     and hasattr(__import__("cloud.oci").oci.SDK, "nsg_owner") and hasattr(__import__("cloud.oci").oci.SDK, "nsgs_of_op")
+     and "self.api.nsg_egress(self.recorded_group(name), egress)" in raw("lib/cloud/oci.py")
+     and "a.delete_groups(name, st)" in py_top_fn("lib/remote.py", "cmd_delete")
+     and "return a.api.delete_nsg_by_id(gid, name, op)" in py_top_fn("lib/remote.py", "delete_group")
+     and "if comp != name or not (mark == op if mark is not None else legacy):" in raw("lib/cloud/oci.py")),
+    ("SECURITY.md", r"a group an\s+earlier version made, which carries no operation, gets no rule changed",
+     lambda m: "was made by an earlier version of metacomputer" in raw("lib/cloud/oci.py")
+     and "if who[0] == name and who[1] is None:" in raw("lib/cloud/oci.py")
+     and "if comp == name and not mark:" in py_top_fn("lib/remote.py", "check_firewall")),
+    ("docs/remote.md", r"a group no computer's record on this Mac names, another Mac's or one whose record is gone, is never deleted on\s+its name",
+     lambda m: "is never deleted on its name" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "pending = a.api.nsg_names()" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "ops=ops))" in py_top_fn("lib/remote.py", "cmd_create")
+     and '"ops": mine.get("ops") or [op]' in py_top_fn("lib/remote.py", "cmd_create")),
 ]
 
 

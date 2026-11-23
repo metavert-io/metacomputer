@@ -531,6 +531,8 @@ class FakeOCI:
         self.actions = []
         self.n = 0
         self.compartment = "compartment-x"
+        self.fail_configure = False
+        self.rule_changes = []
 
     def availability_domains(self, shape=None):
         return ["AD-1", "AD-2", "AD-3"] if shape != "VM.Standard.E2.1.Micro" else ["AD-1"]
@@ -559,7 +561,7 @@ class FakeOCI:
             raise oci.Capacity(f"out of {shape} capacity in {ad}")
         self.n += 1
         iid = f"i{self.n}"
-        self.inst[iid] = {"id": iid, "state": "RUNNING", "shape": shape, "name": name, "ad": ad, "op": op}
+        self.inst[iid] = {"id": iid, "state": "RUNNING", "shape": shape, "name": name, "ad": ad, "op": op, "nsg": nsg_id}
         return iid
 
     def instances(self, tag_value=None, op=None):
@@ -567,29 +569,68 @@ class FakeOCI:
                 if i["state"] != "TERMINATED" and (tag_value is None or i["name"] == tag_value)
                 and (op is None or i.get("op") == op)]
 
-    def make_nsg(self, name, egress):
+    def make_nsg(self, name, egress, op, on_made=None):
+        """Oracle's create, then its wait and rules, as the facade does them: a new group every time (never one found
+        by name), tagged with its computer and operation; fail_configure fails after the create answered."""
+        assert isinstance(op, str) and len(op) == 32, op
         self.made_with.append(egress)
         self.make_network()
-        self.nsgs.setdefault(name, {"id": "nsg-" + name, "egress": None})
-        self.nsg_egress("nsg-" + name, egress)
-        return "nsg-" + name
+        self.n += 1
+        gid = f"nsg-{name}-{self.n}"
+        self.nsgs[gid] = {"id": gid, "name": name, "op": op, "egress": None, "compartment": self.compartment}
+        if on_made:
+            on_made(gid)
+        if self.fail_configure:
+            raise AdapterError("Oracle Cloud refused the group's rules: 500 InternalError")
+        self.nsg_egress(gid, egress)
+        return gid
 
-    def nsg(self, name):
-        return self.nsgs[name]["id"] if name in self.nsgs else None
+    def plant(self, name, op=None, egress="internet"):
+        """A group made outside this test's create (another Mac's, an earlier version's without an operation tag)."""
+        self.n += 1
+        gid = f"nsg-{name}-{self.n}"
+        self.nsgs[gid] = {"id": gid, "name": name, "op": op, "egress": egress, "compartment": self.compartment}
+        return gid
+
+    def groups(self, name):
+        return [g for g in self.nsgs.values() if g["name"] == name]
+
+    def drop(self, name):
+        for g in self.groups(name):
+            del self.nsgs[g["id"]]
+
+    def nsg_owner(self, gid):
+        g = self.nsgs.get(gid)
+        if g is None or g["compartment"] != self.compartment:
+            return None
+        return g["name"], g["op"]
+
+    def nsgs_of_op(self, name, op):
+        return [g["id"] for g in self.nsgs.values() if g["name"] == name and g["op"] == op]
+
+    def nsg_names(self):
+        return [g["name"] for g in self.nsgs.values()]
 
     def nsg_egress(self, gid, egress):
-        for g in self.nsgs.values():
-            if g["id"] == gid:
-                g["egress"] = egress
+        self.rule_changes.append(gid)
+        self.nsgs[gid]["egress"] = egress
 
     def nsg_rules(self, gid):
         from cloud import ubuntu_vm
-        g = next(g for g in self.nsgs.values() if g["id"] == gid)
+        g = self.nsgs[gid]
         return [{"direction": "EGRESS", "protocol": "all", "destination": c, "source": None}
                 for c in (ubuntu_vm.public_v4() if g["egress"] == "internet" else ())]
 
-    def delete_nsg(self, name):
-        return self.nsgs.pop(name, None) is not None
+    def delete_nsg_by_id(self, gid, name, op=None, legacy=False):
+        who = self.nsg_owner(gid)
+        if who is None or who[0] != name or not (who[1] == op if who[1] is not None else legacy):
+            return False
+        del self.nsgs[gid]
+        return True
+
+    def instance_nsgs(self, iid):
+        i = self.inst.get(iid)
+        return [i["nsg"]] if i and i.get("nsg") in self.nsgs else []
 
     def console_tail(self, iid, lines=40):
         return [ln for ln in self.console.splitlines() if ln.strip()][-lines:]
@@ -625,19 +666,13 @@ class FakeOCI:
         self.net = None
         return True
 
-    def delete_nsg_by_id(self, gid, name):
-        g = self.nsgs.get(name)
-        if not g or g["id"] != gid:
-            return False
-        del self.nsgs[name]
-        return True
-
-
 def oci_driver():
     print("\nthe OCI driver (lib/cloud/oci.py), on a stand-in API")
     api = FakeOCI(full={"AD-1"})
     a = oci.OCI(api=api, env={})
-    made = a.create("box", size="arm-2x12", user_data="#cloud-config\n")
+    OP1 = "a1" * 16
+    made = a.create("box", size="arm-2x12", user_data="#cloud-config\n", op=OP1)
+    gid = made["nsg"]
     check("create: the network first, then the instance in the first AD that has room (AD-1 full -> AD-2)",
           api.net is not None and made["ad"] == "AD-2" and [l[1] for l in api.launches] == ["AD-1", "AD-2"], api.launches)
     check("...arm-2x12 is VM.Standard.A1.Flex with 2 OCPU and 12 GB (the whole Always Free Arm allowance)",
@@ -645,7 +680,8 @@ def oci_driver():
     check("...in metacomputer's subnet, with the user-data it was given", api.launches[-1][5] == "s"
           and api.launches[-1][6] == "#cloud-config\n")
     check("...on its own security group, made first, letting out public addresses (review item 1)",
-          api.launches[-1][7] == "nsg-box" and api.nsgs["box"]["egress"] == "internet" and made["nsg"] == "nsg-box")
+          api.launches[-1][7] == gid and api.nsgs[gid]["egress"] == "internet"
+          and (api.nsgs[gid]["name"], api.nsgs[gid]["op"]) == ("box", OP1))
     check("...a second create for the same name is refused", raises(a.create, "box", user_data="x", kind=AdapterError))
     full = FakeOCI(full={"AD-1", "AD-2", "AD-3"})
     why = raises(oci.OCI(api=full, env={}).create, "box", size="arm-1x6", user_data="x", kind=oci.Capacity)
@@ -659,16 +695,16 @@ def oci_driver():
         why = raises(a.create, "other", **({"user_data": "x"} | kw) if bad != "user-data" else {}, kind=AdapterError)
         check(f"create refuses {bad} it can't do, saying why", why is not None and not why.startswith("WRONG"), why)
     s = oci.OCI(api=api, env={}, computers={"box": {"VM_NAME": "box", "PROVIDER": "oci", "EGRESS": "internet"}},
-                states={"box": {"instance": made["instance"], "size": "arm-2x12"}})
+                states={"box": {"instance": made["instance"], "size": "arm-2x12", "nsg": gid, "op": OP1}})
     s.apply_egress("box", "off")
-    check("EGRESS=off outside the computer: its security group lets nothing out", api.nsgs["box"]["egress"] == "off"
-          and api.nsg_rules("nsg-box") == [] and s.egress("box")["outside"] == "off")
+    check("EGRESS=off outside the computer: its security group lets nothing out", api.nsgs[gid]["egress"] == "off"
+          and api.nsg_rules(gid) == [] and s.egress("box")["outside"] == "off")
     s.apply_egress("box", "internet")
     check("...and internet: every public block, nothing private", s.egress("box")["outside"] == "internet"
-          and len(api.nsg_rules("nsg-box")) == len(__import__("cloud.ubuntu_vm").ubuntu_vm.public_v4()))
+          and len(api.nsg_rules(gid)) == len(__import__("cloud.ubuntu_vm").ubuntu_vm.public_v4()))
     check("an allowlist of names is refused (NotSupported)", isinstance(_err(s.set_egress, "box", ["x.com"]), NotSupported))
     lazy = oci.OCI(env={}, computers={"box": {"VM_NAME": "box", "PROVIDER": "oci", "EGRESS": "internet"}},
-                   states={"box": {"instance": made["instance"], "size": "arm-2x12"}})
+                   states={"box": {"instance": made["instance"], "size": "arm-2x12", "nsg": gid, "op": OP1}})
     real_sdk, oci.SDK = oci.SDK, lambda env: api
     try:
         seen = lazy.egress("box").get("outside")
@@ -727,7 +763,7 @@ def oci_driver():
     check("list: metacomputer's instances (tagged)", [i["name"] for i in s.list()] == ["box"])
     s.delete("box")
     check("delete: terminated (its boot volume with it), its security group gone, status absent",
-          s.status("box")["state"] == "absent" and "box" not in api.nsgs)
+          s.status("box")["state"] == "absent" and not api.groups("box"))
     check("a computer this Mac has no instance for: refused, saying where to look",
           "cloud status oci" in (raises(oci.OCI(api=api, env={}).wake, "ghost", kind=AdapterError) or ""))
     checks = oci.OCI(api=FakeOCI(), env={})
@@ -2515,7 +2551,7 @@ def journal_r4():
         remote_mod.cmd_abort(s2, type("A", (), {"op": "f" * 32, "keep": False})())
         check("a network another operation made just before this one took the lock: not this one's (made_network not "
               "recorded), so its failed create's clean-up leaves it; the group it did make goes",
-              not st2.get("made_network") and st2.get("made_nsg") and api.net is not None and "box" not in api.nsgs,
+              not st2.get("made_network") and st2.get("made_nsg") and api.net is not None and not api.groups("box"),
               (st2, api.net, api.nsgs))
         remote_mod.mac_lock = old_lock
         # N3: abort deletes the exact network and group this operation made, never a replacement made since
@@ -2531,7 +2567,8 @@ def journal_r4():
         remote_mod.cmd_abort(s4, type("A", (), {"op": "b2" * 16, "keep": False})())
         check("abort deletes only the network and group this operation made, by the ids it recorded when it made them: a "
               "network made since (its own gone) is left alone (found by review: whichever network existed was deleted)",
-              st4.get("made_network") == "v" and st4.get("made_nsg") == "nsg-box" and api.net and api.net["vcn"] == "v2",
+              st4.get("made_network") == "v" and str(st4.get("made_nsg")).startswith("nsg-box-") and api.net
+              and api.net["vcn"] == "v2",
               (st4.get("made_network"), st4.get("made_nsg"), api.net))
         api.net = None
         raises(remote_mod.cmd_create, s4, type("A", (), {"op": "b3" * 16})(), kind=Exception)
@@ -2698,7 +2735,7 @@ def abort_scoped():
         os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
         api = FakeOCI()
         api.make_network()
-        api.make_nsg("box", "internet")
+        theirs = api.make_nsg("box", "internet", op="o" * 32)
         api.inst["i-theirs"] = {"id": "i-theirs", "state": "RUNNING", "shape": "x", "name": "box", "ad": "AD-1", "op": "o" * 32}
         remote_mod.API_FACTORY = lambda: api
         remote_mod.user_data = lambda s: "#cloud-config\n"
@@ -2709,7 +2746,8 @@ def abort_scoped():
         remote_mod.cmd_abort(settings, type("A", (), {"op": op, "keep": False})())
         check("an instance of the same name this build didn't make (its record here lost): create refuses, and the "
               "clean-up leaves it, its security group and the network alone",
-              why and api.inst["i-theirs"]["state"] == "RUNNING" and "box" in api.nsgs and api.net is not None, (why, api.inst))
+              why and api.inst["i-theirs"]["state"] == "RUNNING" and [g["id"] for g in api.groups("box")] == [theirs]
+              and api.net is not None, (why, api.inst))
         # Its own launch: deleted, with the group and the network it made (nothing else uses them).
         api2 = FakeOCI()
         remote_mod.API_FACTORY = lambda: api2
@@ -2725,7 +2763,7 @@ def abort_scoped():
               and mine[0]["state"] == "STOPPED", api2.actions)
         remote_mod.cmd_abort(s2, type("A", (), {"op": "b" * 32, "keep": False})())
         check("...its own operation: its instance, its security group and the network it made are deleted",
-              mine[0]["state"] == "TERMINATED" and "box" not in api2.nsgs and api2.net is None, (api2.inst, api2.nsgs))
+              mine[0]["state"] == "TERMINATED" and not api2.groups("box") and api2.net is None, (api2.inst, api2.nsgs))
     finally:
         os.environ.pop("MCOMP_LOCK_DIR", None)
         remote_mod.API_FACTORY = None
@@ -2735,6 +2773,358 @@ def abort_scoped():
     check("remote-build.sh: the operation is named before the launch and passed to it; the clean-up is abort --op, "
           "never delete", 'remote_py create --vm "$VM_NAME" --op "$op"' in src and 'remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"' in src
           and "remote_py delete" not in src.split("cleanup_failed() {")[1].split("\n}\n")[0])
+
+
+# --- Oracle Cloud's security groups, through the real SDK facade on an in-memory Oracle -------------------------------
+class OracleStandIn:
+    """Oracle's own clients (VirtualNetworkClient, ComputeClient, IdentityClient), in memory, under lib/cloud/oci.py's
+    real SDK facade: groups and instances by OCID with freeform tags, rules per group, VNICs with their groups. Every
+    change to a group's rules is recorded (rule_changes), and every group deleted (deleted)."""
+
+    class ServiceError(Exception):
+        def __init__(self, status, code="", message=""):
+            super().__init__(message)
+            self.status, self.code, self.message = status, code, message
+
+    def __init__(self, compartment="c"):
+        import types
+        self.compartment = compartment
+        self.n = 0
+        self.groups = {}          # gid -> {id, compartment_id, vcn_id, display_name, freeform_tags, lifecycle_state}
+        self.rules = {}           # gid -> [rule]
+        self.rule_changes = []
+        self.deleted = []
+        self.instances = {}
+        self.vnics = {}
+        self.fail_rules = False
+        self.full = set()
+        ns = types.SimpleNamespace
+        st = self
+
+        class Models:
+            def __getattr__(self, name):
+                return lambda **kw: ns(**kw)
+
+        def pages(fn, *a, **k):
+            return ns(data=fn(*a, **k))
+        self.oci = ns(core=ns(models=Models()), wait_until=lambda *a, **k: None,
+                      exceptions=ns(ServiceError=OracleStandIn.ServiceError), pagination=ns(list_call_get_all_results=pages),
+                      retry=ns(NoneRetryStrategy=lambda: "no-retry"))
+        vcn = ns(id="vcn-1", time_created="2026-11-01", freeform_tags={oci.TAG: oci.NETWORK_TAG}, lifecycle_state="AVAILABLE",
+                 default_security_list_id="sl-1", default_route_table_id="rt-1")
+
+        class Net:
+            def list_vcns(self, compartment):
+                return [vcn] if compartment == st.compartment else []
+
+            def list_subnets(self, compartment, vcn_id=None):
+                return [ns(id="subnet-1", lifecycle_state="AVAILABLE")]
+
+            def list_internet_gateways(self, compartment, vcn_id=None):
+                return [ns(id="igw-1", lifecycle_state="AVAILABLE")]
+
+            def update_route_table(self, rt, d):
+                pass
+
+            def update_security_list(self, sl, d):
+                pass
+
+            def create_network_security_group(self, d):
+                st.n += 1
+                gid = f"ocid1.networksecuritygroup.{st.n}"
+                st.groups[gid] = {"id": gid, "compartment_id": d.compartment_id, "vcn_id": d.vcn_id,
+                                  "display_name": d.display_name, "freeform_tags": dict(d.freeform_tags or {}),
+                                  "lifecycle_state": "AVAILABLE"}
+                st.rules[gid] = []
+                return ns(data=ns(id=gid))
+
+            def get_network_security_group(self, gid):
+                g = st.groups.get(gid)
+                if g is None:
+                    raise OracleStandIn.ServiceError(404, "NotAuthorizedOrNotFound")
+                return ns(data=ns(**g))
+
+            def list_network_security_groups(self, compartment_id=None, vcn_id=None):
+                return [ns(**g) for g in st.groups.values() if g["compartment_id"] == compartment_id
+                        and g["vcn_id"] == vcn_id]
+
+            def delete_network_security_group(self, gid):
+                if gid not in st.groups:
+                    raise OracleStandIn.ServiceError(404, "NotAuthorizedOrNotFound")
+                del st.groups[gid]
+                st.deleted.append(gid)
+
+            def list_network_security_group_security_rules(self, gid):
+                return [ns(**r) for r in st.rules[gid]]
+
+            def remove_network_security_group_security_rules(self, gid, d):
+                st.rule_changes.append(("remove", gid))
+                st.rules[gid] = [r for r in st.rules[gid] if r["id"] not in d.security_rule_ids]
+
+            def add_network_security_group_security_rules(self, gid, d):
+                st.rule_changes.append(("add", gid))
+                if st.fail_rules:
+                    raise OracleStandIn.ServiceError(500, "InternalError", "the rules weren't added")
+                for r in d.security_rules:
+                    st.n += 1
+                    st.rules[gid].append({"id": f"rule-{st.n}", "direction": r.direction, "protocol": r.protocol,
+                                          "destination": r.destination, "source": None})
+
+            def get_vnic(self, vid):
+                return ns(data=ns(**st.vnics[vid]))
+
+            def get_security_list(self, sl):
+                return ns(data=ns(ingress_security_rules=[]))
+
+        class Compute:
+            def list_shapes(self, compartment, availability_domain=None):
+                return [ns(shape="VM.Standard.A1.Flex")]
+
+            def list_images(self, compartment, **k):
+                return ns(data=[ns(id="img-1", display_name="Canonical-Ubuntu-24.04-aarch64")])
+
+            def launch_instance(self, d, retry_strategy=None):
+                if d.availability_domain in st.full:
+                    raise OracleStandIn.ServiceError(500, "InternalError", "Out of host capacity.")
+                st.n += 1
+                iid, vid = f"ocid1.instance.{st.n}", f"ocid1.vnic.{st.n}"
+                st.vnics[vid] = {"id": vid, "public_ip": "198.51.100.7", "nsg_ids": list(d.create_vnic_details.nsg_ids or [])}
+                st.instances[iid] = {"id": iid, "compartment_id": d.compartment_id, "lifecycle_state": "RUNNING",
+                                     "shape": d.shape, "availability_domain": d.availability_domain,
+                                     "freeform_tags": dict(d.freeform_tags or {}), "time_created": "t", "vnic": vid}
+                return ns(data=ns(id=iid))
+
+            def get_instance(self, iid):
+                i = st.instances.get(iid)
+                if i is None:
+                    raise OracleStandIn.ServiceError(404, "NotAuthorizedOrNotFound")
+                return ns(data=ns(**i))
+
+            def list_instances(self, compartment):
+                return [ns(**i) for i in st.instances.values() if i["compartment_id"] == compartment]
+
+            def terminate_instance(self, iid, preserve_boot_volume=False):
+                st.instances[iid]["lifecycle_state"] = "TERMINATED"
+
+            def instance_action(self, iid, what):
+                st.instances[iid]["lifecycle_state"] = "STOPPED" if "STOP" in what else "RUNNING"
+
+            def list_vnic_attachments(self, compartment, instance_id=None):
+                i = st.instances.get(instance_id)
+                return [ns(lifecycle_state="ATTACHED", vnic_id=i["vnic"])] if i else []
+
+        class Identity:
+            def list_availability_domains(self, tenancy):
+                return ns(data=[ns(name="AD-1"), ns(name="AD-2")])
+        self.net, self.compute, self.identity = Net(), Compute(), Identity()
+
+    def sdk(self):
+        s = object.__new__(oci.SDK)
+        s.oci, s.net, s.compute, s.identity = self.oci, self.net, self.compute, self.identity
+        s.compartment, s.cfg = self.compartment, {"tenancy": "t"}
+        return s
+
+    def plant(self, name, op=None, compartment=None, rules=0):
+        """A group made outside this Mac's create: another Mac's computer of the same name (another operation), or one
+        an earlier version made (no operation tag)."""
+        self.n += 1
+        gid = f"ocid1.networksecuritygroup.{self.n}"
+        tags = {oci.TAG: name, **({oci.OP_TAG: op} if op else {})}
+        self.groups[gid] = {"id": gid, "compartment_id": compartment or self.compartment, "vcn_id": "vcn-1",
+                            "display_name": f"metacomputer-{name}", "freeform_tags": tags, "lifecycle_state": "AVAILABLE"}
+        self.rules[gid] = [{"id": f"r{gid}-{i}", "direction": "EGRESS", "protocol": "all", "destination": "10.0.0.0/8",
+                            "source": None} for i in range(rules)]
+        return gid
+
+    def touched(self, gid):
+        return [c for c in self.rule_changes if c[1] == gid]
+
+
+def oci_groups():
+    """Item: Oracle Cloud's security group (NSG) is this computer's and this operation's by the create's answer, never
+    by a lookup of its name; everything after acts only on the recorded id, read again and checked against both tags."""
+    print("\nOracle Cloud's security groups: the create's answer, never a lookup by name")
+    import contextlib
+    import io
+    import remote as remote_mod
+    rd = tempfile.mkdtemp(prefix="mcnsg-")
+    old_ud = remote_mod.user_data
+    OP, OP2, THEIRS, OLD = "a" * 32, "b" * 32, "c" * 32, "d" * 32
+
+    def args(**k):
+        return type("A", (), dict({"op": None, "keep": False, "network_too": False, "checked_provider": False,
+                                   "set": None, "setup": False}, **k))()
+
+    def box(tag):
+        d = os.path.join(rd, tag)
+        os.makedirs(d)
+        return {"VM_NAME": "box", "PLACE": "oci", "PROVIDER": "oci", "SIZE": "arm-1x6", "EGRESS": "internet",
+                "RUN_DIR": d, "SSH_DIR": d}
+
+    def quiet(fn, *a, **k):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return fn(*a, **k)
+
+    def raised(fn, *a, kind=Exception):
+        try:
+            quiet(fn, *a)
+        except kind as e:
+            return str(e) or type(e).__name__
+        except Exception as e:  # noqa: BLE001
+            return f"WRONG {type(e).__name__}: {e}"
+        return None
+    try:
+        os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
+        remote_mod.user_data = lambda s: "#cloud-config\n"
+        # 1. A group of the same name there already (another Mac's computer "box", another operation): the create makes
+        #    its own, journals it from the create's answer, launches on it, and never reuses or changes theirs.
+        o = OracleStandIn()
+        remote_mod.API_FACTORY = o.sdk
+        theirs = o.plant("box", THEIRS)
+        s1 = box("one")
+        rc = quiet(remote_mod.cmd_create, s1, args(op=OP))
+        st = remote_mod.read_state(s1["RUN_DIR"])
+        mine = st.get("nsg")
+        vnic = o.vnics[o.instances[st["instance"]]["vnic"]] if st.get("instance") in o.instances else {}
+        check("(OCI groups) a create journals its own new group from the create's answer (made_nsg) even when a group "
+              "tagged with the computer's name is there already, launches on it, and never reuses or changes that one",
+              rc == 0 and mine and mine != theirs and st.get("made_nsg") == mine and vnic.get("nsg_ids") == [mine]
+              and o.groups[mine]["freeform_tags"] == {oci.TAG: "box", oci.OP_TAG: OP} and not o.touched(theirs)
+              and theirs in o.groups, (st, theirs, o.rule_changes))
+        check("(OCI groups) ...its display name carries the operation (metacomputer-NAME-OP12), and the record keeps the "
+              "operation (ops)", o.groups.get(mine, {}).get("display_name") == f"metacomputer-box-{OP[:12]}"
+              and st.get("ops") == [OP], (o.groups.get(mine), st.get("ops")))
+        # 2. net egress and the adapter's apply_egress act only on the recorded group, read by its id, still tagged for
+        #    this computer and its operation. Re-tagged for another operation: refused, no rule changed anywhere.
+        o.groups[mine]["freeform_tags"][oci.OP_TAG] = OP2
+        n = len(o.rule_changes)
+        why = raised(remote_mod.cmd_egress, s1, args(set="off"), kind=remote_mod.NotOwned)
+        a1 = oci.OCI(api=o.sdk(), env={}, computers={"box": dict(s1)}, states={"box": remote_mod.read_state(s1["RUN_DIR"])})
+        why2 = raised(a1.apply_egress, "box", "off", kind=AdapterError)
+        check("(OCI groups) net egress on a recorded group now tagged for another operation: refused, and no group's "
+              "rules changed (the adapter's apply_egress refuses it too)",
+              why and not why.startswith("WRONG") and why2 and not why2.startswith("WRONG")
+              and len(o.rule_changes) == n, (why, why2, o.rule_changes[n:]))
+        check("(OCI groups) ...and egress() doesn't report that group's rules as the computer's (not known)",
+              a1.egress("box").get("outside") is None, a1.egress("box"))
+        o.groups[mine]["freeform_tags"][oci.OP_TAG] = OP
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = remote_mod.cmd_egress(s1, args(set="off"))
+        check("(OCI groups) ...tagged for it and its operation again: net egress off changes exactly that group",
+              rc == 0 and out.getvalue().strip() == "off" and o.rules[mine] == [] and not o.touched(theirs),
+              (out.getvalue(), o.rule_changes[n:]))
+        # 3. doctor reports the groups OCI applies to the instance's network card (and changes nothing).
+        n = len(o.rule_changes)
+        o.rules[theirs] = [{"id": "x", "direction": "EGRESS", "protocol": "all", "destination": "10.0.0.0/8", "source": None}]
+        d = {c["check"]: c for c in oci.OCI(api=o.sdk(), env={}).doctor()}
+        row = d.get("box: its own security group lets out public addresses only") or {}
+        check("(OCI groups) doctor reads the group on the instance's own network card, not one found by its name (a "
+              "same-named group of another operation with a private rule is not this computer's), and changes nothing",
+              row.get("ok") is True and len(o.rule_changes) == n, (row, o.rule_changes[n:]))
+        # 4. vm delete: its instance and its own group go; the same-named group of another operation stays.
+        rc = quiet(remote_mod.cmd_delete, s1, args())
+        check("(OCI groups) vm delete deletes the computer's own group (by its recorded id, checked) and never a "
+              "same-named group of another operation", rc == 0 and mine not in o.groups and theirs in o.groups
+              and o.deleted == [mine], (o.deleted, list(o.groups)))
+        # 5. A failed configure after the create (its rules refused): the id is in the journal already, and the
+        #    clean-up (abort --op) deletes exactly that one, leaving the other operation's.
+        o2 = OracleStandIn()
+        remote_mod.API_FACTORY = o2.sdk
+        theirs2 = o2.plant("box", THEIRS)
+        o2.fail_rules = True
+        s2 = box("two")
+        why = raised(remote_mod.cmd_create, s2, args(op=OP2))
+        j = remote_mod.read_state(s2["RUN_DIR"])
+        made = j.get("made_nsg")
+        check("(OCI groups) a create whose group's rules fail after the create answered: the group's id is journaled "
+              "already (made_nsg), so the clean-up can find it; nothing launched", why and made and made != theirs2
+              and made in o2.groups and not o2.instances, (why, j, list(o2.groups)))
+        o2.fail_rules = False
+        rc = quiet(remote_mod.cmd_abort, s2, args(op=OP2))
+        check("(OCI groups) abort --op deletes only its own operation's group: the same-named group of another "
+              "operation stays, its rules untouched", rc == 0 and made not in o2.groups and theirs2 in o2.groups
+              and not o2.touched(theirs2) and o2.deleted == [made], (o2.deleted, list(o2.groups), o2.rule_changes))
+        # 6. abort --op after a launch that found no room (every AD full): its group goes, the other's stays.
+        o3 = OracleStandIn()
+        remote_mod.API_FACTORY = o3.sdk
+        theirs3 = o3.plant("box", THEIRS, rules=1)
+        o3.full = {"AD-1", "AD-2"}
+        s3 = box("three")
+        raised(remote_mod.cmd_create, s3, args(op=OP))
+        made3 = remote_mod.read_state(s3["RUN_DIR"]).get("made_nsg")
+        quiet(remote_mod.cmd_abort, s3, args(op=OP))
+        check("(OCI groups) a build with no capacity anywhere: abort --op deletes the group its create made and "
+              "nothing else (the same-named group of another operation stays, rules unchanged)",
+              made3 and made3 != theirs3 and o3.deleted == [made3] and theirs3 in o3.groups and not o3.touched(theirs3),
+              (made3, o3.deleted, o3.rule_changes))
+        # 7. A computer made by an earlier version: its recorded group carries no operation. Rules: refused (delete it
+        #    and make it again); vm delete removes exactly that recorded group, and never another operation's.
+        o4 = OracleStandIn()
+        remote_mod.API_FACTORY = o4.sdk
+        legacy = o4.plant("box", None)
+        other4 = o4.plant("box", THEIRS)
+        o4.full = set()
+        i4 = o4.compute.launch_instance(o4.oci.core.models.X(
+            compartment_id="c", availability_domain="AD-1", shape="VM.Standard.A1.Flex",
+            create_vnic_details=o4.oci.core.models.X(nsg_ids=[legacy]), freeform_tags={oci.TAG: "box", oci.OP_TAG: OLD})).data.id
+        s4 = box("four")
+        remote_mod.write_state(s4["RUN_DIR"], {"provider": "oci", "instance": i4, "op": OLD, "nsg": legacy})
+        n = len(o4.rule_changes)
+        why = raised(remote_mod.cmd_egress, s4, args(set="off"), kind=remote_mod.NotOwned)
+        a4 = oci.OCI(api=o4.sdk(), env={}, computers={"box": dict(s4)}, states={"box": remote_mod.read_state(s4["RUN_DIR"])})
+        why2 = raised(a4.apply_egress, "box", "off", kind=AdapterError)
+        check("(OCI groups) a group an earlier version made (no operation tag): net egress and apply_egress refuse, "
+              "saying to delete it and make it again, and no rule changes", why and "earlier version" in why
+              and why2 and "earlier version" in why2 and "make it again" in why2 and len(o4.rule_changes) == n, (why, why2))
+        quiet(remote_mod.cmd_delete, s4, args())
+        check("(OCI groups) ...vm delete removes exactly the recorded group (its own, from before), never the "
+              "same-named group of another operation", o4.deleted == [legacy] and other4 in o4.groups, o4.deleted)
+        # 8. A group an earlier operation of this Mac's left (its clean-up failed): found again at vm delete by that
+        #    operation's mark (the record's ops), never by the name: another operation's stays, and cloud teardown
+        #    then says how to remove a group no record here names (it never deletes one on its name).
+        o5 = OracleStandIn()
+        remote_mod.API_FACTORY = o5.sdk
+        foreign = o5.plant("box", THEIRS)
+        left = o5.plant("box", OLD)
+        s5 = box("five")
+        quiet(remote_mod.cmd_create, s5, args(op=OP))
+        st5 = remote_mod.read_state(s5["RUN_DIR"])
+        remote_mod.write_state(s5["RUN_DIR"], dict(st5, ops=[OLD] + st5.get("ops", [])))
+        quiet(remote_mod.cmd_delete, s5, args())
+        check("(OCI groups) vm delete deletes a group an earlier operation of this computer's left (its mark is one the "
+              "record names), and not a same-named group of an operation it doesn't", left not in o5.groups
+              and st5.get("nsg") not in o5.groups and foreign in o5.groups, (o5.deleted, list(o5.groups)))
+        why = raised(remote_mod.cmd_cloud, type("A", (), {"provider": "oci", "action": "teardown", "json": True,
+                                                          "forget": None})(), kind=remote_mod.Refused)
+        check("(OCI groups) ...cloud teardown then refuses (a group is there) and says how to remove one no record here "
+              "names (the console), never deleting it on its name", why and "console" in why
+              and "never deleted on its name" in why and foreign in o5.groups, why)
+        # 9. The facade's own checks: a group read by its id must be tagged for the computer AND the operation.
+        o6 = OracleStandIn()
+        sdk = o6.sdk()
+        g_other = o6.plant("box", THEIRS)
+        g_away = o6.plant("box", OP, compartment="elsewhere")
+        g_old = o6.plant("box", None)
+        g_mine = o6.plant("box", OP)
+        ok = (sdk.nsg_owner(g_other) == ("box", THEIRS) and sdk.nsg_owner(g_away) is None
+              and sdk.nsg_owner(g_old) == ("box", None) and sdk.nsg_owner("ocid1.networksecuritygroup.gone") is None
+              and sdk.nsgs_of_op("box", OP) == [g_mine])
+        r = [sdk.delete_nsg_by_id(g_other, "box", OP), sdk.delete_nsg_by_id(g_mine, "other", OP),
+             sdk.delete_nsg_by_id(g_old, "box", OP), sdk.delete_nsg_by_id(g_mine, "box", None),
+             sdk.delete_nsg_by_id(g_away, "box", OP)]
+        check("(OCI groups) the facade: nsg_owner reads a group by its id (gone, or in another compartment: None); "
+              "delete_nsg_by_id refuses another operation's, another computer's, one without an operation (unless "
+              "it's the recorded legacy one), one with no operation to check against, and one elsewhere",
+              ok and r == [False] * 5 and not o6.deleted, (ok, r, o6.deleted))
+        check("(OCI groups) ...and deletes the one tagged for the computer and that operation; make_nsg refuses "
+              "without an operation", sdk.delete_nsg_by_id(g_mine, "box", OP) and o6.deleted == [g_mine]
+              and raised(sdk.make_nsg, "box", "internet", None, kind=AdapterError) is not None, o6.deleted)
+    finally:
+        os.environ.pop("MCOMP_LOCK_DIR", None)
+        remote_mod.API_FACTORY = None
+        remote_mod.user_data = old_ud
+        shutil.rmtree(rd, ignore_errors=True)
 
 
 def cloud_lock():
@@ -2755,13 +3145,13 @@ def cloud_lock():
         remote_mod.API_FACTORY = lambda: api
         rc = remote_mod.cmd_cloud(type("A", (), {"provider": "oci", "action": "setup", "json": True})())
         check("cloud setup makes the network under the network lock", rc == 0 and held == ["oci-network"] and api.net, held)
-        api.make_nsg("pending", "internet")             # a build between its group and its launch
+        api.make_nsg("pending", "internet", op="b" * 32)   # a build between its group and its launch
         held.clear()
         why = raises(remote_mod.cmd_cloud, type("A", (), {"provider": "oci", "action": "teardown", "json": True})(),
                      kind=remote_mod.Refused)
         check("cloud teardown while a computer is being made (its group, no instance): refused, under the lock, the "
               "network kept", why and "being made" in why and held == ["oci-network"] and api.net is not None, (why, held))
-        api.delete_nsg("pending")
+        api.drop("pending")
         rc = remote_mod.cmd_cloud(type("A", (), {"provider": "oci", "action": "teardown", "json": True})())
         check("...and once nothing is made there, it goes", rc == 0 and api.net is None)
     finally:
@@ -2915,14 +3305,14 @@ def network_race():
         api = FakeOCI()
         remote_mod.API_FACTORY = lambda: api
         api.make_network()
-        api.make_nsg("other", "internet")
+        api.make_nsg("other", "internet", op="e" * 32)
         settings = {"VM_NAME": "box", "PLACE": "oci", "PROVIDER": "oci", "SIZE": "arm-1x6", "EGRESS": "internet",
                     "RUN_DIR": rd, "SSH_DIR": rd}
         os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
         remote_mod.cmd_delete(settings, type("A", (), {"network_too": True})())
         check("vm delete --network-too while another computer is being made in the network (its group is there, no "
               "instance yet): the network stays", api.net is not None)
-        api.delete_nsg("other")
+        api.drop("other")
         remote_mod.cmd_delete(settings, type("A", (), {"network_too": True})())
         check("...and goes once no computer has a group or an instance there", api.net is None)
     finally:
@@ -3752,6 +4142,7 @@ def main():
     owner_ssh_options()
     journal_r4()
     abort_scoped()
+    oci_groups()
     cloud_lock()
     remote_helpers()
     view_tunnel_pipes()

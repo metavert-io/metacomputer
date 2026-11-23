@@ -332,6 +332,14 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   recording stand-in; `start` refusing to stop a RUNNING instance whose console shows no power-off, `stop --force`;
   wake, sleep, delete, status and list; the manifest's outside-egress and billing truth; credentials named but
   never shown.
+- Oracle Cloud's security groups, through the real SDK facade on an in-memory Oracle (`OracleStandIn`: groups and
+  instances by OCID with their tags, rules per group, network cards with their groups): a create makes a group of
+  its own operation's and journals it from the create's answer even when a group of the same name is there (never
+  reused or changed), and when its rules then fail; `net egress` and `apply_egress` refuse a recorded group tagged
+  for another operation, or one an earlier version made (no operation tag), changing no rule; doctor reads the groups
+  on the instance's network card; `vm delete` and `abort --op` delete only the groups the record names (by id, and by
+  the marks of its recorded operations), never a same-named group of another operation; `cloud teardown` says how to
+  remove a group no record here names; the facade's `nsg_owner`, `nsgs_of_op` and `delete_nsg_by_id` checks.
 - The Hetzner Cloud, DigitalOcean and Vultr drivers (`StandInREST`, answering each provider's paths and error shapes
   as read from its API): the computer's firewall and first-boot key made before the server, under the provider's
   lock, each journaled by id; the create call's shape (size, region, image, IPv4 only, no backups, the firewall and

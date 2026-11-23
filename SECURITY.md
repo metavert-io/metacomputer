@@ -1762,8 +1762,11 @@ provider's rules outside it where the provider enforces them, and no more than t
   everything `lib/remote.py` prints passes a last filter for the credentials it was given (each line of an API key's
   PEM too); what Fly's `sprite` command says, whose sign-in it never sees, is scrubbed of anything credential-shaped. What a build makes of the shared network and its computer's
   group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact
-  resources and no others; the journal is on the disk (`F_FULLFSYNC`, or `fsync` where that isn't supported) before
-  anything billable is launched, and an error making it so refuses the launch. `start` checks
+  resources and no others; at Oracle Cloud each build makes a group of its own, tagged with the computer and its
+  operation, never one found by its name, and `net egress` and `vm delete` act only on the OCIDs the computer's record
+  names, each read by its id and still tagged for this computer and one of its recorded operations (a group an
+  earlier version made, which carries no operation, gets no rule changed); the journal is on the disk (`F_FULLFSYNC`,
+  or `fsync` where that isn't supported) before anything billable is launched, and an error making it so refuses the launch. `start` checks
   that no session or handoff has the computer, and never hard-stops a running instance unless its whole console
   capture ends with the guest's power-off; a stop is waited for through OCI's 15-minute shutdown window; `vm delete`
   checks again, under the computer's lock, that no session is using it before anything is stopped; the shared network
