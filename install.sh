@@ -819,11 +819,29 @@ agent_step() { # NAME: openclaw, hermes or gemini
 # --uninstall, before the command links: the agent's MCP server metacomputer when it's this checkout's (read again right
 # before its removal, and checked after), and the skill links that point here. One that stays and runs
 # ~/.local/bin/metacomputer or mcomp keeps those links (KEEP_CMD).
+agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may run metacomputer's command (it names
+  # metacomputer or mcomp, or can't be read): read without Python, for an uninstall that can't run agent_setup.py
+  local f
+  case "$1" in
+    gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" ;;
+    hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml" "$HOME"/.hermes/profiles/*/config.yaml ;;
+    openclaw) set -- "${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/openclaw.json}" "$HOME"/.openclaw-*/openclaw.json ;;
+  esac
+  for f in "$@"; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ -r "$f" ] || return 0
+    if grep -q -e metacomputer -e mcomp "$f" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
 agent_uninstall() { # NAME
   local label out rc=0
   label="$(agent_label "$1")"
   if ! codex_python; then
-    if has_agent "$1"; then warn "$label left alone: the uninstall's $label step needs Python 3.11 or later"; fi
+    if agent_config_mentions "$1"; then
+      warn "$label's configuration may run metacomputer's command, and reading it needs Python 3.11 or later: it stays, and so does the command"
+      keep_cmd_for "$label's"; UNINSTALL_FAILED=1
+    fi
     return 0
   fi
   out="$("$CPY" "$ROOT/lib/agent_setup.py" uninstall "$1" --root "$ROOT" --link "$CMD_LINK" 2>/dev/null </dev/null \

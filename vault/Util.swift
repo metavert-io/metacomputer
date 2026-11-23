@@ -605,12 +605,19 @@ func procCwd(_ pid: pid_t) -> String? {
 }
 
 func procArgs(_ pid: pid_t) -> [String] {
+    return procArgsOrNil(pid) ?? []
+}
+
+/// A process's arguments, exactly (KERN_PROCARGS2: what the process left there, so a program that renamed itself shows
+/// its new name first), or nil when they can't be read (another account's process, a zombie, no such process).
+func procArgsOrNil(_ pid: pid_t) -> [String]? {
     var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
     var size = 0
-    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return nil }
     var buf = [UInt8](repeating: 0, count: size)
-    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return [] }
+    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return nil }
     let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+    guard argc > 0 else { return nil }
     var i = 4
     while i < size && buf[i] != 0 { i += 1 }
     while i < size && buf[i] == 0 { i += 1 }
@@ -621,8 +628,12 @@ func procArgs(_ pid: pid_t) -> [String] {
         out.append(String(decoding: buf[a..<i], as: UTF8.self))
         i += 1
     }
-    return out
+    return out.isEmpty ? nil : out
 }
+
+/// An interpreter whose arguments couldn't be read: it may be an agent, so it counts as one, and as no single session
+/// (lib/owners.py UNKNOWN_AGENT).
+let unknownAgent = "unidentified agent"
 
 /// The agent session a process is, if any: "Claude Code" (a process named claude, node running a script named
 /// claude*, or the native installer's version file) or "Codex" (its native binary, named codex; npm and Homebrew start
@@ -636,11 +647,23 @@ func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
         return "Claude Code"
     }
     if e.name == "codex" { return "Codex" }
-    if e.name == "openclaw" || e.name == "openclaw-gateway" { return "OpenClaw" }
-    if isInterpreter(e.name) {
-        return interpreterAgent(procArgs(p))
-    }
-    return nil
+    var args: [String]? = isInterpreter(e.name) ? procArgsOrNil(p) : []
+    #if MCOMP_VAULT_TESTING
+    // tests/test_vault_ops.py: a stand-in interpreter of this name whose arguments can't be read
+    if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_UNREADABLE_ARGS"] == e.name { args = nil }
+    #endif
+    return agentKindOf(e.name, args)
+}
+
+/// The agent a process is, from the kernel's name for it and, for an interpreter, its arguments (nil: they couldn't be
+/// read, which counts as an agent: unknownAgent). As lib/owners.py agent_kind and agent_of.
+func agentKindOf(_ name: String, _ args: [String]?) -> String? {
+    if name == "codex" { return "Codex" }
+    if name == "openclaw" || name == "openclaw-gateway" { return "OpenClaw" }
+    if name == "hermes" { return "Hermes Agent" }
+    guard isInterpreter(name) else { return nil }
+    guard let args = args else { return unknownAgent }
+    return interpreterAgent(args, python: name.lowercased().hasPrefix("python"))
 }
 
 /// A process the kernel names after an interpreter (node, bun, python): the agent is told by what it runs.
@@ -648,25 +671,96 @@ func isInterpreter(_ name: String) -> Bool {
     return name == "node" || name == "nodejs" || name == "bun" || name == "Python" || matches(name, "^python[0-9.]*$")
 }
 
-/// The agent an interpreter's arguments run, else nil (as lib/owners.py script_agent and agent_kind):
-/// - "OpenClaw": it names its processes `openclaw` (a command it runs) and `openclaw-gateway` (the gateway, which runs
-///   every conversation), in its first argument; or node running its `openclaw` launcher (openclaw.mjs);
+/// node's options that take their value as the next argument (lib/owners.py NODE_VALUE_OPTIONS), and the ones after
+/// which no script follows.
+let nodeValueOptions: Set<String> = [
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
+    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
+    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
+    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
+    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
+    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
+    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal"]
+let nodeNoScript: Set<String> = ["-e", "--eval", "-p", "--print", "--run", "-h", "--help", "-v", "--version"]
+
+/// The script node runs: the first argument after node's own options (their values skipped), or after `--`.
+func nodeScript(_ argv: [String]) -> String? {
+    var i = 1
+    while i < argv.count {
+        let a = argv[i]
+        if a == "--" { return i + 1 < argv.count ? argv[i + 1] : nil }
+        if nodeNoScript.contains(a) { return nil }
+        if a.hasPrefix("-") && a != "-" {
+            i += (!a.contains("=") && nodeValueOptions.contains(a)) ? 2 : 1
+            continue
+        }
+        return a
+    }
+    return nil
+}
+
+/// What python runs: ("code", the -c program), ("module", the -m module) or ("script", its path). Short options
+/// cluster; -c and -m end the options, -W and -X take a value.
+func pythonTarget(_ argv: [String]) -> (String, String)? {
+    var i = 1
+    while i < argv.count {
+        let a = argv[i]
+        if a == "--" { return i + 1 < argv.count ? ("script", argv[i + 1]) : nil }
+        if a.hasPrefix("--") { i += a == "--check-hash-based-pycs" ? 2 : 1; continue }
+        if a.hasPrefix("-") && a != "-" {
+            var skip = 1
+            let chars = Array(a)
+            var j = 1
+            while j < chars.count {
+                let c = chars[j]
+                let rest = String(chars[(j + 1)...])
+                if c == "c" || c == "m" {
+                    let v = rest.isEmpty ? (i + 1 < argv.count ? argv[i + 1] : nil) : rest
+                    guard let value = v else { return nil }
+                    return (c == "c" ? "code" : "module", value)
+                }
+                if c == "W" || c == "X" { skip = rest.isEmpty ? 2 : 1; break }
+                j += 1
+            }
+            i += skip
+            continue
+        }
+        return ("script", a)
+    }
+    return nil
+}
+
+/// The agent an interpreter's arguments (exactly) run, else nil, as lib/owners.py script_agent:
+/// - "OpenClaw": argv[0] `openclaw` or `openclaw-gateway` (the names it gives its processes), or node running its
+///   `openclaw` launcher (openclaw.mjs);
+/// - "Hermes Agent": argv[0] `hermes` (its process title, with setproctitle), or python running hermes_cli (`-m`, a
+///   `-c` program that imports it: its launcher's) or a `hermes` script; its gateway runs every conversation;
 /// - "Gemini CLI": node running its `gemini` script (bin/gemini, or bundle/gemini.js of @google/gemini-cli), the
-///   launcher and the node process it starts again, whose children are its shell commands and MCP servers;
-/// - "Hermes Agent": python running its CLI or its gateway (hermes_cli, by module or in its launcher's inline script, or
-///   a `hermes` script); the gateway runs every conversation's tools and MCP servers.
-/// The program is the first argument after the interpreter's own options.
-func interpreterAgent(_ args: [String]) -> String? {
+///   launcher and the node process it starts again, whose children are its shell commands and MCP servers.
+/// The program is read past the interpreter's own options and their values.
+func interpreterAgent(_ args: [String], python: Bool) -> String? {
     guard let first = args.first else { return nil }
     let title = URL(fileURLWithPath: first).lastPathComponent
     if title == "openclaw" || title == "openclaw-gateway" { return "OpenClaw" }
-    let prog = args.dropFirst().first { !$0.hasPrefix("-") } ?? ""
-    let base = URL(fileURLWithPath: prog).lastPathComponent
-    if base == "gemini" || base == "gemini.js" || prog.contains("/@google/gemini-cli/") { return "Gemini CLI" }
-    if base == "openclaw" || base == "openclaw.mjs" { return "OpenClaw" }
-    if base == "hermes" || base == "hermes-agent" || base == "hermes-acp" || args.contains(where: { $0.contains("hermes_cli") }) {
-        return "Hermes Agent"
+    if title == "hermes" { return "Hermes Agent" }
+    if python {
+        guard let (kind, v) = pythonTarget(args) else { return nil }
+        switch kind {
+        case "module":
+            let top = v.split(separator: ".").first.map(String.init) ?? v
+            return top == "hermes_cli" || top == "hermes_agent" ? "Hermes Agent" : nil
+        case "code":
+            return v.contains("hermes_cli") ? "Hermes Agent" : nil
+        default:
+            let base = URL(fileURLWithPath: v).lastPathComponent
+            return ["hermes", "hermes-agent", "hermes-acp"].contains(base) ? "Hermes Agent" : nil
+        }
     }
+    guard let script = nodeScript(args), !script.isEmpty else { return nil }
+    let base = URL(fileURLWithPath: script).lastPathComponent
+    if base == "gemini" || base == "gemini.js" || script.contains("/@google/gemini-cli/") { return "Gemini CLI" }
+    if base == "openclaw" || base == "openclaw.mjs" { return "OpenClaw" }
     return nil
 }
 
@@ -687,6 +781,8 @@ func sharedAgentProcess(_ kind: String, _ p: pid_t) -> String? {
             ? "OpenClaw gateway" : nil
     case "Hermes Agent":
         return "Hermes Agent gateway"
+    case unknownAgent:
+        return "an unidentified agent's process"
     default:
         return nil
     }
@@ -775,6 +871,10 @@ struct Requester {
         if agent == "Codex app server" {
             return clean("\(clientExe) (pid \(clientPID)) under Codex's app server, whose conversations share one process"
                          + " (no session's answers apply)" + claim, max: 300)
+        }
+        if agent == "an unidentified agent's process" {
+            return clean("\(clientExe) (pid \(clientPID)) under an interpreter whose arguments couldn't be read, counted as an"
+                         + " agent (no session's answers apply)" + claim, max: 300)
         }
         if let a = agent, a.hasSuffix(" gateway") {
             return clean("\(clientExe) (pid \(clientPID)) under \(a.dropLast(" gateway".count))'s gateway, whose conversations"

@@ -61,11 +61,27 @@ def write(path, text, mode=None):
 
 # --- stand-ins ---------------------------------------------------------------------------------------------------
 COMMON = r'''
-import json, os, sys
+import fcntl, json, os, sys
 a = sys.argv[1:]
+def lock_held():
+    """Whether metacomputer's lock for this agent is held right now (lib/agent_setup.py agent_lock)."""
+    p = os.path.join(os.environ["HOME"], ".local", "share", "metacomputer", "locks",
+                     "agent-" + os.path.basename(sys.argv[0]) + ".lock")
+    try:
+        fd = os.open(p, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
 log = os.environ.get("STUB_LOG")
 if log:
-    open(log, "a").write(json.dumps([os.path.basename(sys.argv[0])] + a) + "\n")
+    open(log, "a").write(json.dumps([os.path.basename(sys.argv[0])] + a + ["#locked" if lock_held() else "#unlocked"]) + "\n")
 def count(name):
     """How many times this stand-in has been asked NAME (kept beside its state)."""
     p = os.path.join(os.environ["HOME"], ".stub-count-" + name)
@@ -121,7 +137,19 @@ print("stub gemini: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
 # Hermes Agent: config.yaml's mcp_servers through `hermes config get KEY --json` (exit 1 "Config key not set: KEY" on
 # stderr), `config set KEY JSON` (replaces) and `config unset KEY` (exit 1 when there's none). Kept here as JSON.
 HERMES = COMMON + r'''
-home = os.environ.get("HERMES_HOME") or os.path.join(os.environ["HOME"], ".hermes")
+# Profiles as Hermes keeps them: --profile NAME first, else a HERMES_HOME that is a profile folder as it is, else the
+# sticky choice (~/.hermes/active_profile, `hermes profile use`), even under a root HERMES_HOME.
+root = os.path.join(os.environ["HOME"], ".hermes")
+named = None
+if a[:1] in (["--profile"], ["-p"]):
+    named, a = a[1], a[2:]
+hh = os.environ.get("HERMES_HOME")
+if hh and os.path.basename(os.path.dirname(hh)) == "profiles" and not named:
+    home = hh
+else:
+    sticky = open(os.path.join(root, "active_profile")).read().strip() if os.path.exists(os.path.join(root, "active_profile")) else ""
+    name = named or sticky or "default"
+    home = (hh or root) if name == "default" else os.path.join(root, "profiles", name)
 path = os.path.join(home, "stub-config.json")
 def load():
     return json.load(open(path)) if os.path.exists(path) else {}
@@ -135,6 +163,13 @@ def get(d, key):
     return d
 if a == ["--version"]:
     print("Hermes Agent v0.23.3 (2026.9.24) · stable · local caafe5389ae5"); print("Python: 3.14.9"); sys.exit(0)
+if a == ["config", "path"]:
+    if os.environ.get("STUB_FAIL_PATH"):
+        sys.exit(1)
+    print(os.path.join(home, "config.yaml"))
+    if os.environ.get("STUB_SWITCH_AFTER_PATH"):        # someone runs `hermes profile use other` meanwhile
+        open(os.path.join(root, "active_profile"), "w").write("other")
+    sys.exit(0)
 if a[:2] == ["config", "get"]:
     if os.environ.get("STUB_FAIL_GET"):
         print("Error: couldn't load the configuration", file=sys.stderr); sys.exit(2)
@@ -216,7 +251,8 @@ if a[:2] == ["skills", "info"]:
     p = os.path.join(os.environ["HOME"], ".agents", "skills", a[2], "SKILL.md")
     if not os.path.exists(p):
         print(json.dumps({"ok": False, "error": {"message": f'Skill "{a[2]}" not found.'}})); sys.exit(1)
-    print(json.dumps({"name": a[2], "source": "agents-skills-personal", "eligible": True})); sys.exit(0)
+    print(json.dumps({"name": a[2], "source": "agents-skills-personal", "eligible": not os.environ.get("STUB_HIDDEN")}))
+    sys.exit(0)
 print("stub openclaw: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
 '''
 
@@ -320,9 +356,15 @@ def skills_dir(b, name):
     return os.path.join(b.home, ".hermes", "skills") if name == "hermes" else os.path.join(b.home, ".agents", "skills")
 
 
+def words(c):
+    """A logged call without the program, Hermes Agent's --profile NAME and the lock marker."""
+    w = c[3:] if c[1:2] in (["--profile"], ["-p"]) else c[1:]
+    return [x for x in w if x not in ("#locked", "#unlocked")]
+
+
 def mutations(b, name):
-    return [c for c in b.calls() if c[0] == name and (c[1:3] in (["mcp", "add"], ["mcp", "remove"], ["mcp", "unset"],
-                                                                  ["config", "set"], ["config", "unset"]))]
+    return [c for c in b.calls() if c[0] == name and (words(c)[:2] in (["mcp", "add"], ["mcp", "remove"], ["mcp", "unset"],
+                                                                       ["config", "set"], ["config", "unset"]))]
 
 
 LABEL = {"openclaw": "OpenClaw", "hermes": "Hermes Agent", "gemini": "Gemini CLI"}
@@ -407,11 +449,12 @@ def agent_cases(name):
         # a skill folder that isn't metacomputer's
         sk = skills_dir(b, name)
         write(os.path.join(sk, "metacomputer", "SKILL.md"), "---\nname: metacomputer\ndescription: someone else's\n---\n")
+        b.stamp_set([])
         p = b.install(f"--only-{name}")
-        check(f"{label}: a skill folder named metacomputer that isn't a link here is left alone, and said",
-              p.returncode == 0 and os.path.isdir(os.path.join(sk, "metacomputer"))
+        check(f"{label}: a skill folder named metacomputer that isn't a link here is left alone, said, and the step is "
+              "unfinished (exit 1, recorded)", p.returncode == 1 and os.path.isdir(os.path.join(sk, "metacomputer"))
               and not os.path.islink(os.path.join(sk, "metacomputer"))
-              and "isn't metacomputer's; left alone" in p.stdout, p.stdout[-500:])
+              and "isn't metacomputer's; left alone" in p.stdout and b.stamp_incomplete() == [name], p.stdout[-500:])
     finally:
         b.close()
 
@@ -456,6 +499,152 @@ def agent_cases(name):
             check(f"{label}: a removal that doesn't take says how to remove it yourself, and keeps the command links",
                   p.returncode != 0 and REMOVE[name] in p.stdout + p.stderr and os.path.islink(b.link)
                   and entry(b, name) is not None, (p.returncode, (p.stdout + p.stderr)[-500:]))
+    finally:
+        b.close()
+
+
+def link_cases():
+    """Skill links: only a link into this checkout's own skill folders is metacomputer's (fix: foreign links)."""
+    print("skill links that aren't metacomputer's")
+    b = Box(agents=("gemini",))
+    try:
+        sk = os.path.join(b.home, ".agents", "skills")
+        os.makedirs(sk)
+        os.symlink("/unmounted/custom/skills/metacomputer", os.path.join(sk, "metacomputer"))   # broken, someone's
+        os.makedirs(os.path.join(b.home, "mine", "skills", "cua-driver"))
+        os.symlink("../../mine/skills/cua-driver", os.path.join(sk, "cua-driver"))              # relative, valid
+        b.stamp_set([])
+        p = b.install("--only-gemini")
+        check("a broken link of someone else's and a relative one that works from its own folder are left as they are; "
+              "exit 1, recorded", p.returncode == 1
+              and os.readlink(os.path.join(sk, "metacomputer")) == "/unmounted/custom/skills/metacomputer"
+              and os.readlink(os.path.join(sk, "cua-driver")) == "../../mine/skills/cua-driver"
+              and b.stamp_incomplete() == ["gemini"], (p.stdout[-500:], os.listdir(sk)))
+        p = b.install("--uninstall")
+        check("--uninstall leaves them too", os.path.islink(os.path.join(sk, "metacomputer"))
+              and os.readlink(os.path.join(sk, "cua-driver")) == "../../mine/skills/cua-driver", p.stdout[-300:])
+        for n in ("metacomputer", "cua-driver"):
+            if os.path.lexists(os.path.join(sk, n)):
+                os.remove(os.path.join(sk, n))
+        os.symlink(os.path.relpath(os.path.join(LAB, "skills", "metacomputer"), sk), os.path.join(sk, "cua-driver"))
+        p = b.install("--only-gemini")
+        check("a link into this checkout's own skill folders (relative, the wrong skill) is metacomputer's: put right",
+              p.returncode == 0 and os.readlink(os.path.join(sk, "cua-driver")) == os.path.join(LAB, ".claude", "skills",
+                                                                                                "cua-driver"),
+              p.stdout[-300:])
+        os.chmod(sk, 0o555)
+        try:
+            p = b.install("--uninstall")
+        finally:
+            os.chmod(sk, 0o755)
+        check("a skill link that can't be removed leaves the uninstall unfinished (exit 1)", p.returncode != 0
+              and "couldn't remove the" in p.stdout, (p.returncode, p.stdout[-300:]))
+        for n in ("metacomputer", "cua-driver"):
+            if os.path.lexists(os.path.join(sk, n)):
+                os.remove(os.path.join(sk, n))
+        write(os.path.join(sk + "-blocker"), "")
+        os.rmdir(sk)
+        os.symlink(sk + "-blocker", sk)                    # the skills folder is a file: no link can be made
+        b.stamp_set([])
+        p = b.install("--only-gemini")
+        check("a skill that can't be linked leaves the step unfinished (exit 1, recorded), the MCP server set up all the "
+              "same", p.returncode == 1 and "couldn't link the" in p.stdout and b.stamp_incomplete() == ["gemini"]
+              and entry(b, "gemini"), p.stdout[-400:])
+    finally:
+        b.close()
+    b = Box(agents=("openclaw",))
+    try:
+        b.stamp_set([])
+        p = b.install("--only-openclaw", STUB_HIDDEN="1")
+        check("OpenClaw: skills it lists but doesn't offer leave the step unfinished (exit 1, recorded)",
+              p.returncode == 1 and "doesn't offer" in p.stdout and b.stamp_incomplete() == ["openclaw"], p.stdout[-300:])
+    finally:
+        b.close()
+
+
+def lock_cases():
+    """Each read, change and read-back runs under the agent's own lock; a lock someone holds stops the step."""
+    print("the agents' locks")
+    import fcntl
+    b = Box()
+    try:
+        for name in ("openclaw", "hermes", "gemini"):
+            p = b.install(f"--only-{name}")
+            config_calls = [c for c in b.calls() if c[0] == name and words(c)[:1] in (["mcp"], ["config"])
+                            and words(c)[:2] != ["config", "path"]]
+            check(f"{LABEL[name]}: every read and change of its configuration ran under its lock",
+                  p.returncode == 0 and config_calls and all(c[-1] == "#locked" for c in config_calls), config_calls)
+        path = os.path.join(b.home, ".local", "share", "metacomputer", "locks", "agent-hermes.lock")
+        fd = os.open(path, os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            os.remove(os.path.join(b.home, ".hermes", "stub-config.json"))
+            p = b.install("--only-hermes", MCOMP_AGENT_LOCK_WAIT="1")
+        finally:
+            os.close(fd)
+        check("Hermes Agent: while another metacomputer run holds its lock, nothing is read or changed: exit 1",
+              p.returncode == 1 and "another metacomputer install is changing" in p.stdout and not mutations(b, "hermes")
+              and entry(b, "hermes") is None, p.stdout[-300:])
+    finally:
+        b.close()
+
+
+def profile_cases():
+    """Hermes Agent: the profile in use is resolved once, and the MCP server and the skills both go there."""
+    print("Hermes Agent profiles")
+    b = Box(agents=("hermes",))
+    try:
+        write(os.path.join(b.home, ".hermes", "active_profile"), "work")
+        p = b.install("--only-hermes", STUB_SWITCH_AFTER_PATH="1")
+        work = os.path.join(b.home, ".hermes", "profiles", "work")
+        e = json.load(open(os.path.join(work, "stub-config.json")))["mcp_servers"]["metacomputer"]
+        check("the sticky profile (work) gets the MCP server and the skills, and a profile switch during the run changes "
+              "nothing (every command pinned to it)", p.returncode == 0 and e["command"] == b.link
+              and os.path.islink(os.path.join(work, "skills", "metacomputer"))
+              and not os.path.lexists(os.path.join(b.home, ".hermes", "skills", "metacomputer"))
+              and not os.path.exists(os.path.join(b.home, ".hermes", "profiles", "other")), p.stdout[-400:])
+        write(os.path.join(b.home, ".hermes", "active_profile"), "work")
+        p = b.install("--uninstall")
+        check("--uninstall removes them from that profile", not os.path.lexists(os.path.join(work, "skills", "metacomputer"))
+              and "metacomputer" not in json.load(open(os.path.join(work, "stub-config.json"))).get("mcp_servers", {}),
+              p.stdout[-300:])
+        p = b.install("--only-hermes", STUB_FAIL_PATH="1")
+        check("a profile that can't be told changes nothing: exit 1", p.returncode == 1 and "profile" in p.stdout
+              and not mutations(b, "hermes"), p.stdout[-300:])
+    finally:
+        b.close()
+
+
+def no_cli_cases():
+    """Uninstall when an agent's CLI isn't there: what it can't read keeps the command links."""
+    print("uninstall without the agents' commands")
+    b = Box(agents=())
+    try:
+        p = b.install("--only-agents", "--no-claude", "--no-codex")
+        seed(b, "gemini", {"command": b.link, "args": ["--vm", "other", "mcp-lazy"]})
+        p = b.install("--uninstall")
+        check("Gemini CLI not on PATH: its settings.json is read all the same, and an entry there that runs the command "
+              "keeps the command links", os.path.islink(b.link) and f"kept {b.link}" in p.stdout, p.stdout[-400:])
+        seed(b, "gemini", {"command": b.link, "args": ["mcp-lazy"]})
+        p = b.install("--uninstall")
+        check("...metacomputer's own entry there, with no gemini to remove it: said, links kept, exit 1",
+              p.returncode != 0 and os.path.islink(b.link) and "isn't available to remove it" in p.stdout,
+              (p.returncode, p.stdout[-400:]))
+        if os.path.exists(config_file(b, "gemini")):
+            os.remove(config_file(b, "gemini"))
+        write(os.path.join(b.home, ".hermes", "config.yaml"), "mcp_servers:\n  mine:\n    command: " + b.link + "\n")
+        p = b.install("--uninstall")
+        check("Hermes Agent not on PATH, its config.yaml naming the command: links kept, said, exit 1",
+              p.returncode != 0 and os.path.islink(b.link) and "couldn't be read" in p.stdout, p.stdout[-400:])
+        p = b.install("--uninstall", MCOMP_BREW_PYTHON="/nonexistent", PATH="/usr/bin:/bin")
+        check("...and with no Python 3.11 to read it at all: links kept, said, exit 1", p.returncode != 0
+              and os.path.islink(b.link) and "needs Python 3.11" in p.stdout, (p.returncode, p.stdout[-400:]))
+        if os.path.exists(os.path.join(b.home, ".hermes", "config.yaml")):
+            os.remove(os.path.join(b.home, ".hermes", "config.yaml"))
+        write(os.path.join(b.home, ".openclaw", "openclaw.json"), '{"mcp": {"servers": {}}}')
+        p = b.install("--uninstall")
+        check("a configuration that doesn't name the command doesn't hold the links back", p.returncode == 0
+              and not os.path.lexists(b.link), (p.returncode, p.stdout[-400:]))
     finally:
         b.close()
 
@@ -648,6 +837,10 @@ def main():
     unit_cases()
     for name in ("openclaw", "hermes", "gemini"):
         agent_cases(name)
+    link_cases()
+    lock_cases()
+    profile_cases()
+    no_cli_cases()
     choice_cases()
     gemini_home_cases()
     package_cases()

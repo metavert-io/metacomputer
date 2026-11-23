@@ -77,7 +77,7 @@ ACTION = ("Run `metacomputer view --open` (Screen Sharing; paste the live-view p
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
 SPACES = re.compile(r"\s+")
 AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex", "OpenClaw": "OpenClaw", "Hermes Agent": "Hermes",
-               "Gemini CLI": "Gemini"}
+               "Gemini CLI": "Gemini", owners.UNKNOWN_AGENT: "Your agent"}
 
 
 def agent_word(rec):

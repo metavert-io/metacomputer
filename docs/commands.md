@@ -471,7 +471,8 @@ says plainly that new Claude Code sessions have no metacomputer tools until that
 fixed, gives the line that fixes it, and says that `metacomputer update` tries again.
 `--uninstall` removes metacomputer's server before the command it runs, and keeps the
 command (`~/.local/bin/metacomputer` and `mcomp`) while any MCP server that stays,
-any agent's (Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's), metacomputer's or not, runs it.
+any agent's (Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's), metacomputer's or not, runs it, or
+may: an agent's configuration that can't be read (its CLI missing, or no Python to read it) keeps them too, and says so.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:
@@ -533,7 +534,12 @@ Each registers `~/.local/bin/metacomputer mcp-lazy` (Codex: the checkout's `bin/
 Claude Code's does: only metacomputer's own entry (a local command, exactly `~/.local/bin/metacomputer` or the checkout's
 launcher, with exactly `mcp-lazy`) is ever changed or removed, read again right before; anything else is named by its
 program and how many arguments it has, the install says how to remove it yourself, and the step counts as unfinished
-(exit status 1, recorded in installed.json so `metacomputer update` runs it again). `--no-NAME` (`--no-codex`,
+(exit status 1, recorded in installed.json so `metacomputer update` runs it again). Each read, change and read-back
+runs under a lock of the agent's own, so two metacomputer installs never interleave; these agents' CLIs have no
+compare-and-swap, so a change another program makes between the install's last read and the agent's own write isn't
+seen (the window is one CLI call). A skill link is metacomputer's only when it points into this checkout's own skill
+folders; anything else there is left, and the step counts as unfinished, as it does when a skill can't be linked.
+`--no-NAME` (`--no-codex`,
 `--no-openclaw`, `--no-hermes`, `--no-gemini`) leaves one alone in this run and later ones, until `--NAME`;
 `--only-NAME` runs only that agent's step. The agents' sessions count as agent sessions for the one-controller rule,
 the vault, handoffs and [an agent session's computer](#an-agent-sessions-computer); OpenClaw's and Hermes Agent's

@@ -39,7 +39,9 @@ ln -s ~/metacomputer/.claude/skills/cua-driver ~/.hermes/skills/cua-driver
 ```
 
 (`hermes mcp add` starts the server to test it and then asks questions, so the install uses `hermes config set`, which
-keeps your comments and every other setting.) `hermes config set` replaces an entry of the same name, so the install
+keeps your comments and every other setting.) The profile is the one `hermes` uses now (`hermes profile use`, or
+`HERMES_HOME`), read once with `hermes config path`; every command after that names it, and the skills go into the same
+profile's `skills/`, so a profile switched meanwhile can't split them. `hermes config set` replaces an entry of the same name, so the install
 reads it first (`hermes config get mcp_servers.metacomputer --json`) and again right before it sets it. It changes
 Hermes Agent's MCP server `metacomputer` only when there's none, by the rule it uses for Claude Code's and Codex's: a
 server that is a local command, exactly `~/.local/bin/metacomputer` or the checkout's `bin/metacomputer`, with exactly

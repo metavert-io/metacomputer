@@ -1242,9 +1242,17 @@ Each of these needs no VM and takes seconds.
   keeping the command links an entry that stays runs; `--no-NAME` remembered until `--NAME`; nothing printed holding a
   configured value; `agents --json` for each; Gemini CLI's settings read as it reads them (comments, no trailing
   commas) and `GEMINI_CLI_HOME`; and the packages: agent-plugin/'s manifests, skills (names, quoted descriptions, links
-  inside the package) and launcher (it runs only an installed checkout's command), and gemini-extension.json. The
-  recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent) and
-  test_vault_ops's (Gemini CLI a session; OpenClaw's and Hermes Agent's gateways none).
+  inside the package) and launcher (it runs only an installed checkout's command), and gemini-extension.json; skill
+  links of someone else's (a broken one, a relative one that works from its own folder) left alone and the step
+  unfinished, one into this checkout put right, a skill that can't be linked or that OpenClaw doesn't offer leaving the
+  step unfinished, and one that can't be removed the uninstall; every read and change of an agent's configuration made
+  under its lock, and nothing changed while another run holds it; Hermes Agent's sticky profile getting both the server
+  and the skills, a switch during the run changing nothing; and an uninstall without an agent's CLI (Gemini CLI's
+  settings.json read directly, Hermes Agent's config.yaml looked through, no Python at all) keeping the command. The
+  recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent, a titled Hermes,
+  a path with spaces, the shared cases in tests/fixtures/agent_argv.json, and an interpreter whose arguments can't be
+  read counting as an agent) and test_vault_ops's (Gemini CLI a session; OpenClaw's and Hermes Agent's gateways, a
+  titled Hermes and an unreadable interpreter none; the same shared cases through the test build).
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST

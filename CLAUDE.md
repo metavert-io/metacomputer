@@ -197,10 +197,12 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   manifests, `PERSIST`, the feature map; `local-lume` hands actions to the existing commands, never reroutes
   them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
   Which processes are agent sessions is `lib/owners.py` `agent_kind`/`agent_of` (Claude Code, Codex, OpenClaw, Hermes
-  Agent, Gemini CLI; an interpreter's, node's or python's, by the program its command line names, read only through
-  ps_table's `ProcTable`) and, for the vault, `vault/Util.swift` `agentKind` (and `sharedAgentProcess`: Codex's app server,
-  OpenClaw's and Hermes Agent's gateways get no session answers): keep the two the same (test_session_guard's stand-ins,
-  test_vault_ops).
+  Agent, Gemini CLI; an interpreter's, node's or python's, by the program its exact arguments run, past the interpreter's
+  options and their values, read only through ps_table's `ProcTable`, `proc_argv`; arguments that can't be read are
+  `UNKNOWN_AGENT`, an agent: fail closed) and, for the vault, `vault/Util.swift` `agentKindOf` (and `sharedAgentProcess`:
+  Codex's app server, OpenClaw's and Hermes Agent's gateways and an unidentified agent get no session answers): keep the
+  two the same; tests/fixtures/agent_argv.json holds the cases both are checked against (test_session_guard, and
+  test_vault_ops through the test build's `test-agent-kind`).
   An agent session's computer (`lib/sessionvm.py`; docs/commands.md "An agent session's computer"): the MCP bridge and
   every claim in an agent session's name leave a record in a private per-account folder (`MCOMP_SESSIONS_DIR` in
   tests, always), and `session_guard` in bin/metacomputer refuses a command that names no VM when it would act on

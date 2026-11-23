@@ -188,6 +188,7 @@ FORMS = [
     ("secrets", ["session", "policy", "n"], "act"), ("secrets", ["session", "delete", "n"], "act"),
     ("secrets", ["revoke", "--all"], "act"), ("secrets", ["disconnect", "--vm", "x"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
+    ("secrets", ["test-agent-kind", "cases.json"], "act"),       # test builds only: what lib/owners.py is checked against
 ]
 ORDER_FREE = sessionvm.READS | {"security", "recordings", "view"}
 
@@ -1271,6 +1272,8 @@ def other_agents_checks():
              ("Gemini CLI", [node, "--max-old-space-size=2048", "/opt/homebrew/bin/gemini", "--", *run], None),
              ("Hermes Agent", [python, "-I", "-m", "hermes_cli.main", "--profile", "default", "gateway", "run", "--quiet",
                                "--", *run], None),
+             ("Hermes Agent", ["hermes", "--", *run], python),
+             ("Gemini CLI", [node, "--require", "/x/preload.js", "/Volumes/My Tools/bin/gemini", "--", *run], None),
              ("OpenClaw", ["openclaw-gateway", "--", *run], node),
              ("OpenClaw", ["openclaw", "--", *run], node))
     for name, argv, exe in cases:
@@ -1290,29 +1293,36 @@ def other_agents_checks():
         check("...and owners.py at-terminal (the user-only commands' check) refuses under it",
               got.get("at_terminal") not in (0, None), got.get("at_terminal"))
     check("no record is left behind", rec_files() == [], rec_files())
-    # Look-alikes, from command lines as ps shows them (a table with known command lines reads no process).
-    t = owners.ProcTable({10: (1, "/opt/homebrew/bin/node"), 11: (1, "node"), 12: (1, "/usr/bin/python3"),
-                          13: (1, "Python"), 14: (1, "node"), 15: (1, "node"), 16: (1, "/bin/zsh"), 17: (1, "node")},
-                         commands={10: "/opt/homebrew/bin/node /x/openclaw/dist/process/supervisor/service-child-relay.js",
-                                   11: "node /x/openclaw/dist/process/supervisor/service-child-group-anchor.js",
-                                   12: "/usr/bin/python3 -m http.server", 13: "Python /x/tools/gemini_helper.py",
-                                   14: "node /x/my-geminid/server.js", 15: "node --inspect",
-                                   16: "/bin/zsh -c gemini", 17: "node /x/bin/gemini-cli-helper"})
-    check("look-alikes aren't agents: OpenClaw's relay and anchor helpers, other node and python programs, a shell "
-          "whose command mentions gemini", not any(owners.agent_of(p, t) for p in t), {p: owners.agent_of(p, t) for p in t})
-    t = owners.ProcTable({20: (1, "node"), 21: (1, "/x/node"), 22: (1, "/x/python3.14"), 23: (1, "openclaw"),
-                          24: (1, "/x/Python"), 25: (1, "hermes")},
-                         commands={20: "node /Users/a/.npm-global/bin/gemini -p hi", 21: "/x/node /x/openclaw.mjs gateway",
-                                   22: "/x/python3.14 -I -c import os ... from hermes_cli.main import main ... gateway run -v",
-                                   24: "/x/Python /x/venv/bin/hermes chat"})
-    check("...and each agent is told however it runs: npm's gemini, OpenClaw's launcher before it names itself and its "
-          "titled process, Hermes Agent's launcher, its pip script and its process title",
-          [owners.agent_of(p, t) for p in (20, 21, 22, 23, 24, 25)]
-          == ["Gemini CLI", "OpenClaw", "Hermes Agent", "OpenClaw", "Hermes Agent", "Hermes Agent"],
-          [owners.agent_of(p, t) for p in (20, 21, 22, 23, 24, 25)])
+    # The argument cases the vault is checked against too (tests/test_vault_ops.py, its test-agent-kind): exact argv,
+    # options and their values, paths with spaces, -c and -m, titles, unreadable arguments.
+    cases = json.load(open(os.path.join(TESTS, "fixtures", "agent_argv.json")))
+    wrong = [(c["why"], owners.agent_of(7, owners.ProcTable({7: (1, c["name"])}, argvs={7: c["argv"]})))
+             for c in cases if owners.agent_of(7, owners.ProcTable({7: (1, c["name"])}, argvs={7: c["argv"]})) != c["agent"]]
+    check(f"each agent is told from its exact arguments, and look-alikes aren't ({len(cases)} shared cases)", not wrong,
+          wrong)
     t = {30: (1, "node")}
-    check("a plain process table (not ps_table's) never reads a command line: an interpreter there isn't an agent",
+    check("a plain process table (the tests' known processes) reads no arguments: an interpreter there isn't an agent",
           owners.agent_of(30, t) is None)
+    # Fail closed: an interpreter above a command whose arguments can't be read may be an agent.
+    me = os.getpid()
+    t = owners.ProcTable({me: (500, "/bin/zsh"), 500: (400, "/opt/homebrew/bin/node"), 400: (1, "/bin/zsh")},
+                         argvs={500: None})
+    check("an interpreter whose arguments can't be read counts as an agent session (unidentified), never as none",
+          owners.agent_of(500, t) == owners.UNKNOWN_AGENT and owners.claude_of(me, t) == 500, owners.claude_of(me, t))
+    real = (owners.ps_table, owners.os.isatty)
+    try:
+        owners.ps_table = lambda strict=False: t
+        owners.os.isatty = lambda fd: True
+        refused = owners.at_user_terminal((0,)) is False
+        t.argvs[500] = ["/opt/homebrew/bin/node", "/x/server.js"]
+        passed = owners.at_user_terminal((0,)) is True
+    finally:
+        owners.ps_table, owners.os.isatty = real
+    check("...so commands only the user runs refuse under it (at_user_terminal), and pass once it's known to be another "
+          "program", refused and passed, (refused, passed))
+    check("...and the live table reads arguments exactly (proc_argv: this process's own, spaces kept)",
+          owners.proc_argv(os.getpid()) is not None and owners.ps_table().argv(os.getpid()) == owners.proc_argv(os.getpid())
+          and owners.proc_argv(2 ** 22 + 7) is None)
 
 
 def main():

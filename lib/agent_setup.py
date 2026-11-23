@@ -16,14 +16,25 @@ codex_entry): it is metacomputer's own ("ok") only as a local command that is ex
 ~/.local/bin/metacomputer, with exactly the argument mcp-lazy. Anything else ("foreign") is never changed or removed: the
 run names it by its program and how many arguments it has, or its transport (never an argument, a variable or a URL),
 says how to remove it yourself, and the step is unfinished. An entry that can't be read ("error") is never taken for a
-missing one. The entry is read again right before any change (its digest, or that it's still missing), and read back
-after it. The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
+missing one. Each read, change and read-back happens under a lock of the agent's own (agent_lock: two metacomputer
+installs never interleave on one agent), the entry is read again right before any change (its digest, or that it's
+still missing), and read back after it. What's left: these agents' CLIs have no compare-and-swap, so a change another
+program makes to the entry between that last read and the agent's own write isn't seen (the window is one CLI call).
+
+Skill links are metacomputer's only when they point into this checkout's own skill folders (skills/, .claude/skills/;
+a relative target is read from the link's folder): only those are ever replaced or removed. A skill that can't be linked
+(something else there, or an error), or that OpenClaw doesn't offer, leaves the step unfinished. Hermes Agent's profile is
+resolved once (`hermes config path`) and every command and the skills folder use it. Uninstall keeps
+~/.local/bin/metacomputer and mcomp whenever an agent's configuration can't be read and may still run them (its CLI
+missing or refused: Gemini CLI's settings.json is read directly; the others' files are looked through for the names). The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
 "keep" when an entry that stays runs ~/.local/bin/metacomputer (or mcomp), so those stay too. Exit status: 0 finished,
 1 unfinished (install.sh records that in installed.json's "incomplete", so `metacomputer update` runs the step again),
 2 usage. Nothing printed holds a value from the agent's configuration but metacomputer's own command.
 
 Stdlib only; Python 3.11 or later (as lib/agents.py).
 """
+import contextlib
+import glob
 import json
 import os
 import sys
@@ -32,6 +43,7 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import agents        # noqa: E402  (trusted, run, version, link_target, choices)
 import claude_mcp    # noqa: E402  (words, digest, linked, MCP_ARGS)
+import flockwait     # noqa: E402  (the lock's wait)
 
 NAME = "metacomputer"
 TOOL_TIMEOUT = 600          # seconds: as Codex's (install.sh CODEX_TOOL_TIMEOUT); OpenClaw's default is 60 s, Hermes's 300
@@ -103,9 +115,19 @@ class Agent:
     tools = ""              # how the agent names the tools, for the messages
     doc = ""
     note = ""               # said once its MCP server is metacomputer's
+    reads_files = False     # read() works without the agent's CLI (Gemini CLI's settings.json)
+    prefix = ()             # arguments every command gets after the program (Hermes Agent's --profile)
 
     def env(self, env):
         return dict(env)
+
+    def pin(self, prog, env):
+        """(env, None), or (env, why) when the configuration this run acts on can't be told."""
+        return env, None
+
+    def config_files(self, env):
+        """The files that may hold its MCP servers, for an uninstall that can't run its CLI."""
+        return []
 
     def skills_dir(self, env):
         return os.path.join(home(env), ".agents", "skills")
@@ -126,7 +148,7 @@ class Agent:
         raise NotImplementedError
 
     def run(self, argv, env):
-        return agents.run(argv, env=self.env(env), cwd=home(env))
+        return agents.run([argv[0], *self.prefix, *argv[1:]], env=self.env(env), cwd=home(env))
 
     def check_skill(self, prog, env):
         """None when nothing more is known, else (ok, words) about whether the agent sees the metacomputer skill."""
@@ -151,8 +173,13 @@ class Gemini(Agent):
     def settings(self, env):
         return os.path.join(self.base(env), ".gemini", "settings.json")
 
+    reads_files = True
+
     def skills_dir(self, env):
         return os.path.join(self.base(env), ".agents", "skills")
+
+    def config_files(self, env):
+        return [self.settings(env)]
 
     def read(self, prog, env):
         path = self.settings(env)
@@ -200,11 +227,38 @@ class Hermes(Agent):
     300). Skills: $HERMES_HOME/skills (it doesn't read ~/.agents/skills unless told to)."""
     name, label, prog, tools, doc = "hermes", "Hermes Agent", "hermes", "mcp__metacomputer__*", "docs/hermes.md"
 
+    profile = None          # the named profile this run acts on (None: the default one)
+
     def hermes_home(self, env):
         return env.get("HERMES_HOME") or os.path.join(home(env), ".hermes")
 
     def skills_dir(self, env):
         return os.path.join(self.hermes_home(env), "skills")
+
+    def pin(self, prog, env):
+        """The profile `hermes` acts on now (its sticky `hermes profile use` choice, or HERMES_HOME), resolved once with
+        `hermes config path` and pinned for every later command: HERMES_HOME set to its folder, and `--profile default`
+        for the default one (a root HERMES_HOME alone still follows the sticky choice). The skills go into the same
+        folder."""
+        self.prefix, self.profile = (), None
+        rc, out, _ = self.run([prog, "config", "path"], env)
+        lines = [x.strip() for x in out.splitlines() if x.strip()]
+        path = lines[-1] if rc == 0 and lines else ""
+        if not (os.path.isabs(path) and os.path.basename(path) == "config.yaml"):
+            return env, "couldn't tell which Hermes Agent profile is in use (hermes config path)"
+        folder = os.path.dirname(path)
+        named = os.path.basename(os.path.dirname(folder)) == "profiles"
+        self.profile = os.path.basename(folder) if named else None
+        self.prefix = () if named else ("--profile", "default")
+        return dict(env, HERMES_HOME=folder), None
+
+    def config_files(self, env):
+        root = os.path.join(home(env), ".hermes")
+        return ([os.path.join(env["HERMES_HOME"], "config.yaml")] if env.get("HERMES_HOME") else []) + \
+            [os.path.join(root, "config.yaml")] + sorted(glob.glob(os.path.join(root, "profiles", "*", "config.yaml")))
+
+    def cli(self):
+        return f"hermes -p {self.profile}" if self.profile else "hermes"
 
     def read(self, prog, env):
         rc, out, err = self.run([prog, "config", "get", f"mcp_servers.{NAME}", "--json"], env)
@@ -228,11 +282,11 @@ class Hermes(Agent):
         return [prog, "config", "unset", f"mcp_servers.{NAME}"]
 
     def add_line(self, link_shown):
-        return (f"hermes config set mcp_servers.{NAME} '{{\"command\": \"{link_shown}\", \"args\": [\"mcp-lazy\"], "
+        return (f"{self.cli()} config set mcp_servers.{NAME} '{{\"command\": \"{link_shown}\", \"args\": [\"mcp-lazy\"], "
                 f"\"timeout\": {TOOL_TIMEOUT}}}'")
 
     def remove_line(self):
-        return f"hermes config unset mcp_servers.{NAME}"
+        return f"{self.cli()} config unset mcp_servers.{NAME}"
 
 
 class OpenClaw(Agent):
@@ -244,6 +298,13 @@ class OpenClaw(Agent):
 
     def env(self, env):
         return dict(env, OPENCLAW_NO_AUTO_UPDATE="1")        # no update check for a quick command
+
+    def config_files(self, env):
+        if env.get("OPENCLAW_CONFIG_PATH"):
+            return [env["OPENCLAW_CONFIG_PATH"]]
+        state = env.get("OPENCLAW_STATE_DIR") or os.path.join(home(env), ".openclaw")
+        return [os.path.join(state, "openclaw.json")] + sorted(glob.glob(os.path.join(home(env), ".openclaw-*",
+                                                                                         "openclaw.json")))
 
     def read(self, prog, env):
         rc, out, err = self.run([prog, "mcp", "show", NAME, "--json"], env)
@@ -335,22 +396,35 @@ def tilde(path, env):
 
 
 # --- skill links -------------------------------------------------------------------------------------------------
-def old_target(t, root):
-    """A link target an earlier install left: inside this checkout, or a skill folder that's gone (a moved checkout)."""
-    if t.startswith(root.rstrip("/") + "/"):
-        return True
-    return not os.path.exists(t) and (t.endswith("/skills/metacomputer") or t.endswith("/skills/cua-driver")
-                                      or t.endswith("/skills/virtual-computer"))
+def _target(path):
+    """Where a link points, its relative target read from the link's own folder, normalized (not followed)."""
+    t = os.readlink(path)
+    return os.path.normpath(t if os.path.isabs(t) else os.path.join(os.path.dirname(path), t))
+
+
+def _roots(root):
+    return {os.path.normpath(root), os.path.realpath(root)}
+
+
+def ours_link(path, root):
+    """A link metacomputer made: it points into this checkout's own skill folders (skills/, .claude/skills/)."""
+    try:
+        t = _target(path)
+    except OSError:
+        return False
+    return any(os.path.dirname(t) in (os.path.join(r, "skills"), os.path.join(r, ".claude", "skills"))
+               for r in _roots(root))
 
 
 def ensure_skill(path, target, root):
-    """"ok" (already this link), "made", "foreign" (something else there: left alone) or "error"."""
+    """"ok" (already this link), "made", "foreign" (something else there, a link metacomputer didn't make included:
+    left alone) or "error"."""
     try:
         if os.path.islink(path):
-            cur = os.readlink(path)
-            if cur == target:
+            want = {os.path.normpath(target)} | {os.path.join(r, os.path.relpath(target, root)) for r in _roots(root)}
+            if _target(path) in want:
                 return "ok"
-            if not old_target(cur, root):
+            if not ours_link(path, root):
                 return "foreign"
             os.unlink(path)
         elif os.path.lexists(path):
@@ -360,6 +434,47 @@ def ensure_skill(path, target, root):
         return "made"
     except OSError:
         return "error"
+
+
+# --- locks and files ---------------------------------------------------------------------------------------------
+class Busy(Exception):
+    pass
+
+
+def lock_path(name, env):
+    return os.path.join(home(env), ".local", "share", "metacomputer", "locks", f"agent-{name}.lock")
+
+
+@contextlib.contextmanager
+def agent_lock(name, env):
+    """The agent's own lock (a flock on a file of this account's, MCOMP_AGENT_LOCK_WAIT seconds at most, 60 by default),
+    held around each read, change and read-back of its configuration and skill links: two metacomputer runs never
+    interleave on one agent. The agent's own CLI doesn't take it (it has none of its own to honor)."""
+    path = lock_path(name, env)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        flockwait.exclusive(fd, float(os.environ.get("MCOMP_AGENT_LOCK_WAIT", "60")), 0.1)
+    except BlockingIOError:
+        os.close(fd)
+        raise Busy() from None
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+def mentions(path):
+    """True when a configuration file may run metacomputer's command (it names metacomputer or mcomp), or can't be
+    read; False when it plainly doesn't."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(16 << 20)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return b"metacomputer" in data or b"mcomp" in data
 
 
 # --- the steps ---------------------------------------------------------------------------------------------------
@@ -376,6 +491,58 @@ class Out:
         sys.stdout.flush()
 
 
+def _register(agent, prog, root, link, env, out):
+    """The MCP server, under the agent's lock: (finished, registered)."""
+    link_shown = tilde(link, env)
+    again_line = f"./install.sh --only-{agent.name}"
+    res = agent.read(prog, env)
+    own = classify(res, root, link)
+    if own == "error":
+        out("warn", f"couldn't read {agent.label}'s MCP server {NAME} ({res.get('why')}), so it was left as it is; "
+                    f"try {again_line} again")
+        return False, False
+    if own == "foreign":
+        out("warn", f"{agent.label} already has an MCP server named {NAME} that isn't metacomputer's (it runs "
+                    f"{describe(res, own, env)}); it was left as it is.")
+        out("warn", f"To use metacomputer's instead: {agent.remove_line()}, then {again_line}")
+        return False, False
+    if own == "ok":
+        out("ok", f"MCP server {NAME} already registered (tools: {agent.tools})")
+        return True, True
+    # Missing: read again right before the add (Gemini's and Hermes's adds replace an entry of the same name), then add
+    # it and read it back.
+    if classify(agent.read(prog, env), root, link) != "absent":
+        out("warn", f"{agent.label}'s MCP server {NAME} changed since it was read, so it was left as it is; run "
+                    f"{again_line} again")
+        return False, False
+    agent.run(agent.add_argv(prog, link), env)
+    if classify(agent.read(prog, env), root, link) == "ok":
+        out("ok", f"MCP server {NAME} for every {agent.label} session (tools: {agent.tools}, there even while the VM is "
+                  "off)")
+        return True, True
+    out("warn", f"could not add the MCP server to {agent.label}; run: {agent.add_line(link_shown)}")
+    return False, False
+
+
+def _link_skills(agent, root, env, out):
+    """The skill links, under the agent's lock: True when both are there."""
+    done = True
+    sdir = agent.skills_dir(env)
+    where = tilde(sdir, env)
+    for name in SKILLS:
+        state = ensure_skill(os.path.join(sdir, name), skill_target(root, name), root)
+        if state in ("ok", "made"):
+            out("ok", f"skill {name} ({where}, read by {agent.label})")
+            continue
+        done = False
+        if state == "foreign":
+            out("warn", f"{where}/{name} is already there and isn't metacomputer's; left alone ({agent.label} won't get "
+                        f"the {name} skill; move it away, then ./install.sh --only-{agent.name})")
+        else:
+            out("warn", f"couldn't link the {name} skill into {where} ({agent.label} won't get it)")
+    return done
+
+
 def install(agent, root, link, env, out):
     """Set metacomputer up for one agent: its MCP server and its skills. True when everything finished."""
     prog, why = agents.trusted(agent.prog)
@@ -383,100 +550,103 @@ def install(agent, root, link, env, out):
         out("warn", why or f"{agent.label}'s {agent.prog} command isn't on PATH; after installing it, run: "
                            f"./install.sh --only-{agent.name}")
         return False
-    finished = registered = True
-    link_shown = tilde(link, env)
-    res = agent.read(prog, env)
-    own = classify(res, root, link)
-    again_line = f"./install.sh --only-{agent.name}"
-    if own == "error":
-        out("warn", f"couldn't read {agent.label}'s MCP server {NAME} ({res.get('why')}), so it was left as it is; "
-                    f"try {again_line} again")
-        finished = registered = False
-    elif own == "foreign":
-        out("warn", f"{agent.label} already has an MCP server named {NAME} that isn't metacomputer's (it runs "
-                    f"{describe(res, own, env)}); it was left as it is.")
-        out("warn", f"To use metacomputer's instead: {agent.remove_line()}, then {again_line}")
-        finished = registered = False
-    elif own == "ok":
-        out("ok", f"MCP server {NAME} already registered (tools: {agent.tools})")
-    else:
-        # Missing: read again right before the add (Gemini's and Hermes's adds replace an entry of the same name), then
-        # add it and read it back.
-        if classify(agent.read(prog, env), root, link) != "absent":
-            out("warn", f"{agent.label}'s MCP server {NAME} changed since it was read, so it was left as it is; run "
-                        f"{again_line} again")
-            finished = registered = False
-        else:
-            agent.run(agent.add_argv(prog, link), env)
-            back = agent.read(prog, env)
-            if classify(back, root, link) == "ok":
-                out("ok", f"MCP server {NAME} for every {agent.label} session (tools: {agent.tools}, there even while "
-                          "the VM is off)")
-            else:
-                out("warn", f"could not add the MCP server to {agent.label}; run: {agent.add_line(link_shown)}")
-                finished = registered = False
-    sdir = agent.skills_dir(env)
-    for name in SKILLS:
-        state = ensure_skill(os.path.join(sdir, name), skill_target(root, name), root)
-        where = tilde(sdir, env)
-        if state in ("ok", "made"):
-            out("ok", f"skill {name} ({where}, read by {agent.label})")
-        elif state == "foreign":
-            out("warn", f"{where}/{name} is already there and isn't metacomputer's; left alone ({agent.label} won't get "
-                        f"the {name} skill)")
-        else:
-            out("warn", f"couldn't link the {name} skill into {where} ({agent.label} won't get it)")
+    env, why = agent.pin(prog, env)
+    if why:
+        out("warn", f"{why}, so {agent.label} was left as it is; try ./install.sh --only-{agent.name} again")
+        return False
+    try:
+        with agent_lock(agent.name, env):
+            finished, registered = _register(agent, prog, root, link, env, out)
+            finished = _link_skills(agent, root, env, out) and finished
+    except Busy:
+        out("warn", f"another metacomputer install is changing {agent.label}'s setup right now, so nothing was changed; "
+                    f"run ./install.sh --only-{agent.name} again")
+        return False
     if agent.note and registered:
         out("say", agent.note)
     seen = agent.check_skill(prog, env)
     if seen is not None:
         out("ok" if seen[0] else "warn", seen[1])
+        finished = finished and seen[0]
     return finished
+
+
+def _unregister(agent, prog, root, link, env, out):
+    """The MCP server, under the agent's lock: True when it finished. prog None: the agent's CLI isn't available."""
+    if prog is None and not agent.reads_files:
+        files = [f for f in agent.config_files(env) if os.path.lexists(f) and mentions(f)]
+        if files:
+            out("warn", f"{agent.label}'s {agent.prog} command isn't available, so its configuration "
+                        f"({', '.join(tilde(f, env) for f in files)}) couldn't be read, and it may run metacomputer's "
+                        "command: that stays")
+            out("keep", f"{agent.label}'s")
+            return False
+        return True
+    res = agent.read(prog, env)
+    own = classify(res, root, link)
+    if own == "absent":
+        return True
+    if own == "error":
+        out("warn", f"couldn't read {agent.label}'s MCP server {NAME} ({res.get('why')}), so it was left as it is;")
+        out("warn", f"run ./install.sh --uninstall again, or remove it yourself: {agent.remove_line()}")
+        out("keep", f"{agent.label}'s")
+        return False
+    here = own == "ok" and (res["entry"]["command"] != link or points_here(link, root))
+    if not here:
+        out("say", f"{agent.label}'s MCP server {NAME} stays: it runs {describe(res, own, env)}, which isn't this "
+                   "checkout's")
+        if claude_mcp.linked(res, link):
+            out("keep", f"{agent.label}'s")
+        return True
+    if prog is None:
+        out("warn", f"{agent.label}'s MCP server {NAME} is metacomputer's, but its {agent.prog} command isn't available "
+                    f"to remove it: remove the {NAME} entry from {tilde(agent.config_files(env)[0], env)} yourself")
+        out("keep", f"{agent.label}'s")
+        return False
+    if digest(agent.read(prog, env)) != digest(res):
+        out("warn", f"{agent.label}'s MCP server {NAME} changed since it was read, so it was left as it is;")
+        out("warn", f"run ./install.sh --uninstall again, or remove it yourself: {agent.remove_line()}")
+        out("keep", f"{agent.label}'s")
+        return False
+    agent.run(agent.remove_argv(prog), env)
+    if agent.read(prog, env)["kind"] == "absent":
+        out("ok", f"removed {agent.label}'s {NAME} MCP server")
+        return True
+    out("warn", f"couldn't remove {agent.label}'s {NAME} MCP server (or confirm it's gone); remove it yourself: "
+                f"{agent.remove_line()}")
+    out("keep", f"{agent.label}'s")
+    return False
 
 
 def uninstall(agent, root, link, env, out):
     """Remove what this checkout set up for one agent: its MCP server when it's metacomputer's own and runs this
-    checkout (read again right before, and checked after), and the skill links that point here. True when it finished."""
+    checkout (read again right before, and checked after), and the skill links metacomputer made. An entry that can't be
+    read keeps the command links (keep). True when it finished."""
     prog, _ = agents.trusted(agent.prog)
-    finished = True
     if prog:
-        res = agent.read(prog, env)
-        own = classify(res, root, link)
-        if own == "error":
-            out("warn", f"couldn't read {agent.label}'s MCP server {NAME} ({res.get('why')}), so it was left as it is;")
-            out("warn", f"run ./install.sh --uninstall again, or remove it yourself: {agent.remove_line()}")
+        env, why = agent.pin(prog, env)
+        if why:
+            out("warn", f"{why}, so {agent.label}'s setup was left as it is; run ./install.sh --uninstall again")
             out("keep", f"{agent.label}'s")
-            finished = False
-        elif own != "absent":
-            here = own == "ok" and (res["entry"]["command"] != link or points_here(link, root))
-            if not here:
-                out("say", f"{agent.label}'s MCP server {NAME} stays: it runs {describe(res, own, env)}, which isn't "
-                           "this checkout's")
-                if claude_mcp.linked(res, link):
-                    out("keep", f"{agent.label}'s")
-            elif digest(agent.read(prog, env)) != digest(res):
-                out("warn", f"{agent.label}'s MCP server {NAME} changed since it was read, so it was left as it is;")
-                out("warn", f"run ./install.sh --uninstall again, or remove it yourself: {agent.remove_line()}")
-                out("keep", f"{agent.label}'s")
-                finished = False
-            else:
-                agent.run(agent.remove_argv(prog), env)
-                if agent.read(prog, env)["kind"] == "absent":
-                    out("ok", f"removed {agent.label}'s {NAME} MCP server")
-                else:
-                    out("warn", f"couldn't remove {agent.label}'s {NAME} MCP server (or confirm it's gone); remove it "
-                                f"yourself: {agent.remove_line()}")
-                    out("keep", f"{agent.label}'s")
+            return False
+    try:
+        with agent_lock(agent.name, env):
+            finished = _unregister(agent, prog, root, link, env, out)
+            sdir = agent.skills_dir(env)
+            for name in SKILLS:
+                path = os.path.join(sdir, name)
+                try:
+                    if os.path.islink(path) and ours_link(path, root):
+                        os.unlink(path)
+                        out("ok", f"removed the {name} skill link for {agent.label}")
+                except OSError:
+                    out("warn", f"couldn't remove the {name} skill link in {tilde(sdir, env)}")
                     finished = False
-    sdir = agent.skills_dir(env)
-    for name in SKILLS:
-        path = os.path.join(sdir, name)
-        try:
-            if os.path.islink(path) and os.readlink(path) == skill_target(root, name):
-                os.unlink(path)
-                out("ok", f"removed the {name} skill link for {agent.label}")
-        except OSError:
-            out("warn", f"couldn't remove the {name} skill link in {tilde(sdir, env)}")
+    except Busy:
+        out("warn", f"another metacomputer install is changing {agent.label}'s setup right now, so it was left as it "
+                    "is; run ./install.sh --uninstall again")
+        out("keep", f"{agent.label}'s")
+        return False
     return finished
 
 
@@ -488,6 +658,10 @@ def status(agent, root, link, env):
     if why:
         st["untrusted"] = why
     if not prog:
+        return st
+    env, why = agent.pin(prog, env)
+    if why:
+        st.update(mcp_ok=False, mcp_server=None, mcp_error=why, set_up=False)
         return st
     res = agent.read(prog, env)
     own = classify(res, root, link)

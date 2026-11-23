@@ -412,6 +412,7 @@ def run(td, procs):
 
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "MCOMP_VAULT_DIR": vdir, "LANG": "en_US.UTF-8",
            "MCOMP_VAULT_TEST_IGNORE_AGENT": "1",
+           "MCOMP_VAULT_TEST_UNREADABLE_ARGS": "nodejs",   # a stand-in interpreter whose arguments can't be read
            "MCOMP_VAULT_TEST_SSH": stub}
     sock = os.path.join(vdir, "vault.sock")
     alog = os.path.join(vdir, "audit.jsonl")
@@ -1217,7 +1218,7 @@ def run(td, procs):
           and recs[-1].get("approval") == "grant:session" and recs[-1].get("requester", {}).get("agent") == "Gemini CLI",
           (res, recs[-1:]))
     for argv0, exe, said, label in ((["openclaw-gateway", "run"], fnode, "under OpenClaw's gateway", "OpenClaw gateway"),
-                                    ([fpython, "hermes_cli.main"], None, "under Hermes Agent's gateway",
+                                    ([fpython, "-mhermes_cli.main"], None, "under Hermes Agent's gateway",
                                      "Hermes Agent gateway")):
         p, outs = as_agent(argv0, proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
                            ["fill", "web-each", "--vm", "opsvm", "--field", "password"], exe=exe)
@@ -1232,6 +1233,38 @@ def run(td, procs):
         check(f"{label} is no session (its conversations share the process): 'session' allows only that use, the next "
               "asks again", [x[0] for x in res] == [0, 0] and not recs[-1].get("requester", {}).get("claude_pid")
               and recs[-1].get("requester", {}).get("agent") == label, (res, recs[-2:]))
+    # Hermes Agent by its process title alone (setproctitle: argv[0] "hermes"), and an interpreter whose arguments can't
+    # be read: an agent all the same, and no session (fail closed)
+    fnodejs = os.path.join(td, "fakeinterp3", "nodejs")
+    os.makedirs(os.path.dirname(fnodejs))
+    open(fnodejs + ".c", "w").write(FAKE_INTERP_C)
+    subprocess.run(["cc", "-o", fnodejs, fnodejs + ".c"], capture_output=True, text=True)
+    for argv0, exe, said, label in ((["hermes", "x"], fpython, "under Hermes Agent's gateway", "Hermes Agent gateway"),
+                                    ([fnodejs, "/x/bin/gemini"], None, "under an interpreter whose arguments couldn't be read",
+                                     "an unidentified agent's process")):
+        p, outs = as_agent(argv0, proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
+                           ["fill", "web-each", "--vm", "opsvm", "--field", "password"], exe=exe)
+        u.expect(said)
+        u.expect("Type web-each to allow")
+        u.send("web-each session\n")
+        u.expect(said)
+        u.expect("Type web-each to allow")
+        u.send("web-each\n")
+        res = claude_results(p, outs)
+        recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"]
+        check(f"{label}: an agent, and no session: named in the question, 'session' allows only that use",
+              [x[0] for x in res] == [0, 0] and not recs[-1].get("requester", {}).get("claude_pid")
+              and recs[-1].get("requester", {}).get("agent") == label, (res, recs[-2:]))
+    # The same argument cases lib/owners.py is checked against (tests/test_session_guard.py), through the vault's own
+    # reading of them
+    cases_file = os.path.join(LAB, "tests", "fixtures", "agent_argv.json")
+    cases = json.load(open(cases_file))
+    r = subprocess.run([BIN, "test-agent-kind", cases_file], env=env, capture_output=True, text=True, timeout=60)
+    got = r.stdout.splitlines()
+    wrong = [(c["why"], g) for c, g in zip(cases, got) if (None if g == "-" else g) != c["agent"]]
+    check(f"the vault tells the agents from their kernel names and arguments as lib/owners.py does ({len(cases)} shared "
+          "cases: options and their values, paths with spaces, -c and -m, titles, unreadable arguments)",
+          r.returncode == 0 and len(got) == len(cases) and not wrong, (wrong, r.stderr[-300:]))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")
     u.send("web-each unlock\n")

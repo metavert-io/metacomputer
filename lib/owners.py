@@ -93,7 +93,7 @@ def cli():
 
 
 def ps_table(strict=False):
-    """{pid: (ppid, comm)} for every process (a ProcTable: an interpreter's command line on request). strict: OSError when ps fails or lists nothing, instead of a table
+    """{pid: (ppid, comm)} for every process (a ProcTable: an interpreter's arguments on request). strict: OSError when ps fails or lists nothing, instead of a table
     that would look like one without agents."""
     r = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
     out = r.stdout
@@ -111,24 +111,75 @@ def full_command(pid):
     return subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
 
 
-class ProcTable(dict):
-    """ps_table's {pid: (ppid, comm)}, and the command lines of its interpreter processes (node, python), read when
-    asked (command()) and kept with the table: an agent that runs on an interpreter (Gemini CLI, Hermes Agent,
-    OpenClaw's launcher) is told from any other program by the program it names. live: read a command line that isn't
-    known yet from the process itself (ps_table's tables); a table made of known parts (the tests') never does."""
+_CTL_KERN, _KERN_PROCARGS2 = 1, 49            # sysctl(3): a process's exact arguments, as the kernel keeps them
 
-    def __init__(self, *args, commands=None, live=False, **kw):
+
+def proc_argv(pid):
+    """A process's arguments, exactly (argv, one string each: spaces inside an argument stay inside it), or None when
+    they can't be read (no such process, another account's, a zombie). macOS: sysctl KERN_PROCARGS2, which holds what
+    the process left there, so a program that renamed itself (node's process.title, setproctitle) shows its new name as
+    argv[0]; Linux: /proc/PID/cmdline."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+            import ctypes.util
+            import struct
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            mib = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 8:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0 or size.value < 8:
+                return None
+            raw = buf.raw[:size.value]
+            argc = struct.unpack_from("<i", raw, 0)[0]
+        except (OSError, AttributeError, ValueError, struct.error):
+            return None
+        i = raw.find(b"\0", 4)                    # the executable's path, then padding
+        if i < 0 or argc <= 0:
+            return None
+        while i < len(raw) and raw[i] == 0:
+            i += 1
+        out = []
+        while len(out) < argc and i < len(raw):
+            j = raw.find(b"\0", i)
+            j = len(raw) if j < 0 else j
+            out.append(raw[i:j].decode("utf-8", "replace"))
+            i = j + 1
+        return out or None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            parts = f.read().split(b"\0")
+    except OSError:
+        return None
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return [x.decode("utf-8", "replace") for x in parts] or None
+
+
+class ProcTable(dict):
+    """ps_table's {pid: (ppid, comm)}, and the arguments of its interpreter processes (node, python), read when asked
+    (argv()) and kept with the table: an agent that runs on an interpreter (Gemini CLI, Hermes Agent, OpenClaw's
+    launcher) is told from any other program by the program it runs. live: read arguments that aren't known yet from
+    the process itself (ps_table's tables; None when they can't be read); a table made of known parts (the tests') never
+    does: argvs maps a pid to its argument list, or to None for arguments that couldn't be read."""
+
+    def __init__(self, *args, argvs=None, live=False, **kw):
         super().__init__(*args, **kw)
-        self.commands = dict(commands or {})
+        self.argvs = dict(argvs or {})
         self.live = live
 
-    def command(self, pid):
-        if pid not in self.commands:
-            try:
-                self.commands[pid] = full_command(pid) if self.live and pid in self else ""
-            except (OSError, subprocess.SubprocessError):
-                self.commands[pid] = ""
-        return self.commands[pid]
+    def argv(self, pid):
+        if pid not in self.argvs:
+            self.argvs[pid] = proc_argv(pid) if self.live and pid in self else (None if self.live else [])
+        return self.argvs[pid]
 
 
 def ancestors(pid, table):
@@ -160,43 +211,121 @@ def is_codex(comm):
     return os.path.basename(comm or "") == "codex"
 
 
-# Every agent session metacomputer knows, by the name its messages, claims, events and handoffs use.
-AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI")
+# Every agent session metacomputer knows, by the name its messages, claims, events and handoffs use. UNKNOWN_AGENT is an
+# interpreter (node, python) whose arguments couldn't be read: it may be an agent, so it counts as one (fail closed):
+# commands only the user runs refuse under it, and the session guard, claims and the vault treat it as a session.
+UNKNOWN_AGENT = "unidentified agent"
+AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI", UNKNOWN_AGENT)
 # An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
 _INTERPRETER = re.compile(r"(node|nodejs|bun|python[0-9.]*|Python)")
+# node's options that take their value as the next argument (any other option is a flag, or carries `=value`), and the
+# ones after which no script follows (code, or a package.json script).
+NODE_VALUE_OPTIONS = frozenset((
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
+    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
+    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
+    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
+    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
+    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
+    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal"))
+NODE_NO_SCRIPT = frozenset(("-e", "--eval", "-p", "--print", "--run", "-h", "--help", "-v", "--version"))
 
 
 def is_interpreter(comm):
-    return bool(_INTERPRETER.fullmatch(os.path.basename(comm or "")))
+    return bool(_INTERPRETER.fullmatch(os.path.basename(comm or "").strip("()")))
 
 
-def script_agent(command):
-    """The agent an interpreter's command line (ps command=) runs, else None. The program is the first word after the
-    interpreter's own options:
-      Gemini CLI    node running its `gemini` script (npm's and Homebrew's bin/gemini, or bundle/gemini.js of the
-                    @google/gemini-cli package): the launcher, and the node process it starts again with more memory,
-                    whose children are its shell commands and MCP servers
-      OpenClaw      node running its `openclaw` launcher (openclaw.mjs), before it names itself (agent_kind)
-      Hermes Agent  python running its CLI or gateway (`-m hermes_cli.main ... gateway run`, the launcher's inline
-                    script, which imports hermes_cli, or a `hermes` script): the gateway runs every conversation's tools
-                    and MCP servers
-    A program with spaces in its path is missed (the line is split at spaces): an accident guard, like the rest."""
-    words = (command or "").split()
-    prog = next((w for w in words[1:] if not w.startswith("-")), "")
-    base = os.path.basename(prog)
-    if base in ("gemini", "gemini.js") or "/@google/gemini-cli/" in prog:
-        return "Gemini CLI"
-    if base in ("openclaw", "openclaw.mjs"):
-        return "OpenClaw"
-    if "hermes_cli" in (command or "") or base in ("hermes", "hermes-agent", "hermes-acp"):
-        return "Hermes Agent"
+def _family(comm):
+    return "python" if os.path.basename(comm or "").strip("()").lower().startswith("python") else "node"
+
+
+def _node_script(argv):
+    """The script node runs: the first argument after node's own options (their values skipped), or after `--`."""
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            return argv[i + 1] if i + 1 < len(argv) else None
+        if a in NODE_NO_SCRIPT:
+            return None
+        if a.startswith("-") and a != "-":
+            i += 2 if ("=" not in a and a in NODE_VALUE_OPTIONS) else 1
+            continue
+        return a
     return None
 
 
-def agent_kind(comm, command=None):
+def _python_target(argv):
+    """What python runs: ("code", the -c program), ("module", the -m module) or ("script", its path), or None. Short
+    options cluster (`-IBc PROGRAM`); -c and -m end the options, -W and -X take a value."""
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            return ("script", argv[i + 1]) if i + 1 < len(argv) else None
+        if a.startswith("--"):
+            i += 2 if a == "--check-hash-based-pycs" else 1
+            continue
+        if a.startswith("-") and a != "-":
+            skip = 1
+            for j in range(1, len(a)):
+                if a[j] in "cm":
+                    v = a[j + 1:] or (argv[i + 1] if i + 1 < len(argv) else None)
+                    return None if v is None else ("code" if a[j] == "c" else "module", v)
+                if a[j] in "WX":
+                    skip = 1 if a[j + 1:] else 2
+                    break
+            i += skip
+            continue
+        return ("script", a)
+    return None
+
+
+def script_agent(argv, family="node"):
+    """The agent an interpreter's arguments (argv, exactly) run, else None:
+      OpenClaw      argv[0] `openclaw` or `openclaw-gateway` (the name it gives its processes), or node running its
+                    `openclaw` launcher (openclaw.mjs) before it does
+      Hermes Agent  argv[0] `hermes` (its process title, with setproctitle), or python running its CLI or gateway: the
+                    module hermes_cli (`-m hermes_cli.main ... gateway run`), a -c program that imports it (its
+                    launcher's), or a `hermes` script; the gateway runs every conversation's tools and MCP servers
+      Gemini CLI    node running its `gemini` script (npm's and Homebrew's bin/gemini, or bundle/gemini.js of the
+                    @google/gemini-cli package): the launcher, and the node process it starts again with more memory,
+                    whose children are its shell commands and MCP servers
+    The program is read past the interpreter's own options and their values (node: NODE_VALUE_OPTIONS; python: -W, -X),
+    from the exact arguments (proc_argv), so a path with spaces stays one."""
+    if not argv:
+        return None
+    title = os.path.basename(argv[0])
+    if title in ("openclaw", "openclaw-gateway"):
+        return "OpenClaw"
+    if title == "hermes":
+        return "Hermes Agent"
+    if family == "python":
+        t = _python_target(argv)
+        if t is None:
+            return None
+        kind, v = t
+        if kind == "module":
+            return "Hermes Agent" if v.split(".")[0] in ("hermes_cli", "hermes_agent") else None
+        if kind == "code":
+            return "Hermes Agent" if "hermes_cli" in v else None
+        return "Hermes Agent" if os.path.basename(v) in ("hermes", "hermes-agent", "hermes-acp") else None
+    script = _node_script(argv)
+    if not script:
+        return None
+    base = os.path.basename(script)
+    if base in ("gemini", "gemini.js") or "/@google/gemini-cli/" in script:
+        return "Gemini CLI"
+    if base in ("openclaw", "openclaw.mjs"):
+        return "OpenClaw"
+    return None
+
+
+def agent_kind(comm, argv=None):
     """The agent session a process is (one of AGENTS), or None: by its process table command (ps comm=), and for an
-    interpreter by its command line too (script_agent). OpenClaw names its processes `openclaw` (a command it runs, an
-    `agent --local` turn) and `openclaw-gateway` (the gateway that runs every conversation); Hermes Agent's is
+    interpreter by its arguments (script_agent; None here: not read). OpenClaw names its processes `openclaw` (a command
+    it runs, an `agent exec` turn) and `openclaw-gateway` (the gateway that runs every conversation); Hermes Agent's is
     `hermes` where setproctitle is installed."""
     if is_claude(comm):
         return "Claude Code"
@@ -207,17 +336,20 @@ def agent_kind(comm, command=None):
         return "OpenClaw"
     if base == "hermes":
         return "Hermes Agent"
-    return script_agent(command) if command and is_interpreter(comm) else None
+    return script_agent(argv, _family(comm)) if argv and is_interpreter(comm) else None
 
 
 def agent_of(pid, table):
-    """The agent session process pid is, in table (one of AGENTS), or None. An interpreter's command line is read only
-    when the table is ps_table's (ProcTable)."""
+    """The agent session process pid is, in table (one of AGENTS), or None. An interpreter's arguments are read only
+    when the table is ps_table's (ProcTable); when they can't be read it's UNKNOWN_AGENT, never "not an agent". A plain
+    dict (the tests' tables of known processes) has no arguments: an interpreter there isn't one."""
     if pid not in table:
         return None
     comm = table[pid][1]
-    command = table.command(pid) if isinstance(table, ProcTable) and is_interpreter(comm) else None
-    return agent_kind(comm, command)
+    if not isinstance(table, ProcTable) or not is_interpreter(comm):
+        return agent_kind(comm)
+    argv = table.argv(pid)
+    return UNKNOWN_AGENT if argv is None else agent_kind(comm, argv)
 
 
 def claude_of(pid, table):
@@ -241,10 +373,13 @@ def agent_name(pid):
         try:
             comm = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(int(pid))], capture_output=True, text=True,
                                   timeout=5).stdout.strip()
-            command = full_command(int(pid)) if is_interpreter(comm) else None
         except (OSError, ValueError, subprocess.SubprocessError):
             return None
-        _AGENT_NAMES[pid] = agent_kind(comm, command)
+        if is_interpreter(comm):
+            argv = proc_argv(pid)
+            _AGENT_NAMES[pid] = UNKNOWN_AGENT if argv is None else agent_kind(comm, argv)
+        else:
+            _AGENT_NAMES[pid] = agent_kind(comm)
     return _AGENT_NAMES[pid]
 
 
