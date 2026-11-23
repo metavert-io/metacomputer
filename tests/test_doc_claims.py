@@ -708,17 +708,23 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
-    ("SECURITY.md", r"commands only you run also refuse when Claude Code or Codex is above them in the process tree",
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
-     and 'return "Claude Code" if is_claude(comm) else "Codex" if is_codex(comm) else None' in raw("lib/owners.py")
+     and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
+     and 'return "Codex"' in function_src("lib/owners.py", "agent_kind")
+     and 'if base in ("openclaw", "openclaw-gateway"):' in function_src("lib/owners.py", "agent_kind")
+     and 'return script_agent(command) if command and is_interpreter(comm) else None' in function_src("lib/owners.py", "agent_kind")
+     and all(f'return "{a}"' in function_src("lib/owners.py", "script_agent") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
+     and "if agent_of(p, table):" in function_src("lib/owners.py", "claude_of")
      and "owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py") and "owners.at_user_terminal((0,))" in raw("lib/learn.py")
      and "return owners.at_user_terminal((0,))" in raw("lib/handoff.py")
      and "owners.at_user_terminal((0,))" in raw("lib/storage.py") and "owners.at_user_terminal((0,))" in raw("lib/liveview.py")
      and "user_tty || die" in raw("bin/metacomputer")
      and "guard atUserTerminal() else {" in raw("vault/TTY.swift")
      and "return agentAbove(getpid()) == false" in raw("vault/TTY.swift")
-     and 'if e.name == "codex" { return "Codex" }' in raw("vault/Util.swift")),
+     and 'if e.name == "codex" { return "Codex" }' in raw("vault/Util.swift")
+     and "return interpreterAgent(procArgs(p))" in raw("vault/Util.swift")),
     ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
@@ -1351,10 +1357,11 @@ CLAIMS = [
     ("SECURITY.md", r"\*\*A dialog on the Mac \(`INTERACTIVE_PROMPTS`, `(\w+)` by default\)\.\*\* That setting allows "
                     r"metacomputer to show dialogs on this Mac that wait for you",
      lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
-    ("SECURITY.md", r"\"Claude needs you: \" \(\"Codex needs you: \" for a handoff a Codex session opened\) and the "
+    ("SECURITY.md", r"\"Claude needs you: \" \(\"Codex needs you: \" for a handoff a Codex session opened, and likewise "
+                    r"\"OpenClaw\", \"Hermes\" or\s+\"Gemini\" for those agents' sessions\) and the "
                     r"`--say` text \(cleaned like an event, at most (\d+) characters\)",
      lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and 'who & " needs you: " & msg' in handoff.DIALOG_SCRIPT
-     and 'return "Codex" if isinstance(rec, dict) and rec.get("agent") == "Codex" else "Claude"' in raw("lib/handoff.py")
+     and 'return AGENT_NAMES.get(rec.get("agent"), "Claude") if isinstance(rec, dict) else "Claude"' in raw("lib/handoff.py")
      and "t = clean_text(say)" in raw("lib/handoff.py")),
     ("SECURITY.md", r"The text reaches osascript as an argument of a fixed AppleScript, never as part of one",
      lambda m: dialog_text_is_data()),

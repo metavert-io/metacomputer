@@ -33,8 +33,9 @@ the driver: until they end or the driver connection closes, at most the activity
 window. It isn't another controller to that client's process or its Claude Code
 session.
 
-"Self" is the caller's own agent session (its nearest `claude` or `codex` ancestor:
-Claude Code or Codex), or a shell it runs under, so a session never blocks itself.
+"Self" is the caller's own agent session (its nearest agent ancestor: Claude Code, Codex,
+OpenClaw, Hermes Agent or Gemini CLI; agent_of), or a shell it runs under, so a session never
+blocks itself.
 
 A handoff (lib/handoff.py, `metacomputer handoff`) gives the computer to the user:
 while one is open, others() lists it for every caller, its own session included,
@@ -92,13 +93,13 @@ def cli():
 
 
 def ps_table(strict=False):
-    """{pid: (ppid, comm)} for every process. strict: OSError when ps fails or lists nothing, instead of a table
+    """{pid: (ppid, comm)} for every process (a ProcTable: an interpreter's command line on request). strict: OSError when ps fails or lists nothing, instead of a table
     that would look like one without agents."""
     r = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
     out = r.stdout
     if strict and (r.returncode != 0 or not out.strip()):
         raise OSError(f"ps failed (exit {r.returncode})")
-    table = {}
+    table = ProcTable(live=True)
     for line in out.splitlines():
         parts = line.split(None, 2)
         if len(parts) >= 2:
@@ -107,7 +108,27 @@ def ps_table(strict=False):
 
 
 def full_command(pid):
-    return subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+class ProcTable(dict):
+    """ps_table's {pid: (ppid, comm)}, and the command lines of its interpreter processes (node, python), read when
+    asked (command()) and kept with the table: an agent that runs on an interpreter (Gemini CLI, Hermes Agent,
+    OpenClaw's launcher) is told from any other program by the program it names. live: read a command line that isn't
+    known yet from the process itself (ps_table's tables); a table made of known parts (the tests') never does."""
+
+    def __init__(self, *args, commands=None, live=False, **kw):
+        super().__init__(*args, **kw)
+        self.commands = dict(commands or {})
+        self.live = live
+
+    def command(self, pid):
+        if pid not in self.commands:
+            try:
+                self.commands[pid] = full_command(pid) if self.live and pid in self else ""
+            except (OSError, subprocess.SubprocessError):
+                self.commands[pid] = ""
+        return self.commands[pid]
 
 
 def ancestors(pid, table):
@@ -139,16 +160,72 @@ def is_codex(comm):
     return os.path.basename(comm or "") == "codex"
 
 
-def agent_kind(comm):
-    """"Claude Code", "Codex" or None for a process table command."""
-    return "Claude Code" if is_claude(comm) else "Codex" if is_codex(comm) else None
+# Every agent session metacomputer knows, by the name its messages, claims, events and handoffs use.
+AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI")
+# An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
+_INTERPRETER = re.compile(r"(node|nodejs|bun|python[0-9.]*|Python)")
+
+
+def is_interpreter(comm):
+    return bool(_INTERPRETER.fullmatch(os.path.basename(comm or "")))
+
+
+def script_agent(command):
+    """The agent an interpreter's command line (ps command=) runs, else None. The program is the first word after the
+    interpreter's own options:
+      Gemini CLI    node running its `gemini` script (npm's and Homebrew's bin/gemini, or bundle/gemini.js of the
+                    @google/gemini-cli package): the launcher, and the node process it starts again with more memory,
+                    whose children are its shell commands and MCP servers
+      OpenClaw      node running its `openclaw` launcher (openclaw.mjs), before it names itself (agent_kind)
+      Hermes Agent  python running its CLI or gateway (`-m hermes_cli.main ... gateway run`, the launcher's inline
+                    script, which imports hermes_cli, or a `hermes` script): the gateway runs every conversation's tools
+                    and MCP servers
+    A program with spaces in its path is missed (the line is split at spaces): an accident guard, like the rest."""
+    words = (command or "").split()
+    prog = next((w for w in words[1:] if not w.startswith("-")), "")
+    base = os.path.basename(prog)
+    if base in ("gemini", "gemini.js") or "/@google/gemini-cli/" in prog:
+        return "Gemini CLI"
+    if base in ("openclaw", "openclaw.mjs"):
+        return "OpenClaw"
+    if "hermes_cli" in (command or "") or base in ("hermes", "hermes-agent", "hermes-acp"):
+        return "Hermes Agent"
+    return None
+
+
+def agent_kind(comm, command=None):
+    """The agent session a process is (one of AGENTS), or None: by its process table command (ps comm=), and for an
+    interpreter by its command line too (script_agent). OpenClaw names its processes `openclaw` (a command it runs, an
+    `agent --local` turn) and `openclaw-gateway` (the gateway that runs every conversation); Hermes Agent's is
+    `hermes` where setproctitle is installed."""
+    if is_claude(comm):
+        return "Claude Code"
+    if is_codex(comm):
+        return "Codex"
+    base = os.path.basename(comm or "")
+    if base in ("openclaw", "openclaw-gateway"):
+        return "OpenClaw"
+    if base == "hermes":
+        return "Hermes Agent"
+    return script_agent(command) if command and is_interpreter(comm) else None
+
+
+def agent_of(pid, table):
+    """The agent session process pid is, in table (one of AGENTS), or None. An interpreter's command line is read only
+    when the table is ps_table's (ProcTable)."""
+    if pid not in table:
+        return None
+    comm = table[pid][1]
+    command = table.command(pid) if isinstance(table, ProcTable) and is_interpreter(comm) else None
+    return agent_kind(comm, command)
 
 
 def claude_of(pid, table):
-    """Nearest agent session process above pid: Claude Code or Codex (None outside both). The name is older than
-    Codex support; claims, events and the vault still call this process claude_pid."""
+    """Nearest agent session process above pid: Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI (None outside
+    them all). The name is older than the other agents' support; claims, events and the vault still call this process
+    claude_pid."""
     for p in ancestors(pid, table)[1:]:
-        if agent_kind(table[p][1]):
+        if agent_of(p, table):
             return p
     return None
 
@@ -157,22 +234,23 @@ _AGENT_NAMES = {}
 
 
 def agent_name(pid):
-    """"Claude Code" or "Codex" for a live agent session process (cached per pid), else None."""
+    """The agent (one of AGENTS) a live agent session process is (cached per pid), else None."""
     if not pid:
         return None
     if pid not in _AGENT_NAMES:
         try:
             comm = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(int(pid))], capture_output=True, text=True,
                                   timeout=5).stdout.strip()
+            command = full_command(int(pid)) if is_interpreter(comm) else None
         except (OSError, ValueError, subprocess.SubprocessError):
             return None
-        _AGENT_NAMES[pid] = agent_kind(comm)
+        _AGENT_NAMES[pid] = agent_kind(comm, command)
     return _AGENT_NAMES[pid]
 
 
 def at_user_terminal(fds=(0,)):
-    """The bar for commands only the user runs: every fd in fds is a terminal and no agent session (Claude Code or
-    Codex) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
+    """The bar for commands only the user runs: every fd in fds is a terminal and no agent session (Claude Code, Codex,
+    OpenClaw, Hermes Agent or Gemini CLI) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
     give a command a pseudo-terminal of its own. Fails closed when the process table can't be read. Like every
     check against your own account, this stops an agent from passing by accident, not a program that sets out to
     (it can start a command outside the agent's process tree)."""
@@ -200,8 +278,8 @@ def ancestry_complete(pid, table):
     return pid == 1
 
 
-AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through Claude Code, Codex, a "
-                    "script or a pipe")
+AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through an agent (Claude Code, "
+                    "Codex, OpenClaw, Hermes Agent, Gemini CLI), a script or a pipe")
 
 
 def proc_cwd(pid):
@@ -466,7 +544,7 @@ def handoff_valid(rec):
             and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
             and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S + 1    # + 1: float rounding of a 2 h limit
             and opt("say", str) and opt("cwd", str) and opt("note", str) and opt("ended_from", str)
-            and opt("claude_pid", int) and rec.get("agent") in (None, "Claude Code", "Codex")
+            and opt("claude_pid", int) and rec.get("agent") in (None, *AGENTS)
             and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
@@ -731,7 +809,7 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
 
 
 def _agent(o):
-    return o.get("agent") if o.get("agent") in ("Claude Code", "Codex") else "Claude Code"
+    return o.get("agent") if o.get("agent") in AGENTS else "Claude Code"
 
 
 def describe(o):

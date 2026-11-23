@@ -76,21 +76,24 @@ LIVE_VIEW = ("Open the live view: run `metacomputer view --open` on your Mac. Sc
 ACTION = ("Run `metacomputer view --open` (Screen Sharing; paste the live-view password with Cmd+V if it asks), "
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
 SPACES = re.compile(r"\s+")
-AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex"}
+AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex", "OpenClaw": "OpenClaw", "Hermes Agent": "Hermes",
+               "Gemini CLI": "Gemini"}
 
 
 def agent_word(rec):
-    """Who asked, for the user's messages: "Codex" for a handoff a Codex session opened, else "Claude"."""
-    return "Codex" if isinstance(rec, dict) and rec.get("agent") == "Codex" else "Claude"
+    """Who asked, for the user's messages: the short name of the agent whose session opened the handoff ("Codex",
+    "OpenClaw", "Hermes", "Gemini"), else "Claude"."""
+    return AGENT_NAMES.get(rec.get("agent"), "Claude") if isinstance(rec, dict) else "Claude"
 
 
 def at_terminal():
-    """The user's own terminal: standard input is a terminal and no agent session (Claude Code or Codex) is above this
+    """The user's own terminal: standard input is a terminal and no agent session (Claude Code, Codex, OpenClaw, Hermes
+    Agent or Gemini CLI) is above this
     process (owners.at_user_terminal). Codex can give its commands a pseudo-terminal, so a terminal alone isn't the
     user: there, pressing Enter or `handoff done` would be the agent saying the user is done."""
     return owners.at_user_terminal((0,))
 # The dialog (INTERACTIVE_PROMPTS=on). argv: mode ("show"; "compose" returns the text instead, for the tests), the
-# --say text, seconds until it gives up, and who asks ("Claude" or "Codex"). The text is data: AppleScript never
+# --say text, seconds until it gives up, and who asks ("Claude", "Codex", "OpenClaw", "Hermes" or "Gemini"). The text is data: AppleScript never
 # parses it.
 DIALOG_SCRIPT = '''on run argv
 	set {mode, msg, secs, who} to {item 1 of argv, item 2 of argv, (item 3 of argv) as integer, item 4 of argv}
@@ -402,7 +405,7 @@ def announce(rec, interactive):
 
 # --- the dialog (INTERACTIVE_PROMPTS=on) ------------------------------------------------------------
 def dialog_text(say):
-    """The --say text as the dialog shows it after "Claude needs you: " (or "Codex needs you: "): cleaned (one line, no control characters)
+    """The --say text as the dialog shows it after "Claude needs you: " (or "Codex needs you: ", and so on): cleaned (one line, no control characters)
     and at most DIALOG_TEXT_MAX characters."""
     t = clean_text(say)
     return t if len(t) <= DIALOG_TEXT_MAX else t[:DIALOG_TEXT_MAX - 1] + "\N{HORIZONTAL ELLIPSIS}"
@@ -606,7 +609,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
             now = time.time()
             rec = {"v": 1, "id": "h-" + secrets.token_hex(6), "status": "open", "why": a.why, "say": say,
                    "opened": now, "deadline": now + timeout, "timeout_s": int(timeout), "opener_pid": os.getpid(),
-                   "claude_pid": claude, "agent": owners.agent_kind(table.get(claude, (None, ""))[1]) if claude else None,
+                   "claude_pid": claude, "agent": owners.agent_of(claude, table) if claude else None,
                    "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
                    "ended": None, "ended_from": None, "note": None}
             opened["id"] = rec["id"]             # before the write: a signal during it still finds the record
@@ -660,10 +663,11 @@ def cmd_end(a, to):
             "up), so it can't say the user is done. The user runs `metacomputer handoff done` in their own terminal.")
         return EXIT_REFUSED
     if to == "done" and claude and not interactive:
-        # Any agent session, not only the one that asked: another Claude Code or Codex session (or one started from
-        # the session that asked) saying "done" would be an agent saying the user is done.
-        who = ("this " + (rec.get("agent") if rec.get("agent") in ("Claude Code", "Codex") else "Claude Code")
-               + " session asked for the handoff, so it" if own_session else "an agent session (Claude Code or Codex)")
+        # Any agent session, not only the one that asked: another agent's session (or one started from the session
+        # that asked) saying "done" would be an agent saying the user is done.
+        who = ("this " + (rec.get("agent") if rec.get("agent") in owners.AGENTS else "Claude Code")
+               + " session asked for the handoff, so it" if own_session
+               else "an agent session (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI)")
         err(f"{who} can't say the user is done. The user runs "
             "`metacomputer handoff done` in their own terminal (or presses Enter where `metacomputer handoff` "
             "waits at a terminal). Ask them; if they've changed their mind, `metacomputer handoff cancel` calls it off.")

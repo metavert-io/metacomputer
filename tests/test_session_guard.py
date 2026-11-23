@@ -1219,12 +1219,109 @@ def end_to_end(fake):
         b.close()
 
 
+# --- the other agents: OpenClaw, Hermes Agent, Gemini CLI -------------------------------------------------------
+OTHER_DRIVER = r'''
+import json, os, subprocess, sys, time
+sys.path.insert(0, sys.argv[1])
+import owners, sessionvm
+comp = json.loads(sys.argv[2])
+t = owners.ps_table()
+agent = owners.claude_of(os.getpid(), t)
+out = {"agent_pid": agent, "agent": owners.agent_of(agent, t) if agent else None, "name": owners.agent_name(agent)}
+bridge = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+try:
+    time.sleep(0.2)
+    out["noted"] = bool(sessionvm.note_bridge(agent, bridge.pid, comp, agent=out["agent"]))
+    guard = [sys.executable, os.path.join(sys.argv[1], "sessionvm.py"), "guard", "--vm", "beta", "--ssh-port", "2402",
+             "--chosen", "main", "--settings", "config/local.env", "--", "stop"]
+    r = subprocess.run(guard, capture_output=True, text=True, timeout=60)
+    out["other"] = [r.returncode, r.stderr]
+    guard[guard.index("beta")], guard[guard.index("2402")] = comp["vm"], comp["ssh_port"]
+    r = subprocess.run(guard, capture_output=True, text=True, timeout=60)
+    out["own"] = [r.returncode, r.stderr]
+    r = subprocess.run([sys.executable, os.path.join(sys.argv[1], "owners.py"), "at-terminal"], capture_output=True,
+                       text=True, timeout=60)
+    out["at_terminal"] = r.returncode
+finally:
+    sessionvm.drop_bridge(agent, bridge.pid)          # the bridge's own record, while it still runs (as mcp_lazy does)
+    bridge.kill()
+    bridge.wait()
+print(json.dumps(out))
+'''
+
+
+def other_agents_checks():
+    """OpenClaw, Hermes Agent and Gemini CLI count as agent sessions as Codex does (lib/owners.py agent_kind): a stand-in
+    for each, as `ps` shows the real one (Gemini CLI: node running its gemini script; Hermes Agent: python running
+    hermes_cli's gateway; OpenClaw: a process named openclaw-gateway), holds a computer through a bridge under it, and
+    a command from it that names no computer is refused on another computer, with the agent's name; at-terminal refuses
+    under it. And look-alikes don't count: node or python running something else, OpenClaw's own helper processes."""
+    print("the other agents: OpenClaw, Hermes Agent, Gemini CLI")
+    node, python = userterm.fake_interpreter("node"), userterm.fake_interpreter("python3")
+    if not node or not python:
+        check("a C compiler to build the stand-in interpreters (cc)", False, "no /usr/bin/cc")
+        return
+    clear_records()
+    path = os.path.join(TD, "other_driver.py")
+    write(path, OTHER_DRIVER)
+    A = comp("alpha", 2401)
+    lib = os.path.join(LAB, "lib")
+    run = [PY, path, lib, json.dumps(A)]
+    cases = (("Gemini CLI", [node, "/x/lib/node_modules/@google/gemini-cli/bundle/gemini.js", "--", *run], None),
+             ("Gemini CLI", [node, "--max-old-space-size=2048", "/opt/homebrew/bin/gemini", "--", *run], None),
+             ("Hermes Agent", [python, "-I", "-m", "hermes_cli.main", "--profile", "default", "gateway", "run", "--quiet",
+                               "--", *run], None),
+             ("OpenClaw", ["openclaw-gateway", "--", *run], node),
+             ("OpenClaw", ["openclaw", "--", *run], node))
+    for name, argv, exe in cases:
+        r = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=120, env=dict(os.environ))
+        try:
+            got = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            check(f"{name} stand-in ({os.path.basename(argv[0])} ...) ran", False, (r.stdout[-300:], r.stderr[-500:]))
+            continue
+        shown = os.path.basename(argv[0]) + (" " + argv[1] if exe is None else "")
+        check(f"{name} ({shown}): its process is the agent session above a command (owners.claude_of, agent_of, "
+              "agent_name)", got.get("agent") == name and got.get("name") == name and got.get("noted"), got)
+        check(f"...a command that names no computer is refused on another computer than its bridge's, naming {name}",
+              got.get("other", [0])[0] == sessionvm.REFUSED and f"this {name} session" in got["other"][1]
+              and REFUSED_WORDS in got["other"][1], got.get("other"))
+        check("...and goes ahead on its own computer", got.get("own", [1])[0] == 0, got.get("own"))
+        check("...and owners.py at-terminal (the user-only commands' check) refuses under it",
+              got.get("at_terminal") not in (0, None), got.get("at_terminal"))
+    check("no record is left behind", rec_files() == [], rec_files())
+    # Look-alikes, from command lines as ps shows them (a table with known command lines reads no process).
+    t = owners.ProcTable({10: (1, "/opt/homebrew/bin/node"), 11: (1, "node"), 12: (1, "/usr/bin/python3"),
+                          13: (1, "Python"), 14: (1, "node"), 15: (1, "node"), 16: (1, "/bin/zsh"), 17: (1, "node")},
+                         commands={10: "/opt/homebrew/bin/node /x/openclaw/dist/process/supervisor/service-child-relay.js",
+                                   11: "node /x/openclaw/dist/process/supervisor/service-child-group-anchor.js",
+                                   12: "/usr/bin/python3 -m http.server", 13: "Python /x/tools/gemini_helper.py",
+                                   14: "node /x/my-geminid/server.js", 15: "node --inspect",
+                                   16: "/bin/zsh -c gemini", 17: "node /x/bin/gemini-cli-helper"})
+    check("look-alikes aren't agents: OpenClaw's relay and anchor helpers, other node and python programs, a shell "
+          "whose command mentions gemini", not any(owners.agent_of(p, t) for p in t), {p: owners.agent_of(p, t) for p in t})
+    t = owners.ProcTable({20: (1, "node"), 21: (1, "/x/node"), 22: (1, "/x/python3.14"), 23: (1, "openclaw"),
+                          24: (1, "/x/Python"), 25: (1, "hermes")},
+                         commands={20: "node /Users/a/.npm-global/bin/gemini -p hi", 21: "/x/node /x/openclaw.mjs gateway",
+                                   22: "/x/python3.14 -I -c import os ... from hermes_cli.main import main ... gateway run -v",
+                                   24: "/x/Python /x/venv/bin/hermes chat"})
+    check("...and each agent is told however it runs: npm's gemini, OpenClaw's launcher before it names itself and its "
+          "titled process, Hermes Agent's launcher, its pip script and its process title",
+          [owners.agent_of(p, t) for p in (20, 21, 22, 23, 24, 25)]
+          == ["Gemini CLI", "OpenClaw", "Hermes Agent", "OpenClaw", "Hermes Agent", "Hermes Agent"],
+          [owners.agent_of(p, t) for p in (20, 21, 22, 23, 24, 25)])
+    t = {30: (1, "node")}
+    check("a plain process table (not ps_table's) never reads a command line: an interpreter there isn't an agent",
+          owners.agent_of(30, t) is None)
+
+
 def main():
     try:
         classification_checks()
         record_checks()
         hub_claim_checks()
         bridge_unit_checks()
+        other_agents_checks()
         fake = userterm.fake_agent("codex")
         if fake:
             end_to_end(fake)

@@ -627,7 +627,8 @@ func procArgs(_ pid: pid_t) -> [String] {
 /// The agent session a process is, if any: "Claude Code" (a process named claude, node running a script named
 /// claude*, or the native installer's version file) or "Codex" (its native binary, named codex; npm and Homebrew start
 /// it from a node launcher, and the IDE extensions and the desktop app run `codex app-server`, one process for all of
-/// their conversations).
+/// their conversations); for an interpreter (node, python), what it runs (interpreterAgent): "OpenClaw", "Hermes
+/// Agent" or "Gemini CLI".
 func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
     if e.name == "claude"
         || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
@@ -635,11 +636,64 @@ func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
         return "Claude Code"
     }
     if e.name == "codex" { return "Codex" }
+    if e.name == "openclaw" || e.name == "openclaw-gateway" { return "OpenClaw" }
+    if isInterpreter(e.name) {
+        return interpreterAgent(procArgs(p))
+    }
     return nil
 }
 
-/// Who sent a request: the client process and the nearest agent session process above it (Claude Code or Codex;
-/// agentKind), with its start time and working folder (the project). The fields keep their older names (claudePID):
+/// A process the kernel names after an interpreter (node, bun, python): the agent is told by what it runs.
+func isInterpreter(_ name: String) -> Bool {
+    return name == "node" || name == "nodejs" || name == "bun" || name == "Python" || matches(name, "^python[0-9.]*$")
+}
+
+/// The agent an interpreter's arguments run, else nil (as lib/owners.py script_agent and agent_kind):
+/// - "OpenClaw": it names its processes `openclaw` (a command it runs) and `openclaw-gateway` (the gateway, which runs
+///   every conversation), in its first argument; or node running its `openclaw` launcher (openclaw.mjs);
+/// - "Gemini CLI": node running its `gemini` script (bin/gemini, or bundle/gemini.js of @google/gemini-cli), the
+///   launcher and the node process it starts again, whose children are its shell commands and MCP servers;
+/// - "Hermes Agent": python running its CLI or its gateway (hermes_cli, by module or in its launcher's inline script, or
+///   a `hermes` script); the gateway runs every conversation's tools and MCP servers.
+/// The program is the first argument after the interpreter's own options.
+func interpreterAgent(_ args: [String]) -> String? {
+    guard let first = args.first else { return nil }
+    let title = URL(fileURLWithPath: first).lastPathComponent
+    if title == "openclaw" || title == "openclaw-gateway" { return "OpenClaw" }
+    let prog = args.dropFirst().first { !$0.hasPrefix("-") } ?? ""
+    let base = URL(fileURLWithPath: prog).lastPathComponent
+    if base == "gemini" || base == "gemini.js" || prog.contains("/@google/gemini-cli/") { return "Gemini CLI" }
+    if base == "openclaw" || base == "openclaw.mjs" { return "OpenClaw" }
+    if base == "hermes" || base == "hermes-agent" || base == "hermes-acp" || args.contains(where: { $0.contains("hermes_cli") }) {
+        return "Hermes Agent"
+    }
+    return nil
+}
+
+/// An agent process that runs all of its conversations, whose requests therefore name no one session: Codex's app
+/// server (`codex app-server`: the IDE extension, the desktop app, the terminal app's background server), OpenClaw's
+/// gateway (`openclaw-gateway`, or `openclaw gateway ...`) and Hermes Agent's gateway (every Hermes conversation's tools
+/// run there; its own CLI and TUI are clients of it). Arguments that can't be read count as shared: unknown never
+/// names a session. The label it returns names the process in the vault's question and records.
+func sharedAgentProcess(_ kind: String, _ p: pid_t) -> String? {
+    switch kind {
+    case "Codex":
+        let args = procArgs(p)
+        return args.isEmpty || args.dropFirst().contains("app-server") ? "Codex app server" : nil
+    case "OpenClaw":
+        let args = procArgs(p)
+        let title = args.first.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        return args.isEmpty || title == "openclaw-gateway" || args.dropFirst().prefix(3).contains("gateway")
+            ? "OpenClaw gateway" : nil
+    case "Hermes Agent":
+        return "Hermes Agent gateway"
+    default:
+        return nil
+    }
+}
+
+/// Who sent a request: the client process and the nearest agent session process above it (Claude Code, Codex,
+/// OpenClaw, Hermes Agent or Gemini CLI; agentKind), with its start time and working folder (the project). The fields keep their older names (claudePID):
 /// they mean that agent session. Attribution only: any process running as you can arrange the same ancestry.
 struct Requester {
     let clientPID: pid_t
@@ -647,7 +701,8 @@ struct Requester {
     let claudePID: pid_t?
     let claudeStart: Double?
     let project: String?
-    var agent: String? = nil        // "Claude Code" or "Codex": what claudePID is
+    var agent: String? = nil        // "Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI": what claudePID is;
+                                    // with no claudePID, the shared process it came from ("Codex app server", ...)
     // What the client says about whom it asks for (`--on-behalf-pid`): the Claude Code process it names.
     // Shown and recorded, never used to decide anything (project limits, rules and grants use the fields above).
     var claimedClaudePID: pid_t? = nil
@@ -661,13 +716,13 @@ struct Requester {
             guard p > 1, let e = procEntry(p) else { break }
             // Claude Code from the native installer runs as its version file (.../claude/versions/2.1.325).
             if p != pid, let kind = agentKind(p, e) {
-                let args = kind == "Codex" ? procArgs(p) : []
-                if kind == "Codex" && (args.isEmpty || args.dropFirst().contains("app-server")) {
-                    // Codex's IDE extension and desktop app run every conversation in this one process: it names no
-                    // single session, so it gets none of a session's answers, project rules or tokens (each use asks).
-                    // Arguments that can't be read count the same way: unknown never names a session.
+                if let shared = sharedAgentProcess(kind, p) {
+                    // Codex's app server, OpenClaw's and Hermes Agent's gateways run every conversation in this one
+                    // process: it names no single session, so it gets none of a session's answers, project rules or
+                    // tokens (each use asks). Arguments that can't be read count the same way: unknown never names a
+                    // session.
                     return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil,
-                                     agent: "Codex app server")
+                                     agent: shared)
                 }
                 let cwd = procCwd(p).map { realPath($0) ?? $0 }
                 return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd, agent: kind)
@@ -721,7 +776,12 @@ struct Requester {
             return clean("\(clientExe) (pid \(clientPID)) under Codex's app server, whose conversations share one process"
                          + " (no session's answers apply)" + claim, max: 300)
         }
-        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code or Codex" + claim, max: 300)
+        if let a = agent, a.hasSuffix(" gateway") {
+            return clean("\(clientExe) (pid \(clientPID)) under \(a.dropLast(" gateway".count))'s gateway, whose conversations"
+                         + " share one process (no session's answers apply)" + claim, max: 300)
+        }
+        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code, Codex, OpenClaw, Hermes Agent"
+                     + " or Gemini CLI" + claim, max: 300)
     }
 }
 

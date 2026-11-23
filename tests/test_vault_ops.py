@@ -75,6 +75,20 @@ int main(int argc, char **argv) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 }
 """
+FAKE_INTERP_C = r"""
+#include <sys/wait.h>
+#include <unistd.h>
+/* Stands in for an agent on an interpreter: argv[1] is the program it runs (node's gemini, python's hermes_cli),
+   argv[2] the project folder, then the command. */
+int main(int argc, char **argv) {
+    if (argc < 4 || chdir(argv[2]) != 0) return 111;
+    pid_t p = fork();
+    if (p == 0) { execv(argv[3], argv + 3); _exit(127); }
+    int st = 0;
+    waitpid(p, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+}
+"""
 FAKE_CLAUDE_C = r"""
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -457,14 +471,14 @@ def run(td, procs):
         procs.append(p)
         return p, outs
 
-    def as_agent(argv0, project, *commands):
+    def as_agent(argv0, project, *commands, exe=None):
         """as_claude, under another stand-in: argv0 is the program and its leading arguments ([codex], or [codex,
-        "app-server"]), then the project folder."""
+        "app-server"]), then the project folder; exe runs another program under argv0's name (a process title)."""
         counter[0] += 1
         outs = [os.path.join(td, f"ag{counter[0]}-{i}.out") for i in range(len(commands))]
         script = "; ".join(f"{shlex.join([BIN, *c])} >{shlex.quote(o)} 2>&1; echo $? >{shlex.quote(o + '.rc')}"
                            for c, o in zip(commands, outs))
-        p = subprocess.Popen([*argv0, project, "/bin/sh", "-c", script], env=env, stdin=subprocess.DEVNULL)
+        p = subprocess.Popen([*argv0, project, "/bin/sh", "-c", script], env=env, stdin=subprocess.DEVNULL, executable=exe)
         procs.append(p)
         return p, outs
 
@@ -1182,6 +1196,42 @@ def run(td, procs):
     check("Codex's app server is no session (its conversations share the process): 'session' allows only that use, "
           "the next asks again", [x[0] for x in res] == [0, 0] and not recs[-1].get("requester", {}).get("claude_pid")
           and recs[-1].get("requester", {}).get("agent") == "Codex app server", (res, recs[-2:]))
+    # Gemini CLI (node running its gemini script) is a session of its own; OpenClaw's gateway and Hermes Agent's (python
+    # running hermes_cli) run every conversation in one process, so they're none, like Codex's app server.
+    fnode, fpython = os.path.join(td, "fakeinterp", "node"), os.path.join(td, "fakeinterp2", "python3")
+    for path in (fnode, fpython):
+        os.makedirs(os.path.dirname(path))
+        open(path + ".c", "w").write(FAKE_INTERP_C)
+        subprocess.run(["cc", "-o", path, path + ".c"], capture_output=True, text=True)
+    p, outs = as_agent([fnode, "/x/lib/node_modules/@google/gemini-cli/bundle/gemini.js"], proj1,
+                       ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
+                       ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
+    u.expect(f"Asked by Gemini CLI in {proj1} (pid {p.pid})")
+    u.expect("Type web-each to allow")
+    n0 = u.text().count("Type web-each to allow")
+    u.send("web-each session\n")
+    res = claude_results(p, outs)
+    recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"]
+    check("a Gemini CLI session (node running its gemini script) is a session: named in the question, and 'NAME session' "
+          "covers its next use", [x[0] for x in res] == [0, 0] and u.text().count("Type web-each to allow") == n0
+          and recs[-1].get("approval") == "grant:session" and recs[-1].get("requester", {}).get("agent") == "Gemini CLI",
+          (res, recs[-1:]))
+    for argv0, exe, said, label in ((["openclaw-gateway", "run"], fnode, "under OpenClaw's gateway", "OpenClaw gateway"),
+                                    ([fpython, "hermes_cli.main"], None, "under Hermes Agent's gateway",
+                                     "Hermes Agent gateway")):
+        p, outs = as_agent(argv0, proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
+                           ["fill", "web-each", "--vm", "opsvm", "--field", "password"], exe=exe)
+        u.expect(said)
+        u.expect("Type web-each to allow")
+        u.send("web-each session\n")
+        u.expect(said)
+        u.expect("Type web-each to allow")
+        u.send("web-each\n")
+        res = claude_results(p, outs)
+        recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"]
+        check(f"{label} is no session (its conversations share the process): 'session' allows only that use, the next "
+              "asks again", [x[0] for x in res] == [0, 0] and not recs[-1].get("requester", {}).get("claude_pid")
+              and recs[-1].get("requester", {}).get("agent") == label, (res, recs[-2:]))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")
     u.send("web-each unlock\n")

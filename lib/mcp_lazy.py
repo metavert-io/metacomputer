@@ -253,7 +253,7 @@ class Front:
         try:
             table = owners.ps_table()
             self.agent = owners.claude_of(self.pid, table)
-            self.agent_name = owners.agent_kind(table.get(self.agent, (0, ""))[1]) if self.agent else None
+            self.agent_name = owners.agent_of(self.agent, table) if self.agent else None
         except Exception:
             self.agent = None
         self.note_computer()

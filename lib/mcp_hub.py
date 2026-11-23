@@ -649,7 +649,7 @@ class Client:
         self.cid = next(Client._ids)
         self.kind, self.cwd, self.session, self.auto_session = "unknown", None, None, None
         self.claude, self.mine, self.holder, self.sid = None, set(), peer_pid, None
-        self.agent = None           # "Claude Code" or "Codex": the agent session process self.claude is
+        self.agent = None           # one of owners.AGENTS: the agent session process self.claude is
         self.claude_start = None    # that process's start time when it connected (lib/sessionvm.py proc_start)
         self.hello = False
         self.has_claim = False
@@ -1075,7 +1075,7 @@ class Hub:
             table = owners.ps_table()
             client.mine = set(owners.ancestors(client.peer_pid, table)) if client.peer_pid else set()
             client.claude = owners.claude_of(client.peer_pid, table) if client.peer_pid else None
-            client.agent = owners.agent_kind(table.get(client.claude, (None, ""))[1]) if client.claude else None
+            client.agent = owners.agent_of(client.claude, table) if client.claude else None
             # Which process that session is, from now on: its claims and a lease after it's gone keep this start time.
             client.claude_start = owners._session_start(client.claude) if client.claude else None
             client.sid = owners.sid_of(client.peer_pid) if client.peer_pid else None
@@ -4324,9 +4324,9 @@ def describe_status(st, brief=False):
     rows = [line]
     for c in cl:
         who = kinds.get(c.get("kind"), c.get("kind"))
-        if c.get("kind") == "claude-code" and c.get("agent") in ("Claude Code", "Codex"):
+        if c.get("kind") == "claude-code" and c.get("agent") in owners.AGENTS:
             who = c["agent"]
-        agent = c.get("agent") if c.get("agent") in ("Claude Code", "Codex") else "Claude Code"
+        agent = c.get("agent") if c.get("agent") in owners.AGENTS else "Claude Code"
         rows.append(f"    {who} (pid {c.get('pid')}{', ' + agent + ' pid ' + str(c['claude_pid']) if c.get('claude_pid') else ''})"
                     f" in {owners.short(c.get('cwd')) or '?'}: {c.get('calls')} call(s), last {c.get('last_tool') or '-'}, "
                     f"idle {c.get('idle_s')} s" + (f", driver session {c['session']}" if c.get("session") else ""))
